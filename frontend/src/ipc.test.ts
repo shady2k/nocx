@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
@@ -23,8 +24,8 @@ function socket(): MockWebSocket {
   return ws
 }
 
-function mockDispatcher(): Dispatcher {
-  return new Dispatcher()
+function mockDispatcher(port = 9876, host = '127.0.0.1'): Dispatcher {
+  return new Dispatcher(fixedEndpoint(port, host))
 }
 
 async function connectedSession(): Promise<{
@@ -33,9 +34,9 @@ async function connectedSession(): Promise<{
   ws: MockWebSocket
 }> {
   const client = new WSClient(mockDispatcher())
-  const connecting = client.connect(9876)
+  client.start()
+  await Promise.resolve()
   socket().serverAccepts()
-  await connecting
 
   const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
@@ -52,9 +53,9 @@ async function twoSessions(): Promise<{
   ws: MockWebSocket
 }> {
   const client = new WSClient(mockDispatcher())
-  const connecting = client.connect(9876)
+  client.start()
+  await Promise.resolve()
   socket().serverAccepts()
-  await connecting
 
   const openingA = client.openSession(80, 24)
   const reqsAfterA = socket().requests()
@@ -95,52 +96,59 @@ describe('connect', () => {
   it('resolves once the handshake completes', async () => {
     const client = new WSClient(mockDispatcher())
     let resolved = false
-    const connecting = client.connect(9876).then(() => (resolved = true))
+    client.dispatcher.onConnect(() => {
+      resolved = true
+    })
+    client.start()
+    await Promise.resolve()
 
     expect(resolved).toBe(false)
     socket().serverAccepts()
-    await connecting
 
     expect(resolved).toBe(true)
     expect(client.connected).toBe(true)
   })
 
   it('dials the local session endpoint on the given port', async () => {
-    const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(1234)
+    const client = new WSClient(mockDispatcher(1234))
+    client.start()
+    await Promise.resolve()
     expect(socket().url).toBe('ws://127.0.0.1:1234/session')
     socket().serverAccepts()
-    await connecting
   })
 
   it('can dial a non-default host (plain-browser dev path)', async () => {
-    const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(1234, 'vm-agents')
+    const client = new WSClient(mockDispatcher(1234, 'vm-agents'))
+    client.start()
+    await Promise.resolve()
     expect(socket().url).toBe('ws://vm-agents:1234/session')
     socket().serverAccepts()
-    await connecting
   })
 
   it('asks for arraybuffer frames, not blobs', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     expect(socket().binaryType).toBe('arraybuffer')
     socket().serverAccepts()
-    await connecting
   })
 
-  it('rejects when the socket errors', async () => {
+  it('moves to waiting when the socket errors', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverFails()
-    await expect(connecting).rejects.toThrow('ws connection failed')
+    await Promise.resolve()
+    expect(client.connected).toBe(false)
+    expect(client.dispatcher.connectionState.kind).toBe('waiting')
   })
 
   it('leaves the connection usable but with no sessions yet', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
+
     expect(client.connected).toBe(true)
   })
 })
@@ -148,9 +156,9 @@ describe('connect', () => {
 describe('openSession', () => {
   it('sends a JSON-RPC open carrying the initial grid size', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     void client.openSession(132, 43)
     const [req] = socket().requests()
@@ -167,9 +175,9 @@ describe('openSession', () => {
   // and the renderer must not reintroduce a way to answer.
   it('never asks for integration — every opener sends the same params (nocx-tr2n)', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     void client.openSession(80, 24)
     void client.openSSHSession(80, 24, 'ssh:test:1')
@@ -191,9 +199,10 @@ describe('openSession', () => {
 
     async function connected(): Promise<WSClient> {
       const client = new WSClient(mockDispatcher())
-      const connecting = client.connect(9876)
+      client.start()
+      await Promise.resolve()
       socket().serverAccepts()
-      await connecting
+
       return client
     }
 
@@ -261,9 +270,9 @@ describe('openSession', () => {
   // it learns where the session landed (nocx-fraus).
   it('reads the workspace the backend resolved for the session (nocx-fraus)', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     const openID = socket().requests()[0].id
@@ -283,9 +292,9 @@ describe('openSession', () => {
 
   it('rejects on a JSON-RPC error response', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     const id = socket().requests()[0].id
@@ -300,9 +309,9 @@ describe('openSession', () => {
 
   it('rejects a session-id the server should never have sent', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     const id = socket().requests()[0].id
@@ -313,9 +322,9 @@ describe('openSession', () => {
 
   it('rejects — rather than hanging forever — when the socket dies mid-open', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     socket().serverHangsUp()
@@ -325,9 +334,9 @@ describe('openSession', () => {
 
   it('ignores a response correlated to some other request id', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     let settled = false
     const opening = client.openSession(80, 24).finally(() => (settled = true))
@@ -347,9 +356,9 @@ describe('openSession', () => {
 
   it('survives a control frame that is not JSON', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     expect(() => socket().deliverText('}{ not json')).not.toThrow()
@@ -441,9 +450,10 @@ describe('inbound data', () => {
 
   it('starts each connection with a clean decoder', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
+
     const opening = client.openSession(80, 24)
     socket().deliverText({
       jsonrpc: '2.0',
@@ -454,9 +464,11 @@ describe('inbound data', () => {
 
     socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('€').slice(0, 1)))
 
-    const reconnected = client.connect(9876)
+    client.start()
+
+    await Promise.resolve()
     socket().serverAccepts()
-    await reconnected
+
     const reopening = client.openSession(80, 24)
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
@@ -823,9 +835,9 @@ describe('reconnect and reattach', () => {
     session: SessionHandle
     firstWS: MockWebSocket
   }> {
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const opening = client.openSession(80, 24)
     const openID = socket().requests()[0].id
@@ -848,6 +860,7 @@ describe('reconnect and reattach', () => {
 
     // Advance just past the first backoff window. 475ms > 250+125(max jitter).
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
 
     // The reconnect attempt creates a new WebSocket. Accept it.
     const reconnectedWS = socket()
@@ -884,6 +897,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
 
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
@@ -928,6 +942,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
 
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
@@ -949,6 +964,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -977,6 +993,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1003,6 +1020,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1037,6 +1055,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1071,6 +1090,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1096,6 +1116,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
 
@@ -1126,9 +1147,9 @@ describe('reconnect and reattach', () => {
 
   it('sends attach for multiple sessions on reconnect', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const openingA = client.openSession(80, 24)
     const openIdA = socket()
@@ -1157,6 +1178,7 @@ describe('reconnect and reattach', () => {
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1171,9 +1193,9 @@ describe('reconnect and reattach', () => {
 
   it('reports the aggregate reattach outcome once every attach has settled', async () => {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
 
     const openingA = client.openSession(80, 24)
     const openIdA = socket()
@@ -1202,6 +1224,7 @@ describe('reconnect and reattach', () => {
     const firstWS = socket()
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
+    await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
     await Promise.resolve()
@@ -1443,9 +1466,10 @@ describe('reclaiming a live session', () => {
    *  window is in, and the whole premise of this feature. */
   async function freshClient(): Promise<{ client: WSClient; ws: MockWebSocket }> {
     const client = new WSClient(mockDispatcher())
-    const connecting = client.connect(9876)
+    client.start()
+    await Promise.resolve()
     socket().serverAccepts()
-    await connecting
+
     return { client, ws: socket() }
   }
 
@@ -1810,9 +1834,9 @@ describe('session.displaced notification', () => {
     expect(ws.sent.length).toBe(sent)
 
     ws.serverHangsUp()
-    const reconnecting = client.connect(9876)
+    client.dispatcher.retryNow()
+    await Promise.resolve()
     socket().serverAccepts()
-    await reconnecting
     expect(
       socket()
         .requests()

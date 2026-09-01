@@ -54,6 +54,7 @@ import {
   VaultBackend,
   bindEndpoint,
   clickIntoEditor,
+  appReadyForInput,
   createAiEndpoint,
   promptReady,
   setDefaultModel,
@@ -276,6 +277,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await bindEndpoint(page, endpoint)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // ── The assistant is configured, and `run` is allowed to run ──────────
     await openSettings(page, SETTINGS_AI_NAV)
@@ -388,6 +390,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     const second = await backend.restart()
     await bindEndpoint(page, second)
     await page.reload()
+    await appReadyForInput(page)
     await expect(page.locator(RESTORED).first()).toBeVisible({ timeout: 90_000 })
 
     // ── What came back, one claim per kind ────────────────────────────────

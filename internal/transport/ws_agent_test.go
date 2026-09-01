@@ -39,7 +39,11 @@ func newAgentWSServer(t *testing.T) (*WSServer, content.ContentDB, func()) {
 		t.Fatalf("content.Open: %v", err)
 	}
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithContentDB(db))
+		WithContentDB(db),
+		// This harness tests broker/assistant wiring without a shell
+		// integration lifecycle. WallClock is independent of that lifecycle;
+		// output and inactivity bounds are covered by ws_run_lease_test.go.
+		WithRunLease(RunLeaseConfig{WallClock: runRequestTimeout}))
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

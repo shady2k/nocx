@@ -11,6 +11,7 @@
 // exactly what the panel's production seam must emit.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 import { createFilesPanelServices } from './files-client'
 import { createFilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
@@ -93,10 +94,10 @@ function lastSocket(): MockSocket {
   return nextSocket
 }
 
-async function connect(d: Dispatcher, port = 9876): Promise<void> {
-  const p = d.connect(port)
+async function connect(d: Dispatcher): Promise<void> {
+  d.start()
+  await Promise.resolve()
   lastSocket().accept()
-  await p
 }
 
 /** Drain the microtask queue until the store's promise chains settle. */
@@ -151,7 +152,7 @@ function frames(socket: MockSocket): Array<{ method?: string; params?: unknown }
 
 describe('files client over the real composition seam', () => {
   it('sends files.open, files.list and files.watch over the wire for a rescope', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connect(dispatcher)
     const services = createFilesPanelServices(dispatcher)
     const store = createFilesTreeStore(services)
@@ -177,7 +178,7 @@ describe('files client over the real composition seam', () => {
     store.dispose()
   })
   it('sends files.stat with only the binding and path', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connect(dispatcher)
     const services = createFilesPanelServices(dispatcher)
     const socket = lastSocket()
@@ -190,7 +191,7 @@ describe('files client over the real composition seam', () => {
   })
 
   it('delivers files.reveal with the binding and lexical path', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connect(dispatcher)
     const services = createFilesPanelServices(dispatcher)
     const socket = lastSocket()
@@ -203,7 +204,7 @@ describe('files client over the real composition seam', () => {
   })
 
   it('routes a files.changed notification from the wire into a re-list', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connect(dispatcher)
     const services = createFilesPanelServices(dispatcher)
     const store = createFilesTreeStore(services)

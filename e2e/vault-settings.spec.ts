@@ -16,7 +16,13 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
+import {
+  VaultBackend,
+  appReadyForInput,
+  bindEndpoint,
+  settingsReady,
+  type DisposableRoot,
+} from './harness'
 import { addSecretFromLock, pressLock } from './secret-field'
 import { readStand } from './stand'
 
@@ -221,6 +227,7 @@ test.describe('Vault settings — change passphrase', () => {
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Phase 1: Set up vault + save password.
     await openVaultSettings(page)
@@ -261,6 +268,7 @@ test.describe('Vault settings — change passphrase', () => {
 
     // Wait for app to reinitialize.
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Phase 4: Connect to profile → vault sealed → unseal with NEW passphrase.
     await page.keyboard.press('Meta+,')
@@ -324,6 +332,7 @@ test.describe('Vault settings — reissue recovery code', () => {
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Phase 1: Set up vault + save password.
     await openVaultSettings(page)
@@ -363,6 +372,7 @@ test.describe('Vault settings — reissue recovery code', () => {
     await page.reload()
 
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Phase 4: Connect → vault sealed → unseal with NEW recovery code.
     await page.keyboard.press('Meta+,')

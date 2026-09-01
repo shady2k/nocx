@@ -35,18 +35,9 @@
  * ```
  */
 
-import {
-  createEffect,
-  createSignal,
-  createUniqueId,
-  onCleanup,
-  onMount,
-  type Component,
-  type JSX,
-  Show,
-} from 'solid-js'
+import { createUniqueId, onCleanup, onMount, type Component, type JSX, Show } from 'solid-js'
 import { render } from 'solid-js/web'
-import { pushOverlay, popOverlay, restoreFocus, topOverlay } from './overlay/stack'
+import { createModalHost } from './overlay/modal-host'
 import { Button } from './button'
 import { CloseIcon } from './icons'
 import { IconButton } from './icon-button'
@@ -133,10 +124,8 @@ function focusInitial(d: HTMLDialogElement): void {
 }
 
 export const Dialog: Component<DialogProps> = (props) => {
-  let ref: HTMLDialogElement | undefined
   const titleId = createUniqueId()
   let panel: HTMLDivElement | undefined
-  const [entry, setEntry] = createSignal<ReturnType<typeof pushOverlay> | null>(null)
 
   /* ── Panel height animation ──────────────────────────────────────────
      The panel's height is `auto` and content-driven: it grows and shrinks
@@ -189,7 +178,7 @@ export const Dialog: Component<DialogProps> = (props) => {
    */
   const syncPanelHeight = () => {
     const p = panel
-    const d = ref
+    const d = host.element()
     if (!p || !d || !d.open) return
     if (animating) return
     if (reducedMotion()) return
@@ -234,44 +223,32 @@ export const Dialog: Component<DialogProps> = (props) => {
     settlePanelHeight()
   }
 
-  createEffect(() => {
-    const d = ref
-    if (!d) return
-
-    if (props.open && !d.open) {
-      // Fresh open: no animation from a previous session's sizes — the panel
-      // appears at its natural height and the first observation settles it.
+  /**
+   * The top layer, the overlay stack, Escape and light dismiss — the mechanism
+   * a modal surface needs and Dialog does not own. What Dialog adds to it is
+   * everything below: the card, its measured height animation, and the caret
+   * policy for the field a user is about to type in.
+   */
+  const host = createModalHost({
+    open: () => props.open,
+    dismissible: () => props.dismissible !== false,
+    onClose: () => props.onClose(),
+    onEscape: () => props.onEscape?.() === true,
+    // Fresh open: no animation from a previous session's sizes — the panel
+    // appears at its natural height and the first observation settles it.
+    // Closing mid-animation cancels the transition without a transitionend, so
+    // the pin is dropped there too and the panel cannot reopen at a stale
+    // inline height.
+    beforeOpen: () => {
       releasePanelHeight()
       lastHeight = null
-      d.showModal()
-      // The callback is stored and invoked later, when Escape or an outside
-      // interaction reaches the top of the overlay stack — i.e. as an event
-      // response, which is where solid/reactivity permits a prop read.
-      //
-      // The element travels with the entry so the toast host can render itself
-      // inside the topmost dialog. A modal dialog is in the browser's top
-      // layer, which nothing in the normal layer can paint over at any
-      // z-index, so a notification raised while this is open is only visible
-      // if it is a child of it.
-      const close = () => {
-        if (props.dismissible === false) return false
-        if (props.onEscape?.() === true) return false
-        props.onClose()
-        return true
-      }
-      const e = pushOverlay(close, undefined, d)
-      setEntry(e)
-      focusInitial(d)
-    } else if (!props.open && d.open) {
-      // Closing mid-animation cancels the transition without a transitionend;
-      // drop the pin so the panel does not reopen at a stale inline height.
+    },
+    beforeClose: () => {
       releasePanelHeight()
       lastHeight = null
-      const e = entry()
-      if (e) popOverlay(e)
-      d.close()
-      if (e) restoreFocus(e)
-    }
+    },
+    afterOpen: (d) => focusInitial(d),
+    lightDismissRegion: (d) => d.querySelector('.nocx-dialog__panel'),
   })
 
   // Watch the panel's own box: any content-driven size change (a section
@@ -285,90 +262,13 @@ export const Dialog: Component<DialogProps> = (props) => {
     ro.observe(p)
   })
 
-  // Handle native cancel event (Escape key).
-  const onCancel = (e: Event) => {
-    // Only the dialog's OWN cancel. `cancel` bubbles, and `input[type=file]`
-    // fires one when the user dismisses the OS file picker — so cancelling a
-    // file chooser inside a dialog was closing the dialog and discarding the
-    // form behind it. The native `<dialog>` cancel (Escape) targets the dialog
-    // itself; anything else reaching here belongs to a descendant.
-    if (e.target !== ref) return
-    // Escape belongs to the topmost overlay, which is what the stack is for.
-    // A Prompt opened over this dialog renders inside it, so the dialog is
-    // still the element the browser fires `cancel` at — and a user cancelling
-    // "which passphrase do you want?" was losing the connection they had just
-    // filled in. The stack's own Escape handler closes the prompt; this one
-    // stands down until the dialog is topmost again. `cancel` is cancelable,
-    // and preventing it is what keeps the dialog open.
-    const own = entry()
-    if (own && topOverlay() !== own) {
-      e.preventDefault()
-      return
-    }
-    // An overlay state may claim Escape to walk back a step instead of
-    // closing (the palette's drill, nocx-4t37); prevent the cancel so the
-    // dialog stays open.
-    if (props.dismissible === false) {
-      e.preventDefault()
-      return
-    }
-    if (props.onEscape?.() === true) {
-      e.preventDefault()
-      return
-    }
-    props.onClose()
-  }
-
+  // The host disposes the overlay entry, the focus return and the element
+  // itself; what is left here is the panel's own measurement state.
   onCleanup(() => {
     ro?.disconnect()
     ro = null
     releasePanelHeight()
-    const e = entry()
-    if (e) {
-      popOverlay(e)
-      if (e.prevFocus) restoreFocus(e)
-    }
-    if (ref?.open) ref.close()
   })
-
-  /**
-   * Light dismiss — a click outside the panel closes the dialog.
-   *
-   * The listener is on the `<dialog>` rather than on the backdrop, because
-   * `::backdrop` is a pseudo-element and cannot take one. A native modal
-   * `<dialog>` fills the viewport with the panel centred inside it, so a click
-   * that lands on the dialog element itself landed outside the panel. Comparing
-   * against the panel's box rather than checking `e.target === ref` is what
-   * makes it survive a click on padding or on a child that stops bubbling.
-   */
-  const onPointerDown = (e: MouseEvent) => {
-    const d = ref
-    if (!d || props.dismissible === false) return
-    // The toast host renders inside this dialog when it is topmost, so a click
-    // on a toast is a click on a descendant that is deliberately outside the
-    // panel. Dismissing a notification must not dismiss the form behind it.
-    if ((e.target as Element | null)?.closest('.ui-toast-host')) return
-    // Same reasoning, and the same mechanism: a Prompt opened over this dialog
-    // moves itself inside it, because the top layer is escaped by parentage
-    // rather than by a z-index. Its scrim then covers the dialog's own, so
-    // dismissing the prompt would otherwise dismiss the form that asked for
-    // it — the user cancels "which passphrase?" and loses the connection they
-    // were editing, which is the defect light-dismiss exists to avoid.
-    if ((e.target as Element | null)?.closest('.ui-prompt-overlay')) return
-    // An anchored field picker re-homes into this dialog's top-layer subtree,
-    // so its visible rows are outside the panel box but still belong to the
-    // interaction that opened it.
-    if ((e.target as Element | null)?.closest('.ui-floating-panel')) return
-    const panel = d.querySelector('.nocx-dialog__panel')
-    if (!panel) return
-    const r = panel.getBoundingClientRect()
-    const inside =
-      e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
-    // A click with no coordinates is a keyboard-activated one (Enter on a
-    // button reports 0,0); those are never a dismiss.
-    if (e.clientX === 0 && e.clientY === 0) return
-    if (!inside) props.onClose()
-  }
 
   /**
    * Enter in a single-line field means "the obvious yes", which is what it
@@ -393,12 +293,12 @@ export const Dialog: Component<DialogProps> = (props) => {
 
   return (
     <dialog
-      ref={ref}
+      ref={host.ref}
       class="nocx-dialog"
       data-dismissible={props.dismissible === false ? 'false' : undefined}
       aria-labelledby={props.title ? titleId : undefined}
-      onCancel={onCancel}
-      onMouseDown={onPointerDown}
+      onCancel={host.onCancel}
+      onMouseDown={host.onMouseDown}
       onKeyDown={onKeyDown}
     >
       <div

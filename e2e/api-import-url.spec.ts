@@ -63,6 +63,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  appReadyForInput,
   bindEndpoint,
   openImportDestination,
   settingsReady,
@@ -231,6 +232,7 @@ test.describe('an export arrives by URL', () => {
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // ── The vault first, because the export carries a bearer token ────────
     await setUpVault(page)
@@ -383,6 +385,7 @@ test.describe('an export arrives by URL through a connection', () => {
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await setUpVault(page)
 

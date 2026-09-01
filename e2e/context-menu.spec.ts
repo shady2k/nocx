@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 
 const MORE = '[aria-label="More"]'
 const MENU_ITEM = '.ui-context-menu__item'
@@ -46,6 +46,7 @@ test.describe('context menu (kit)', () => {
   test("the strip's menu paints the mark on every row that has one", async ({ page }) => {
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
+    await appReadyForInput(page)
 
     await page.locator(MORE).first().click()
     await expect(page.locator(MENU_ITEM).first()).toBeVisible({ timeout: 10_000 })
@@ -64,6 +65,7 @@ test.describe('context menu (kit)', () => {
   test("a tab's own menu paints its marks too", async ({ page }) => {
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
+    await appReadyForInput(page)
 
     await page.locator(TAB).first().click({ button: 'right' })
     await expect(page.locator(MENU_ITEM).first()).toBeVisible({ timeout: 10_000 })

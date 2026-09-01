@@ -60,6 +60,11 @@ export interface BlockProjectionPort {
  *  the completed attempt. Resolves with the store's ack or null. */
 export type HistoryPort = (rec: CommandRecord, attempt: ExecutionAttempt) => Promise<unknown>
 
+/** Notifies the transport that an app-owned attempt reached its authenticated
+ * running boundary. The callback is invoked once per attempt, after the local
+ * record is bound and never from stream parsing. */
+export type AttemptBindPort = (record: CommandRecord, attempt: ExecutionAttempt) => void
+
 /** One observer that drives the ledger, history and block projections from
  *  the kernel. It holds no lifecycle state: the per-attempt `_bound` and
  *  `_done` sets are idempotency bookkeeping, not a second model — each
@@ -85,6 +90,7 @@ export class LifecycleProjections {
     private readonly ledger: CommandLedger,
     private readonly blocks: BlockProjectionPort,
     private readonly persist: HistoryPort,
+    private readonly bindAttempt?: AttemptBindPort,
   ) {}
 
   /** Subscribe to kernel changes and drive the projections once with the
@@ -98,6 +104,24 @@ export class LifecycleProjections {
   detach(): void {
     this._unsub?.()
     this._unsub = null
+  }
+
+  /** Finalize app-owned work before the kernel forgets the old session. */
+  reset(): void {
+    for (const id of this._bound) {
+      if (this._done.has(id)) continue
+      const attempt = this.kernel.attempt(id)
+      if (attempt === undefined || attempt.state !== 'open') continue
+      const abandoned: ExecutionAttempt = { ...attempt, state: 'unknown' }
+      this._done.add(id)
+      this.ledger.complete(abandoned)
+      this.blocks.abandonBlock(abandoned)
+    }
+    if (this.ledger.abandonPending() !== null) this.blocks.abandonPending()
+    this._bound.clear()
+    this._done.clear()
+    this._endedSeen = 0
+    this._depthSeen = 0
   }
 
   /** Reconcile the projections with the kernel's current state. The ONLY
@@ -138,7 +162,6 @@ export class LifecycleProjections {
     this._depthSeen = depth
     if (state.kind !== 'running') return
     const attempt = state.attempt
-
     if (attempt.state === 'open') {
       if (this._bound.has(attempt.id)) return
       this._bound.add(attempt.id)
@@ -148,6 +171,7 @@ export class LifecycleProjections {
         // may carry a literal password — no ledger record, no history.
         this.blocks.openBlock(attempt)
       } else {
+        this.bindAttempt?.(rec, attempt)
         this.blocks.bindBlock(attempt)
       }
       return

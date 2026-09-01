@@ -67,6 +67,7 @@ import { SURFACE_TERMINAL } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
@@ -873,7 +874,7 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
 describe("the dropdown owns the arrows while it is open; recall's bare-Up gesture waits for it to close (nocx-mlm7)", () => {
   /** A profile client whose quick-connect assembly answers two hosts. */
   const hostsClient = (): ProfileClient => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([
       {
         id: 'prof:ssh:pi',
@@ -4435,12 +4436,88 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       await vi.waitFor(() =>
         expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
       )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-9',
+          state: 'open',
+          origin: 'app',
+          command: 'make deploy',
+        },
+      })
+      expect(client.call).toHaveBeenCalledWith('ledger.bind', {
+        envelope: {
+          id: 'att-9',
+          sessionId: session.sessionId,
+          cwd: FIXTURE_CWD,
+          kind: 'shell',
+          intent: 'make deploy',
+          sensitivity: 'normal',
+          clientSeq: 0,
+          attemptId: 'att-9',
+        },
+        facts: {},
+      })
     } finally {
       restoreScroll()
       teardown()
     }
   })
+  it('an agent submission cancelled during the attempt round trip sends no bytes and releases its waiters', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const session = sessionOf(content)
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    const controller = new AbortController()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
+      const pending = content.submitAgentCommand('touch pid', 'req-cancel', controller.signal)
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The broker cancellation lands while lifecycle.submitAttempt is still
+      // in flight — this is the only window that proves the renderer checks
+      // immediately before its write rather than only at submit entry.
+      controller.abort()
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'touch pid',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+
+      await expect(pending).rejects.toThrow('submission expired before execution')
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.signal).not.toHaveBeenCalled()
+      const waiters = content as unknown as {
+        agentRuns: Map<unknown, unknown>
+        runEntryIds: Map<unknown, unknown>
+      }
+      expect(waiters.agentRuns.size).toBe(0)
+      expect(waiters.runEntryIds.size).toBe(0)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
   it('the attempt receives the reference-intact record line, never the resolved send line', async () => {
     const client = makeClient()
     // vault.resolveLine goes over the WSClient seam (client.call); the
@@ -11070,6 +11147,47 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
         'stopped',
       )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('shows pre-execution submission failure in the answer block, not as terminalization', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'run the deployment')
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({
+        runId: 42,
+        entryId: 'entry-42',
+        state: 'failed',
+        error: 'submission expired before execution',
+      })
+
+      expect(answer.querySelector('.cmd-answer-error')?.textContent).toBe(
+        'submission expired before execution',
+      )
+      expect(answer.querySelector('.cmd-answer-error')?.textContent).not.toContain('terminal')
     } finally {
       teardown()
     }

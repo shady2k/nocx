@@ -17,7 +17,13 @@ import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
+import {
+  VaultBackend,
+  appReadyForInput,
+  bindEndpoint,
+  settingsReady,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import { addSecretFromLock, pressLock } from './secret-field'
 
@@ -101,6 +107,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     await page.goto('/')
     // Wait for the app to load and show the initial tab.
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Open Settings via keyboard shortcut.
     await page.keyboard.press('Meta+,')
@@ -241,6 +248,7 @@ test.describe('Vault — no keyring, full round trip', () => {
 
     // Wait for app to reinitialize.
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Re-open Settings and navigate back to Connections.
     await page.keyboard.press('Meta+,')
@@ -311,6 +319,7 @@ test.describe('Vault — recovery code unseal', () => {
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Open Settings, Connections, create profile with password (same as case 1).
     await page.keyboard.press('Meta+,')
@@ -396,6 +405,7 @@ test.describe('Vault — recovery code unseal', () => {
     await page.reload()
 
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Navigate back to Settings → Connections.
     await page.keyboard.press('Meta+,')
@@ -501,6 +511,7 @@ test.describe('Vault — a reachable keyring still asks for a passphrase', () =>
 
       await page.goto('/')
       await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+      await appReadyForInput(page)
 
       // Open Settings → Connections → create connection with password.
       await page.keyboard.press('Meta+,')

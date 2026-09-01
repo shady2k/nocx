@@ -1,4 +1,4 @@
-import { test, expect, clickIntoEditor } from './harness'
+import { appReadyForInput, test, expect, clickIntoEditor } from './harness'
 
 // Regression guard for the layout regression fixed in 2314a2a: the gutter no
 // longer overrides pane.style.position, so multiple tabs don't collapse the
@@ -10,6 +10,7 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
   // Wait for the initial tab to populate its title (session is ready).
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+  await appReadyForInput(page)
   await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
   // Click the + button to add a second tab.
@@ -47,6 +48,7 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', {
       timeout: 10_000,
     })
+    await appReadyForInput(page)
     // Open Settings, go to the section that owns the setting, and switch to
     // horizontal. The rail navigation is not optional: Settings opens on its
     // FIRST section rather than listing every setting end to end, so a row in

@@ -353,6 +353,29 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     expect(text).toContain('{{secret:key}}')
   })
 
+  it('the preview line names an option list, a condition and a malformed tag', async () => {
+    const { container, host } = createHarness([])
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-empty-state')).toBeTruthy()
+    })
+    clickButton(container.querySelector('.ui-empty-state') as HTMLElement, '+ New snippet')
+
+    host.type('{{w=a|b}}\n{% if fast %}x{% endif %}\n{% if bad %}')
+    const preview = () => dialog()!.querySelector('.sn-preview')!
+    await vi.waitFor(() => {
+      expect(preview().textContent).toContain('{{w=a|b}}')
+    })
+    const text = preview().textContent ?? ''
+    expect(text).toContain('you will choose one of a, b')
+    expect(text).toContain('kept only if you tick "fast"')
+    // The unclosed block is the reason the whole body cannot fire, so it is
+    // reported as a problem rather than as one more tick to offer.
+    expect(text).toContain('no {% endif %}')
+    expect(preview().querySelector('[data-recognised="false"]')?.textContent).toContain(
+      'cannot be fired',
+    )
+  })
+
   it('an env key outside the table is reported in the preview, not silently accepted', async () => {
     const { container, host } = createHarness([])
     await vi.waitFor(() => {

@@ -8,10 +8,8 @@ frontend/bindings/
 frontend/node_modules/
 package-lock.json
 spike/
-_bmad/
 .agents/
 .claude/
-.opencode/
 
 # Playwright run artefacts. Already in .gitignore, but prettier walks the
 # filesystem rather than the index, so an ignored directory still failed

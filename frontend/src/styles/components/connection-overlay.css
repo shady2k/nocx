@@ -1,0 +1,204 @@
+/* ConnectionOverlay — the application's loading screen and its recovery
+   surface. Identity: .ui-connection-overlay and its __content/__mark/__logo/
+   __headline/__detail/__action parts. Variance: data-state (the connection), data-shown (the face drawn), data-exiting.
+
+   It is a native <dialog>, so it is in the browser top layer and nothing in
+   the normal layer can paint over it — but a modal dialog is sized to its
+   content and centred, so the full bleed below is ours to declare. Both the
+   element AND its ::backdrop are painted: the element covers the window, and
+   the backdrop closes the hairline a fractional device-pixel rounding can
+   leave at the edges. */
+
+dialog.ui-connection-overlay {
+  position: fixed;
+  /* `inset: 0` alone loses to the UA's `margin: auto` on a modal dialog. */
+  top: 0;
+  left: 0;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--color-canvas);
+  padding: 0;
+  color: var(--color-text);
+  /* The surface itself is never a drag region in a Wails webview. */
+  --wails-draggable: no-drag;
+}
+
+dialog.ui-connection-overlay::backdrop {
+  background: var(--color-canvas);
+}
+
+/* The whole composition sits optically above the mathematical midpoint: a
+   group centred by arithmetic reads as sitting low, because the icon and the
+   button both carry their weight below their own centres. */
+.ui-connection-overlay__content {
+  display: flex;
+  width: min(420px, calc(100vw - var(--space-8) * 2));
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+  text-align: center;
+  transform: translateY(clamp(-48px, -5vh, -28px));
+}
+
+/* ── The mark: the app icon, and a ring that says whether we are trying ──── */
+
+/* 144, not the 120 a 96px icon suggests. The icon is a rounded SQUARE, so its
+   outermost point is a corner, not an edge: with a 22px corner radius that
+   corner sits 58.8px from the centre, which a 120px ring's inner edge (58px)
+   cuts straight through — the mark then reads as a disc with clipped corners
+   rather than as an icon inside a ring. 144 puts the inner edge at 70 and
+   leaves an even 11px of air all the way round. */
+.ui-connection-overlay__mark {
+  position: relative;
+  display: grid;
+  width: 144px;
+  height: 144px;
+  flex: 0 0 auto;
+  margin-bottom: var(--space-6);
+  place-items: center;
+}
+
+/* The track. Present in every state, so the composition does not change size
+   when an attempt starts or stops — only the arc appears. */
+.ui-connection-overlay__mark::before,
+.ui-connection-overlay__mark::after {
+  position: absolute;
+  border-radius: 50%;
+  content: '';
+  inset: 0;
+}
+
+.ui-connection-overlay__mark::before {
+  border: 2px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+}
+
+/* The arc. A conic gradient masked to a 2px annulus, so the leading edge fades
+   instead of ending on a hard cap — one element, no SVG, no markup. */
+.ui-connection-overlay__mark::after {
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg 236deg,
+    color-mix(in srgb, var(--color-accent) 25%, transparent) 252deg,
+    var(--color-accent) 326deg,
+    transparent 344deg 360deg
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+  opacity: 0;
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 1.5px)
+  );
+}
+
+/* Motion states what is true: the arc turns only while an attempt is in
+   flight. Through backoff and through a blocked state the track stands still —
+   an indicator that keeps moving while nothing is happening is lying, and the
+   countdown already says when the next attempt is. 1.6s linear, deliberately:
+   easing each revolution produces a pulse that reads as impatience, and
+   anything near a second reads as a generic busy spinner. */
+.ui-connection-overlay[data-shown='connecting'] .ui-connection-overlay__mark::after {
+  animation: ui-connection-overlay-ring 1.6s linear infinite;
+  opacity: 1;
+}
+
+@keyframes ui-connection-overlay-ring {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+/* The icon is a raster plate — a dark rounded square that, on a near-black
+   ground, reads as a sticker floating in space. The hairline separates it from
+   the ground, the shadow seats it, and the very diffuse accent bloom lets the
+   artwork's own neon touch the surface around it. Kept low on purpose: past
+   about 12% the bloom stops being integration and starts being decoration, and
+   a heavier shadow that seats the plate nicely on Tokyo Night reads as a grey
+   smudge on Solarized Light — which is the ground both have to work on. */
+.ui-connection-overlay__logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-text) 6%, transparent),
+    0 10px 26px color-mix(in srgb, black, transparent 76%),
+    0 0 30px color-mix(in srgb, var(--color-accent) 10%, transparent);
+  object-fit: contain;
+}
+
+/* ── The sentence, and the line under it ────────────────────────────────── */
+
+.ui-connection-overlay__headline {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Reserves its own line even when empty, so the mark above does not jump when
+   `connecting` becomes a countdown. `--color-text-dim`, not `--color-text-
+   muted`: a remedy is the sentence that tells somebody what to do, and it has
+   to stay effortlessly readable. */
+.ui-connection-overlay__detail {
+  min-height: calc(var(--font-size-md) * 1.5);
+  max-width: 40ch;
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-md);
+  font-weight: 400;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* A wider gap than anything above it. At the kit's next step down the button
+   reads as the last line of the copy rather than as a separate decision. */
+.ui-connection-overlay__action {
+  margin-top: var(--space-8);
+}
+
+/* The row is present in every state; the control inside it is hidden where it
+   cannot act. `visibility: hidden` and not `display: none` on purpose — the
+   row must keep occupying the button's height, because the group is centred
+   and a row that comes and goes moved the mark 28px on every attempt. It also
+   takes the button out of the tab order and the accessibility tree, so a
+   keyboard or screen-reader user is not offered a Retry that does nothing. */
+.ui-connection-overlay__action[data-available='false'] {
+  visibility: hidden;
+}
+
+/* ── Departure ──────────────────────────────────────────────────────────── */
+
+/* Arrival is instantaneous and deliberately so: an outage is already motion,
+   and a ground that fades in delays telling somebody their terminal is not
+   connected. Only the departure transitions, and the whole ground goes at
+   once — fading the mark on its own timing turns a recovery into a splash
+   screen's logo reveal. The duration matches CONNECTION_OVERLAY_EXIT_MS. */
+dialog.ui-connection-overlay[data-exiting='true'] {
+  opacity: 0;
+  transition: opacity 180ms cubic-bezier(0.4, 0, 1, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-connection-overlay[data-shown='connecting'] .ui-connection-overlay__mark::after {
+    animation: none;
+    /* Off the top of the circle, so the arc still reads as an arc rather than
+       as a gap in the track. */
+    transform: rotate(35deg);
+  }
+
+  dialog.ui-connection-overlay[data-exiting='true'] {
+    transition: none;
+  }
+}

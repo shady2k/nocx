@@ -21,6 +21,7 @@ import { systemPromptText } from './systemprompt'
 import { SettingsObserver } from './settings-observer'
 import { ProfileClient, type RestorePreview } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { Declaration, SettingsGroup } from './settings-domain'
 import type { PaneHost } from './pane-content'
 import { VaultSection, createVaultSecretSource, type VaultController } from './vault'
@@ -197,7 +198,7 @@ describe('SettingsContent', () => {
     toasts.length = 0
     target = document.createElement('div')
     document.body.append(target)
-    client = new ProfileClient(new Dispatcher())
+    client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     content = new SettingsContent(client)
     host = mockPaneHost()
     signal = new AbortController().signal
@@ -1312,7 +1313,7 @@ describe('notification routing matrix (nocx-3mniv)', () => {
     document.body.replaceChildren()
     target = document.createElement('div')
     document.body.append(target)
-    client = new ProfileClient(new Dispatcher())
+    client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     content = new SettingsContent(client)
     host = mockPaneHost()
     signal = new AbortController().signal
@@ -1548,7 +1549,7 @@ describe('horizontal Field gate — every settings row must use primary label', 
     document.body.replaceChildren()
     target = document.createElement('div')
     document.body.append(target)
-    client = new ProfileClient(new Dispatcher())
+    client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     content = new SettingsContent(client)
     host = mockPaneHost()
     signal = new AbortController().signal
@@ -1655,7 +1656,7 @@ describe("the person's own instructions to the assistant", () => {
     document.body.replaceChildren()
     target = document.createElement('div')
     document.body.append(target)
-    client = new ProfileClient(new Dispatcher())
+    client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     content = new SettingsContent(client)
     host = mockPaneHost()
     signal = new AbortController().signal
@@ -1834,7 +1835,7 @@ describe('the Secrets fallback carries the value, not only the name', () => {
     toasts.length = 0
     target = document.createElement('div')
     document.body.append(target)
-    client = new ProfileClient(new Dispatcher())
+    client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vaultController = {
       status: () => UNSEALED,
       refresh: vi.fn().mockResolvedValue(true),

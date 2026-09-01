@@ -102,11 +102,12 @@ func newUnitLease(t *testing.T, sess runLeaseSession, cfg RunLeaseConfig) (*runL
 	}
 	ring := newOutputRing()
 	return &runLease{
-		log:  log.NewSlogAdapter(nil),
-		sid:  session.ID("sid-unit"),
-		sess: sess,
-		ring: ring,
-		cfg:  cfg,
+		log:                 log.NewSlogAdapter(nil),
+		sid:                 session.ID("sid-unit"),
+		sess:                sess,
+		ring:                ring,
+		cfg:                 cfg,
+		submissionDelivered: true,
 	}, ring
 }
 
@@ -132,6 +133,58 @@ func TestRunLease_WallClockFiresAndEscalates(t *testing.T) {
 	sig := sess.got()
 	if len(sig) != 2 || sig[0] != syscall.SIGINT || sig[1] != syscall.SIGTERM {
 		t.Fatalf("signals = %v, want [INT TERM] — the escalation stops at the signal that works", sig)
+	}
+}
+
+func TestRunLease_BoundBeforeSubmissionDoesNotEscalateOrClaimTerminalization(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:   50 * time.Millisecond,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	lease.submissionDelivered = false
+
+	err := lease.supervise(context.Background(), blockForever(nil))
+	le := leaseErrorOf(t, err)
+	if !le.SubmissionExpired {
+		t.Fatal("lease error says the submission started, want an expired pre-execution submission")
+	}
+	_, sentence := classifyAskFailure(le, "qwen3")
+	if sentence != "the run submission expired before execution started" {
+		t.Fatalf("pre-execution sentence = %q, want the submission-expired sentence", sentence)
+	}
+	if strings.Contains(sentence, "terminalized") {
+		t.Fatalf("pre-execution sentence = %q, must not claim terminalization", sentence)
+	}
+	if got := sess.got(); len(got) != 0 {
+		t.Fatalf("signals = %v, want none when no submission exists", got)
+	}
+}
+
+// A conventional shell has no authenticated start fact, but a delivered
+// request still owns the command. The lease must keep the normal
+// terminalization sentence instead of treating accountingStarted as proof
+// that nothing was submitted.
+func TestRunLease_DeliveredWithoutObservedStartStillTerminalizes(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:   50 * time.Millisecond,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	lease.submissionDelivered = true
+
+	err := lease.supervise(context.Background(), blockForever(nil))
+	le := leaseErrorOf(t, err)
+	if le.SubmissionExpired {
+		t.Fatal("delivered request was reported as pre-execution")
+	}
+	sentence := assistant.RunLeaseSentence(le.Reason, le.SubmissionExpired)
+	if !strings.Contains(sentence, "terminalized") ||
+		!strings.Contains(sentence, "wall-clock") {
+		t.Fatalf("delivered no-start sentence = %q, want wall-clock terminalization", sentence)
+	}
+	if got := sess.got(); len(got) == 0 {
+		t.Fatal("delivered request sent no escalation signals")
 	}
 }
 
@@ -178,7 +231,10 @@ func TestRunLease_InactivityFiresAndIsDistinctFromWallClock(t *testing.T) {
 	// explain the outcome.
 	lease, _ := newUnitLease(t, sess, RunLeaseConfig{WallClock: 30 * time.Second, Inactivity: 50 * time.Millisecond, SignalGrace: 50 * time.Millisecond})
 
-	err := lease.supervise(context.Background(), blockForever(nil))
+	err := lease.supervise(context.Background(), func(ctx context.Context) error {
+		lease.onAttemptStart()
+		return blockForever(nil)(ctx)
+	})
 	le := leaseErrorOf(t, err)
 	if le.Reason != content.TermInactivity {
 		t.Fatalf("reason = %s, want inactivity — a silent execution is wedged, not slow", le.Reason)
@@ -196,6 +252,7 @@ func TestRunLease_OutputBreaksTheSilence(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			lease.onAttemptStart()
 			ticker := time.NewTicker(5 * time.Millisecond)
 			defer ticker.Stop()
 			for {
@@ -231,8 +288,16 @@ func TestRunLease_OutputBudgetFiresAndNamesItself(t *testing.T) {
 	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
 	lease, ring := newUnitLease(t, sess, RunLeaseConfig{WallClock: 30 * time.Second, OutputBudget: 100, SignalGrace: 50 * time.Millisecond})
 
+	ready := make(chan struct{})
 	errCh := make(chan error, 1)
-	go func() { errCh <- lease.supervise(context.Background(), blockForever(nil)) }()
+	go func() {
+		errCh <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			close(ready)
+			return blockForever(nil)(ctx)
+		})
+	}()
+	<-ready
+	lease.onAttemptStart()
 
 	// The execution produces bytes through the ring: the observer hits the
 	// budget and the lease terminalizes — the run is bounded, never
@@ -255,6 +320,111 @@ func TestRunLease_OutputBudgetFiresAndNamesItself(t *testing.T) {
 	if le.Reason != content.TermOutputBudget {
 		t.Fatalf("reason = %s, want output-budget", le.Reason)
 	}
+}
+
+func TestRunLease_OutputBudgetIgnoresPreStartCommandLine(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, ring := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:    30 * time.Second,
+		OutputBudget: 4,
+		SignalGrace:  50 * time.Millisecond,
+	})
+
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			close(ready)
+			return blockForever(nil)(ctx)
+		})
+	}()
+	<-ready
+
+	// The shell echoes this command before its authenticated start. The
+	// command line is longer than the budget and must not consume it.
+	if err := ring.write([]byte("echo a command line longer than budget")); err != nil {
+		t.Fatalf("pre-start ring write: %v", err)
+	}
+	if output, started, reason := leaseAccounting(lease); output != 0 || started || reason != "" {
+		t.Fatalf("pre-start accounting = output %d, started %v, reason %q; want untouched", output, started, reason)
+	}
+
+	lease.onAttemptStart()
+	if output, started, reason := leaseAccounting(lease); output != 0 || !started || reason != "" {
+		t.Fatalf("start accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
+	}
+	lease.mu.Lock()
+	lastOutput := lease.lastOutput
+	lease.mu.Unlock()
+	if lastOutput.IsZero() {
+		t.Fatal("authenticated start did not stamp last output")
+	}
+	if err := ring.write([]byte("ok")); err != nil {
+		t.Fatalf("first command output: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("budget fired after only command output below the bound: %v", err)
+	default:
+	}
+	if err := ring.write([]byte("!")); err != nil {
+		t.Fatalf("second command output: %v", err)
+	}
+	if err := ring.write([]byte("?")); err != nil {
+		t.Fatalf("third command output: %v", err)
+	}
+	le := leaseErrorOf(t, <-done)
+	if le.Reason != content.TermOutputBudget {
+		t.Fatalf("reason = %s, want output-budget", le.Reason)
+	}
+	if output, started, _ := leaseAccounting(lease); output != 4 || !started {
+		t.Fatalf("final accounting = output %d, started %v; want 4 and active", output, started)
+	}
+}
+
+func TestRunLease_OutputBurstImmediatelyAfterStartIsCountedOnce(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, ring := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:    30 * time.Second,
+		OutputBudget: 8,
+		SignalGrace:  50 * time.Millisecond,
+	})
+
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			close(ready)
+			return blockForever(nil)(ctx)
+		})
+	}()
+	<-ready
+	lease.onAttemptStart()
+
+	// Two writes can race the lifecycle start in production. Once start has
+	// authenticated, both writes belong to this attempt and count exactly once.
+	if err := ring.write([]byte("1234")); err != nil {
+		t.Fatalf("first output burst: %v", err)
+	}
+	// A repeated authenticated-start publication must not reset the first
+	// burst before the second write.
+	lease.onAttemptStart()
+	if err := ring.write([]byte("5678")); err != nil {
+		t.Fatalf("second output burst: %v", err)
+	}
+	le := leaseErrorOf(t, <-done)
+	if le.Reason != content.TermOutputBudget {
+		t.Fatalf("reason = %s, want output-budget", le.Reason)
+	}
+	if output, started, _ := leaseAccounting(lease); output != 8 || !started {
+		t.Fatalf("burst accounting = output %d, started %v; want 8 and active", output, started)
+	}
+}
+
+func leaseAccounting(l *runLease) (output int64, started bool, reason content.TerminationReason) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.output, l.accountingStarted, l.firedReason
 }
 
 func TestRunLease_AwaitingTakeoverSuspendsTheLease(t *testing.T) {

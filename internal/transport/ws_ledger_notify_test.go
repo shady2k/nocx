@@ -394,7 +394,7 @@ func TestLedgerOpenAndBind_RaiseNothing(t *testing.T) {
 		t.Fatalf("ledger.open: %+v", errObj)
 	}
 	if _, errObj := ledgerCall(t, conn, "ledger.bind",
-		map[string]any{"envelope": ledgerEnv(sid, "quiet", "make", 2)}, 3); errObj != nil {
+		map[string]any{"envelope": ledgerBindEnv(sid, "quiet", "make", 2)}, 3); errObj != nil {
 		t.Fatalf("ledger.bind: %+v", errObj)
 	}
 	// The close is the barrier AND the positive control: its event proves the

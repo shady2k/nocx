@@ -80,6 +80,10 @@ type ledgerEnvelopeWire struct {
 	Intent      string `json:"intent"`
 	Sensitivity string `json:"sensitivity"`
 	ClientSeq   int64  `json:"clientSeq"`
+	// AttemptID is the server-minted lifecycle identity carried by the
+	// authenticated running fact corresponding to OSC 133 C. It is required
+	// by ledger.bind and absent from open/close envelopes.
+	AttemptID string `json:"attemptId,omitempty"`
 }
 
 type ledgerOpenParams struct {
@@ -228,6 +232,7 @@ type ledgerHandlers struct {
 	shared   *ledgerShared
 	state    *connState
 	clientID string
+	broker   *Broker
 	r        Responder
 
 	// raiser is the notification pipeline's ingress (ADR-0029); nil when the
@@ -278,6 +283,11 @@ func (h ledgerHandlers) handleBind(ctx context.Context, req jsonrpcRequest) {
 	if p.Facts.Executor != "" {
 		executor := p.Facts.Executor
 		cmd.start.Executor = &executor
+	}
+	// The authenticated OSC 133 C identity is the only event that opens
+	// accounting. The broker lookup is by attempt id, never session or time.
+	if h.broker != nil {
+		h.broker.startRunLeaseForAttempt(p.Envelope.AttemptID)
 	}
 	h.apply(ctx, req, cmd)
 }
@@ -723,6 +733,9 @@ func validateLedgerBindRaw(raw json.RawMessage) string {
 	if msg := validateLedgerEnvelope(p.Envelope); msg != "" {
 		return msg
 	}
+	if strings.TrimSpace(p.Envelope.AttemptID) == "" {
+		return "envelope.attemptId is required"
+	}
 	// Absent is legitimate: the shell driver knows nothing about
 	// interactivity at OSC 133 C, and the column's own default is `none`.
 	switch content.Interactivity(p.Facts.Interactivity) {
@@ -801,6 +814,7 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			clientID: connectionID(w),
 			r:        r,
 			raiser:   s.notifyRaiser,
+			broker:   s.broker,
 		}
 	}
 	return []methodSpec{

@@ -2,7 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { test, expect, promptReady, showSidebarView } from './harness'
+import { test, expect, promptReady, showSidebarView, resolveBackend } from './harness'
 import type { Page } from './harness'
 import { readStand } from './stand'
 
@@ -225,20 +225,6 @@ function trustHostKey(fixture: Fixture): void {
   writeFileSync(path.join(sshDir, 'known_hosts'), fixture.knownHosts + '\n')
 }
 
-/** The backend's port and token through the wails bindings — the same seam
- *  auth.spec.ts uses, rather than a second answer to "where is the backend". */
-async function bindings(page: Page): Promise<{ port: number; token: string }> {
-  return page.evaluate(async () => {
-    const w = window as unknown as Record<string, unknown>
-    const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-    const app = main.WailsApp as {
-      GetWSPort: () => Promise<number>
-      GetWSToken: () => Promise<string>
-    }
-    return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-  })
-}
-
 /** One JSON-RPC method over the real backend socket, as the app does. */
 async function rpc<T>(
   page: Page,
@@ -441,7 +427,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
 
     // ── a second host announces something ────────────────────────────────
     await backToTheTerminal(page)
-    const ws = await bindings(page)
+    const ws = await resolveBackend(page)
     // Unique per run: the stand's profile store persists across runs in this
     // home, and a stale profile would dial a fixture that is long dead.
     const profileName = `e2e-grouping-${Date.now()}`
@@ -562,7 +548,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // (nocx-8rda).
     try {
       if (profileId) {
-        const ws = await bindings(page)
+        const ws = await resolveBackend(page)
         await rpc(page, ws.port, ws.token, 'profiles.delete', { id: profileId })
       }
     } catch {

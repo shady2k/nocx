@@ -1,4 +1,4 @@
-import { test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 
 /**
  * e2e: a snippet a person saved reaches a running program, filled in, and
@@ -134,11 +134,13 @@ test.describe('a saved snippet reaches a running program', () => {
     await promptReady(page)
     await removeSnippet(page, 'e2e fill')
     await removeSnippet(page, 'e2e two lines')
+    await removeSnippet(page, 'e2e choice')
   })
 
   test('fires filled in, without a newline, into the program reading stdin', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // One env span and one ask span, exactly as the epic's criterion asks.
     // cwd rather than user: `user` is the SSH user and a local shell has
@@ -185,6 +187,7 @@ test.describe('a saved snippet reaches a running program', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     await createSnippet(page, 'e2e two lines', 'first line\nsecond line')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
@@ -273,11 +276,88 @@ test.describe('a saved snippet reaches a running program', () => {
     await expect(block).toContainText('second line')
   })
 
+  // The epic's own sentence (nocx-92kes): a body whose CHOICES and whose
+  // PARAGRAPHS both vary, fired by a person who picks one and leaves the
+  // other switched off.
+  //
+  // What makes it an end-to-end check rather than a third rendering of the
+  // resolver's unit tests is the program on the other side. `read -r a` then
+  // `read -r b` reads exactly two lines and prints them bracketed, so the
+  // assertion discriminates the failures that matter and that a unit test
+  // cannot see: a blank line left where the dropped paragraph was arrives as
+  // an empty `b`, and a paragraph that was not dropped arrives as the wrong
+  // one. The person's own Enter is what completes the second read, which is
+  // how "no trailing newline was sent" is observed — the fire left the
+  // program still waiting.
+  test('a chosen option and an un-ticked condition reach the program', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+
+    // The tags stand on their own lines here, which is the case that needs
+    // watching: each takes its whole line with it, so switching `parallel`
+    // off has to leave `run codex\ndone` and NOT a blank line between them.
+    await createSnippet(
+      page,
+      'e2e choice',
+      'run {{worker=claude|omp|codex}}\n{% if parallel %}\nin parallel\n{% endif %}\ndone',
+    )
+
+    const blocksBefore = await programWaitingOnStdin(
+      page,
+      'printf \'\\033[?2004h\'; read -r a; read -r b; printf \'got-[%s][%s]\\n\' "$a" "$b"',
+    )
+
+    // Same shape as the bracketed-paste test above, and for the same reason:
+    // the program's DECSET may still be in flight at the first moment this
+    // spec can act, and a refused fire is provably side-effect-free, so the
+    // poll re-attempts rather than waiting on a duration.
+    await expect
+      .poll(
+        async () => {
+          const toastsBefore = await page.locator(REFUSAL).count()
+          await pressChord(page)
+          await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
+          await page.locator(`${PANEL} .quick-connect__search input`).fill('e2e choice')
+          await expect(page.locator(ROW, { hasText: 'e2e choice' })).toHaveCount(1)
+          await page.keyboard.press('Enter')
+
+          // The form asks both questions at once: a dropdown for the choice
+          // and a tick for the paragraph.
+          const form = page.locator(ASK_FORM).filter({ hasText: 'e2e choice' })
+          await expect(form).toBeVisible({ timeout: 10_000 })
+          const flag = form.locator('label.ui-checkbox', { hasText: 'parallel' })
+          await expect(flag).toBeVisible()
+          await expect(flag.locator('input')).not.toBeChecked()
+          await form.locator('#snippet-ask-worker').selectOption('codex')
+          await form.getByRole('button', { name: 'Insert', exact: true }).click()
+          await expect(form).toHaveCount(0, { timeout: 10_000 })
+
+          await expectPaletteClosed(page)
+          return (await page.locator(REFUSAL).count()) > toastsBefore ? 'refused' : 'delivered'
+        },
+        { timeout: 20_000 },
+      )
+      .toBe('delivered')
+
+    // Nothing was submitted: the fire never sends a newline of its own, so
+    // the second `read` is still waiting for the person.
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
+
+    await page.keyboard.press('Enter')
+    const block = page.locator('.cmd-block', { hasText: 'got-[' }).first()
+    await expect(block).toBeVisible({ timeout: 10_000 })
+    // The whole assertion in one string: the chosen option is there, the
+    // un-ticked paragraph is not, there is no blank line where it was, and
+    // no {{…}} survived as literal text.
+    await expect(block).toContainText('got-[run codex][done]')
+  })
+
   test('a snippet whose secret cannot be resolved refuses, and writes nothing', async ({
     page,
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     // This stand has no vault set up, so the reference cannot resolve. The
     // rule under test is the one §11.1 states: an unresolved name refuses
     // the whole fire — the literal {{secret:…}} must never reach a running

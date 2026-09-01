@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { VaultBackend, bindEndpoint, promptReady, settingsReady } from './harness'
+import { VaultBackend, bindEndpoint, promptReady, settingsReady, resolveBackend } from './harness'
 import { readStand } from './stand'
 
 /**
@@ -229,11 +229,7 @@ test('turning the OS banner off leaves the toast on, and the banner is never rea
     // The page reports the backend it was meant to reach. bindEndpoint's own
     // doc comment asks for this: a spec that quietly measures the wrong
     // backend is a green run about nothing (nocx-w4vy).
-    const reachedPort = await page.evaluate(() =>
-      (
-        window as unknown as { go: { main: { WailsApp: { GetWSPort: () => Promise<number> } } } }
-      ).go.main.WailsApp.GetWSPort(),
-    )
+    const reachedPort = (await resolveBackend(page)).port
     expect(reachedPort).toBe(endpoint.port)
 
     // ── two tabs, two parked announcements ──────────────────────────────

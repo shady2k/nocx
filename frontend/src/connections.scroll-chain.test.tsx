@@ -46,6 +46,7 @@ import { Page } from './ui/page'
 import { ConnectionsView } from './connections'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 
 const dirname =
   (import.meta as { dirname?: string }).dirname ?? resolve(new URL('.', import.meta.url).pathname)
@@ -152,7 +153,7 @@ const ONE_PROFILE: SSHProfile[] = [
 /** A ProfileClient whose calls never reach a socket. The chain is a layout
  *  property; what the rows say is irrelevant to it. */
 function mockClient(): ProfileClient {
-  const pc = new ProfileClient(new Dispatcher())
+  const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(pc, 'listProfiles').mockResolvedValue(ONE_PROFILE)
   vi.spyOn(pc, 'listGroups').mockResolvedValue([])
   vi.spyOn(pc, 'sessionStatus').mockResolvedValue({ statuses: {} })

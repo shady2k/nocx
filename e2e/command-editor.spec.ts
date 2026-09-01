@@ -1,4 +1,4 @@
-import { test, expect } from './harness' // shared Wails WS-port shim for headless CI
+import { appReadyForInput, test, expect } from './harness' // shared Wails WS-port shim for headless CI
 
 const TITLE = '.nocx-tab-title'
 const EDITOR = '.nocx-editor'
@@ -9,6 +9,7 @@ async function waitForPrompt(page: import('@playwright/test').Page) {
   await expect(page.locator(TITLE).first()).not.toHaveText('', {
     timeout: 15000,
   })
+  await appReadyForInput(page)
 }
 
 /**

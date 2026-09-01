@@ -53,6 +53,7 @@ import { join, resolve } from 'node:path'
 
 import type { Locator } from '@playwright/test'
 import {
+  appReadyForInput,
   bindEndpoint,
   readVaultState,
   test,
@@ -93,6 +94,7 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, currentEndpoint())
   await page.goto('/')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
 }
 
 /** The New Endpoint dialog with its header row already added, so both fields

@@ -6,8 +6,6 @@ vi.mock('../bindings/github.com/shady2k/nocx/wailsapp', () => ({
   ApplyUpdate: vi.fn<() => Promise<void>>(),
   CheckForUpdate: vi.fn(),
   ReportHealthy: vi.fn(),
-  GetWSPort: vi.fn(),
-  GetWSToken: vi.fn(),
 }))
 
 import { ApplyUpdate } from '../bindings/github.com/shady2k/nocx/wailsapp'

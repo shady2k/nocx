@@ -140,7 +140,12 @@ export class AgentInputTarget implements InputTarget {
 
   private settleRun(
     runId: number,
-    presentation: { state: AgentRunState['state']; error?: string; droppedDeltas?: number },
+    presentation: {
+      state: AgentRunState['state']
+      error?: string
+      droppedDeltas?: number
+      unarmedBounds?: string[]
+    },
   ): void {
     const run = this.runs.get(runId)
     if (!run) return
@@ -164,6 +169,10 @@ export class AgentInputTarget implements InputTarget {
           ? '— part of the answer was dropped while streaming; the full answer was saved —'
           : `— ${dropped} chunks of the answer were dropped while streaming; the full answer was saved —`,
       )
+    }
+    const unarmed = presentation.unarmedBounds ?? []
+    if (unarmed.length > 0) {
+      run.handle.append(`— ${unarmed.join('; ')}; only the wall-clock deadline remains active —`)
     }
     if (presentation.state === 'completed') {
       run.handle.close('success', undefined, run.handle.el.dataset.answeredBy)

@@ -53,6 +53,11 @@ import (
 // RunLeaseConfig bounds one run execution. Zero disables the corresponding
 // bound; all zero disables the lease entirely (the broker's pre-lease
 // timeout applies). The WSServer's defaults are defaultRunLease.
+//
+// WallClock is independent of shell integration and arms in supervise.
+// Inactivity and OutputBudget require an authenticated lifecycle attempt,
+// which only shell integration can open; RequestRun refuses a run rather than
+// silently advertising either bound when that integration is unavailable.
 type RunLeaseConfig struct {
 	// WallClock bounds the whole execution, from the run request to the
 	// resolution — the bounded ceiling of decision 2. It is the ONLY bound
@@ -70,6 +75,13 @@ type RunLeaseConfig struct {
 	// the execution to cooperate before escalating. Zero means the default
 	// (defaultRunSignalGrace).
 	SignalGrace time.Duration
+}
+
+// needsShellIntegration is the single declaration of which lease bounds
+// depend on the authenticated lifecycle attempt. WallClock does not: it is
+// armed in supervise before delivery. The output and inactivity observers do.
+func (cfg RunLeaseConfig) needsShellIntegration() bool {
+	return cfg.Inactivity > 0 || cfg.OutputBudget > 0
 }
 
 // DefaultRunLeaseConfig is the production lease, named at the composition
@@ -131,36 +143,42 @@ type runLease struct {
 	lane      *laneState      // nil → no awaiting-takeover observation
 	protected protectedForeground
 	cfg       RunLeaseConfig
+	// submissionDelivered is the broker-owned fact that the run request
+	// reached at least one renderer. It is distinct from accountingStarted:
+	// the latter is an authenticated lifecycle observation unavailable on
+	// conventional shells. The lifecycle attempt bridge is separate and is
+	// used only to name the exact ledger attempt.
+	submissionDelivered bool
 
-	mu            sync.Mutex
-	cancel        context.CancelFunc
-	wallTimer     *time.Timer
-	inactTimer    *time.Timer
-	unwatch       func()
-	lastOutput    time.Time
-	output        int64
-	firedReason   content.TerminationReason
-	done          bool
-	suspended     bool
-	cancelStarted bool
+	mu                sync.Mutex
+	cancel            context.CancelFunc
+	wallTimer         *time.Timer
+	inactTimer        *time.Timer
+	unwatch           func()
+	lastOutput        time.Time
+	output            int64
+	accountingStarted bool
+	firedReason       content.TerminationReason
+	done              bool
+	suspended         bool
+	cancelStarted     bool
 }
 
 // supervise runs fn (the broker request) under the lease, INLINE on the
 // caller's goroutine. It returns fn's result when the run completes within
-// its bounds, or a RunLeaseError naming the bound that fired — after the
-// escalation has run to completion, so the caller can assert, on
-// RequestRun's return, that the execution is actually dead, not merely
-// scheduled to die.
+// its bounds, or a RunLeaseError naming the bound that fired. For a delivered
+// request the escalation has run to completion before return, so the caller
+// can assert the execution is actually dead, not merely scheduled to die.
 //
 // A transport disconnect is deliberately treated like abandonment, not like
 // a reconnectable pause: the renderer that owns this request is gone and
 // leaving its command alive would recreate the orphan this lease prevents.
 // AD-9 preserves the session, replay ring and ledger for reconnect, so the
 // next connection reads the terminalized run rather than inheriting a live
-// process with no answerer. The lease owns signal authority from the moment
-// this request is armed, before renderer delivery, through fn's return and
-// completion of any escalation; the exact foreground group is still captured
-// by protectedForeground, so no later command can be signalled.
+// process with no answerer. The lease only escalates after broker delivery
+// establishes that a renderer could submit the command; before that point
+// there is no execution for it to signal. The exact foreground group is still
+// captured by protectedForeground, so no later command can be signalled.
 func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) error) error {
 	cfg := l.cfg
 	if cfg.SignalGrace <= 0 {
@@ -183,12 +201,8 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 		return context.Canceled
 	}
 	if enabled {
-		l.lastOutput = time.Now()
 		if cfg.WallClock > 0 {
 			l.wallTimer = time.AfterFunc(cfg.WallClock, func() { l.fire(content.TermTimeout) })
-		}
-		if cfg.Inactivity > 0 {
-			l.inactTimer = time.AfterFunc(cfg.Inactivity, l.checkInactivity)
 		}
 		if l.lane != nil {
 			l.unwatch = l.lane.watch(l.sid, l.onLane)
@@ -211,15 +225,22 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	err := fn(ctx)
 
 	// Disarm before the verdict: every trigger is stopped or neutered, so
-	// firedReason is final and no observer can act after this point.
 	l.disarm()
 	l.mu.Lock()
 	reason := l.firedReason
 	cancelStarted := l.cancelStarted
+	submitted := l.submissionDelivered
 	l.mu.Unlock()
 	if reason != "" {
-		l.escalate()
-		return &assistant.RunLeaseError{Reason: reason, Err: err}
+		leaseErr := &assistant.RunLeaseError{
+			Reason:            reason,
+			Err:               err,
+			SubmissionExpired: !submitted,
+		}
+		if submitted {
+			l.escalate()
+		}
+		return leaseErr
 	}
 	// A caller cancellation can end the broker request without a lease
 	// observer firing. A renderer disappearing is the same abandonment under
@@ -257,11 +278,42 @@ func (l *runLease) fire(reason content.TerminationReason) {
 	}
 }
 
+// onAttemptStart begins output and inactivity accounting at the authenticated
+// lifecycle start. The ring lock is taken first so a write racing this
+// callback is ordered: bytes completed before the start are ignored, while
+// bytes written after it are counted exactly once.
+//
+// The observer is deliberately installed by supervise, before broker
+// delivery. This method only opens the accounting interval; it never changes
+// the observer under l.mu, preserving ring.mu → l.mu.
+func (l *runLease) onAttemptStart() {
+	if l.ring != nil {
+		l.ring.mu.Lock()
+		defer l.ring.mu.Unlock()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done || l.suspended || l.firedReason != "" || l.accountingStarted {
+		return
+	}
+	l.accountingStarted = true
+	l.output = 0
+	l.lastOutput = time.Now()
+	if l.cfg.Inactivity > 0 {
+		l.inactTimer = time.AfterFunc(l.cfg.Inactivity, l.checkInactivity)
+	}
+}
+
 // onOutput is the ring observer: it counts bytes for the budget and stamps
-// the last-output time for the inactivity deadline. It runs under the
-// ring's lock and never blocks — the budget check fires outside the lock.
+// the last-output time for the inactivity deadline after authenticated start.
+// It runs under the ring's lock and never blocks — the budget check fires
+// outside the lock.
 func (l *runLease) onOutput(n int) {
 	l.mu.Lock()
+	if !l.accountingStarted || l.done || l.suspended || l.firedReason != "" {
+		l.mu.Unlock()
+		return
+	}
 	l.output += int64(n)
 	l.lastOutput = time.Now()
 	budget := l.cfg.OutputBudget
@@ -281,7 +333,7 @@ func (l *runLease) onOutput(n int) {
 // no other goroutine resets it.
 func (l *runLease) checkInactivity() {
 	l.mu.Lock()
-	if l.done || l.suspended || l.firedReason != "" {
+	if !l.accountingStarted || l.done || l.suspended || l.firedReason != "" {
 		l.mu.Unlock()
 		return
 	}
@@ -429,6 +481,31 @@ func (s *WSServer) effectiveRunLease() RunLeaseConfig {
 		return s.runLeaseCfg
 	}
 	return defaultRunLease
+}
+
+// runLeaseIntegrationAvailable reports whether sid currently has an
+// authenticated shell-integration lifecycle lane. The integration axis owns
+// the current status; the lane registry proves the corresponding lane exists.
+// Snapshot both under their locks and never hold either across a broker call.
+func (s *WSServer) runLeaseIntegrationAvailable(sid session.ID) bool {
+	if s.lifecyclePub == nil {
+		return false
+	}
+	s.integrationMu.Lock()
+	st, ok := s.integrations[sid]
+	integrated := ok && st.status == IntegrationIntegrated
+	s.integrationMu.Unlock()
+	if !integrated {
+		return false
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	for _, owner := range s.lifecycleLanes {
+		if owner == sid {
+			return true
+		}
+	}
+	return false
 }
 
 // newRunLease builds the lease supervising one run on sid: the session's

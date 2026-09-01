@@ -150,11 +150,12 @@ type agentCancelParams struct {
 // only when this request closed a live run; an already-terminal or unknown
 // run is answered as an error rather than being reported as stopped.
 type agentCancelResponse struct {
-	RunID         int64  `json:"runId"`
-	State         string `json:"state"`
-	Cancelled     bool   `json:"cancelled"`
-	Error         string `json:"error,omitempty"`
-	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
+	RunID         int64    `json:"runId"`
+	State         string   `json:"state"`
+	Cancelled     bool     `json:"cancelled"`
+	Error         string   `json:"error,omitempty"`
+	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
+	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -429,12 +430,15 @@ type agentRunReasoning struct {
 // non-blocking policy), so the renderer must not read the block it received
 // as a complete answer. The durable answer is whole either way — every
 // chunk was persisted before the notify — so the marker is a live-view
-// bound, never a reason to treat the run as failed (nocx-dw3.1).
+// bound, never a reason to treat the run as failed (nocx-dw3.1). unarmedBounds
+// is present only when shell integration was unavailable; each item is a
+// human-readable sentence naming one bound that did not apply.
 type agentRunState struct {
-	RunID         int64  `json:"runId"`
-	State         string `json:"state"`
-	Error         string `json:"error,omitempty"`
-	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
+	RunID         int64    `json:"runId"`
+	State         string   `json:"state"`
+	Error         string   `json:"error,omitempty"`
+	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
+	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
 }
 
 // agentApprovalRequested is the agent.approvalRequested notification (design
@@ -871,6 +875,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// effect any of them run all log under one trace, across the several
 	// wire frames it takes (internal/log).
 	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
+	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:      askRes.RunID,
@@ -888,8 +893,9 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// middleware's re-built proposal matches the one the person
 		// approved; the approved call's own execution is the entry's
 		// SUBSEQUENT attempt (attempt 2), recorded by the middleware.
-		attempt:   1,
-		sessionID: sid,
+		attempt:          1,
+		sessionID:        sid,
+		leaseDegradation: leaseDegradation,
 		// The facts the model is told come from their existing owners: the cwd
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
@@ -1042,6 +1048,10 @@ type askRunContext struct {
 	// row and would stop being the session the moment a row is scoped
 	// wider.
 	sessionID session.ID
+	// leaseDegradation crosses every stream drive, including approval
+	// suspension and resume, so terminalize can report bounds the renderer
+	// requester could not arm.
+	leaseDegradation *assistant.RunLeaseDegradation
 	// nextSeq is the delta sequence the NEXT drive of this run starts
 	// from — written by suspendForApproval, read by runAskStream.
 	//
@@ -1096,6 +1106,9 @@ func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reas
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	if rc.leaseDegradation != nil {
+		ctx = assistant.WithRunLeaseDegradation(ctx, rc.leaseDegradation)
+	}
 	streamStarted := time.Now()
 	var reasoningChars, answerChars atomic.Int64
 	var toolCallsRequested, toolCallsExecuted atomic.Int64
@@ -1615,6 +1628,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		State:         string(content.RunCancelled),
 		Cancelled:     true,
 		DroppedDeltas: rc.control.droppedDeltaCount(),
+		UnarmedBounds: unarmedRunLeaseSentences(rc),
 	}
 	if hasDetails {
 		result.Error = sentence
@@ -2005,15 +2019,32 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 			"run", rc.runID, "state", string(state), "error", err)
 		return
 	}
+	unarmedBounds := unarmedRunLeaseSentences(rc)
 	notification := agentRunState{
 		RunID:         rc.runID,
 		State:         string(state),
 		DroppedDeltas: dropped,
+		UnarmedBounds: unarmedBounds,
 	}
 	if wireError {
 		notification.Error = sentence
 	}
 	_ = r.TryNotify("agent.runState", mustMarshal(notification))
+}
+
+func unarmedRunLeaseSentences(rc askRunContext) []string {
+	if rc.leaseDegradation == nil {
+		return nil
+	}
+	bounds := rc.leaseDegradation.Bounds()
+	if len(bounds) == 0 {
+		return nil
+	}
+	sentences := make([]string, 0, len(bounds))
+	for _, bound := range bounds {
+		sentences = append(sentences, assistant.RunLeaseUnavailableSentence(bound))
+	}
+	return sentences
 }
 
 // classifyAskFailure turns any Ask error into the run's termination reason
@@ -2064,7 +2095,7 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	// direction.
 	var leaseErr *assistant.RunLeaseError
 	if errors.As(err, &leaseErr) {
-		return leaseErr.Reason, assistant.RunLeaseSentence(leaseErr.Reason)
+		return leaseErr.Reason, assistant.RunLeaseSentence(leaseErr.Reason, leaseErr.SubmissionExpired)
 	}
 	// The broker reports a renderer death directly when its disconnect
 	// lifecycle wins the race with the ask context's cancellation. It is the

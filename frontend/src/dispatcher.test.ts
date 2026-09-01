@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Dispatcher, SATURATION_TOAST_WINDOW_MS, resetSaturationToastDedup } from './dispatcher'
+import type { EndpointProvider, EndpointResult } from './endpoint'
+import {
+  Dispatcher,
+  HEARTBEAT_IDLE_WINDOW_MS,
+  SATURATION_TOAST_WINDOW_MS,
+  resetSaturationToastDedup,
+} from './dispatcher'
 import { clearToasts, toasts } from './ui/toast'
 
 /**
@@ -19,12 +25,34 @@ const SATURATION_ERROR = {
   },
 }
 
+const SUCCESS: EndpointResult = {
+  ok: true,
+  endpoint: { host: '127.0.0.1', port: 9876, token: 'token-1' },
+}
+
+class TestEndpointProvider implements EndpointProvider {
+  calls = 0
+  private readonly queued: (() => EndpointResult | Promise<EndpointResult>)[] = []
+  resolveImpl: (() => EndpointResult | Promise<EndpointResult>) | null = null
+
+  enqueue(result: EndpointResult): void {
+    this.queued.push(() => result)
+  }
+
+  resolve(): Promise<EndpointResult> {
+    this.calls++
+    const result = this.resolveImpl?.() ?? this.queued.shift()?.() ?? SUCCESS
+    return Promise.resolve(result)
+  }
+}
+
 class MockWebSocket {
   static readonly CONNECTING = 0
   static readonly OPEN = 1
   static readonly CLOSING = 2
   static readonly CLOSED = 3
   static last: MockWebSocket | null = null
+  static all: MockWebSocket[] = []
 
   readyState: number = MockWebSocket.CONNECTING
   binaryType = 'blob'
@@ -59,6 +87,7 @@ class MockWebSocket {
 
   constructor(readonly url: string) {
     MockWebSocket.last = this
+    MockWebSocket.all.push(this)
   }
 
   send(data: string | ArrayBuffer): void {
@@ -97,10 +126,15 @@ function socket(): MockWebSocket {
   return ws
 }
 
+async function flush(): Promise<void> {
+  await Promise.resolve()
+}
+
 async function connected(d: Dispatcher): Promise<void> {
-  const connecting = d.connect(9876)
+  d.start()
+  await flush()
   socket().serverAccepts()
-  await connecting
+  await flush()
 }
 
 /**
@@ -123,20 +157,302 @@ function deliverSaturation(id: number): void {
 
 beforeEach(() => {
   MockWebSocket.last = null
+  MockWebSocket.all = []
   vi.stubGlobal('WebSocket', MockWebSocket)
   resetSaturationToastDedup()
   vi.useFakeTimers()
+  vi.spyOn(Math, 'random').mockReturnValue(0)
 })
 
 afterEach(() => {
   clearToasts()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
   vi.useRealTimers()
+})
+
+describe('dispatcher endpoint state machine', () => {
+  it('asks the provider on every attempt and connects to its returned endpoint', async () => {
+    const provider = new TestEndpointProvider()
+    provider.enqueue({
+      ok: true,
+      endpoint: { host: 'first-host', port: 1001, token: 'first-token' },
+    })
+    provider.enqueue({
+      ok: true,
+      endpoint: { host: 'second-host', port: 1002, token: 'second-token' },
+    })
+    const d = new Dispatcher(provider)
+
+    await connected(d)
+    expect(provider.calls).toBe(1)
+    expect(socket().url).toBe('ws://first-host:1001/session')
+
+    socket().close()
+    vi.advanceTimersByTime(250)
+    await flush()
+
+    expect(provider.calls).toBe(2)
+    expect(socket().url).toBe('ws://second-host:1002/session')
+  })
+
+  it('publishes each state transition exactly once, including timer-fired connecting', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    const states: string[] = []
+    d.onConnectionStateChange((state) => states.push(state.kind))
+
+    d.start()
+    await flush()
+    expect(states).toEqual(['connecting'])
+    socket().serverAccepts()
+    await flush()
+    expect(states).toEqual(['connecting', 'online'])
+
+    socket().close()
+    expect(states).toEqual(['connecting', 'online', 'waiting'])
+    vi.advanceTimersByTime(250)
+    await flush()
+    expect(states).toEqual(['connecting', 'online', 'waiting', 'connecting'])
+  })
+
+  it('blocks on provider failure and retries only when retryNow is called', async () => {
+    const provider = new TestEndpointProvider()
+    const failure = {
+      kind: 'server-binary-unusable' as const,
+      message: 'The server cannot be started.',
+      remedy: 'Reinstall the server and try again.',
+    }
+    provider.enqueue({ ok: false, failure })
+    const d = new Dispatcher(provider)
+
+    d.start()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'blocked', failure })
+    expect(d.reconnectPending).toBe(false)
+    expect(provider.calls).toBe(1)
+
+    provider.enqueue(SUCCESS)
+    d.retryNow()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+    expect(provider.calls).toBe(2)
+    socket().serverAccepts()
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'online' })
+  })
+
+  it('keeps retryNow single-flight while provider discovery is in flight', async () => {
+    const provider = new TestEndpointProvider()
+    let resolveProvider!: (result: EndpointResult) => void
+    provider.resolveImpl = () =>
+      new Promise<EndpointResult>((resolve) => {
+        resolveProvider = resolve
+      })
+    const d = new Dispatcher(provider)
+
+    d.start()
+    d.retryNow()
+    d.retryNow()
+    await flush()
+    expect(provider.calls).toBe(1)
+    expect(MockWebSocket.all).toHaveLength(0)
+
+    resolveProvider(SUCCESS)
+    await flush()
+    expect(MockWebSocket.all).toHaveLength(1)
+  })
+
+  it('ignores a superseded socket opening late', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    const onConnect = vi.fn()
+    d.onConnect(onConnect)
+
+    d.start()
+    await flush()
+    const oldSocket = socket()
+    const replacement = new MockWebSocket('ws://replacement:9999/session')
+    ;(d as unknown as { ws: MockWebSocket | null }).ws = replacement
+
+    oldSocket.serverAccepts()
+
+    expect(onConnect).not.toHaveBeenCalled()
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+  })
+
+  it('removes the old connect API', () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    expect('connect' in d).toBe(false)
+  })
+
+  it('retries a waiting connection immediately on visibility or online events only once', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+    expect(provider.calls).toBe(1)
+
+    socket().close()
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    await flush()
+
+    expect(provider.calls).toBe(2)
+    expect(d.connectionState).toEqual({ kind: 'connecting' })
+  })
+
+  it('does nothing for visibility or online events outside waiting', async () => {
+    const onlineProvider = new TestEndpointProvider()
+    const online = new Dispatcher(onlineProvider)
+    await connected(online)
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    expect(onlineProvider.calls).toBe(1)
+
+    const blockedProvider = new TestEndpointProvider()
+    blockedProvider.enqueue({
+      ok: false,
+      failure: { kind: 'no-server', message: 'No server.', remedy: 'Start the server.' },
+    })
+    const blocked = new Dispatcher(blockedProvider)
+    blocked.start()
+    await flush()
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    expect(blockedProvider.calls).toBe(1)
+
+    const connectingProvider = new TestEndpointProvider()
+    connectingProvider.resolveImpl = () => new Promise<EndpointResult>(() => {})
+    const connecting = new Dispatcher(connectingProvider)
+    connecting.start()
+    await flush()
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    expect(connectingProvider.calls).toBe(1)
+  })
+
+  it('reaches online and stays there for a successful provider', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+
+    expect(d.connectionState).toEqual({ kind: 'online' })
+    vi.advanceTimersByTime(15_000)
+    await flush()
+    expect(d.connectionState).toEqual({ kind: 'online' })
+    expect(provider.calls).toBe(1)
+  })
+})
+
+describe('dispatcher heartbeat', () => {
+  it('pings an idle socket and stays online when the response arrives', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+
+    vi.advanceTimersByTime(1)
+    const ping = socket()
+      .requests()
+      .find((request) => request.method === 'transport.ping')
+    expect(ping).toBeDefined()
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: ping!.id,
+      result: { serverTimeMs: 1756500000000 },
+    })
+    await flush()
+    vi.advanceTimersByTime(5_000)
+
+    expect(socket().closeCalled).toBe(false)
+    expect(d.connectionState).toEqual({ kind: 'online' })
+  })
+
+  it('does not ping while control traffic keeps the socket busy', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    d.notify('activity', {})
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+
+    socket().deliverText({ jsonrpc: '2.0', method: 'activity', params: {} })
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+    expect(socket().closeCalled).toBe(false)
+  })
+
+  it('closes an idle socket when the heartbeat response times out through close', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const disconnect = vi.fn()
+    d.onDisconnect(disconnect)
+
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS)
+    const ping = socket()
+      .requests()
+      .find((request) => request.method === 'transport.ping')
+    expect(ping).toBeDefined()
+    const pending = d.call('long.operation', {})
+    pending.catch(() => {})
+
+    vi.advanceTimersByTime(4_999)
+    expect(socket().closeCalled).toBe(false)
+
+    vi.advanceTimersByTime(1)
+    await expect(pending).rejects.toThrow('ws closed')
+    expect(socket().closeCalled).toBe(true)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(d.connectionState.kind).toBe('waiting')
+  })
+
+  it('keeps a healthy idle socket alive across three heartbeat windows', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    for (let id = 1; id <= 3; id++) {
+      vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS)
+      const pings = socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping')
+      const ping = pings[pings.length - 1]
+      expect(ping).toBeDefined()
+      if (!ping) throw new Error('heartbeat ping was not sent')
+      socket().deliverText({
+        jsonrpc: '2.0',
+        id: ping.id,
+        result: { serverTimeMs: 1756500000000 + id },
+      })
+      await flush()
+    }
+
+    expect(socket().closeCalled).toBe(false)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(3)
+  })
 })
 
 describe('control-plane saturation visibility', () => {
   it('surfaces a refused request to the user without the calling surface opting in', async () => {
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
     const call = d.call('ssh.connect', {})
     const id = socket().requests()[0].id!
@@ -155,7 +471,8 @@ describe('control-plane saturation visibility', () => {
   })
 
   it('deduplicates a burst of refusals into one toast', async () => {
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
     const ids: number[] = []
     for (let i = 0; i < 5; i++) {
@@ -169,7 +486,8 @@ describe('control-plane saturation visibility', () => {
   })
 
   it('raises a fresh toast once the dedup window has passed', async () => {
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
 
     deliverSaturation(startCall(d))
@@ -189,7 +507,8 @@ describe('control-plane saturation visibility', () => {
   })
 
   it('leaves an ordinary RPC error untouched — rejects, no saturation toast', async () => {
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
     const call = d.call('some.method', {})
     const id = socket().requests()[0].id!
@@ -207,7 +526,8 @@ describe('control-plane saturation visibility', () => {
   })
 
   it('raises the same toast for a refused NOTIFICATION (control.saturated has no id)', async () => {
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
 
     // A refused notification cannot carry the -32004 error (no id to
@@ -241,7 +561,8 @@ describe('lifecycle event ordering', () => {
     // subscriber reading reconnectPending at event time sees the state that
     // will hold — the sentence can say "reconnecting" instead of guessing
     // (nocx-gbhwh).
-    const d = new Dispatcher()
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
     await connected(d)
 
     let seen: boolean | null = null

@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { appReadyForInput, test, expect, promptReady } from './harness'
 
 /**
  * e2e: a paragraph typed into a snippet body stays inside the box (nocx-dn33v).
@@ -20,6 +20,7 @@ const LONG =
 
 test('a long snippet body wraps instead of running off the box', async ({ page }) => {
   await page.goto('/')
+  await appReadyForInput(page)
   // The app has to be up before the shortcut is pressed. On WebKit this
   // keystroke landed before Meta+, was wired: Settings never opened, the click
   // on its rail waited on an element that was never going to appear, and the

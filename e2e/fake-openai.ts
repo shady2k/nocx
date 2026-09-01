@@ -313,9 +313,70 @@ export class FakeOpenAI {
         return
       }
       const script = this.scripts.shift() ?? { chunks: ['ok'] }
-      this.stream(record, res, script)
+      let streamRequest = false
+      try {
+        const payload = JSON.parse(record.body) as { stream?: unknown }
+        streamRequest = payload.stream === true
+      } catch {
+        // A malformed request has no true stream flag, so use the explicit
+        // non-stream response shape below.
+      }
+      // The assistant makes two model-call shapes: the ordinary ask streams,
+      // while skill drafting uses Generate and sends stream:false. The fake
+      // must answer both honestly or the drafting path cannot be tested.
+      if (streamRequest) {
+        this.stream(record, res, script)
+      } else {
+        this.complete(record, res, script)
+      }
     })
     req.on('error', () => res.destroy())
+  }
+  private complete(record: FakeRequest, res: ServerResponse, script: StreamScript): void {
+    if (script.holdAfter !== undefined) {
+      record.state = 'done'
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          error: { message: 'fake-openai: holdAfter requires a streaming request' },
+        }),
+      )
+      return
+    }
+
+    const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
+    const calls = script.toolCalls ?? []
+    const model = script.model ?? 'e2e-model'
+    const message: Record<string, unknown> = {
+      role: 'assistant',
+      content: chunks.join(''),
+    }
+    if (calls.length > 0) {
+      message.tool_calls = calls.map((call, index) => ({
+        id: call.id ?? `call_${index + 1}`,
+        type: 'function',
+        function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+      }))
+    }
+
+    record.chunksSent = chunks.length
+    record.state = 'done'
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        id: CHUNK_ID,
+        object: 'chat.completion',
+        created: 0,
+        model,
+        choices: [
+          {
+            index: 0,
+            message,
+            finish_reason: calls.length > 0 ? 'tool_calls' : 'stop',
+          },
+        ],
+      }),
+    )
   }
 
   private stream(record: FakeRequest, res: ServerResponse, script: StreamScript): void {

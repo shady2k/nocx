@@ -216,6 +216,9 @@ test.describe('a skill written in pane A is followed in pane B (nocx-hzd6t)', ()
     // ledger row is complete after the approval resumes the run.
     const requestsA = await fake.waitForRequests(requestBaseA + 3)
     expect(requestsA[requestBaseA].body).toContain('skills.create')
+    expect(JSON.parse(requestsA[requestBaseA].body)).toMatchObject({ stream: true })
+    expect(JSON.parse(requestsA[requestBaseA + 1].body)).toMatchObject({ stream: false })
+    expect(JSON.parse(requestsA[requestBaseA + 2].body)).toMatchObject({ stream: true })
     await expect(answerBlock(page, QUESTION_A).locator('[data-answer-body]')).toContainText(
       `Saved ${SKILL_NAME}`,
     )

@@ -189,9 +189,11 @@ function main(): void {
   // synchronous: nothing can hide the overlay before the assignment, because the
   // minimum visible time is a timer and the first `online` arrives off the socket.
   let focusActive: () => void = () => undefined
+  // `connecting`, not `waiting`: nothing has been attempted yet at this point,
+  // and seeding the backoff made a cold start's first frame offer Retry for an
+  // attempt nobody had made.
   const [connectionState, setConnectionState] = createSignal<ConnectionOverlayState>({
-    kind: 'waiting',
-    nextAttemptInMs: dispatcher.backoffMs,
+    kind: 'connecting',
   })
   const connectionOverlayRoot = document.createElement('div')
   document.body.append(connectionOverlayRoot)

@@ -15,7 +15,7 @@ export type { Page } from '@playwright/test'
  * for the application's input gate without asserting a particular editor.
  */
 export async function appReadyForInput(page: Page): Promise<void> {
-  const overlay = page.locator('dialog:has(.ui-connection-overlay)')
+  const overlay = page.locator('dialog.ui-connection-overlay')
   await baseExpect(overlay).toHaveCount(1, { timeout: 10_000 })
   await baseExpect(overlay).not.toHaveAttribute('open', { timeout: 10_000 })
 }

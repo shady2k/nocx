@@ -2151,7 +2151,10 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
       secondHandler({ ...LOST_WITH_RECOVERY, sessionId: second.sessionId })
       rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
-      expect(pending).toHaveLength(2)
+      expect(
+        pending,
+        'a fresh bind must claim its recovery acknowledgement without inheriting the old bind',
+      ).toHaveLength(2)
 
       // The old bind settles after the new bind has claimed the same-shaped
       // recovery contract. It must not clear the new episode.
@@ -2294,6 +2297,7 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
         client.dispatcher.call.mock.calls.filter(
           (call: unknown[]) => call[0] === 'lifecycle.establishAck',
         ),
+        'a late acknowledgement from the old bind must not mint a duplicate acknowledgement for the current bind',
       ).toHaveLength(2)
     } finally {
       teardown()

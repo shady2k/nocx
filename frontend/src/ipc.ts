@@ -445,6 +445,10 @@ export class SessionHandle {
     this.client.closeSession(this.sessionId)
   }
 
+  detach(): void {
+    this.client.detachSession(this.sessionId)
+  }
+
   onData(cb: (data: string) => void): void {
     this.client.onSessionData(this.sessionId, cb)
   }
@@ -1232,6 +1236,15 @@ export class WSClient {
    */
   signalSession(sessionId: string, signal: SessionSignal['signal']): Promise<SessionSignal> {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
+  }
+
+  detachSession(sessionId: string): void {
+    const ws = this.dispatcher.socket
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      void this.dispatcher.call('detach', { sessionId }).catch(() => {})
+    }
+    this._flushAck(sessionId)
+    this.sessions.delete(sessionId)
   }
 
   closeSession(sessionId: string): void {

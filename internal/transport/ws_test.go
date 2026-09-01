@@ -426,6 +426,94 @@ func TestWSServer_CloseSession(t *testing.T) {
 	}
 }
 
+func TestWSServer_DetachSessionLeavesInventoryAndProcessAlive(t *testing.T) {
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), reg)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSessionOnConn(t, ws, conn, 1)
+	awaitSubscriber(t, ws, session.ID(sid))
+	resize := jsonrpcCallWithID(t, conn, "resize", map[string]any{
+		"sessionId": sid, "cols": 132, "rows": 43,
+	}, 2)
+	var resizeEnvelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resize, &resizeEnvelope); err != nil {
+		t.Fatalf("decode resize response: %v", err)
+	}
+	if resizeEnvelope.Error != nil {
+		t.Fatalf("resize returned error: %+v", resizeEnvelope.Error)
+	}
+	awaitEffectiveSize(t, ws, sid, session.Size{Cols: 132, Rows: 43})
+	resized, getErr := reg.Get(session.ID(sid))
+	if getErr != nil {
+		t.Fatalf("resized session is not in the registry: %v", getErr)
+	}
+	if got, want := resized.EffectiveSize(), (session.Size{Cols: 132, Rows: 43}); got != want {
+		t.Fatalf("resize did not update effective size: got %+v, want %+v", got, want)
+	}
+
+	resp := jsonrpcCallWithID(t, conn, "detach", map[string]string{"sessionId": sid}, 3)
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("decode detach response: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("detach returned error: code %d, message %q", envelope.Error.Code, envelope.Error.Message)
+	}
+
+	live, liveErr := reg.Get(session.ID(sid))
+	if liveErr != nil {
+		t.Fatalf("detached session is not in the registry: %v", liveErr)
+	}
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("detach removed the session receiver")
+	}
+	if got, _ := rx.getSubscriber(); got != nil {
+		t.Fatal("detach left the connection subscribed")
+	}
+	awaitEffectiveSize(t, ws, sid, session.DefaultSize())
+	if got := live.EffectiveSize(); got != session.DefaultSize() {
+		t.Fatalf("detach left effective size %+v, want default %+v", got, session.DefaultSize())
+	}
+	select {
+	case <-live.Done():
+		t.Fatal("detach ended the helper-hosted session")
+	default:
+	}
+	attach := jsonrpcCallWithID(t, conn, "attach", map[string]any{
+		"sessionId": sid,
+	}, 4)
+	var attachEnvelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(attach, &attachEnvelope); err != nil {
+		t.Fatalf("decode reattach response: %v", err)
+	}
+	if attachEnvelope.Error != nil {
+		t.Fatalf("reattach after detach returned error: code %d, message %q", attachEnvelope.Error.Code, attachEnvelope.Error.Message)
+	}
+	if got, _ := ws.getRx(session.ID(sid)).getSubscriber(); got == nil {
+		t.Fatal("reattach did not restore the subscriber")
+	}
+}
+
 func TestWSServer_DataFrameWithUnknownSessionID_Dropped(t *testing.T) {
 	sess := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), sess)

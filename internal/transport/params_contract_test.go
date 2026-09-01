@@ -687,6 +687,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"host.attentionActivated": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		"detach": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

@@ -5900,7 +5900,7 @@ export class TerminalContent extends BasePaneContent {
       this._targetChordKeydown = null
     }
     this._endSummon(true)
-    this.session?.close()
+    this.session?.detach()
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()

@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import { systemPromptText } from './systemprompt'
 import { SettingsObserver } from './settings-observer'
 import { ProfileClient, type RestorePreview } from './profiles'
 import { Dispatcher } from './dispatcher'
@@ -1754,6 +1755,15 @@ describe("the person's own instructions to the assistant", () => {
     expect(prompt!.textContent).toContain('<local shell or ssh session>')
     expect(prompt!.textContent).toContain('<host or local machine>')
     expect(prompt!.textContent).toContain('<attached or absent>')
+    for (const intakeRule of [
+      'A link on its own means go there and tell the person what is on it.',
+      'Text on its own means remember this as a note.',
+      'When the intent is not plain, ask one question and stop.',
+      'Do not guess, and do not call a tool to check first.',
+    ]) {
+      expect(systemPromptText).toContain(intakeRule)
+      expect(prompt!.textContent).toContain(intakeRule)
+    }
     expect(prompt!.textContent).not.toContain('s-real-session')
     expect(prompt!.textContent).not.toContain('/home/real-user/project')
     expect(prompt!.textContent).not.toContain('real-host.example')

@@ -8466,6 +8466,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       expect(ed.isVisible).toBe(true)
       expect(ed.root.dataset.placement).toBe('overlay')
+      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+        'frozen screen attached automatically',
+      )
       // Ask, not the shell: the summoned editor's only target. Read off the
       // indicator, which is the product's own account of where Enter goes.
       expect(targetNamed(ed)).toBe('agent')
@@ -8483,6 +8486,35 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // _syncLifecycleOwnership states about itself: editor shown ⟺ grid
       // read-only.
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(true)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+  it('attaches the still-running owner when its block froze before summon capture', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      scrollback.blockManager.freezeBlock(() => undefined, 0, 0)
+      const renderer = rendererOf(content)
+      renderer._fireBufferChange('alternate')
+      renderer._fireWriteParsed()
+
+      await summonChord(content)
+
+      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+        'frozen screen attached automatically',
+      )
     } finally {
       restore()
       teardown()
@@ -8852,6 +8884,28 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       return frozen!.el
     }
 
+    /** THE PROMPT FINISHED PAINTING. nocx.bash appends the OSC 133 B marker
+     *  to PS1 as its final action, so B rides the prompt's last byte and the
+     *  parse pass that carried it is the pass the prompt's redraw ends in —
+     *  which is why the marker and the write-parsed fire together here, in
+     *  that order, exactly as xterm's OSC handler and onWriteParsed do. */
+    function promptPainted(renderer: ReturnType<typeof rendererOf>): void {
+      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+      renderer._fireWriteParsed()
+    }
+
+    /** Give the automatic attachment the whole of its asynchronous path — the
+     *  capture promise and the checks after it — so "nothing was attached" is
+     *  a statement about a path that had its chance, not about a promise
+     *  nobody awaited. */
+    async function settleAttachment(): Promise<void> {
+      for (let i = 0; i < 2; i++) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      }
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+
     /** The chord as a person presses it, from wherever focus happens to be. */
     function chordOn(el: EventTarget): void {
       el.dispatchEvent(
@@ -8885,6 +8939,101 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
         expect(targetNamed(ed)).toBe('shell')
         expect(ed.getDoc()).toBe('ls -la')
+      } finally {
+        teardown()
+      }
+    })
+    it('attaches the retained frozen owner when Ctrl+Enter flips a visible editor to Ask', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'top', ['screen marker'])
+        const renderer = rendererOf(content)
+        // The prompt came back and finished painting — the screen is nobody's
+        // as of this pass.
+        promptPainted(renderer)
+        // …and then the background child repainted it. That write, parsed
+        // after the handback, is what makes this screen worth attaching; the
+        // finished-command case below has no such write and is refused.
+        renderer._fireWriteParsed()
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+
+        await vi.waitFor(() =>
+          expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+            'frozen screen attached automatically',
+          ),
+        )
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+      } finally {
+        teardown()
+      }
+    })
+    it('does not attach a historical block when no screen bytes follow its freeze', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'old command', ['old output'])
+        const renderer = rendererOf(content)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        await settleAttachment()
+
+        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+          'frozen screen attached automatically',
+        )
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+    // THE agent-ask DEFECT AT UNIT LEVEL (nocx-7l4ex.21). A command that has
+    // finished is not a screen anybody is painting — but the shell writes its
+    // own prompt after the block freezes (D/A/OSC 7, then the B marker in
+    // PS1), so "bytes newer than the freeze" was true of every finished
+    // command that printed anything, and every one of them was attached. The
+    // person who marked block A was handed block B as well, under a sentence
+    // calling it the current screen of a full-screen program. The baseline
+    // moves to the prompt's own last byte, which is what B is.
+    it('does not attach a finished command whose prompt redrew and nothing else painted', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        // The prompt's own bytes, parsed after the freeze — the one write
+        // this screen will ever see again, and it ends in B. Fire it WITHOUT
+        // the marker and this test goes green on a broken product, because a
+        // bare write after the freeze is what the defect mistook for a live
+        // screen.
+        promptPainted(renderer)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        await settleAttachment()
+
+        expect(targetNamed(ed)).toBe('agent')
+        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+          'frozen screen attached automatically',
+        )
+        expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
         teardown()
       }
@@ -10343,6 +10492,8 @@ describe('summoning answers instead of vanishing (nocx-og42r)', () => {
 })
 describe('summoned answers return one composer and take ordered seats (nocx-7l4ex.4/.8)', () => {
   const commandFence = 'd'.repeat(64)
+  const firstCallFence = 'e'.repeat(64)
+  const secondCallFence = 'f'.repeat(64)
   const rendererReadOnly = (content: TerminalContent): ReturnType<typeof vi.fn> =>
     (rendererOf(content) as unknown as { setReadOnly: ReturnType<typeof vi.fn> }).setReadOnly
 
@@ -10604,6 +10755,149 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       teardown()
     }
   })
+  it('keeps one composer unavailable across every call in an active turn', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: '',
+          source: 'assistant',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'assistant command',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what happens across calls?')
+      expect(ed.isVisible).toBe(false)
+
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+
+      // The host command finishes while the assistant turn still owns the
+      // answer. Its intermediate lifecycle result must not return the
+      // keyboard to the composer.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-31T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(false)
+
+      // Two assistant tool calls share the same turn. Each call opens and
+      // closes its own command block, but neither intermediate result owns the
+      // composer while the answer remains non-terminal.
+      const firstCall = content.submitAgentCommand('first call')
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(
+            ([method]) => method === 'lifecycle.submitAttempt',
+          ),
+        ).toHaveLength(1),
+      )
+      await Promise.resolve()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-first', state: 'open', origin: 'app', command: 'first call' },
+      })
+      expect(ed.isVisible).toBe(false)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-first',
+          state: 'completed',
+          exitCode: 0,
+          fence: firstCallFence,
+          completedAt: '2026-08-31T12:00:01Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: firstCallFence, line: 4, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(false)
+      await expect(firstCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+
+      const secondCall = content.submitAgentCommand('second call')
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(
+            ([method]) => method === 'lifecycle.submitAttempt',
+          ),
+        ).toHaveLength(2),
+      )
+      await Promise.resolve()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-second', state: 'open', origin: 'app', command: 'second call' },
+      })
+      expect(ed.isVisible).toBe(false)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-second',
+          state: 'completed',
+          exitCode: 0,
+          fence: secondCallFence,
+          completedAt: '2026-08-31T12:00:02Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: secondCallFence, line: 5, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(false)
+      await expect(secondCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
+
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(answer.isConnected).toBe(true))
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+    } finally {
+      teardown()
+    }
+  })
 
   it('keeps overlapping pre-ack answers correlated when the earlier ask is refused', async () => {
     const client = makeClient()
@@ -10772,7 +11066,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('moves the streaming turn after command completion without duplication', async () => {
+  it('keeps the streaming turn in the overlay until both command and answer end', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
@@ -10784,7 +11078,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
       })
     })
-    const { content, teardown } = await mountTerminal(
+    const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
@@ -10797,7 +11091,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const delta = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runDelta',
       )?.[1] as ((params: unknown) => void) | undefined
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
       expect(delta).toBeDefined()
+      expect(state).toBeDefined()
       delta!({ runId: 42, entryId: 'entry-42', text: 'before the program ends' })
       const answerBody = answer.querySelector('[data-answer-body]')
       expect(answerBody?.textContent).toContain('before the program ends')
@@ -10822,22 +11120,120 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       })
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      const answerList = pane.querySelector<HTMLElement>('.nocx-summon-answers')
       expect(command).not.toBeNull()
-      expect(answer.parentElement).toBe(inner)
+      expect(answerList).not.toBeNull()
+      expect(answer.parentElement).toBe(answerList)
+      expect(ed.isVisible).toBe(false)
+
+      delta!({ runId: 42, entryId: 'entry-42', text: ' while it ends' })
+      expect(answerBody).toBe(answer.querySelector('[data-answer-body]'))
+      expect(answerBody?.textContent).toContain('before the program ends while it ends')
+
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(answer.parentElement).toBe(inner))
       expect(answer.isConnected).toBe(true)
       expect(Array.from(inner.children).indexOf(command!)).toBeLessThan(
         Array.from(inner.children).indexOf(answer),
       )
-
-      delta!({ runId: 42, entryId: 'entry-42', text: ' after it ends' })
-      expect(answerBody).toBe(answer.querySelector('[data-answer-body]'))
-      expect(answerBody?.textContent).toContain('before the program ends after it ends')
-      expect(inner.querySelectorAll('.cmd-block[data-block-kind="ask"]')).toHaveLength(1)
     } finally {
       teardown()
+    }
+  })
+  it('corrects the tail after seated growth becomes observable', async () => {
+    let resize: (() => void) | null = null
+    const originalResizeObserver = globalThis.ResizeObserver
+    class DeferredResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resize = () => callback([], this as unknown as ResizeObserver)
+      }
+
+      observe(): void {}
+
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', DeferredResizeObserver)
+
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    let teardown: (() => void) | undefined
+    try {
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      teardown = mounted.teardown
+      const { content } = mounted
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      await submitQuestion(content, client, 'how did the tail move?')
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-31T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const area = scrollbackFor(content).scrollbackArea
+      let scrollHeight = 900
+      let scrollTop = 500
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
+      Object.defineProperty(area, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      })
+      Object.defineProperty(area, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = value
+        },
+      })
+      const scrollTo = vi.fn((options: { top: number }) => {
+        scrollTop = options.top
+      })
+      Object.defineProperty(area, 'scrollTo', { configurable: true, value: scrollTo })
+      scrollbackFor(content).scrollToBottom()
+      scrollTop = 500
+      scrollTo.mockClear()
+
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: 'instant' })
+      expect(resize).toBeDefined()
+
+      // Seating grows the scroller after the first read. The resize callback
+      // is the observable completion of that layout change, not a timer.
+      scrollHeight = 1400
+      resize!()
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 1400, behavior: 'instant' })
+    } finally {
+      vi.stubGlobal('ResizeObserver', originalResizeObserver)
+      teardown?.()
     }
   })
 

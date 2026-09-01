@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/fetch.url.schema.json",
+  "title": "FetchURLParams",
+  "description": "Fetch one http:// or https:// URL from the machine running nocx. The request is direct, never through a terminal pane's remote host, and only bounded UTF-8 text is returned.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The complete web URL to fetch."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "FetchURLResult",
+      "description": "The complete UTF-8 response text returned by the fetch.url assistant tool. HTML is retained as markup rather than being lossy-extracted; oversize responses are refused, so a successful result is never silently short.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "contentType", "text", "truncated", "omitted", "lossy"],
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "contentType": { "type": "string" },
+        "text": { "type": "string" },
+        "truncated": { "type": "boolean", "const": false },
+        "omitted": { "type": "integer", "minimum": 0, "const": 0 },
+        "lossy": { "type": "boolean", "const": false }
+      }
+    }
+  }
+}

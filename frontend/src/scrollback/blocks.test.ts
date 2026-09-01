@@ -2173,6 +2173,18 @@ describe('BlockManager.addAnswerBlock', () => {
     const rows = Array.from(h.el.querySelectorAll('.term-line')).map((r) => r.textContent)
     expect(rows).toEqual(['it says hello'])
   })
+  it('closes a short answer without an empty row before its reasoning note', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+
+    h.append('short\n')
+    h.reasoning('the model is thinking')
+    h.close('success')
+
+    expect(Array.from(h.el.querySelectorAll('.term-line')).map((row) => row.textContent)).toEqual([
+      'short',
+    ])
+  })
 
   it('opens the thinking note when the person asked for it, and only then (nocx-y9e88)', () => {
     const { manager } = newManager()

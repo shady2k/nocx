@@ -16,6 +16,7 @@ import { createFilesPanelServices } from './files-client'
 import { createFilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
 import type { FilesListResult } from '../generated/files.list'
+import type { FilesStatResult } from '../generated/files.stat'
 
 class MockSocket {
   static readonly CONNECTING = 0
@@ -175,6 +176,18 @@ describe('files client over the real composition seam', () => {
     expect(watch?.params).toEqual({ bindingId: 'b1', paths: ['/'] })
     expect(store.watchMode()).toBe('watching')
     store.dispose()
+  })
+  it('sends files.stat with only the binding and path', async () => {
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
+    await connect(dispatcher)
+    const services = createFilesPanelServices(dispatcher)
+    const socket = lastSocket()
+
+    const result = services.stat('b1', '/home/alice/file.txt')
+    const stat = frames(socket).find((f) => f.method === 'files.stat')
+    expect(stat?.params).toEqual({ bindingId: 'b1', path: '/home/alice/file.txt' })
+    answer(socket, 'files.stat', { kind: 'regular' } satisfies FilesStatResult)
+    await expect(result).resolves.toEqual({ kind: 'regular' })
   })
 
   it('delivers files.reveal with the binding and lexical path', async () => {

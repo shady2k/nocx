@@ -257,6 +257,9 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	if p.ID == "" {
 		return executeSessionScreen(ctx, sessionID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
+	if reader.IsAutomaticItem(p.ID) {
+		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
+	}
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
 	}

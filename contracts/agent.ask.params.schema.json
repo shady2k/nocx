@@ -23,7 +23,8 @@
           "command": { "type": "string", "pattern": ".*\\S.*", "maxLength": 8000 },
           "state": { "type": "string", "enum": ["running", "exited"] },
           "start": { "type": "integer", "minimum": 0 },
-          "count": { "type": "integer", "minimum": 1, "maximum": 2000 }
+          "count": { "type": "integer", "minimum": 1, "maximum": 2000 },
+          "automatic": { "type": "boolean" }
         },
         "oneOf": [
           { "required": ["start", "count"] },

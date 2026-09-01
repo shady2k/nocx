@@ -1,7 +1,7 @@
 # ADR-0021 — Secrets in the prompt: mask what we keep, resolve what we can't
 
 - **Status:** Accepted
-- **Schema lifecycle:** superseded by [ADR-0054](0054-contentdb-schema-changes-migrate-or-refuse.md).
+- **Schema lifecycle:** superseded by [ADR-0055](0055-contentdb-schema-changes-migrate-or-refuse.md).
 - **Date:** 2026-08-02 (amended 2026-08-03)
 - **Related:** [ADR-0008](0008-*.md) (output is never retained), ADR-0018
   (the encrypted store the masked rows land in), ADR-0011 §2 (a secret never

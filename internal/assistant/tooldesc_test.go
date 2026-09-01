@@ -57,11 +57,12 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 	}
 
 	f := askWithGrant(t, &content.Grant{
-		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
 			{Kind: content.ResourceContent, ID: "content"},
+			{Kind: content.ResourceDestination, ID: "*"},
 		},
 	})
 	got := toolDescriptions(t, f.body())

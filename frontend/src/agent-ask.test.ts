@@ -103,6 +103,17 @@ describe('AgentInputTarget', () => {
     expect(ask!.params).not.toHaveProperty('rows')
     expect(handle.el.dataset.entryId).toBe('answer-1')
   })
+  it('preserves automatic frozen-frame provenance on the ask payload', async () => {
+    const frozen = { ...grant('frame-1', 'top', 'running'), automatic: true as const }
+    const { dispatcher, target } = makeTarget([frozen])
+
+    await target.submit('what is on this frozen screen?')
+
+    const ask = dispatcher.calls.find((call) => call.method === 'agent.ask')
+    expect((ask!.params as { attachedContent: unknown[] }).attachedContent).toEqual([
+      { itemId: 'frame-1', command: 'top', state: 'running', automatic: true },
+    ])
+  })
 
   it('sends an explicit empty grant list for a general question', async () => {
     const { dispatcher, target } = makeTarget()

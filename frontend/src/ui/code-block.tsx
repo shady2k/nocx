@@ -27,9 +27,10 @@
  * question (nocx-kdawd). Long content is then reached by scrolling sideways
  * inside the block, which already has its own scroll box.
  *
- * `variant="answer"` is the streamed assistant fence's bordered form. It
- * shares this component's appearance rather than letting the answer surface
- * repaint a second code block.
+ * `variant="answer"` is the streamed assistant fence's bordered form and
+ * `variant="dump"` is the taller captured-output form. Both share this
+ * component's appearance rather than letting their surfaces repaint a second
+ * code block.
  *
  * `children` is a JSX element rather than a string, so a block may carry an
  * inline component where the machine output does: the API workbench's raw
@@ -42,15 +43,16 @@
  *
  * `copy` is the optional clipboard operation behind a copy control in a real
  * header strip, injected rather than reached for so the kit never names a
- * platform. It is offered only for a block whose children ARE the text: a
- * block carrying an inline component has no text to hand over, and where that
- * component is a `SecretChip` the bytes behind it are precisely what must not
- * leave through the clipboard. Callers that already own a copy affordance omit
- * the prop and render the read-only block. `label` names the fence language or
- * block kind on the left; it defaults to `Code`. An imperative surface — the
- * assistant's streamed answer, which builds its blocks by hand — passes the
- * same label through `mountCodeBlockCopyButton`, so there is one copy
- * vocabulary rather than two.
+ * platform. Plain string children provide their own copy text; highlighted
+ * children may supply the explicit `copyText` prop. A block carrying an inline
+ * component with neither has no text to hand over, and where that component is
+ * a `SecretChip` the bytes behind it are precisely what must not leave through
+ * the clipboard. Callers that already own a copy affordance omit the prop and
+ * render the read-only block. `label` names the fence language or block kind on
+ * the left; it defaults to `Code`. An imperative surface — the assistant's
+ * streamed answer, which builds its blocks by hand — passes the same label
+ * through `mountCodeBlockCopyButton`, so there is one copy vocabulary rather
+ * than two.
  */
 import { Show, children, createSignal } from 'solid-js'
 import type { JSX } from 'solid-js'
@@ -70,10 +72,12 @@ export interface CodeBlockProps {
   /** Whether a long line wraps. Default true; see the note above for when a
    *  block says false. */
   wrap?: boolean
-  /** Surface-specific bordered form used by streamed assistant answers. */
-  variant?: 'answer'
+  /** Surface-specific bordered form used by streamed assistant answers and dumps. */
+  variant?: 'answer' | 'dump'
+  /** Text represented by highlighted JSX children, for a safe copy operation. */
+  copyText?: string
   /** Injected platform clipboard operation. Existing callers with their own copy
-   * affordance may omit this and render only the read-only block. */
+   *  affordance may omit this and render only the read-only block. */
   copy?: (text: string) => Promise<void>
 }
 
@@ -183,10 +187,11 @@ export function CodeBlock(props: CodeBlockProps) {
   // `actions` the same way.
   const held = children(() => props.children)
 
-  // The text a copy control would hand over, and `undefined` when there is
-  // none: children are a JSX element so that a block CAN carry a component,
-  // and an element is not text.
-  const copyText = (): string | undefined => {
+  // A highlighted block carries spans rather than a string child. The caller
+  // supplies the exact visible text explicitly; this keeps the copy operation
+  // honest without making CodeBlock inspect or serialise arbitrary JSX.
+  const getCopyText = (): string | undefined => {
+    if (props.copyText !== undefined) return props.copyText
     const value = held()
     return typeof value === 'string' ? value : undefined
   }
@@ -194,13 +199,13 @@ export function CodeBlock(props: CodeBlockProps) {
   return (
     <div
       class="ui-code-block-wrap"
-      classList={{ 'ui-code-block-wrap--copy': Boolean(props.copy) && copyText() !== undefined }}
+      classList={{ 'ui-code-block-wrap--copy': Boolean(props.copy) && getCopyText() !== undefined }}
     >
-      <Show when={props.copy && copyText() !== undefined ? props.copy : undefined}>
+      <Show when={props.copy && getCopyText() !== undefined ? props.copy : undefined}>
         {(copy) => (
           <div class="ui-code-block__header">
             <span class="ui-code-block__label">{props.label ?? DEFAULT_CODE_LABEL}</span>
-            <CodeBlockCopyButton getText={() => copyText() ?? ''} copy={copy()} />
+            <CodeBlockCopyButton getText={() => getCopyText() ?? ''} copy={copy()} />
           </div>
         )}
       </Show>

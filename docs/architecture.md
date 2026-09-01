@@ -168,7 +168,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: concurrency and session bookkeeping.
 - Prevents: shared-goroutine coupling across tabs.
 - Rule: one PTY (or SSH channel) per tab; one goroutine per session; the backend `session` module is the authoritative registry keyed by session-id.
-  - **Session-id authority is server-authoritative.** The client sends `open{correlationId, ...}`; the server assigns and returns the authoritative `sessionId` in an ack; the client MUST NOT send PTY frames for a session before its ack.
+  - **Session-id authority is server-authoritative.** The client sends `open{correlationId, ...}`; for a helper-hosted session, the execution host's helper mints the id and the server adopts and returns that same authoritative `sessionId`; otherwise the server assigns it. The client MUST NOT send PTY frames for a session before its ack.
   - **Channel/connection ownership**: `session` owns the channel and references (does not own) a pooled `ssh` connection from AD-4. The shared `Channel` interface declares `Resize() error` (may return an unsupported error) and a `Disconnected` signal, so local-PTY and SSH both feed AD-9 reconnect uniformly.
 
 **AD-8 — Interface-first + dependency injection paradigm.**

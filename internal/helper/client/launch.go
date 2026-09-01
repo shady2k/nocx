@@ -58,14 +58,15 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:    cfg.Exec,
-		cfg:     cfg,
-		log:     cfg.Log,
-		nonce:   nonce,
-		pending: make(map[uint64]chan proto.Response),
-		streams: make(map[uint64]*chunkStream),
-		done:    make(chan struct{}),
-		hsCh:    make(chan error, 1),
+		conn:        cfg.Exec,
+		cfg:         cfg,
+		log:         cfg.Log,
+		nonce:       nonce,
+		pending:     make(map[uint64]chan proto.Response),
+		streams:     make(map[uint64]*chunkStream),
+		attachments: make(map[[16]byte]*AttachedSession),
+		done:        make(chan struct{}),
+		hsCh:        make(chan error, 1),
 	}
 
 	hello := proto.Hello{Version: proto.Version, Nonce: nonce, Corr: randomCorr()}

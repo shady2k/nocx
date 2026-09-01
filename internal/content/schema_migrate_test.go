@@ -33,6 +33,8 @@ func aDatabaseAtSchema14(t *testing.T, path string) {
 	rawExec(
 		t, path,
 		theSchema14Script(t),
+		theTwoCounterEraAPIRunScript(t),
+		`INSERT INTO api_run_schema (id, version) VALUES (1, 1)`,
 		fmt.Sprintf(`INSERT INTO workspaces (id, name, created_at) VALUES ('ws-1', 'work', %d)`, now),
 		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-1', 'ws-1', 'the tab from before the upgrade')`,
 		`INSERT INTO panes (id, tab_id, cwd, kind) VALUES ('pane-1', 'tab-1', '/srv', 'local')`,
@@ -329,5 +331,50 @@ func TestTheLadderIsAContiguousChainEndingAtTheCurrentSchema(t *testing.T) {
 	}
 	if err := validateLadder(gapped); err == nil {
 		t.Fatal("validateLadder accepted a ladder with a hole between 2 and 3")
+	}
+}
+
+func TestValidateLadderRefusesAnEmptyLadder(t *testing.T) {
+	err := validateLadder(nil)
+	if err == nil {
+		t.Fatal("validateLadder accepted an empty ladder")
+	}
+	if !strings.Contains(err.Error(), "empty ladder") {
+		t.Fatalf("empty-ladder refusal reads %q; it must name the empty ladder", err)
+	}
+}
+
+func TestTheAPIRunRetirementRungRequiresItsPreflight(t *testing.T) {
+	ladder := append([]migrationStep(nil), schemaLadder...)
+	ladder[1].preflight = nil
+
+	err := validateLadder(ladder)
+	if err == nil {
+		t.Fatal("validateLadder accepted the API-run retirement rung without its preflight")
+	}
+	if !strings.Contains(err.Error(), "api-run preflight") {
+		t.Fatalf("retirement-rung refusal reads %q; it must name the missing API-run preflight", err)
+	}
+}
+
+func TestMigratableRungWithoutHistoricalShapeIsRefused(t *testing.T) {
+	path := aFreshDatabase(t)
+	conn, closeConn := rawConn(t, path)
+	defer closeConn()
+
+	ladder := append([]migrationStep(nil), schemaLadder...)
+	ladder = append(ladder, migrationStep{
+		from: 16,
+		to:   17,
+		apply: func(context.Context, *sql.Tx) error {
+			return nil
+		},
+	})
+	err := validateOnDiskSchemaShapeFor(context.Background(), conn, 16, 17, ladder)
+	if err == nil {
+		t.Fatal("schema-shape validation accepted a migratable rung without a historical shape")
+	}
+	if !strings.Contains(err.Error(), "no expected schema shape for migratable schema 16") {
+		t.Fatalf("shape omission refusal reads %q; it must name the missing historical shape", err)
 	}
 }

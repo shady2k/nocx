@@ -108,7 +108,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
+	"github.com/ncruces/go-sqlite3/driver"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -132,6 +135,7 @@ type migrationStep struct {
 	from         int
 	to           int
 	apply        func(ctx context.Context, tx *sql.Tx) error
+	preflight    func(ctx context.Context, conn *sql.Conn) error
 	schemaDigest string
 }
 
@@ -149,7 +153,7 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
-	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -162,6 +166,9 @@ func validateLadder(ladder []migrationStep) error {
 // Production always calls validateLadder with the compiled-in schemaVersion and
 // schemaV1.
 func validateLadderForSchema(ladder []migrationStep, version int, schema string) error {
+	if len(ladder) == 0 {
+		return errors.New("content: migration ladder: empty ladder; no rows were discarded")
+	}
 	for i, step := range ladder {
 		if step.to != step.from+1 {
 			return fmt.Errorf("content: migration ladder: step %d spans %d→%d; one edge is one version", i, step.from, step.to)
@@ -186,7 +193,234 @@ func validateLadderForSchema(ladder []migrationStep, version int, schema string)
 				version, gotHex, ladder[len(ladder)-1].schemaDigest)
 		}
 	}
+	if version >= 16 {
+		found := false
+		for _, step := range ladder {
+			if step.from != 15 || step.to != 16 {
+				continue
+			}
+			found = true
+			if step.preflight == nil {
+				return errors.New("content: migration ladder: 15→16 retirement rung has no api-run preflight")
+			}
+			break
+		}
+		if !found {
+			return errors.New("content: migration ladder: 15→16 retirement rung is missing its api-run preflight")
+		}
+	}
 	return nil
+}
+
+func validateOnDiskSchemaShapeFor(ctx context.Context, conn *sql.Conn, version, currentVersion int, ladder []migrationStep) error {
+	expected, ok := schemaShapeDigests[version]
+	var expectedObjects map[string]struct{}
+	if !ok && version == currentVersion {
+		var err error
+		expected, expectedObjects, err = currentSchemaShape(ctx)
+		if err != nil {
+			return fmt.Errorf("content: inspect current schema shape: %w", err)
+		}
+		ok = true
+	}
+	if !ok {
+		if len(ladder) > 0 && ladder[0].from >= schemaLadder[0].from {
+			for _, step := range ladder {
+				if step.from == version && step.from < currentVersion {
+					return fmt.Errorf("content: migration ladder: no expected schema shape for migratable schema %d; add its pinned shape before migrating", version)
+				}
+			}
+		}
+		return nil
+	}
+	if expectedObjects == nil {
+		expectedObjects = historicalSchemaObjectNames[version]
+	}
+	foundObjects, err := sqliteSchemaObjects(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("content: inspect schema %d shape: %w", version, err)
+	}
+	found := schemaObjectNames(foundObjects)
+	foundDigest := schemaObjectsDigest(foundObjects)
+	if foundDigest == expected {
+		return nil
+	}
+	difference := schemaShapeDifference(expectedObjects, found)
+	if difference == "" {
+		difference = "table/index definitions differ"
+	}
+	return fmt.Errorf("content: refusing database stamped schema %d: expected schema %d shape %s, found shape %s; %s; stamp and contents disagree, and no rows were discarded",
+		version, version, expected, foundDigest, difference)
+}
+
+// schemaShapeDigests pins the complete SQLite catalog for the historical
+// shapes this build migrates. The current shape is derived from schemaV1 at
+// runtime so it has one source of truth rather than a second digest constant.
+var schemaShapeDigests = map[int]string{
+	14: "30be8a0ce52a6598a21616cab3b2931be9544065b9deb51c11741a77166f3c51",
+	15: "14c52ba462a0448ffb197467d4e512b37e4ca7557ffc10ff91a89428fd06637e",
+}
+
+var historicalSchemaObjectNames = map[int]map[string]struct{}{
+	14: schema14ObjectNames(),
+	15: schema15ObjectNames(),
+}
+
+func schema14ObjectNames() map[string]struct{} {
+	names := []string{
+		"table:workspaces", "table:tabs", "table:panes", "table:sessions",
+		"table:environments", "table:environment_observations", "table:entries",
+		"table:edges", "table:executions", "table:authority_grants",
+		"table:grant_scopes", "table:grant_effects", "table:artifacts",
+		"table:artifact_chunks", "table:ledger_sequence",
+		"table:retention_watermark", "table:api_run_schema", "table:api_runs",
+		"table:api_run_artifacts", "table:api_run_artifact_chunks",
+		"index:tabs_by_workspace", "index:tabs_by_parent", "index:panes_by_tab",
+		"index:entries_by_env", "index:entries_by_status", "index:entries_open",
+		"index:entries_by_session", "index:entries_by_pane", "index:edges_by_to",
+		"index:executions_by_entry", "index:artifacts_by_entry",
+		"index:artifacts_by_execution", "index:observations_by_env",
+		"index:entries_capture_key", "index:api_runs_by_request",
+		"index:api_run_artifacts_by_run",
+		"index:sqlite_autoindex_api_run_artifact_chunks_1",
+		"index:sqlite_autoindex_api_run_artifacts_1",
+		"index:sqlite_autoindex_artifact_chunks_1",
+		"index:sqlite_autoindex_artifacts_1",
+		"index:sqlite_autoindex_authority_grants_1",
+		"index:sqlite_autoindex_edges_1",
+		"index:sqlite_autoindex_entries_1",
+		"index:sqlite_autoindex_entries_2",
+		"index:sqlite_autoindex_entries_3",
+		"index:sqlite_autoindex_environment_observations_1",
+		"index:sqlite_autoindex_environments_1",
+		"index:sqlite_autoindex_grant_effects_1",
+		"index:sqlite_autoindex_grant_scopes_1",
+		"index:sqlite_autoindex_panes_1",
+		"index:sqlite_autoindex_sessions_1",
+		"index:sqlite_autoindex_tabs_1",
+		"index:sqlite_autoindex_workspaces_1",
+	}
+	result := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		result[name] = struct{}{}
+	}
+	return result
+}
+
+func schema15ObjectNames() map[string]struct{} {
+	result := schema14ObjectNames()
+	result["table:session_output"] = struct{}{}
+	result["table:session_output_chunks"] = struct{}{}
+	result["index:sqlite_autoindex_session_output_1"] = struct{}{}
+	result["index:sqlite_autoindex_session_output_chunks_1"] = struct{}{}
+	return result
+}
+
+type sqliteSchemaObject struct {
+	typ, name, table, sql string
+}
+
+func currentSchemaShape(ctx context.Context) (string, map[string]struct{}, error) {
+	db, err := driver.Open(":memory:")
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = db.Close() }()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, execErr := conn.ExecContext(ctx, schemaV1); execErr != nil {
+		return "", nil, execErr
+	}
+	objects, err := sqliteSchemaObjects(ctx, conn)
+	if err != nil {
+		return "", nil, err
+	}
+	return schemaObjectsDigest(objects), schemaObjectNames(objects), nil
+}
+
+// Tables and indexes are the schema objects this ladder owns. Triggers are
+// runtime behavior, not part of schemaV1, so they are deliberately excluded.
+func sqliteSchemaObjects(ctx context.Context, conn *sql.Conn) ([]sqliteSchemaObject, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('table', 'index')
+		ORDER BY type, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var objects []sqliteSchemaObject
+	for rows.Next() {
+		var object sqliteSchemaObject
+		if err := rows.Scan(&object.typ, &object.name, &object.table, &object.sql); err != nil {
+			return nil, err
+		}
+		objects = append(objects, object)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return objects, nil
+}
+
+func schemaObjectNames(objects []sqliteSchemaObject) map[string]struct{} {
+	names := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		names[object.typ+":"+object.name] = struct{}{}
+	}
+	return names
+}
+
+func schemaObjectsDigest(objects []sqliteSchemaObject) string {
+	var shape strings.Builder
+	for _, object := range objects {
+		shape.WriteString(object.typ)
+		shape.WriteString(`\x00`)
+		shape.WriteString(object.name)
+		shape.WriteString(`\x00`)
+		shape.WriteString(object.table)
+		shape.WriteString(`\x00`)
+		shape.WriteString(object.sql)
+		shape.WriteString(`\x00`)
+	}
+	sum := sha256.Sum256([]byte(shape.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func schemaShapeDifference(expected, found map[string]struct{}) string {
+	var missing, extra []string
+	for name := range expected {
+		if _, ok := found[name]; !ok {
+			missing = append(missing, schemaObjectLabel(name))
+		}
+	}
+	for name := range found {
+		if _, ok := expected[name]; !ok {
+			extra = append(extra, schemaObjectLabel(name))
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	var differences []string
+	if len(missing) > 0 {
+		differences = append(differences, "missing "+strings.Join(missing, ", "))
+	}
+	if len(extra) > 0 {
+		differences = append(differences, "extra "+strings.Join(extra, ", "))
+	}
+	return strings.Join(differences, "; ")
+}
+
+func schemaObjectLabel(key string) string {
+	kind, name, ok := strings.Cut(key, ":")
+	if !ok {
+		return fmt.Sprintf("%q", key)
+	}
+	return fmt.Sprintf("%s %q", kind, name)
 }
 
 // migrateSchema brings the file up to schemaVersion, or refuses it. It is the
@@ -199,6 +433,9 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 	var onDisk int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
 		return fmt.Errorf("content: read schema version: %w", err)
+	}
+	if err := validateOnDiskSchemaShapeFor(ctx, conn, onDisk, schemaVersion, ladder); err != nil {
+		return err
 	}
 	if onDisk == schemaVersion {
 		return nil
@@ -231,25 +468,6 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 		return fmt.Errorf("content: refusing to open a database written by schema %d: this build understands schema %d, and rebuilding it would discard rows it cannot read — update nocx to a build that understands schema %d; no rows were discarded",
 			onDisk, schemaVersion, onDisk)
 	}
-	// THE SAME REFUSAL, FOR THE FILES THE STAMP CANNOT SPEAK FOR YET. Before
-	// 16 the `api_run*` tables were versioned by a counter of their own, so a
-	// file written then says "what shape am I in" twice and the two halves
-	// are independent: a database stamped 14 or 15 can carry api-run tables
-	// from any build at all. This is the second half of that answer, and it
-	// is read HERE — beside the other refusals, before a single step runs —
-	// because the old code asked it LAST, after the walk had migrated and
-	// stamped the file, and a refusal that has already rewritten what it
-	// refuses is not a refusal.
-	//
-	// It is not a second counter kept alive. It is the retirement's
-	// precondition: 15→16 drops `api_run_schema`, and dropping a counter
-	// whose value this build does not understand would erase the evidence
-	// that the file is ahead. From 16 on no file carries the table and this
-	// clause is inert, which is what makes it a rung's precondition rather
-	// than a rule.
-	if err := refuseAPIRunTablesFromANewerBuild(ctx, conn); err != nil {
-		return err
-	}
 	// A file with no user tables is a CREATION, not a migration: version 0
 	// with nothing in it is what a fresh install looks like, and Open stamps
 	// it after schemaV1 runs. Anything else stamped below the ladder is a
@@ -272,6 +490,17 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 	if onDisk < ladder[0].from {
 		return fmt.Errorf("content: refusing to open a database written by schema %d: this build creates schema %d and its migration chain starts at schema %d, so no step carries a schema %d file forward — move the file aside to start a fresh history; no rows were discarded",
 			onDisk, schemaVersion, ladder[0].from, onDisk)
+	}
+	// A rung's preflight is evaluated before any pending rung applies. This
+	// keeps refusal clauses attached to the edge whose old shape they protect,
+	// while still checking a file at 14 before the 14→15 transaction starts.
+	for _, step := range ladder {
+		if step.from < onDisk || step.preflight == nil {
+			continue
+		}
+		if err := step.preflight(ctx, conn); err != nil {
+			return err
+		}
 	}
 	// FOREIGN KEYS OFF FOR THE WALK, and it is not a relaxation — it is
 	// SQLite's own documented procedure for changing a table's shape

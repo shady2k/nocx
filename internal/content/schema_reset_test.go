@@ -221,26 +221,15 @@ func rawRowCount(t *testing.T, path, table string) int {
 // schema bump guaranteed they would not do.
 func TestAnUpgradeKeepsTheTabsAndPanesTheUserHadOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
-	db := openStore(t, path)
+	aReleasedSchema14Database(t, path)
+	rawExec(t, path,
+		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-second', 'ws-fourteen', 'the second tab')`,
+		`INSERT INTO panes (id, tab_id, cwd, kind) VALUES ('pane-second', 'tab-second', '/srv/second', 'local')`,
+	)
 	ctx := context.Background()
-	layout := db.Layout()
-	if _, err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"},
-		Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow},
-		Pane{ID: "pane-0", TabID: "tab-1", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
-		t.Fatalf("CreateWorkspace: %v", err)
-	}
-	parent := "tab-1"
-	if _, err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow},
-		Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
-		t.Fatalf("CreateTab child: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
 
-	// Restamp it as the version below: the next Open must MIGRATE it.
-	rawExec(t, path, "PRAGMA user_version=14")
-
+	// The released fixture is stamped as the version below; the next Open must
+	// MIGRATE it while carrying both tabs and panes forward.
 	again := openStore(t, path)
 	if got := rawUserVersion(t, path); got != schemaVersion {
 		t.Fatalf("user_version = %d, want %d — the migration did not complete", got, schemaVersion)
@@ -249,22 +238,22 @@ func TestAnUpgradeKeepsTheTabsAndPanesTheUserHadOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Workspaces after the migration: %v", err)
 	}
-	if len(spaces) != 1 || spaces[0].ID != "ws-1" {
+	if len(spaces) != 1 || spaces[0].ID != "ws-fourteen" {
 		t.Fatalf("workspaces after the migration = %+v, want the one the user had", spaces)
 	}
-	tabs, err := again.Layout().Tabs(ctx, "ws-1")
+	tabs, err := again.Layout().Tabs(ctx, "ws-fourteen")
 	if err != nil {
 		t.Fatalf("Tabs after the migration: %v", err)
 	}
 	if len(tabs) != 2 {
 		t.Fatalf("tabs after the migration = %+v, want both", tabs)
 	}
-	panes, err := again.Layout().Panes(ctx, "tab-1")
+	panes, err := again.Layout().Panes(ctx, "tab-fourteen")
 	if err != nil {
 		t.Fatalf("Panes after the migration: %v", err)
 	}
-	if len(panes) != 1 || panes[0].ID != "pane-0" {
-		t.Fatalf("panes after the migration = %+v, want the one in tab-1", panes)
+	if len(panes) != 1 || panes[0].ID != "pane-fourteen" {
+		t.Fatalf("panes after the migration = %+v, want the fixture's pane", panes)
 	}
 }
 
@@ -293,6 +282,8 @@ func TestAFileHoldingANestedEntryIsMigratedWithItsTreeIntact(t *testing.T) {
 	rawExec(
 		t, path,
 		theSchema14Script(t),
+		theTwoCounterEraAPIRunScript(t),
+		`INSERT INTO api_run_schema (id, version) VALUES (1, 1)`,
 		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
 		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent, phase, status, submitted_at)
 			VALUES ('root', 1, 'c', 'd', 'env', NULL, NULL, '/', 'shell', 'user', 'x', 'closed', 'success', 0)`,

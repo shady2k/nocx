@@ -87,6 +87,10 @@ func aReleasedSchema14Database(t *testing.T, path string) {
 		"PRAGMA auto_vacuum=INCREMENTAL",
 		"PRAGMA journal_mode=WAL",
 		releasedSchema(t, 14),
+		// The released 14 startup sequence ran the api-run migration after
+		// schemaV1, so this fixture carries those tables and their counter too.
+		theTwoCounterEraAPIRunScript(t),
+		`INSERT INTO api_run_schema (id, version) VALUES (1, 1)`,
 		`INSERT INTO workspaces (id, name, colour, position, created_at, payload, digest)
 			VALUES ('ws-fourteen', 'the workspace from before the upgrade', '#123456', 7, 1400, '{"kept":true}', 'digest-fourteen')`,
 		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-fourteen', 'ws-fourteen', 'the tab the user named')`,
@@ -110,6 +114,45 @@ func aReleasedSchema14Database(t *testing.T, path string) {
 		`UPDATE ledger_sequence SET next = 1 WHERE id = 1`,
 		`PRAGMA user_version=14`,
 	)
+}
+
+func TestReleasedSchema14FixtureIncludesTheAPIRunTablesAndCounter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema14Database(t, path)
+
+	for _, name := range []string{"api_run_schema", "api_runs", "api_run_artifacts", "api_run_artifact_chunks"} {
+		if !aTableExists(t, path, name) {
+			t.Fatalf("released schema 14 fixture has no %s table — a real schema 14 build created every api-run table before stamping the file", name)
+		}
+	}
+	if got := rawCount(t, path, `SELECT version FROM api_run_schema WHERE id = 1`); got != 1 {
+		t.Fatalf("released schema 14 fixture api-run counter = %d, want 1 — the fixture must carry the counter its build wrote", got)
+	}
+}
+
+func TestAStampedSchema14DatabaseWithAnotherShapeIsRefusedBeforeMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema14Database(t, path)
+	rawExec(t, path,
+		`DROP TABLE entries`,
+		`PRAGMA user_version=14`,
+	)
+
+	_, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err == nil {
+		t.Fatal("Open accepted a database stamped schema 14 whose tables have a different shape")
+	}
+	if !strings.Contains(err.Error(), "missing") || !strings.Contains(err.Error(), `table "entries"`) {
+		t.Fatalf("shape refusal reads %q; it must name the missing entries table", err)
+	}
+	if got := rawUserVersion(t, path); got != 14 {
+		t.Fatalf("user_version = %d after shape refusal, want 14 — the ladder migrated a file before checking what its stamp described", got)
+	}
+	if scopeErr := rawTry(t, path, aContentScope); scopeErr == nil {
+		t.Fatal("the malformed schema 14 file was migrated before its shape was refused")
+	}
 }
 
 // assertTheRowsOfSchema14 is "its rows are present AND CORRECT afterwards",
@@ -638,8 +681,7 @@ func TestANewerDatabaseIsRefusedAndACurrentOneOpens(t *testing.T) {
 
 	// AND A DATABASE AT THIS EXACT VERSION OPENS, untouched, with no
 	// migration run over it.
-	current := filepath.Join(t.TempDir(), "content.db")
-	aReleasedSchema14Database(t, current)
+	current := aFreshDatabase(t)
 	rawExec(t, current, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion))
 	stable := fingerprint(t, current)
 	conn, done = rawConn(t, current)

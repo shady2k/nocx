@@ -55,7 +55,6 @@ func aTwoCounterEraDatabase(t *testing.T, path string, apiRunCounter int) {
 	aReleasedSchema14Database(t, path)
 	rawExec(
 		t, path,
-		theTwoCounterEraAPIRunScript(t),
 		`INSERT INTO api_runs
 			(id, collection_path, request_rel_path, method, url, outcome,
 			 request_spans, metadata, started_at, ended_at, logical_bytes)
@@ -63,7 +62,7 @@ func aTwoCounterEraDatabase(t *testing.T, path string, apiRunCounter int) {
 			        'GET', 'https://example.invalid/ping', 'answered', '[]', '{}', 1400, 1401, 9)`,
 		`INSERT INTO api_run_artifacts (id, run_id, kind, byte_len, chunk_count) VALUES (1, 1, 'request', 9, 1)`,
 		`INSERT INTO api_run_artifact_chunks (artifact_id, seq, body) VALUES (1, 1, CAST('GET /ping' AS BLOB))`,
-		fmt.Sprintf(`INSERT INTO api_run_schema (id, version) VALUES (1, %d)`, apiRunCounter),
+		fmt.Sprintf(`UPDATE api_run_schema SET version = %d WHERE id = 1`, apiRunCounter),
 		`PRAGMA user_version=14`,
 	)
 }

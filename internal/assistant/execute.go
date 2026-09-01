@@ -440,10 +440,17 @@ func marshalResult(v any) (string, error) {
 	return string(b), nil
 }
 
+type skillReadFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
 type skillReadResult struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Name    string            `json:"name"`
+	Path    string            `json:"path"`
+	Content string            `json:"content"`
+	Finding *skillReadFinding `json:"finding,omitempty"`
 }
 
 func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
@@ -468,7 +475,20 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 	if err != nil {
 		return "", fmt.Errorf("skills.read: %w", err)
 	}
-	return marshalResult(skillReadResult{Name: p.Name, Path: got.Path, Content: string(got.Bytes)})
+	result := skillReadResult{Name: p.Name, Path: got.Path, Content: string(got.Bytes)}
+	if got.Provenance != skill.ProvenanceBuiltin {
+		findings := skill.Scan(got.Bytes)
+		if len(findings) > 0 {
+			finding := findings[0]
+			result.Content = agenttools.FrameUntrusted(result.Content)
+			result.Finding = &skillReadFinding{
+				PatternID:  finding.PatternID,
+				Line:       finding.Line,
+				LineNumber: finding.LineNumber,
+			}
+		}
+	}
+	return marshalResult(result)
 }
 
 func marshalBoundedNotes(rows []noteSearchRow, max int64) (string, error) {

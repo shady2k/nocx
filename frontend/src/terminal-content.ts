@@ -615,6 +615,10 @@ export class TerminalContent extends BasePaneContent {
     running: RunningBlockActions | undefined
   }[] = []
   private _summonedCommand: BlockRecord | null = null
+  /** The owner whose frame was captured for the automatic attachment. It is
+   * separate from the summon parent because a running block may own a summon
+   * without being a frozen screen attachment. */
+  private _automaticFrameOwner: BlockRecord | null = null
   /** The most recent visual freeze that can own a later screen read. It is
    *  valid only while the live renderer has parsed bytes after that freeze. */
   private _lastFrozenBlock: BlockRecord | null = null
@@ -1756,6 +1760,7 @@ export class TerminalContent extends BasePaneContent {
         // headers and the editor below must judge against the same instance.
         onClear: () => {
           this._lastFrozenBlock = null
+          this._automaticFrameOwner = null
           this._lastFrozenWriteGeneration = -1
           this.clearGrants()
         },
@@ -4850,12 +4855,12 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** Find the block that owns the screen this ask will describe. The
-   *  lifecycle can still be running after the block's visual freeze has
-   *  released the manager's running slot, so retain that attempt-bound block.
-   *  A background child has no open attempt; in that case the most recent
-   *  frozen block is eligible only after the renderer parsed newer bytes.
-   *  `frozenOnly` excludes an un-frozen manager slot, which is stale once the
-   *  lifecycle has returned to the prompt. */
+   * lifecycle can still be running after the block's visual freeze has
+   * released the manager's running slot, so retain that attempt-bound block.
+   * A background child has no open attempt; in that case the most recent
+   * frozen block is eligible only after the renderer parsed newer bytes.
+   * `frozenOnly` excludes an un-frozen manager slot, which is stale once the
+   * lifecycle has returned to the prompt. */
   private automaticAttachmentOwner(frozenOnly = false): BlockRecord | null {
     const scrollback = this.scrollback
     const manager = scrollback?.blockManager
@@ -4899,6 +4904,7 @@ export class TerminalContent extends BasePaneContent {
         !this.scrollback?.blockManager.blocks.includes(owner)
       )
         return
+      this._automaticFrameOwner = owner
       this._pinnedFrame = frame
       this._pendingReadFrame = frame
       this._summonedCommand = owner
@@ -4914,6 +4920,7 @@ export class TerminalContent extends BasePaneContent {
   private clearAutomaticFrozenFrame(): void {
     if (this._summoned) return
     this._pinnedFrame = null
+    this._automaticFrameOwner = null
     this._pendingReadFrame = null
     this._summonedCommand = null
     this.grantController?.setAutomaticBlock(null)
@@ -4923,8 +4930,11 @@ export class TerminalContent extends BasePaneContent {
    * attachment is derived from the same frozen command block that owns the
    * display, and carries no copied rows or frame payload. */
   private automaticFrozenGrant(): GrantBlock | null {
-    if (this._pinnedFrame === null || this._summonedCommand === null) return null
-    const grant = grantBlockFromElement(this._summonedCommand.el)
+    const owner = this._automaticFrameOwner
+    if (this._pinnedFrame === null || owner === null) return null
+    const grant = grantBlockFromElement(owner.el)
+    // The owner was pinned when the frame passed its async validity checks;
+    // it is not recomputed from whichever block is running now.
     return grant === null ? null : { ...grant, state: 'running', automatic: true }
   }
 
@@ -4975,6 +4985,8 @@ export class TerminalContent extends BasePaneContent {
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
       if (!this._placeEditorInSummonStack(editor)) return false
+      const frozenOwner = this.automaticAttachmentOwner(true)
+      const automaticOwner = this._bufferType === 'alternate' ? frozenOwner : null
 
       const view = createCapturedFrameView(frame)
       this._freezeFrameParentPosition = frameHost.style.position
@@ -4987,6 +4999,7 @@ export class TerminalContent extends BasePaneContent {
       const marker = createFreezeMarker()
       markerHost.appendChild(marker)
       this._freezeMarker = marker
+      this._automaticFrameOwner = automaticOwner
       this._summonedCommand = owner
       this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
 
@@ -5274,6 +5287,7 @@ export class TerminalContent extends BasePaneContent {
     this._freezeFrameView?.remove()
     this._freezeFrameView = null
     this._pinnedFrame = null
+    this._automaticFrameOwner = null
     this._freezeMarker?.remove()
     this._freezeMarker = null
   }
@@ -5311,6 +5325,7 @@ export class TerminalContent extends BasePaneContent {
     targets.setActive(next)
     const owner = this.automaticAttachmentOwner(true)
     if (owner !== null) void this.captureAutomaticFrozenFrame(owner)
+    else this.clearAutomaticFrozenFrame()
   }
 
   /** Address a signal to THE ACTIVE BLOCK — the one command running in this

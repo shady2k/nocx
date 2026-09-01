@@ -187,6 +187,32 @@ func TestSystemPrompt_AutomaticFrozenFrameIsNamedAsAutomatic(t *testing.T) {
 	}
 }
 
+func TestSystemPrompt_PartitionsAutomaticAndPersonItems(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Env: content.Environment{Kind: content.EnvLocal},
+		AttachedContent: []AttachedContentItem{
+			{ItemID: "automatic-frame", Command: "top", State: "running", Automatic: true},
+			{ItemID: "marked-item", Command: "echo marked", State: "exited"},
+		},
+	})
+	autoHeading := strings.Index(got, "A frozen screen was attached automatically")
+	personHeading := strings.Index(got, "The person marked these terminal items")
+	autoItem := strings.Index(got, "- id: automatic-frame")
+	personItem := strings.Index(got, "- id: marked-item")
+	if autoHeading < 0 || personHeading < 0 || autoItem < 0 || personItem < 0 {
+		t.Fatalf("prompt omitted an attachment heading or item:\n%s", got)
+	}
+	if !(autoHeading < autoItem && autoItem < personHeading && personHeading < personItem) {
+		t.Fatalf("prompt did not partition automatic and person-marked items:\n%s", got)
+	}
+	if strings.Contains(got[autoHeading:personHeading], "marked-item") {
+		t.Fatalf("automatic section names a person-marked item:\n%s", got)
+	}
+	if strings.Contains(got[personHeading:], "automatic-frame") {
+		t.Fatalf("person-marked section names the automatic item:\n%s", got)
+	}
+}
+
 // TestSystemPrompt_AttachedContentSentenceIsConditional keeps the bought
 // rule (nocx-4wtlh): a question with nothing attached must not claim
 // content was attached — the sentence is derived from the facts, never a

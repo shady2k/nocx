@@ -8240,6 +8240,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       expect(ed.isVisible).toBe(true)
       expect(ed.root.dataset.placement).toBe('overlay')
+      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+        'frozen screen attached automatically',
+      )
       // Ask, not the shell: the summoned editor's only target. Read off the
       // indicator, which is the product's own account of where Enter goes.
       expect(targetNamed(ed)).toBe('agent')
@@ -8277,6 +8280,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       scrollback.beginBlockNow('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
       scrollback.blockManager.freezeBlock(() => undefined, 0, 0)
+      const renderer = rendererOf(content)
+      renderer._fireBufferChange('alternate')
+      renderer._fireWriteParsed()
 
       await summonChord(content)
 

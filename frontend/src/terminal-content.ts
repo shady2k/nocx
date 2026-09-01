@@ -4889,7 +4889,13 @@ export class TerminalContent extends BasePaneContent {
    * A background child has no open attempt; in that case the most recent
    * frozen block is eligible only after the renderer parsed newer bytes.
    * `frozenOnly` excludes an un-frozen manager slot, which is stale once the
-   * lifecycle has returned to the prompt. */
+   * lifecycle has returned to the prompt.
+   *
+   * "Newer bytes" is necessary and NOT sufficient for the visible-editor
+   * attachment: the shell's prompt is written after the freeze, so a finished
+   * command satisfies it too. That path fences on screenIsStillPainting
+   * before it captures; this predicate only says which block would own the
+   * screen if one does. */
   private automaticAttachmentOwner(frozenOnly = false): BlockRecord | null {
     const scrollback = this.scrollback
     const manager = scrollback?.blockManager
@@ -4910,6 +4916,36 @@ export class TerminalContent extends BasePaneContent {
     return frozen
   }
 
+  /** IS ANYTHING STILL PAINTING THIS SCREEN, NOW? Sample the parsed-write
+   *  generation, let one animation frame pass, and sample again: a
+   *  background child that owns the grid advances it within the frame, and a
+   *  screen nobody is writing to does not. The frame is an OBSERVABLE —
+   *  the renderer's own paint cadence — not a duration; a millisecond count
+   *  would be a timing dependency, which is exactly what AGENTS.md forbids
+   *  a test (and therefore a product rule a test must judge) to rest on.
+   *
+   *  Why this and not "newer bytes since the block froze", which is what
+   *  automaticAttachmentOwner asks: the shell's own prompt is written AFTER
+   *  the freeze, so every finished command that printed anything satisfies
+   *  that test and was attached — a person who marked block A was silently
+   *  handed block B under the sentence "the current screen of the full-screen
+   *  program" (nocx-7l4ex.21).
+   *
+   *  And why not re-baseline that test at prompt_ready, which was the
+   *  obvious repair: the shell sends the prompt_ready fact from inside
+   *  __nocx_prompt_command (scripts/nocx.bash:1197) and only afterwards
+   *  emits D/A/OSC 7 and sets PS1 to the B marker, so the prompt's bytes are
+   *  written to the pty strictly after the fact leaves the shell. A baseline
+   *  stamped when the fact lands is therefore stamped BEFORE the redraw it
+   *  is meant to exclude, and the redraw goes on counting. That is not a
+   *  race that can be won by ordering the two channels better; it is the
+   *  order the shell hook emits them in. */
+  private async screenIsStillPainting(): Promise<boolean> {
+    const before = this._screenWriteGeneration
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    return this._screenWriteGeneration > before
+  }
+
   /** Capture the current screen for a visible-editor Ask transition. Unlike
    *  summonEditor this changes no layout: the frame is pinned for session.read
    *  and its owner is shown in the grant chip. */
@@ -4921,6 +4957,12 @@ export class TerminalContent extends BasePaneContent {
     if (targets === null || agentId === undefined) return
     this._automaticCapturePending = true
     try {
+      // The screen is worth attaching only while something is still writing
+      // it. Asked here rather than in automaticAttachmentOwner because that
+      // predicate answers WHICH BLOCK owns the screen and is also read by the
+      // summon path, and because the answer costs a frame — a synchronous
+      // caller cannot wait for it.
+      if (!(await this.screenIsStillPainting())) return
       const frame =
         this._bufferType === 'alternate'
           ? await this.captureLiveFrame({ start: 0, end: this.rows })

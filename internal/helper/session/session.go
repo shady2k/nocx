@@ -56,10 +56,13 @@ type ProcessGroupSignaller interface {
 // command — host.Register refuses argv-shaped params, and this is the same
 // rule one layer in.
 type SpawnRequest struct {
-	Cwd  string
-	Env  map[string]string
-	Cols uint16
-	Rows uint16
+	// SessionID is minted by the helper before launch so the in-memory shell
+	// integration can identify the session without an installed script.
+	SessionID string
+	Cwd       string
+	Env       map[string]string
+	Cols      uint16
+	Rows      uint16
 }
 
 // Spawner starts a shell under a PTY. One implementation reaches internal/pty;

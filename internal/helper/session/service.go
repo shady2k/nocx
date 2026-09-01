@@ -429,14 +429,15 @@ func decode(raw json.RawMessage, into any) error {
 // names what is true if the next one fails:
 //
 //  1. clamp the bound and reserve it against the aggregate budget. A refusal
-//     here has forked NOTHING — a budget checked after the fork would leave an
-//     orphan shell every time it refused.
-//  2. spawn. A failure releases the reservation and returns; there is no
-//     entry, no window and no process, so the inventory cannot show a session
-//     whose PTY does not exist.
-//  3. mint the id, allocate the window, record the launch, register. Only now
-//     is the session findable — which is the opening end of the interval "a
-//     session is in the inventory from the moment its PTY exists".
+//     here has forked NOTHING — a budget checked after the fork would leave
+//     an orphan shell every time it refused.
+//  2. mint the id and spawn with it. The id is not visible in the inventory
+//     until the PTY exists, but the spawner needs it to activate the
+//     in-memory shell integration without an installed script. A spawn or id
+//     failure releases the reservation and returns with no entry or process.
+//  3. allocate the window, record the launch and register. Only now is the
+//     session findable — which is the opening end of the interval "a session
+//     is in the inventory from the moment its PTY exists".
 //  4. start the output pump and the exit watcher. Both are attached to a
 //     session that already exists, so a process that exits between step 3 and
 //     step 4 is still observed: the watcher sees an already-closed Done.
@@ -459,7 +460,7 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		rows = 24
 	}
 
-	proc, err := s.spawner.Spawn(SpawnRequest{Cwd: p.Cwd, Env: p.Env, Cols: cols, Rows: rows})
+	raw, err := s.newID()
 	if err != nil {
 		s.mu.Lock()
 		s.budget -= bound
@@ -467,11 +468,14 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
-	raw, err := s.newID()
+	proc, err := s.spawner.Spawn(SpawnRequest{
+		SessionID: proto.SessionHex(raw),
+		Cwd:       p.Cwd,
+		Env:       p.Env,
+		Cols:      cols,
+		Rows:      rows,
+	})
 	if err != nil {
-		// The PTY exists and cannot be registered, so it is closed rather
-		// than leaked: an unfindable process is worse than no process.
-		_ = proc.Close()
 		s.mu.Lock()
 		s.budget -= bound
 		s.mu.Unlock()

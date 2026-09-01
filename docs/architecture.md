@@ -84,7 +84,7 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 | `session`          | Own session lifecycle; act as the registry mapping session-id → one PTY/SSH channel + one goroutine. Owns the **channel**; references (never owns) a pooled `ssh` connection.                                   |
 | `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
-| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks now; Tier B remote-helper seam later).                                                                                                             |
+| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
 
 **Frontend (xterm.js)**:
 
@@ -136,7 +136,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - Binds: cwd/prompt/block metadata and the features that consume it.
 - Prevents: coupling MVP features to a remote-install requirement.
-- Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) is the MVP substrate; Tier B = a cross-compiled Go helper scp'd to a remote host **augments** (never replaces) the remote shell and feeds richer metadata to the local terminal — a designed seam, not built now.
+- Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) remains the substrate wherever no helper is installed; Tier B = a consented cross-compiled Go helper that spawns the shell, owns its PTY and delivers the same hooks in-memory on a helper-installed host, replacing Tier A's delivery there.
   - The OSC-7 cwd event payload = `{host, path}` (percent-decoded). Ownership: the **backend** owns "local vs remote + host" and validates the host; the frontend only supplies the desired path.
   - Fallback: when the shell emits no OSC 7, cwd falls back to `$HOME` — **surfaced to the user, not applied silently.**
   - Tier A relies on the VT frontend surfacing OSC 7/133 as events — **verified on xterm.js** (`nocx-dej`, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).

@@ -466,7 +466,11 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
-	Standing agentApprovalStanding     `json:"standing"`
+	// Finding is static-scan evidence attached to a proposed skill write.
+	Finding *assistant.SkillScanFinding `json:"finding,omitempty"`
+	// Classifier is the model gate's verdict or bounded failure fact.
+	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
+	Standing   agentApprovalStanding         `json:"standing"`
 }
 
 type agentApprovalStanding struct {
@@ -1541,6 +1545,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
+		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings

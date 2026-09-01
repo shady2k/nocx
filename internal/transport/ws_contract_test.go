@@ -3790,7 +3790,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// No subscriber, then a change: the same shape a drop leaves, made

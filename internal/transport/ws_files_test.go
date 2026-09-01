@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -245,7 +246,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// Drop the connection, then change the directory. The server closes
@@ -310,7 +311,8 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir1] != "" && w.paths[dir2] != ""
+		return w.paths[dir1] != nil && w.paths[dir1].rev != "" &&
+			w.paths[dir2] != nil && w.paths[dir2].rev != ""
 	})
 
 	// No subscriber: the same state a WebSocket drop leaves the session
@@ -380,7 +382,7 @@ func TestFilesWatch_EmptySetStopsTheLoop(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	resp := jsonrpcCallWithID(t, e.conn, "files.watch", map[string]any{
@@ -788,7 +790,7 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// Wedge the subscriber's outbound pump mid-write. The next
@@ -1205,13 +1207,11 @@ func TestFilesPoll_StayingVisibleIsNotAPollTrigger(t *testing.T) {
 	}
 }
 
-// TestFilesPoll_IdleLadderBacksOff pins the exact watcher-local idle ladder
-// without a server, goroutine, or wall clock. It also proves change and
-// explicit reset edges return to the responsive rung.
+// TestFilesPoll_IdleLadderBacksOff pins the exact per-path idle and failure
+// ladders without a server, goroutine, or wall clock.
 func TestFilesPoll_IdleLadderBacksOff(t *testing.T) {
 	const base = time.Second
-	w := &filesWatcher{}
-	want := []time.Duration{
+	idleWant := []time.Duration{
 		2 * base,
 		2 * base,
 		4 * base,
@@ -1219,23 +1219,11 @@ func TestFilesPoll_IdleLadderBacksOff(t *testing.T) {
 		20 * base,
 		20 * base,
 	}
-	for i, expected := range want {
-		if got := w.nextPollWait(base); got != expected {
-			t.Fatalf("idle rung %d wait = %s, want %s", i, got, expected)
+	for idleStep, expected := range idleWant {
+		if got := filesPollWait(base, idleStep, 0, nil); got != expected {
+			t.Fatalf("idle rung %d wait = %s, want %s", idleStep, got, expected)
 		}
-		w.notePoll(filesPollResult{continueLoop: true})
 	}
-
-	w.notePoll(filesPollResult{continueLoop: true, changed: true})
-	if got := w.nextPollWait(base); got != 2*base {
-		t.Fatalf("changed poll wait = %s, want %s", got, 2*base)
-	}
-	w.idleStep = 4
-	w.resetPollSchedule()
-	if got := w.nextPollWait(base); got != 2*base {
-		t.Fatalf("reset poll wait = %s, want %s", got, 2*base)
-	}
-	w = &filesWatcher{}
 	failureWant := []time.Duration{
 		20 * base,
 		40 * base,
@@ -1243,68 +1231,62 @@ func TestFilesPoll_IdleLadderBacksOff(t *testing.T) {
 		120 * base,
 		120 * base,
 	}
-	for i, expected := range failureWant {
-		w.notePoll(filesPollResult{continueLoop: true, failed: true})
-		if got := w.nextPollWait(base); got != expected {
-			t.Fatalf("failure rung %d wait = %s, want %s", i, got, expected)
+	for failureStep, expected := range failureWant {
+		if got := filesPollWait(base, 0, failureStep+1, nil); got != expected {
+			t.Fatalf("failure rung %d wait = %s, want %s", failureStep+1, got, expected)
 		}
 	}
 }
 
-// TestFilesPoll_RemoteJitterIsBounded proves that only a remote watcher gets
-// deterministic ±10% jitter in this unit test; local watchers leave jitter
-// nil and therefore retain exact ladder waits.
+// TestFilesPoll_RemoteJitterIsBounded proves that only a remote path gets
+// deterministic ±10% jitter; local paths retain exact ladder waits.
 func TestFilesPoll_RemoteJitterIsBounded(t *testing.T) {
 	const base = time.Second
-	local := &filesWatcher{}
-	if got := local.nextPollWait(base); got != 2*base {
+	if got := filesPollWait(base, 0, 0, nil); got != 2*base {
 		t.Fatalf("local wait = %s, want %s", got, 2*base)
 	}
-	remote := &filesWatcher{
-		jitter: rand.New(rand.NewPCG(1, 2)), //nolint:gosec // fixed non-security PRNG seed keeps the jitter-bound assertion deterministic
-	}
+	remote := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // fixed non-security PRNG seed
 	for i := range 100 {
-		got := remote.nextPollWait(base)
+		got := filesPollWait(base, 0, 0, remote)
 		if got < 1800*time.Millisecond || got > 2200*time.Millisecond {
 			t.Fatalf("remote wait %d = %s, want [1.8s, 2.2s]", i, got)
 		}
 	}
 }
 
-// TestFilesPoll_ChangeAnnouncementResetsLadder proves that a change
-// notification re-arms the next poll at the responsive rung rather than
-// leaving the watcher at its backed-off idle wait.
-func TestFilesPoll_ChangeAnnouncementResetsLadder(t *testing.T) {
+// TestFilesPoll_ChangeAnnouncementDoesNotResetOtherPaths proves that
+// notification delivery does not mutate any path's scheduling state.
+func TestFilesPoll_ChangeAnnouncementDoesNotResetOtherPaths(t *testing.T) {
 	e, count := newCountingFilesEnv(t)
-	e.ws.filesPollInterval = 20 * time.Millisecond
+	e.ws.filesPollInterval = time.Hour
 	sid := e.openSession(t, 1)
 	root := t.TempDir()
-	dir := filepath.Join(root, "watched")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
 	bid := e.openBinding(t, sid, root, 2)
-	e.watchDir(t, bid, []string{dir}, 3)
-	before := count(dir)
-	waittest.WaitForTimeout(t, "the idle ladder to advance", 5*time.Second, func() bool {
-		return count(dir)-before >= 3
-	})
-	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	w := e.watchDir(t, bid, dirs, 3)
+	w.mu.Lock()
+	first := w.paths[dirs[0]]
+	second := w.paths[dirs[1]]
+	first.idleStep = filesPollMaxIdleStep
+	first.dueAt = time.Now().Add(time.Hour)
+	second.idleStep = 1
+	second.dueAt = time.Now().Add(2 * time.Hour)
+	w.mu.Unlock()
+	e.ws.emitFilesChanged(w, dirs[0], "synthetic")
+	w.mu.Lock()
+	if first.idleStep != filesPollMaxIdleStep || second.idleStep != 1 {
+		w.mu.Unlock()
+		t.Fatalf("notification changed path ladders: first=%d second=%d", first.idleStep, second.idleStep)
 	}
-	raw := readNotification(t, e.conn, "files.changed", wantWithin)
-	var params map[string]any
-	if err := json.Unmarshal(raw, &params); err != nil {
-		t.Fatalf("files.changed: unmarshal: %v", err)
+	w.mu.Unlock()
+	if count(dirs[0])+count(dirs[1]) != 2 {
+		t.Fatalf("notification performed a listing, counts: %d %d", count(dirs[0]), count(dirs[1]))
 	}
-	if params["path"] != dir {
-		t.Fatalf("files.changed path = %v, want %s", params["path"], dir)
-	}
-	announced := count(dir)
-	waittest.WaitForTimeout(t, "the next poll after the real change announcement", wantWithin,
-		func() bool {
-			return count(dir) > announced
-		})
 }
 
 // TestFilesPoll_ListActionResetsLadder proves that a user listing action
@@ -1371,20 +1353,30 @@ func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
 		func() bool {
 			w.mu.Lock()
 			defer w.mu.Unlock()
-			return w.failureStep >= 1
+			entry := w.paths[dir]
+			return entry != nil && entry.failureStep >= 1
 		})
-	if got := w.nextPollWait(base); got != 20*base {
+	w.mu.Lock()
+	entry := w.paths[dir]
+	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 20*base {
+		w.mu.Unlock()
 		t.Fatalf("first failure wait = %s, want %s", got, 20*base)
 	}
+	w.mu.Unlock()
 	waittest.WaitForTimeout(t, "a successful listing after the failure", wantWithin,
 		func() bool {
 			w.mu.Lock()
 			defer w.mu.Unlock()
-			return w.failureStep == 0 && p.count(dir) > beforeFailure
+			current := w.paths[dir]
+			return current != nil && current.failureStep == 0 && p.count(dir) > beforeFailure
 		})
-	if got := w.nextPollWait(base); got != 2*base {
+	w.mu.Lock()
+	entry = w.paths[dir]
+	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 2*base {
+		w.mu.Unlock()
 		t.Fatalf("post-failure idle wait = %s, want %s", got, 2*base)
 	}
+	w.mu.Unlock()
 }
 
 // newBlockingCountingFilesEnv exposes the counting provider's one-shot List
@@ -1460,4 +1452,249 @@ func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
 	waittest.WaitForTimeout(t, "the next poll after the post-work wait", 5*time.Second, func() bool {
 		return p.count(dir) > afterRelease
 	})
+}
+
+func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := []string{
+		filepath.Join(root, "one"),
+		filepath.Join(root, "two"),
+		filepath.Join(root, "three"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, dirs, 3)
+
+	w.mu.Lock()
+	w.markVisibleCatchUpLocked(time.Now())
+	w.mu.Unlock()
+	visited := make(map[string]bool, len(dirs))
+	for i := range dirs {
+		before := make(map[string]int, len(dirs))
+		for _, dir := range dirs {
+			before[dir] = count(dir)
+		}
+		if result := e.ws.filesPollTick(w); result == filesPollPathStopped {
+			t.Fatal("poll stopped during visibility catch-up")
+		}
+		totalDelta := 0
+		for _, dir := range dirs {
+			delta := count(dir) - before[dir]
+			if delta > 1 {
+				t.Fatalf("dispatch %d listed %s %d times, want at most once", i, dir, delta)
+			}
+			if delta == 1 {
+				visited[dir] = true
+				totalDelta++
+			}
+		}
+		if totalDelta != 1 {
+			t.Fatalf("dispatch %d listed %d paths, want exactly one", i, totalDelta)
+		}
+	}
+	for _, dir := range dirs {
+		if !visited[dir] {
+			t.Fatalf("catch-up never visited %s", dir)
+		}
+	}
+}
+
+func TestFilesPoll_PerPathLaddersAreIndependent(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	const base = 5 * time.Millisecond
+	e.ws.filesPollInterval = base
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first")
+	secondPath := filepath.Join(root, "second")
+	for _, dir := range []string{firstPath, secondPath} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{firstPath, secondPath}, 3)
+	w.mu.Lock()
+	first := w.paths[firstPath]
+	second := w.paths[secondPath]
+	first.idleStep = 3
+	second.idleStep = 1
+	w.pollBase = base
+	w.mu.Unlock()
+	provider().failNext(errors.New("synthetic first-path failure"))
+	result := e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+		path: firstPath, entry: first, generation: first.generation,
+	})
+	if result != filesPollPathFailed {
+		t.Fatalf("first path result = %v, want failure", result)
+	}
+	w.mu.Lock()
+	if first.failureStep != 1 || first.idleStep != 3 {
+		t.Fatalf("failed path state = failure %d idle %d, want 1/3", first.failureStep, first.idleStep)
+	}
+	if second.failureStep != 0 || second.idleStep != 1 {
+		t.Fatalf("healthy path changed after unrelated failure: failure %d idle %d", second.failureStep, second.idleStep)
+	}
+	second.failureStep = 2
+	w.mu.Unlock()
+	result = e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+		path: firstPath, entry: first, generation: first.generation,
+	})
+	if result != filesPollPathOK {
+		t.Fatalf("first path recovery result = %v, want ok", result)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if first.failureStep != 0 || second.failureStep != 2 {
+		t.Fatalf("recovery reset unrelated path: first failure %d second failure %d", first.failureStep, second.failureStep)
+	}
+}
+
+func TestFilesPoll_FailedListDoesNotResetPath(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	w.mu.Lock()
+	w.paths[dir].idleStep = filesPollMaxIdleStep
+	w.mu.Unlock()
+	provider().failNext(errors.New("synthetic list failure"))
+	resp := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid, "path": dir, "offset": 0, "limit": 1,
+	}, 4)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.list: unmarshal: %v", err)
+	}
+	if envelope.Error == nil {
+		t.Fatal("failed files.list unexpectedly succeeded")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := w.paths[dir].idleStep; got != filesPollMaxIdleStep {
+		t.Fatalf("failed files.list reset idle rung to %d, want %d", got, filesPollMaxIdleStep)
+	}
+}
+
+func TestFilesPoll_WatchReplacementRetainsPathState(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first")
+	secondPath := filepath.Join(root, "second")
+	for _, dir := range []string{firstPath, secondPath} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{firstPath}, 3)
+	w.mu.Lock()
+	retained := w.paths[firstPath]
+	retained.idleStep = 3
+	retained.failureStep = 2
+	w.mu.Unlock()
+	e.watchDir(t, bid, []string{firstPath, secondPath}, 4)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.paths[firstPath] != retained || w.paths[firstPath].idleStep != 3 || w.paths[firstPath].failureStep != 2 {
+		t.Fatal("retained path lost its scheduling state during watch replacement")
+	}
+	added := w.paths[secondPath]
+	if added == nil || added.idleStep != 0 || added.failureStep != 0 || added.rev == "" {
+		t.Fatalf("added path state = %+v, want fresh successful baseline", added)
+	}
+	if count(secondPath) != 1 {
+		t.Fatalf("added path baseline count = %d, want 1", count(secondPath))
+	}
+}
+
+func TestFilesPoll_UploadTargetsBothDestinations(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, dirs, 3)
+	before := map[string]int{dirs[0]: count(dirs[0]), dirs[1]: count(dirs[1])}
+	for _, dir := range dirs {
+		e.ws.invalidateUploadDest(&runningTransfer{
+			sessionID: session.ID(sid),
+			bindingID: bid,
+			upload:    transfer.Upload{DestDir: dir},
+		})
+	}
+	waittest.WaitForTimeout(t, "both upload destinations to be polled", wantWithin, func() bool {
+		return count(dirs[0]) > before[dirs[0]] && count(dirs[1]) > before[dirs[1]]
+	})
+	for _, dir := range dirs {
+		if got := count(dir) - before[dir]; got != 1 {
+			t.Fatalf("upload destination %s polled %d times, want 1", dir, got)
+		}
+	}
+}
+
+func TestFilesPoll_StaleCompletionDoesNotOverwriteReaddedPath(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	w.mu.Lock()
+	old := w.paths[dir]
+	old.dueAt = time.Now()
+	h := w.handle
+	w.mu.Unlock()
+	selection := &filesPollSelection{path: dir, entry: old, generation: old.generation}
+	p := provider()
+	p.blockNext()
+	result := make(chan filesPollPathResult, 1)
+	go func() { result <- e.ws.filesPollPath(w, h, selection) }()
+	select {
+	case <-p.listStarted:
+	case <-time.After(wantWithin):
+		t.Fatal("stale listing did not start")
+	}
+	w.mu.Lock()
+	readded := newFilesPollEntry("new-baseline", old.generation+1, time.Hour, nil)
+	w.paths[dir] = readded
+	w.mu.Unlock()
+	close(p.listRelease)
+	select {
+	case <-result:
+	case <-time.After(wantWithin):
+		t.Fatal("stale listing did not finish")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := w.paths[dir].rev; got != "new-baseline" {
+		t.Fatalf("re-added path rev = %q, stale completion overwrote it", got)
+	}
 }

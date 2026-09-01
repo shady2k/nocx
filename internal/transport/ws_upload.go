@@ -1376,9 +1376,9 @@ func (s *WSServer) invalidateUploadDest(rt *runningTransfer) {
 	if !watched {
 		return
 	}
-	// Upload completion is a genuine mutation: refresh immediately through
-	// the existing watcher seam, then announce the same change.
-	w.requestPollNow()
+	// Upload completion is a genuine mutation: refresh the destination
+	// immediately, then announce the same change.
+	w.requestPollNow(rt.upload.DestDir)
 	s.emitFilesChanged(w, rt.upload.DestDir, "")
 }
 

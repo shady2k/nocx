@@ -444,7 +444,39 @@ export class ScrollbackController {
     if (!cell || cell <= 0) return 0
     const top = this._renderer.viewportTopLine ?? 0
     const rows = rec.outputStart - top
-    return rows > 0 ? rows * cell : 0
+    if (rows <= 0) return 0
+    // AND ONLY WHILE THE ECHO IS STILL THERE (nocx-hp8p2.9). The shift hides
+    // the row the shell echoed the command on. A program that CLEARS THE
+    // SCREEN — `top`, and every full-viewport program that repaints from the
+    // home position — writes its own first line onto that row, and the shift
+    // then hides a line of the program's output instead: `top`'s uptime and
+    // load-average header was missing from a block whose rows below it were
+    // all present.
+    //
+    // The condition is read from the grid rather than from a clear event,
+    // because it is the condition the shift is actually FOR: no clear event
+    // exists for a program's own erase, and one that did would still not
+    // cover a program that simply overwrites the row.
+    return this._echoStillOnRow(rec) ? rows * cell : 0
+  }
+
+  /** Whether the block's creation row still holds the shell's echo of the
+   *  command. The echo is the prompt followed by the command, so the row
+   *  ENDS with it; a repaint by the program does not. */
+  private _echoStillOnRow(rec: { outputStart: number; command: string }): boolean {
+    const command = rec.command.trim()
+    if (command === '') return true
+    const line = this._renderer.getBufferLine(rec.outputStart - 1)
+    if (!line) return true
+    const text = line.translateToString(true).trimEnd()
+    // THE SHIFT IS THE DEFAULT AND ONLY EVIDENCE TAKES IT AWAY. A row we
+    // cannot read, or one that is blank, says nothing about whether the echo
+    // is still there — and dropping the shift on silence would put the echo
+    // back into every running block that has not painted yet. Only a row
+    // that HAS content and does not end with the command is proof the
+    // program overwrote it.
+    if (text === '') return true
+    return text.endsWith(command)
   }
 
   /** Apply the echo shift to the grid, or clear it. The write is guarded:

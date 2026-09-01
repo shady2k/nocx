@@ -188,9 +188,33 @@ func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *
 	}
 	var body json.RawMessage
 	if err := s.broker.Request(ctx, readScreenKind(), params, &body); err != nil {
+		// SAY WHY, IN THE LOG THE OWNER READS. A screen read that does not
+		// come back is the assistant answering from nothing, and every
+		// reason it can fail — no renderer, an undelivered notification, a
+		// dead connection, the timeout — was previously indistinguishable
+		// from the outside: the run's sentence names only the timeout, and a
+		// resolution refused on the ingress (below) is silent altogether.
+		s.log.Warn("readScreen: the screen request did not resolve",
+			"session", sessionID, "region", region != nil, "error", err)
 		return nil, err
 	}
 	return body, nil
+}
+
+// refuseReadScreenResolution is validateReadScreenResolvedRaw with the
+// refusal made VISIBLE. A renderer answer refused here never reaches the
+// broker, so the pending request stays armed and the run ends thirty seconds
+// later on the kind's timeout — a shape that reads exactly like a renderer
+// that never answered at all. The sentence is the validator's own; the log
+// line is what tells the two apart. Params are never logged: a frame is the
+// person's screen.
+func (s *WSServer) refuseReadScreenResolution(raw json.RawMessage) string {
+	msg := validateReadScreenResolvedRaw(raw)
+	if msg != "" {
+		s.log.Warn("readScreen: the renderer's resolution was refused on the ingress",
+			"reason", msg, "bytes", len(raw))
+	}
+	return msg
 }
 
 // brokerSpecs declares the broker's resolution RPCs on the read-loop
@@ -200,11 +224,20 @@ func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *
 // two existing resolvers register with.
 func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSpec {
 	return []methodSpec{
-		reg(immediate, "agent.readScreenResolved", params(validateReadScreenResolvedRaw),
+		reg(immediate, "agent.readScreenResolved", params(s.refuseReadScreenResolution),
 			func(w *wsConn, _ *connState, r Responder) handlerFunc {
 				return func(ctx context.Context, req jsonrpcRequest) {
 					perr := s.broker.Resolve("agent.readScreenResolved", req.Params, w)
 					if perr.Code != 0 {
+						// The other silent refusal, and the one a reconnect
+						// produces: a renderer that answers on a connection
+						// which was not a recipient of the request (its own
+						// socket died and came back while the run was
+						// suspended on an approval) is refused as an unknown
+						// id, and the pending request goes on waiting for a
+						// connection that no longer exists.
+						s.log.Warn("readScreen: the renderer's resolution was not accepted",
+							"reason", perr.Message, "code", perr.Code)
 						_ = w.TryError(req.ID, perr)
 						return
 					}

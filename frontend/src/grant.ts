@@ -119,13 +119,24 @@ export class GrantController {
   private updateChip(): void {
     const count = this.blocks.length
     this.chip.dataset.state = count === 0 ? 'default' : 'chosen'
-    const automatic = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
+    // SHORT ON THE CHIP, WHOLE IN THE NAME (nocx-hp8p2.5). The chip is a
+    // count in a narrow box beside several others; the full sentence made it
+    // twice its width and it was painted over its neighbours. The attachment
+    // is already stated twice at full length beside it — the freeze badge on
+    // the same row, and its own row in this chip's popover — so what belongs
+    // here is the fact that something came with the question, not the
+    // sentence about it. The accessible name and the title keep the sentence.
+    const automatic = this.automaticBlock === null ? '' : ' + screen'
+    const spoken = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
     this.chip.textContent = `marked for the question · ${count}${automatic}`
+    // The chip ellipsises when the pane is narrow (style.css), so the title
+    // carries the whole line rather than a label about it — nothing may live
+    // only in the ellipsis.
     this.chip.title =
       count === 0 && this.automaticBlock === null
         ? 'Mark blocks to include them in a question'
-        : 'Open the marked blocks'
-    this.chip.setAttribute('aria-label', `marked for the question · ${count}${automatic}`)
+        : `Open the marked blocks — marked for the question · ${count}${spoken}`
+    this.chip.setAttribute('aria-label', `marked for the question · ${count}${spoken}`)
   }
 
   private renderPanel(): void {

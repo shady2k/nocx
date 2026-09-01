@@ -69,6 +69,16 @@ function valueText(value: unknown): string {
  * argument was an unnameable session is too. Neither invents a placeholder:
  * the tool name is a true and complete sentence about what happened.
  */
+/** One `key=value` pair as a person reads it. A value carrying a space is
+ *  QUOTED, because the pairs are joined by spaces and an unquoted one stops
+ *  being one value: a pane called "* Claude Code" turned
+ *  `session.read session=* Claude Code id=att-cf87…` into a line where
+ *  nothing says which words belong to `session` (nocx-hp8p2.12). Session
+ *  names are the common case — they are tab titles, written by people. */
+function pairText(key: string, value: string): string {
+  return /\s/.test(value) ? `${key}="${value}"` : `${key}=${value}`
+}
+
 export function toolCallTitle(call: ToolCallTitleSpec, deps: ToolCallTitleDeps = {}): string {
   const args = call.args ?? {}
   const sessionId = call.resource?.kind === 'session' ? call.resource.id : null
@@ -78,12 +88,12 @@ export function toolCallTitle(call: ToolCallTitleSpec, deps: ToolCallTitleDeps =
     if (sessionId !== null && raw === sessionId) {
       sessionCarried = true
       const named = deps.sessionName?.(sessionId) ?? null
-      if (named) parts.push(`${key}=${named}`)
+      if (named) parts.push(pairText(key, named))
       continue
     }
     const text = valueText(raw)
     if (text === '') continue
-    parts.push(`${key}=${text}`)
+    parts.push(pairText(key, text))
   }
   // THE RESOURCE NAMES THE PANE, NOT THE ARGUMENT (nocx-i4gg7). The session
   // used to arrive as a parameter the model spelled out, and the title read
@@ -95,7 +105,7 @@ export function toolCallTitle(call: ToolCallTitleSpec, deps: ToolCallTitleDeps =
   // cannot tell which pane was read, which is the defect nocx-vnzek fixed.
   if (sessionId !== null && !sessionCarried) {
     const named = deps.sessionName?.(sessionId) ?? null
-    if (named) parts.unshift(`session=${named}`)
+    if (named) parts.unshift(pairText('session', named))
   }
   if (parts.length === 0) return call.tool
   return `${call.tool} ${parts.join(' ')}`

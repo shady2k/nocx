@@ -86,6 +86,18 @@ describe('AnswerMarkdown — table rows', () => {
     expect(row.textContent).toBe('| only |')
   })
 
+  it('keeps an ordered marker on one line whatever its width (nocx-hp8p2.11)', () => {
+    // "1." is two cells; the marker box is 1.2em. The answer body breaks
+    // words to wrap, so a marker that did not fit was split — the digit on
+    // one row and the period on the next, under every numbered item.
+    const css = readFileSync('src/styles/components/answer-markdown.css', 'utf8')
+    const marker = /\.ui-md-marker\s*\{([^}]*)\}/s.exec(css)?.[1] ?? ''
+    expect(marker).not.toBe('')
+    expect(marker).toMatch(/white-space:\s*nowrap/)
+    expect(marker).toMatch(/min-width:\s*1\.2em/)
+    expect(marker).not.toMatch(/(?<![\w-])width:\s*1\.2em/)
+  })
+
   it('lets CSS own the cross-row sizing and removes only each row box', () => {
     const css = readFileSync('src/styles/components/answer-markdown.css', 'utf8')
     expect(css).toMatch(/\.term-line\.ui-md-table-row\s*\{[^}]*display:\s*contents/s)

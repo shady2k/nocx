@@ -62,6 +62,9 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"snippets.delete":  executeSnippetsDelete,
 	"snippets.reorder": executeSnippetsReorder,
 	"skills.read":      executeSkillsRead,
+	"skills.create":    executeSkillsCreate,
+	"skills.update":    executeSkillsUpdate,
+	"skills.delete":    executeSkillsDelete,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is
@@ -489,6 +492,99 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 		}
 	}
 	return marshalResult(result)
+}
+
+type skillWriteFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
+type skillWriteResult struct {
+	Status  string             `json:"status"`
+	Name    string             `json:"name"`
+	Finding *skillWriteFinding `json:"finding,omitempty"`
+}
+
+func executeSkillsCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	return executeSkillsWrite(ctx, "skills.create", "created", cap, args, seams, func(library SkillLibrary, name, description, body string) error {
+		return library.Create(name, description, body)
+	})
+}
+
+func executeSkillsUpdate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	return executeSkillsWrite(ctx, "skills.update", "updated", cap, args, seams, func(library SkillLibrary, name, description, body string) error {
+		return library.Update(name, description, body)
+	})
+}
+
+func executeSkillsDelete(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := skillWriteScope(cap, "skills.delete")
+	if err != nil {
+		return "", err
+	}
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("skills.delete: args: %w", err)
+	}
+	if !scope.Allows(params.Name) {
+		return "", fmt.Errorf("skills.delete: %q is outside this run's grant", params.Name)
+	}
+	library, ok := seams.skills.(SkillLibrary)
+	if !ok || library == nil {
+		return "", errors.New("skills.delete: the skill library is unavailable")
+	}
+	if err := library.Delete(params.Name); err != nil {
+		return "", fmt.Errorf("skills.delete: %w", err)
+	}
+	return marshalResult(skillWriteResult{Status: "deleted", Name: params.Name})
+}
+
+func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.Capability, args json.RawMessage, seams toolSeams, write func(SkillLibrary, string, string, string) error) (string, error) {
+	scope, err := skillWriteScope(cap, tool)
+	if err != nil {
+		return "", err
+	}
+	var params struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("%s: args: %w", tool, err)
+	}
+	if !scope.Allows(params.Name) {
+		return "", fmt.Errorf("%s: %q is outside this run's grant", tool, params.Name)
+	}
+	library, ok := seams.skills.(SkillLibrary)
+	if !ok || library == nil {
+		return "", fmt.Errorf("%s: the skill library is unavailable", tool)
+	}
+
+	result := skillWriteResult{Status: status, Name: params.Name}
+	findings := skill.Scan([]byte(params.Body))
+	if len(findings) > 0 {
+		finding := findings[0]
+		result.Finding = &skillWriteFinding{
+			PatternID:  finding.PatternID,
+			Line:       finding.Line,
+			LineNumber: finding.LineNumber,
+		}
+	}
+	if err := write(library, params.Name, params.Description, params.Body); err != nil {
+		return "", fmt.Errorf("%s: %w", tool, err)
+	}
+	return marshalResult(result)
+}
+
+func skillWriteScope(cap agenttools.Capability, tool string) (*agenttools.SkillWriteScope, error) {
+	scope, ok := cap.(*agenttools.SkillWriteScope)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, not *agenttools.SkillWriteScope", tool, cap)
+	}
+	return scope, nil
 }
 
 func marshalBoundedNotes(rows []noteSearchRow, max int64) (string, error) {

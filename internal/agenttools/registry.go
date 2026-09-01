@@ -253,13 +253,13 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// Five rows, four execution states (design §4.1–§4.2): files.read executes
-// in Go; session.list executes in Go against the ledger; session.read uses
-// Dynamic dispatch, selecting the ledger for an exited item and the
-// renderer broker for a running item or the current screen; run executes in
-// the renderer; and git.status remains declared-but-not-executable (Narrow
-// nil). The dynamic row is explicit so state-dependent ownership cannot hide
-// behind either InGo or InRenderer.
+// The table includes four execution states (design §4.1–§4.2): files.read and
+// the content tools execute in Go; session.list executes in Go against the
+// ledger; session.read uses Dynamic dispatch, selecting the ledger for an
+// exited item and the renderer broker for a running item or the current
+// screen; run executes in the renderer; and git.status remains
+// declared-but-not-executable (Narrow nil). The dynamic row is explicit so
+// state-dependent ownership cannot hide behind either InGo or InRenderer.
 var declarations = []Declaration{
 	{
 		Name:             "files.read",
@@ -513,6 +513,51 @@ var declarations = []Declaration{
 		Params:           "skills.read.schema.json",
 		Narrow:           narrowContent,
 	},
+	{
+		Name:             "skills.create",
+		Description:      "Write a new skill the person asked you to remember; the person approves its exact text before it is stored.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.create.schema.json",
+		Narrow:           narrowSkillsWrite,
+	},
+	{
+		Name:             "skills.update",
+		Description:      "Replace a managed skill after the person asks you to change how it is remembered; the person approves its exact text before it is stored.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.update.schema.json",
+		Narrow:           narrowSkillsWrite,
+	},
+	{
+		Name:             "skills.delete",
+		Description:      "Delete a managed skill the person no longer wants remembered; the person approves the removal before it happens.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.delete.schema.json",
+		Narrow:           narrowSkillsWrite,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the
@@ -726,12 +771,12 @@ func (r Registry) All() []Tool {
 }
 
 // LiveEffects is the set of effect classes at least one DECLARED tool
-// carries, deduplicated, in the lattice's canonical order. Today: observe
-// and mutate-destructive — the other five rows of the policy matrix have no
-// tool behind them at all.
+// carries, deduplicated, in the lattice's canonical order. Today: observe,
+// mutate-reversible and mutate-destructive — the other four rows of the
+// policy matrix have no tool behind them at all.
 //
-// The settings surface needs this and cannot derive it: five controls that
-// govern nothing must not look like the two that do, and only the
+// The settings surface needs this and cannot derive it: four controls that
+// govern nothing must not look like the three that do, and only the
 // declaration table knows which is which. It goes on the wire (policy.get's
 // "live") for exactly that reason.
 //

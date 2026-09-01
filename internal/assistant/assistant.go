@@ -187,6 +187,16 @@ type Header struct {
 	Value string
 }
 
+// SkillLibrary is the read-and-write seam used by the skills mutation tools.
+// AskParams keeps the read-only SkillSource shape for existing composition
+// roots; a write refuses unless its source also satisfies this interface.
+type SkillLibrary interface {
+	SkillSource
+	Create(name, description, body string) error
+	Update(name, description, body string) error
+	Delete(name string) error
+}
+
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {

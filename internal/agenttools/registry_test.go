@@ -428,6 +428,15 @@ func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
 	if !containsName(reg.ForGrant(g), "skills.read") {
 		t.Fatalf("a skill grant must offer skills.read; got %v", toolNames(reg.ForGrant(g)))
 	}
+	mutationGrant := content.Grant{
+		Effects: []content.Effect{content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill/deploy"}},
+	}
+	for _, name := range []string{"skills.create", "skills.update", "skills.delete"} {
+		if !containsName(reg.ForGrant(mutationGrant), name) {
+			t.Fatalf("a mutation skill grant omitted %q; got %v", name, toolNames(reg.ForGrant(mutationGrant)))
+		}
+	}
 	if containsName(reg.ForGrant(content.Grant{
 		Effects: []content.Effect{content.EffectObserve},
 		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/deploy"}},
@@ -455,6 +464,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
 		"skills.read.schema.json":      skillsReadSchema,
+		"skills.create.schema.json":    skillsReadSchema,
+		"skills.update.schema.json":    skillsReadSchema,
+		"skills.delete.schema.json":    skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -579,6 +591,9 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
 		"skills.read.schema.json":      skillsReadSchema,
+		"skills.create.schema.json":    skillsReadSchema,
+		"skills.update.schema.json":    skillsReadSchema,
+		"skills.delete.schema.json":    skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

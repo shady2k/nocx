@@ -113,3 +113,30 @@ func TestNarrowFilesCreateRefusesSkillRoot(t *testing.T) {
 		t.Fatalf("ordinary create did not create %s: %v", otherPath, err)
 	}
 }
+
+func TestNarrowSkillsWriteRetainsOnlyGrantedSkillNames(t *testing.T) {
+	grant := content.Grant{Scopes: []content.GrantScope{{
+		Kind: content.ResourceContent,
+		ID:   "skill/deploy",
+	}}}
+	capability, err := narrowSkillsWrite(grant, []ResourceRef{
+		{Kind: content.ResourceContent, ID: "skill/deploy"},
+		{Kind: content.ResourceContent, ID: "skill/other"},
+	}, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowSkillsWrite: %v", err)
+	}
+	scope, ok := capability.(*SkillWriteScope)
+	if !ok {
+		t.Fatalf("capability = %T, want *SkillWriteScope", capability)
+	}
+	if !scope.Allows("deploy") {
+		t.Fatal("granted skill was not retained")
+	}
+	if scope.Allows("other") {
+		t.Fatal("ungranted skill escaped the narrowed capability")
+	}
+	if scope.Allows("skill/deploy") {
+		t.Fatal("Allows expects a skill name, not a canonical resource id")
+	}
+}

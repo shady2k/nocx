@@ -623,7 +623,21 @@ export class TerminalContent extends BasePaneContent {
    *  valid only while the live renderer has parsed bytes after that freeze. */
   private _lastFrozenBlock: BlockRecord | null = null
   private _screenWriteGeneration = 0
-  private _lastFrozenWriteGeneration = -1
+  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. The
+   *  interval it closes has both ends named: it OPENS at a block's visual
+   *  freeze, which takes the command's rows out of the grid, and it CLOSES
+   *  when the prompt that follows has finished painting — the OSC 133 B
+   *  marker, which nocx.bash appends to PS1 as its final action in every
+   *  branch (__nocx_b_marker, :1227/:1243/:1245), so B is the prompt's last
+   *  byte. A write parsed AFTER that belongs to something else, and that is
+   *  the whole test for whether this screen is worth attaching. */
+  private _screenHandbackGeneration = -1
+  /** B was parsed in the pass now running; stamp the handback at the END of
+   *  it. The OSC handler fires inside the parse, the generation counts the
+   *  pass when the parse finishes (xterm WriteBuffer fires onWriteParsed
+   *  after its chunk loop), so stamping on the marker itself would leave the
+   *  prompt's own pass counting as newer bytes — off by exactly one. */
+  private _handbackPendingParse = false
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -1761,7 +1775,8 @@ export class TerminalContent extends BasePaneContent {
         onClear: () => {
           this._lastFrozenBlock = null
           this._automaticFrameOwner = null
-          this._lastFrozenWriteGeneration = -1
+          this._screenHandbackGeneration = -1
+          this._handbackPendingParse = false
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
@@ -2453,7 +2468,17 @@ export class TerminalContent extends BasePaneContent {
         // stops being its own start and becomes something a user can miss
         // (PaneHost.contentSettled). It grants nothing, opens nothing and
         // persists nothing, so ADR-0024 §1's severed list is untouched.
-        if (marker.kind === 'B') this._settle()
+        // AND the same B closes the interval in which this screen belongs to
+        // nobody (_screenHandbackGeneration): PS1 ends with this marker in
+        // every branch nocx.bash writes, so B is the last byte of the
+        // prompt's own redraw. Reading it here grants nothing and opens
+        // nothing — it moves a generation counter the automatic Ask
+        // attachment compares against, which is the same render-only
+        // partition A/B already exist for.
+        if (marker.kind === 'B') {
+          this._settle()
+          this._handbackPendingParse = true
+        }
       })
 
       // Optional on the renderer contract (types.ts): a renderer that does
@@ -3668,6 +3693,13 @@ export class TerminalContent extends BasePaneContent {
       this.scheduleLiveResize()
       // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
       this._screenWriteGeneration++
+      // The prompt finished painting in this pass: the screen is nobody's
+      // as of now, so anything parsed later belongs to something that is
+      // still writing it (_screenHandbackGeneration).
+      if (this._handbackPendingParse) {
+        this._handbackPendingParse = false
+        this._screenHandbackGeneration = this._screenWriteGeneration
+      }
       // carries the same "working, nothing written yet" indicator a turn
       // does, in the live region where its output will appear, and the
       // first parsed write is the moment that claim stops being true.
@@ -4891,11 +4923,13 @@ export class TerminalContent extends BasePaneContent {
    * `frozenOnly` excludes an un-frozen manager slot, which is stale once the
    * lifecycle has returned to the prompt.
    *
-   * "Newer bytes" is necessary and NOT sufficient for the visible-editor
-   * attachment: the shell's prompt is written after the freeze, so a finished
-   * command satisfies it too. That path fences on screenIsStillPainting
-   * before it captures; this predicate only says which block would own the
-   * screen if one does. */
+   * "Newer bytes" is measured from the SCREEN HANDBACK, not from the freeze.
+   * The shell's prompt is written after the freeze, so a baseline stamped
+   * there is true of every finished command that printed anything — which is
+   * how a person who marked block A was handed block B as well, under the
+   * sentence calling it the current screen of a full-screen program
+   * (nocx-7l4ex.21). The handback closes on the prompt's own last byte, so
+   * what survives this test is a screen something is still writing. */
   private automaticAttachmentOwner(frozenOnly = false): BlockRecord | null {
     const scrollback = this.scrollback
     const manager = scrollback?.blockManager
@@ -4908,42 +4942,12 @@ export class TerminalContent extends BasePaneContent {
     const frozen = this._lastFrozenBlock
     if (
       frozen === null ||
-      this._screenWriteGeneration <= this._lastFrozenWriteGeneration ||
+      this._screenWriteGeneration <= this._screenHandbackGeneration ||
       !manager.blocks.includes(frozen) ||
       !scrollback.scrollbackInner.contains(frozen.el)
     )
       return null
     return frozen
-  }
-
-  /** IS ANYTHING STILL PAINTING THIS SCREEN, NOW? Sample the parsed-write
-   *  generation, let one animation frame pass, and sample again: a
-   *  background child that owns the grid advances it within the frame, and a
-   *  screen nobody is writing to does not. The frame is an OBSERVABLE —
-   *  the renderer's own paint cadence — not a duration; a millisecond count
-   *  would be a timing dependency, which is exactly what AGENTS.md forbids
-   *  a test (and therefore a product rule a test must judge) to rest on.
-   *
-   *  Why this and not "newer bytes since the block froze", which is what
-   *  automaticAttachmentOwner asks: the shell's own prompt is written AFTER
-   *  the freeze, so every finished command that printed anything satisfies
-   *  that test and was attached — a person who marked block A was silently
-   *  handed block B under the sentence "the current screen of the full-screen
-   *  program" (nocx-7l4ex.21).
-   *
-   *  And why not re-baseline that test at prompt_ready, which was the
-   *  obvious repair: the shell sends the prompt_ready fact from inside
-   *  __nocx_prompt_command (scripts/nocx.bash:1197) and only afterwards
-   *  emits D/A/OSC 7 and sets PS1 to the B marker, so the prompt's bytes are
-   *  written to the pty strictly after the fact leaves the shell. A baseline
-   *  stamped when the fact lands is therefore stamped BEFORE the redraw it
-   *  is meant to exclude, and the redraw goes on counting. That is not a
-   *  race that can be won by ordering the two channels better; it is the
-   *  order the shell hook emits them in. */
-  private async screenIsStillPainting(): Promise<boolean> {
-    const before = this._screenWriteGeneration
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-    return this._screenWriteGeneration > before
   }
 
   /** Capture the current screen for a visible-editor Ask transition. Unlike
@@ -4957,12 +4961,6 @@ export class TerminalContent extends BasePaneContent {
     if (targets === null || agentId === undefined) return
     this._automaticCapturePending = true
     try {
-      // The screen is worth attaching only while something is still writing
-      // it. Asked here rather than in automaticAttachmentOwner because that
-      // predicate answers WHICH BLOCK owns the screen and is also read by the
-      // summon path, and because the answer costs a frame — a synchronous
-      // caller cannot wait for it.
-      if (!(await this.screenIsStillPainting())) return
       const frame =
         this._bufferType === 'alternate'
           ? await this.captureLiveFrame({ start: 0, end: this.rows })
@@ -6294,7 +6292,12 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
-    this._lastFrozenWriteGeneration = this._screenWriteGeneration
+    // The screen is handed back HERE and stays handed back until the prompt
+    // that follows has finished painting; the marker handler closes the
+    // interval by re-stamping this on B. Both ends move the generation
+    // forward only — the freeze reads the counter now, B reads it at a later
+    // parse — so the later of the two always stands.
+    this._screenHandbackGeneration = this._screenWriteGeneration
     this.refreshGrant(rec.el)
 
     const waiter = this.agentRuns.get(rec)

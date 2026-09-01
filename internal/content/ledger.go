@@ -21,8 +21,10 @@ package content
 // author the renderer minted (nocx-iadtt); ledger.capture drives
 // CaptureOutput.
 //
-// WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
-// ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+// WHAT IS STILL TEST-REACHABLE ONLY: DeleteSession, ListEntries, DeleteEntry,
+// AppendArtifact, AddEdge and RunState. CreateSession is wired by the shipped
+// helper-hosted open path, which records the authoritative host, account and
+// generation before acknowledging the session.
 //
 // AddCause and Caused were never on that list: they arrived wired
 // (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for

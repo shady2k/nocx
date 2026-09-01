@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -125,19 +126,14 @@ type openHandlers struct {
 	// whole server.
 	lifecycle ssh.RemoteLifecycle
 	// panes resolves pane → tab → workspace for the open ack's workspaceId
-	// (nocx-isoph.2). nil when the content store is not wired, which is the
-	// honest state and not a degrade to hide: with no layout store there is
-	// no chain to walk and every session is in the default workspace.
-	//
-	// It is the store's READ seam and not the gated LayoutOperation, and the
-	// reason is a deadlock rather than a convenience. This handler already
-	// runs inside the open operation, which holds [config, session] and then
-	// the execution lane; acquiring the content operation inside it would
-	// take a second lane permit while holding one, and with every lane permit
-	// held by an open the whole control plane would stop. The read itself
-	// needs no gate: layout reads go straight to the pool and never through
-	// the single writer goroutine.
-	panes  paneWorkspaces
+	// (nocx-isoph.2). nil when the content store is not wired, which is a
+	// visible unavailable state and not a degrade to hide.
+	panes paneWorkspaces
+	// ledger is the durable writer for the helper binding. It is deliberately
+	// the existing content ledger seam, not a second session store: the
+	// helper returns host, account and generation together with the
+	// authoritative id, and this handler records those facts before ack.
+	ledger content.LedgerRepository
 	helper HelperSessionOpener
 	log    log.Logger
 }
@@ -529,10 +525,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	// PHASE TWO — dial, on the execution lane and no domain gate. The
-	// handshake waits on the network and sometimes on a person (the
-	// password prompt), and a gate held across that wait is what refused
-	// every other pane's open with "the terminal is busy" while one tab
-	// was still connecting.
+	// handshake waits on the network and sometimes on a person (the password prompt),
+	// and a gate held across that wait is what refused
+	// every other pane's open with "the terminal is busy" while one tab was
+	// still connecting.
+	var hosted *HostedSessionOpen
 	err = h.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		var oerr error
 		if cfg.Kind == session.KindRemote && h.helper != nil {
@@ -547,6 +544,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					return errors.New("helper session opener returned no session")
 				}
 				sess = openedHosted.Session
+				hosted = &openedHosted
 				opened = true
 				return nil
 			}
@@ -569,6 +567,28 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		// The callback answered a refusal already (missing resolver,
 		// missing target); nothing further to do.
 		return
+	}
+
+	// The helper's authoritative id and binding facts are one synchronous
+	// result. Persist them before the session enters connState or sends its
+	// open ack, so reconciliation can never observe a live helper session
+	// without the generation that qualifies its id space. A failed write
+	// refuses the open and closes the helper session rather than exposing an
+	// unbound session that no inventory may safely judge.
+	if hosted != nil && h.ledger != nil {
+		if err := h.ledger.CreateSession(ctx, content.Session{
+			ID:          string(sess.ID()),
+			WorkspaceID: workspaceID,
+			Host:        hosted.Host,
+			Account:     hosted.Account,
+			Generation:  hosted.Generation,
+		}); err != nil {
+			_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
+				return svc.Close(sess.ID())
+			})
+			h.answerOpenFailure(r, req, err)
+			return
+		}
 	}
 
 	state.add(sess)
@@ -1139,6 +1159,10 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 // submission.
 func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate control.Admission) []methodSpec {
 	openOp := capability.NewOpenOperation(configGate, sessionGate, lane, s.resolver, s.registry)
+	var sessionLedger content.LedgerRepository
+	if s.contentDB != nil {
+		sessionLedger = s.contentDB.Ledger()
+	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside
 	// the per-session factory the other methods use: the list is about every
@@ -1160,7 +1184,12 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), helper: s.helperSessionOpener, log: s.log}
+			h := openHandlers{
+				op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver,
+				launcher: s.remoteLauncher, installer: s.remoteInstaller,
+				lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
+				ledger: sessionLedger, helper: s.helperSessionOpener, log: s.log,
+			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

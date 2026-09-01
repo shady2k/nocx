@@ -889,6 +889,13 @@ type failingLedger struct {
 	err    error
 }
 
+func (l *failingLedger) CreateSession(ctx context.Context, sess content.Session) error {
+	if l.failOn == "CreateSession" {
+		return l.err
+	}
+	return l.LedgerRepository.CreateSession(ctx, sess)
+}
+
 func (l *failingLedger) Entry(ctx context.Context, id string) (*content.LedgerEntry, error) {
 	if l.failOn == "Entry" {
 		return nil, l.err

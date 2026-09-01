@@ -40,6 +40,8 @@ type fakeFS struct {
 	// readFileErr is an injected transport-level ReadFile failure (not
 	// fs-shaped), for the pass-through test.
 	readFileErr error
+	// statErr is an injected metadata failure for the stat error path.
+	statErr error
 	// realPathErr is an injected failure of the home resolution — the
 	// paired failure of Root's external call.
 	realPathErr error
@@ -85,6 +87,9 @@ func (f *fakeFS) ReadDir(ctx context.Context, p string) ([]os.FileInfo, error) {
 func (f *fakeFS) Stat(p string) (os.FileInfo, error) {
 	if f.closed {
 		return nil, errLeaseClosed
+	}
+	if f.statErr != nil {
+		return nil, f.statErr
 	}
 	return os.Stat(p)
 }

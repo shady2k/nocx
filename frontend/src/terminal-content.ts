@@ -573,8 +573,9 @@ export class TerminalContent extends BasePaneContent {
    *  It is an axis of the SHOW question only, never a second authority. The
    *  current answer temporarily occupies the frozen stack alone; its terminal
    *  close returns the same editor and read-only grid beneath every answer.
-   *  `inputOwner()` still derives from `editor.isVisible`, and the summon is
-   *  spent the moment the command stops running, whichever way it stops. */
+   *  `inputOwner()` still derives from `editor.isVisible`, and the summon ends
+   *  only after both the command has stopped and every summoned answer is
+   *  terminal. */
   /** The one live frame displayed while the summoned editor is open. The
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
@@ -591,6 +592,9 @@ export class TerminalContent extends BasePaneContent {
   private _freezeMarker: HTMLElement | null = null
   /** Prevent two concurrent capture transactions from both summoning. */
   private _summonPending = false
+  /** Prevent concurrent visible-editor frame captures from replacing one
+   *  another while the target chord is being pressed repeatedly. */
+  private _automaticCapturePending = false
   private _summoned = false
   /** The target the summon displaced, restored when the summon ends and the
    *  draft is empty.
@@ -611,6 +615,29 @@ export class TerminalContent extends BasePaneContent {
     running: RunningBlockActions | undefined
   }[] = []
   private _summonedCommand: BlockRecord | null = null
+  /** The owner whose frame was captured for the automatic attachment. It is
+   * separate from the summon parent because a running block may own a summon
+   * without being a frozen screen attachment. */
+  private _automaticFrameOwner: BlockRecord | null = null
+  /** The most recent visual freeze that can own a later screen read. It is
+   *  valid only while the live renderer has parsed bytes after that freeze. */
+  private _lastFrozenBlock: BlockRecord | null = null
+  private _screenWriteGeneration = 0
+  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. The
+   *  interval it closes has both ends named: it OPENS at a block's visual
+   *  freeze, which takes the command's rows out of the grid, and it CLOSES
+   *  when the prompt that follows has finished painting — the OSC 133 B
+   *  marker, which nocx.bash appends to PS1 as its final action in every
+   *  branch (__nocx_b_marker, :1227/:1243/:1245), so B is the prompt's last
+   *  byte. A write parsed AFTER that belongs to something else, and that is
+   *  the whole test for whether this screen is worth attaching. */
+  private _screenHandbackGeneration = -1
+  /** B was parsed in the pass now running; stamp the handback at the END of
+   *  it. The OSC handler fires inside the parse, the generation counts the
+   *  pass when the parse finishes (xterm WriteBuffer fires onWriteParsed
+   *  after its chunk loop), so stamping on the marker itself would leave the
+   *  prompt's own pass counting as newer bytes — off by exactly one. */
+  private _handbackPendingParse = false
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -1742,14 +1769,16 @@ export class TerminalContent extends BasePaneContent {
         pane: target,
         renderer,
         now: () => performance.now(),
+        snapshotStore: renderer.snapshotStore,
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
-        snapshotStore: renderer.snapshotStore,
-        // A `clear` took every block: the grants die with their blocks — a
-        // grant whose block is gone would point at nothing
-        // (AGENTS.md: a soft degrade the UI contradicts is how a feature
-        // that does not exist survives a release).
-        onClear: () => this.clearGrants(),
+        onClear: () => {
+          this._lastFrozenBlock = null
+          this._automaticFrameOwner = null
+          this._screenHandbackGeneration = -1
+          this._handbackPendingParse = false
+          this.clearGrants()
+        },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         // The copy path is handed a TURN's entry id (blocks.ts reaches it
@@ -1934,10 +1963,14 @@ export class TerminalContent extends BasePaneContent {
         cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
-        // The ask's payload is the whole-block grants, never re-derived from
-        // DOM selection at submit time (AD-8: selection is copy; the grant is
-        // the record).
-        grants: () => this.grantedBlocks,
+        // The ask's payload is the whole-block grants plus the renderer-owned
+        // frozen frame when this editor was summoned over a running command.
+        // The frame's block id is the same durable item id session.read accepts;
+        // no rows or frame text cross the control plane.
+        grants: () => {
+          const automatic = this.automaticFrozenGrant()
+          return automatic === null ? this.grantedBlocks : [...this.grantedBlocks, automatic]
+        },
         onTurnAccepted: () => {
           // Agent asks keep the editor visible by default. A summoned answer
           // is the one accepted case where the submitted question must give
@@ -2017,7 +2050,10 @@ export class TerminalContent extends BasePaneContent {
           showToast({ level: 'warning', message })
         },
         onTurnStart: (askId) => this.bindReadTurn(askId),
-        onTurnEnd: (askId) => this.endReadTurn(askId),
+        onTurnEnd: (askId) => {
+          this.endReadTurn(askId)
+          if (!this._summoned) this.clearAutomaticFrozenFrame()
+        },
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
         // Through the store, not around it: a refusal is exactly when the
@@ -2432,7 +2468,17 @@ export class TerminalContent extends BasePaneContent {
         // stops being its own start and becomes something a user can miss
         // (PaneHost.contentSettled). It grants nothing, opens nothing and
         // persists nothing, so ADR-0024 §1's severed list is untouched.
-        if (marker.kind === 'B') this._settle()
+        // AND the same B closes the interval in which this screen belongs to
+        // nobody (_screenHandbackGeneration): PS1 ends with this marker in
+        // every branch nocx.bash writes, so B is the last byte of the
+        // prompt's own redraw. Reading it here grants nothing and opens
+        // nothing — it moves a generation counter the automatic Ask
+        // attachment compares against, which is the same render-only
+        // partition A/B already exist for.
+        if (marker.kind === 'B') {
+          this._settle()
+          this._handbackPendingParse = true
+        }
       })
 
       // Optional on the renderer contract (types.ts): a renderer that does
@@ -3646,6 +3692,14 @@ export class TerminalContent extends BasePaneContent {
     renderer.onWriteParsed(() => {
       this.scheduleLiveResize()
       // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
+      this._screenWriteGeneration++
+      // The prompt finished painting in this pass: the screen is nobody's
+      // as of now, so anything parsed later belongs to something that is
+      // still writing it (_screenHandbackGeneration).
+      if (this._handbackPendingParse) {
+        this._handbackPendingParse = false
+        this._screenHandbackGeneration = this._screenWriteGeneration
+      }
       // carries the same "working, nothing written yet" indicator a turn
       // does, in the live region where its output will appear, and the
       // first parsed write is the moment that claim stops being true.
@@ -4861,6 +4915,98 @@ export class TerminalContent extends BasePaneContent {
     return { kind: 'ok', editor, targets, agentId }
   }
 
+  /** Find the block that owns the screen this ask will describe. The
+   * lifecycle can still be running after the block's visual freeze has
+   * released the manager's running slot, so retain that attempt-bound block.
+   * A background child has no open attempt; in that case the most recent
+   * frozen block is eligible only after the renderer parsed newer bytes.
+   * `frozenOnly` excludes an un-frozen manager slot, which is stale once the
+   * lifecycle has returned to the prompt.
+   *
+   * "Newer bytes" is measured from the SCREEN HANDBACK, not from the freeze.
+   * The shell's prompt is written after the freeze, so a baseline stamped
+   * there is true of every finished command that printed anything — which is
+   * how a person who marked block A was handed block B as well, under the
+   * sentence calling it the current screen of a full-screen program
+   * (nocx-7l4ex.21). The handback closes on the prompt's own last byte, so
+   * what survives this test is a screen something is still writing. */
+  private automaticAttachmentOwner(frozenOnly = false): BlockRecord | null {
+    const scrollback = this.scrollback
+    const manager = scrollback?.blockManager
+    if (scrollback === null || manager === undefined) return null
+    if (!frozenOnly && manager.runningBlock !== null) return manager.runningBlock
+    const state = this.lifecycle.state
+    if (!frozenOnly && state.kind === 'running' && state.attempt.state === 'open') {
+      return manager.blockForAttempt(state.attempt.id)
+    }
+    const frozen = this._lastFrozenBlock
+    if (
+      frozen === null ||
+      this._screenWriteGeneration <= this._screenHandbackGeneration ||
+      !manager.blocks.includes(frozen) ||
+      !scrollback.scrollbackInner.contains(frozen.el)
+    )
+      return null
+    return frozen
+  }
+
+  /** Capture the current screen for a visible-editor Ask transition. Unlike
+   *  summonEditor this changes no layout: the frame is pinned for session.read
+   *  and its owner is shown in the grant chip. */
+  private async captureAutomaticFrozenFrame(owner: BlockRecord): Promise<void> {
+    if (this._automaticCapturePending || this._summoned || this.editor === null) return
+    const editor = this.editor
+    const targets = this.inputTargets
+    const agentId = this.agentTarget?.id
+    if (targets === null || agentId === undefined) return
+    this._automaticCapturePending = true
+    try {
+      const frame =
+        this._bufferType === 'alternate'
+          ? await this.captureLiveFrame({ start: 0, end: this.rows })
+          : await this.captureLiveFrame()
+      if (
+        this._disposed ||
+        this.editor !== editor ||
+        !editor.isVisible ||
+        targets.active().id !== agentId ||
+        !this.scrollback?.blockManager.blocks.includes(owner)
+      )
+        return
+      this._automaticFrameOwner = owner
+      this._pinnedFrame = frame
+      this._pendingReadFrame = frame
+      this._summonedCommand = owner
+      this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
+    } catch {
+      // A renderer that disappears during the transition cannot provide a
+      // truthful frame, so leave the ordinary Ask surface unchanged.
+    } finally {
+      this._automaticCapturePending = false
+    }
+  }
+
+  private clearAutomaticFrozenFrame(): void {
+    if (this._summoned) return
+    this._pinnedFrame = null
+    this._automaticFrameOwner = null
+    this._pendingReadFrame = null
+    this._summonedCommand = null
+    this.grantController?.setAutomaticBlock(null)
+  }
+
+  /** Build the one automatic grant for the captured frozen screen. The
+   * attachment is derived from the same frozen command block that owns the
+   * display, and carries no copied rows or frame payload. */
+  private automaticFrozenGrant(): GrantBlock | null {
+    const owner = this._automaticFrameOwner
+    if (this._pinnedFrame === null || owner === null) return null
+    const grant = grantBlockFromElement(owner.el)
+    // The owner was pinned when the frame passed its async validity checks;
+    // it is not recomputed from whichever block is running now.
+    return grant === null ? null : { ...grant, state: 'running', automatic: true }
+  }
+
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
    *  The renderer is the one owner of the grid (AD-6). Capture therefore
@@ -4877,6 +5023,7 @@ export class TerminalContent extends BasePaneContent {
       return false
     }
     const { editor, targets, agentId } = decision
+    const owner = this.automaticAttachmentOwner()
     // Alternate-buffer programs are not a refusal: the editor is an overlay,
     // so their grid keeps its size and the program receives no resize.
 
@@ -4907,6 +5054,8 @@ export class TerminalContent extends BasePaneContent {
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
       if (!this._placeEditorInSummonStack(editor)) return false
+      const frozenOwner = this.automaticAttachmentOwner(true)
+      const automaticOwner = this._bufferType === 'alternate' ? frozenOwner : null
 
       const view = createCapturedFrameView(frame)
       this._freezeFrameParentPosition = frameHost.style.position
@@ -4919,7 +5068,9 @@ export class TerminalContent extends BasePaneContent {
       const marker = createFreezeMarker()
       markerHost.appendChild(marker)
       this._freezeMarker = marker
-      this._summonedCommand = this.scrollback?.blockManager.runningBlock ?? null
+      this._automaticFrameOwner = automaticOwner
+      this._summonedCommand = owner
+      this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
 
       this._summonRestoreTargetId = targets.active().id
       this._summoned = true
@@ -5008,13 +5159,14 @@ export class TerminalContent extends BasePaneContent {
     this._summonAnswerList = null
   }
 
-  /** Return the newest non-terminal turn. Two submits can overlap only in the
-   * pre-ack window, before the first acceptance hides the composer; every key
-   * path uses this one ordering decision rather than re-deriving a target. */
+  /** Return the newest answer still owned by the summon list and not yet
+   *  terminal. A cleared scrollback block may leave a stale record in this
+   *  list until the next lifecycle reconciliation; a detached answer cannot
+   *  own the keyboard or keep a summon alive. */
   private _newestActiveSummonedAnswer(): (typeof this._summonedAnswers)[number] | null {
     for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
       const answer = this._summonedAnswers[i]
-      if (!answer.terminal) return answer
+      if (!answer.terminal && answer.el.parentElement === this._summonAnswerList) return answer
     }
     return null
   }
@@ -5169,6 +5321,7 @@ export class TerminalContent extends BasePaneContent {
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
     this._pendingReadFrame = null
+    this.grantController?.setAutomaticBlock(null)
     this._clearFreezePresentation()
     if (discardAnswers) {
       for (const answer of this._summonedAnswers) answer.el.remove()
@@ -5203,6 +5356,7 @@ export class TerminalContent extends BasePaneContent {
     this._freezeFrameView?.remove()
     this._freezeFrameView = null
     this._pinnedFrame = null
+    this._automaticFrameOwner = null
     this._freezeMarker?.remove()
     this._freezeMarker = null
   }
@@ -5232,7 +5386,15 @@ export class TerminalContent extends BasePaneContent {
       })
       return
     }
+    if (next === 'shell') {
+      this.clearAutomaticFrozenFrame()
+      targets.setActive(next)
+      return
+    }
     targets.setActive(next)
+    const owner = this.automaticAttachmentOwner(true)
+    if (owner !== null) void this.captureAutomaticFrozenFrame(owner)
+    else this.clearAutomaticFrozenFrame()
   }
 
   /** Address a signal to THE ACTIVE BLOCK — the one command running in this
@@ -5520,12 +5682,13 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
-    // A SUMMON IS SPENT the moment the command stops running, whichever way
-    // it stops — completed, lost, the integration gone. Reconciled here
-    // rather than on the completion fact alone, because this is the one
-    // place every lifecycle change already arrives, and a second place that
-    // cleared it would be a second owner of the same flag.
-    if (!this.hasRunningCommand()) {
+    // A non-terminal summoned answer is the turn's ownership fact. While it
+    // exists, a lifecycle completion for a child command is only an
+    // intermediate result: the assistant turn still owns the overlay and the
+    // person's keystroke must not be advertised as available to the composer.
+    // The answer's terminal close clears this fact, then this same projection
+    // restores the editor and seats the answer.
+    if (!this.hasRunningCommand() && this._currentSummonedAnswer() === null) {
       // Restore the editor before removing its stack, then seat all answer
       // nodes consecutively after the command.
       if (this._summoned) this._endSummon()
@@ -6128,6 +6291,13 @@ export class TerminalContent extends BasePaneContent {
    *  renderer clamps the text to the wire bound and states how much more
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
+    this._lastFrozenBlock = rec
+    // The screen is handed back HERE and stays handed back until the prompt
+    // that follows has finished painting; the marker handler closes the
+    // interval by re-stamping this on B. Both ends move the generation
+    // forward only — the freeze reads the counter now, B reads it at a later
+    // parse — so the later of the two always stands.
+    this._screenHandbackGeneration = this._screenWriteGeneration
     this.refreshGrant(rec.el)
 
     const waiter = this.agentRuns.get(rec)

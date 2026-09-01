@@ -98,8 +98,11 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 			t.Fatalf("grant scopes = %+v, want content family root %q", grant.Scopes, family)
 		}
 	}
-	if len(grant.Scopes) != 5 {
-		t.Fatalf("grant scopes = %+v, want path, session and three content family scopes", grant.Scopes)
+	if !hasGrantScope(grant.Scopes, content.ResourceDestination, "*") {
+		t.Fatalf("grant scopes = %+v, want the direct-destination scope", grant.Scopes)
+	}
+	if len(grant.Scopes) != 6 {
+		t.Fatalf("grant scopes = %+v, want path, session, three content and destination scopes", grant.Scopes)
 	}
 
 	reg, err := agenttools.Assemble(tools.Schemas)
@@ -110,7 +113,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete"}
+	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}

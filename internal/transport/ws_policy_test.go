@@ -199,8 +199,8 @@ func TestPolicyGet_UnwiredIsUnavailable(t *testing.T) {
 }
 
 // TestPolicyGet_ReportsWhichEffectClassesAreLive: the settings page draws
-// seven rows and three of them govern tools today. Mutate-reversible stopped
-// being an effect class with no tool behind it, so the expected live list grew.
+// seven rows and the live set includes every class carried by a declaration.
+// session.run carries delegate in addition to the other reachable classes.
 // It cannot know which, so policy.get says — and it says what the DECLARATION
 // TABLE carries, read off the real socket rather than off a payload this test
 // built. The harness names the seam exactly as the composition root does, so
@@ -219,7 +219,7 @@ func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("policy.get error: %+v (%s)", env.Error, raw)
 	}
-	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary, content.EffectDelegate}
 	if !reflect.DeepEqual(env.Result.Live, want) {
 		t.Fatalf("live = %v, want %v", env.Result.Live, want)
 	}
@@ -234,8 +234,7 @@ func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 // REAL socket satisfies the contract now that "live" is required and the
 // result object is closed — and the bytes really do carry the key, which a
 // decode into a struct with a nil-able slice would not have shown.
-// Mutate-reversible stopped being an effect class with no tool behind it, so
-// the expected wire value includes it.
+// The expected wire value includes every effect carried by the declarations.
 func TestPolicyGetLive_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "policy.get.schema.json")
 	h, _ := newPolicyHarness(t)
@@ -261,8 +260,8 @@ func TestPolicyGetLive_OverTheWireConformsToContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("result carries no live key: %s", env.Result)
 	}
-	if string(live) != `["observe","mutate-reversible","mutate-destructive"]` {
-		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-reversible\",\"mutate-destructive\"]", live)
+	if string(live) != `["observe","mutate-reversible","mutate-destructive","cross-boundary","delegate"]` {
+		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-reversible\",\"mutate-destructive\",\"cross-boundary\",\"delegate\"]", live)
 	}
 }
 

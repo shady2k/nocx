@@ -108,8 +108,12 @@ export interface StreamScript {
   model?: string
   /** Tool calls this response PROPOSES, written as one frame after the
    *  content chunks and finishing the response with `tool_calls` instead of
-   *  `stop`. Absent or empty: a content-only response, exactly as before. */
-  toolCalls?: ScriptedToolCall[]
+   *  `stop`. Absent or empty: a content-only response, exactly as before.
+   *
+   *  A FUNCTION receives the request body so a measurement can call a tool
+   *  with an id the product actually announced, rather than with a
+   *  test-invented id. */
+  toolCalls?: ScriptedToolCall[] | ((body: string) => ScriptedToolCall[])
 }
 
 const CHUNK_ID = 'chatcmpl-e2e'
@@ -346,7 +350,10 @@ export class FakeOpenAI {
       )
       return
     }
-    const calls = script.toolCalls ?? []
+    const calls =
+      typeof script.toolCalls === 'function'
+        ? script.toolCalls(record.body)
+        : (script.toolCalls ?? [])
     const model = script.model ?? 'e2e-model'
     const message: Record<string, unknown> = {
       role: 'assistant',
@@ -389,7 +396,10 @@ export class FakeOpenAI {
     res.flushHeaders()
 
     const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
-    const calls = script.toolCalls ?? []
+    const calls =
+      typeof script.toolCalls === 'function'
+        ? script.toolCalls(record.body)
+        : (script.toolCalls ?? [])
     const model = script.model ?? 'e2e-model'
     const holdAfter = script.holdAfter ?? chunks.length
     let i = 0

@@ -151,7 +151,7 @@ func skillAlternative(tool string) string {
 // narrowSession is the session.list and session.read constructor. The
 // capability carries only the resolved session identities that the grant also
 // permits.
-func narrowSession(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+func narrowSession(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
 	scoped := grantedResources(grant, resources)
 	scopes := make([]content.GrantScope, 0, len(scoped))
 	for _, ref := range scoped {
@@ -159,7 +159,18 @@ func narrowSession(grant content.Grant, resources []ResourceRef, _ RunContext) (
 			scopes = append(scopes, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
 		}
 	}
-	return NewSessionReader(scopes), nil
+	return NewSessionReader(scopes, runCtx.AutomaticSessionItems), nil
+}
+
+func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	scoped := grantedResources(grant, resources)
+	urls := make([]string, 0, len(scoped))
+	for _, ref := range scoped {
+		if ref.Kind == content.ResourceDestination {
+			urls = append(urls, ref.ID)
+		}
+	}
+	return &URLScope{URLs: urls}, nil
 }
 
 // narrowRun is the run row's capability constructor. It carries only the

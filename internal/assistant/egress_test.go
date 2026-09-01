@@ -380,7 +380,7 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, nil, nil, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }

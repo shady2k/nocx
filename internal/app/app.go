@@ -1606,6 +1606,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAssistantProbeStore(assistantProbes),
 		transport.WithSkillSource(skills),
 		transport.WithAgentToolRegistry(agentToolRegistry),
+		transport.WithAgentFetcher(apiFetcher),
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.

@@ -1,7 +1,7 @@
 package transport
 
-// The files.* control plane (fm-w8): six JSON-RPC methods backed by
-// internal/filesystem, plus the files.changed notification.
+// The files.* control plane is backed by internal/filesystem, plus the
+// files.changed notification.
 //
 // Two guards, and they are the point of this file:
 //
@@ -131,6 +131,18 @@ func validateFilesListRaw(raw json.RawMessage) string {
 		return "limit must be at least 1"
 	}
 	return ""
+}
+
+// validateFilesStatRaw checks files.stat: the binding and one provider path.
+func validateFilesStatRaw(raw json.RawMessage) string {
+	var p filesStatParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	return validateFSPath(p.Path, "path")
 }
 
 // validateFilesReadRaw checks files.read: the binding, the file, and the
@@ -341,6 +353,17 @@ type filesListParams struct {
 	Path      string `json:"path"`
 	Offset    int    `json:"offset"`
 	Limit     int    `json:"limit"`
+}
+type filesStatParams struct {
+	BindingID string `json:"bindingId"`
+	Path      string `json:"path"`
+}
+
+type filesStatResult struct {
+	Kind string `json:"kind"`
+}
+type filesStatErrorData struct {
+	Reason string `json:"reason"`
 }
 
 // filesListEntry is one row of a listing. linkTarget/linkKind are present
@@ -611,6 +634,42 @@ func (h filesBindingHandlers) handleList(ctx context.Context, state *connState, 
 			HasMore:   listing.HasMore,
 			Rev:       listing.Rev,
 		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+	}
+}
+
+// handleStat classifies one path with one provider metadata call. Unlike
+// files.list it never enumerates the parent directory.
+func (h filesBindingHandlers) handleStat(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
+	var params filesStatParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
+		return
+	}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		handle, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		stat, err := handle.Stat(ctx, params.Path)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    filesErrorCode(err),
+				Message: err.Error(),
+				Data:    filesStatErrorDataOf(err),
+			})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(filesStatResult{Kind: wireKind(stat.Kind)}))
 		return nil
 	})
 	if err != nil {
@@ -913,6 +972,10 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.stat", params(validateFilesStatRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStat(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
@@ -1341,6 +1404,21 @@ func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
 
 // ── wire mapping helpers ──────────────────────────────────────────────────
 
+// filesStatErrorDataOf gives files.stat callers a typed reason for every
+// provider refusal. A missing path is proof of absence; permission and every
+// other provider failure mean classification was not possible.
+func filesStatErrorDataOf(err error) *filesStatErrorData {
+	var notFound *filesystem.ErrNotFound
+	if errors.As(err, &notFound) {
+		return &filesStatErrorData{Reason: "not-found"}
+	}
+	var permission *filesystem.ErrPermission
+	if errors.As(err, &permission) {
+		return &filesStatErrorData{Reason: "permission-denied"}
+	}
+	return &filesStatErrorData{Reason: "unavailable"}
+}
+
 // filesErrorCode maps filesystem domain errors to JSON-RPC codes: the
 // request-shaped refusals — a binding the caller cannot use, a path the
 // provider rejects, a row that cannot be opened — are invalid-params;
@@ -1348,23 +1426,29 @@ func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
 // error's own words (permission denied, no such file or directory), which
 // is what the panel surfaces.
 func filesErrorCode(err error) int {
-	switch err.(type) {
-	case *filesystem.ErrUnknownBinding, *filesystem.ErrNotOwned,
-		*filesystem.ErrInvalidPath, *filesystem.ErrInvalidPage,
-		*filesystem.ErrNotFound, *filesystem.ErrNotDir,
-		*filesystem.ErrNotRegular, *filesystem.ErrPermission,
-		// A binding with no sink cannot be uploaded to, and one with no
-		// source cannot be downloaded from (rule R1, in each direction).
-		// Both belong with the request-shaped refusals and not with
-		// -32603: the caller named a binding that cannot do this, which is
-		// a property of what they asked for, not of the server going
-		// wrong.
-		*filesystem.ErrUploadUnsupported,
-		*filesystem.ErrDownloadUnsupported:
+	var unknownBinding *filesystem.ErrUnknownBinding
+	var notOwned *filesystem.ErrNotOwned
+	var invalidPath *filesystem.ErrInvalidPath
+	var invalidPage *filesystem.ErrInvalidPage
+	var notFound *filesystem.ErrNotFound
+	var notDir *filesystem.ErrNotDir
+	var notRegular *filesystem.ErrNotRegular
+	var permission *filesystem.ErrPermission
+	var uploadUnsupported *filesystem.ErrUploadUnsupported
+	var downloadUnsupported *filesystem.ErrDownloadUnsupported
+	if errors.As(err, &unknownBinding) ||
+		errors.As(err, &notOwned) ||
+		errors.As(err, &invalidPath) ||
+		errors.As(err, &invalidPage) ||
+		errors.As(err, &notFound) ||
+		errors.As(err, &notDir) ||
+		errors.As(err, &notRegular) ||
+		errors.As(err, &permission) ||
+		errors.As(err, &uploadUnsupported) ||
+		errors.As(err, &downloadUnsupported) {
 		return -32602
-	default:
-		return -32603
 	}
+	return -32603
 }
 
 // wireKind maps a provider Kind onto the wire enum

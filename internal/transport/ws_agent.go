@@ -31,6 +31,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
@@ -135,11 +136,12 @@ type agentAskParams struct {
 }
 
 type agentAttachedContentWire struct {
-	ItemID  string `json:"itemId"`
-	Command string `json:"command"`
-	State   string `json:"state"`
-	Start   *int   `json:"start,omitempty"`
-	Count   *int   `json:"count,omitempty"`
+	ItemID    string `json:"itemId"`
+	Command   string `json:"command"`
+	State     string `json:"state"`
+	Start     *int   `json:"start,omitempty"`
+	Count     *int   `json:"count,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -569,6 +571,8 @@ type agentHandlers struct {
 	credentials   credential.Resolver
 	client        assistant.Client
 	askSub        control.Submission
+	// fetcher is the guarded direct-network seam for fetch.url.
+	fetcher apifetch.TextFetcher
 	// attemptLedger is the ledger seam the tool-call pipeline records its
 	// attempts with (design §6.4 — the attempt is durable, before the
 	// call). The real ledger when the content store is wired; nil otherwise,
@@ -693,6 +697,16 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 		f.OS = runtime.GOOS
 	}
 	return f
+}
+
+func automaticSessionItems(attached []assistant.AttachedContentItem) []string {
+	ids := make([]string, 0, len(attached))
+	for _, item := range attached {
+		if item.Automatic {
+			ids = append(ids, item.ItemID)
+		}
+	}
+	return ids
 }
 
 // personalParagraph is the seam read, or "" when this handler was built
@@ -940,7 +954,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
+		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
+		automaticSessionItems: automaticSessionItems(attached),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1115,6 +1130,9 @@ type askRunContext struct {
 	// resume must re-drive the run the person answered about, not a run
 	// described differently.
 	promptFacts assistant.SystemPromptFacts
+	// automaticSessionItems is pinned from the renderer's attached-content
+	// metadata at ask submission and reused on approval resume.
+	automaticSessionItems []string
 	// sessionID is the session the run lives in — the session an "allow in
 	// this session" answer is about. Carried EXPLICITLY, from the ask that
 	// named it, rather than read back out of the grant: the grant's scope
@@ -1345,6 +1363,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
 		SkillDraft:       rc.draft,
+		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
 		RunID:            strconv.FormatInt(rc.runID, 10),
@@ -1355,7 +1374,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// set from one SubmitAgentAsk result — so the relation is written
 		// from a fact the backend is already holding, and the renderer
 		// never sends an arrangement of its own.
-		TurnEntryID: rc.entryID,
+		TurnEntryID:           rc.entryID,
+		AutomaticSessionItems: rc.automaticSessionItems,
 	}, func(ev assistant.AskEvent) error {
 		if rc.control != nil {
 			// Declared inside the branch, like the other two: outside it
@@ -2418,7 +2438,7 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 		}
 		attached = append(attached, assistant.AttachedContentItem{
 			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
-			Start: grant.Start, Count: grant.Count,
+			Start: grant.Start, Count: grant.Count, Automatic: grant.Automatic,
 		})
 	}
 	in := content.AgentAsk{
@@ -2536,7 +2556,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
-			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
+			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

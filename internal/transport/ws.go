@@ -430,6 +430,10 @@ type WSServer struct {
 	// agentTools is the registry used to decide which declarations this run
 	// may be offered. It is the same assembled table used by the assistant.
 	agentTools agenttools.Registry
+	// agentFetcher is the guarded direct-network capability for fetch.url.
+	// It is kept separate from the model client because the tool must use the
+	// same apifetch route/policy owner without exposing a remote pane route.
+	agentFetcher apifetch.TextFetcher
 	// assistantProbes records the last endpoints.probe outcome — the
 	// process-lifetime "last probe result" agent.status reports. When nil,
 	// probes still run and return their outcome, but agent.status reports
@@ -987,6 +991,13 @@ func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
 // Prompt indexing asks this registry which declarations the grant permits.
 func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
 	return func(ws *WSServer) { ws.agentTools = reg }
+}
+
+// WithAgentFetcher attaches the guarded direct-network seam used by fetch.url.
+// Without it the declaration remains policy-visible but execution refuses
+// honestly as unavailable; production wires the same route table as imports.
+func WithAgentFetcher(f apifetch.TextFetcher) WSServerOption {
+	return func(ws *WSServer) { ws.agentFetcher = f }
 }
 
 // WithRunLease names the lease bounds every run execution is supervised

@@ -364,6 +364,24 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s, nocx-0m
     expect(names(container)).not.toContain('effect')
   })
 
+  it('states that fetch.url reaches the network from this machine', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'fetch.url',
+        effect: 'cross-boundary',
+        arguments: '{"url":"https://example.test/page"}',
+        resource: { kind: 'destination', id: 'https://example.test/page' },
+      },
+      sessionWhere: () => null,
+    })
+    expect(rows(container)).toEqual([
+      ['url', 'https://example.test/page'],
+      ['network', 'reaches the network from this machine'],
+      ['effect', EFFECT_LABEL['cross-boundary']],
+    ])
+  })
+
   it('says what the call can do, in the effect vocabulary and never from the tool name', () => {
     const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
     expect(rows(container).find(([name]) => name === 'effect')).toEqual([

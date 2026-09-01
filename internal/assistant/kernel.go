@@ -366,7 +366,7 @@ type effectKernel struct {
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
+func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, automaticItems []string, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -386,11 +386,15 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		turnEntryID: turnEntryID,
 		requester:   requester,
 		classifier:  classifier,
-		runCtx:      agenttools.RunContext{RunID: runID, Session: sessionID},
-		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
-		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
-		onCall:      onCall,
-		runSeams:    runSeams,
+		runCtx: agenttools.RunContext{
+			RunID:                 runID,
+			Session:               sessionID,
+			AutomaticSessionItems: append([]string(nil), automaticItems...),
+		},
+		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
+		results:    make(map[string]*jsonschema.Schema, len(registry.All())),
+		onCall:     onCall,
+		runSeams:   runSeams,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -518,7 +522,7 @@ func classifyCall(decl agenttools.Tool, args map[string]any) (agenttools.Tool, c
 		return decl, content.Invocation{}
 	}
 	invocation := parseCanonicalInvocation(command)
-	decl.Effect = commandEffect(invocation, decl.Effect)
+	decl.Effect = commandEffect(invocation, decl.Declaration.Effect)
 	return decl, invocation
 }
 
@@ -553,7 +557,15 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 }
 
 func isSkillMutationTool(tool agenttools.Tool) bool {
-	return tool.ScopeFamily == "skill" && tool.Effect != content.EffectObserve
+	if tool.ScopeFamily != "skill" {
+		return false
+	}
+	for _, effect := range tool.Declaration.Effect {
+		if effect != content.EffectObserve {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []agenttools.ResourceRef) (string, bool) {
@@ -619,17 +631,9 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 	for _, resource := range resources {
 		inside := false
 		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
-			switch resource.Kind {
-			case content.ResourcePath:
-				inside = pathUnder(resource.ID, scope.ID) && scope.Kind == content.ResourcePath
-			case content.ResourceContent:
-				inside = scope.Kind == content.ResourceContent &&
-					(content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
-						content.GrantScope{Kind: resource.Kind, ID: resource.ID},
-					)
-			default:
-				inside = resource.Kind == scope.Kind && resource.ID == scope.ID
-			}
+			inside = (content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
+				content.GrantScope{Kind: resource.Kind, ID: resource.ID},
+			)
 			if inside {
 				break
 			}
@@ -649,20 +653,6 @@ func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
 		return nil
 	}
 	return &content.GrantScope{Kind: resources[0].Kind, ID: resources[0].ID}
-}
-
-// pathUnder is the lexical containment test of the policy's scope check: the
-// path is the spelled argument, the scope is the grant's spelled scope. Both
-// ends are absolute; the capability's canonical check is what actually
-// decides whether the read happens.
-func pathUnder(path, scope string) bool {
-	if scope == "" {
-		return false
-	}
-	if path == scope {
-		return true
-	}
-	return strings.HasPrefix(path, strings.TrimSuffix(scope, "/")+"/")
 }
 
 // bindApprovalFileVersions captures path identities before an approval is
@@ -906,6 +896,18 @@ func canonicalArgHash(raw string) string {
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// withheldToolResult is the product-visible answer when offer-time filtering
+// removes every class a declared tool can reach. The rows are named so a person
+// can understand the omission and change the policy, rather than seeing a
+// completed turn that silently skipped the tool.
+func withheldToolResult(tool string, effects []content.Effect) string {
+	rows := make([]string, 0, len(effects))
+	for _, effect := range effects {
+		rows = append(rows, string(effect))
+	}
+	return fmt.Sprintf("REFUSED: nocx did not offer tool %q: every effect it can reach is refused by policy (%s).", tool, strings.Join(rows, ", "))
 }
 
 // refusalResult is the TOOL RESULT a refused call returns to the model
@@ -1421,10 +1423,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
 	}
 	// The mechanical call classifier is deliberately after validation and
-	// before every policy/approval/ledger path. Unlike the model classifier
-	// below, it may lower a declared worst case: CommandEffect retains that
-	// worst case for every disqualified command. The returned invocation is
-	// the parser result reused by rule matching; it is never re-tokenized.
+	// before every policy/approval/ledger path. It selects one effect from the
+	// declaration's reachable set; unresolved input keeps the set's worst
+	// member. The returned invocation is the parser result reused by rule
+	// matching; it is never re-tokenized.
 	var invocation content.Invocation
 	decl, invocation = classifyCall(decl, args)
 	if decl.CommandArg == "" {

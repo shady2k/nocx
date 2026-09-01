@@ -103,6 +103,9 @@ func historyLedgerQuery(scope content.Scope, paneID, cwd, host string, limit int
 		Cwd:    cwd,
 		Text:   text,
 		Limit:  limit,
+		// history.query is the shell/run corpus. Ask entries have their own
+		// target-local recall path and must never appear as runnable commands.
+		Kind: content.EntryShell,
 	}
 	// The rung's coordinates are only meaningful on the rungs that have
 	// them; `everywhere` carries none, and sending one would be a filter the

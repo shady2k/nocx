@@ -106,6 +106,7 @@ const readFixture = (over: Partial<FilesReadResult> = {}): FilesReadResult => ({
 function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelServices {
   return {
     open: vi.fn().mockResolvedValue(openFixture()),
+    stat: vi.fn().mockResolvedValue({ kind: 'regular' }),
     list: vi.fn().mockResolvedValue(listFixture('C:/', [])),
     read: vi.fn().mockResolvedValue(readFixture()),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),

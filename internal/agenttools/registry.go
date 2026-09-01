@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -32,6 +33,26 @@ type ResourceRef struct {
 	ID   string               `json:"id"`
 }
 
+// URLScope is the narrowed authority for fetch.url. It retains only the
+// destination identities this call resolved and the grant covers; the
+// executor still obtains the actual network capability from its composition
+// root seam.
+type URLScope struct {
+	URLs []string
+}
+
+func (s *URLScope) Allows(rawURL string) bool {
+	if s == nil {
+		return false
+	}
+	for _, allowed := range s.URLs {
+		if allowed == "*" || allowed == rawURL {
+			return true
+		}
+	}
+	return false
+}
+
 // RunContext carries only immutable identities of the run. It is passed to
 // resource resolvers for resources whose parent scope comes from the run,
 // never for mutable UI state.
@@ -39,11 +60,29 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
+	// AutomaticSessionItems are renderer-owned screen attachments. They are
+	// immutable ids carried by this run so session.read can route them to the
+	// renderer even when the shell-originated attempt has no ledger row.
+	AutomaticSessionItems []string
 }
 
 // ResolveResources derives every resource touched by one validated call.
 // A nil resolver means the declaration names no resource in its parameters.
 type ResolveResources func(args map[string]any, runCtx RunContext) ([]ResourceRef, error)
+
+func resourceURL(arg string) ResolveResources {
+	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
+		raw, ok := args[arg].(string)
+		if !ok || raw == "" {
+			return nil, fmt.Errorf("resource argument %q is absent", arg)
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("resource argument %q is not an absolute HTTP URL", arg)
+		}
+		return []ResourceRef{{Kind: content.ResourceDestination, ID: u.String()}}, nil
+	}
+}
 
 func resourceArgument(arg string, kind content.ResourceKind) ResolveResources {
 	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
@@ -113,10 +152,10 @@ type Declaration struct {
 	// (validateDeclaration), so a tool cannot be offered as a name and a
 	// schema with nothing to say what it is for.
 	Description string
-	// Effect is the tool's declared worst-case class on the ADR-0020 lattice
-	// (the ledger's vocabulary — content.Effect). A validated command carrier
-	// may lower the proposal's effective class in the backend policy gate.
-	Effect content.Effect
+	// Effect is the set of classes this tool can resolve to. Singleton
+	// declarations describe ordinary actions; a command carrier may resolve
+	// to several classes after its arguments are parsed.
+	Effect []content.Effect
 	// OutputTrust is independent from Effect: any result may contain text
 	// influenced by the program or data it observed. It must be explicit so
 	// adding a row cannot silently choose an unsafe default.
@@ -226,6 +265,10 @@ type Capability any
 // only real parameter is `command` (nocx-ydu92).
 type Tool struct {
 	Declaration
+	// Effect is the singular class selected for the invocation currently
+	// being evaluated. Approval, ledger and wire records describe this
+	// decision, never Declaration.Effect's whole reachable set.
+	Effect       content.Effect
 	ParamsSchema json.RawMessage
 	// ResultSchema is the shape the tool RETURNS, declared in the same
 	// contract document as its parameters, under $defs/result.
@@ -253,18 +296,19 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// The table includes four execution states (design §4.1–§4.2): files.read and
-// the content tools execute in Go; session.list executes in Go against the
-// ledger; session.read uses Dynamic dispatch, selecting the ledger for an
-// exited item and the renderer broker for a running item or the current
-// screen; run executes in the renderer; and git.status remains
+// The table covers the tool rows and execution states described in design
+// §4.1–§4.2: files.read executes
+// in Go; session.list executes in Go against the ledger; session.read uses
+// Dynamic dispatch, selecting the ledger for an ordinary exited item and the
+// renderer broker for a running item, a renderer-owned automatic item, or the
+// current screen; run executes in the renderer; and git.status remains
 // declared-but-not-executable (Narrow nil). The dynamic row is explicit so
 // state-dependent ownership cannot hide behind either InGo or InRenderer.
 var declarations = []Declaration{
 	{
 		Name:             "files.read",
 		Description:      "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -276,9 +320,23 @@ var declarations = []Declaration{
 		Narrow:           narrowFilesRead,
 	},
 	{
+		Name:             "fetch.url",
+		Description:      "Fetch a public web URL from this machine and return its bounded UTF-8 text; reach for this when the answer depends on what a page says rather than on the URL alone.",
+		Effect:           []content.Effect{content.EffectCrossBoundary},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         60 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceDestination},
+		ResolveResources: resourceURL("url"),
+		Executes:         InGo,
+		Params:           "fetch.url.schema.json",
+		Narrow:           narrowURL,
+	},
+	{
 		Name:             "session.list",
 		Description:      "List what can be addressed in a terminal session right now — each item has an id, the command or program, and whether it is running or exited; an empty list is honest for a pane with no recorded blocks.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -292,7 +350,7 @@ var declarations = []Declaration{
 	{
 		Name:             "session.read",
 		Description:      "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -306,7 +364,13 @@ var declarations = []Declaration{
 	{
 		Name:        "session.run",
 		Description: "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
-		Effect:      content.EffectMutateDestructive,
+		Effect: []content.Effect{
+			content.EffectObserve,
+			content.EffectMutateReversible,
+			content.EffectMutateDestructive,
+			content.EffectDelegate,
+			content.EffectCrossBoundary,
+		},
 		OutputTrust: OutputTrustUntrusted,
 		ResultBound: ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		// session.run is a command carrier: the transport run lease is its
@@ -324,7 +388,7 @@ var declarations = []Declaration{
 	{
 		Name:             "files.edit",
 		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -338,7 +402,7 @@ var declarations = []Declaration{
 	{
 		Name:             "files.create",
 		Description:      "Create a new file if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -354,7 +418,7 @@ var declarations = []Declaration{
 	{
 		Name:          "git.status",
 		Description:   "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",
-		Effect:        content.EffectObserve,
+		Effect:        []content.Effect{content.EffectObserve},
 		OutputTrust:   OutputTrustUntrusted,
 		ResultBound:   ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:      30 * time.Second,
@@ -366,7 +430,7 @@ var declarations = []Declaration{
 	{
 		Name:             "notes.search",
 		Description:      "Find notes by the text they contain and return bounded rows without exposing unrelated note bodies.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -381,7 +445,7 @@ var declarations = []Declaration{
 	{
 		Name:             "notes.create",
 		Description:      "Create a note with a backend-minted id and return the saved note.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -396,7 +460,7 @@ var declarations = []Declaration{
 	{
 		Name:             "notes.update",
 		Description:      "Replace the body of an existing note by its backend-minted id and return the saved note.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -411,7 +475,7 @@ var declarations = []Declaration{
 	{
 		Name:             "notes.delete",
 		Description:      "Remove one note by its backend-minted id and report the removal.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -426,7 +490,7 @@ var declarations = []Declaration{
 	{
 		Name:             "snippets.list",
 		Description:      "List the person's reusable snippets, including their text, as bounded untrusted data.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -441,7 +505,7 @@ var declarations = []Declaration{
 	{
 		Name:             "snippets.create",
 		Description:      "Create a reusable snippet with a backend-minted id and return the saved text.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -456,7 +520,7 @@ var declarations = []Declaration{
 	{
 		Name:             "snippets.update",
 		Description:      "Replace an existing reusable snippet by its backend-minted id and return the saved text.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -471,7 +535,7 @@ var declarations = []Declaration{
 	{
 		Name:             "snippets.delete",
 		Description:      "Remove one reusable snippet by its backend-minted id and report the removal.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -486,7 +550,7 @@ var declarations = []Declaration{
 	{
 		Name:             "snippets.reorder",
 		Description:      "Replace the entire snippet order with an explicit permutation of backend-minted ids.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -501,7 +565,7 @@ var declarations = []Declaration{
 	{
 		Name:             "skills.read",
 		Description:      "Read a skill's instructions by name, or one file inside that skill; reach for this when the index names a skill relevant to the task.",
-		Effect:           content.EffectObserve,
+		Effect:           []content.Effect{content.EffectObserve},
 		OutputTrust:      OutputTrustTrusted,
 		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -516,7 +580,7 @@ var declarations = []Declaration{
 	{
 		Name:             "skills.create",
 		Description:      "Write a new skill the person asked you to remember; the person approves its exact text before it is stored.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -531,7 +595,7 @@ var declarations = []Declaration{
 	{
 		Name:             "skills.update",
 		Description:      "Replace a managed skill after the person asks you to change how it is remembered; the person approves its exact text before it is stored.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -546,7 +610,7 @@ var declarations = []Declaration{
 	{
 		Name:             "skills.delete",
 		Description:      "Delete a managed skill the person no longer wants remembered; the person approves the removal before it happens.",
-		Effect:           content.EffectMutateReversible,
+		Effect:           []content.Effect{content.EffectMutateReversible},
 		OutputTrust:      OutputTrustUntrusted,
 		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
 		Deadline:         30 * time.Second,
@@ -633,7 +697,7 @@ func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
 			problems = append(problems, fmt.Sprintf("%s: params schema in %q: %v", d.Name, d.Params, paramsErr))
 			continue
 		}
-		tools = append(tools, Tool{Declaration: d, ParamsSchema: params, ResultSchema: result})
+		tools = append(tools, Tool{Declaration: d, Effect: content.WorstEffect(d.Effect), ParamsSchema: params, ResultSchema: result})
 	}
 	return Registry{tools: tools}, joinProblems(problems)
 }
@@ -647,8 +711,13 @@ func validateDeclaration(d Declaration) string {
 	if strings.TrimSpace(d.Name) == "" {
 		bad = append(bad, "missing name")
 	}
-	if !supportedEffect(d.Effect) {
-		bad = append(bad, fmt.Sprintf("unsupported effect %q", d.Effect))
+	if len(d.Effect) == 0 {
+		bad = append(bad, "missing effect set")
+	}
+	for _, effect := range d.Effect {
+		if !supportedEffect(effect) {
+			bad = append(bad, fmt.Sprintf("unsupported effect %q", effect))
+		}
 	}
 	if !supportedOutputTrust(d.OutputTrust) {
 		bad = append(bad, fmt.Sprintf("unsupported output trust %q", d.OutputTrust))
@@ -691,12 +760,20 @@ func joinProblems(problems []string) error {
 }
 
 // ForGrant returns exactly the executable tools the grant permits: every
-// declared tool with a capability constructor whose effect the grant allows
-// AND whose resource kinds the grant covers. Nothing is returned "for later
-// filtering" — a tool the grant forbids, or one that cannot execute, is absent
-// from the set, because the strongest refusal is the one never proposed. The
-// result is in table order. The grant is the ledger's type (content.Grant):
-// one grant model, owned by the ledger that records it.
+// declared tool with a capability constructor and at least one reachable
+// effect the grant allows, whose resource kinds the grant covers. Nothing is
+// returned "for later filtering" — a tool no reachable effect can use, or one
+// that cannot execute, is absent from the set because the strongest refusal is
+// the one never proposed. The result is in table order.
+func anyEffectPermitted(effects []content.Effect, permitted map[content.Effect]bool) bool {
+	for _, effect := range effects {
+		if permitted[effect] {
+			return true
+		}
+	}
+	return false
+}
+
 func (r Registry) ForGrant(g content.Grant) []Tool {
 	effectPermitted := make(map[content.Effect]bool, len(g.Effects))
 	for _, e := range g.Effects {
@@ -716,7 +793,7 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if t.Narrow == nil {
 			continue
 		}
-		if !effectPermitted[t.Effect] {
+		if !anyEffectPermitted(t.Declaration.Effect, effectPermitted) {
 			continue
 		}
 		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
@@ -760,6 +837,27 @@ func (r Registry) Lookup(name string) (Tool, bool) {
 	return Tool{}, false
 }
 
+// RefusedEffects returns the declaration rows that all refuse a named,
+// executable tool. It is the offer-time explanation path: the caller can tell
+// the person why a tool was withheld instead of silently treating it as absent.
+func (r Registry) RefusedEffects(g content.Grant, name string) []content.Effect {
+	for _, t := range r.tools {
+		if t.Name != name || t.Narrow == nil || len(t.Declaration.Effect) == 0 {
+			continue
+		}
+		refused := make([]content.Effect, 0, len(t.Declaration.Effect))
+		for _, effect := range t.Declaration.Effect {
+			if g.Policy.DecisionFor(effect) == content.DecisionRefuse {
+				refused = append(refused, effect)
+			}
+		}
+		if len(refused) == len(t.Declaration.Effect) {
+			return refused
+		}
+	}
+	return nil
+}
+
 // All returns the assembled set, in table order — what the middleware
 // compiles validators for.
 func (r Registry) All() []Tool {
@@ -767,12 +865,10 @@ func (r Registry) All() []Tool {
 }
 
 // LiveEffects is the set of effect classes at least one DECLARED tool
-// carries, deduplicated, in the lattice's canonical order. Today: observe,
-// mutate-reversible and mutate-destructive — the other four rows of the
-// policy matrix have no tool behind them at all.
+// carries, deduplicated, in the lattice's canonical order.
 //
-// The settings surface needs this and cannot derive it: four controls that
-// govern nothing must not look like the three that do, and only the
+// The settings surface needs this and cannot derive it: two controls that
+// govern nothing must not look like the five that do, and only the
 // declaration table knows which is which. It goes on the wire (policy.get's
 // "live") for exactly that reason.
 //
@@ -791,7 +887,9 @@ func LiveEffects() []content.Effect {
 func liveEffects(decls []Declaration) []content.Effect {
 	carried := make(map[content.Effect]bool, len(decls))
 	for _, d := range decls {
-		carried[d.Effect] = true
+		for _, effect := range d.Effect {
+			carried[effect] = true
+		}
 	}
 	// Iterating the lattice rather than the table gives the canonical order
 	// and the deduplication in one pass, and makes an effect no member of

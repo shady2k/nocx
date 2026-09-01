@@ -60,6 +60,26 @@ const filesReadSchema = `{
   }}
 }`
 
+const fetchURLSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {"url": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["url", "contentType", "text", "truncated", "omitted", "lossy"],
+    "properties": {
+      "url": {"type": "string"},
+      "contentType": {"type": "string"},
+      "text": {"type": "string"},
+      "truncated": {"type": "boolean"},
+      "omitted": {"type": "integer"},
+      "lossy": {"type": "boolean"}
+    }
+  }}
+}`
+
 const filesEditSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -247,13 +267,13 @@ func TestAssemble_MissingRootIsQuiet(t *testing.T) {
 func TestAssemble_RejectsUnclassifiedDeclaration(t *testing.T) {
 	cases := map[string]Declaration{
 		"unknown effect": {
-			Name: "x", Effect: content.Effect("imagine"), ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: InGo, Params: "x.schema.json",
+			Name: "x", Effect: []content.Effect{content.Effect("imagine")}, ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: InGo, Params: "x.schema.json",
 		},
 		"unknown resource kind": {
-			Name: "x", Effect: content.EffectObserve, ResourceKinds: []content.ResourceKind{content.ResourceKind("imaginary")}, Executes: InGo, Params: "x.schema.json",
+			Name: "x", Effect: []content.Effect{content.EffectObserve}, ResourceKinds: []content.ResourceKind{content.ResourceKind("imaginary")}, Executes: InGo, Params: "x.schema.json",
 		},
 		"unknown execution site": {
-			Name: "x", Effect: content.EffectObserve, ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: Executes("teleport"), Params: "x.schema.json",
+			Name: "x", Effect: []content.Effect{content.EffectObserve}, ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: Executes("teleport"), Params: "x.schema.json",
 		},
 		"empty row": {},
 	}
@@ -347,7 +367,7 @@ func TestValidateDeclarationRequiresContentScopeFamily(t *testing.T) {
 	d := Declaration{
 		Name:          "content.tool",
 		Description:   "a content tool",
-		Effect:        content.EffectObserve,
+		Effect:        []content.Effect{content.EffectObserve},
 		OutputTrust:   OutputTrustUntrusted,
 		ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
 		Deadline:      time.Second,
@@ -367,6 +387,53 @@ func TestFamilyCoveredIgnoresNonContentScopes(t *testing.T) {
 	}
 	if familyCovered(g, "note") {
 		t.Fatal("a non-content scope must not cover a content family")
+	}
+}
+
+func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
+	want := map[string][]content.Effect{
+		"files.read":   {content.EffectObserve},
+		"fetch.url":    {content.EffectCrossBoundary},
+		"session.list": {content.EffectObserve},
+		"session.read": {content.EffectObserve},
+		"session.run": {
+			content.EffectObserve, content.EffectMutateReversible,
+			content.EffectMutateDestructive, content.EffectDelegate,
+			content.EffectCrossBoundary,
+		},
+		"files.edit":       {content.EffectMutateReversible},
+		"files.create":     {content.EffectMutateReversible},
+		"git.status":       {content.EffectObserve},
+		"notes.search":     {content.EffectObserve},
+		"notes.create":     {content.EffectMutateReversible},
+		"notes.update":     {content.EffectMutateReversible},
+		"notes.delete":     {content.EffectMutateReversible},
+		"snippets.list":    {content.EffectObserve},
+		"snippets.create":  {content.EffectMutateReversible},
+		"snippets.update":  {content.EffectMutateReversible},
+		"snippets.delete":  {content.EffectMutateReversible},
+		"snippets.reorder": {content.EffectMutateReversible},
+		"skills.read":      {content.EffectObserve},
+		"skills.create":    {content.EffectMutateReversible},
+		"skills.update":    {content.EffectMutateReversible},
+		"skills.delete":    {content.EffectMutateReversible},
+	}
+	if len(declarations) != 21 {
+		t.Fatalf("declaration count = %d, want 21", len(declarations))
+	}
+	for _, declaration := range declarations {
+		effects, ok := want[declaration.Name]
+		if !ok {
+			t.Errorf("unexpected declaration %q", declaration.Name)
+			continue
+		}
+		if !reflect.DeepEqual(declaration.Effect, effects) {
+			t.Errorf("%s effects = %v, want %v", declaration.Name, declaration.Effect, effects)
+		}
+		delete(want, declaration.Name)
+	}
+	for name := range want {
+		t.Errorf("missing declaration %q", name)
 	}
 }
 
@@ -448,6 +515,7 @@ func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":       filesReadSchema,
+		"fetch.url.schema.json":        fetchURLSchema,
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
 		"session.read.schema.json":     sessionReadSchema,
@@ -488,6 +556,17 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath)); containsName(got, "files.edit") || containsName(got, "files.create") {
 		t.Fatalf("ForGrant(observe+path) = %v, want mutating tools absent", toolNames(got))
 	}
+
+	// A run whose destructive row is refused still offers the command carrier
+	// because its set contains other reachable classes; execution selects the
+	// command's actual member and the policy decides that member.
+	safeRunGrant := grant([]content.Effect{
+		content.EffectObserve, content.EffectMutateReversible,
+		content.EffectCrossBoundary, content.EffectDelegate,
+	}, content.ResourceSession)
+	if got := reg.ForGrant(safeRunGrant); !containsName(got, "session.run") {
+		t.Fatalf("ForGrant(non-destructive session effects) = %v, want session.run offered", toolNames(got))
+	}
 	mutatePath := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectMutateReversible}, content.ResourcePath)))
 	if !reflect.DeepEqual(mutatePath, []string{"files.edit", "files.create"}) {
 		t.Fatalf("ForGrant(mutate-reversible+path) = %v, want files.edit and files.create", mutatePath)
@@ -496,16 +575,17 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(observePath); containsName(got, "session.read") {
 		t.Fatalf("ForGrant(observe+path) = %v, want session.read absent (session tool, path grant)", toolNames(got))
 	}
-	// A session grant offers exactly the two session tools. One lists
-	// addressable items and one reads an item or the current screen.
+	// A session grant offers all session tools whose reachable set includes
+	// observe, including the command carrier. The carrier's command argument
+	// selects the actual effect at execution time.
 	sessionObserve := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)))
-	wantSession := []string{"session.list", "session.read"}
+	wantSession := []string{"session.list", "session.read", "session.run"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
-	// The session.run row's classification: mutate-destructive + session. A grant
+	// The session.run row's set includes mutate-destructive + session. A grant
 	// carrying exactly that effect and kind offers exactly session.run; an observe
-	// grant offers the read tool instead, never the mutating one.
+	// grant also offers it because observe is another reachable member.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
 	if got := reg.ForGrant(runGrant); !containsName(got, "session.run") || len(got) != 1 {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [session.run]", toolNames(got))
@@ -523,7 +603,7 @@ func TestForGrant_ExcludesDeclarationsWithoutCapability(t *testing.T) {
 		{
 			Name:          "wired",
 			Description:   "a wired observe tool",
-			Effect:        content.EffectObserve,
+			Effect:        []content.Effect{content.EffectObserve},
 			OutputTrust:   OutputTrustUntrusted,
 			ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
 			Deadline:      time.Second,
@@ -538,7 +618,7 @@ func TestForGrant_ExcludesDeclarationsWithoutCapability(t *testing.T) {
 		{
 			Name:          "unwired",
 			Description:   "an unwired observe tool",
-			Effect:        content.EffectObserve,
+			Effect:        []content.Effect{content.EffectObserve},
 			OutputTrust:   OutputTrustUntrusted,
 			ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
 			Deadline:      time.Second,
@@ -574,6 +654,7 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
+		"fetch.url.schema.json":        fetchURLSchema,
 		"files.read.schema.json":       filesReadSchema,
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
@@ -700,15 +781,12 @@ func toolNames(tools []Tool) []string {
 // tests pin that it is DERIVED from the table and not a second list kept in
 // step by hand.
 
-// TestLiveEffects_IsWhatTheDeclarationsCarry pins today's answer. The reading
-// rows carry observe, files.edit and files.create carry mutate-reversible and
-// run carries mutate-destructive, so the live set is those three —
-// deduplicated, and in the lattice's order. It moves when a declaration's
-// effect moves, which is the point: the settings surface must not offer a
-// control over an effect no tool carries.
+// TestLiveEffects_IsWhatTheDeclarationsCarry pins today's answer. The singleton
+// rows carry their one effect; session.run carries all five reachable effects,
+// so the live set includes each of them — deduplicated and in lattice order.
 func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
 	got := LiveEffects()
-	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary, content.EffectDelegate}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LiveEffects() = %v, want %v", got, want)
 	}
@@ -720,7 +798,7 @@ func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
 func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 	withDisclose := append(append([]Declaration{}, declarations...), Declaration{
 		Name:          "secrets.reveal",
-		Effect:        content.EffectDisclose,
+		Effect:        []content.Effect{content.EffectDisclose},
 		ResourceKinds: []content.ResourceKind{content.ResourceCredential},
 	})
 	got := liveEffects(withDisclose)
@@ -729,6 +807,8 @@ func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 		content.EffectMutateReversible,
 		content.EffectMutateDestructive,
 		content.EffectDisclose,
+		content.EffectCrossBoundary,
+		content.EffectDelegate,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("liveEffects(+disclose) = %v, want %v", got, want)
@@ -743,7 +823,7 @@ func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 func TestLiveEffects_IsTheLatticesOrderNotTheTables(t *testing.T) {
 	withReversible := append(append([]Declaration{}, declarations...), Declaration{
 		Name:          "files.write",
-		Effect:        content.EffectMutateReversible,
+		Effect:        []content.Effect{content.EffectMutateReversible},
 		ResourceKinds: []content.ResourceKind{content.ResourcePath},
 		Executes:      InGo,
 		Params:        "files.write.schema.json",
@@ -753,6 +833,8 @@ func TestLiveEffects_IsTheLatticesOrderNotTheTables(t *testing.T) {
 		content.EffectObserve,
 		content.EffectMutateReversible,
 		content.EffectMutateDestructive,
+		content.EffectCrossBoundary,
+		content.EffectDelegate,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("liveEffects(+mutate-reversible) = %v, want %v (table order, not the lattice's)", got, want)
@@ -817,7 +899,7 @@ func TestDeclarationsDescribeInTheProductsWords(t *testing.T) {
 func TestAssemble_RejectsDeclarationWithoutDescription(t *testing.T) {
 	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": filesReadSchema}), []Declaration{{
 		Name:          "x",
-		Effect:        content.EffectObserve,
+		Effect:        []content.Effect{content.EffectObserve},
 		ResourceKinds: []content.ResourceKind{content.ResourcePath},
 		Executes:      InGo,
 		Params:        "x.schema.json",
@@ -865,7 +947,7 @@ func TestDeclaration_FrameToolResultUsesDeclaredTrust(t *testing.T) {
 		{name: "mutating", effect: content.EffectMutateReversible},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := Declaration{Effect: tc.effect, OutputTrust: OutputTrustUntrusted}
+			d := Declaration{Effect: []content.Effect{tc.effect}, OutputTrust: OutputTrustUntrusted}
 			framed := d.FrameToolResult(raw)
 			if framed == raw {
 				t.Fatal("untrusted result was returned unchanged")
@@ -900,7 +982,7 @@ func TestAssemble_AnExecutableToolWithNoDeclaredResultDoesNotAssemble(t *testing
 	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": noResult}), []Declaration{{
 		Name:          "x",
 		Description:   "a tool that does not say what it returns",
-		Effect:        content.EffectObserve,
+		Effect:        []content.Effect{content.EffectObserve},
 		OutputTrust:   OutputTrustTrusted,
 		ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
 		Deadline:      time.Second,
@@ -1210,7 +1292,7 @@ func TestAssemble_RejectsMissingResultSafetyMetadata(t *testing.T) {
 	base := Declaration{
 		Name:          "x",
 		Description:   "a tool",
-		Effect:        content.EffectObserve,
+		Effect:        []content.Effect{content.EffectObserve},
 		ResourceKinds: []content.ResourceKind{content.ResourcePath},
 		Executes:      InGo,
 		Params:        "x.schema.json",

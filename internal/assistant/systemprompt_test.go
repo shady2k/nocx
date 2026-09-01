@@ -27,6 +27,26 @@ func TestSystemPrompt_DoesNotTellModelToRepeatSessionID(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_ExplainsBareInputAndNeverGuesses keeps the three intake
+// cases in the model-facing document rather than leaving their meaning to
+// chance.
+func TestSystemPrompt_ExplainsBareInputAndNeverGuesses(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+	})
+	for _, want := range []string{
+		"A link on its own means go there and tell the person what is on it.",
+		"Text on its own means remember this as a note.",
+		"When the intent is not plain, ask one question and stop.",
+		"Do not guess, and do not call a tool to check first.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks intake rule %q:\n%s", want, got)
+		}
+	}
+}
+
 func quoted(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
@@ -137,6 +157,59 @@ func TestSystemPrompt_AttachedContentNamesEveryGrantedItem(t *testing.T) {
 	}
 	if strings.Contains(got, "Referenced frame:") || strings.Contains(got, "output text") {
 		t.Fatalf("attached prompt inlined or described frame text:\n%s", got)
+	}
+}
+
+func TestSystemPrompt_AutomaticFrozenFrameIsNamedAsAutomatic(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID:    "attempt-top",
+			Command:   "top",
+			State:     "running",
+			Automatic: true,
+		}},
+	})
+	for _, want := range []string{
+		"frozen screen was attached automatically",
+		"id: attempt-top",
+		"command: \"top\"",
+		"state: running",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "The person marked these terminal items") {
+		t.Fatalf("automatic frame was described as a person's mark:\n%s", got)
+	}
+}
+
+func TestSystemPrompt_PartitionsAutomaticAndPersonItems(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Env: content.Environment{Kind: content.EnvLocal},
+		AttachedContent: []AttachedContentItem{
+			{ItemID: "automatic-frame", Command: "top", State: "running", Automatic: true},
+			{ItemID: "marked-item", Command: "echo marked", State: "exited"},
+		},
+	})
+	autoHeading := strings.Index(got, "A frozen screen was attached automatically")
+	personHeading := strings.Index(got, "The person marked these terminal items")
+	autoItem := strings.Index(got, "- id: automatic-frame")
+	personItem := strings.Index(got, "- id: marked-item")
+	if autoHeading < 0 || personHeading < 0 || autoItem < 0 || personItem < 0 {
+		t.Fatalf("prompt omitted an attachment heading or item:\n%s", got)
+	}
+	if !(autoHeading < autoItem && autoItem < personHeading && personHeading < personItem) {
+		t.Fatalf("prompt did not partition automatic and person-marked items:\n%s", got)
+	}
+	if strings.Contains(got[autoHeading:personHeading], "marked-item") {
+		t.Fatalf("automatic section names a person-marked item:\n%s", got)
+	}
+	if strings.Contains(got[personHeading:], "automatic-frame") {
+		t.Fatalf("person-marked section names the automatic item:\n%s", got)
 	}
 }
 

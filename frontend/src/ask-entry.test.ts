@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { grantBlockFromElement, grantBlockFromSelection } from './ask-entry'
+import { createAnswerBody } from './scrollback/answer-body'
+import { CommandSnapshotStore } from './command-snapshot'
 
 const blockOf = (id: string, command: string, running = false) => {
   const block = document.createElement('div')
@@ -88,6 +90,28 @@ describe('whole-block grants', () => {
     })
     expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowStart')
     expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowEnd')
+  })
+
+  it('selects streamed table rows through DOM ranges, not row geometry', () => {
+    const { output } = blockOf('answer-table', 'compare values')
+    output.replaceChildren()
+    const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
+    body.append('| Name | Age |\n|---|---:\n| Ada | 37 |')
+    body.finish()
+
+    const rows = output.querySelectorAll<HTMLElement>('.term-line')
+    const range = document.createRange()
+    range.setStart(rows[0], 0)
+    range.setEnd(rows[1], rows[1].childNodes.length)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    expect(grantBlockFromSelection(selection)).toMatchObject({
+      itemId: 'answer-table',
+      start: 0,
+      count: 2,
+    })
   })
 
   it('collapses a selection covering every output row into a whole-block mark', () => {

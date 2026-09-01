@@ -1199,6 +1199,53 @@ func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
 	}
 }
 
+func TestStatClassifiesTargetThroughSFTPSeam(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "file.txt")
+	mustWrite(t, file, []byte("x"))
+	subdir := filepath.Join(dir, "subdir")
+	mustMkdir(t, subdir)
+
+	p := New(newFakeFS(t))
+	for _, tc := range []struct {
+		name string
+		path string
+		want filesystem.Kind
+	}{
+		{name: "regular", path: file, want: filesystem.KindRegular},
+		{name: "directory", path: subdir, want: filesystem.KindDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := p.Stat(context.Background(), tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Kind != tc.want {
+				t.Errorf("Kind = %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestStatMissingPathUsesProviderError(t *testing.T) {
+	path := filepath.Join(tempDir(t), "missing")
+	_, err := New(newFakeFS(t)).Stat(context.Background(), path)
+	var nf *filesystem.ErrNotFound
+	if !errors.As(err, &nf) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStatPermissionDeniedUsesProviderError(t *testing.T) {
+	f := newFakeFS(t)
+	f.statErr = os.ErrPermission
+	_, err := New(f).Stat(context.Background(), filepath.Join(f.root, "secret"))
+	var pe *filesystem.ErrPermission
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want ErrPermission", err)
+	}
+}
+
 func TestCanonicalMethod(t *testing.T) {
 	dir := tempDir(t)
 	real := filepath.Join(dir, "real")

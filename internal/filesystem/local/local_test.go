@@ -844,6 +844,64 @@ func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
 	}
 }
 
+func TestStatClassifiesTargetWithoutEnumeratingParent(t *testing.T) {
+	dir := tempDir(t)
+	file := filepath.Join(dir, "file.txt")
+	mustWrite(t, file, []byte("x"))
+	subdir := filepath.Join(dir, "subdir")
+	mustMkdir(t, subdir)
+
+	p := New()
+	for _, tc := range []struct {
+		name string
+		path string
+		want filesystem.Kind
+	}{
+		{name: "regular", path: file, want: filesystem.KindRegular},
+		{name: "directory", path: subdir, want: filesystem.KindDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := p.Stat(context.Background(), tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Kind != tc.want {
+				t.Errorf("Kind = %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestStatMissingPathUsesProviderError(t *testing.T) {
+	path := filepath.Join(tempDir(t), "missing")
+	_, err := New().Stat(context.Background(), path)
+	var nf *filesystem.ErrNotFound
+	if !errors.As(err, &nf) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStatPermissionDeniedUsesProviderError(t *testing.T) {
+	skipIfRoot(t)
+	parent := tempDir(t)
+	locked := filepath.Join(parent, "locked")
+	mustMkdir(t, locked)
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// #nosec G302 - restoring the fixture directory's mode; cleanup must
+		// restore traversal for TempDir removal.
+		_ = os.Chmod(locked, 0o755)
+	})
+
+	_, err := New().Stat(context.Background(), filepath.Join(locked, "secret"))
+	var pe *filesystem.ErrPermission
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v, want ErrPermission", err)
+	}
+}
+
 func TestCanonicalMethod(t *testing.T) {
 	dir := tempDir(t)
 	real := filepath.Join(dir, "real")

@@ -57,9 +57,21 @@ type Provider interface {
 	Root(ctx context.Context) (Root, error)
 	List(ctx context.Context, path string, page Page) (Listing, error)
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
+	// Stat classifies one path without enumerating its parent. The result is
+	// intentionally only the kind the caller needs; size, mode and mtime
+	// belong to directory rows and are not part of path-link classification.
+	Stat(ctx context.Context, path string) (Stat, error)
 	Watch(ctx context.Context, path string) (Watch, error)
 	Canonical(ctx context.Context, path string) (string, error)
 	Close() error
+}
+
+// Stat is the minimal metadata needed to classify a path link. Providers
+// follow symlinks, so a symlink to a directory is KindDir and a symlink to a
+// regular file is KindRegular; non-regular, non-directory objects are
+// KindOther.
+type Stat struct {
+	Kind Kind
 }
 
 // Uploader is the optional write seam (upload design D7). A provider that

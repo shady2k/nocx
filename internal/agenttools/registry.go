@@ -719,6 +719,9 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if !effectPermitted[t.Effect] {
 			continue
 		}
+		if t.ScopeFamily != "" && g.ExcludesScopeFamily(t.ScopeFamily) {
+			continue
+		}
 		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
 			continue
 		}

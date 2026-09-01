@@ -18,8 +18,10 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 type fixedSkills []skill.Skill
@@ -144,6 +146,32 @@ func TestRunGrantForOffersContentTools(t *testing.T) {
 		if !names[want] {
 			t.Fatalf("run grant offered tools %v, missing %q", names, want)
 		}
+	}
+}
+
+func TestRunGrantFor_GlobalSkillsOffOmitsSkillTools(t *testing.T) {
+	dir := t.TempDir()
+	registry := settings.New(storage.NewDocumentStore(dir), &fakeSecretStore{})
+	if err := registry.SetBool(settings.SkillsEnabled, false); err != nil {
+		t.Fatalf("disable skills: %v", err)
+	}
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSettingsRegistry(registry), WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a")
+	if grant == nil {
+		t.Fatal("runGrantFor returned no grant")
+	}
+	tools, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	for _, tool := range tools.ForGrant(*grant) {
+		if strings.HasPrefix(tool.Name, "skills.") {
+			t.Fatalf("skills disabled but tool %q was offered", tool.Name)
+		}
+	}
+	if len(tools.ForGrant(*grant)) == 0 {
+		t.Fatal("skills exclusion removed all ordinary tools")
 	}
 }
 

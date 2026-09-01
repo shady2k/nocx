@@ -27,6 +27,11 @@ const (
 	ProvenanceManaged Provenance = "managed"
 )
 
+// disabledNames is supplied by a Store's document owner. Discovery owns the
+// filtering decision; roots only provide the persisted state to that one
+// decision point.
+type disabledNames func() (map[string]struct{}, error)
+
 // Root is one searched location. FS is set for the builtin root, whose bytes
 // live in an embed.FS; Dir is set for the on-disk roots. Exactly one of them
 // is populated.
@@ -34,6 +39,18 @@ type Root struct {
 	Dir        string
 	FS         fs.FS
 	Provenance Provenance
+	disabled   disabledNames
+}
+
+// Skill is one discovered skill. The body is deliberately absent: discovery
+// reads frontmatter only, and the body is fetched by Read when a tool asks
+// for it.
+type Skill struct {
+	Name        string
+	Description string
+	Provenance  Provenance
+	BaseDir     string
+	Enabled     bool
 }
 
 // FilesystemRoots returns the on-disk directories among roots, preserving
@@ -46,16 +63,6 @@ func FilesystemRoots(roots []Root) []string {
 		}
 	}
 	return dirs
-}
-
-// Skill is one discovered skill. The body is deliberately absent: discovery
-// reads frontmatter only, and the body is fetched by Read when a tool asks
-// for it.
-type Skill struct {
-	Name        string
-	Description string
-	Provenance  Provenance
-	BaseDir     string
 }
 
 // Content is the bytes returned by Read and the root that supplied them.

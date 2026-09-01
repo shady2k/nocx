@@ -2297,6 +2297,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
 	snippetWired := s.snippets != nil
+	skillSource, skillWired := s.skillLibrary.(skillSettingsSource)
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
 	noteWired := s.notes != nil
@@ -2421,6 +2422,18 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "settings.describe", noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.list", noParams(), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.setEnabled", params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.remove", params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "settings.getSnapshot", noParams(), func(r Responder) handlerFunc {

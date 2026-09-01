@@ -14,7 +14,7 @@ import (
 // the provenance of the root that supplied it.
 func Read(roots []Root, name, relPath string) (Content, error) {
 	var found *discovered
-	for _, candidate := range discoverDetailed(roots) {
+	for _, candidate := range discoverDetailed(roots, false) {
 		if candidate.Name == name {
 			copy := candidate
 			found = &copy

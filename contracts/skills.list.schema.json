@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.list.schema.json",
+  "title": "SkillsList",
+  "description": "The discovered skills and their person-controlled state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["skills", "documentPath"],
+  "properties": {
+    "skills": { "type": "array", "items": { "$ref": "#/$defs/skill" } },
+    "documentPath": { "type": "string" },
+    "documentError": { "type": "string" }
+  },
+  "$defs": {
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "provenance", "path", "enabled"],
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "provenance": { "type": "string", "enum": ["authored", "builtin", "managed"] },
+        "path": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

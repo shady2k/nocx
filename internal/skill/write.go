@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unicode"
+
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 var errUnavailable = errors.New("skill library is unavailable")
@@ -73,27 +75,20 @@ type Store struct {
 	fs         FileSystem
 	roots      []Root
 	managedDir string
+	docStore   storage.DocumentStore
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 	seq   atomic.Uint64
+
+	docMu      sync.Mutex
+	docFailure error
 }
 
 // NewStore builds a skill store. The roots must include one managed directory;
 // authored and builtin roots are retained for collision checks and precedence.
 func NewStore(fsys FileSystem, roots []Root) *Store {
-	if fsys == nil {
-		fsys = OSFileSystem{}
-	}
-	copyRoots := append([]Root(nil), roots...)
-	var managedDir string
-	for _, root := range copyRoots {
-		if root.Provenance == ProvenanceManaged && root.Dir != "" {
-			managedDir = root.Dir
-			break
-		}
-	}
-	return &Store{fs: fsys, roots: copyRoots, managedDir: managedDir, locks: make(map[string]*sync.Mutex)}
+	return newStore(fsys, roots, nil)
 }
 
 // FS exposes the injected write surface for failure-path tests and composition
@@ -282,7 +277,7 @@ func (s *Store) managedPaths(name string) (string, string, error) {
 }
 
 func (s *Store) refuseForeignCollision(name string) error {
-	for _, found := range Discover(s.roots) {
+	for _, found := range discoverDetailed(s.roots, true) {
 		if found.Name != name {
 			continue
 		}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.setEnabled.schema.json",
+  "title": "SkillsSetEnabled",
+  "description": "The enabled state stored for one skill.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "enabled"],
+  "properties": {
+    "name": { "type": "string" },
+    "enabled": { "type": "boolean" }
+  }
+}

@@ -557,11 +557,23 @@ func ShellExitCodeOf(payload string) (*int, error) {
 // one source of what a run may do, and a grant built any other way is a
 // hand-rolled authority the consumer cannot have reasoned about.
 type Grant struct {
-	Version   int
-	ExpiresAt int64
-	Policy    EffectPolicy
-	Effects   []Effect
-	Scopes    []GrantScope
+	Version               int
+	ExpiresAt             int64
+	Policy                EffectPolicy
+	Effects               []Effect
+	Scopes                []GrantScope
+	ExcludedScopeFamilies []string
+}
+
+// ExcludesScopeFamily lets a grant carry a deliberate feature-level exclusion
+// while retaining other resources in the same content root.
+func (g Grant) ExcludesScopeFamily(family string) bool {
+	for _, excluded := range g.ExcludedScopeFamilies {
+		if excluded == family {
+			return true
+		}
+	}
+	return false
 }
 
 // FinishAgentRun is the terminal close of an assistant run (the state

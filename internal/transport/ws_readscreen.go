@@ -258,6 +258,9 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 		{Kind: content.ResourcePath, ID: "/"},
 		{Kind: content.ResourceContent, ID: "content"},
 	})
+	if !s.skillsEnabled() {
+		g.ExcludedScopeFamilies = []string{"skill"}
+	}
 	return &g
 }
 

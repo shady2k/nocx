@@ -163,6 +163,9 @@ func validateLadder(ladder []migrationStep) error {
 // Production always calls validateLadder with the compiled-in schemaVersion and
 // schemaV1.
 func validateLadderForSchema(ladder []migrationStep, version int, schema string) error {
+	if len(ladder) == 0 {
+		return errors.New("content: migration ladder: empty ladder; no rows were discarded")
+	}
 	for i, step := range ladder {
 		if step.to != step.from+1 {
 			return fmt.Errorf("content: migration ladder: step %d spans %d→%d; one edge is one version", i, step.from, step.to)

@@ -333,4 +333,13 @@ func TestTheLadderIsAContiguousChainEndingAtTheCurrentSchema(t *testing.T) {
 		t.Fatal("validateLadder accepted a ladder with a hole between 2 and 3")
 	}
 }
+func TestValidateLadderRefusesAnEmptyLadder(t *testing.T) {
+	err := validateLadder(nil)
+	if err == nil {
+		t.Fatal("validateLadder accepted an empty ladder")
+	}
+	if !strings.Contains(err.Error(), "empty ladder") {
+		t.Fatalf("empty-ladder refusal reads %q; it must name the empty ladder", err)
+	}
+}
 

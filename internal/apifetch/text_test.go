@@ -87,35 +87,147 @@ func TestFetchTextPrivateHTTPUsesTheSharedPolicy(t *testing.T) {
 	}
 }
 
-func TestFetchTextRefusesNonTextAndInvalidUTF8WithTextPositive(t *testing.T) {
+func TestFetchTextClassifiesBodyRatherThanContentType(t *testing.T) {
+	binaryPNG := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x01, 0x02, 0x03}
 	cases := []struct {
 		name        string
 		body        []byte
 		contentType string
 		wantErr     bool
 	}{
-		{"binary content type", []byte("PNG"), "image/png", true},
-		{"invalid utf8", []byte{0xff, 0xfe}, "text/plain", true},
-		{"ordinary text", []byte("plain response"), "text/plain; charset=utf-8", false},
+		{"binary PNG body", binaryPNG, "image/png", true},
+		{"three UTF-8 replacements", []byte{0xff, 0xfd, 0xfc}, "text/plain; charset=utf-8", true},
+		{"text body with stray NUL", []byte("plain\x00response"), "text/plain", true},
+		{"missing content type", []byte("plain response"), "", false},
+		{"text/xml", []byte("<rss/>"), "text/xml", false},
+		{"RSS XML", []byte("<feed/>"), "application/rss+xml", false},
+		{"CSV", []byte("name,value\n"), "text/csv", false},
+		{"unknown type", []byte("plain response"), "application/x-made-up", false},
+		{"empty body", nil, "application/x-made-up", false},
+		{"one-byte body", []byte("x"), "application/x-made-up", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", tc.contentType)
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
 				_, _ = w.Write(tc.body)
 			}))
 			defer srv.Close()
+
 			got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
 			if tc.wantErr {
 				if !errors.Is(err, apifetch.ErrNotText) {
-					t.Fatalf("error = %v, want ErrNotText", err)
+					t.Fatalf("result = %+v, error = %v; want ErrNotText", got, err)
 				}
 				return
 			}
 			if err != nil || got.Text != string(tc.body) {
-				t.Fatalf("result = %+v, err = %v; want ordinary text", got, err)
+				t.Fatalf("result = %+v, err = %v; want body text", got, err)
 			}
 		})
+	}
+}
+
+func TestFetchTextDecodesDeclaredWindows1251(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=windows-1251")
+		_, _ = w.Write([]byte{0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2})
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.Text != "Привет" || got.Lossy {
+		t.Fatalf("result = %+v, want UTF-8 Привет without loss", got)
+	}
+}
+
+func TestFetchTextSniffsHTMLMetaCharset(t *testing.T) {
+	body := append([]byte(`<meta charset="windows-1251"><p>`), []byte{0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2}...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil || got.Text != `<meta charset="windows-1251"><p>Привет` || got.Lossy {
+		t.Fatalf("result = %+v, err = %v; want meta-decoded UTF-8", got, err)
+	}
+}
+
+func TestFetchTextMarksReplacementFromDeclaredCharsetLossy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte{0xff})
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.Text != "\ufffd" || !got.Lossy {
+		t.Fatalf("result = %+v, want replacement text with lossy=true", got)
+	}
+}
+
+func TestFetchTextRefusesUnknownDeclaredCharset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=x-made-up-charset")
+		_, _ = w.Write([]byte("plain response"))
+	}))
+	defer srv.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "x-made-up-charset") {
+		t.Fatalf("error = %v, want refusal naming unsupported charset", err)
+	}
+}
+
+func TestFetchTextWithoutCharsetKeepsUTF8(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("Привет"))
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil || got.Text != "Привет" || got.Lossy {
+		t.Fatalf("result = %+v, err = %v; want lossless UTF-8", got, err)
+	}
+}
+
+func TestFetchTextHonorsDeclaredCharsetOverWireUTF8(t *testing.T) {
+	const wireText = "Привет"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=windows-1251")
+		_, _ = w.Write([]byte(wireText))
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.Text != "РџСЂРёРІРµС‚" || got.Lossy {
+		t.Fatalf("result = %+v, want header-decoded mojibake without loss", got)
+	}
+}
+
+func TestFetchTextRejectsTranscodedBodyOverCeiling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=windows-1251")
+		_, _ = w.Write([]byte{0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2})
+	}))
+	defer srv.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 6)
+	if !errors.Is(err, apifetch.ErrTooLarge) {
+		t.Fatalf("error = %v, want ErrTooLarge after UTF-8 expansion", err)
 	}
 }
 

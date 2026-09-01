@@ -16,7 +16,7 @@
   "$defs": {
     "result": {
       "title": "FetchURLResult",
-      "description": "The complete UTF-8 response text returned by the fetch.url assistant tool. HTML is retained as markup rather than being lossy-extracted; oversize responses are refused, so a successful result is never silently short.",
+      "description": "The complete UTF-8 response text returned by the fetch.url assistant tool. HTML is retained as markup rather than being lossy-extracted; legacy charsets are transcoded, and lossy is true when decoding substituted replacement characters. Oversize responses are refused, so a successful result is never silently short.",
       "type": "object",
       "additionalProperties": false,
       "required": ["url", "contentType", "text", "truncated", "omitted", "lossy"],
@@ -26,7 +26,10 @@
         "text": { "type": "string" },
         "truncated": { "type": "boolean", "const": false },
         "omitted": { "type": "integer", "minimum": 0, "const": 0 },
-        "lossy": { "type": "boolean", "const": false }
+        "lossy": {
+          "description": "Whether charset decoding substituted replacement characters for bytes that did not obey the declared or detected encoding.",
+          "type": "boolean"
+        }
       }
     }
   }

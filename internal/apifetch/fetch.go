@@ -34,6 +34,7 @@
 package apifetch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,6 +42,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -50,6 +52,7 @@ import (
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/log"
+	"golang.org/x/net/html/charset"
 )
 
 const component = "apifetch"
@@ -140,6 +143,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, route apicoll.Route) 
 		break
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNotADocument, u.Redacted())
+
 }
 
 // FetchText gets a direct-route HTTP response as complete UTF-8 text. The
@@ -154,17 +158,30 @@ func (c *Client) FetchText(ctx context.Context, rawURL string, maxBytes int64) (
 		return TextResult{}, err
 	}
 	contentType := resp.Header.Get("Content-Type")
-	if !textContentType(contentType) {
-		return TextResult{}, fmt.Errorf("%w: content type %q", ErrNotText, contentType)
-	}
 	body, err := readBody(resp, maxBytes)
 	if err != nil {
 		return TextResult{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
 	}
-	if !utf8.Valid(body) {
-		return TextResult{}, fmt.Errorf("%w: body at %s is not valid UTF-8", ErrNotText, u.Redacted())
+	if err := validateDeclaredCharset(contentType); err != nil {
+		return TextResult{}, err
 	}
-	return TextResult{URL: u.String(), ContentType: contentType, Text: string(body)}, nil
+	// The header remains metadata and a decoding hint; the body is the only
+	// witness for whether this response is text or binary.
+	text, lossy, err := decodeText(body, contentType)
+	if err != nil {
+		return TextResult{}, fmt.Errorf("%s: decoding %s: %w", component, u.Redacted(), err)
+	}
+	if sampleLooksBinary(body, contentType) {
+		return TextResult{}, fmt.Errorf("%w: body at %s looks binary", ErrNotText, u.Redacted())
+	}
+
+	// maxBytes is authoritative for bytes read from the wire, preserving the
+	// existing fetch bound. Reject expanded UTF-8 rather than returning a
+	// decoded result that silently exceeds the caller's ceiling.
+	if int64(len(text)) > maxBytes {
+		return TextResult{}, fmt.Errorf("%w (decoded text exceeds the limit of %d bytes)", ErrTooLarge, maxBytes)
+	}
+	return TextResult{URL: u.String(), ContentType: contentType, Text: text, Lossy: lossy}, nil
 }
 
 func (c *Client) get(ctx context.Context, rawURL string, route apicoll.Route) (*http.Response, *url.URL, error) {
@@ -215,17 +232,71 @@ func readBody(resp *http.Response, maxBytes int64) ([]byte, error) {
 	return body, nil
 }
 
-func textContentType(value string) bool {
-	if value == "" {
+func sampleLooksBinary(body []byte, contentType string) bool {
+	sampleSize := len(body)
+	if sampleSize > 4096 {
+		sampleSize = 4096
+	}
+	if bytes.IndexByte(body[:sampleSize], 0) >= 0 {
 		return true
 	}
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
+	if sampleSize == 0 {
 		return false
 	}
-	return mediaType == "text/plain" || mediaType == "text/html" ||
-		mediaType == "text/markdown" || mediaType == "application/json" ||
-		mediaType == "application/xml" || mediaType == "application/xhtml+xml"
+	text, _, err := decodeText(body[:sampleSize], contentType)
+	if err != nil {
+		return true
+	}
+	replacements := strings.Count(text, "\ufffd")
+	characters := utf8.RuneCountInString(text)
+	return replacements >= 3 && characters > 0 && replacements*100 > characters
+}
+
+func validateDeclaredCharset(contentType string) error {
+	if _, params, err := mime.ParseMediaType(contentType); err == nil {
+		if label, ok := params["charset"]; ok {
+			if _, name := charset.Lookup(label); name == "" {
+				return fmt.Errorf("%w: unsupported charset %q", ErrNotText, label)
+			}
+		}
+	}
+	return nil
+}
+
+func decodeText(body []byte, contentType string) (text string, lossy bool, err error) {
+	if len(body) == 0 {
+		return "", false, nil
+	}
+	reader, err := charset.NewReader(bytes.NewReader(body), contentType)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrNotText, err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrNotText, err)
+	}
+	text = string(decoded)
+	valid := utf8.ValidString(text)
+	lossy = !valid || strings.Contains(text, "\ufffd")
+	if !valid {
+		text = replaceInvalidUTF8(text)
+	}
+	return text, lossy, nil
+}
+
+func replaceInvalidUTF8(text string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(text))
+	for offset := 0; offset < len(text); {
+		r, size := utf8.DecodeRuneInString(text[offset:])
+		if r == utf8.RuneError && size == 1 {
+			normalized.WriteRune(utf8.RuneError)
+		} else {
+			normalized.WriteString(text[offset : offset+size])
+		}
+		offset += size
+	}
+	return normalized.String()
 }
 
 // transport builds the guarded transport for one route.

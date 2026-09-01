@@ -253,14 +253,16 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	// the run. Drop session selectors before the generic fence intersection;
 	// the single-session run fence still prevents access to any other session.
 	p = preserveRunSessionScope(p)
-	g := p.AsGrant([]content.GrantScope{
+	scopes := []content.GrantScope{
 		{Kind: content.ResourceSession, ID: sessionID},
 		{Kind: content.ResourcePath, ID: "/"},
-		{Kind: content.ResourceContent, ID: "content"},
-	})
-	if !s.skillsEnabled() {
-		g.ExcludedScopeFamilies = []string{"skill"}
+		{Kind: content.ResourceContent, ID: "note"},
+		{Kind: content.ResourceContent, ID: "snippet"},
 	}
+	if s.skillsEnabled() {
+		scopes = append(scopes, content.GrantScope{Kind: content.ResourceContent, ID: "skill"})
+	}
+	g := p.AsGrant(scopes)
 	return &g
 }
 

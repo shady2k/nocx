@@ -385,7 +385,7 @@ func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
 	}
 	g := content.Grant{
 		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/n1"}},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note"}},
 	}
 
 	var names []string
@@ -423,14 +423,14 @@ func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
 	}
 	g := content.Grant{
 		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill/deploy"}},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
 	}
 	if !containsName(reg.ForGrant(g), "skills.read") {
 		t.Fatalf("a skill grant must offer skills.read; got %v", toolNames(reg.ForGrant(g)))
 	}
 	mutationGrant := content.Grant{
 		Effects: []content.Effect{content.EffectMutateReversible},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill/deploy"}},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
 	}
 	for _, name := range []string{"skills.create", "skills.update", "skills.delete"} {
 		if !containsName(reg.ForGrant(mutationGrant), name) {

@@ -373,7 +373,7 @@ var declarations = []Declaration{
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
 		ScopeFamily:      "note",
-		ResolveResources: contentRootResources,
+		ResolveResources: contentFamilyResources("note"),
 		Executes:         InGo,
 		Params:           "notes.search.schema.json",
 		Narrow:           narrowContent,
@@ -388,7 +388,7 @@ var declarations = []Declaration{
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
 		ScopeFamily:      "note",
-		ResolveResources: contentRootResources,
+		ResolveResources: contentFamilyResources("note"),
 		Executes:         InGo,
 		Params:           "notes.create.schema.json",
 		Narrow:           narrowContent,
@@ -433,7 +433,7 @@ var declarations = []Declaration{
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
 		ScopeFamily:      "snippet",
-		ResolveResources: contentRootResources,
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.list.schema.json",
 		Narrow:           narrowContent,
@@ -448,7 +448,7 @@ var declarations = []Declaration{
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
 		ScopeFamily:      "snippet",
-		ResolveResources: contentRootResources,
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.create.schema.json",
 		Narrow:           narrowContent,
@@ -493,7 +493,7 @@ var declarations = []Declaration{
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
 		ScopeFamily:      "snippet",
-		ResolveResources: contentRootResources,
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.reorder.schema.json",
 		Narrow:           narrowContent,
@@ -719,9 +719,6 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if !effectPermitted[t.Effect] {
 			continue
 		}
-		if t.ScopeFamily != "" && g.ExcludesScopeFamily(t.ScopeFamily) {
-			continue
-		}
 		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
 			continue
 		}
@@ -739,16 +736,12 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 	return out
 }
 
-// familyCovered reports whether a grant scope covers the content family. The
-// root scope contains any child; an item scope covers its own family even
-// though it does not contain a different item's identity.
+// familyCovered reports whether a grant scope contains the family root.
+// Containment is the only family predicate; no synthetic item is needed.
 func familyCovered(g content.Grant, family string) bool {
-	probe := content.GrantScope{Kind: content.ResourceContent, ID: family + "/probe"}
+	root := content.GrantScope{Kind: content.ResourceContent, ID: family}
 	for _, s := range g.Scopes {
-		if s.Kind != content.ResourceContent {
-			continue
-		}
-		if s.Contains(probe) || strings.HasPrefix(s.ID, family+"/") {
+		if s.Kind == content.ResourceContent && s.Contains(root) {
 			return true
 		}
 	}

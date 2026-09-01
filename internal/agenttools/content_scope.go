@@ -48,8 +48,10 @@ func narrowContent(grant content.Grant, resources []ResourceRef, _ RunContext) (
 	return NewContentScope(grantedResources(grant, resources)), nil
 }
 
-func contentRootResources(_ map[string]any, _ RunContext) ([]ResourceRef, error) {
-	return []ResourceRef{{Kind: content.ResourceContent, ID: "content"}}, nil
+func contentFamilyResources(family string) ResolveResources {
+	return func(_ map[string]any, _ RunContext) ([]ResourceRef, error) {
+		return []ResourceRef{{Kind: content.ResourceContent, ID: family}}, nil
+	}
 }
 
 func contentItemResource(arg, kind string) ResolveResources {

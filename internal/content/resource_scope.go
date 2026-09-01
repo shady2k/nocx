@@ -56,7 +56,16 @@ func (scope GrantScope) Contains(child GrantScope) bool {
 	case ResourceContent:
 		parent, _ := parseContentID(scope.ID)
 		candidate, _ := parseContentID(child.ID)
-		return parent.kind == "content" || (parent.kind == candidate.kind && parent.id == candidate.id)
+		if parent.kind == "content" {
+			return true
+		}
+		if parent.kind != candidate.kind {
+			return false
+		}
+		// Family roots revise the deliberate former hierarchy, which had no
+		// "every note" scope. Positive note+snippet roots are required to
+		// express a skills-off grant without the universal content root.
+		return parent.id == "" || parent.id == candidate.id
 	case ResourceWorkspace:
 		parent, _ := parseWorkspaceID(scope.ID)
 		candidate, _ := parseWorkspaceID(child.ID)
@@ -84,8 +93,11 @@ type contentResourceID struct {
 }
 
 func parseContentID(id string) (contentResourceID, bool) {
-	if id == "content" {
+	switch id {
+	case "content":
 		return contentResourceID{kind: "content"}, true
+	case "note", "snippet", "skill":
+		return contentResourceID{kind: id}, true
 	}
 	parts := strings.Split(id, "/")
 	if len(parts) != 2 || (parts[0] != "note" && parts[0] != "snippet" && parts[0] != "skill") || !validResourceAtom(parts[1]) {
@@ -96,7 +108,7 @@ func parseContentID(id string) (contentResourceID, bool) {
 
 func validateContentID(id string) error {
 	if _, ok := parseContentID(id); !ok {
-		return fmt.Errorf("want content, note/<id>, snippet/<id> or skill/<name>")
+		return fmt.Errorf("want content, note, snippet, skill, note/<id>, snippet/<id> or skill/<name>")
 	}
 	return nil
 }

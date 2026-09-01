@@ -76,8 +76,8 @@ func askEveryTimeMatrixForTests() content.EffectPolicy {
 	}
 }
 
-// The product-minted grant includes the path, session and content roots, so
-// the registry can offer both filesystem and notes/snippets tools.
+// The product-minted grant includes the path, session and one root per
+// enabled content family, so the registry can offer each family's tools.
 func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(askEveryTimePolicyStore(t)))
@@ -93,11 +93,13 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	if !hasGrantScope(grant.Scopes, content.ResourceSession, sid) {
 		t.Fatalf("grant scopes = %+v, want the run's session scope", grant.Scopes)
 	}
-	if !hasGrantScope(grant.Scopes, content.ResourceContent, "content") {
-		t.Fatalf("grant scopes = %+v, want the content root for notes and snippets", grant.Scopes)
+	for _, family := range []string{"note", "snippet", "skill"} {
+		if !hasGrantScope(grant.Scopes, content.ResourceContent, family) {
+			t.Fatalf("grant scopes = %+v, want content family root %q", grant.Scopes, family)
+		}
 	}
-	if len(grant.Scopes) != 3 {
-		t.Fatalf("grant scopes = %+v, want path, session and content scopes", grant.Scopes)
+	if len(grant.Scopes) != 5 {
+		t.Fatalf("grant scopes = %+v, want path, session and three content family scopes", grant.Scopes)
 	}
 
 	reg, err := agenttools.Assemble(tools.Schemas)

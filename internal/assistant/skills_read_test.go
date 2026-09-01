@@ -174,7 +174,7 @@ func TestSkillsRead_OverTheWireConformsToContract(t *testing.T) {
 	}}
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{
 		Kind: content.ResourceContent,
-		ID:   "skill/deploy",
+		ID:   "skill",
 	}})
 	schema := loadSkillsReadContract(t)
 

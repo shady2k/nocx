@@ -139,3 +139,34 @@ func TestContentRootContainsASkill(t *testing.T) {
 		t.Fatalf("ValidateGrantScope(skill/deploy) = %v", err)
 	}
 }
+
+func TestGrantScopeContainsContentFamilyRoots(t *testing.T) {
+	family := func(id string) content.GrantScope {
+		return content.GrantScope{Kind: content.ResourceContent, ID: id}
+	}
+	cases := map[string]struct {
+		parent content.GrantScope
+		child  content.GrantScope
+		want   bool
+	}{
+		"note root contains note":            {family("note"), family("note/note-a"), true},
+		"snippet root contains snippet":      {family("snippet"), family("snippet/snippet-a"), true},
+		"skill root contains skill":          {family("skill"), family("skill/deploy"), true},
+		"note root excludes snippet":         {family("note"), family("snippet/snippet-a"), false},
+		"skill root excludes note":           {family("skill"), family("note/note-a"), false},
+		"item does not contain family root":  {family("skill/deploy"), family("skill"), false},
+		"item does not contain sibling item": {family("skill/deploy"), family("skill/backup"), false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.parent.Contains(tc.child); got != tc.want {
+				t.Fatalf("%v.Contains(%v) = %v, want %v", tc.parent, tc.child, got, tc.want)
+			}
+		})
+	}
+	for _, id := range []string{"note", "snippet", "skill"} {
+		if err := content.ValidateGrantScope(family(id)); err != nil {
+			t.Fatalf("ValidateGrantScope(%q) = %v", id, err)
+		}
+	}
+}

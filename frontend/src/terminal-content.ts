@@ -118,6 +118,7 @@ import {
   arrangedByCause,
   blocksForPane,
   restoredBody,
+  type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -2440,13 +2441,20 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       renderer.onCommandMarker((marker) => {
-        // SEVERED (ADR-0024 §1): PTY output is render-only. OSC 133 A/B
-        // partition prompt bytes from output bytes for rendering and interop
-        // with other tools; C and D have no meaning to nocx. No stream
-        // sequence may grant keyboard ownership, open or complete an attempt,
-        // assign an exit status, persist history, open or freeze a block,
-        // activate an environment or enable rewriting — every one of those
-        // paths was deleted with the marker cycle (nocx-u7uh.1).
+        // OSC 133 remains render-derived (AD-6): live C/D markers never
+        // authorize or complete a lifecycle attempt. During the adopted
+        // session's recovered write and the restore transaction only, the
+        // same parsed markers are retained for the open ledger entry.
+        if ((this._replayCapture || this._pastRestoring) && marker.buffer === 'normal') {
+          if (marker.kind === 'C') {
+            this._replayCommandOpen = true
+          } else if (marker.kind === 'D') {
+            if (this._replayCommandOpen && marker.exitCode !== undefined) {
+              this._replayCompletions.push(marker.exitCode)
+            }
+            this._replayCommandOpen = false
+          }
+        }
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
         // ONE thing is read off a marker here, and it is not a decision about
         // the session: B is prompt-end, so the shell has finished starting
@@ -3348,6 +3356,9 @@ export class TerminalContent extends BasePaneContent {
       this.session?.close()
       this.session = null
 
+      this._replayCapture = false
+      this._replayCompletions = []
+      this._replayCommandOpen = false
       // The state that DESCRIBES the shell that is gone. The kernel's domains,
       // the markers that point into a stream nobody is writing any more, the
       // handshake generation that was acknowledged to a backend lane that no
@@ -3559,6 +3570,10 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // Reclaimed bytes are flushed as soon as onData is registered. Start
+    // capture before that registration so their parsed C/D markers cannot
+    // outrun the later ledger restore.
+    this._replayCapture = session.recovered !== undefined
     // A RECLAIMED session was sized by somebody else, and its recovered
     // scrollback is about to be written (nocx-eidfb.3). The claim reports no
     // geometry — reclaimSession attaches at an offset and nothing else — so
@@ -3694,6 +3709,17 @@ export class TerminalContent extends BasePaneContent {
         host.requestAttention()
       }
     })
+    if (this._replayCapture) {
+      try {
+        await renderer.awaitWriteBarrier()
+      } catch (err) {
+        log.warn('nocx: recovered marker parsing did not settle', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        this._replayCapture = false
+      }
+    }
 
     // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
     // bytes were handed over. `write()` parses asynchronously, so the
@@ -4247,6 +4273,32 @@ export class TerminalContent extends BasePaneContent {
     )
   }
 
+  /** A recovered OSC 133 D adjudicates the next unreconciled command entry.
+   *  The marker has no durable identity, so ledger order is the only honest
+   *  association. Missing replay leaves the row in its third state. */
+  private applyReplayCompletions(blocks: RestorableBlock[]): void {
+    const pending = blocks.filter((block) => block.unreconciled !== null)
+    let next = 0
+    for (const exitCode of this._replayCompletions) {
+      while (next < pending.length) {
+        const candidate = pending[next++]
+        if (
+          this.scrollback?.blockManager.completeRestoredBlock(
+            candidate.entryId,
+            exitCode,
+            candidate.durationMs,
+          )
+        ) {
+          break
+        }
+      }
+    }
+    this._replayCompletions = []
+    this._replayCommandOpen = false
+    this._replayCapture = false
+    this._pastRestoring = false
+  }
+
   /** One shot. A pane is shown many times — every tab switch — and its past
    *  is drawn once; the guard is set before the first await so two switches
    *  in the same turn cannot both start. */
@@ -4254,6 +4306,16 @@ export class TerminalContent extends BasePaneContent {
   /** Guards the window between asking and answering: a tab switched away and
    *  back while the read is in flight must not start a second one. */
   private _pastRestoring = false
+  /** Captures markers from the adopted session's recovered write before the
+   *  restore transaction starts, then remains active for that transaction. */
+  private _replayCapture = false
+  /** Parsed OSC 133 D events retained while the durable page is unresolved.
+   *  They are applied only to restored entries; live blocks remain
+   *  lifecycle-authorized. */
+  private _replayCompletions: number[] = []
+  /** A replay C starts the command whose D adjudicates one unreconciled
+   *  restored entry. */
+  private _replayCommandOpen = false
   /** A retry that arrived while a read was in flight. Without it the window
    *  is small but real: a reconnect report landing between "asked" and "the
    *  ask failed" would be dropped, and the pane would wait for another
@@ -4309,7 +4371,6 @@ export class TerminalContent extends BasePaneContent {
     }
     this._pastRetryPending = false
     this._pastRestored = true
-    this._pastRestoring = false
     // THE THIRD STATE, said before the blocks are drawn (nocx-k6p18.5). Some
     // of these rows may be neither running nor finished: their session was
     // carried over from a previous coordinator and nobody could be asked
@@ -4319,7 +4380,10 @@ export class TerminalContent extends BasePaneContent {
     // raises nothing: mountUnreconciledNotice answers null, and the decision
     // lives there so this side is not a second reader of it.
     this._showUnreconciledNotice(blocks)
-    if (blocks.length === 0) return
+    if (blocks.length === 0) {
+      this.applyReplayCompletions(blocks)
+      return
+    }
     const snapshot = fromITheme(getCurrentTheme())
     // Every block's body AND its causal flow, in the one round trip pair the
     // body already cost (restore-client restoredBody). Both are needed
@@ -4506,6 +4570,7 @@ export class TerminalContent extends BasePaneContent {
       )
     }
     this.scrollback.restorePast(els)
+    this.applyReplayCompletions(blocks)
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────

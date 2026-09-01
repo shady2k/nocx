@@ -133,6 +133,7 @@ type migrationStep struct {
 	from         int
 	to           int
 	apply        func(ctx context.Context, tx *sql.Tx) error
+	preflight    func(ctx context.Context, conn *sql.Conn) error
 	schemaDigest string
 }
 
@@ -150,7 +151,7 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
-	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -188,6 +189,22 @@ func validateLadderForSchema(ladder []migrationStep, version int, schema string)
 		if ladder[len(ladder)-1].schemaDigest != gotHex {
 			return fmt.Errorf("content: migration ladder: schemaV1 changed without a migration rung; add a new rung and update its schema digest for schema %d (got %s, want %s)",
 				version, gotHex, ladder[len(ladder)-1].schemaDigest)
+		}
+	}
+	if version >= 16 {
+		found := false
+		for _, step := range ladder {
+			if step.from != 15 || step.to != 16 {
+				continue
+			}
+			found = true
+			if step.preflight == nil {
+				return errors.New("content: migration ladder: 15→16 retirement rung has no api-run preflight")
+			}
+			break
+		}
+		if !found {
+			return errors.New("content: migration ladder: 15→16 retirement rung is missing its api-run preflight")
 		}
 	}
 	return nil
@@ -295,25 +312,6 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 		return fmt.Errorf("content: refusing to open a database written by schema %d: this build understands schema %d, and rebuilding it would discard rows it cannot read — update nocx to a build that understands schema %d; no rows were discarded",
 			onDisk, schemaVersion, onDisk)
 	}
-	// THE SAME REFUSAL, FOR THE FILES THE STAMP CANNOT SPEAK FOR YET. Before
-	// 16 the `api_run*` tables were versioned by a counter of their own, so a
-	// file written then says "what shape am I in" twice and the two halves
-	// are independent: a database stamped 14 or 15 can carry api-run tables
-	// from any build at all. This is the second half of that answer, and it
-	// is read HERE — beside the other refusals, before a single step runs —
-	// because the old code asked it LAST, after the walk had migrated and
-	// stamped the file, and a refusal that has already rewritten what it
-	// refuses is not a refusal.
-	//
-	// It is not a second counter kept alive. It is the retirement's
-	// precondition: 15→16 drops `api_run_schema`, and dropping a counter
-	// whose value this build does not understand would erase the evidence
-	// that the file is ahead. From 16 on no file carries the table and this
-	// clause is inert, which is what makes it a rung's precondition rather
-	// than a rule.
-	if err := refuseAPIRunTablesFromANewerBuild(ctx, conn); err != nil {
-		return err
-	}
 	// A file with no user tables is a CREATION, not a migration: version 0
 	// with nothing in it is what a fresh install looks like, and Open stamps
 	// it after schemaV1 runs. Anything else stamped below the ladder is a
@@ -336,6 +334,17 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 	if onDisk < ladder[0].from {
 		return fmt.Errorf("content: refusing to open a database written by schema %d: this build creates schema %d and its migration chain starts at schema %d, so no step carries a schema %d file forward — move the file aside to start a fresh history; no rows were discarded",
 			onDisk, schemaVersion, ladder[0].from, onDisk)
+	}
+	// A rung's preflight is evaluated before any pending rung applies. This
+	// keeps refusal clauses attached to the edge whose old shape they protect,
+	// while still checking a file at 14 before the 14→15 transaction starts.
+	for _, step := range ladder {
+		if step.from < onDisk || step.preflight == nil {
+			continue
+		}
+		if err := step.preflight(ctx, conn); err != nil {
+			return err
+		}
 	}
 	// FOREIGN KEYS OFF FOR THE WALK, and it is not a relaxation — it is
 	// SQLite's own documented procedure for changing a table's shape

@@ -343,3 +343,16 @@ func TestValidateLadderRefusesAnEmptyLadder(t *testing.T) {
 	}
 }
 
+func TestTheAPIRunRetirementRungRequiresItsPreflight(t *testing.T) {
+	ladder := append([]migrationStep(nil), schemaLadder...)
+	ladder[1].preflight = nil
+
+	err := validateLadder(ladder)
+	if err == nil {
+		t.Fatal("validateLadder accepted the API-run retirement rung without its preflight")
+	}
+	if !strings.Contains(err.Error(), "api-run preflight") {
+		t.Fatalf("retirement-rung refusal reads %q; it must name the missing API-run preflight", err)
+	}
+}
+

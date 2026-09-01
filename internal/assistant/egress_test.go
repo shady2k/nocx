@@ -353,3 +353,49 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }
+
+// THE MASKING BELT IS FOR THE ONE MOMENT THE GATE STANDS DOWN (nocx-hp8p2.13).
+// The egress gate refuses-and-asks on a finding, so a result reaching the
+// durable record normally carries none. An APPROVED resume is the exception:
+// the person authorised sending those exact bytes to the provider, and they
+// go. What must not follow is a second, unmasked copy of them in the store —
+// the pane's "show me what it returned" would then be a path around the
+// masking every other durable row obeys (ADR-0021, nocx-a21v).
+func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	const secret = "sk-proj-abcdefghijklmnopqrstuvwx"
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+	writeFile(t, filepath.Join(dir, "a.txt"), "the key is "+secret)
+
+	ledger := &fakeLedger{}
+	approvals := NewApprovalStore()
+	mw := middlewareFor(t, grant, ledger, approvals)
+
+	// The gate finds the key and suspends, retaining the exact bytes.
+	if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err == nil {
+		t.Fatal("the gate passed a result carrying a key; want a suspension")
+	}
+	if len(ledger.recordedCaptures()) != 0 {
+		t.Fatal("a withheld result was recorded before the person decided")
+	}
+
+	// The person approves: the retained bytes go to the model as they are.
+	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
+	if err != nil {
+		t.Fatalf("approved resume: %v", err)
+	}
+	if !strings.Contains(out, secret) {
+		t.Fatalf("the model received %q, want the exact approved bytes", out)
+	}
+	captures := ledger.recordedCaptures()
+	if len(captures) != 1 {
+		t.Fatalf("captures = %d, want the call's own body", len(captures))
+	}
+	body := string(captures[0].Body)
+	if strings.Contains(body, secret) {
+		t.Fatalf("recorded body = %q, want the key masked out of the durable record", body)
+	}
+	if !strings.Contains(body, "the key is ") {
+		t.Fatalf("recorded body = %q, want the rest of the result kept", body)
+	}
+}

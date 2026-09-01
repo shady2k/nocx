@@ -88,7 +88,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand, toolCallExpansion } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -116,6 +116,7 @@ import {
   arrangedByCause,
   blocksForPane,
   restoredBody,
+  toolResultForEntry,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -1858,6 +1859,10 @@ export class TerminalContent extends BasePaneContent {
         // ADR-0040 it does not have (nocx-3dteo).
         answerText: (entryId) => answerTextForTurn(this.client, entryId),
         dump: (entryId) => agentClient.dump(entryId),
+        // What a tool call returned, read back from the action entry it was
+        // recorded under — the handle agent.runToolCall sends instead of the
+        // bytes (nocx-hp8p2.13).
+        toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
       })
 
@@ -4471,7 +4476,7 @@ export class TerminalContent extends BasePaneContent {
             // draws it, so a restored turn must not restate it.
             if (cause.kind === 'action') {
               if (cause.opensBlock) return null
-              return restoredBlock(
+              const toolEl = restoredBlock(
                 {
                   ...factsOf(b),
                   id: nextId(),
@@ -4500,6 +4505,17 @@ export class TerminalContent extends BasePaneContent {
                 this.runningActions,
                 this.dumpSource ?? undefined,
               )
+              // A RESTORED CALL EXPANDS THE SAME WAY A LIVE ONE DOES
+              // (nocx-hp8p2.13). The result is on the action entry, which is
+              // this child's own row, so the restore reaches it through the
+              // same reader — a turn read back from the ledger says exactly
+              // what the turn said while it was being written.
+              toolEl.appendChild(
+                toolCallExpansion(cause.entryId, cause.args ?? {}, (actionEntryId) =>
+                  toolResultForEntry(this.client, actionEntryId),
+                ),
+              )
+              return toolEl
             }
             // A block the turn RAN (or a person's, if the ledger
             // mis-seated): it is already a page row, drawn where the turn

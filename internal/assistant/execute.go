@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/note"
@@ -47,6 +48,7 @@ func toolBound(ctx context.Context) (agenttools.ResultBound, error) {
 // (a new row with a Narrow but no executor is a registration that cannot
 // run).
 var executors = map[string]func(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error){
+	"fetch.url":        executeFetchURL,
 	"files.read":       executeFilesRead,
 	"files.edit":       executeFilesEdit,
 	"files.create":     executeFilesCreate,
@@ -70,6 +72,7 @@ type toolSeams struct {
 	sessions         SessionSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
+	fetcher          apifetch.TextFetcher
 }
 
 type noteSearchRow struct {
@@ -131,6 +134,38 @@ func requireContentItem(scope *agenttools.ContentScope, tool, kind, id string) e
 		return fmt.Errorf("%s: %s/%s is outside the run's grant", tool, kind, id)
 	}
 	return nil
+}
+
+func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, ok := cap.(*agenttools.URLScope)
+	if !ok {
+		return "", fmt.Errorf("fetch.url: capability is %T, not *agenttools.URLScope", cap)
+	}
+	var p struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("fetch.url: args: %w", err)
+	}
+	if !scope.Allows(p.URL) {
+		return "", errors.New("fetch.url: URL is outside the run's destination grant")
+	}
+	if seams.fetcher == nil {
+		return "", errors.New("fetch.url: URL fetcher is unavailable")
+	}
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	result, err := seams.fetcher.FetchText(ctx, p.URL, bound.MaxBytes)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("fetch.url: result: %w", err)
+	}
+	return string(raw), nil
 }
 
 func executeNotesSearch(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {

@@ -1,0 +1,266 @@
+package apifetch_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/httppolicy"
+)
+
+func directTextRoutes() apisend.Routes {
+	return func(_ context.Context, routeID string) (httppolicy.Route, error) {
+		if routeID != "" {
+			return nil, fmt.Errorf("unexpected route %q", routeID)
+		}
+		return httppolicy.Local(), nil
+	}
+}
+
+func routedTextRoutes(resolve httppolicy.ResolverFunc) apisend.Routes {
+	return func(_ context.Context, routeID string) (httppolicy.Route, error) {
+		if routeID != "" {
+			return nil, fmt.Errorf("unexpected route %q", routeID)
+		}
+		return httppolicy.NewRoute(resolve, httppolicy.DialerFunc((&net.Dialer{}).DialContext), nil), nil
+	}
+}
+
+func TestFetchTextReturnsUTF8TextAndMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><body>Hello from the page</body></html>"))
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.URL != srv.URL || got.ContentType != "text/html; charset=utf-8" {
+		t.Fatalf("metadata = %+v, want URL and content type", got)
+	}
+	if got.Text != "<html><body>Hello from the page</body></html>" || got.Truncated || got.Lossy {
+		t.Fatalf("result = %+v, want complete lossless text", got)
+	}
+}
+
+// httppolicy deliberately permits private and loopback HTTP for local services.
+// The refusal half of the fetch acceptance therefore targets the policy's real
+// unsafe-HTTP sentence rather than adding a second SSRF rule in apifetch.
+func TestFetchTextRefusesUnsafeHTTPAddressAndOversize(t *testing.T) {
+	unsafeRoutes := routedTextRoutes(func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	})
+	_, err := apifetch.New(unsafeRoutes, nil).FetchText(context.Background(), "http://public.example/page", 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "not a loopback or private address") {
+		t.Fatalf("unsafe HTTP error = %v, want the shared policy's stated refusal", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 129)))
+	}))
+	defer srv.Close()
+	_, err = apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 128)
+	if !errors.Is(err, apifetch.ErrTooLarge) || !strings.Contains(err.Error(), "128") {
+		t.Fatalf("oversize error = %v, want ErrTooLarge and limit", err)
+	}
+}
+
+func TestFetchTextPrivateHTTPUsesTheSharedPolicy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("local service"))
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil || got.Text != "local service" {
+		t.Fatalf("private HTTP result = %+v, err = %v; want policy-permitted local text", got, err)
+	}
+}
+
+func TestFetchTextRefusesNonTextAndInvalidUTF8WithTextPositive(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        []byte
+		contentType string
+		wantErr     bool
+	}{
+		{"binary content type", []byte("PNG"), "image/png", true},
+		{"invalid utf8", []byte{0xff, 0xfe}, "text/plain", true},
+		{"ordinary text", []byte("plain response"), "text/plain; charset=utf-8", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write(tc.body)
+			}))
+			defer srv.Close()
+			got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+			if tc.wantErr {
+				if !errors.Is(err, apifetch.ErrNotText) {
+					t.Fatalf("error = %v, want ErrNotText", err)
+				}
+				return
+			}
+			if err != nil || got.Text != string(tc.body) {
+				t.Fatalf("result = %+v, err = %v; want ordinary text", got, err)
+			}
+		})
+	}
+}
+
+func TestFetchTextDNSFailureHasPairedSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("resolved"))
+	}))
+	defer srv.Close()
+
+	routes := routedTextRoutes(func(ctx context.Context, host string) ([]net.IP, error) {
+		if host == "dns-failure.test" {
+			return nil, errors.New("resolver unavailable")
+		}
+		return httppolicy.SystemResolver().LookupIP(ctx, host)
+	})
+	_, err := apifetch.New(routes, nil).FetchText(context.Background(), "http://dns-failure.test/page", 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "resolver unavailable") {
+		t.Fatalf("DNS error = %v, want resolver failure", err)
+	}
+	got, err := apifetch.New(routes, nil).FetchText(context.Background(), srv.URL, 64<<10)
+	if err != nil || got.Text != "resolved" {
+		t.Fatalf("ordinary URL = %+v, err = %v; want success after DNS failure case", got, err)
+	}
+}
+
+func TestFetchTextConnectionRefusedHasPairedSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("connected"))
+	}))
+	closedURL := srv.URL
+	srv.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), closedURL, 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") {
+		t.Fatalf("connection error = %v, want refused local address", err)
+	}
+
+	open := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("connected"))
+	}))
+	defer open.Close()
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), open.URL, 64<<10)
+	if err != nil || got.Text != "connected" {
+		t.Fatalf("ordinary URL = %+v, err = %v; want connection success", got, err)
+	}
+}
+
+func TestFetchTextTLSFailureHasPairedSuccess(t *testing.T) {
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("secure"))
+	}))
+	defer tlsSrv.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), tlsSrv.URL, 64<<10)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "certificate") {
+		t.Fatalf("TLS error = %v, want certificate failure", err)
+	}
+
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ordinary"))
+	}))
+	defer plain.Close()
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), plain.URL, 64<<10)
+	if err != nil || got.Text != "ordinary" {
+		t.Fatalf("ordinary URL = %+v, err = %v; want success after TLS failure case", got, err)
+	}
+}
+
+func TestFetchTextRedirectChainPastBoundHasPairedSuccess(t *testing.T) {
+	var redirector *httptest.Server
+	redirector = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirector.URL+"/again", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), redirector.URL, 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "redirects") {
+		t.Fatalf("redirect error = %v, want the chain bound", err)
+	}
+
+	ordinary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("one hop"))
+	}))
+	defer ordinary.Close()
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), ordinary.URL, 64<<10)
+	if err != nil || got.Text != "one hop" {
+		t.Fatalf("ordinary URL = %+v, err = %v; want success", got, err)
+	}
+}
+
+func TestFetchTextRedirectToUnsafeHTTPIsRefusedAtTheHop(t *testing.T) {
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://public.example/hop", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	routes := routedTextRoutes(func(ctx context.Context, host string) ([]net.IP, error) {
+		if host == "public.example" {
+			return []net.IP{net.ParseIP("203.0.113.7")}, nil
+		}
+		return httppolicy.SystemResolver().LookupIP(ctx, host)
+	})
+	_, err := apifetch.New(routes, nil).FetchText(context.Background(), redirector.URL, 64<<10)
+	if err == nil || !strings.Contains(err.Error(), "not a loopback or private address") {
+		t.Fatalf("redirect error = %v, want policy refusal at the redirect hop", err)
+	}
+}
+
+func TestFetchTextBodyThatStopsMidStreamHasPairedSuccess(t *testing.T) {
+	truncated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("server does not support hijacking")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_, _ = fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\nshort")
+		_ = rw.Flush()
+		_ = conn.Close()
+	}))
+	truncatedURL := truncated.URL
+	defer truncated.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), truncatedURL, 64<<10)
+	if err == nil {
+		t.Fatal("mid-stream body was accepted as complete text")
+	}
+
+	ordinary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("complete"))
+	}))
+	defer ordinary.Close()
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), ordinary.URL, 64<<10)
+	if err != nil || got.Text != "complete" {
+		t.Fatalf("ordinary URL = %+v, err = %v; want complete text", got, err)
+	}
+}

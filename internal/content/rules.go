@@ -37,6 +37,19 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 	if inv.Disqualified {
 		return InvocationRule{}, fmt.Errorf("invocation is disqualified")
 	}
+	if len(inv.Resources.Unresolved) > 0 {
+		unresolved := inv.Resources.Unresolved[0]
+		if unresolved.Reason != "" {
+			return InvocationRule{}, fmt.Errorf(
+				"the command contains unresolved input %q: %s; its meaning can change between executions",
+				unresolved.Path, unresolved.Reason,
+			)
+		}
+		return InvocationRule{}, fmt.Errorf(
+			"the command contains unresolved input %q; its meaning can change between executions",
+			unresolved.Path,
+		)
+	}
 	rule := InvocationRule{Pattern: inv.Commands, Decision: decision}
 	if err := validateInvocationRules([]InvocationRule{rule}); err != nil {
 		return InvocationRule{}, err
@@ -56,8 +69,11 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 
 // StandingRule returns the only invocation rule a person may be offered from
 // this canonical parse. A standing answer must show one complete command:
-// compound, disqualified, unparsed and pattern-bearing invocations are not
-// representable without granting more than the question showed.
+// compound, disqualified, unparsed, unresolved and pattern-bearing invocations
+// are not representable without granting more than the question showed.
+//
+// The boundary is that a standing rule may only be saved over text whose
+// meaning cannot change between the reading and the next match.
 func StandingRule(inv Invocation) (InvocationRule, string) {
 	if !inv.Parsed {
 		return InvocationRule{}, "the command could not be parsed safely"
@@ -113,7 +129,8 @@ func ruleTokenLabel(token string) string {
 // Every subcommand and every token must match. A token '*' matches any one
 // token's contents; it never spans token boundaries or shell separators.
 func (r InvocationRule) Matches(inv Invocation) bool {
-	if !inv.Parsed || inv.Disqualified || len(r.Pattern) != len(inv.Commands) {
+	if !inv.Parsed || inv.Disqualified || len(inv.Resources.Unresolved) != 0 ||
+		len(r.Pattern) != len(inv.Commands) {
 		return false
 	}
 	for i, patternCommand := range r.Pattern {

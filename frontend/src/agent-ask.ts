@@ -45,6 +45,7 @@ interface AskParams {
     state: GrantBlock['state']
     start?: number
     count?: number
+    automatic?: true
   }[]
 }
 
@@ -79,12 +80,15 @@ export class AgentInputTarget implements InputTarget {
     this.ensureSubscribed()
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
-    const attachedContent = this.seams.grants().map(({ itemId, command, state, start, count }) => ({
-      itemId,
-      command,
-      state,
-      ...(start !== undefined && count !== undefined ? { start, count } : {}),
-    }))
+    const attachedContent = this.seams
+      .grants()
+      .map(({ itemId, command, state, start, count, automatic }) => ({
+        itemId,
+        command,
+        state,
+        ...(start !== undefined && count !== undefined ? { start, count } : {}),
+        ...(automatic === true ? { automatic: true as const } : {}),
+      }))
     const askId = crypto.randomUUID()
     const askParams: AskParams = {
       askId,

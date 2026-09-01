@@ -150,6 +150,45 @@ describe('GrantController', () => {
     expect(one.blockEl.dataset.granted).toBe('true')
     controller.destroy()
   })
+  it('shows an automatic frozen screen without counting it as a person mark', () => {
+    const controller = new GrantController()
+    controller.mount(document.body)
+    const frozen = { ...block('frame-1', 'top', true), automatic: true as const }
+
+    controller.setAutomaticBlock(frozen)
+
+    expect(controller.current).toEqual([])
+    expect(controller.chip.textContent).toBe(
+      'marked for the question · 0 · frozen screen attached automatically',
+    )
+    expect(frozen.blockEl.dataset.granted).toBeUndefined()
+
+    controller.chip.click()
+    const panel = document.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
+    expect(panel?.textContent).toContain('Frozen screen attached automatically')
+    expect(panel?.textContent).toContain('top')
+    expect(panel?.querySelector('[data-action="dismiss-grant"]')).toBeNull()
+    controller.destroy()
+  })
+
+  it('keeps person marks alongside the automatic frozen screen', () => {
+    const controller = new GrantController()
+    controller.mount(document.body)
+    const marked = block('item-1', 'git status', true)
+    const frozen = { ...block('frame-1', 'top', true), automatic: true as const }
+
+    controller.setBlocks([marked])
+    controller.setAutomaticBlock(frozen)
+
+    expect(controller.current).toEqual([marked])
+    expect(controller.chip.textContent).toContain('· 1 · frozen screen attached automatically')
+    controller.chip.click()
+    const panel = document.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
+    expect(panel?.textContent).toContain('git status')
+    expect(panel?.textContent).toContain('Frozen screen attached automatically · top')
+    expect(panel?.querySelector('[data-action="dismiss-grant"][data-item-id="frame-1"]')).toBeNull()
+    controller.destroy()
+  })
 
   it('hides every manifestation while preserving the exact grants for a visible round trip', () => {
     const controller = new GrantController()

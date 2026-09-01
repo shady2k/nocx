@@ -194,11 +194,6 @@ interface FilesBinding {
    *  only when it is true (nocx-ngf3u). */
   revealAvailable: boolean
 }
-export interface FilesRevealHint {
-  bindingId: string
-  parentPath: string
-  listing: Extract<FilesListResult, { state: 'ok' }>
-}
 
 export interface FilesTreeStore {
   phase(): FilesPanelPhase
@@ -243,7 +238,7 @@ export interface FilesTreeStore {
    *  does not exist under the root, ends the walk with what was expanded left
    *  expanded and the level's state row rendered — the reveal did not reach
    *  the target and the tree says so where it stopped. */
-  revealPath(path: string, hint?: FilesRevealHint): Promise<boolean>
+  revealPath(path: string): Promise<boolean>
   /** The path the last completed reveal selected, or null when nothing
    *  has been revealed: no verified cwd yet, a viewer origin (no
    *  opinion), or a fresh scope. The view renders the matching row
@@ -353,10 +348,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  machine must not linger. */
   const [revealTarget, setRevealTarget] = createSignal<string | null>(null)
   let pendingReveal: string | null = null
-  let pendingRevealHint: FilesRevealHint | undefined
   let pendingRevealPromise: Promise<boolean> | null = null
   let pendingRevealResolve: ((isDirectory: boolean) => void) | null = null
-  let revealHint: FilesRevealHint | undefined
   const settleReveal = (isDirectory: boolean): void => {
     const resolve = pendingRevealResolve
     pendingRevealResolve = null
@@ -364,7 +357,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     resolve?.(isDirectory)
   }
   const cancelReveal = (): void => {
-    revealHint = undefined
     settleReveal(false)
   }
   /** True while a reveal walk is in flight. The change stream must not
@@ -1140,7 +1132,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // the same path.
     setRevealTarget(null)
     pendingReveal = null
-    pendingRevealHint = undefined
     cancelReveal()
     revealing = false
     revealWalkId++
@@ -1209,7 +1200,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       .catch((e) => {
         if (!openCurrent(ctx)) return
         pendingReveal = null
-        pendingRevealHint = undefined
         cancelReveal()
         setPhase('failed')
         setOpenError(messageOf(e))
@@ -1335,24 +1325,21 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  the root's first listing is ready. */
   function startQueuedReveal(): void {
     const target = pendingReveal
-    const hint = pendingRevealHint
     const resolve = pendingRevealResolve
     if (target === null || resolve === null || revealing || untrack(root) === null) return
     pendingReveal = null
-    pendingRevealHint = undefined
     pendingRevealPromise = null
     pendingRevealResolve = null
-    void revealPath(target, hint).then(resolve, () => resolve(false))
+    void revealPath(target).then(resolve, () => resolve(false))
   }
 
-  function revealPath(targetPath: string, hint?: FilesRevealHint): Promise<boolean> {
+  function revealPath(targetPath: string): Promise<boolean> {
     const r = untrack(root)
     if (r === null) {
       if (closed || untrack(origin) === null) return Promise.resolve(false)
       if (targetPath === pendingReveal) return pendingRevealPromise ?? Promise.resolve(false)
       cancelReveal()
       pendingReveal = targetPath
-      pendingRevealHint = hint
       const promise = new Promise<boolean>((resolve) => {
         pendingRevealResolve = resolve
       })
@@ -1371,8 +1358,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const under = r.path === '/' ? targetPath.startsWith('/') : targetPath.startsWith(r.path + '/')
     if (targetPath !== r.path && !under) return Promise.resolve(false)
     cancelReveal()
-    pendingReveal = targetPath
-    revealHint = hint?.bindingId === ctx.bindingId ? hint : undefined
     const promise = new Promise<boolean>((resolve) => {
       pendingRevealResolve = resolve
     })
@@ -1522,19 +1507,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       applyListing(dir, ctx, res)
       if (walk === revealWalkId) onDone()
     }
-    const hint = revealHint
-    if (
-      hint !== undefined &&
-      hint.bindingId === ctx.bindingId &&
-      hint.parentPath === dir.path &&
-      hint.listing.offset === dir.nextOffset &&
-      (dir.state !== 'ok' || hint.listing.rev === dir.rev)
-    ) {
-      revealHint = undefined
-      apply(hint.listing)
-      return
-    }
-    revealHint = undefined
     services
       .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE)
       .then(apply, (e) =>
@@ -1584,8 +1556,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function completeReveal(dir: FilesRoot | FilesNode, walk: number): void {
     if (walk !== revealWalkId) return
     pendingReveal = null
-    pendingRevealHint = undefined
-    revealHint = undefined
     revealing = false
     setRevealTarget(dir.path)
     maybeStartFilterSearch()
@@ -1601,8 +1571,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function endWalk(walk: number): void {
     if (walk !== revealWalkId) return
     pendingReveal = null
-    pendingRevealHint = undefined
-    revealHint = undefined
     revealing = false
     settleReveal(false)
     maybeStartFilterSearch()
@@ -1751,7 +1719,6 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setWatchFailed(null)
     setRefreshState(null)
     setRevealTarget(null)
-    pendingRevealHint = undefined
     // Supersede any walk still in flight: closed already drops its
     // responses, and the pending marker must not suppress the next
     // scope's reveal of the same path.

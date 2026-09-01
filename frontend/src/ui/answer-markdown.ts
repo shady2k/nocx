@@ -13,17 +13,19 @@
 // it would have to re-lay the answer out on every chunk. So this paints ONE
 // COMPLETED LINE, which is the largest unit the stream can hand over
 // finished — and the row model, the copy path and the chip path are all
-// untouched.
+// untouched. Tables are the deliberate exception to the single-line
+// grammar: answer-body keeps their completed rows in this same stack and
+// this module paints their cells.
 //
-// WHAT THAT COSTS, DELIBERATELY. Anything markdown expresses ACROSS lines is
-// not rendered, and it is not rendered on purpose rather than by oversight:
-//   - tables (a grid is not a stack of rows),
+// WHAT THAT COSTS, DELIBERATELY. Anything markdown expresses ACROSS lines
+// other than a table is not rendered, and it is not rendered on purpose
+// rather than by oversight:
 //   - setext headings (`===` under a line — the underline arrives after the
 //     line it names, which this cannot reach back to),
 //   - nested block quotes and lazy continuation,
 //   - horizontal rules, images and task-list checkboxes.
-// Consecutive list items are painted as consecutive rows with bullets rather
-// than gathered into one `<ul>`, for the same reason.
+// Consecutive list items are painted as consecutive rows with bullets
+// rather than gathered into one `<ul>`, for the same reason.
 //
 // AND ONE THING IS OMITTED FOR SAFETY, NOT FOR EFFORT: a `[text](url)` is
 // NEVER turned into an anchor. Every byte here is the model's, and an anchor
@@ -158,4 +160,125 @@ export function paintAnswerLine(row: HTMLElement, text: string): void {
     return
   }
   row.innerHTML = inlineHtml(text)
+}
+export type TableAlignment = 'left' | 'center' | 'right'
+
+interface TableCellPart {
+  readonly value: string
+  readonly leadingWhitespace: string
+  readonly trailingWhitespace: string
+}
+
+export interface TableRowParts {
+  readonly cells: readonly TableCellPart[]
+  readonly leadingPipe: boolean
+  readonly trailingPipe: boolean
+}
+
+function pipeIndexes(text: string): number[] {
+  const indexes: number[] = []
+  let inCode = false
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '`' && text[i - 1] !== '\\') inCode = !inCode
+    else if (text[i] === '|' && !inCode) indexes.push(i)
+  }
+  return indexes
+}
+
+function cellPart(raw: string): TableCellPart {
+  const value = raw.trim()
+  return {
+    value,
+    leadingWhitespace: raw.slice(0, raw.length - raw.trimStart().length),
+    trailingWhitespace: raw.slice(raw.trimEnd().length),
+  }
+}
+
+export function tableRowParts(text: string): TableRowParts | null {
+  const pipes = pipeIndexes(text)
+  if (pipes.length === 0) return null
+
+  const leadingPipe = pipes[0] === 0
+  const trailingPipe = pipes[pipes.length - 1] === text.length - 1
+  const cells: TableCellPart[] = []
+  if (leadingPipe) {
+    for (let i = 0; i + 1 < pipes.length; i++) {
+      cells.push(cellPart(text.slice(pipes[i] + 1, pipes[i + 1])))
+    }
+    if (!trailingPipe) cells.push(cellPart(text.slice(pipes[pipes.length - 1] + 1)))
+  } else {
+    cells.push(cellPart(text.slice(0, pipes[0])))
+    for (let i = 0; i + 1 < pipes.length; i++) {
+      cells.push(cellPart(text.slice(pipes[i] + 1, pipes[i + 1])))
+    }
+    if (!trailingPipe) cells.push(cellPart(text.slice(pipes[pipes.length - 1] + 1)))
+  }
+  if (cells.length === 0) cells.push(cellPart(''))
+  return { cells, leadingPipe, trailingPipe }
+}
+
+export function tableDelimiterAlignments(text: string): TableAlignment[] | null {
+  const parts = tableRowParts(text)
+  if (!parts || parts.cells.length < 2) return null
+  const alignments: TableAlignment[] = []
+  for (const cell of parts.cells) {
+    if (!/^(?::)?-{3,}(?::)?$/.test(cell.value)) return null
+    alignments.push(
+      cell.value.startsWith(':')
+        ? cell.value.endsWith(':')
+          ? 'center'
+          : 'left'
+        : cell.value.endsWith(':')
+          ? 'right'
+          : 'left',
+    )
+  }
+  return alignments
+}
+
+function hiddenText(text: string): HTMLSpanElement {
+  const span = document.createElement('span')
+  span.className = 'ui-md-table-source'
+  span.setAttribute('aria-hidden', 'true')
+  span.textContent = text
+  return span
+}
+
+/** Paint one table row while retaining its separators in row.textContent. */
+export function paintTableRow(
+  row: HTMLElement,
+  text: string,
+  alignments: readonly TableAlignment[],
+  header: boolean,
+  delimiter = false,
+): void {
+  const parts = tableRowParts(text)
+  if (!parts) {
+    paintAnswerLine(row, text)
+    return
+  }
+  row.className = `term-line ui-md-table-row${delimiter ? ' ui-md-table-delimiter' : ''}`
+  row.setAttribute('role', 'row')
+  row.replaceChildren()
+  if (delimiter) {
+    row.appendChild(hiddenText(text))
+    return
+  }
+
+  const pipes = pipeIndexes(text)
+  let sourceCursor = parts.leadingPipe ? pipes[0] + 1 : 0
+  if (parts.leadingPipe) row.appendChild(hiddenText(text.slice(0, sourceCursor)))
+  for (let i = 0; i < parts.cells.length; i++) {
+    const nextPipe = pipes.find((pipe) => pipe >= sourceCursor)
+    const cellPart = parts.cells[i]
+    const cell = document.createElement('span')
+    cell.className = `ui-md-table-cell ui-md-table-cell-${alignments[i] ?? 'left'}`
+    cell.setAttribute('role', header ? 'columnheader' : 'cell')
+    if (cellPart.leadingWhitespace) cell.appendChild(hiddenText(cellPart.leadingWhitespace))
+    cell.appendChild(document.createTextNode(cellPart.value))
+    if (cellPart.trailingWhitespace) cell.appendChild(hiddenText(cellPart.trailingWhitespace))
+    row.appendChild(cell)
+    sourceCursor = nextPipe === undefined ? text.length : nextPipe + 1
+    if (nextPipe !== undefined) row.appendChild(hiddenText('|'))
+  }
 }

@@ -48,6 +48,10 @@ func (readOnlyProvider) Read(context.Context, string, int64) (filesystem.Content
 	return filesystem.Content{}, nil
 }
 
+func (readOnlyProvider) Stat(context.Context, string) (filesystem.Stat, error) {
+	return filesystem.Stat{Kind: filesystem.KindRegular}, nil
+}
+
 func (readOnlyProvider) Watch(context.Context, string) (filesystem.Watch, error) {
 	return nil, &filesystem.ErrWatchUnavailable{}
 }

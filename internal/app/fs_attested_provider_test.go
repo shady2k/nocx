@@ -28,6 +28,10 @@ func (p *stubRemoteProvider) Read(context.Context, string, int64) (filesystem.Co
 	return filesystem.Content{}, nil
 }
 
+func (p *stubRemoteProvider) Stat(context.Context, string) (filesystem.Stat, error) {
+	return filesystem.Stat{Kind: filesystem.KindRegular}, nil
+}
+
 func (p *stubRemoteProvider) Watch(context.Context, string) (filesystem.Watch, error) {
 	return nil, &filesystem.ErrWatchUnavailable{}
 }

@@ -88,7 +88,7 @@ func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 			t.Fatalf("add %s: %v", e.Name(), addErr)
 		}
 	}
-	path := filepath.Join(contractDir, filepath.Base(name))
+	path := filepath.Join(contractDir, filepath.Clean(name))
 	f, openErr := os.Open(path) //nolint:gosec // a test-only path under contracts/
 	if openErr != nil {
 		t.Fatalf("open %s: %v", path, openErr)
@@ -3007,10 +3007,9 @@ func TestShellFootprintConsent_UnwiredStoreRefuses(t *testing.T) {
 
 // ── files.* ──────────────────────────────────────────────────────────────
 //
-// The seven wire shapes of the file-tree control plane (fm-w8): six
-// methods plus the files.changed notification, which gets the same three
-// checks as a method because an unsolicited notification is exactly where
-// an addressing defect hides (spec §5.3).
+// The file-tree wire shapes (fm-w8) get the same three checks as methods
+// because an unsolicited notification is exactly where an addressing defect
+// hides (spec §5.3).
 
 func TestFilesOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.open.schema.json")
@@ -3100,6 +3099,54 @@ func TestFilesOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.RevealAvailable {
 		t.Error("revealAvailable is true although no revealer is wired")
+	}
+}
+
+func TestFilesStat_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.stat.schema.json")
+	for name, result := range map[string]filesStatResult{
+		"regular":   {Kind: "regular"},
+		"directory": {Kind: "dir"},
+		"other":     {Kind: "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(result)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.stat DTO")
+		})
+	}
+}
+
+func TestFilesStat_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.stat.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      dir,
+	}, 3)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.stat: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.stat result (real socket)")
+	var got filesStatResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("files.stat: decode: %v", err)
+	}
+	if got.Kind != "dir" {
+		t.Errorf("kind = %q, want dir", got.Kind)
 	}
 }
 

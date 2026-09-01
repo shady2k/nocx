@@ -1595,6 +1595,7 @@ func New(opts ...Option) (*App, error) {
 	tpOpts = append(tpOpts,
 		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
+		transport.WithAgentFetcher(apiFetcher),
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.

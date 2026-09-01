@@ -18,12 +18,17 @@ export class GrantController {
   private readonly panel: FloatingPanel
   private readonly onChange: ((blocks: ReadonlyArray<GrantBlock>) => void) | undefined
   private blocks: GrantBlock[] = []
+  /** The frozen frame is an attachment, not a person mark: keep it in the
+   * same panel for discoverability, but outside the stored mark list and its
+   * count. */
+  private automaticBlock: GrantBlock | null = null
   private readonly paintedBlocks = new Set<HTMLElement>()
   private mounted = false
   private readonly paintedRows = new Set<HTMLElement>()
   private readonly ownsChip: boolean
   /** Presentation only: hidden grants remain the exact stored objects. */
   private visible = true
+
   constructor(options: GrantControllerOptions = {}) {
     this.onChange = options.onChange
     this.ownsChip = options.chip === undefined
@@ -45,10 +50,11 @@ export class GrantController {
     })
     this.updateChip()
   }
+
   toggle(): void {
     if (!this.visible) return
     if (this.panel.isOpen) this.panel.hide()
-    else if (this.blocks.length > 0) this.renderPanel()
+    else if (this.blocks.length > 0 || this.automaticBlock !== null) this.renderPanel()
   }
 
   mount(container: HTMLElement): void {
@@ -59,13 +65,27 @@ export class GrantController {
   }
 
   setBlocks(blocks: ReadonlyArray<GrantBlock>): void {
-    this.blocks = [...blocks]
+    this.blocks = blocks.filter((block) => !block.automatic)
     this.repaintBlocks()
     this.updateChip()
     if (this.panel.isOpen) {
-      if (this.blocks.length > 0) this.renderPanel()
+      if (this.blocks.length > 0 || this.automaticBlock !== null) this.renderPanel()
       else this.panel.hide()
     }
+  }
+
+  setAutomaticBlock(block: GrantBlock | null): void {
+    this.automaticBlock = block?.automatic === true ? block : null
+    this.updateChip()
+    if (this.panel.isOpen) {
+      if (this.blocks.length > 0 || this.automaticBlock !== null) this.renderPanel()
+      else this.panel.hide()
+    }
+  }
+
+  /** The panel rows include the automatic attachment after person marks. */
+  private panelBlocks(): GrantBlock[] {
+    return this.automaticBlock === null ? [...this.blocks] : [...this.blocks, this.automaticBlock]
   }
 
   /**
@@ -92,24 +112,30 @@ export class GrantController {
     this.paintedRows.clear()
     if (this.ownsChip) this.chip.remove()
     this.blocks = []
+    this.automaticBlock = null
     this.mounted = false
   }
 
   private updateChip(): void {
     const count = this.blocks.length
     this.chip.dataset.state = count === 0 ? 'default' : 'chosen'
-    this.chip.textContent = `marked for the question · ${count}`
+    const automatic = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
+    this.chip.textContent = `marked for the question · ${count}${automatic}`
     this.chip.title =
-      count === 0 ? 'Mark blocks to include them in a question' : 'Open the marked blocks'
-    this.chip.setAttribute('aria-label', `marked for the question · ${count}`)
+      count === 0 && this.automaticBlock === null
+        ? 'Mark blocks to include them in a question'
+        : 'Open the marked blocks'
+    this.chip.setAttribute('aria-label', `marked for the question · ${count}${automatic}`)
   }
 
   private renderPanel(): void {
-    const rows: FloatingPanelRow[] = this.blocks.map((grant) => ({
+    const rows: FloatingPanelRow[] = this.panelBlocks().map((grant) => ({
       id: grant.itemId,
-      displayText: grant.command,
+      displayText: grant.automatic
+        ? `Frozen screen attached automatically · ${grant.command}`
+        : grant.command,
       matchRanges: [],
-      actions: [this.dismissButton(grant.itemId)],
+      ...(grant.automatic ? {} : { actions: [this.dismissButton(grant.itemId)] }),
     }))
     const footer = document.createElement('div')
     footer.className = 'ui-floating-panel__footer'
@@ -145,13 +171,14 @@ export class GrantController {
       this.repaintBlocks()
       this.updateChip()
       this.onChange?.(this.blocks)
-      if (this.blocks.length === 0) this.panel.hide()
+      if (this.blocks.length === 0 && this.automaticBlock === null) this.panel.hide()
       else this.renderPanel()
     })
     return button
   }
+
   private reveal(index: number): void {
-    const grant = this.blocks[index]
+    const grant = this.panelBlocks()[index]
     if (!grant) return
     grant.blockEl.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     const marked: HTMLElement[] =

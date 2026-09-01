@@ -40,6 +40,10 @@ func (s *stubProvider) Read(ctx context.Context, path string, maxBytes int64) (C
 	return Content{Path: path}, nil
 }
 
+func (s *stubProvider) Stat(ctx context.Context, path string) (Stat, error) {
+	return Stat{Kind: KindRegular}, nil
+}
+
 func (s *stubProvider) Canonical(ctx context.Context, path string) (string, error) { return path, nil }
 
 func (s *stubProvider) Watch(ctx context.Context, path string) (Watch, error) {

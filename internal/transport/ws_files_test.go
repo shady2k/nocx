@@ -546,6 +546,217 @@ func TestFilesOpen_UnknownSessionRefused(t *testing.T) {
 	}
 }
 
+// TestFilesStat_ClassifiesWithoutPaging proves a file link's classification
+// costs one files.stat call, even when its parent would require many pages.
+func TestFilesStat_ClassifiesWithoutPaging(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      file,
+	}, 3)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("files.stat: %+v", env.Error)
+	}
+	var got filesStatResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatalf("files.stat: decode: %v", err)
+	}
+	if got.Kind != string(filesystem.KindRegular) {
+		t.Errorf("kind = %q, want %q", got.Kind, filesystem.KindRegular)
+	}
+}
+
+func TestFilesStat_DirectoryStillReachesDirectoryKind(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child")
+	if err := os.Mkdir(child, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      child,
+	}, 3)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("files.stat: %+v", env.Error)
+	}
+	var got filesStatResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatalf("files.stat: decode: %v", err)
+	}
+	if got.Kind != string(filesystem.KindDir) {
+		t.Errorf("kind = %q, want %q", got.Kind, filesystem.KindDir)
+	}
+}
+
+func TestFilesStat_MissingPathRefused(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      filepath.Join(dir, "missing"),
+	}, 3)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("files.stat missing path error = %+v, want -32602", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "files.stat.error.schema.json"), mustMarshal(env.Error.Data), "files.stat missing error data")
+	var data struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(mustMarshal(env.Error.Data), &data); err != nil {
+		t.Fatalf("files.stat missing error data: %v", err)
+	}
+	if data.Reason != "not-found" {
+		t.Fatalf("files.stat missing reason = %q, want not-found", data.Reason)
+	}
+}
+
+type statErrorProvider struct {
+	filesystem.Provider
+	err error
+}
+
+func (p *statErrorProvider) Stat(context.Context, string) (filesystem.Stat, error) {
+	return filesystem.Stat{}, p.err
+}
+
+func TestFilesStat_UnreadablePathRefused(t *testing.T) {
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(func(_ session.Session, rootPath string) (filesystem.Provider, error) {
+		return &statErrorProvider{
+			Provider: local.New(local.WithRoot(rootPath)),
+			err:      fmt.Errorf("wrapped stat failure: %w", &filesystem.ErrPermission{Path: "/secret", Err: os.ErrPermission}),
+		}, nil
+	}))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      filepath.Join(dir, "secret"),
+	}, 3)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("files.stat unreadable path error = %+v, want -32602", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "files.stat.error.schema.json"), mustMarshal(env.Error.Data), "files.stat permission error data")
+	var data struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(mustMarshal(env.Error.Data), &data); err != nil {
+		t.Fatalf("files.stat permission error data: %v", err)
+	}
+	if data.Reason != "permission-denied" {
+		t.Fatalf("files.stat permission reason = %q, want permission-denied", data.Reason)
+	}
+}
+
+func TestFilesStat_UnknownFailureCarriesUnavailableReason(t *testing.T) {
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(func(_ session.Session, rootPath string) (filesystem.Provider, error) {
+		return &statErrorProvider{
+			Provider: local.New(local.WithRoot(rootPath)),
+			err:      errors.New("stat transport failed"),
+		}, nil
+	}))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      filepath.Join(dir, "unclear"),
+	}, 3)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32603 {
+		t.Fatalf("files.stat unknown error = %+v, want -32603", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "files.stat.error.schema.json"), mustMarshal(env.Error.Data), "files.stat unknown error data")
+	var data struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(mustMarshal(env.Error.Data), &data); err != nil {
+		t.Fatalf("files.stat unknown error data: %v", err)
+	}
+	if data.Reason != "unavailable" {
+		t.Fatalf("files.stat unknown reason = %q, want unavailable", data.Reason)
+	}
+}
+
+func TestFilesStat_BindingGoneRefused(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	closeSession := jsonrpcCallWithID(t, e.conn, "close", map[string]string{"sessionId": sid}, 3)
+	var closeEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(closeSession, &closeEnv); err != nil {
+		t.Fatalf("close: unmarshal: %v", err)
+	}
+	if closeEnv.Error != nil {
+		t.Fatalf("close: %+v", closeEnv.Error)
+	}
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.stat", map[string]any{
+		"bindingId": bid,
+		"path":      dir,
+	}, 4)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("files.stat: unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("files.stat gone binding error = %+v, want -32602", env.Error)
+	}
+}
+
 // TestFilesList_UnknownBindingRefused: every external call fails cleanly
 // on a binding id that does not exist.
 func TestFilesList_UnknownBindingRefused(t *testing.T) {

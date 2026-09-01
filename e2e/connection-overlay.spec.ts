@@ -361,10 +361,10 @@ test.describe('connection overlay survives backend loss', () => {
       pages.push(page)
 
       await expect(overlay(page)).toHaveAttribute('data-state', 'blocked')
-      await expect(overlay(page).locator('.ui-connection-overlay__message')).toHaveText(
+      await expect(overlay(page).locator('.ui-connection-overlay__headline')).toHaveText(
         failure.message,
       )
-      await expect(overlay(page).locator('.ui-connection-overlay__remedy')).toHaveText(
+      await expect(overlay(page).locator('.ui-connection-overlay__detail')).toHaveText(
         failure.remedy,
       )
       await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()

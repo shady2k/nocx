@@ -445,6 +445,26 @@ describe('PaneManager', () => {
       .workspaces.flatMap((workspace) => workspace.panes)
       .find((candidate) => candidate.host === 'host.example.com')
     expect(unavailable?.cwd).toEqual({ state: 'unavailable' })
+
+    // The case the whole three-state shape exists for, and the only one where
+    // the `unavailable` check does any work: the helper ASKED, could not
+    // answer, and a cwd value is present anyway. Omitting cwd here would let
+    // this pass with the check deleted — the empty-value branch would catch
+    // it — and a reader that showed the stale value would be the exact defect
+    // nocx-k6p18.10 built three states to prevent, silently, because such a
+    // value is always plausible.
+    client.listHelperSessions.mockResolvedValue([
+      entry({ cwd: '/stale-from-an-earlier-answer', unavailable: ['cwd'] }),
+    ])
+    await manager.refreshHelperSessions()
+    const stale = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(stale?.cwd, 'the overview showed a cwd the helper reported as unavailable').toEqual({
+      state: 'unavailable',
+    })
   })
 
   // ── fallback title consistency (badge vs title after close) ───────────

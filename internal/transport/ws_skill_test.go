@@ -21,7 +21,7 @@ func TestSkillsSettingsMethodsOverWire(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(authored, "SKILL.md"), []byte("---\nname: deploy\ndescription: deploy\n---\nbody\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := skill.NewStoreWithDocumentStore(skill.OSFileSystem{}, []skill.Root{
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{
 		{Dir: filepath.Dir(authored), Provenance: skill.ProvenanceAuthored},
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
 	}, storage.NewDocumentStore(configDir))

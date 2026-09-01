@@ -16,7 +16,7 @@ func TestCorruptDisabledDocumentFailsClosed(t *testing.T) {
 		t.Fatalf("write corrupt document: %v", err)
 	}
 
-	source := NewStoreWithDocumentStore(OSFileSystem{}, []Root{
+	source := NewStore(OSFileSystem{}, []Root{
 		{Dir: authored, Provenance: ProvenanceAuthored},
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: ProvenanceManaged},
 	}, storage.NewDocumentStore(configDir))
@@ -38,7 +38,7 @@ func TestSetEnabledPersistsAndHidesSkill(t *testing.T) {
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: ProvenanceManaged},
 	}
 	docStore := storage.NewDocumentStore(configDir)
-	source := NewStoreWithDocumentStore(OSFileSystem{}, roots, docStore)
+	source := NewStore(OSFileSystem{}, roots, docStore)
 
 	if err := source.SetEnabled("deploy", false); err != nil {
 		t.Fatalf("disable skill: %v", err)
@@ -57,7 +57,7 @@ func TestSetEnabledPersistsAndHidesSkill(t *testing.T) {
 		t.Fatal("want skills.read to refuse a disabled skill")
 	}
 
-	fresh := NewStoreWithDocumentStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))
+	fresh := NewStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))
 	if got := fresh.Index(); len(got) != 0 {
 		t.Fatalf("fresh index = %+v, want no disabled skills", got)
 	}
@@ -73,7 +73,7 @@ func TestSetEnabledPersistsAndHidesSkill(t *testing.T) {
 func TestApprovedDigestCoversEveryFileAndIsDeterministic(t *testing.T) {
 	configDir := t.TempDir()
 	managed := filepath.Join(configDir, "managed-skills")
-	store := NewStoreWithDocumentStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}}, storage.NewDocumentStore(configDir))
+	store := NewStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}}, storage.NewDocumentStore(configDir))
 	if err := store.Create("deploy", "deploy", "body"); err != nil {
 		t.Fatalf("create: %v", err)
 	}

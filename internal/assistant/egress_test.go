@@ -67,7 +67,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -127,7 +127,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -169,7 +169,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -245,7 +245,7 @@ func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
 	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
 	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
 
-	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}})
+	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, nil)
 	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
 		Kind: content.ResourceContent,
 		ID:   "content",
@@ -348,7 +348,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

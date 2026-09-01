@@ -79,7 +79,7 @@ func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	sourceAuthored := filepath.Join(sourceConfig, "skills")
 	sourceManaged := filepath.Join(sourceConfig, "managed-skills")
 	writeAuthoredSkill(t, sourceAuthored, "authored", "written here", "Use the local deploy command.")
-	sourceSkills := skill.NewStoreWithDocumentStore(nil, []skill.Root{
+	sourceSkills := skill.NewStore(nil, []skill.Root{
 		{Dir: sourceAuthored, Provenance: skill.ProvenanceAuthored},
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: sourceManaged, Provenance: skill.ProvenanceManaged},
@@ -110,7 +110,7 @@ func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	destinationConfig := t.TempDir()
 	destinationAuthored := filepath.Join(destinationConfig, "skills")
 	destinationManaged := filepath.Join(destinationConfig, "managed-skills")
-	destinationSkills := skill.NewStoreWithDocumentStore(nil, []skill.Root{
+	destinationSkills := skill.NewStore(nil, []skill.Root{
 		{Dir: destinationAuthored, Provenance: skill.ProvenanceAuthored},
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: destinationManaged, Provenance: skill.ProvenanceManaged},

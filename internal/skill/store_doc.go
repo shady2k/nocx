@@ -75,12 +75,6 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 	return s
 }
 
-// NewStoreWithDocumentStore wires the skill settings document through the
-// same DocumentStore as the rest of the config family.
-func NewStoreWithDocumentStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *Store {
-	return newStore(fsys, roots, docStore)
-}
-
 func (s *Store) loadDisabled() (map[string]struct{}, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()

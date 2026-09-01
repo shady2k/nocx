@@ -385,17 +385,6 @@ type ProbeResult struct {
 	At time.Time `json:"at"`
 }
 
-// NewClientWithoutSkillRoots builds the engine client with the caller-declared
-// safety floor. The floor is a mandatory parameter rather than a default so
-// production and tests cannot silently omit it. This constructor is named for
-// what it lacks so callers must say out loud when they have no filesystem skill
-// roots: a nil default here would silently disable the fence that keeps
-// files.create out of the managed skill root.
-func NewClientWithoutSkillRoots(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, error) {
-	client, _, err := NewClientAndRegistry(logger, recorder, floor, nil)
-	return client, err
-}
-
 // NewClientAndRegistry builds the assistant and returns the exact registry
 // used by its engine. The composition root passes that same registry to
 // transport so prompt offers and execution use one declaration table.
@@ -406,15 +395,6 @@ func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor conten
 	}
 	searchSchema, _ := fs.ReadFile(tools.Schemas, "search.schema.json")
 	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
-}
-
-func newClientWithoutSkillRoots(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := assembleToolRegistry(toolsFS, nil)
-	if err != nil {
-		return nil, err
-	}
-	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
 }
 
 func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {

@@ -81,7 +81,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{
 		Dir:        root,
 		Provenance: skill.ProvenanceManaged,
-	}})
+	}}, nil)
 	var requests atomic.Int64
 	_, server := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
 		var envelope struct {
@@ -105,7 +105,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	})
 	defer server.Close()
 
-	client, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	client, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestSkillsWriteResultsConformOnTheProviderSocket(t *testing.T) {
 			})
 			defer server.Close()
 
-			client, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+			client, err := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 			if err != nil {
 				t.Fatalf("newClient: %v", err)
 			}

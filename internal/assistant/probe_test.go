@@ -132,7 +132,7 @@ func TestProbe_SucceedsEndToEnd(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestProbe_SendsCustomHeadersOnCompletion(t *testing.T) {
 		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
 		{Name: "X-Title", Value: "nocx"},
 	}
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestProbe_ConnectionCheckSendsCustomHeaders(t *testing.T) {
 		{Name: "X-Tenant", Value: "tenant-7"},
 		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
 	}
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestProbe_ConnectionCheckSendsCustomHeaders(t *testing.T) {
 // TestProbe_DialFailure is the mechanical failure path: an unreachable
 // address is a probe outcome (OK=false with the dial error), not a Go error.
 func TestProbe_DialFailure(t *testing.T) {
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestProbe_HTTPError(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestProbe_ZeroContent(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestProbe_StreamingDeliversAnAnswer(t *testing.T) {
 	_, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestProbe_StreamingDeliversAnAnswer(t *testing.T) {
 // TestProbe_InvalidParams: a probe that cannot run is a Go error, and no
 // result is produced.
 func TestProbe_InvalidParams(t *testing.T) {
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestProbe_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestProbe_RedirectToPublicRefused(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

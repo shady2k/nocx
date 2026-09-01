@@ -64,7 +64,7 @@ func TestAgentAsk_NoKeyEndpointAnswersWithoutAuthorization(t *testing.T) {
 	}))
 	defer model.Close()
 
-	client, err := assistant.NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

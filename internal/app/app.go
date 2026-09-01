@@ -776,6 +776,7 @@ func New(opts ...Option) (*App, error) {
 	// close-before-remove, so a machine's channels are closed by the same
 	// bookkeeping that started them.
 	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
+	helperReg.registry = sess
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -1225,6 +1226,7 @@ func New(opts ...Option) (*App, error) {
 		// uninstall surface needs it to close them before removing an
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
+		transport.WithHelperSessionOpener(helperReg),
 		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before

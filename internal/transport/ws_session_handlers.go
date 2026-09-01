@@ -137,8 +137,9 @@ type openHandlers struct {
 	// held by an open the whole control plane would stop. The read itself
 	// needs no gate: layout reads go straight to the pool and never through
 	// the single writer goroutine.
-	panes paneWorkspaces
-	log   log.Logger
+	panes  paneWorkspaces
+	helper HelperSessionOpener
+	log    log.Logger
 }
 
 // paneWorkspaces answers "which workspace is this pane in" — the one
@@ -534,6 +535,25 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// was still connecting.
 	err = h.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		var oerr error
+		if cfg.Kind == session.KindRemote && h.helper != nil {
+			var selected bool
+			var openedHosted HostedSessionOpen
+			openedHosted, selected, oerr = h.helper.OpenHosted(ctx, cfg)
+			if selected {
+				if oerr != nil {
+					return oerr
+				}
+				if openedHosted.Session == nil {
+					return errors.New("helper session opener returned no session")
+				}
+				sess = openedHosted.Session
+				opened = true
+				return nil
+			}
+			if oerr != nil {
+				return oerr
+			}
+		}
 		sess, oerr = svc.Open(ctx, cfg)
 		if oerr != nil {
 			return oerr
@@ -1140,7 +1160,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), helper: s.helperSessionOpener, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

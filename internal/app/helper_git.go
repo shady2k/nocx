@@ -12,6 +12,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -84,7 +86,7 @@ func accountFromOptions(opts []ssh.ConnectOption) string {
 
 func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
 	reg := &helperRegistry{
-		lanes: lanes, log: log,
+		lanes: lanes, install: lanes, log: log, consent: store,
 		hosts:   make(map[session.ID]*hostHelper),
 		closing: make(map[string]struct{}),
 	}
@@ -250,20 +252,28 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 // is one bounded exec and writes nothing; it is the only remote command
 // the consent decision runs before the user has accepted.
 func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (deploy.Platform, bool, error) {
-	ctx := context.Background()
-	probe, err := lanes.DiscoveryConn(ctx, sess.Host(), sess.SSHOptions()...)
+	_, platform, available, err := probeHelperPlatformAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes)
+	return platform, available, err
+}
+
+func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider) (string, deploy.Platform, bool, error) {
+	probe, err := lanes.DiscoveryConn(ctx, host, opts...)
 	if err != nil {
-		return deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", sess.Host(), err)
+		return "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
 	}
 	defer func() { _ = probe.Close() }()
+	fingerprint := ""
+	if fp, ok := probe.(interface{ HostKeyFingerprint() string }); ok {
+		fingerprint = fp.HostKeyFingerprint()
+	}
 	platform, err := deploy.Probe(ctx, probeExec{probe})
 	if err != nil {
-		return deploy.Platform{}, false, err
+		return fingerprint, deploy.Platform{}, false, err
 	}
 	if _, _, aerr := deploy.DefaultSource.Artifact(platform); aerr != nil {
-		return platform, false, aerr
+		return fingerprint, platform, false, aerr
 	}
-	return platform, true, nil
+	return fingerprint, platform, true, nil
 }
 
 // installHelperFor installs the helper artifact on sess's host for the
@@ -274,26 +284,26 @@ func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (dep
 // lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
 func installHelperFor(sess session.Session, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
-	ctx := context.Background()
+	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, platform)
+}
 
-	conn, err := lanes.HelperInstallConn(ctx, sess.Host(), sess.SSHOptions()...)
+func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
+	conn, err := lanes.HelperInstallConn(ctx, host, opts...)
 	if err != nil {
-		return "", "", fmt.Errorf("install lease for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("install lease for %s: %w", host, err)
 	}
 	defer func() { _ = conn.Close() }()
 	home, err := conn.Home()
 	if err != nil {
-		return "", "", fmt.Errorf("remote home for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("remote home for %s: %w", host, err)
 	}
 	fsys := installFS{conn}
 	command, hash, err = deploy.Ensure(ctx, fsys, deploy.DefaultSource, home, platform)
 	if err != nil {
 		return "", "", err
 	}
-	// Bound the footprint: every superseded install on the host goes, the
-	// one just installed never (D25).
 	if err := deploy.Prune(ctx, fsys, home, path.Base(path.Dir(command))); err != nil {
-		return "", "", fmt.Errorf("prune for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("prune for %s: %w", host, err)
 	}
 	return command, hash, nil
 }
@@ -386,12 +396,87 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 // exposed, and sharing a helper across principals would be an
 // authorization error. Cross-session sharing waits for that seam.
 type helperRegistry struct {
-	lanes helperLaneProvider
-	log   *slog.Logger
+	lanes    helperLaneProvider
+	install  helperInstallProvider
+	log      *slog.Logger
+	consent  *consent.Store
+	registry *session.Reg
+	mu       sync.Mutex
+	hosts    map[session.ID]*hostHelper
+	closing  map[string]struct{}
+}
 
-	mu      sync.Mutex
-	hosts   map[session.ID]*hostHelper
-	closing map[string]struct{}
+// OpenHosted applies the same helper resolver used by git.open, then spawns
+// and attaches through the helper ABI. The returned session id is the helper's
+// id; the coordinator never mints a replacement.
+func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (transport.HostedSessionOpen, bool, error) {
+	if cfg.Kind != session.KindRemote || cfg.Remote == nil || r.install == nil || r.registry == nil {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	opts := session.SSHOptionsFromConfig(cfg.Remote)
+	fingerprint, platform, available, err := probeHelperPlatformAt(ctx, cfg.Host, opts, r.install)
+	if err != nil && !available {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	resolver := newResolver(
+		withStore(r.consent),
+		withHelperArtifactAvailable(available),
+		withHelperRequested(true),
+	)
+	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredRelay {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, platform)
+	if err != nil {
+		return transport.HostedSessionOpen{}, true, err
+	}
+	f := &sessionFactory{reg: r, sid: session.NewID(), host: cfg.Host, account: accountFromOptions(opts), opts: opts, command: command, expectHash: generation}
+	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
+	h.mu.Lock()
+	c, outcome, err := h.connectLocked(ctx)
+	h.mu.Unlock()
+	if err != nil {
+		return transport.HostedSessionOpen{}, true, err
+	}
+	if outcome.State != "" {
+		return transport.HostedSessionOpen{}, true, errors.New(outcome.Message)
+	}
+	var subscriberRaw [16]byte
+	if _, randErr := rand.Read(subscriberRaw[:]); randErr != nil {
+		return transport.HostedSessionOpen{}, true, randErr
+	}
+	subscriber := proto.SubscriberID(hex.EncodeToString(subscriberRaw[:]))
+	entry, err := c.Spawn(ctx, proto.SpawnParams{Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows})
+	if err != nil {
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	attached, err := c.Attach(ctx, proto.AttachParams{
+		Subscriber: subscriber,
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(entry.HostSessionID.Generation),
+			Session:    entry.HostSessionID.Session,
+		},
+		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true, RequestWrite: true,
+	})
+	if err != nil {
+		_ = c.CloseSession(ctx, entry.HostSessionID)
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	sid := session.ID(entry.HostSessionID.Session)
+	f.sid = sid
+	sess, err := r.registry.Adopt(cfg, sid, attached)
+	if err != nil {
+		_ = attached.Close()
+		_ = c.CloseSession(ctx, entry.HostSessionID)
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	r.mu.Lock()
+	r.hosts[sid] = h
+	r.mu.Unlock()
+	return transport.HostedSessionOpen{Session: sess, Host: cfg.Host, Account: f.account, Generation: generation}, true, nil
 }
 
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {

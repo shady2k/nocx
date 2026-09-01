@@ -598,6 +598,9 @@ type WSServer struct {
 	// and Refusal, git.open answers the not-available error for that
 	// session.
 	gitHelperFor GitFactoryFor
+	// helperSessionOpener selects the execution-host-owned PTY for remote
+	// opens when the existing helper resolver permits it.
+	helperSessionOpener HelperSessionOpener
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -1266,6 +1269,25 @@ type GitOpenSelection struct {
 // available for this host, and may it be used" (the remote-helper design).
 // ConsentRequired and Refusal answer their states instead of opening; a
 // selection with none of the three answers the not-available error.
+
+// HostedSessionOpen is the synchronous result of selecting a helper-owned
+// session. Host, Account and Generation are facts used by later projections;
+// Session carries the helper-minted authoritative id.
+type HostedSessionOpen struct {
+	Session    session.Session
+	Host       string
+	Account    string
+	Generation string
+}
+
+type HelperSessionOpener interface {
+	OpenHosted(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+}
+
+func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {
+	return func(s *WSServer) { s.helperSessionOpener = opener }
+}
+
 // It must be side-effect-free: git.open consults it twice (the handler's
 // refusal decision, then the open), and the two calls must agree.
 type GitFactoryFor func(sess session.Session) GitOpenSelection

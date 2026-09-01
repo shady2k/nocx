@@ -65,11 +65,12 @@ type Client struct {
 	// response to its waiting Call by request id; streams holds the D14
 	// reassembly state of each chunked response in flight, keyed by the
 	// stream id the ChunkedResult sentinel minted.
-	mu      sync.Mutex
-	pending map[uint64]chan proto.Response
-	streams map[uint64]*chunkStream
-	nextID  uint64
-	lost    bool
+	mu          sync.Mutex
+	pending     map[uint64]chan proto.Response
+	streams     map[uint64]*chunkStream
+	attachments map[[16]byte]*AttachedSession
+	nextID      uint64
+	lost        bool
 
 	done      chan struct{}
 	hsCh      chan error
@@ -211,8 +212,16 @@ func (c *Client) lose(reason error) {
 		c.lostErr = reason
 		c.mu.Lock()
 		c.lost = true
+		matched := make([]*AttachedSession, 0, len(c.attachments))
+		for _, a := range c.attachments {
+			matched = append(matched, a)
+		}
+		c.attachments = make(map[[16]byte]*AttachedSession)
 		c.mu.Unlock()
 		close(c.done)
+		for _, a := range matched {
+			a.finish()
+		}
 	})
 }
 
@@ -231,7 +240,7 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeNotify:
-		c.log.Warn("notify frame", "bytes", len(payload))
+		c.sessionNotify(payload)
 	case proto.TypeSessionData:
 		c.sessionData(payload)
 	default:
@@ -239,26 +248,60 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	}
 }
 
-// sessionData handles an inbound data-plane frame (AD-1: raw PTY bytes, never
-// JSON and never base64). This coordinator has nothing to route them to yet —
-// the session service is reserved and unbuilt (D15) — so the frame is dropped.
-//
-// It is recognised rather than ignored because generations are immutable and
-// coexist: a helper newer than this build will send these frames, and an
-// unknown type byte is garbage to the decoder, which then scans forward one
-// byte at a time through the PTY stream and through the head of whatever
-// followed it. Dropping one frame is the cheap outcome; resyncing is not.
-//
-// The bytes are counted, never read (AD-6).
+func (c *Client) sessionNotify(payload []byte) {
+	var n proto.Notification
+	if err := json.Unmarshal(payload, &n); err != nil {
+		c.log.Warn("malformed notify frame", "err", err)
+		return
+	}
+	if n.Service != proto.ServiceSession || n.Event != proto.EventSessionExit {
+		return
+	}
+	raw, err := json.Marshal(n.Params)
+	if err != nil {
+		return
+	}
+	var exit proto.SessionExit
+	if unmarshalErr := json.Unmarshal(raw, &exit); unmarshalErr != nil {
+		c.log.Warn("malformed session exit notification", "err", unmarshalErr)
+		return
+	}
+	sessionRaw, err := proto.SessionBytes(exit.Session.Session)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	matched := make([]*AttachedSession, 0)
+	for _, a := range c.attachments {
+		if a.session == sessionRaw {
+			matched = append(matched, a)
+		}
+	}
+	c.mu.Unlock()
+	for _, a := range matched {
+		a.finish()
+	}
+}
+
+// sessionData routes raw PTY bytes to the attached subscriber. The subscriber
+// is part of the frame identity: a displaced attachment must never feed the
+// old coordinator.
 func (c *Client) sessionData(payload []byte) {
 	f, err := proto.DecodeSessionFrame(payload)
 	if err != nil {
 		c.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
 		return
 	}
-	c.log.Warn("session data frame dropped: no session reader in this coordinator",
-		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
-		"bytes", len(f.Payload))
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("session data frame dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"bytes", len(f.Payload))
+		return
+	}
+	a.deliver(f.Payload)
 }
 
 // deliverResponse routes one response frame. A response whose result is a

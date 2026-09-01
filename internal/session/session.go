@@ -590,6 +590,48 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	return s, nil
 }
 
+// Adopt registers a session whose execution channel was created by an
+// execution-host helper. The helper mints the id; the registry preserves it
+// rather than generating a second coordinator id (AD-7).
+func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
+	if ch == nil {
+		return nil, errors.New("session: helper returned a nil channel")
+	}
+	if id == "" {
+		_ = ch.Close()
+		return nil, errors.New("session: helper returned an empty session id")
+	}
+	if !cfg.Parent.Zero() {
+		if err := r.validateParent(id, cfg.Parent); err != nil {
+			_ = ch.Close()
+			return nil, err
+		}
+	}
+	eff := effectiveSize(cfg.clientSize())
+	epoch := r.epochCounter.Add(1)
+	s := &realSession{
+		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
+		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
+		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
+		sshOpts: nil, ch: ch, size: eff, log: r.log.With("session_id", string(id)),
+		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}),
+	}
+	r.mu.Lock()
+	if _, exists := r.sessions[id]; exists {
+		r.mu.Unlock()
+		_ = ch.Close()
+		return nil, fmt.Errorf("session: session already exists: %s", id)
+	}
+	r.sessions[id] = s
+	r.mu.Unlock()
+	s.startWriteLoop()
+	r.log.Info("helper session adopted", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch)
+	if r.usageTracker != nil && cfg.ProfileID != "" {
+		r.usageTracker.SessionOpened(cfg.ProfileID)
+	}
+	return s, nil
+}
+
 // InstanceID is this backend instance's identity: the value stamped on every
 // session this registry opens, minted once at construction and equal to no
 // other registry's.
@@ -812,6 +854,12 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 		opts = append(opts, ssh.WithAgentForward())
 	}
 	return opts
+}
+
+// SSHOptionsFromConfig returns the canonical option translation used by the
+// registry when a helper-backed session needs the same destination credentials.
+func SSHOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
+	return sshOptionsFromConfig(cfg)
 }
 
 // realSession is the concrete Session implementation.

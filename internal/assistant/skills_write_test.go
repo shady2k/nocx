@@ -240,19 +240,17 @@ func TestSkillsWriteResultsConformOnTheProviderSocket(t *testing.T) {
 			params.KnownMaterial = &fakeKnownMaterial{}
 			params.Skills = &skillsWriteLibrary{}
 			askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil })
-			if tc.name != "delete" {
-				var asked *ApprovalRequestedError
-				if !errors.As(askErr, &asked) || asked.Request == nil {
-					t.Fatalf("Ask error = %v, want the approval-requested suspension", askErr)
-				}
-				if !approvals.Approve(Approval{
-					RunID: asked.Request.RunID, Attempt: asked.Request.Attempt,
-					Tool: asked.Request.Tool, CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
-				}) {
-					t.Fatal("the exact skill proposal was not pending")
-				}
-				askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil })
+			var asked *ApprovalRequestedError
+			if !errors.As(askErr, &asked) || asked.Request == nil {
+				t.Fatalf("Ask error = %v, want the approval-requested suspension", askErr)
 			}
+			if !approvals.Approve(Approval{
+				RunID: asked.Request.RunID, Attempt: asked.Request.Attempt,
+				Tool: asked.Request.Tool, CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
+			}) {
+				t.Fatal("the exact skill proposal was not pending")
+			}
+			askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil })
 			if askErr != nil {
 				t.Fatalf("Ask: %v", askErr)
 			}

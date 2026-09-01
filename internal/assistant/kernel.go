@@ -543,7 +543,7 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	if !m.inScope(t, resources, resourceDeclaration) {
 		return policyRefuse, RefusedOutOfScope, ""
 	}
-	if decision == content.DecisionPermit && isSkillWriteTool(t.Name) {
+	if decision == content.DecisionPermit && isSkillMutationTool(t) {
 		return policyAsk, "", ""
 	}
 	if decision == content.DecisionPermit {
@@ -552,8 +552,8 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	return policyAsk, "", ""
 }
 
-func isSkillWriteTool(name string) bool {
-	return name == "skills.create" || name == "skills.update"
+func isSkillMutationTool(tool agenttools.Tool) bool {
+	return tool.ScopeFamily == "skill" && tool.Effect != content.EffectObserve
 }
 
 func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []agenttools.ResourceRef) (string, bool) {
@@ -1463,7 +1463,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
-	skillWrite := isSkillWriteTool(decl.Name)
+	skillMutation := isSkillMutationTool(decl)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1481,7 +1481,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// Approval binds to the exact proposal: an approved call skips
 		// the ask; a changed argument hashes differently and does NOT
 		// resume under the old approval (design §7.2).
-		if !skillWrite {
+		if !skillMutation {
 			ap := k.proposal(decl.Name, callID, rawArgs)
 			if k.approvals != nil && k.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; verify before dispatch
@@ -1493,15 +1493,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
 	// ask — never lower it. Ordinary calls are consulted only where the
-	// policy says permit; skills.create/update are deliberately consulted
+	// policy says permit; skill mutations are deliberately consulted
 	// before their mandatory approval even when policy says ask. Refused
 	// calls are never changed by a verdict, and their latency stays off a
 	// path where a person is already waiting.
-	// the approval covers the proposal INCLUDING its classification,
-	// and consulting the classifier again on the approved resume could
-	// ask forever. Failure is escalation, always: unreachable, timed
-	// out, unparseable and role-unassigned each escalate, and the
-	// classifier is never silently skipped.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources)
@@ -1518,7 +1513,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 		classifierFact = fact
 	}
-	if skillWrite && !k.proposalApproved(decl.Name, callID, rawArgs) {
+	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		if classifierFact != nil {
 			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources), classifierFact, resources, invocation)
 		}

@@ -81,6 +81,31 @@ func TestASkillsWriteNeverAutoPermits(t *testing.T) {
 	}
 }
 
+func TestASkillsDeleteNeverAutoPermits(t *testing.T) {
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{
+		Kind: content.ResourceContent,
+		ID:   "skill/deploy",
+	}})
+	mw := middlewareFor(t, grant, &fakeLedger{}, nil)
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	tool, ok := reg.Lookup("skills.delete")
+	if !ok {
+		t.Fatal("skills.delete is not in the registry")
+	}
+	resources, err := tool.ResolveResources(map[string]any{"name": "deploy"}, mw.kernel.runCtx)
+	if err != nil {
+		t.Fatalf("ResolveResources: %v", err)
+	}
+
+	outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, true, content.Invocation{Parsed: true})
+	if outcome != policyAsk {
+		t.Fatalf("outcome = %v, want policyAsk: deleting a skill must ask before removal", outcome)
+	}
+}
+
 func TestASkillsWriteClassifierFailureEscalates(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -140,5 +165,25 @@ func TestASkillsUpdateIsClassifiedBeforeApproval(t *testing.T) {
 	}
 	if request.Tool != "skills.update" {
 		t.Fatalf("request tool = %q, want skills.update", request.Tool)
+	}
+}
+
+func TestASkillsDeleteIsClassifiedBeforeApproval(t *testing.T) {
+	classifier := &skillsWriteClassifier{result: Classification{
+		Verdict: ClassifierClear,
+		Model:   "classifier-model",
+	}}
+	request := approvalFromSkillWrite(t, skillsWriteKernel(t, classifier), "skills.delete", `{"name":"deploy"}`)
+	if classifier.calls != 1 {
+		t.Fatalf("classifier calls = %d, want 1", classifier.calls)
+	}
+	if request.Tool != "skills.delete" {
+		t.Fatalf("request tool = %q, want skills.delete", request.Tool)
+	}
+	if request.Classifier == nil || request.Classifier.Verdict != ClassifierClear {
+		t.Fatalf("classifier = %+v, want a clear verdict carried into approval", request.Classifier)
+	}
+	if request.Finding != nil {
+		t.Fatalf("delete approval unexpectedly carried a body finding: %+v", request.Finding)
 	}
 }

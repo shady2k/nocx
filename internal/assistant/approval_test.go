@@ -129,7 +129,7 @@ func TestAsk_EscalationRecordsTheProposalThread(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -221,7 +221,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	f, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -362,7 +362,7 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 	_, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

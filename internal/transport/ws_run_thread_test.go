@@ -111,7 +111,7 @@ func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarne
 	fake, srv := newRunToolCallingServer("")
 	t.Cleanup(srv.Close)
 
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, err := assistant.NewClientWithoutSkillRoots(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -216,7 +216,7 @@ type approvalBinding struct {
 // result and the streamed answer text.
 func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, approvalBinding) {
 	t.Helper()
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, err := assistant.NewClientWithoutSkillRoots(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

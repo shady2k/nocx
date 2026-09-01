@@ -23,7 +23,7 @@ func TestAsk_LazyPresentationProjectsEssentialAndSearch(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestAsk_LazyPresentationFallsBackBelowSchemaThreshold(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestAsk_HiddenEligibleToolUsesFullKernelPipeline(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args, id: "hidden-call"}))
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestAsk_LazySearchIsVisibleWithoutObserveGrant(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestAsk_ConcurrentLazySearchUsesPrivateLoadedState(t *testing.T) {
 	_, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

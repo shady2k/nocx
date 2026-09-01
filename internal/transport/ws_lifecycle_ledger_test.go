@@ -265,7 +265,7 @@ func TestLifecycleSubmitAttempt_StoreUnavailableStillRunsCommand(t *testing.T) {
 }
 
 func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, err := assistant.NewClientWithoutSkillRoots(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

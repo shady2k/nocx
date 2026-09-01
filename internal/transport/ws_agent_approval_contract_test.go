@@ -173,7 +173,7 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 
 	fake, srv := newToolCallingServer()
 	defer srv.Close()
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, err := assistant.NewClientWithoutSkillRoots(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

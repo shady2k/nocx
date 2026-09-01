@@ -36,6 +36,18 @@ type Root struct {
 	Provenance Provenance
 }
 
+// FilesystemRoots returns the on-disk directories among roots, preserving
+// their order and omitting roots backed by an embedded filesystem.
+func FilesystemRoots(roots []Root) []string {
+	dirs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if root.Dir != "" {
+			dirs = append(dirs, root.Dir)
+		}
+	}
+	return dirs
+}
+
 // Skill is one discovered skill. The body is deliberately absent: discovery
 // reads frontmatter only, and the body is fetched by Read when a tool asks
 // for it.

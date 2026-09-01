@@ -196,7 +196,7 @@ func TestSkillsRead_OverTheWireConformsToContract(t *testing.T) {
 	})
 	defer server.Close()
 
-	client, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	client, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

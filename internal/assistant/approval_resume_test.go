@@ -52,7 +52,7 @@ func TestAsk_ApprovedProposalResumesWhenTheModelReRolls(t *testing.T) {
 	_, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -139,7 +139,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 	_, srv := newFakeOpenAI(twoProposalsThenAnswer("files.read", firstArgs, secondArgs))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -203,7 +203,7 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 	_, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -268,7 +268,7 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 	_, srv := newFakeOpenAI(twoProposalsThenAnswer("files.read", firstArgs, secondArgs))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

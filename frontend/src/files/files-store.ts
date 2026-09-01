@@ -167,10 +167,23 @@ interface FilesRoot extends DirListing {
 }
 
 export type FilesFlatRow =
-  | { kind: 'entry'; node: FilesNode; depth: number }
+  | { kind: 'entry'; node: FilesNode; depth: number; projected?: boolean }
   | { kind: 'loading'; dir: FilesRoot | FilesNode; depth: number }
   | { kind: 'more'; dir: FilesRoot | FilesNode; depth: number }
   | { kind: 'state'; dir: FilesRoot | FilesNode; depth: number }
+  | { kind: 'filter-searching'; dir: FilesRoot | FilesNode; depth: number }
+  | { kind: 'filter-refusal'; dir: FilesRoot | FilesNode; depth: number; message: string }
+
+interface FilterProjection {
+  dir: FilesRoot | FilesNode
+  bindingId: string
+  generation: number
+  filterGeneration: number
+  rev: string
+  state: 'searching' | 'ready' | 'refusal'
+  nodes: FilesNode[]
+  error: string | null
+}
 
 interface FilesBinding {
   bindingId: string
@@ -199,6 +212,11 @@ export interface FilesTreeStore {
    *  also what the reveal walk and the watch-set reconciliation reason
    *  about. Both must go on seeing the whole tree. */
   rows(): FilesFlatRow[]
+  /** Rows for the active name filter. These may contain disposable
+   *  whole-directory projection entries; `rows()` remains the committed tree. */
+  filterRows(): FilesFlatRow[]
+  /** Whether every expanded-and-truncated directory has answered. */
+  filterSettled(): boolean
   /** The panel's name filter (nocx-708q.2), and its residence is the same
    *  choice Git's made: in the store, so it survives the view being
    *  swapped out and back — the panel is unmounted whenever another
@@ -301,11 +319,30 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
   const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
   /** The panel's name filter (nocx-708q.2): the one string that narrows the
-   *  tree. Renderer-side over the rows the store already holds — typing
-   *  issues no request, so it can neither churn the watch set nor race a
-   *  reveal walk. Deliberately NOT reset by `dispose`, which is what makes
-   *  it survive a sidebar view switch. */
-  const [filter, setFilter] = createSignal('')
+   *  tree. Typing activates one serialized, whole-directory projection after
+   *  a debounce; subsequent keystrokes reuse it, so they cannot churn the
+   *  watch set or race a reveal walk. Deliberately NOT reset by `dispose`,
+   *  which is what makes it survive a sidebar view switch. */
+  const [filter, setFilterSignal] = createSignal('')
+  /** Filter projections are presentation-only whole-directory snapshots. */
+  const [filterVersion, setFilterVersion] = createSignal(0)
+  const filterProjections = new Map<string, FilterProjection>()
+  let filterTimer: ReturnType<typeof setTimeout> | null = null
+  let filterActivationReady = false
+  let filterSearchStarted = false
+  let filterQueue: {
+    dir: FilesRoot | FilesNode
+    ctx: ListCtx
+    rev: string
+    filterGeneration: number
+  }[] = []
+  let filterQueueRunning = false
+  let refreshing = false
+  let filterGeneration = 0
+  const FILTER_ACTIVATION_DEBOUNCE = 150
+  const bumpFilter = (): void => {
+    setFilterVersion((v) => v + 1)
+  }
   /** The path the last completed reveal selected (see the interface doc).
    *  Reset on every re-scope and dispose — a selection from a previous
    *  machine must not linger. */
@@ -360,29 +397,135 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  origin changes (or a newer reveal starts) must drop, never paint. */
   let revealWalkId = 0
 
+  interface RowWalkerOptions {
+    children(dir: FilesRoot | FilesNode): readonly FilesNode[]
+    resolveNode(dir: FilesRoot | FilesNode, candidate: FilesNode): FilesNode
+    isProjected(dir: FilesRoot | FilesNode, candidate: FilesNode): boolean
+    structural(dir: FilesRoot | FilesNode, depth: number): FilesFlatRow | null
+  }
+
+  function walkRows(r: FilesRoot, options: RowWalkerOptions): FilesFlatRow[] {
+    const out: FilesFlatRow[] = []
+    const emitDir = (dir: FilesRoot | FilesNode, childDepth: number): void => {
+      for (const candidate of options.children(dir)) {
+        const node = options.resolveNode(dir, candidate)
+        out.push({
+          kind: 'entry',
+          node,
+          depth: childDepth,
+          ...(options.isProjected(dir, candidate) ? { projected: true } : {}),
+        })
+        if (node.expanded) emitDir(node, childDepth + 1)
+      }
+      const structural = options.structural(dir, childDepth)
+      if (structural !== null) out.push(structural)
+    }
+    emitDir(r, 0)
+    return out
+  }
+
+  function standardStructural(dir: FilesRoot | FilesNode, depth: number): FilesFlatRow | null {
+    if (dir.state === 'ok') return dir.hasMore ? { kind: 'more', dir, depth } : null
+    if (dir.state !== null) return { kind: 'state', dir, depth }
+    return dir.busy ? { kind: 'loading', dir, depth } : null
+  }
+
   const rows = createMemo<FilesFlatRow[]>(() => {
     treeVersion()
     const r = root()
     if (r === null) return []
-    const out: FilesFlatRow[] = []
-    const emitDir = (dir: FilesRoot | FilesNode, childDepth: number): void => {
-      if (dir.state === 'ok') {
-        for (const child of dir.children) emitNode(child, childDepth)
-        if (dir.hasMore) out.push({ kind: 'more', dir, depth: childDepth })
-      } else if (dir.state !== null) {
-        out.push({ kind: 'state', dir, depth: childDepth })
-      } else if (dir.busy) {
-        out.push({ kind: 'loading', dir, depth: childDepth })
-      }
-    }
-    const emitNode = (node: FilesNode, depth: number): void => {
-      out.push({ kind: 'entry', node, depth })
-      if (!node.expanded) return
-      emitDir(node, depth + 1)
-    }
-    emitDir(r, 0)
-    return out
+    return walkRows(r, {
+      children: (dir) => dir.children,
+      resolveNode: (_dir, candidate) => candidate,
+      isProjected: () => false,
+      structural: standardStructural,
+    })
   })
+
+  function validFilterProjection(dir: FilesRoot | FilesNode): FilterProjection | null {
+    const projection = filterProjections.get(dir.path)
+    const currentBinding = untrack(binding)
+    if (
+      projection === undefined ||
+      projection.dir !== dir ||
+      projection.bindingId !== currentBinding?.bindingId ||
+      projection.generation !== generation ||
+      projection.filterGeneration !== filterGeneration ||
+      projection.rev !== dir.rev
+    ) {
+      return null
+    }
+    return projection
+  }
+
+  function buildFilterRows(): FilesFlatRow[] {
+    const r = untrack(root)
+    if (r === null) return []
+    const active = filter().trim() !== ''
+    const sources = new Map<
+      FilesRoot | FilesNode,
+      { candidates: readonly FilesNode[]; actual: Map<string, FilesNode> | null }
+    >()
+    const sourceFor = (
+      dir: FilesRoot | FilesNode,
+    ): { candidates: readonly FilesNode[]; actual: Map<string, FilesNode> | null } => {
+      const existing = sources.get(dir)
+      if (existing !== undefined) return existing
+      const eligible = active && dir.state === 'ok' && dir.hasMore
+      const projection = eligible ? validFilterProjection(dir) : null
+      const actual =
+        projection?.state === 'ready'
+          ? new Map(dir.children.map((child) => [child.path, child]))
+          : null
+      const source = {
+        candidates: projection?.state === 'ready' ? projection.nodes : dir.children,
+        actual,
+      }
+      sources.set(dir, source)
+      return source
+    }
+    return walkRows(r, {
+      children: (dir) => sourceFor(dir).candidates,
+      resolveNode: (dir, candidate) => sourceFor(dir).actual?.get(candidate.path) ?? candidate,
+      isProjected: (dir, candidate) => {
+        const actual = sourceFor(dir).actual
+        return actual !== null && !actual.has(candidate.path)
+      },
+      structural: (dir, depth) => {
+        const eligible = active && dir.state === 'ok' && dir.hasMore
+        const projection = eligible ? validFilterProjection(dir) : null
+        if (!active || !eligible) return standardStructural(dir, depth)
+        if (projection?.state === 'refusal') {
+          return {
+            kind: 'filter-refusal',
+            dir,
+            depth,
+            message: projection.error ?? 'Could not search this directory',
+          }
+        }
+        return projection?.state === 'ready' ? null : { kind: 'filter-searching', dir, depth }
+      },
+    })
+  }
+
+  const filterRows = createMemo<FilesFlatRow[]>(() => {
+    treeVersion()
+    filterVersion()
+    filter()
+    return buildFilterRows()
+  })
+
+  function eligibleFilterDirs(): (FilesRoot | FilesNode)[] {
+    const r = untrack(root)
+    if (r === null) return []
+    const dirs: (FilesRoot | FilesNode)[] = []
+    const collect = (dir: FilesRoot | FilesNode): void => {
+      if (dir.state === 'ok' && dir.hasMore) dirs.push(dir)
+      for (const child of dir.children) if (child.expanded) collect(child)
+    }
+    collect(r)
+    return dirs
+  }
   /** The response's request is still the view's current scope: same tab,
    *  and — once a binding exists — the same binding. The generation part of
    *  the triple is checked per node (rule 2), not here.
@@ -393,6 +536,159 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  a response applies to the state it lands in, not to a state it could
    *  have re-rendered for. untrack says that in code, and keeps the
    *  one-shot guard from looking like a reactive derivation. */
+
+  function maybeQueueFilterDirs(): void {
+    if (!filterSearchStarted || !filterActivationReady || refreshing || revealing) return
+    const ctx = captureCtx()
+    if (ctx === null) return
+    const eligible = eligibleFilterDirs()
+    const eligiblePaths = new Set(eligible.map((dir) => dir.path))
+    for (const path of filterProjections.keys()) {
+      if (!eligiblePaths.has(path)) filterProjections.delete(path)
+    }
+    for (const dir of eligible) {
+      const existing = validFilterProjection(dir)
+      if (existing !== null) continue
+      const projection: FilterProjection = {
+        dir,
+        bindingId: ctx.bindingId as string,
+        generation: ctx.generation,
+        filterGeneration,
+        rev: dir.rev,
+        state: 'searching',
+        nodes: [],
+        error: null,
+      }
+      filterProjections.set(dir.path, projection)
+      filterQueue.push({ dir, ctx, rev: dir.rev, filterGeneration })
+    }
+    bumpFilter()
+    if (filterQueue.length > 0) void runFilterQueue()
+  }
+
+  async function runFilterQueue(): Promise<void> {
+    if (filterQueueRunning) return
+    filterQueueRunning = true
+    await watchInFlight
+    bumpFilter()
+    try {
+      while (filterQueue.length > 0) {
+        if (refreshing || revealing) return
+        const item = filterQueue.shift()!
+        if (item.filterGeneration !== filterGeneration || !scopeCurrent(item.ctx)) continue
+        const projection = validFilterProjection(item.dir)
+        if (projection === null) continue
+        const limit = Math.max(item.dir.total, FILES_PAGE_SIZE + 1)
+        try {
+          const result = await services.list(item.ctx.bindingId as string, item.dir.path, 0, limit)
+          if (
+            !scopeCurrent(item.ctx) ||
+            item.filterGeneration !== filterGeneration ||
+            filterProjections.get(item.dir.path) !== projection
+          ) {
+            continue
+          }
+          if (result.state === 'ok' && (result.rev !== item.rev || item.dir.rev !== item.rev)) {
+            filterGeneration++
+            filterQueue = []
+            filterProjections.clear()
+            filterSearchStarted = false
+            bumpFilter()
+            refreshDir(item.dir, item.ctx)
+          } else if (result.state === 'ok') {
+            const oldProjected = new Map(projection.nodes.map((node) => [node.path, node]))
+            const actual = new Map(item.dir.children.map((node) => [node.path, node]))
+            projection.nodes = result.entries.map(
+              (entry) =>
+                actual.get(entry.path) ?? oldProjected.get(entry.path) ?? entryToNode(entry),
+            )
+            projection.state = 'ready'
+            projection.error = null
+          } else if (result.state === 'tooLarge') {
+            projection.state = 'refusal'
+            projection.error = `Directory too large to search (more than ${result.limit} entries)`
+          } else if (result.state === 'timedOut') {
+            projection.state = 'refusal'
+            projection.error = 'Directory search took too long'
+          } else {
+            filterProjections.delete(item.dir.path)
+          }
+        } catch (e) {
+          if (
+            scopeCurrent(item.ctx) &&
+            item.filterGeneration === filterGeneration &&
+            filterProjections.get(item.dir.path) === projection
+          ) {
+            projection.state = 'refusal'
+            projection.error = messageOf(e)
+          }
+        }
+        bumpFilter()
+      }
+    } finally {
+      filterQueueRunning = false
+      bumpFilter()
+    }
+  }
+
+  function maybeStartFilterSearch(): void {
+    if (filter().trim() === '' || !filterActivationReady || refreshing || revealing) return
+    if (!filterSearchStarted) {
+      filterSearchStarted = true
+      filterGeneration++
+      filterProjections.clear()
+      filterQueue = []
+    }
+    maybeQueueFilterDirs()
+  }
+
+  function discardFilterProjection(): void {
+    if (filterTimer !== null) {
+      clearTimeout(filterTimer)
+      filterTimer = null
+    }
+    filterGeneration++
+    filterQueue = []
+    filterProjections.clear()
+    filterActivationReady = false
+    filterSearchStarted = false
+    bumpFilter()
+  }
+
+  function setFilter(value: string): void {
+    setFilterSignal(value)
+    if (filterTimer !== null) {
+      clearTimeout(filterTimer)
+      filterTimer = null
+    }
+    if (value.trim() === '') {
+      discardFilterProjection()
+      return
+    }
+    if (filterSearchStarted) return
+    if (eligibleFilterDirs().length === 0) {
+      // No request can be issued for a fully loaded tree, so the answer is
+      // settled without waiting for the request-avoidance debounce.
+      filterActivationReady = true
+      maybeStartFilterSearch()
+      return
+    }
+    filterActivationReady = false
+    filterTimer = setTimeout(() => {
+      filterTimer = null
+      filterActivationReady = true
+      maybeStartFilterSearch()
+    }, FILTER_ACTIVATION_DEBOUNCE)
+  }
+
+  function filterSettled(): boolean {
+    filterVersion()
+    if (filter().trim() === '' || !filterActivationReady) return false
+    if (!filterSearchStarted && eligibleFilterDirs().length > 0) return false
+    if (filterQueueRunning || filterQueue.length > 0 || refreshing || revealing) return false
+    return eligibleFilterDirs().every((dir) => validFilterProjection(dir) !== null)
+  }
+
   function scopeCurrent(ctx: ListCtx): boolean {
     if (closed) return false
     const o = untrack(origin)
@@ -502,6 +798,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function applyListing(dir: FilesRoot | FilesNode, ctx: ListCtx, res: FilesListResult): void {
     applyListingState(dir, ctx, res)
     void syncWatchSet()
+    maybeStartFilterSearch()
   }
 
   function applyListingState(dir: FilesRoot | FilesNode, ctx: ListCtx, res: FilesListResult): void {
@@ -565,6 +862,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     applyListErrorState(dir, ctx, e)
     // A directory that leaves 'ok' leaves the set too.
     void syncWatchSet()
+    maybeStartFilterSearch()
   }
 
   function applyListErrorState(dir: FilesRoot | FilesNode, ctx: ListCtx, e: unknown): void {
@@ -641,8 +939,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     dir.busy = true
     bumpTree()
     return services.list(ctx.bindingId as string, dir.path, offset, limit).then(
-      (res) => applyListing(dir, ctx, res),
-      (e) => applyListError(dir, ctx, e),
+      (res) => untrack(() => applyListing(dir, ctx, res)),
+      (e) => untrack(() => applyListError(dir, ctx, e)),
     )
   }
 
@@ -804,11 +1102,17 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     }
     if (dir === null || dir.state !== 'ok' || dir.busy) return
     if (p.rev !== undefined && p.rev === dir.rev) return
+    // A change invalidates the presentation snapshot immediately. The
+    // committed refresh below is the only source allowed to rebuild it, so a
+    // late projection response cannot briefly show entries from the old rev.
+    if (filterProjections.delete(dir.path)) bumpFilter()
     refreshDir(dir, ctx)
   }
 
   function openScope(o: ActiveOrigin): void {
     generation++
+    discardFilterProjection()
+    if (filter().trim() !== '') setFilter(filter())
     setPhase('opening')
     setOpenError(null)
     // A fresh binding has no watch state yet: the badge and the sticky
@@ -952,6 +1256,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     }
     closed = false
     generation++
+    if (next === null) discardFilterProjection()
     if (prevBinding !== null) {
       void services.close(prevBinding.bindingId).catch(() => {})
     }
@@ -975,6 +1280,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // panel renders, and files.watch replaces it wholesale, so sending
       // the set without the collapsed path is what stops the watch.
       void syncWatchSet()
+      maybeQueueFilterDirs()
       return
     }
     node.expanded = true
@@ -983,6 +1289,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (node.state === 'ok' && node.children.length > 0) {
       bumpTree()
       void syncWatchSet()
+      maybeQueueFilterDirs()
       return
     }
     const ctx = captureCtx()
@@ -1217,11 +1524,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     revealHint = undefined
     services
       .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE)
-      .then(apply, (e) => {
-        if (!scopeCurrent(ctx)) return
-        applyListError(dir, ctx, e)
-        if (walk === revealWalkId) onDone()
-      })
+      .then(apply, (e) =>
+        untrack(() => {
+          if (!scopeCurrent(ctx)) return
+          applyListError(dir, ctx, e)
+          if (walk === revealWalkId) onDone()
+        }),
+      )
   }
 
   /** The walk reached the target: EXPAND it, then select it. Expanding is
@@ -1266,6 +1575,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     revealHint = undefined
     revealing = false
     setRevealTarget(dir.path)
+    maybeStartFilterSearch()
     bumpTree()
     settleReveal(true)
     void syncWatchSet()
@@ -1282,6 +1592,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     revealHint = undefined
     revealing = false
     settleReveal(false)
+    maybeStartFilterSearch()
     void syncWatchSet()
   }
 
@@ -1343,7 +1654,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         dir.busy = false
         bumpTree()
       },
-      (e) => applyListError(dir, ctx, e),
+      (e) => untrack(() => applyListError(dir, ctx, e)),
     )
   }
 
@@ -1372,9 +1683,14 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // conflict gate, and parallel refresh work would make sibling
     // directories refuse one another after the bounded gate wait.
     generation++
+    refreshing = true
     const ctx = captureCtx()
     const r = root()
-    if (ctx === null || r === null) return
+    if (ctx === null || r === null) {
+      refreshing = false
+      maybeStartFilterSearch()
+      return
+    }
     const dirs: (FilesRoot | FilesNode)[] = [r]
     const collect = (dir: FilesRoot | FilesNode): void => {
       for (const child of dir.children) {
@@ -1388,22 +1704,29 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     void dirs
       .reduce<Promise<void>>((chain, dir) => {
         return chain.then(() => {
-          if (!scopeCurrent(ctx)) return
-          return issueList(dir, 0, refreshLimit(dir), ctx)
+          if (!untrack(() => scopeCurrent(ctx))) return
+          return untrack(() => issueList(dir, 0, refreshLimit(dir), ctx))
         })
       }, Promise.resolve())
       // The watch set rides the refresh cycle too: re-establishing it is
       // what recovers a failed watch. It follows every list so retrying the
       // watch cannot contend with the refresh it belongs to.
       .then(() => {
-        if (!scopeCurrent(ctx)) return
+        if (!untrack(() => scopeCurrent(ctx))) return
         forgetPublishedWatchSet()
-        return syncWatchSet()
+        return untrack(() => syncWatchSet())
       })
+      .finally(() =>
+        untrack(() => {
+          refreshing = false
+          maybeStartFilterSearch()
+        }),
+      )
   }
 
   function dispose(): void {
     closed = true
+    discardFilterProjection()
     const b = binding()
     setOrigin(null)
     setBinding(null)
@@ -1448,6 +1771,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     origin,
     root,
     rows,
+    filterRows,
+    filterSettled,
     filter,
     setFilter,
     rescope,

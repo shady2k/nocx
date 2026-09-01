@@ -1476,4 +1476,289 @@ describe('files tree store', () => {
     expect(unsubChanged).toHaveBeenCalledTimes(1)
     expect(unsubConnect).toHaveBeenCalledTimes(1)
   })
+  it('searches beyond the first page through a disposable projection', async () => {
+    vi.useFakeTimers()
+    try {
+      const firstPage = Array.from({ length: 50 }, (_, i) =>
+        entry({ name: `file-${i}`, path: `/file-${i}` }),
+      )
+      const hidden = entry({ name: 'needle.txt', path: '/needle.txt' })
+      const wide = deferred<FilesListResult>()
+      const list = vi
+        .fn()
+        .mockImplementation((_bindingId: string, _path: string, _offset: number, limit: number) =>
+          limit > FILES_PAGE_SIZE
+            ? wide.promise
+            : Promise.resolve(
+                listOk('C:/', firstPage, {
+                  total: 51,
+                  hasMore: true,
+                  rev: 'r51',
+                }),
+              ),
+        )
+      const store = createFilesTreeStore(makeServices({ list }))
+      store.rescope(LOCAL_A)
+      await settle()
+
+      const beforeRoot = store.root()!
+      const before = {
+        children: [...beforeRoot.children],
+        busy: beforeRoot.busy,
+        state: beforeRoot.state,
+        tooLargeLimit: beforeRoot.tooLargeLimit,
+        observedCount: beforeRoot.observedCount,
+        timeout: beforeRoot.timeout,
+        error: beforeRoot.error,
+        canonical: beforeRoot.canonical,
+        rev: beforeRoot.rev,
+        total: beforeRoot.total,
+        hasMore: beforeRoot.hasMore,
+        nextOffset: beforeRoot.nextOffset,
+        appliedGeneration: beforeRoot.appliedGeneration,
+      }
+      store.setFilter('needle')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(list).toHaveBeenLastCalledWith('b1', '/', 0, 51)
+      expect(store.root()?.children).toEqual(before.children)
+      expect(store.filterRows().some((row) => row.kind === 'filter-searching')).toBe(true)
+
+      wide.resolve(
+        listOk('C:/', [...firstPage, hidden], {
+          total: 51,
+          hasMore: false,
+          rev: 'r51',
+        }),
+      )
+      vi.runAllTicks()
+      await Promise.resolve()
+
+      const projected = store
+        .filterRows()
+        .find((row) => row.kind === 'entry' && row.node.path === '/needle.txt')
+      expect(projected?.kind).toBe('entry')
+      expect(store.filterSettled()).toBe(true)
+      const afterRoot = store.root()!
+      expect({
+        children: [...afterRoot.children],
+        busy: afterRoot.busy,
+        state: afterRoot.state,
+        tooLargeLimit: afterRoot.tooLargeLimit,
+        observedCount: afterRoot.observedCount,
+        timeout: afterRoot.timeout,
+        error: afterRoot.error,
+        canonical: afterRoot.canonical,
+        rev: afterRoot.rev,
+        total: afterRoot.total,
+        hasMore: afterRoot.hasMore,
+        nextOffset: afterRoot.nextOffset,
+        appliedGeneration: afterRoot.appliedGeneration,
+      }).toEqual(before)
+      const callsAfterProjection = list.mock.calls.length
+      store.setFilter('needle.txt')
+      store.setFilter('needle.txtx')
+      expect(list.mock.calls.length).toBe(callsAfterProjection)
+      expect(store.root()?.children).toHaveLength(50)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a projection when the committed directory changes before its response lands', async () => {
+    vi.useFakeTimers()
+    try {
+      const firstPage = Array.from({ length: 50 }, (_, i) =>
+        entry({ name: `file-${i}`, path: `/file-${i}` }),
+      )
+      const wide = deferred<FilesListResult>()
+      const refresh = deferred<FilesListResult>()
+      let changed!: (params: FilesChanged) => void
+      const subscribeFilesChanged = vi.fn((handler: (params: FilesChanged) => void) => {
+        changed = handler
+        return () => {}
+      })
+      const list = vi
+        .fn()
+        .mockImplementation((_bindingId: string, _path: string, _offset: number, limit: number) => {
+          if (limit > FILES_PAGE_SIZE) return wide.promise
+          if (list.mock.calls.length === 1) {
+            return Promise.resolve(
+              listOk('C:/', firstPage, {
+                total: 51,
+                hasMore: true,
+                rev: 'r1',
+              }),
+            )
+          }
+          return refresh.promise
+        })
+      const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+      store.rescope(LOCAL_A)
+      await settle()
+
+      store.setFilter('needle')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(list).toHaveBeenLastCalledWith('b1', '/', 0, 51)
+
+      changed({ bindingId: 'b1', path: '/', rev: 'r2' })
+      vi.runAllTicks()
+      await Promise.resolve()
+      expect(list).toHaveBeenLastCalledWith('b1', '/', 0, 50)
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.name === 'needle.txt'),
+      ).toBe(false)
+
+      wide.resolve(
+        listOk('C:/', [...firstPage, entry({ name: 'needle.txt', path: '/needle.txt' })], {
+          total: 51,
+          hasMore: false,
+          rev: 'r1',
+        }),
+      )
+      vi.runAllTicks()
+      await Promise.resolve()
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.name === 'needle.txt'),
+      ).toBe(false)
+
+      refresh.resolve(
+        listOk('C:/', firstPage, {
+          total: 50,
+          hasMore: false,
+          rev: 'r2',
+        }),
+      )
+      await settle()
+      expect(store.filterSettled()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('invalidates projections on clear, rescope, and replacement binding', async () => {
+    vi.useFakeTimers()
+    try {
+      const firstPage = Array.from({ length: 50 }, (_, i) =>
+        entry({ name: `file-${i}`, path: `/file-${i}` }),
+      )
+      const projectedEntry = entry({ name: 'needle.txt', path: '/needle.txt' })
+      const open = vi
+        .fn()
+        .mockResolvedValueOnce(OPEN_RESULT)
+        .mockResolvedValueOnce({ ...OPEN_RESULT, bindingId: 'b2' })
+      const list = vi
+        .fn()
+        .mockImplementation((bindingId: string, _path: string, _offset: number, limit: number) =>
+          limit > FILES_PAGE_SIZE
+            ? Promise.resolve(
+                listOk('C:/', [...firstPage, projectedEntry], { total: 51, rev: 'r1' }),
+              )
+            : Promise.resolve(
+                listOk(bindingId === 'b2' ? 'D:/' : 'C:/', firstPage, {
+                  total: 51,
+                  hasMore: true,
+                  rev: 'r1',
+                }),
+              ),
+        )
+      const store = createFilesTreeStore(makeServices({ open, list }))
+      store.rescope(LOCAL_A)
+      await settle()
+
+      store.setFilter('needle')
+      await vi.advanceTimersByTimeAsync(200)
+      vi.runAllTicks()
+      await Promise.resolve()
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.path === '/needle.txt'),
+      ).toBe(true)
+
+      store.setFilter('')
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.path === '/needle.txt'),
+      ).toBe(false)
+
+      store.setFilter('needle')
+      await vi.advanceTimersByTimeAsync(200)
+      vi.runAllTicks()
+      await Promise.resolve()
+      store.rescope(null)
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.path === '/needle.txt'),
+      ).toBe(false)
+
+      store.rescope(SSH_B)
+      expect(
+        store.filterRows().some((row) => row.kind === 'entry' && row.node.path === '/needle.txt'),
+      ).toBe(false)
+      await settle()
+      expect(open).toHaveBeenLastCalledWith('session-b', '/')
+      expect(list).toHaveBeenCalledWith('b2', '/', 0, FILES_PAGE_SIZE)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles a filter immediately when no directory needs searching', async () => {
+    const store = createFilesTreeStore(makeServices())
+    store.rescope(LOCAL_A)
+    await settle()
+
+    store.setFilter('zzz')
+
+    expect(store.filterSettled()).toBe(true)
+    expect(store.filterRows()).toEqual([])
+  })
+
+  it('serializes filter projections and defers them behind a reveal', async () => {
+    vi.useFakeTimers()
+    try {
+      const firstPage = Array.from({ length: 50 }, (_, i) =>
+        entry({ name: `file-${i}`, path: `/file-${i}` }),
+      )
+      const wideRoot = deferred<FilesListResult>()
+      const wideDocs = deferred<FilesListResult>()
+      const calls: string[] = []
+      const list = vi
+        .fn()
+        .mockImplementation((_bindingId: string, path: string, _offset: number, limit: number) => {
+          if (limit > FILES_PAGE_SIZE) {
+            calls.push(path)
+            return path === '/' ? wideRoot.promise : wideDocs.promise
+          }
+          return Promise.resolve(
+            path === '/'
+              ? listOk('C:/', [...firstPage, entry({ name: 'docs', path: '/docs', kind: 'dir' })], {
+                  total: 51,
+                  hasMore: true,
+                  rev: 'r51',
+                })
+              : listOk('C:/docs', [], { path: '/docs' }),
+          )
+        })
+      const store = createFilesTreeStore(makeServices({ list }))
+      store.rescope(LOCAL_A)
+      vi.runAllTicks()
+      await Promise.resolve()
+      const rootBeforeFilter = list.mock.calls.length
+      store.setFilter('needle')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(calls).toEqual(['/'])
+      expect(list.mock.calls.length).toBe(rootBeforeFilter + 1)
+      expect(store.filterSettled()).toBe(false)
+
+      wideRoot.resolve(
+        listOk('C:/', [...firstPage, entry({ name: 'docs', path: '/docs', kind: 'dir' })], {
+          total: 51,
+          hasMore: false,
+          rev: 'r51',
+        }),
+      )
+      vi.runAllTicks()
+      await Promise.resolve()
+      expect(calls).toEqual(['/'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

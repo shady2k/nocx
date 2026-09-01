@@ -25,7 +25,7 @@ import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
-import type { FilesTreeStore } from './files-store'
+import { FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin, PaneContent } from '../pane-content'
 import { ToastHost, clearToasts } from '../ui/toast'
 import type { ClipboardAccess } from '../clipboard'
@@ -117,6 +117,14 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     close: vi.fn().mockResolvedValue({}),
     ...over,
   }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 // Fixture origins stand in for the PaneContent capability (design §5.4) —
@@ -492,15 +500,22 @@ describe('files sidebar view', () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string, offset: number) =>
       Promise.resolve(
         offset === 0
-          ? listFixture('C:/', [entryFixture({ name: 'f1' })], {
+          ? listFixture('C:/', [entryFixture({ name: 'f1', path: '/f1' })], {
               total: 3,
               hasMore: true,
             })
-          : listFixture('C:/', [entryFixture({ name: 'f2' }), entryFixture({ name: 'f3' })], {
-              offset: 1,
-              total: 3,
-              hasMore: false,
-            }),
+          : listFixture(
+              'C:/',
+              [
+                entryFixture({ name: 'f2', path: '/f2' }),
+                entryFixture({ name: 'f3', path: '/f3' }),
+              ],
+              {
+                offset: 1,
+                total: 3,
+                hasMore: false,
+              },
+            ),
       ),
     )
     const services = fakeServices({ list })
@@ -1664,6 +1679,146 @@ describe('filtering the tree by name', () => {
     return app
   }
 
+  it('finds a file past the first page after filtering an opened directory', async () => {
+    const rootPage = [
+      ...Array.from({ length: FILES_PAGE_SIZE - 1 }, (_, i) =>
+        entryFixture({ name: `file-${i}`, path: `/file-${i}` }),
+      ),
+      entryFixture({ name: 'docs', path: '/docs', kind: 'dir' }),
+    ]
+    const docsPage = Array.from({ length: FILES_PAGE_SIZE }, (_, i) =>
+      entryFixture({ name: `docs-file-${i}`, path: `/docs/docs-file-${i}` }),
+    )
+    const list = vi
+      .fn()
+      .mockImplementation((_bindingId: string, path: string, _offset: number, limit: number) => {
+        const wide = limit > FILES_PAGE_SIZE
+        if (path === '/') {
+          return Promise.resolve(
+            wide
+              ? listFixture(
+                  'C:/',
+                  [...rootPage, entryFixture({ name: 'root-tail', path: '/root-tail' })],
+                  {
+                    total: FILES_PAGE_SIZE + 1,
+                    hasMore: false,
+                    rev: 'r51',
+                  },
+                )
+              : listFixture('C:/', rootPage, {
+                  total: FILES_PAGE_SIZE + 1,
+                  hasMore: true,
+                  rev: 'r51',
+                }),
+          )
+        }
+        return Promise.resolve(
+          wide
+            ? listFixture(
+                'C:/docs',
+                [...docsPage, entryFixture({ name: 'needle.txt', path: '/docs/needle.txt' })],
+                {
+                  path: '/docs',
+                  total: FILES_PAGE_SIZE + 1,
+                  hasMore: false,
+                  rev: 'r51',
+                },
+              )
+            : listFixture('C:/docs', docsPage, {
+                path: '/docs',
+                total: FILES_PAGE_SIZE + 1,
+                hasMore: true,
+                rev: 'r51',
+              }),
+        )
+      })
+    const app = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'docs')).not.toBeUndefined())
+    rowNamed(app.panel, 'docs').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'docs-file-0')).not.toBeUndefined())
+
+    fireEvent.input(box(app.panel), { target: { value: 'needle' } })
+
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'needle.txt')).not.toBeUndefined())
+    expect(list).toHaveBeenLastCalledWith('b1', '/docs', 0, FILES_PAGE_SIZE + 1)
+  })
+
+  it('keeps the empty state hidden until every paginated directory is searched', async () => {
+    const firstPage = Array.from({ length: FILES_PAGE_SIZE }, (_, i) =>
+      entryFixture({ name: `file-${i}`, path: `/file-${i}` }),
+    )
+    const wideA = deferred<FilesListResult>()
+    const wideB = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockImplementation((_bindingId: string, path: string, _offset: number, limit: number) => {
+        if (path === '/' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/', [
+              entryFixture({ name: 'a', path: '/a', kind: 'dir' }),
+              entryFixture({ name: 'b', path: '/b', kind: 'dir' }),
+            ]),
+          )
+        }
+        if (path === '/a' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/a', firstPage, {
+              path: '/a',
+              total: FILES_PAGE_SIZE + 1,
+              hasMore: true,
+              rev: 'r-a',
+            }),
+          )
+        }
+        if (path === '/b' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/b', firstPage, {
+              path: '/b',
+              total: FILES_PAGE_SIZE + 1,
+              hasMore: true,
+              rev: 'r-b',
+            }),
+          )
+        }
+        if (path === '/a') return wideA.promise
+        if (path === '/b') return wideB.promise
+        throw new Error(`unexpected list ${path} ${limit}`)
+      })
+    const app = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'a')).not.toBeUndefined())
+    rowNamed(app.panel, 'a').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'file-0')).not.toBeUndefined())
+    rowNamed(app.panel, 'b').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'file-0')).not.toBeUndefined())
+
+    fireEvent.input(box(app.panel), { target: { value: 'zzzz' } })
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/a', 0, FILES_PAGE_SIZE + 1))
+    expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).toBeNull()
+
+    wideA.resolve(
+      listFixture('C:/a', firstPage, {
+        path: '/a',
+        total: FILES_PAGE_SIZE + 1,
+        hasMore: false,
+        rev: 'r-a',
+      }),
+    )
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/b', 0, FILES_PAGE_SIZE + 1))
+    expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).toBeNull()
+
+    wideB.resolve(
+      listFixture('C:/b', firstPage, {
+        path: '/b',
+        total: FILES_PAGE_SIZE + 1,
+        hasMore: false,
+        rev: 'r-b',
+      }),
+    )
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).not.toBeNull(),
+    )
+  })
+
   it('is the kit`s SearchField, not a hand-rolled input', () => {
     // A surface may place a kit component and may never draw its own. The
     // identity class is what says which one is here.
@@ -1728,7 +1883,10 @@ describe('filtering the tree by name', () => {
   it('a filter that matches nothing is a state with a way out, never a blank tree', async () => {
     const { panel } = await mountWithTree()
     fireEvent.input(box(panel), { target: { value: 'zzzz' } })
-    await vi.waitFor(() => expect(shown(panel)).toHaveLength(0))
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-filter-clear"]')).not.toBeNull(),
+    )
+    expect(shown(panel)).toHaveLength(0)
 
     const clear = panel.querySelector<HTMLElement>('[data-testid="files-filter-clear"]')
     expect(clear).not.toBeNull()

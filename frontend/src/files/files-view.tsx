@@ -498,7 +498,7 @@ function FilesPanel(props: FilesPanelProps) {
    * — it was only being drawn through a narrower opening.
    */
   const visibleRows = createMemo<FilesFlatRow[]>(() =>
-    narrowFilesRows(props.store.rows(), props.store.filter()),
+    narrowFilesRows(props.store.filterRows(), props.store.filter()),
   )
   /** A filter is typed AND the tree has nothing to show for it. Not "the
    *  tree is empty": an empty directory with no filter is a different state
@@ -506,7 +506,9 @@ function FilesPanel(props: FilesPanelProps) {
    *  the narrowing, and walking the tree twice per render for one answer is
    *  the kind of waste a long tree makes visible. */
   const filterMatchedNothing = (): boolean =>
-    filterIsActive(props.store.filter()) && visibleRows().length === 0
+    filterIsActive(props.store.filter()) &&
+    props.store.filterSettled() &&
+    visibleRows().length === 0
 
   const renderRow = (row: FilesFlatRow) => {
     if (row.kind === 'entry') {
@@ -519,6 +521,10 @@ function FilesPanel(props: FilesPanelProps) {
           onClick={() => {
             if (openable(node)) {
               void openFile(node)
+              return
+            }
+            if (row.projected) {
+              void props.store.revealPath(node.path)
               return
             }
             // A click anywhere on a directory row expands or collapses it —
@@ -551,8 +557,33 @@ function FilesPanel(props: FilesPanelProps) {
             // completed reveal reached. The kit row owns the rendering
             // (data-selected); the panel only names the target.
             selected={node.path === props.store.revealTarget()}
-            onToggle={() => props.store.toggle(node)}
+            onToggle={() =>
+              row.projected ? void props.store.revealPath(node.path) : props.store.toggle(node)
+            }
           />
+        </div>
+      )
+    }
+    if (row.kind === 'filter-searching') {
+      return (
+        <div
+          class="files-row files-row-state"
+          data-depth={row.depth}
+          data-testid="files-filter-searching"
+        >
+          <Spinner size="sm" label="Searching opened directory" />
+          <span>Searching opened directory…</span>
+        </div>
+      )
+    }
+    if (row.kind === 'filter-refusal') {
+      return (
+        <div
+          class="files-row files-row-state"
+          data-depth={row.depth}
+          data-testid="files-filter-refusal"
+        >
+          <span>Could not search this opened folder: {row.message}</span>
         </div>
       )
     }
@@ -681,7 +712,7 @@ function FilesPanel(props: FilesPanelProps) {
         <Show when={filterMatchedNothing()}>
           <EmptyState
             title="No files match"
-            description="Only the folders you have opened are searched."
+            description="Opened folders are searched completely. Unopened folders are not searched."
             action={
               <Button
                 size="sm"

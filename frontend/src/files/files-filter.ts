@@ -54,29 +54,30 @@
 //
 // ## What the filter cannot see, and how it says so
 //
-// The tree is lazy: a folder nobody expanded has no children loaded, and a
-// paginated one has only its first page. The filter is renderer-side over
-// what is loaded — typing never issues a request, which is what keeps it
-// from churning the watch set or racing the reveal walk — so it genuinely
-// cannot match a file nocx has not listed.
+// The tree is lazy: a folder nobody expanded has no children loaded. An
+// expanded paginated folder receives one serialized whole-directory
+// projection when the filter activates; subsequent keystrokes only narrow
+// that projection. Unopened folders still have no children loaded, so they
+// genuinely cannot match a file nocx has not listed.
 //
-// The structural rows are what keep that honest. They are statements about
-// a LISTING rather than entries with names, so there is nothing in them for
-// a name filter to match: a "Show next 47" says forty-seven entries here
-// were never searched, a 'loading' row says a listing is in flight, and a
-// too-large or errored folder says it could not be read at all. Three ways
-// of saying NOT SEARCHED.
+// The structural rows are what keep that honest. They are statements about a
+// LISTING rather than entries with names, so there is nothing in them for a
+// name filter to match: a pagination row says entries here were not searched,
+// a 'loading' row says a listing is in flight, and a too-large or errored folder
+// says it could not be read at all. Three ways of saying NOT SEARCHED. Once a
+// projection has answered an expanded paginated directory, that pagination row
+// retires because the whole directory has been searched.
 //
 // Which is why a structural row brings its ancestors with it, exactly as a
 // match does — rule 2 above applies to both, and for the same reason. This
 // was once the opposite: a structural row was kept only when its directory
 // was already on screen for some other reason, on the argument that it must
 // not drag a folder into view. The argument was wrong in the case that
-// matters. When nothing matched, the folder was not on screen, so its "Show
-// next 211" went with it — and the panel answered "No files match" over a
-// blank tree, having deleted the one row that could explain the answer. The
-// honesty the structural rows were retained FOR was available in every case
-// except the one that needed it (nocx-708q.7).
+// matters. When nothing matched, the folder was not on screen, so its
+// pagination row went with it — and the panel answered "No files match" over
+// a blank tree, having deleted the one row that could explain the answer.
+// The honesty the structural rows were retained FOR was available in every
+// case except the one that needed it (nocx-708q.7).
 //
 // So the rule reads: a row is shown when it matches, when something below
 // it matches, or when something below it was never searched. Still one
@@ -145,7 +146,8 @@ export function narrowFilesRows(rows: FilesFlatRow[], filter: string): FilesFlat
       if (matchesNameFilter(row.node.name, filter)) flush()
       continue
     }
-    // A structural row ('loading', 'more', 'state') belongs to the
+    // A structural row ('loading', 'more', 'state', or a filter search
+    // status) belongs to the
     // directory one level up — the root when it is at depth 0 — and it says
     // that directory holds entries this filter has NOT SEEN. So it earns
     // its ancestors exactly as a match does: flush, then emit. At depth 0

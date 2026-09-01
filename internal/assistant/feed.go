@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html"
+	"io"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/apifetch"
@@ -67,7 +68,17 @@ func shouldRenderFeed(contentType, body string) bool {
 
 func renderFeedOrRaw(body string) string {
 	var feed feedDocument
-	if err := xml.Unmarshal([]byte(body), &feed); err != nil {
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	// apifetch already converted the bytes to UTF-8. The declaration still
+	// names the historical wire encoding, so preserve the text and accept it.
+	decoder.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) {
+		return input, nil
+	}
+	if err := decoder.Decode(&feed); err != nil {
+		return body
+	}
+	var trailing feedDocument
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return body
 	}
 	root := strings.ToLower(feed.XMLName.Local)

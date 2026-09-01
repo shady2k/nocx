@@ -908,7 +908,7 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills)
 	if recoverErr := backupService.Recover(); recoverErr != nil {
 		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}

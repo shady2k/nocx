@@ -353,3 +353,26 @@ func TestStoreRefusesASymlinkedManagedRoot(t *testing.T) {
 		t.Fatalf("symlink target was touched: %v", err)
 	}
 }
+
+func TestRestoreSnapshotRefusesSymlinkedNestedDirectory(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "deploy", "references")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	err := store.RestoreSnapshot(Snapshot{
+		Managed: []SnapshotTree{{
+			Name:  "deploy",
+			Files: []SnapshotFile{{Path: "references/guide.md", Bytes: "must not escape"}},
+		}},
+	})
+	if err == nil {
+		t.Fatal("want restore to refuse a symlinked nested directory")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "guide.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore escaped through nested symlink, stat error = %v", err)
+	}
+}

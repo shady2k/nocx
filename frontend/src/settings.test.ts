@@ -423,6 +423,7 @@ describe('SettingsContent', () => {
         groups: { included: 0, added: 0, updated: 0, removed: 0 },
         snippets: { included: 0 },
         notes: { included: 0 },
+        skills: { included: 0 },
         connectionsRequiringCredential: [],
         omissions: {
           credentialBindingsRemoved: 0,

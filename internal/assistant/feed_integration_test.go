@@ -75,7 +75,7 @@ func TestLegacyAtomDecodedByFetchTextRendersAsAList(t *testing.T) {
 
 func TestFeedRendererAcceptsUnknownHistoricalDeclaration(t *testing.T) {
 	const body = `<?xml version="1.0" encoding="x-unknown-feed-charset"?><rss><channel><title>News</title><item><title>Item</title></item></channel></rss>`
-	text := renderFetchedDocument(apifetch.TextDocument{ContentType: "text/xml", Text: body})
+	text, _ := renderFetchedDocumentWithLossy(apifetch.TextDocument{ContentType: "text/xml", Text: body})
 	if !strings.Contains(text, "# News") || strings.Contains(text, "<rss") {
 		t.Fatalf("rendered unknown-declaration feed = %q, want list rather than raw XML", text)
 	}

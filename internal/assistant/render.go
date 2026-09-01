@@ -51,11 +51,6 @@ type atomLink struct {
 // Feed, JSON and HTML shapes are presentation, so the assistant owns these
 // decisions; apifetch owns acquisition and charset decoding and must not grow
 // a second shape rule.
-func renderFetchedDocument(doc apifetch.TextDocument) string {
-	text, _ := renderFetchedDocumentWithLossy(doc)
-	return text
-}
-
 func renderFetchedDocumentWithLossy(doc apifetch.TextDocument) (string, bool) {
 	if shouldRenderFeed(doc.ContentType, doc.Text) {
 		return renderFeedOrRaw(doc.Text), false

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"unicode"
 
 	"github.com/shady2k/nocx/internal/storage"
@@ -433,10 +432,18 @@ func skillFrontmatter(name, description string) string {
 	return "---\nname: " + name + "\ndescription: " + strconv.Quote(description) + "\n---\n"
 }
 
+// linkCount answers how many names the file has, so a write can refuse a
+// skill file somebody else also holds a link to.
+//
+// It reads Nlink REFLECTIVELY rather than through a *syscall.Stat_t type
+// assertion, and that is deliberate: the field is uint64 on Linux and
+// uint16 on Darwin, so a typed fast path either fails to compile on macOS
+// or carries a conversion that unconvert calls unnecessary here. Splitting
+// the access per OS would work and would move this whole package into the
+// Makefile's OS partition (ci-os-split enforces that) — a large answer to
+// one integer's width. reflect.Value.Uint widens either width, and this
+// runs once per skill write.
 func linkCount(info os.FileInfo) uint64 {
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		return statNlink(stat)
-	}
 	value := reflect.ValueOf(info.Sys())
 	if value.IsValid() && value.Kind() == reflect.Pointer && !value.IsNil() {
 		field := value.Elem().FieldByName("Nlink")

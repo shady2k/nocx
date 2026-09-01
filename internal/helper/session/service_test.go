@@ -79,27 +79,30 @@ type fakeProcess struct {
 	done     chan struct{}
 	closeOne sync.Once
 
-	mu      sync.Mutex
-	written []byte
-	waitErr error
-	waitSet bool
-	cols    uint16
-	rows    uint16
-	fg      int
-	fgErr   error
-	closed  bool
-	signal  syscall.Signal
-	sigErr  error
+	mu         sync.Mutex
+	written    []byte
+	waitErr    error
+	waitSet    bool
+	cols       uint16
+	rows       uint16
+	fg         int
+	fgErr      error
+	closed     bool
+	signal     syscall.Signal
+	signalPgid int
+	pgid       int
+	sigErr     error
 }
 
 func newFakeProcess() *fakeProcess {
 	r, w := io.Pipe()
-	return &fakeProcess{stdout: r, produce: w, done: make(chan struct{})}
+	return &fakeProcess{stdout: r, produce: w, done: make(chan struct{}), pgid: 4343}
 }
 
 func (p *fakeProcess) Read(b []byte) (int, error) { return p.stdout.Read(b) }
 func (p *fakeProcess) Done() <-chan struct{}      { return p.done }
 func (p *fakeProcess) Pid() int                   { return 4242 }
+func (p *fakeProcess) ProcessGroup() int          { return p.pgid }
 func (p *fakeProcess) Shell() string              { return "/bin/fake" }
 func (p *fakeProcess) ForegroundProcessGroup() (int, error) {
 	p.mu.Lock()
@@ -132,10 +135,11 @@ func (p *fakeProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 	return nil
 }
 
-func (p *fakeProcess) SignalProcessGroup(_ int, sig syscall.Signal) error {
+func (p *fakeProcess) SignalProcessGroup(pgid int, sig syscall.Signal) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.signal = sig
+	p.signalPgid = pgid
 	return p.sigErr
 }
 
@@ -1000,10 +1004,14 @@ func TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup(t *testing.T) {
 	})
 
 	proc.mu.Lock()
-	got := proc.signal
+	got, gotPgid := proc.signal, proc.signalPgid
 	proc.mu.Unlock()
 	if got != syscall.SIGTERM {
 		t.Fatalf("signal = %v, want %v", got, syscall.SIGTERM)
+	}
+	if gotPgid != entry.Launch.Pgid {
+		t.Fatalf("signal pgid = %d, want the launched process group %d",
+			gotPgid, entry.Launch.Pgid)
 	}
 }
 

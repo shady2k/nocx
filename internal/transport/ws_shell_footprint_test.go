@@ -407,6 +407,7 @@ type recordingHelperCloser struct {
 	mu          sync.Mutex
 	events      *[]string
 	fingerprint string
+	err         error
 }
 
 func (c *recordingHelperCloser) CloseHelpersFor(_ context.Context, fp string) error {
@@ -416,7 +417,7 @@ func (c *recordingHelperCloser) CloseHelpersFor(_ context.Context, fp string) er
 	if c.events != nil {
 		*c.events = append(*c.events, "close")
 	}
-	return nil
+	return c.err
 }
 
 func (c *recordingHelperCloser) FinishHelpersFor(fp string) {
@@ -755,6 +756,43 @@ func TestFootprintHelperUninstall_UnresolvableProfileRefuses(t *testing.T) {
 	}
 	if remover.host != "" {
 		t.Errorf("capability was called (host=%q) although the profile did not resolve", remover.host)
+	}
+}
+
+// TestFootprintHelperUninstall_RefusesWhenSessionsCannotBeEnumerated proves
+// the removal capability is never called when the helper daemon did not
+// answer the liveness inventory.
+func TestFootprintHelperUninstall_RefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	const fingerprint = "SHA256:unavailable"
+	if err := installs.Record(consent.Install{
+		Fingerprint: fingerprint,
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	closer := &recordingHelperCloser{err: errors.New("helper session inventory unavailable")}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, _ := footprintHelperUninstallHarness(t, installs, closer, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": fingerprint,
+		"path": "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("uninstall with unavailable sessions: got %+v, want -32603", resp.Error)
+	}
+	if remover.host != "" {
+		t.Fatalf("uninstall removed the helper despite unavailable sessions: host %q", remover.host)
+	}
+	if got := installs.All(); len(got) != 1 {
+		t.Fatalf("install observation after refusal = %v, want one retryable row", got)
 	}
 }
 

@@ -451,21 +451,33 @@ func (r *helperRegistry) inventories() []sessionInventory {
 // the read-only inventory RPC. A failed helper fails the aggregate answer;
 // callers must not interpret a partial list as a complete inventory.
 func (r *helperRegistry) sessions(ctx context.Context) ([]client.SessionEntry, error) {
-	inventories := r.inventories()
-	if len(inventories) == 0 {
+	r.mu.Lock()
+	helpers := make([]*hostHelper, 0, len(r.hosts))
+	for _, h := range r.hosts {
+		helpers = append(helpers, h)
+	}
+	r.mu.Unlock()
+	if len(helpers) == 0 {
 		return nil, errors.New("helper session inventory unavailable: no active helper")
 	}
 	out := make([]client.SessionEntry, 0)
-	for _, raw := range inventories {
-		inv, ok := raw.(*helperSessionInventory)
-		if !ok {
-			return nil, fmt.Errorf("helper inventory has unexpected type %T", raw)
-		}
-		entries, err := inv.client.Sessions(ctx)
-		if err != nil {
+	for _, h := range helpers {
+		for attempt := range 2 {
+			c, err := h.inventoryClient(ctx)
+			if err != nil {
+				return nil, err
+			}
+			entries, err := c.Sessions(ctx)
+			if err == nil {
+				out = append(out, entries...)
+				break
+			}
+			if attempt == 0 && errors.Is(err, client.ErrLost) {
+				h.invalidate(c)
+				continue
+			}
 			return nil, err
 		}
-		out = append(out, entries...)
 	}
 	return out, nil
 }
@@ -532,7 +544,13 @@ func (h *hostHelper) closeSessions(ctx context.Context) error {
 		return errors.New("helper is already closing")
 	}
 	h.closing = true
-	c, generation := h.client, h.f.expectHash
+	if h.client == nil && h.factory == nil && !h.dead {
+		h.closing = false
+		h.mu.Unlock()
+		return nil
+	}
+	c, outcome, err := h.connectLocked(ctx)
+	generation := h.f.expectHash
 	h.mu.Unlock()
 	ok := false
 	defer func() {
@@ -540,9 +558,11 @@ func (h *hostHelper) closeSessions(ctx context.Context) error {
 			h.cancelClosing()
 		}
 	}()
-	if c == nil {
-		ok = true
-		return nil
+	if err != nil {
+		return fmt.Errorf("connect helper for session close: %w", err)
+	}
+	if outcome.State != "" {
+		return fmt.Errorf("connect helper for session close: %s", outcome.Message)
 	}
 	entries, err := c.Sessions(ctx)
 	if err != nil {
@@ -619,6 +639,79 @@ type hostHelper struct {
 	refs    int
 	dead    bool // the shared client is closed; the next open must redial
 	closing bool // uninstall has frozen this helper against new opens
+}
+
+// connectLocked returns the existing carrier or establishes a new bridge to
+// the helper daemon. A lost carrier is disposable; the daemon's endpoint and
+// session state live on the host and are reached again through a fresh lane.
+func (h *hostHelper) connectLocked(ctx context.Context) (*client.Client, git.OpenOutcome, error) {
+	if h.client != nil && !h.dead {
+		select {
+		case <-h.client.Done():
+			h.client = nil
+			h.factory = nil
+			h.dead = true
+		default:
+			return h.client, git.OpenOutcome{}, nil
+		}
+	}
+	lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
+	if err != nil {
+		return nil, git.OpenOutcome{}, fmt.Errorf("helper lane for %s: %w", h.f.host, err)
+	}
+	c, err := client.Dial(ctx, client.Config{
+		Exec:       lane,
+		Command:    bridgeCommand(h.f.command, h.f.expectHash),
+		ExpectHash: h.f.expectHash,
+		Log:        h.log,
+	})
+	if err != nil {
+		// Dial's contract: on failure the lane is left for the caller to
+		// close. Refusals are returned as an open outcome; other failures
+		// remain errors so callers can apply their retry policy.
+		_ = lane.Close()
+		if outcome, ok := dialFailure(err, h.f.host); ok {
+			return nil, outcome, nil
+		}
+		return nil, git.OpenOutcome{}, err
+	}
+	h.client = c
+	h.dead = false
+	h.factory = helpergit.NewFactory(c)
+	return c, git.OpenOutcome{}, nil
+}
+
+// inventoryClient preserves the hostHelper registry entry across carrier loss.
+// It only redials an entry that had already opened a helper; an unstarted
+// entry must not make inventory claim a helper exists.
+func (h *hostHelper) inventoryClient(ctx context.Context) (*client.Client, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.client == nil && h.factory == nil && !h.dead {
+		return nil, errors.New("helper session inventory unavailable: no active helper")
+	}
+	c, outcome, err := h.connectLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.State != "" {
+		return nil, errors.New(outcome.Message)
+	}
+	return c, nil
+}
+
+// invalidate drops only the carrier used by a failed operation. Comparing
+// pointers prevents an old loss from evicting a replacement installed by a
+// concurrent retry.
+func (h *hostHelper) invalidate(c *client.Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.client != c {
+		return
+	}
+	h.client = nil
+	h.factory = nil
+	h.dead = true
 }
 
 func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {

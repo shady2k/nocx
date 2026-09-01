@@ -406,6 +406,47 @@ func TestLayoutPaneMoveChangesOnlyTheReference(t *testing.T) {
 	}
 }
 
+// TestLayoutCloseKeepsBlocksInRecallOverTheWire proves the transport close
+// route reaches DeleteTab's closed-row semantics instead of deleting the
+// durable pane anchor that recall uses.
+func TestLayoutCloseKeepsBlocksInRecallOverTheWire(t *testing.T) {
+	ctx := context.Background()
+	ws, db := newLayoutWSServer(t)
+	conn := connectWS(t, ws)
+	seedWire(t, conn)
+
+	ledger := db.Ledger()
+	envID := content.EnvironmentIDFor(content.EnvLocal, "")
+	if err := ledger.EnsureEnvironment(ctx, content.Environment{
+		ID: envID, Kind: content.EnvLocal,
+	}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	const blockID = "0198f2b0-0000-7000-8000-000000000101"
+	paneID := paneID1
+	if _, err := ledger.Submit(ctx, content.SubmitEntry{
+		ID: blockID, Client: "layout-close-test", EnvironmentID: envID,
+		PaneID: &paneID, Cwd: "/repos/nocx", Kind: content.EntryShell,
+		Intent: "make ci",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	mustLayoutCall(t, conn, "tabs.close",
+		map[string]any{"id": tabID1, "replacement": aReplacement()}, 39)
+
+	page, err := ledger.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopePane, PaneID: paneID1, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries after tabs.close: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].ID != blockID {
+		t.Fatalf("recall after tabs.close = %+v, want block %s still anchored to pane %s",
+			page.Entries, blockID, paneID1)
+	}
+}
+
 // The close cascades, and the answer names only the id: there is no object
 // left to describe.
 func TestLayoutCloseRemovesTheContainerAndItsMembers(t *testing.T) {

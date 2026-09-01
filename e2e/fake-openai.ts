@@ -333,7 +333,8 @@ export class FakeOpenAI {
     req.on('error', () => res.destroy())
   }
   private complete(record: FakeRequest, res: ServerResponse, script: StreamScript): void {
-    if (script.holdAfter !== undefined) {
+    const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
+    if (script.holdAfter !== undefined && script.holdAfter < chunks.length) {
       record.state = 'done'
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(
@@ -343,8 +344,6 @@ export class FakeOpenAI {
       )
       return
     }
-
-    const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
     const calls = script.toolCalls ?? []
     const model = script.model ?? 'e2e-model'
     const message: Record<string, unknown> = {

@@ -527,6 +527,28 @@ func Assemble(fsys fs.FS) (Registry, error) {
 	return assemble(fsys, declarations)
 }
 
+// AssembleWithSkillRoots assembles the registry with the application's
+// filesystem skill roots bound into the three general-purpose file tools.
+// Declarations are cloned so one application profile cannot alter another
+// registry or the package-level declaration table.
+func AssembleWithSkillRoots(fsys fs.FS, skillRoots []string) (Registry, error) {
+	if len(skillRoots) == 0 {
+		return Assemble(fsys)
+	}
+	decls := slices.Clone(declarations)
+	for i := range decls {
+		switch decls[i].Name {
+		case "files.read":
+			decls[i].Narrow = narrowFilesReadWithSkillRoots(skillRoots)
+		case "files.edit":
+			decls[i].Narrow = narrowFilesEditWithSkillRoots(skillRoots)
+		case "files.create":
+			decls[i].Narrow = narrowFilesCreateWithSkillRoots(skillRoots)
+		}
+	}
+	return assemble(fsys, decls)
+}
+
 func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
 	// A root that is not there is "the schemas are not shipped in this build"
 	// (the shipped app carries no contracts/ tree): assemble an empty set

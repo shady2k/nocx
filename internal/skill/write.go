@@ -435,7 +435,7 @@ func skillFrontmatter(name, description string) string {
 
 func linkCount(info os.FileInfo) uint64 {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		return stat.Nlink
+		return statNlink(stat)
 	}
 	value := reflect.ValueOf(info.Sys())
 	if value.IsValid() && value.Kind() == reflect.Pointer && !value.IsNil() {

@@ -1,11 +1,30 @@
 package skill_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/skill/builtin"
 )
+
+func TestBuiltinDiscoveryWithFreshProfileRoots(t *testing.T) {
+	authored := filepath.Join(t.TempDir(), "skills")
+	managed := filepath.Join(t.TempDir(), "managed-skills")
+	roots := []skill.Root{
+		{Dir: authored, Provenance: skill.ProvenanceAuthored},
+		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
+		{Dir: managed, Provenance: skill.ProvenanceManaged},
+	}
+
+	got := skill.Discover(roots)
+	if len(got) != 1 {
+		t.Fatalf("fresh profile discovered %d skills, want exactly one builtin skill: %+v", len(got), got)
+	}
+	if got[0].Name != "skill-authoring" || got[0].Provenance != skill.ProvenanceBuiltin {
+		t.Fatalf("fresh profile discovered %+v, want skill-authoring from builtin root", got[0])
+	}
+}
 
 func TestPrecedenceAuthoredBeatsBuiltinBeatsManaged(t *testing.T) {
 	authored, managed := t.TempDir(), t.TempDir()

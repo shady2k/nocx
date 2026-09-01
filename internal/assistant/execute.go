@@ -83,7 +83,7 @@ type toolSeams struct {
 	sessions         SessionSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
-	skills           SkillSource
+	skills           SkillLibrary
 }
 
 type noteSearchRow struct {
@@ -532,10 +532,7 @@ func executeSkillsDelete(ctx context.Context, cap agenttools.Capability, args js
 	if !scope.Allows(params.Name) {
 		return "", fmt.Errorf("skills.delete: %q is outside this run's grant", params.Name)
 	}
-	library, ok := seams.skills.(SkillLibrary)
-	if !ok || library == nil {
-		return "", errors.New("skills.delete: the skill library is unavailable")
-	}
+	library := seams.skills
 	if err := library.Delete(params.Name); err != nil {
 		return "", fmt.Errorf("skills.delete: %w", err)
 	}
@@ -558,10 +555,7 @@ func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.C
 	if !scope.Allows(params.Name) {
 		return "", fmt.Errorf("%s: %q is outside this run's grant", tool, params.Name)
 	}
-	library, ok := seams.skills.(SkillLibrary)
-	if !ok || library == nil {
-		return "", fmt.Errorf("%s: the skill library is unavailable", tool)
-	}
+	library := seams.skills
 
 	result := skillWriteResult{Status: status, Name: params.Name}
 	findings := skill.Scan([]byte(params.Body))

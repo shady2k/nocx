@@ -555,7 +555,7 @@ type agentHandlers struct {
 	configOp   capability.ConfigOperation
 	noteOp     capability.NoteOperation
 	snippetOp  capability.SnippetOperation
-	skills     assistant.SkillSource
+	skills     assistant.SkillLibrary
 	agentTools agenttools.Registry
 	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
@@ -690,7 +690,7 @@ func (h agentHandlers) personalParagraph() string {
 	return h.personalInstructions()
 }
 
-func skillRefsForGrant(grant *content.Grant, source assistant.SkillSource, registry agenttools.Registry) []assistant.SkillRef {
+func skillRefsForGrant(grant *content.Grant, source assistant.SkillLibrary, registry agenttools.Registry) []assistant.SkillRef {
 	if grant == nil || source == nil {
 		return nil
 	}
@@ -2441,7 +2441,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillSource, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)

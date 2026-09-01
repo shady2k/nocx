@@ -424,9 +424,9 @@ type WSServer struct {
 	// endpoints.probe and agent.status's last-probe fact. When nil, the
 	// endpoints.probe method answers -32601 "agent not available".
 	assistantClient assistant.Client
-	// skillSource is the filesystem-backed source for skills.read and the
-	// per-ask prompt index. Both paths use this same abstraction.
-	skillSource assistant.SkillSource
+	// skillLibrary is the single filesystem-backed owner for skills.read and
+	// the skills mutation tools.
+	skillLibrary assistant.SkillLibrary
 	// agentTools is the registry used to decide which declarations this run
 	// may be offered. It is the same assembled table used by the assistant.
 	agentTools agenttools.Registry
@@ -978,9 +978,9 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
-// WithSkillSource attaches the skill library used by assistant asks.
-func WithSkillSource(source assistant.SkillSource) WSServerOption {
-	return func(ws *WSServer) { ws.skillSource = source }
+// WithSkillSource attaches the single skill library used by assistant asks.
+func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
+	return func(ws *WSServer) { ws.skillLibrary = source }
 }
 
 // WithAgentToolRegistry attaches the registry used by the assistant engine.
@@ -1498,7 +1498,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillSource, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

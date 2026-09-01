@@ -245,7 +245,7 @@ func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
 	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
 	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
 
-	source := skill.NewLibrary([]skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}})
+	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}})
 	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
 		Kind: content.ResourceContent,
 		ID:   "content",

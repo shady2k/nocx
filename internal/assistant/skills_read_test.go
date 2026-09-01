@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -28,6 +29,18 @@ func (s *skillsReadSource) Index() []skill.Skill {
 
 func (s *skillsReadSource) Read(string, string) (skill.Content, error) {
 	return s.content, nil
+}
+
+func (s *skillsReadSource) Create(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (s *skillsReadSource) Update(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (s *skillsReadSource) Delete(string) error {
+	return errors.New("not used")
 }
 
 func skillsReadTestCapability() *agenttools.ContentScope {

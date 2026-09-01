@@ -32,6 +32,18 @@ func (fixedSkills) Read(string, string) (skill.Content, error) {
 	return skill.Content{}, errors.New("not used")
 }
 
+func (fixedSkills) Create(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (fixedSkills) Update(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (fixedSkills) Delete(string) error {
+	return errors.New("not used")
+}
+
 type grantPromptClient struct {
 	seen chan assistant.AskParams
 }

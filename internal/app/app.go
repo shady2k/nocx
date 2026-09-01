@@ -101,7 +101,7 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-
+	skills           assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -556,7 +556,7 @@ func New(opts ...Option) (*App, error) {
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
 	}
-	skills := skill.NewLibrary(skillRoots)
+	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots)
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
 	if o.logFilePath != nil {
@@ -1763,6 +1763,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
+		skills:           skills,
 		vaultCloser:      v,
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,

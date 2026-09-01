@@ -15,6 +15,8 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
@@ -510,5 +512,29 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 		if fact.Lifecycle == "prompt_ready" && fact.Domain != "" {
 			return // the local shell established through production wiring
 		}
+	}
+}
+
+func TestNew_WiresOneWritableSkillStoreIntoTheAssistant(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := newTestApp(t)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	store, ok := a.skills.(*skill.Store)
+	if !ok {
+		t.Fatalf("skills = %T, want *skill.Store", a.skills)
+	}
+	createErr := store.Create("deploy", "d", "body")
+	if createErr != nil {
+		t.Fatalf("Create through the app's skill seam: %v", createErr)
+	}
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		t.Fatalf("NewAppPaths: %v", err)
+	}
+	path := filepath.Join(paths.ConfigDir(), "managed-skills", "deploy", "SKILL.md")
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("created skill %s is not on disk: %v", path, statErr)
 	}
 }

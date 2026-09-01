@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,6 +72,55 @@ func TestExecuteSkillsCreateScansBodyBeforeCallingStore(t *testing.T) {
 	}
 	if result.Finding == nil || result.Finding.PatternID != "prompt_injection" || result.Finding.LineNumber != 2 {
 		t.Fatalf("finding = %+v, want prompt injection on line 2", result.Finding)
+	}
+}
+
+func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
+	root := t.TempDir()
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{
+		Dir:        root,
+		Provenance: skill.ProvenanceManaged,
+	}})
+	var requests atomic.Int64
+	_, server := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			streamToolCalls(w, toolCallSpec{
+				name: "skills.create",
+				args: `{"name":"deploy","description":"d","body":"body"}`,
+			})
+			return
+		}
+		streamOK(w)
+	})
+	defer server.Close()
+
+	client, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{
+		Kind: content.ResourceContent,
+		ID:   "skill/deploy",
+	}})
+	params := testAskParams(server.URL)
+	params.Grant = &grant
+	params.AttemptLedger = &fakeLedger{}
+	params.KnownMaterial = &fakeKnownMaterial{}
+	params.Skills = store
+	askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil })
+	if askErr != nil {
+		t.Fatalf("Ask: %v", askErr)
+	}
+	path := filepath.Join(root, "deploy", "SKILL.md")
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("skills.create did not write %s: %v", path, statErr)
+	}
+	got, readErr := os.ReadFile(path) //nolint:gosec // test path is inside t.TempDir
+	if readErr != nil {
+		t.Fatalf("read %s: %v", path, readErr)
+	}
+	if !strings.Contains(string(got), "name: deploy") || !strings.HasSuffix(string(got), "body") {
+		t.Fatalf("skill file = %q, want frontmatter and body", got)
 	}
 }
 

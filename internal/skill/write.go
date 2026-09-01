@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,8 @@ import (
 	"syscall"
 	"unicode"
 )
+
+var errUnavailable = errors.New("skill library is unavailable")
 
 const (
 	managedSkillDirMode  os.FileMode = 0o700
@@ -108,7 +111,12 @@ func (s *Store) Index() []Skill {
 	if s == nil {
 		return nil
 	}
-	return NewLibrary(s.roots).Index()
+	index := Discover(s.roots)
+	if len(index) > MaxIndexed {
+		slog.Warn("skill: index cap reached", "cap", MaxIndexed)
+		index = index[:MaxIndexed]
+	}
+	return index
 }
 
 func (s *Store) Read(name, relPath string) (Content, error) {

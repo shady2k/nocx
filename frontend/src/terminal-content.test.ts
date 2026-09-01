@@ -8658,6 +8658,19 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       return frozen!.el
     }
 
+    /** Let the automatic attachment's one-frame liveness fence resolve, and
+     *  the capture it would schedule after it. Two frames plus the
+     *  microtasks: the fence's own frame, then room for the capture that
+     *  follows it — so "nothing was attached" is a statement about a path
+     *  that had its chance, not about a promise nobody awaited. */
+    async function settleAttachmentFence(): Promise<void> {
+      for (let i = 0; i < 2; i++) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      }
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+
     /** The chord as a person presses it, from wherever focus happens to be. */
     function chordOn(el: EventTarget): void {
       el.dispatchEvent(
@@ -8710,6 +8723,11 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         renderer.captureLiveFrame = captureLiveFrame
 
         chordOn(viewOf(ed).contentDOM)
+        // The background child is STILL repainting — bytes parsed while the
+        // liveness fence's frame is in flight. That, and not "some bytes
+        // arrived after the freeze", is what makes this screen worth
+        // attaching; the finished-command case below fires nothing here.
+        renderer._fireWriteParsed()
 
         await vi.waitFor(() =>
           expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
@@ -8735,8 +8753,44 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         renderer.captureLiveFrame = captureLiveFrame
 
         chordOn(viewOf(ed).contentDOM)
-        await Promise.resolve()
+        await settleAttachmentFence()
 
+        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+          'frozen screen attached automatically',
+        )
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+    // THE agent-ask DEFECT AT UNIT LEVEL (nocx-7l4ex.21). A command that has
+    // finished is not a screen anybody is painting — but the shell writes its
+    // own prompt after the block freezes (D/A/OSC 7, then the B marker in
+    // PS1), so "bytes newer than the freeze" is true of every finished
+    // command that printed anything, and every one of them was attached. The
+    // person who marked block A was handed block B as well, under a sentence
+    // calling it the current screen of a full-screen program.
+    it('does not attach a finished command whose prompt redrew and nothing else painted', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        // The prompt's own bytes, parsed after the freeze — the one write
+        // this screen will ever see again. It is already over when the chord
+        // arrives, which is exactly what the fence measures.
+        renderer._fireWriteParsed()
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        await settleAttachmentFence()
+
+        expect(targetNamed(ed)).toBe('agent')
         expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
           'frozen screen attached automatically',
         )

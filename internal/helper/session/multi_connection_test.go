@@ -207,7 +207,6 @@ func TestAckAndDetachAreBoundToTheAttachmentConnection(t *testing.T) {
 	entry := decodeInto[proto.SpawnResult](t, on(t, svc, first, proto.OpSpawn,
 		proto.SpawnParams{Cols: 80, Rows: 24})).Entry
 	sub := proto.SubscriberID("6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b")
-	sessionRaw, _ := proto.SessionBytes(entry.Session.Session)
 	subRaw, _ := proto.SessionBytes(string(sub))
 
 	old := decodeInto[proto.AttachResult](t, on(t, svc, first, proto.OpAttach,
@@ -226,13 +225,15 @@ func TestAckAndDetachAreBoundToTheAttachmentConnection(t *testing.T) {
 		proto.DetachParams{Attachment: old.Attachment})); result.ReleasedWrite {
 		t.Fatal("old connection detached a replacement write capability")
 	}
-
-	sessionDataOn(svc, second, proto.SessionFrame{
-		Session: sessionRaw, Subscriber: subRaw, Epoch: replacement.Write.Epoch, Payload: []byte("survives\n"),
-	})
-	if got := spawner.last().typed(); got != "survives\n" {
-		t.Fatalf("replacement attachment was removed by stale detach: PTY received %q", got)
+	if _, err := svc.Call(host.WithConnection(context.Background(), second), proto.OpAck,
+		mustJSON(t, proto.AckParams{Subscriber: sub, Session: entry.Session, Offset: 0})); err != nil {
+		t.Fatalf("replacement connection lost its subscriber after stale detach: %v", err)
 	}
+
+	spawner.last().say(t, "survives\n")
+	awaitSink(t, second, "the replacement reader's bytes", func() bool {
+		return string(second.bytesFor(subRaw)) == "survives\n"
+	})
 
 	detached := decodeInto[proto.DetachResult](t, on(t, svc, second, proto.OpDetach,
 		proto.DetachParams{Attachment: replacement.Attachment}))

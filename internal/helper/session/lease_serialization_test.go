@@ -10,11 +10,23 @@ import (
 )
 
 type lockProbeProcess struct {
-	host   *hostSession
-	locked bool
+	host        *hostSession
+	locked      bool
+	readStarted chan struct{}
+	releaseRead <-chan struct{}
 }
 
-func (p *lockProbeProcess) Read([]byte) (int, error) { return 0, io.EOF }
+func (p *lockProbeProcess) Read(b []byte) (int, error) {
+	if p.readStarted == nil {
+		return 0, io.EOF
+	}
+	close(p.readStarted)
+	<-p.releaseRead
+	if len(b) > 0 {
+		b[0] = 'x'
+	}
+	return 1, io.EOF
+}
 
 func (p *lockProbeProcess) Write(b []byte) (int, error) {
 	if p.host.mu.TryLock() {
@@ -67,5 +79,38 @@ func TestWriteSerializesProcessWriteWithLeaseTransition(t *testing.T) {
 	}
 	if !proc.locked {
 		t.Fatal("process write ran outside the lease mutex: a concurrent detach could grant the next epoch before these bytes landed")
+	}
+}
+
+func TestOutputPumpDoesNotTakeSessionMutex(t *testing.T) {
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	proc := &lockProbeProcess{readStarted: readStarted, releaseRead: releaseRead}
+	hs := &hostSession{
+		proc: proc,
+		win:  newWindow(2 * creditLimit),
+		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	hs.mu.Lock()
+	pumpDone := make(chan struct{})
+	go func() {
+		hs.pump()
+		close(pumpDone)
+	}()
+	select {
+	case <-readStarted:
+	case <-t.Context().Done():
+		hs.mu.Unlock()
+		close(releaseRead)
+		t.Fatal("output pump could not reach proc.Read while s.mu was held")
+	}
+	close(releaseRead)
+	select {
+	case <-pumpDone:
+		hs.mu.Unlock()
+	case <-t.Context().Done():
+		hs.mu.Unlock()
+		t.Fatal("output pump contended on s.mu after proc.Read")
 	}
 }

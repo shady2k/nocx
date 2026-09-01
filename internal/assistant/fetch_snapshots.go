@@ -91,7 +91,7 @@ func (s *runSnapshots) Fetch(ctx context.Context, fetcher apifetch.TextFetcher, 
 	if err != nil {
 		return fetchURLResult{}, err
 	}
-	text := renderFetchedDocument(doc)
+	text, renderedLossy := renderFetchedDocumentWithLossy(doc)
 	if int64(len(text)) > snapshotMaxBytes {
 		return fetchURLResult{}, ErrSnapshotTooLarge
 	}
@@ -103,7 +103,7 @@ func (s *runSnapshots) Fetch(ctx context.Context, fetcher apifetch.TextFetcher, 
 		URL:         rawURL,
 		ContentType: doc.ContentType,
 		Text:        text,
-		Lossy:       doc.Lossy,
+		Lossy:       doc.Lossy || renderedLossy,
 	}
 	s.store(runID, revision, snapshot)
 	return makeFetchURLResult(rawURL, revision, snapshot, start, maxBytes)

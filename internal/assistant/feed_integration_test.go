@@ -22,10 +22,10 @@ func localFeedRoutes() apisend.Routes {
 	}
 }
 
-func legacyFeedResult(t *testing.T, body []byte) string {
+func fetchedResult(t *testing.T, contentType string, body []byte) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/xml")
+		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
@@ -40,9 +40,13 @@ func legacyFeedResult(t *testing.T, body []byte) string {
 		64<<10,
 	)
 	if err != nil {
-		t.Fatalf("fetch legacy feed: %v", err)
+		t.Fatalf("fetch document: %v", err)
 	}
 	return result.Text
+}
+
+func legacyFeedResult(t *testing.T, body []byte) string {
+	return fetchedResult(t, "text/xml", body)
 }
 
 func TestLegacyRSSDecodedByFetchTextRendersAsAList(t *testing.T) {
@@ -74,5 +78,16 @@ func TestFeedRendererAcceptsUnknownHistoricalDeclaration(t *testing.T) {
 	text := renderFetchedDocument(apifetch.TextDocument{ContentType: "text/xml", Text: body})
 	if !strings.Contains(text, "# News") || strings.Contains(text, "<rss") {
 		t.Fatalf("rendered unknown-declaration feed = %q, want list rather than raw XML", text)
+	}
+}
+
+func TestHTMLFetchedThroughFetchTextIsExtracted(t *testing.T) {
+	body := []byte(`<html><head><style>.hidden { display: none }</style><script>var privatePageData = "secret";</script></head><body><p>Visible first paragraph.</p><div>Visible second paragraph.</div></body></html>`)
+	text := fetchedResult(t, "text/html; charset=utf-8", body)
+	if text != "Visible first paragraph.\nVisible second paragraph." {
+		t.Fatalf("fetched HTML = %q, want extracted block prose", text)
+	}
+	if strings.Contains(text, "privatePageData") || strings.Contains(text, ".hidden") {
+		t.Fatalf("fetched HTML = %q, contains discarded element content", text)
 	}
 }

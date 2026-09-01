@@ -456,6 +456,22 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 	}
 }
 
+// helperPeerWithoutSession serves the git surface but omits the session
+// service. Uninstall must refuse when this daemon cannot enumerate its live
+// sessions; treating the unknown service as an empty inventory would remove a
+// live helper executable without first closing its process.
+func helperPeerWithoutSession() func(in io.Reader, out io.Writer) int {
+	contentHash := syntheticArtifactHash
+	return func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h.Register(hostsvc.New(localgit.NewFactory()))
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	}
+}
+
 // fakeRemoteSession is a session.Session whose only interesting facts are
 // the id, kind, host, fingerprint, mode and SSH options the helper
 // selection reads.
@@ -858,6 +874,59 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	// An unknown fingerprint closes nothing and is not an error.
 	if err := reg.CloseHelpersFor(context.Background(), "SHA256:nobody"); err != nil {
 		t.Fatalf("close unknown helper: %v", err)
+	}
+}
+
+// TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated protects
+// uninstall's safety boundary: an unknown session service is not an empty
+// inventory. Every affected helper must be unfrozen and remain registered so
+// the operation can be retried after the daemon is repaired.
+func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
+	const fingerprint = "SHA256:test-host"
+	provider := &fakeLaneProvider{peer: helperPeerWithoutSession()}
+	stubArtifacts(t)
+	store, installs := testConsentStores(t)
+	factory, reg := helperGitFactory(provider, store, installs, discardLogger())
+	dir := fixtureRepo(t)
+
+	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selectionB := factory(&fakeRemoteSession{id: "s2", host: "host.example"})
+	repoA, outcome, err := selectionA.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open A: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repoA.Close() })
+	repoB, outcome, err := selectionB.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open B: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repoB.Close() })
+
+	if got := len(reg.hosts); got != 2 {
+		t.Fatalf("helper registry before uninstall = %d entries, want 2", got)
+	}
+	if err := reg.CloseHelpersFor(context.Background(), fingerprint); err == nil {
+		t.Fatal("uninstall continued after the daemon could not list its sessions, so a live session's executable was about to be deleted")
+	}
+	if reg.isClosing(fingerprint) {
+		t.Fatal("failed uninstall left the machine in the closing state")
+	}
+	for _, id := range []session.ID{"s1", "s2"} {
+		h, ok := reg.hosts[id]
+		if !ok {
+			t.Fatalf("failed uninstall forgot helper %q, so retry could not reach it", id)
+		}
+		h.mu.Lock()
+		closing := h.closing
+		h.mu.Unlock()
+		if closing {
+			t.Fatalf("failed uninstall left helper %q frozen against retry", id)
+		}
+	}
+	for i := range 2 {
+		if got := provider.lane(i).closeCount(); got != 0 {
+			t.Fatalf("failed uninstall closed helper lane %d %d times, want 0", i, got)
+		}
 	}
 }
 

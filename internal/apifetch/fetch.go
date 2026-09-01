@@ -85,22 +85,30 @@ type Fetcher interface {
 	Fetch(ctx context.Context, rawURL string, route apicoll.Route) ([]byte, error)
 }
 
-// TextResult is the assistant fetch's honest text representation. The body is
-// retained as UTF-8 text, including HTML markup; no lossy HTML extraction is
-// hidden from the model. Truncated is always false for a successful result:
-// oversize bodies are refused before a short answer can look complete.
-type TextResult struct {
-	URL         string `json:"url"`
-	ContentType string `json:"contentType"`
-	Text        string `json:"text"`
-	Truncated   bool   `json:"truncated"`
-	Omitted     int64  `json:"omitted"`
-	Lossy       bool   `json:"lossy"`
+// TextRequest asks the guarded fetch seam for one complete decoded document.
+//
+// MaxBytes is the absolute acquisition ceiling, not the assistant's response
+// window. The assistant keeps the complete document in its run-scoped
+// snapshot and applies the smaller result bound there.
+type TextRequest struct {
+	URL      string
+	MaxBytes int64
+}
+
+// TextDocument is the complete decoded document acquired by the fetch seam.
+// URL is metadata from the HTTP request; callers that authorize a URL keep
+// their original request identity rather than replacing it with a redirect
+// target.
+type TextDocument struct {
+	URL         string
+	ContentType string
+	Text        string
+	Lossy       bool
 }
 
 // TextFetcher is the assistant-facing extension of the guarded fetch seam.
 type TextFetcher interface {
-	FetchText(ctx context.Context, rawURL string, maxBytes int64) (TextResult, error)
+	FetchText(ctx context.Context, request TextRequest) (TextDocument, error)
 }
 
 // Client is the Fetcher over a route table.
@@ -145,42 +153,41 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, route apicoll.Route) 
 	return nil, fmt.Errorf("%w: %s", ErrNotADocument, u.Redacted())
 }
 
-// FetchText gets a direct-route HTTP response as complete UTF-8 text. The
-// assistant deliberately cannot select a pane's connection route: the route
-// argument is fixed to direct here by the tool executor.
-func (c *Client) FetchText(ctx context.Context, rawURL string, maxBytes int64) (TextResult, error) {
-	if maxBytes <= 0 {
-		return TextResult{}, fmt.Errorf("%s: text ceiling must be positive", component)
+// FetchText gets a direct-route HTTP response as a complete UTF-8 document.
+// The assistant applies its per-result window after this seam returns; this
+// method only enforces the absolute acquisition ceiling in request.MaxBytes.
+func (c *Client) FetchText(ctx context.Context, request TextRequest) (TextDocument, error) {
+	if request.MaxBytes <= 0 {
+		return TextDocument{}, fmt.Errorf("%s: text ceiling must be positive", component)
 	}
-	resp, u, err := c.get(ctx, rawURL, apicoll.Route{Kind: apicoll.RouteDirect})
+	resp, u, err := c.get(ctx, request.URL, apicoll.Route{Kind: apicoll.RouteDirect})
 	if err != nil {
-		return TextResult{}, err
+		return TextDocument{}, err
 	}
 	contentType := resp.Header.Get("Content-Type")
-	body, err := readBody(resp, maxBytes)
+	body, err := readBody(resp, request.MaxBytes)
 	if err != nil {
-		return TextResult{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
+		return TextDocument{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
 	}
 	if charsetErr := validateDeclaredCharset(contentType); charsetErr != nil {
-		return TextResult{}, charsetErr
+		return TextDocument{}, charsetErr
 	}
 	// The header remains metadata and a decoding hint; the body is the only
 	// witness for whether this response is text or binary.
 	text, lossy, err := decodeText(body, contentType)
 	if err != nil {
-		return TextResult{}, fmt.Errorf("%s: decoding %s: %w", component, u.Redacted(), err)
+		return TextDocument{}, fmt.Errorf("%s: decoding %s: %w", component, u.Redacted(), err)
 	}
 	if sampleLooksBinary(body, contentType) {
-		return TextResult{}, fmt.Errorf("%w: body at %s looks binary", ErrNotText, u.Redacted())
+		return TextDocument{}, fmt.Errorf("%w: body at %s looks binary", ErrNotText, u.Redacted())
 	}
 
-	// maxBytes is authoritative for bytes read from the wire, preserving the
-	// existing fetch bound. Reject expanded UTF-8 rather than returning a
-	// decoded result that silently exceeds the caller's ceiling.
-	if int64(len(text)) > maxBytes {
-		return TextResult{}, fmt.Errorf("%w (decoded text exceeds the limit of %d bytes)", ErrTooLarge, maxBytes)
+	// request.MaxBytes is authoritative for decoded text too. Reject expanded
+	// UTF-8 rather than retaining a document beyond the acquisition ceiling.
+	if int64(len(text)) > request.MaxBytes {
+		return TextDocument{}, fmt.Errorf("%w (decoded text exceeds the limit of %d bytes)", ErrTooLarge, request.MaxBytes)
 	}
-	return TextResult{URL: u.String(), ContentType: contentType, Text: text, Lossy: lossy}, nil
+	return TextDocument{URL: request.URL, ContentType: contentType, Text: text, Lossy: lossy}, nil
 }
 
 func (c *Client) get(ctx context.Context, rawURL string, route apicoll.Route) (*http.Response, *url.URL, error) {

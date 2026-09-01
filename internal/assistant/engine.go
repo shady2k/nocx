@@ -412,6 +412,8 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			noteOperation:    p.NoteOperation,
 			snippetOperation: p.SnippetOperation,
 			fetcher:          p.Fetcher,
+			snapshots:        c.snapshots,
+			runID:            p.RunID,
 		})
 		if err != nil {
 			return err
@@ -498,6 +500,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 func (c *client) Discard(runID string) {
 	if runID == "" {
 		return
+	}
+	if c.snapshots != nil {
+		c.snapshots.Discard(runID)
 	}
 	_ = c.checkpoints.Delete(context.Background(), runID)
 }

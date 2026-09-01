@@ -408,6 +408,7 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder 
 		floor:        floor,
 		approvals:    NewApprovalStore(),
 		checkpoints:  newRunCheckpoints(),
+		snapshots:    newRunSnapshots(),
 	}
 }
 
@@ -420,4 +421,5 @@ type client struct {
 
 	approvals   *ApprovalStore
 	checkpoints *runCheckpoints
+	snapshots   *runSnapshots
 }

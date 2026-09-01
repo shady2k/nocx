@@ -55,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // PolicyRefusalReason is WHY a call was refused — the branches decide takes,
@@ -225,6 +226,31 @@ type ApprovalRequest struct {
 	// CommandInvocation preserves command-vs-non-command provenance for the
 	// approval surface, including malformed command parses.
 	CommandInvocation bool `json:"-"`
+	// Finding is the first static-scan finding in a skills.create or
+	// skills.update body, carried to the person with the exact proposal.
+	Finding *SkillScanFinding `json:"finding,omitempty"`
+	// Classifier is the classifier's verdict or bounded failure fact for a
+	// skills write. It is absent for ordinary policy approvals.
+	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
+}
+
+// SkillScanFinding is the first suspicious instruction pattern found in a
+// proposed skill body. It is evidence for the person approving the exact
+// bytes, never the body itself.
+type SkillScanFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
+// ApprovalClassifier is the classifier gate's fact carried with an approval
+// question. A failed consultation has no verdict or model, but still carries
+// its bounded failure reason so the gate cannot disappear silently.
+type ApprovalClassifier struct {
+	Consulted bool              `json:"consulted"`
+	Verdict   ClassifierVerdict `json:"verdict,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	Reason    string            `json:"reason"`
 }
 
 func init() {
@@ -530,10 +556,25 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	if !m.inScope(t, resources, resourceDeclaration) {
 		return policyRefuse, RefusedOutOfScope, ""
 	}
+	if decision == content.DecisionPermit && isSkillMutationTool(t) {
+		return policyAsk, "", ""
+	}
 	if decision == content.DecisionPermit {
 		return policyPermit, "", ""
 	}
 	return policyAsk, "", ""
+}
+
+func isSkillMutationTool(tool agenttools.Tool) bool {
+	if tool.ScopeFamily != "skill" {
+		return false
+	}
+	for _, effect := range tool.Declaration.Effect {
+		if effect != content.EffectObserve {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []agenttools.ResourceRef) (string, bool) {
@@ -717,6 +758,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.ArgHash = ap.ArgHash
 	ask.CommandInvocation = decl.CommandArg != ""
 	ask.Invocation = cloneInvocation(invocation)
+	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -731,7 +773,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 // with: one builder is what keeps a classifier ask from reaching the surface
 // without an effect, which the notification's schema requires.
 func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef) *ApprovalRequest {
-	return &ApprovalRequest{
+	req := &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
 		Tool:      decl.Name,
@@ -740,6 +782,32 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 		Effect:    decl.Effect,
 		Resources: append([]agenttools.ResourceRef(nil), resources...),
 		Resource:  matchedResource(resources),
+	}
+	if decl.Name == "skills.create" || decl.Name == "skills.update" {
+		var params struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(rawArgs), &params); err == nil {
+			if findings := skill.Scan([]byte(params.Body)); len(findings) > 0 {
+				finding := findings[0]
+				req.Finding = &SkillScanFinding{
+					PatternID: finding.PatternID, Line: finding.Line, LineNumber: finding.LineNumber,
+				}
+			}
+		}
+	}
+	return req
+}
+
+func approvalClassifier(fact *classifierFact) *ApprovalClassifier {
+	if fact == nil {
+		return nil
+	}
+	return &ApprovalClassifier{
+		Consulted: fact.Consulted,
+		Verdict:   fact.Verdict,
+		Model:     fact.Model,
+		Reason:    fact.Reason,
 	}
 }
 
@@ -1342,6 +1410,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	if !ok {
 		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
 	}
+	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
+		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
+		if err != nil {
+			k.warn("agent tool: skill draft could not be generated", "error", err)
+			return modelResult{
+				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
+				kind: modelNocxMessage,
+			}, nil
+		}
+		rawArgs = generated
+	}
 
 	// 2. Parameter validation against the tool's schema: the file the
 	// model was shown, byte for byte, plus the ingress size bound.
@@ -1406,6 +1485,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
+	skillMutation := isSkillMutationTool(decl)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1423,24 +1503,22 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// Approval binds to the exact proposal: an approved call skips
 		// the ask; a changed argument hashes differently and does NOT
 		// resume under the old approval (design §7.2).
-		ap := k.proposal(decl.Name, callID, rawArgs)
-		if k.approvals != nil && k.approvals.IsApproved(ap) {
-			break // the exact proposal was approved; verify before dispatch
+		if !skillMutation {
+			ap := k.proposal(decl.Name, callID, rawArgs)
+			if k.approvals != nil && k.approvals.IsApproved(ap) {
+				break // the exact proposal was approved; verify before dispatch
+			}
+			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 
 	}
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
-	// ask — never lower it. Consulted ONLY where the policy says permit
-	// (an ask or refuse cannot be changed by its verdict, and its
-	// latency must stay off a path where a person is already waiting),
-	// and skipped for the exact proposal a person already approved —
-	// the approval covers the proposal INCLUDING its classification,
-	// and consulting the classifier again on the approved resume could
-	// ask forever. Failure is escalation, always: unreachable, timed
-	// out, unparseable and role-unassigned each escalate, and the
-	// classifier is never silently skipped.
+	// ask — never lower it. Ordinary calls are consulted only where the
+	// policy says permit; skill mutations are deliberately consulted
+	// before their mandatory approval even when policy says ask. Refused
+	// calls are never changed by a verdict, and their latency stays off a
+	// path where a person is already waiting.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources)
@@ -1456,6 +1534,12 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
 		}
 		classifierFact = fact
+	}
+	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
+		if classifierFact != nil {
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources), classifierFact, resources, invocation)
+		}
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 	}
 
 	// An approved proposal may reach here through either policyAsk or the

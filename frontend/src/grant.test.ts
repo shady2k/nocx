@@ -34,6 +34,20 @@ function productionModules(dir: string): string[] {
   return modules
 }
 
+const DOCUMENT_HIDDEN_READ = /\bdocument\s*\.\s*hidden\b/
+const APP_VISIBILITY_MODULE = resolve(SRC_ROOT, 'app-visible.ts')
+
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
+}
+
+it('keeps direct document visibility reads in the app visibility module', () => {
+  const readers = productionModules(SRC_ROOT)
+    .filter((file) => !file.includes('/test-support/'))
+    .filter((file) => DOCUMENT_HIDDEN_READ.test(stripComments(readFileSync(file, 'utf8'))))
+  expect(readers.filter((file) => file !== APP_VISIBILITY_MODULE)).toEqual([])
+})
+
 it('keeps the grant chip label in one production module', () => {
   const owners = productionModules(SRC_ROOT).filter((file) =>
     readFileSync(file, 'utf8').includes(GRANT_LABEL),

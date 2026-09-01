@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.approve.schema.json",
+  "title": "SkillsApprove",
+  "description": "The approved state stored for one changed managed skill.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "status"],
+  "properties": {
+    "name": { "type": "string" },
+    "status": { "type": "string", "const": "approved" }
+  }
+}

@@ -13,8 +13,10 @@ import type { FilesStatResult } from '../generated/files.stat'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesWatchResult } from '../generated/files.watch'
+import type { FilesVisibleResult } from '../generated/files.visible'
 import type { FilesRevealResult } from '../generated/files.reveal'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 
 class FilesClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -56,6 +58,16 @@ class FilesClient {
     return this.dispatcher.call<FilesWatchResult>('files.watch', { bindingId, paths })
   }
 
+  /** Whether the panel showing this binding's tree is on screen. While it
+   *  is not, the backend's digest poll issues NO listing for this binding —
+   *  a tick is a full enumeration of every watched directory, so a
+   *  collapsed sidebar used to cost exactly as much as an open one. A
+   *  hidden→visible edge polls once immediately, so nobody waits an
+   *  interval for a panel they just opened (design §5.5). */
+  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult> {
+    return this.dispatcher.call<FilesVisibleResult>('files.visible', { bindingId, visible })
+  }
+
   /** Show a path in the OS file manager. The backend refuses a remote
    *  binding rather than silently doing nothing (design §5.2); the panel
    *  renders that refusal — and the -32601 an unwired revealer answers —
@@ -72,6 +84,20 @@ class FilesClient {
     return this.dispatcher.subscribe('files.changed', (params: unknown) => {
       const p = params as FilesChanged
       if (p && typeof p.bindingId === 'string' && typeof p.path === 'string') handler(p)
+    })
+  }
+
+  /** Subscribe to the binding-level refresh freshness edge. Routine polling
+   *  stays silent; delayed and recovered state are the only transitions, with
+   *  the current state replayed after attach/reconnect by the backend. */
+  subscribeFilesRefreshStateChanged(
+    handler: (params: FilesRefreshStateChanged) => void,
+  ): () => void {
+    return this.dispatcher.subscribe('files.refreshStateChanged', (params: unknown) => {
+      const p = params as FilesRefreshStateChanged
+      if (p && typeof p.bindingId === 'string' && (p.state === 'ok' || p.state === 'delayed')) {
+        handler(p)
+      }
     })
   }
 
@@ -97,8 +123,10 @@ export interface FilesPanelServices {
   list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult>
   read(bindingId: string, path: string, maxBytes: number): Promise<FilesReadResult>
   watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
+  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult>
   reveal(bindingId: string, path: string): Promise<FilesRevealResult>
   subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void
+  subscribeFilesRefreshStateChanged(handler: (params: FilesRefreshStateChanged) => void): () => void
   onConnect(handler: () => void): () => void
   close(bindingId: string): Promise<FilesCloseResult>
 }
@@ -112,7 +140,10 @@ export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServ
     list: (bindingId, path, offset, limit) => client.list(bindingId, path, offset, limit),
     read: (bindingId, path, maxBytes) => client.read(bindingId, path, maxBytes),
     watch: (bindingId, paths) => client.watch(bindingId, paths),
+    visible: (bindingId, isVisible) => client.visible(bindingId, isVisible),
     reveal: (bindingId, path) => client.reveal(bindingId, path),
+    subscribeFilesRefreshStateChanged: (handler) =>
+      client.subscribeFilesRefreshStateChanged(handler),
     subscribeFilesChanged: (handler) => client.subscribeFilesChanged(handler),
     onConnect: (handler) => client.onConnect(handler),
     close: (bindingId) => client.close(bindingId),

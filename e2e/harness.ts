@@ -841,7 +841,9 @@ export async function setDefaultModel(
   await baseExpect(modelSelect).toHaveValue(/.+/, { timeout: 10_000 })
   // And the answering role, which has no pair of its own, stops refusing:
   // its warning line is gone because the default now carries it.
-  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  const answering = page
+    .locator('.roles-role')
+    .filter({ has: page.locator('.roles-role__title', { hasText: /^Answering$/ }) })
   await baseExpect(answering.locator('.roles-role__state')).toHaveCount(0, { timeout: 10_000 })
 }
 

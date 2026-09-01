@@ -228,7 +228,9 @@ async function backToTerminal(page: Page): Promise<void> {
 async function assignAnsweringRole(page: Page, endpointName: string, model: string): Promise<void> {
   await page.keyboard.press('Meta+,')
   await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
-  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  const answering = page
+    .locator('.roles-role')
+    .filter({ has: page.locator('.roles-role__title', { hasText: /^Answering$/ }) })
   await expect(answering).toBeVisible({ timeout: 10_000 })
   await answering.locator('select').first().selectOption({ label: endpointName })
   const modelSelect = answering.locator('select').nth(1)

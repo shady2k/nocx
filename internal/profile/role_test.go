@@ -14,7 +14,7 @@ import (
 
 func TestAllRoles_IsTheClosedSetInOrder(t *testing.T) {
 	got := AllRoles()
-	want := []ModelRole{RoleAnswering, RoleClassifier}
+	want := []ModelRole{RoleAnswering, RoleClassifier, RoleSummarizing}
 	if len(got) != len(want) {
 		t.Fatalf("AllRoles() = %v, want %v", got, want)
 	}
@@ -31,6 +31,9 @@ func TestParseModelRole(t *testing.T) {
 	}
 	if r, err := ParseModelRole("classifier"); err != nil || r != RoleClassifier {
 		t.Fatalf("ParseModelRole(classifier) = %q, %v", r, err)
+	}
+	if r, err := ParseModelRole("summarizing"); err != nil || r != RoleSummarizing {
+		t.Fatalf("ParseModelRole(summarizing) = %q, %v", r, err)
 	}
 	if _, err := ParseModelRole("gpt-4o"); !errors.Is(err, ErrRoleUnknown) {
 		t.Fatalf("ParseModelRole(gpt-4o) = %v, want ErrRoleUnknown", err)

@@ -30,6 +30,7 @@ import {
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { LOCAL_TARGET_ID } from './ports-client'
+import { setDocumentHidden } from './test-support/document-visibility'
 
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -325,6 +326,42 @@ describe('ports sidebar view', () => {
 
     icon.click() // expand
     await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+  })
+
+  it('hiding the window pauses sampling, then showing resumes it', async () => {
+    const restore = setDocumentHidden(false)
+    try {
+      const visible = vi.fn().mockResolvedValue({})
+      const services = fakeServices({ visible })
+      await mountApp(services)
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+
+      const hide = setDocumentHidden(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+
+      hide()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(visible).toHaveBeenLastCalledWith('ssh:p1:1', true))
+    } finally {
+      restore()
+    }
+  })
+
+  it('a window already hidden at mount starts Ports hidden and resumes on show', async () => {
+    const restore = setDocumentHidden(true)
+    try {
+      const visible = vi.fn().mockResolvedValue({})
+      const services = fakeServices({ visible })
+      await mountApp(services)
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', false))
+
+      restore()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(visible).toHaveBeenCalledWith('ssh:p1:1', true))
+    } finally {
+      restore()
+    }
   })
 
   it('Ctrl/Cmd+Shift+O reveals the collapsed view and focuses it when open', async () => {

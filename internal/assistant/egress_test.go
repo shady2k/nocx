@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // knownMatcher is the vault-comparison seam whose answer is computed from
@@ -66,7 +67,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -126,7 +127,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -168,7 +169,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -233,6 +234,36 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	}
 	if !strings.Contains(out, "the file's contents") {
 		t.Fatalf("result = %s, want the file's contents in the window", out)
+	}
+}
+
+func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "deploy", "references"), 0o700); err != nil {
+		t.Fatalf("mkdir references: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
+	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
+
+	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, nil)
+	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
+		Kind: content.ResourceContent,
+		ID:   "content",
+	}})
+	got, err := executeSkillsRead(context.Background(), cap, json.RawMessage(`{"name":"deploy","path":"./references/guide.md"}`), toolSeams{skills: source})
+	if err != nil {
+		t.Fatalf("executeSkillsRead: %v", err)
+	}
+
+	var result skillReadResult
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Path != "references/guide.md" {
+		t.Fatalf("result path = %q, want normalized path", result.Path)
+	}
+	if result.Content != "guide" {
+		t.Fatalf("result content = %q, want guide", result.Content)
 	}
 }
 
@@ -317,7 +348,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

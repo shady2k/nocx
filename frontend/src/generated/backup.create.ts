@@ -20,6 +20,10 @@ export interface BackupCreateResult {
      * The number of snippets in the backup. 0 when the service has no snippet store or the library is empty.
      */
     snippets: number
+    /**
+     * The number of authored and managed skill trees in the backup. Builtins are embedded and never carried.
+     */
+    skills: number
     credentialBindingsRemoved: number
     groupCredentialBindingsRemoved: number
     groupDefaultKeysOmitted: number

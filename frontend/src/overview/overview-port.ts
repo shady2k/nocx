@@ -24,6 +24,17 @@ import type { PaneActivity } from '../pane-observation'
 import type { CommandStatus } from '../command-ledger'
 import type { WorkspaceColour } from '../layout/workspace-colours'
 
+/** The helper's three answers about a session's current working directory.
+ *
+ * The launch directory is deliberately not carried here. It is a historical
+ * fact, not an observation, and using it as a fallback would make a stale
+ * path look current.
+ */
+export type CwdObservation =
+  | { readonly state: 'unobserved' }
+  | { readonly state: 'known'; readonly cwd: string }
+  | { readonly state: 'unavailable' }
+
 /** One pane, as the application knows it at the moment the overview opens. */
 export interface OverviewPaneFacts {
   /** The pane's durable id — `Pane.wireId`, the id `activate` takes back. */
@@ -38,8 +49,8 @@ export interface OverviewPaneFacts {
   /** The machine this pane is talking to (`user@host` or `host`), or null for
    *  a local session and for a pane holding no session at all. */
   readonly host: string | null
-  /** The shell's working directory, or null when it is not knowable. */
-  readonly cwd: string | null
+  /** The shell's current directory as observed by the helper or local shell. */
+  readonly cwd: CwdObservation
   /** The git branch the pane's repository is on, or null when the pane is not
    *  in a repository, or when nothing has asked. */
   readonly branch: string | null

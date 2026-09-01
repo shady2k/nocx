@@ -400,6 +400,52 @@ describe('PaneManager', () => {
     })
   })
 
+  it('uses the helper observation for the overview and names unavailable cwd', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    const sessionId = client._sessions[1].sessionId
+    const entry = (observed: { cwd?: string; unavailable: string[] }) => ({
+      hostSessionId: { generation: 'generation-a', session: sessionId },
+      workspace: 'workspace-a',
+      startedAt: '2026-09-01T00:00:00Z',
+      launch: {
+        shell: '/bin/sh',
+        cwd: '/launch',
+        pid: 12,
+        pgid: 12,
+        cols: 80,
+        rows: 24,
+        windowBytes: 0,
+      },
+      observed: { source: 'procfs', ...observed },
+      window: { base: 0, written: 0 },
+      writer: null,
+      writerEpoch: 0,
+      exit: null,
+    })
+
+    client.listHelperSessions.mockResolvedValue([entry({ cwd: '/observed', unavailable: [] })])
+    await manager.refreshHelperSessions()
+    const pane = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(pane?.cwd).toEqual({ state: 'known', cwd: '/observed' })
+
+    client.listHelperSessions.mockResolvedValue([entry({ unavailable: ['cwd'] })])
+    await manager.refreshHelperSessions()
+    const unavailable = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(unavailable?.cwd).toEqual({ state: 'unavailable' })
+  })
+
   // ── fallback title consistency (badge vs title after close) ───────────
 
   it('fallback title is the directory, not a number that would disagree with the badge', async () => {

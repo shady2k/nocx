@@ -508,7 +508,9 @@ function main(): void {
   // installs its own ⌥⌘O listener on the document — like the other two ⌥⌘
   // surfaces, because which pane you are in is not the question it answers —
   // and the strip's head button opens the same one rather than a second.
-  const overview = createOverviewController(tm.overviewPort())
+  const overview = createOverviewController(tm.overviewPort(), {
+    onOpen: () => void tm.refreshHelperSessions(),
+  })
   tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)

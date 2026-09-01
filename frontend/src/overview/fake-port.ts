@@ -18,7 +18,7 @@ export function fakePane(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFac
     paneId: 'pane-1',
     title: null,
     host: null,
-    cwd: null,
+    cwd: { state: 'unobserved' },
     branch: null,
     agentStatus: null,
     runningCommand: null,

@@ -22,6 +22,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { SessionHandle, WSClient } from './ipc'
+import type { SessionEntry } from './generated/sessions.inventory'
 import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import {
@@ -47,7 +48,12 @@ import {
   showWorkspaceCreateDialog,
   showWorkspaceEditDialog,
 } from './name-colour-dialog'
-import type { OverviewPaneFacts, OverviewPort, OverviewSnapshot } from './overview/overview-port'
+import type {
+  CwdObservation,
+  OverviewPaneFacts,
+  OverviewPort,
+  OverviewSnapshot,
+} from './overview/overview-port'
 import { LayoutStore } from './layout/layout-store'
 import type { UIStateClient } from './uistate-client'
 import { tabLabel } from './layout/tab-label'
@@ -124,6 +130,8 @@ export class Pane implements PaneHost {
   /** The tab's stored decoration, as the backend last answered. Never
    *  decided here — see setTabDecoration. */
   private _tabName: string | null = null
+  /** The program's own title, kept separate from the composed tab title. */
+  private _programTitle = ''
   private _colour: string | null = null
   private _pinned = false
   private _groupKey = ''
@@ -195,6 +203,11 @@ export class Pane implements PaneHost {
    */
   get displayTitle(): string {
     return tabLabel(this._tabName, [this._title]) || this.descriptor.defaultTitle
+  }
+
+  /** Whether the composed title came from an OSC program title. */
+  get hasProgramTitle(): boolean {
+    return this._programTitle !== ''
   }
 
   /**
@@ -471,6 +484,7 @@ export class Pane implements PaneHost {
 
   updateProgramTitle(programTitle: string): void {
     if (this._disposed) return
+    this._programTitle = programTitle.trim()
     this.updateAgentStatus(programTitle)
   }
 
@@ -758,6 +772,12 @@ export class PaneManager {
    * behaviour exactly — every restored pane opens a fresh session.
    */
   private readonly liveByPane = new Map<string, LiveSession>()
+  /** The last helper inventory, keyed by the backend session id. */
+  private readonly helperSessions = new Map<string, SessionEntry>()
+  /** One in-flight read; concurrent overview opens share it. */
+  private helperInventoryRequest: Promise<void> | null = null
+  /** Inventory changes redraw the overview without making it own a cache. */
+  private readonly helperInventoryListeners = new Set<() => void>()
   /** The endpoints this turn has yet to report as not reconnected, and
    *  whether the report is already scheduled. One statement per turn, not
    *  one per pane: four stored connections behind a host that is not
@@ -1135,6 +1155,66 @@ export class PaneManager {
       })
     }
     log.info('nocx: live sessions the coordinator is holding', { panes: this.liveByPane.size })
+  }
+
+  /**
+   * Refresh the helper-owned observation cache for the overview.
+   *
+   * The read is deliberately open-time capable: `OverviewPort.snapshot()` is
+   * synchronous, so the response updates the cache and notifies an already
+   * mounted overview instead of making the surface guess or await inside
+   * rendering.
+   */
+  refreshHelperSessions(): Promise<void> {
+    if (this.helperInventoryRequest !== null) return this.helperInventoryRequest
+    this.helperSessions.clear()
+
+    const request = this.client
+      .listHelperSessions()
+      .then((entries) => {
+        this.helperSessions.clear()
+        for (const entry of entries) {
+          this.helperSessions.set(entry.hostSessionId.session, entry)
+        }
+        for (const listener of this.helperInventoryListeners) listener()
+      })
+      .catch((err: unknown) => {
+        this.helperSessions.clear()
+        log.warn('nocx: helper session observations are unavailable', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        for (const listener of this.helperInventoryListeners) listener()
+      })
+      .finally(() => {
+        this.helperInventoryRequest = null
+      })
+    this.helperInventoryRequest = request
+    return request
+  }
+
+  private cwdObservationFor(content: PaneContent | undefined): CwdObservation {
+    const origin = content?.activeOrigin?.() ?? null
+    if (origin?.kind === 'local') {
+      if (origin.cwdVerified && origin.cwd !== null && origin.cwd.trim() !== '') {
+        return { state: 'known', cwd: origin.cwd }
+      }
+      return { state: 'unobserved' }
+    }
+
+    const sessionId = origin?.kind === 'ssh' ? origin.sessionId : content?.lineage?.()?.sessionId
+    if (!sessionId) return { state: 'unobserved' }
+
+    const entry = this.helperSessions.get(sessionId)
+    if (!entry || entry.observed === null) return { state: 'unobserved' }
+    const observedCwd = entry.observed.cwd
+    if (
+      entry.observed.unavailable.includes('cwd') ||
+      observedCwd === undefined ||
+      observedCwd.trim() === ''
+    ) {
+      return { state: 'unavailable' }
+    }
+    return { state: 'known', cwd: observedCwd }
   }
 
   /**
@@ -2974,7 +3054,14 @@ export class PaneManager {
       },
       closeWorkspace: (workspaceId) => this.closeWorkspaceById(workspaceId),
       createWorkspace: () => void this.newWorkspace(),
-      subscribe: (listener) => this.layout.onChange(listener),
+      subscribe: (listener) => {
+        const removeLayout = this.layout.onChange(listener)
+        this.helperInventoryListeners.add(listener)
+        return () => {
+          removeLayout()
+          this.helperInventoryListeners.delete(listener)
+        }
+      },
     }
   }
 
@@ -3000,14 +3087,20 @@ export class PaneManager {
     const content = pane?.content
     const terminal = content instanceof TerminalContent ? content : null
     const live = terminal?.liveWork() ?? null
+    const origin = content?.activeOrigin?.() ?? null
+    const cwd = this.cwdObservationFor(content)
+    const title =
+      cwd.state !== 'known' &&
+      origin?.kind === 'ssh' &&
+      !pane?.hasProgramTitle &&
+      (live?.command ?? '').trim() === ''
+        ? null
+        : pane?.displayTitle || null
     return {
       paneId: row.id,
-      title: pane?.displayTitle || null,
-      // The row's endpoint is the fallback and not the first choice: a live
-      // session knows where it actually is, and the row knows only where it
-      // was opened.
+      title,
       host: live?.host ?? (row.endpoint || null),
-      cwd: row.cwd || null,
+      cwd,
       // No per-pane branch exists in the renderer: D10 makes the git panel
       // follow the ACTIVE tab and the session the sole owner of "which
       // repository", so a branch per card would need a second owner of that

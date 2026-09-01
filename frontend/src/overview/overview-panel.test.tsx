@@ -25,7 +25,13 @@ function twoWorkspaces(): OverviewSnapshot {
       {
         id: 'w-default',
         name: null,
-        panes: [fakePane({ paneId: 'here', title: '~/repos/nocx', cwd: '~/repos/nocx' })],
+        panes: [
+          fakePane({
+            paneId: 'here',
+            title: '~/repos/nocx',
+            cwd: { state: 'known', cwd: '~/repos/nocx' },
+          }),
+        ],
       },
       {
         id: 'w1',
@@ -35,7 +41,7 @@ function twoWorkspaces(): OverviewSnapshot {
             paneId: 'elsewhere',
             title: 'claude',
             host: 'deploy@srv-01',
-            cwd: '~/app',
+            cwd: { state: 'known', cwd: '~/app' },
             branch: 'main',
             agentStatus: 'idle',
             since: NOW - 5 * 60_000,

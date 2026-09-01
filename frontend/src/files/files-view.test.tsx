@@ -20,6 +20,7 @@ import { FILES_VIEW_ID, FILES_VIEW_ORDER, createFilesView } from './files-view'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { PlugIcon } from '../ui/icons'
 import { createRendererMock, makeClient, mountPaneManager } from '../test-support/panes-fixtures'
+import { setDocumentHidden } from '../test-support/document-visibility'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
@@ -1826,5 +1827,39 @@ describe('the visibility signal (nocx-8hdia.1)', () => {
     filesStore.setVisible(true)
     filesStore.setVisible(true)
     expect(sent).toEqual([true])
+  })
+
+  it('hiding the window tells Files to stop its background work, then showing resumes it', async () => {
+    const restore = setDocumentHidden(false)
+    try {
+      const { services, sent } = recordingServices()
+      await mountApp(services)
+      await vi.waitFor(() => expect(sent).toEqual([true]))
+
+      const hide = setDocumentHidden(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+      hide()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+    } finally {
+      restore()
+    }
+  })
+
+  it('a window already hidden at mount starts Files hidden and resumes on show', async () => {
+    const restore = setDocumentHidden(true)
+    try {
+      const { services, sent } = recordingServices()
+      await mountApp(services)
+      await vi.waitFor(() => expect(sent).toEqual([false]))
+
+      restore()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([false, true]))
+    } finally {
+      restore()
+    }
   })
 })

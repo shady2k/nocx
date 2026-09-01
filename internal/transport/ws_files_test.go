@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -919,6 +920,24 @@ type countingProvider struct {
 	filesystem.Provider
 	mu    sync.Mutex
 	lists map[string]int
+
+	blockNextList bool
+	listStarted   chan struct{}
+	listRelease   chan struct{}
+	listFinished  chan struct{}
+	failNextList  error
+}
+
+func (p *countingProvider) blockNext() {
+	p.mu.Lock()
+	p.blockNextList = true
+	p.mu.Unlock()
+}
+
+func (p *countingProvider) failNext(err error) {
+	p.mu.Lock()
+	p.failNextList = err
+	p.mu.Unlock()
 }
 
 func (p *countingProvider) List(
@@ -928,8 +947,25 @@ func (p *countingProvider) List(
 ) (filesystem.Listing, error) {
 	p.mu.Lock()
 	p.lists[path]++
+	fail := p.failNextList
+	p.failNextList = nil
+	block := p.blockNextList
+	if block {
+		p.blockNextList = false
+		close(p.listStarted)
+	}
 	p.mu.Unlock()
-	return p.Provider.List(ctx, path, page)
+	if fail != nil {
+		return filesystem.Listing{}, fail
+	}
+	if block {
+		<-p.listRelease
+	}
+	listing, err := p.Provider.List(ctx, path, page)
+	if block {
+		close(p.listFinished)
+	}
+	return listing, err
 }
 
 func (p *countingProvider) count(path string) int {
@@ -1167,4 +1203,261 @@ func TestFilesPoll_StayingVisibleIsNotAPollTrigger(t *testing.T) {
 	if got := count(dir) - before; got != 0 {
 		t.Errorf("re-asserting visibility issued %d listings, want 0", got)
 	}
+}
+
+// TestFilesPoll_IdleLadderBacksOff pins the exact watcher-local idle ladder
+// without a server, goroutine, or wall clock. It also proves change and
+// explicit reset edges return to the responsive rung.
+func TestFilesPoll_IdleLadderBacksOff(t *testing.T) {
+	const base = time.Second
+	w := &filesWatcher{}
+	want := []time.Duration{
+		2 * base,
+		2 * base,
+		4 * base,
+		10 * base,
+		20 * base,
+		20 * base,
+	}
+	for i, expected := range want {
+		if got := w.nextPollWait(base); got != expected {
+			t.Fatalf("idle rung %d wait = %s, want %s", i, got, expected)
+		}
+		w.notePoll(filesPollResult{continueLoop: true})
+	}
+
+	w.notePoll(filesPollResult{continueLoop: true, changed: true})
+	if got := w.nextPollWait(base); got != 2*base {
+		t.Fatalf("changed poll wait = %s, want %s", got, 2*base)
+	}
+	w.idleStep = 4
+	w.resetPollSchedule()
+	if got := w.nextPollWait(base); got != 2*base {
+		t.Fatalf("reset poll wait = %s, want %s", got, 2*base)
+	}
+	w = &filesWatcher{}
+	failureWant := []time.Duration{
+		20 * base,
+		40 * base,
+		80 * base,
+		120 * base,
+		120 * base,
+	}
+	for i, expected := range failureWant {
+		w.notePoll(filesPollResult{continueLoop: true, failed: true})
+		if got := w.nextPollWait(base); got != expected {
+			t.Fatalf("failure rung %d wait = %s, want %s", i, got, expected)
+		}
+	}
+}
+
+// TestFilesPoll_RemoteJitterIsBounded proves that only a remote watcher gets
+// deterministic ±10% jitter in this unit test; local watchers leave jitter
+// nil and therefore retain exact ladder waits.
+func TestFilesPoll_RemoteJitterIsBounded(t *testing.T) {
+	const base = time.Second
+	local := &filesWatcher{}
+	if got := local.nextPollWait(base); got != 2*base {
+		t.Fatalf("local wait = %s, want %s", got, 2*base)
+	}
+	remote := &filesWatcher{
+		jitter: rand.New(rand.NewPCG(1, 2)), //nolint:gosec // fixed non-security PRNG seed keeps the jitter-bound assertion deterministic
+	}
+	for i := range 100 {
+		got := remote.nextPollWait(base)
+		if got < 1800*time.Millisecond || got > 2200*time.Millisecond {
+			t.Fatalf("remote wait %d = %s, want [1.8s, 2.2s]", i, got)
+		}
+	}
+}
+
+// TestFilesPoll_ChangeAnnouncementResetsLadder proves that a change
+// notification re-arms the next poll at the responsive rung rather than
+// leaving the watcher at its backed-off idle wait.
+func TestFilesPoll_ChangeAnnouncementResetsLadder(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = 20 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	before := count(dir)
+	waittest.WaitForTimeout(t, "the idle ladder to advance", 5*time.Second, func() bool {
+		return count(dir)-before >= 3
+	})
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	raw := readNotification(t, e.conn, "files.changed", wantWithin)
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("files.changed: unmarshal: %v", err)
+	}
+	if params["path"] != dir {
+		t.Fatalf("files.changed path = %v, want %s", params["path"], dir)
+	}
+	announced := count(dir)
+	waittest.WaitForTimeout(t, "the next poll after the real change announcement", wantWithin,
+		func() bool {
+			return count(dir) > announced
+		})
+}
+
+// TestFilesPoll_ListActionResetsLadder proves that a user listing action
+// resets the adaptive rung without spending a second full scan, then allows
+// the next scheduled poll at the responsive rung.
+func TestFilesPoll_ListActionResetsLadder(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = 20 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	before := count(dir)
+	waittest.WaitForTimeout(t, "the idle ladder to advance", 5*time.Second, func() bool {
+		return count(dir)-before >= 3
+	})
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid,
+		"path":      dir,
+		"offset":    0,
+		"limit":     1,
+	}, 4)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.list: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.list: %+v", envelope.Error)
+	}
+	afterAction := count(dir)
+	waittest.WaitForTimeout(t, "the responsive poll after files.list", wantWithin,
+		func() bool {
+			return count(dir) > afterAction
+		})
+}
+
+// TestFilesPoll_FailureLadderUsesRealListingErrors proves a provider listing
+// failure reaches the separate retry ladder, and that a later successful
+// listing returns to the responsive idle ladder.
+func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	const base = 5 * time.Millisecond
+	e.ws.filesPollInterval = base
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	p := provider()
+	beforeFailure := p.count(dir)
+	p.failNext(errors.New("synthetic listing failure"))
+
+	waittest.WaitForTimeout(t, "the failure ladder to record the failed listing", wantWithin,
+		func() bool {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			return w.failureStep >= 1
+		})
+	if got := w.nextPollWait(base); got != 20*base {
+		t.Fatalf("first failure wait = %s, want %s", got, 20*base)
+	}
+	waittest.WaitForTimeout(t, "a successful listing after the failure", wantWithin,
+		func() bool {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			return w.failureStep == 0 && p.count(dir) > beforeFailure
+		})
+	if got := w.nextPollWait(base); got != 2*base {
+		t.Fatalf("post-failure idle wait = %s, want %s", got, 2*base)
+	}
+}
+
+// newBlockingCountingFilesEnv exposes the counting provider's one-shot List
+// wedge so the timer test can release a deliberately slow poll and observe
+// whether another scan was already pending.
+func newBlockingCountingFilesEnv(t *testing.T) (*filesTestEnv, func() *countingProvider) {
+	t.Helper()
+	var mu sync.Mutex
+	var prov *countingProvider
+	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		inner, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		p := &countingProvider{
+			Provider:     inner,
+			lists:        map[string]int{},
+			listStarted:  make(chan struct{}),
+			listRelease:  make(chan struct{}),
+			listFinished: make(chan struct{}),
+		}
+		mu.Lock()
+		prov = p
+		mu.Unlock()
+		return p, nil
+	}
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	return e, func() *countingProvider {
+		mu.Lock()
+		defer mu.Unlock()
+		return prov
+	}
+}
+
+// TestFilesPoll_ArmsTimerAfterPoll proves that a slow scan does not leave a
+// pending tick that starts the next scan immediately when the first returns.
+func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = 10 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	p := provider()
+	p.blockNext()
+
+	select {
+	case <-p.listStarted:
+	case <-time.After(wantWithin):
+		t.Fatal("poll did not reach the deliberately slow listing")
+	}
+	beforeRelease := p.count(dir)
+	close(p.listRelease)
+	select {
+	case <-p.listFinished:
+	case <-time.After(wantWithin):
+		t.Fatal("slow listing did not finish")
+	}
+	afterRelease := p.count(dir)
+	if afterRelease != beforeRelease {
+		t.Fatalf("listing count changed while the slow poll was completing: before=%d after=%d",
+			beforeRelease, afterRelease)
+	}
+
+	time.Sleep(e.ws.filesPollInterval)
+	if got := p.count(dir); got != afterRelease {
+		t.Fatalf("next poll started immediately after slow work: count=%d want %d", got, afterRelease)
+	}
+	waittest.WaitForTimeout(t, "the next poll after the post-work wait", 5*time.Second, func() bool {
+		return p.count(dir) > afterRelease
+	})
 }

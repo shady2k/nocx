@@ -581,11 +581,13 @@ describe('SettingsContent', () => {
             provenance: 'authored',
             path: '/tmp/nocx/skills/deploy/SKILL.md',
             enabled: true,
+            status: 'approved',
           },
         ],
       }),
       setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
       remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
+      approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
     }
     const skillsStore = new SkillsStore(skillsClient)
     content = new SettingsContent(

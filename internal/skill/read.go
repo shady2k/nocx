@@ -69,7 +69,7 @@ func Read(roots []Root, name, relPath string) (Content, error) {
 		}
 		data = data[offset:]
 	}
-	return Content{Bytes: data, Provenance: found.Provenance, Path: filePath}, nil
+	return Content{Bytes: data, Provenance: found.Provenance, Path: filePath, Changed: found.Status == StatusChanged}, nil
 }
 
 func cleanRelativePath(relPath string) (string, error) {

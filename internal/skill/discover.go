@@ -2,8 +2,12 @@ package skill
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -46,16 +50,25 @@ func Discover(roots []Root) []Skill {
 // is read.
 func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 	disabled := map[string]struct{}{}
+	digests := map[string]string{}
 	for _, root := range roots {
-		if root.disabled == nil {
-			continue
+		if root.disabled != nil {
+			var err error
+			disabled, err = root.disabled()
+			if err != nil {
+				return nil
+			}
 		}
-		var err error
-		disabled, err = root.disabled()
-		if err != nil {
-			return nil
+		if root.digests != nil {
+			var err error
+			digests, err = root.digests()
+			if err != nil {
+				return nil
+			}
 		}
-		break
+		if root.disabled != nil || root.digests != nil {
+			break
+		}
 	}
 	seen := make(map[string]struct{})
 	out := make([]discovered, 0)
@@ -128,9 +141,21 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 					continue
 				}
 			}
+			changed := false
+			if root.Provenance == ProvenanceManaged {
+				expected, approved := digests[skName]
+				actual, hashErr := hashSkillDirectory(base)
+				if hashErr != nil {
+					slog.Warn("skill: cannot hash managed skill", "skill", skName, "error", hashErr)
+					changed = true
+				} else {
+					changed = !approved || actual != expected
+				}
+			}
 			out = append(out, discovered{Skill: Skill{
 				Name: skName, Description: description,
 				Provenance: root.Provenance, BaseDir: base, Enabled: enabled,
+				Status: statusFor(root.Provenance, changed),
 			}, root: root})
 		}
 	}
@@ -240,4 +265,56 @@ func parseFrontmatter(data []byte) (frontmatter, int, bool) {
 		return frontmatter{}, 0, false
 	}
 	return fm, closeEnd, true
+}
+
+func hashSkillDirectory(base string) (string, error) {
+	h := sha256.New()
+	err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		var data []byte
+		if entry.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			data = []byte("symlink:" + target)
+		} else {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("%s is not a regular file", rel)
+			}
+			// #nosec G304 -- path is beneath the managed skill directory.
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		writeDigestPart(h, []byte(rel))
+		writeDigestPart(h, data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func writeDigestPart(h hash.Hash, data []byte) {
+	var length [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(length[:], uint64(len(data)))
+	_, _ = h.Write(length[:n])
+	_, _ = h.Write(data)
 }

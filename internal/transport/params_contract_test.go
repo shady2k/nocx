@@ -329,6 +329,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"skills.setEnabled": {
 			[]byte(`{"name":"deploy","enabled":true}`),
 		},
+		"skills.approve": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"shell.commandNames": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},

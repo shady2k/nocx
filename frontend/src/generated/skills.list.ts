@@ -23,4 +23,5 @@ export interface Skill {
   provenance: 'authored' | 'builtin' | 'managed'
   path: string
   enabled: boolean
+  status: 'approved' | 'changed'
 }

@@ -161,6 +161,28 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 		!strings.HasSuffix(string(got), "Run make release.") {
 		t.Fatalf("skill file = %q, want the approved draft", got)
 	}
+	if got := store.Index(); len(got) != 1 {
+		t.Fatalf("approved skill index = %+v, want the created skill", got)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: deploy\ndescription: \"Generated release procedure\"\n---\nChanged on disk."), 0o600); err != nil {
+		t.Fatalf("modify approved skill: %v", err)
+	}
+	if got := store.Index(); len(got) != 0 {
+		t.Fatalf("changed skill index = %+v, want no changed skills", got)
+	}
+	content, readErr := store.Read("deploy", "")
+	if readErr != nil {
+		t.Fatalf("read changed skill: %v", readErr)
+	}
+	if !content.Changed || !strings.Contains(string(content.Bytes), "Changed on disk.") {
+		t.Fatalf("changed skill content = %+v, want bytes plus changed marker", content)
+	}
+	if err := store.Approve("deploy"); err != nil {
+		t.Fatalf("re-approve changed skill: %v", err)
+	}
+	if got := store.Index(); len(got) != 1 || got[0].Status != skill.StatusApproved {
+		t.Fatalf("re-approved skill index = %+v, want approved skill", got)
+	}
 }
 
 func TestExecuteSkillsWriteRefusesAnOutOfScopeName(t *testing.T) {

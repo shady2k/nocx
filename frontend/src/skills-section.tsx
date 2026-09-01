@@ -42,6 +42,18 @@ export function SkillsSection(props: SkillsSectionProps) {
     }
   }
 
+  async function approve(skill: Skill): Promise<void> {
+    setBusy(skill.name)
+    try {
+      await props.store.approve(skill.name)
+      showToast({ level: 'success', message: `Re-approved “${skill.name}”` })
+    } catch (err) {
+      showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const readySkills = () => {
     const current = state()
     return current.kind === 'ready' ? current.skills : []
@@ -86,6 +98,16 @@ export function SkillsSection(props: SkillsSectionProps) {
                   <div>
                     {skill.provenance} · {skill.path}
                   </div>
+                  <Show when={skill.status === 'changed'}>
+                    <StatusCard
+                      tone="danger"
+                      title="Changed since approval"
+                      description={`The person approved different bytes at ${skill.path}.`}
+                    />
+                    <Button disabled={busy() === skill.name} onClick={() => void approve(skill)}>
+                      Re-approve
+                    </Button>
+                  </Show>
                   <Checkbox
                     variant="switch"
                     checked={skill.enabled}

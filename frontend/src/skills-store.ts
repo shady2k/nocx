@@ -6,6 +6,7 @@ export interface SkillsClientLike {
   list(): Promise<SkillsList>
   setEnabled(name: string, enabled: boolean): Promise<unknown>
   remove(name: string): Promise<unknown>
+  approve(name: string): Promise<unknown>
 }
 
 export type SkillsState =
@@ -62,6 +63,10 @@ export class SkillsStore {
 
   async remove(name: string): Promise<void> {
     await this.client.remove(name)
+    await this.refresh()
+  }
+  async approve(name: string): Promise<void> {
+    await this.client.approve(name)
     await this.refresh()
   }
 }

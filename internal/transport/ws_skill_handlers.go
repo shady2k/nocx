@@ -11,6 +11,7 @@ type skillSettingsSource interface {
 	List() (skill.ListResult, error)
 	SetEnabled(name string, enabled bool) error
 	Remove(name string) error
+	Approve(name string) error
 }
 
 type skillSetEnabledParams struct {
@@ -63,6 +64,17 @@ func (h skillSettingsHandlers) handleMethod(_ context.Context, req jsonrpcReques
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(map[string]string{"name": p.Name}))
+	case "skills.approve":
+		var p skillRemoveParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		if err := h.source.Approve(p.Name); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(map[string]string{"name": p.Name, "status": string(skill.StatusApproved)}))
 	}
 }
 
@@ -92,4 +104,8 @@ func validateSkillRemoveRaw(raw json.RawMessage) string {
 		return "name is required"
 	}
 	return ""
+}
+
+func validateSkillApproveRaw(raw json.RawMessage) string {
+	return validateSkillRemoveRaw(raw)
 }

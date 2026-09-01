@@ -1,4 +1,5 @@
 import type { Dispatcher } from './dispatcher'
+import type { SkillsApprove } from './generated/skills.approve'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsSetEnabled } from './generated/skills.setEnabled'
 import type { SkillsRemove } from './generated/skills.remove'
@@ -16,5 +17,9 @@ export class SkillsClient {
 
   remove(name: string): Promise<SkillsRemove> {
     return this.dispatcher.call<SkillsRemove>('skills.remove', { name })
+  }
+
+  approve(name: string): Promise<SkillsApprove> {
+    return this.dispatcher.call<SkillsApprove>('skills.approve', { name })
   }
 }

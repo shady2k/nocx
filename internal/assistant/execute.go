@@ -486,13 +486,18 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 		findings := skill.Scan(got.Bytes)
 		if len(findings) > 0 {
 			finding := findings[0]
-			result.Content = agenttools.FrameUntrusted(result.Content)
 			result.Finding = &skillReadFinding{
 				PatternID:  finding.PatternID,
 				Line:       finding.Line,
 				LineNumber: finding.LineNumber,
 			}
 		}
+	}
+	if got.Changed {
+		result.Content = fmt.Sprintf("Skill %q changed since approval; the person approved different bytes.\n%s", p.Name, result.Content)
+	}
+	if got.Changed || result.Finding != nil {
+		result.Content = agenttools.FrameUntrusted(result.Content)
 	}
 	return marshalResult(result)
 }

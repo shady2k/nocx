@@ -28,12 +28,24 @@ const (
 	// has no consumer in this build, and its row is still assignable —
 	// visible now, consumed by the bead that follows.
 	RoleClassifier ModelRole = "classifier"
+	// RoleSummarizing is the model that reads a transcript and writes a
+	// short text from it. It was named by nocx-0s2gh.3 (compaction's
+	// rolling summary) and is introduced by the skills work, which is its
+	// first consumer — a role in the closed set that nothing asks for is
+	// the shape RoleClassifier is stuck in (nocx-01ud6), and repeating it
+	// would be worse than not having the role. Compaction consumes this
+	// one when it lands.
+	//
+	// Unassigned, it falls back to the ANSWERING role's endpoint with a
+	// note in the UI, never silently: it spends money the person did not
+	// ask to spend.
+	RoleSummarizing ModelRole = "summarizing"
 )
 
 // AllRoles is the closed role set, in the order the roles surface renders
 // them (answering first: it is the role a normal ask uses).
 func AllRoles() []ModelRole {
-	return []ModelRole{RoleAnswering, RoleClassifier}
+	return []ModelRole{RoleAnswering, RoleClassifier, RoleSummarizing}
 }
 
 // ValidModelRole reports whether v is a value this build recognises. An

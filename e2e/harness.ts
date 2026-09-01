@@ -95,20 +95,6 @@ export async function settingsReady(page: Page): Promise<void> {
     timeout: 15_000,
   })
 }
-/**
- * Open Settings and wait until its rail is painted. Keeping the shortcut and
- * readiness assertion together prevents callers from racing the surface.
- */
-export async function openSettings(page: Page): Promise<void> {
-  await page.keyboard.press('Meta+,')
-  await settingsReady(page)
-}
-
-/** Close Settings through the pane manager and await its unmount. */
-export async function closeSettings(page: Page): Promise<void> {
-  await page.keyboard.press('Meta+W')
-  await baseExpect(page.locator('.ui-settings')).toHaveCount(0, { timeout: 15_000 })
-}
 
 /**
  * Click into the active pane's prompt editor.

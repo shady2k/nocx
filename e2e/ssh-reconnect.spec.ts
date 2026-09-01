@@ -48,15 +48,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import {
-  appReadyForInput,
-  closeSettings,
-  expect,
-  openSettings,
-  resolveBackend,
-  test,
-  type Page,
-} from './harness'
+import { appReadyForInput, test, expect, resolveBackend, type Page } from './harness'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
 import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
 import { readStand } from './stand'
@@ -107,7 +99,8 @@ function trustHostKey(line: string): void {
  * journeys below.
  */
 async function setReconnectPolicy(page: Page, value: 'ask' | 'auto' | 'never'): Promise<void> {
-  await openSettings(page)
+  await page.keyboard.press('Meta+,')
+  await expect(page.locator('[aria-label="Settings sections"]')).toBeVisible({ timeout: 15_000 })
   // Navigating the rail is not optional: Settings renders only the section it
   // is on, so the control is in the DOM and never visible without this click
   // (e2e/tabs.spec.ts records the timeout that taught it).
@@ -115,7 +108,7 @@ async function setReconnectPolicy(page: Page, value: 'ask' | 'auto' | 'never'): 
   await expect(page.locator(RECONNECT_SETTING)).toBeVisible({ timeout: 10_000 })
   await page.selectOption(RECONNECT_SETTING, value)
   await expect(page.locator(RECONNECT_SETTING)).toHaveValue(value)
-  await closeSettings(page)
+  await page.keyboard.press('Escape')
 }
 
 /** Open the seeded profile through quick connect and wait for a real prompt.

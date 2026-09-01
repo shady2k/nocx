@@ -36,6 +36,7 @@ import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
+import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
 import type { DriverState } from '../pane-observation'
 import type { Open } from '../generated/open'
@@ -600,6 +601,8 @@ export interface ClientFake {
    *  backend and the ordinary case; a restore test that means to RECLAIM a
    *  pane overrides it with an entry naming that pane. */
   listLiveSessions: ReturnType<typeof vi.fn>
+  /** Helper-owned inventory returned to the overview reader. */
+  listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
    *  that adopts one still has a handle to drive. */
   reclaimSession: ReturnType<typeof vi.fn>
@@ -679,6 +682,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     listLiveSessions: vi.fn(() => Promise.resolve([])),
     reclaimSession: vi.fn(() => Promise.resolve(newSession())),
+    listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),

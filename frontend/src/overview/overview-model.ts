@@ -126,18 +126,37 @@ export function stateText(f: OverviewPaneFacts, now: number): string {
 }
 
 /**
+ * Return the cwd text that is safe to show as a current location.
+ *
+ * The helper's launch cwd is not an observation. In particular, the
+ * unavailable state must never turn that historical value into a plausible
+ * current path.
+ */
+function cwdText(f: OverviewPaneFacts): string {
+  switch (f.cwd.state) {
+    case 'known':
+      return present(f.cwd.cwd) ?? 'Directory not known'
+    case 'unavailable':
+      return 'Directory unavailable'
+    case 'unobserved':
+      return 'Directory not observed'
+  }
+}
+
+/**
  * What the card calls the pane: the title it composed for itself, and — when
  * it has composed none yet — the same chain one rung at a time.
  *
  * The last resort is a name rather than an empty string. A blank card is
  * indistinguishable from a rendering bug, and a pane one round trip old is an
- * ordinary state, not a broken one.
+ * ordinary state, not a broken one. Only an observed cwd is eligible for this
+ * fallback; the other two states are rendered by `cardLocation`.
  */
 export function cardTitle(f: OverviewPaneFacts): string {
   return (
     present(f.title) ??
     present(f.runningCommand) ??
-    present(f.cwd) ??
+    (f.cwd.state === 'known' ? present(f.cwd.cwd) : null) ??
     present(f.host) ??
     'Untitled pane'
   )
@@ -147,19 +166,16 @@ export function cardTitle(f: OverviewPaneFacts): string {
  * Where the pane is: the machine, the directory and the branch, in that order,
  * and only the parts that are known.
  *
- * A part equal to the title is dropped. A pane sitting at a prompt is titled
- * by its cwd (`pushTitle`: program title, else running command, else cwd), so
- * printing that cwd underneath would be one fact twice — the same reason
- * `terminal-content.ts` suppresses its own location line.
+ * A part equal to the title is dropped. An unknown cwd remains an explicit
+ * status rather than disappearing or falling back to the launch value.
  */
 export function cardLocation(f: OverviewPaneFacts): string | null {
   const title = present(f.title)
-  const parts = [present(f.host), present(f.cwd), present(f.branch)].filter(
+  const parts = [present(f.host), cwdText(f), present(f.branch)].filter(
     (p): p is string => p !== null && p !== title,
   )
   return parts.length === 0 ? null : parts.join(' · ')
 }
-
 /**
  * WHAT THE CARD QUOTES UNDERNEATH THE STATUS — one line, and which line it is
  * depends on what the pane is doing, because one rule cannot serve all four.

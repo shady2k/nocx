@@ -69,7 +69,7 @@ func narrowSession(grant content.Grant, resources []ResourceRef, runCtx RunConte
 			scopes = append(scopes, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
 		}
 	}
-	return NewSessionReader(scopes, runCtx.AutomaticSessionItems), nil
+	return NewSessionReader(scopes, runCtx.AutomaticSessionItems, runCtx.MarkedSessionWindows), nil
 }
 
 func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {

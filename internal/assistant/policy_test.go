@@ -315,7 +315,7 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 		}
 	}
 	// Test grants carry the pane identity; production receives it from transport.
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, nil, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, Attachments{}, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -812,7 +812,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, nil, nil, nil)
+	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, Attachments{}, nil, nil)
 	if mwErr != nil {
 		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
 	}
@@ -1825,7 +1825,7 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	if !found {
 		t.Fatal("files.read declaration not found")
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, nil, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, Attachments{}, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

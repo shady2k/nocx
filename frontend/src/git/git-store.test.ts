@@ -648,16 +648,16 @@ describe('polling is coalesced by repository identity (D23)', () => {
     expect(open).toHaveBeenCalledTimes(1)
     expect(status).toHaveBeenCalledTimes(1)
 
-    // Over two intervals the repository's ONE loop fires once per tick —
-    // not twice, and not an extra immediate read for the new tab. The
-    // advance is stepped so the in-flight flag from each tick's read can
-    // settle before the next tick (a tick that finds a read still in
-    // flight is D23's backoff, asserted separately below).
+    // After the first base interval the repository's ONE loop backs off;
+    // advancing only to the next 5s boundary must not issue a second read
+    // or an extra immediate read for the new tab. The advance is stepped
+    // so the in-flight flag from the first read can settle before checking
+    // the shorter-than-next-rung window.
     vi.advanceTimersByTime(5000)
     await settle()
     vi.advanceTimersByTime(5000)
     await settle()
-    expect(status).toHaveBeenCalledTimes(3)
+    expect(status).toHaveBeenCalledTimes(2)
     expect(open).toHaveBeenCalledTimes(1)
   })
 
@@ -733,6 +733,101 @@ describe('the consent prompt', () => {
 // ── Polling (D13, rule 6) ─────────────────────────────────────────────────
 
 describe('polling', () => {
+  it('backs off unchanged status to the stated 50s idle tail', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
+    const status = mockHandle(services, 'status')
+    status.mockClear()
+
+    store.setVisible(true)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(1) // fresh the moment it is seen
+
+    await vi.advanceTimersByTimeAsync(5000)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(2) // 5s responsive rung
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(3) // 10s rung
+
+    await vi.advanceTimersByTimeAsync(20_000)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(4) // 20s rung
+
+    await vi.advanceTimersByTimeAsync(49_999)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(4) // no poll before the 50s tail
+
+    await vi.advanceTimersByTimeAsync(1)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(5) // 50s idle tail
+  })
+
+  it('a mutation completion resets the next poll to the responsive rung', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 100 })
+    const status = mockHandle(services, 'status')
+    status.mockClear()
+
+    store.setVisible(true)
+    await settle()
+    await vi.advanceTimersByTimeAsync(100)
+    await settle() // one unchanged poll moves the timer to 2x
+
+    status.mockClear()
+    store.stage(['a.txt'])
+    await settle()
+    expect(status).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(100)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(1)
+  })
+
+  it('a changed status resets the next poll to the responsive rung', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 100 })
+    const status = mockHandle(services, 'status')
+    status.mockClear()
+
+    store.setVisible(true)
+    await settle()
+    await vi.advanceTimersByTimeAsync(100)
+    await settle() // unchanged: the next rung is 2x
+    status.mockClear()
+    status.mockResolvedValueOnce(statusResult({ branch: 'feature' }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(1)
+    expect(store.status()?.branch).toBe('feature')
+
+    await vi.advanceTimersByTimeAsync(100)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(2)
+  })
+
+  it('a manual refresh resets the next poll to the responsive rung', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 100 })
+    const status = mockHandle(services, 'status')
+    status.mockClear()
+
+    store.setVisible(true)
+    await settle()
+    await vi.advanceTimersByTimeAsync(100)
+    await settle() // unchanged: the next rung is 2x
+
+    status.mockClear()
+    store.refresh()
+    await settle()
+    expect(status).toHaveBeenCalledTimes(1) // the refresh itself is immediate
+
+    await vi.advanceTimersByTimeAsync(100)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(2)
+  })
+
   it('polls only while visible and ready, one in flight, and a failed poll keeps the last good status (stale mark)', async () => {
     vi.useFakeTimers()
     const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
@@ -769,6 +864,7 @@ describe('polling', () => {
     status.mockClear()
     store.stage(['a.txt'])
     vi.advanceTimersByTime(10_000)
+    await settle()
     expect(status).not.toHaveBeenCalled()
 
     mutation.resolve(statusResult())

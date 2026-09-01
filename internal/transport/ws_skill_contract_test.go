@@ -82,7 +82,7 @@ func TestSkillsRemove_OverTheWireConformsToContract(t *testing.T) {
 func TestSkillsApprove_OverTheWireConformsToContract(t *testing.T) {
 	configDir := t.TempDir()
 	managedRoot := filepath.Join(configDir, "managed-skills")
-	store := skill.NewStoreWithDocumentStore(skill.OSFileSystem{}, []skill.Root{{Dir: managedRoot, Provenance: skill.ProvenanceManaged}}, storage.NewDocumentStore(configDir))
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: managedRoot, Provenance: skill.ProvenanceManaged}}, storage.NewDocumentStore(configDir))
 	if err := store.Create("deploy", "deploy", "body"); err != nil {
 		t.Fatalf("create managed skill: %v", err)
 	}
@@ -120,7 +120,7 @@ func skillsContractConnection(t *testing.T) (*websocket.Conn, func()) {
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: deploy\ndescription: deploy\n---\nbody\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := skill.NewStoreWithDocumentStore(skill.OSFileSystem{}, []skill.Root{{Dir: filepath.Dir(skillDir), Provenance: skill.ProvenanceAuthored}, {Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged}}, storage.NewDocumentStore(configDir))
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: filepath.Dir(skillDir), Provenance: skill.ProvenanceAuthored}, {Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged}}, storage.NewDocumentStore(configDir))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {

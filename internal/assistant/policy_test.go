@@ -437,7 +437,7 @@ func TestAsk_RefusalContinuesAsToolResult(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: `{"path":"/etc/passwd"}`}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -516,7 +516,7 @@ func TestAsk_RefusedCallIsOneCallsAnswerNotTheBatchs(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -578,7 +578,7 @@ func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -608,7 +608,7 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -650,7 +650,7 @@ func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -832,7 +832,7 @@ func TestAsk_DeclinedProposalResumesWithRefusalAndContinues(t *testing.T) {
 	f, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -917,7 +917,7 @@ func TestAsk_StandingRefusalTellsTheModelTheSecondTime(t *testing.T) {
 	f, srv := newFakeOpenAI(retryAfterRefusalThenAnswer("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -984,7 +984,7 @@ func TestAsk_PermittedReadReturnsFileContents(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -1046,7 +1046,7 @@ func TestAsk_PermittedEditChangesFile(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.edit", args: args}))
 	defer srv.Close()
 
-	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -1164,7 +1164,7 @@ func TestAsk_StaleEditIsRefusedAsToolResult(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestExecutorsCoverTheRegistry(t *testing.T) {
 func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	t.Chdir(t.TempDir()) // the embed is compiled into the binary: cwd must not matter
 
-	cl, err := NewClientWithoutSkillRoots(nil, nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("NewClient outside the repo: %v", err)
 	}
@@ -1403,7 +1403,7 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -1477,7 +1477,7 @@ func TestAsk_PolicyEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, path)}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -1524,7 +1524,7 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 			if tc.floorRefusal {
 				floor = content.NewFloor("", "")
 			}
-			cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, floor)
+			cl, _, err := NewClientAndRegistry(nil, nil, floor, nil)
 			if err != nil {
 				t.Fatalf("newClient: %v", err)
 			}
@@ -1628,7 +1628,7 @@ func TestAsk_EgressSuspensionCarriesTheEffectAndTheResource(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, path)}))
 	defer srv.Close()
 
-	cl, clErr := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -1711,7 +1711,7 @@ func TestAsk_ObserveToolResultIsFramedAsDataBeforeModelActs(t *testing.T) {
 	p := askParams(srv.URL, &grant, ledger, nil)
 	p.Requester = runner
 	p.Messages = []Message{{Role: "user", Content: "read the block"}}
-	cl, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -1796,7 +1796,7 @@ func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
 		args: fmt.Sprintf(`{"path":%q}`, path),
 	}))
 	defer readServer.Close()
-	readClient, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	readClient, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("new read client: %v", err)
 	}
@@ -1812,7 +1812,7 @@ func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
 		args: fmt.Sprintf(`{"command":%q}`, path),
 	}))
 	defer executeServer.Close()
-	executeClient, err := newClientWithoutSkillRoots(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	executeClient, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("new execute client: %v", err)
 	}

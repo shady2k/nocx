@@ -87,8 +87,8 @@ type Store struct {
 
 // NewStore builds a skill store. The roots must include one managed directory;
 // authored and builtin roots are retained for collision checks and precedence.
-func NewStore(fsys FileSystem, roots []Root) *Store {
-	return newStore(fsys, roots, nil)
+func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *Store {
+	return newStore(fsys, roots, docStore)
 }
 
 // FS exposes the injected write surface for failure-path tests and composition

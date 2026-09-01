@@ -58,7 +58,7 @@ func (f *failingWriteCloser) Write(p []byte) (int, error) {
 func TestUpdateLeavesThePreviousVersionOnAFailedRename(t *testing.T) {
 	root := t.TempDir()
 	fsys := &fakeFS{}
-	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "original body"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestUpdateLeavesThePreviousVersionOnAFailedRename(t *testing.T) {
 func TestUpdateLeavesThePreviousVersionOnAFailedWrite(t *testing.T) {
 	root := t.TempDir()
 	fsys := &fakeFS{}
-	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "original body"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCreateCompletesALeftoverEmptyDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 
 	if err := store.Create("deploy", "d", "body"); err != nil {
 		t.Fatalf("a crash between mkdir and write must not make the name unusable: %v", err)
@@ -135,7 +135,7 @@ func TestCreateRefusesAnAuthoredName(t *testing.T) {
 	store := NewStore(OSFileSystem{}, []Root{
 		{Dir: authored, Provenance: ProvenanceAuthored},
 		{Dir: managed, Provenance: ProvenanceManaged},
-	})
+	}, nil)
 
 	err := store.Create("deploy", "d", "b")
 	if err == nil {
@@ -151,7 +151,7 @@ func TestCreateRefusesABuiltinName(t *testing.T) {
 	store := NewStore(OSFileSystem{}, []Root{
 		{FS: builtinFSForTest(), Provenance: ProvenanceBuiltin},
 		{Dir: managed, Provenance: ProvenanceManaged},
-	})
+	}, nil)
 
 	err := store.Create("skill-authoring", "d", "b")
 	if err == nil {
@@ -164,7 +164,7 @@ func TestCreateRefusesABuiltinName(t *testing.T) {
 
 func TestCreateNormalizesNameAndSanitizesDescription(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("  Deploy-Now ", "line\nfeed\u200b", "body"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestCreateNormalizesNameAndSanitizesDescription(t *testing.T) {
 func TestWriteValidationRefusesBeforeTouchingFilesystem(t *testing.T) {
 	root := t.TempDir()
 	fsys := &fakeFS{}
-	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	cases := []struct {
 		name string
 		desc string
@@ -207,7 +207,7 @@ func TestWriteValidationRefusesBeforeTouchingFilesystem(t *testing.T) {
 
 func TestUpdateAndDeleteMissingTargetsRefuse(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Update("missing", "d", "body"); err == nil {
 		t.Fatal("want update of missing target refused")
 	}
@@ -218,7 +218,7 @@ func TestUpdateAndDeleteMissingTargetsRefuse(t *testing.T) {
 
 func TestUpdateRefusesMultiplyLinkedFile(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "body"); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestUpdateRefusesMultiplyLinkedFile(t *testing.T) {
 func TestDeleteRemovesManagedSkillAndSyncsDirectory(t *testing.T) {
 	root := t.TempDir()
 	fsys := &fakeFS{}
-	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(fsys, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "body"); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func builtinFSForTest() fs.FS {
 
 func TestCreateRefusesExistingManagedName(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "body"); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestCreateRefusesExistingManagedName(t *testing.T) {
 
 func TestCreateRefusesAnOversizedSkill(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", strings.Repeat("x", maxSkillFileBytes)); err == nil {
 		t.Fatal("want oversized skill refused")
 	}
@@ -295,7 +295,7 @@ func TestUpdateRefusesAnAuthoredName(t *testing.T) {
 	store := NewStore(OSFileSystem{}, []Root{
 		{Dir: authored, Provenance: ProvenanceAuthored},
 		{Dir: managed, Provenance: ProvenanceManaged},
-	})
+	}, nil)
 	if err := store.Update("deploy", "d", "b"); err == nil || !strings.Contains(err.Error(), "you wrote") {
 		t.Fatalf("update error = %v, want authored-name refusal", err)
 	}
@@ -303,7 +303,7 @@ func TestUpdateRefusesAnAuthoredName(t *testing.T) {
 
 func TestUpdateRefusesASymlinkedSkillFile(t *testing.T) {
 	managed, outside := t.TempDir(), t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}}, nil)
 	dir := filepath.Join(managed, "deploy")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -329,7 +329,7 @@ func TestUpdateRefusesASymlinkedSkillFile(t *testing.T) {
 
 func TestUpdateRefusesANonRegularSkillFile(t *testing.T) {
 	managed := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}}, nil)
 	path := filepath.Join(managed, "deploy", "SKILL.md")
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestStoreRefusesASymlinkedManagedRoot(t *testing.T) {
 	if err := os.Symlink(outside, root); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	if err := store.Create("deploy", "d", "body"); err == nil {
 		t.Fatal("want symlinked managed root refused")
 	}
@@ -362,7 +362,7 @@ func TestRestoreSnapshotRefusesSymlinkedNestedDirectory(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "deploy", "references")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}})
+	store := NewStore(OSFileSystem{}, []Root{{Dir: root, Provenance: ProvenanceManaged}}, nil)
 	err := store.RestoreSnapshot(Snapshot{
 		Managed: []SnapshotTree{{
 			Name:  "deploy",

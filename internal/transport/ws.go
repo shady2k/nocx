@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -426,6 +427,9 @@ type WSServer struct {
 	// skillSource is the filesystem-backed source for skills.read and the
 	// per-ask prompt index. Both paths use this same abstraction.
 	skillSource assistant.SkillSource
+	// agentTools is the registry used to decide which declarations this run
+	// may be offered. It is the same assembled table used by the assistant.
+	agentTools agenttools.Registry
 	// assistantProbes records the last endpoints.probe outcome — the
 	// process-lifetime "last probe result" agent.status reports. When nil,
 	// probes still run and return their outcome, but agent.status reports
@@ -979,6 +983,12 @@ func WithSkillSource(source assistant.SkillSource) WSServerOption {
 	return func(ws *WSServer) { ws.skillSource = source }
 }
 
+// WithAgentToolRegistry attaches the registry used by the assistant engine.
+// Prompt indexing asks this registry which declarations the grant permits.
+func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
+	return func(ws *WSServer) { ws.agentTools = reg }
+}
+
 // WithRunLease names the lease bounds every run execution is supervised
 // under (ADR-0020 decision 2): the wall-clock deadline, the inactivity
 // deadline, the output budget and the escalation grace. Zero fields mean
@@ -1488,7 +1498,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillSource, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillSource, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

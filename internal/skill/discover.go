@@ -32,8 +32,20 @@ type discovered struct {
 // candidate SKILL.md. Broken entries are logged and skipped so one bad file
 // cannot make an ask fail.
 func Discover(roots []Root) []Skill {
+	detailed := discoverDetailed(roots)
+	out := make([]Skill, 0, len(detailed))
+	for _, candidate := range detailed {
+		out = append(out, candidate.Skill)
+	}
+	return out
+}
+
+// discoverDetailed is the single source of truth for root precedence,
+// validation, diagnostics, and name deduplication. Read selects from this
+// same result so a skill cannot be indexed differently from how it is read.
+func discoverDetailed(roots []Root) []discovered {
 	seen := make(map[string]struct{})
-	out := make([]Skill, 0)
+	out := make([]discovered, 0)
 	for _, root := range roots {
 		entries, cut, err := rootEntries(root)
 		if err != nil {
@@ -56,6 +68,7 @@ func Discover(roots []Root) []Skill {
 			}
 			base := joinRootPath(root, name)
 			if root.Dir != "" {
+				// #nosec G304 -- path is a discovered skill file under a configured root.
 				info, statErr := os.Lstat(filepath.Join(root.Dir, name, "SKILL.md"))
 				if statErr != nil {
 					if !errors.Is(statErr, fs.ErrNotExist) {
@@ -95,7 +108,10 @@ func Discover(roots []Root) []Skill {
 				continue
 			}
 			seen[skName] = struct{}{}
-			out = append(out, Skill{Name: skName, Description: description, Provenance: root.Provenance, BaseDir: base})
+			out = append(out, discovered{Skill: Skill{
+				Name: skName, Description: description,
+				Provenance: root.Provenance, BaseDir: base,
+			}, root: root})
 		}
 	}
 	return out

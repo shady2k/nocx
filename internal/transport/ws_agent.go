@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
@@ -551,11 +552,12 @@ type agentHandlers struct {
 	dumpOp capability.LedgerOperation
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
-	configOp  capability.ConfigOperation
-	noteOp    capability.NoteOperation
-	snippetOp capability.SnippetOperation
-	skills    assistant.SkillSource
-	log       log.Logger
+	configOp   capability.ConfigOperation
+	noteOp     capability.NoteOperation
+	snippetOp  capability.SnippetOperation
+	skills     assistant.SkillSource
+	agentTools agenttools.Registry
+	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
 	// service, so the ask refuses before the call.
@@ -660,6 +662,10 @@ func environmentForSession(sess session.Session) content.Environment {
 //     owner is the settings document (nocx-avogl.4). It is read here, on
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
+//     governs the next question with no restart and nothing to invalidate.
+//   - The skills index is supplied by the caller from the registry-granted
+//     skill source; this function records it in prompt facts and does not
+//     derive which skills the run may read.
 func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, skills []assistant.SkillRef) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		Cwd:                  cwd,
@@ -684,34 +690,32 @@ func (h agentHandlers) personalParagraph() string {
 	return h.personalInstructions()
 }
 
-func skillRefsForGrant(grant *content.Grant, source assistant.SkillSource) []assistant.SkillRef {
+func skillRefsForGrant(grant *content.Grant, source assistant.SkillSource, registry agenttools.Registry) []assistant.SkillRef {
 	if grant == nil || source == nil {
 		return nil
 	}
-	observes := false
-	for _, effect := range grant.Effects {
-		if effect == content.EffectObserve {
-			observes = true
+	offered := false
+	for _, tool := range registry.ForGrant(*grant) {
+		if tool.Name == "skills.read" {
+			offered = true
 			break
 		}
 	}
-	if !observes {
+	if !offered {
 		return nil
 	}
-	for _, scope := range grant.Scopes {
-		if scope.Kind == content.ResourceContent && (scope.ID == "content" || strings.HasPrefix(scope.ID, "skill/")) {
-			index := source.Index()
-			refs := make([]assistant.SkillRef, 0, len(index))
-			for _, item := range index {
-				child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + item.Name}
-				if scope.Contains(child) {
-					refs = append(refs, assistant.SkillRef{Name: item.Name, Description: item.Description})
-				}
+	index := source.Index()
+	refs := make([]assistant.SkillRef, 0, len(index))
+	for _, item := range index {
+		child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + item.Name}
+		for _, scope := range grant.Scopes {
+			if scope.Contains(child) {
+				refs = append(refs, assistant.SkillRef{Name: item.Name, Description: item.Description})
+				break
 			}
-			return refs
 		}
 	}
-	return nil
+	return refs
 }
 
 // personalInstructionsText reads the person's own paragraph out of the
@@ -917,7 +921,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefsForGrant(runGrant, h.skills)),
+		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefsForGrant(runGrant, h.skills, h.agentTools)),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -2437,7 +2441,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillSource, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillSource, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2456,7 +2460,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
-			noteOp: noteOp, snippetOp: snippetOp, skills: skills,
+			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,

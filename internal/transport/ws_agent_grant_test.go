@@ -15,10 +15,22 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 )
+
+type fixedSkills []skill.Skill
+
+func (s fixedSkills) Index() []skill.Skill {
+	return s
+}
+
+func (fixedSkills) Read(string, string) (skill.Content, error) {
+	return skill.Content{}, errors.New("not used")
+}
 
 type grantPromptClient struct {
 	seen chan assistant.AskParams
@@ -120,6 +132,32 @@ func TestRunGrantForOffersContentTools(t *testing.T) {
 		if !names[want] {
 			t.Fatalf("run grant offered tools %v, missing %q", names, want)
 		}
+	}
+}
+
+func TestSkillRefsForGrantListsEveryGrantedSkillScope(t *testing.T) {
+	reg, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	grant := content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes: []content.GrantScope{
+			{Kind: content.ResourceContent, ID: "skill/deploy"},
+			{Kind: content.ResourceContent, ID: "skill/backup"},
+		},
+	}
+	source := fixedSkills{
+		{Name: "deploy", Description: "deployment"},
+		{Name: "backup", Description: "backups"},
+	}
+
+	got := skillRefsForGrant(&grant, source, reg)
+	if len(got) != 2 {
+		t.Fatalf("skill refs = %+v, want both granted skills", got)
+	}
+	if got[0].Name != "deploy" || got[1].Name != "backup" {
+		t.Fatalf("skill refs = %+v, want deploy and backup", got)
 	}
 }
 

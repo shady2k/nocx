@@ -3,7 +3,6 @@ package skill
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,15 +14,10 @@ import (
 // the provenance of the root that supplied it.
 func Read(roots []Root, name, relPath string) (Content, error) {
 	var found *discovered
-	for _, root := range roots {
-		for _, candidate := range discoverOneRoot(root) {
-			if candidate.Name == name {
-				copy := candidate
-				found = &copy
-				break
-			}
-		}
-		if found != nil {
+	for _, candidate := range discoverDetailed(roots) {
+		if candidate.Name == name {
+			copy := candidate
+			found = &copy
 			break
 		}
 	}
@@ -76,49 +70,6 @@ func Read(roots []Root, name, relPath string) (Content, error) {
 		data = data[offset:]
 	}
 	return Content{Bytes: data, Provenance: found.Provenance, Path: filePath}, nil
-}
-
-func discoverOneRoot(root Root) []discovered {
-	entries, cut, err := rootEntries(root)
-	if err != nil {
-		return nil
-	}
-	_ = cut
-	out := make([]discovered, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.Type()&fs.ModeSymlink != 0 || !entry.IsDir() {
-			continue
-		}
-		if root.Dir != "" {
-			info, statErr := os.Lstat(filepath.Join(root.Dir, name, "SKILL.md"))
-			if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
-				continue
-			}
-		}
-		data, readErr := readRootFile(root, name, "SKILL.md", MaxFrontmatterBytes)
-		if readErr != nil {
-			continue
-		}
-		fm, _, ok := parseFrontmatter(data)
-		if !ok {
-			continue
-		}
-		skName := strings.TrimSpace(fm.Name)
-		if skName == "" {
-			skName = name
-		}
-		if !skillNamePattern.MatchString(skName) || strings.TrimSpace(fm.Description) == "" {
-			continue
-		}
-		out = append(out, discovered{Skill: Skill{
-			Name:        skName,
-			Description: strings.TrimSpace(fm.Description),
-			Provenance:  root.Provenance,
-			BaseDir:     joinRootPath(root, name),
-		}, root: root})
-	}
-	return out
 }
 
 func cleanRelativePath(relPath string) (string, error) {

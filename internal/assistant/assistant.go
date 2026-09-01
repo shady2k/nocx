@@ -374,19 +374,40 @@ type ProbeResult struct {
 // NewClient builds the engine client with the caller-declared safety floor.
 // The floor is mandatory so production and tests cannot silently omit it.
 func NewClient(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, error) {
-	return newClient(logger, tools.Schemas, recorder, floor)
+	client, _, err := NewClientAndRegistry(logger, recorder, floor)
+	return client, err
+}
+
+// NewClientAndRegistry builds the assistant and returns the exact registry
+// used by its engine. The composition root passes that same registry to
+// transport so prompt offers and execution use one declaration table.
+func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, agenttools.Registry, error) {
+	reg, err := assembleToolRegistry(tools.Schemas)
+	if err != nil {
+		return nil, agenttools.Registry{}, err
+	}
+	searchSchema, _ := fs.ReadFile(tools.Schemas, "search.schema.json")
+	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
 }
 
 func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := agenttools.Assemble(toolsFS)
+	reg, err := assembleToolRegistry(toolsFS)
 	if err != nil {
-		return nil, fmt.Errorf("assistant: tool registry: %w", err)
-	}
-	if len(reg.All()) == 0 {
-		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
+		return nil, err
 	}
 	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
 	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
+}
+
+func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
+	reg, err := agenttools.Assemble(toolsFS)
+	if err != nil {
+		return agenttools.Registry{}, fmt.Errorf("assistant: tool registry: %w", err)
+	}
+	if len(reg.All()) == 0 {
+		return agenttools.Registry{}, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
+	}
+	return reg, nil
 }
 
 func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, floor content.Floor, searchSchema ...[]byte) Client {

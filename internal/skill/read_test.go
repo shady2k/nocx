@@ -1,6 +1,8 @@
 package skill_test
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,27 @@ import (
 
 	"github.com/shady2k/nocx/internal/skill"
 )
+
+type logCapture struct {
+	records []slog.Record
+}
+
+func (l *logCapture) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (l *logCapture) Handle(_ context.Context, record slog.Record) error {
+	l.records = append(l.records, record)
+	return nil
+}
+
+func (l *logCapture) WithAttrs([]slog.Attr) slog.Handler {
+	return l
+}
+
+func (l *logCapture) WithGroup(string) slog.Handler {
+	return l
+}
 
 func TestReadRefusesEscapes(t *testing.T) {
 	root := t.TempDir()
@@ -85,4 +108,30 @@ func TestReadBoundsReturnedContent(t *testing.T) {
 	if len(got.Bytes) > 64<<10 {
 		t.Fatalf("read returned %d bytes, want at most %d", len(got.Bytes), 64<<10)
 	}
+}
+
+func TestReadUsesDiscoveryValidationLogging(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "broken")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: broken\ndescription: missing closing\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	capture := &logCapture{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if _, err := skill.Read([]skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, "broken", ""); err == nil {
+		t.Fatal("Read accepted malformed skill")
+	}
+	for _, record := range capture.records {
+		if record.Message == "skill: invalid frontmatter" {
+			return
+		}
+	}
+	t.Fatalf("Read emitted no discovery warning: %+v", capture.records)
 }

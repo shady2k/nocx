@@ -87,6 +87,10 @@ func aReleasedSchema14Database(t *testing.T, path string) {
 		"PRAGMA auto_vacuum=INCREMENTAL",
 		"PRAGMA journal_mode=WAL",
 		releasedSchema(t, 14),
+		// The released 14 startup sequence ran the api-run migration after
+		// schemaV1, so this fixture carries those tables and their counter too.
+		theTwoCounterEraAPIRunScript(t),
+		`INSERT INTO api_run_schema (id, version) VALUES (1, 1)`,
 		`INSERT INTO workspaces (id, name, colour, position, created_at, payload, digest)
 			VALUES ('ws-fourteen', 'the workspace from before the upgrade', '#123456', 7, 1400, '{"kept":true}', 'digest-fourteen')`,
 		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-fourteen', 'ws-fourteen', 'the tab the user named')`,
@@ -110,6 +114,19 @@ func aReleasedSchema14Database(t *testing.T, path string) {
 		`UPDATE ledger_sequence SET next = 1 WHERE id = 1`,
 		`PRAGMA user_version=14`,
 	)
+}
+func TestReleasedSchema14FixtureIncludesTheAPIRunTablesAndCounter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema14Database(t, path)
+
+	for _, name := range []string{"api_run_schema", "api_runs", "api_run_artifacts", "api_run_artifact_chunks"} {
+		if !aTableExists(t, path, name) {
+			t.Fatalf("released schema 14 fixture has no %s table — a real schema 14 build created every api-run table before stamping the file", name)
+		}
+	}
+	if got := rawCount(t, path, `SELECT version FROM api_run_schema WHERE id = 1`); got != 1 {
+		t.Fatalf("released schema 14 fixture api-run counter = %d, want 1 — the fixture must carry the counter its build wrote", got)
+	}
 }
 
 // assertTheRowsOfSchema14 is "its rows are present AND CORRECT afterwards",

@@ -326,12 +326,77 @@ func TestDeclarationsAreClassified(t *testing.T) {
 	}
 }
 
+func TestValidateDeclarationRequiresContentScopeFamily(t *testing.T) {
+	d := Declaration{
+		Name:          "content.tool",
+		Description:   "a content tool",
+		Effect:        content.EffectObserve,
+		OutputTrust:   OutputTrustUntrusted,
+		ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
+		Deadline:      time.Second,
+		Cancellation:  CancellationReturnError,
+		ResourceKinds: []content.ResourceKind{content.ResourceContent},
+		Executes:      InGo,
+		Params:        "content.tool.schema.json",
+	}
+	if got := validateDeclaration(d); !strings.Contains(got, "scope family") {
+		t.Fatalf("validateDeclaration = %q, want a missing scope family error", got)
+	}
+}
+
+func TestFamilyCoveredIgnoresNonContentScopes(t *testing.T) {
+	g := content.Grant{
+		Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: "note/foo"}},
+	}
+	if familyCovered(g, "note") {
+		t.Fatal("a non-content scope must not cover a content family")
+	}
+}
+
 func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Grant {
 	scopes := make([]content.GrantScope, 0, len(kinds))
 	for _, k := range kinds {
 		scopes = append(scopes, content.GrantScope{Kind: k, ID: "test-scope"})
 	}
 	return content.Grant{Effects: effects, Scopes: scopes}
+}
+
+func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := content.Grant{
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/n1"}},
+	}
+
+	var names []string
+	for _, tool := range reg.ForGrant(g) {
+		names = append(names, tool.Name)
+	}
+
+	for _, n := range names {
+		if strings.HasPrefix(n, "snippets.") {
+			t.Fatalf("a note-only grant offered %q; ForGrant matched the kind and not the family", n)
+		}
+	}
+	if !containsName(reg.ForGrant(g), "notes.search") {
+		t.Fatalf("a note grant must still offer notes.search; got %v", names)
+	}
+
+	root := content.Grant{
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "content"}},
+	}
+	for _, name := range []string{
+		"notes.search", "notes.create", "notes.update", "notes.delete",
+		"snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder",
+	} {
+		if !containsName(reg.ForGrant(root), name) {
+			t.Fatalf("a content-root grant omitted %q; got %v", name, toolNames(reg.ForGrant(root)))
+		}
+	}
 }
 
 func TestForGrant_ExactPermittedSet(t *testing.T) {

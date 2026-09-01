@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 	"time"
 
@@ -132,6 +133,17 @@ type Declaration struct {
 	// ResourceKinds is the presentation-time upper bound of the resource
 	// kinds a call may resolve to. The policy checks the resolved resources.
 	ResourceKinds []content.ResourceKind
+	// ScopeFamily is the content sub-scope family a grant must CONTAIN for
+	// this tool to be offered — "note", "snippet", "skill". Empty for a
+	// declaration that needs no sub-scope.
+	//
+	// It exists because ForGrant used to answer coverage from scope KINDS
+	// alone, so a grant naming one note offered every notes AND snippets
+	// tool: the kind is `content` for all of them. The family is what the
+	// grant actually said, and content.GrantScope.Contains is what compares
+	// them, so the content root still covers everything and a narrow grant
+	// covers only what it named.
+	ScopeFamily string
 	// ResolveResources derives the resources named by validated arguments.
 	// Nil means the declaration names no resource at all; a non-nil resolver
 	// returning no refs is a distinct zero-resource call.
@@ -360,6 +372,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentRootResources,
 		Executes:         InGo,
 		Params:           "notes.search.schema.json",
@@ -374,6 +387,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentRootResources,
 		Executes:         InGo,
 		Params:           "notes.create.schema.json",
@@ -388,6 +402,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentItemResource("id", "note"),
 		Executes:         InGo,
 		Params:           "notes.update.schema.json",
@@ -402,6 +417,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentItemResource("id", "note"),
 		Executes:         InGo,
 		Params:           "notes.delete.schema.json",
@@ -416,6 +432,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentRootResources,
 		Executes:         InGo,
 		Params:           "snippets.list.schema.json",
@@ -430,6 +447,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentRootResources,
 		Executes:         InGo,
 		Params:           "snippets.create.schema.json",
@@ -444,6 +462,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentItemResource("id", "snippet"),
 		Executes:         InGo,
 		Params:           "snippets.update.schema.json",
@@ -458,6 +477,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentItemResource("id", "snippet"),
 		Executes:         InGo,
 		Params:           "snippets.delete.schema.json",
@@ -472,6 +492,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentRootResources,
 		Executes:         InGo,
 		Params:           "snippets.reorder.schema.json",
@@ -565,6 +586,9 @@ func validateDeclaration(d Declaration) string {
 			bad = append(bad, fmt.Sprintf("unsupported resource kind %q", k))
 		}
 	}
+	if hasContentResource := slices.Contains(d.ResourceKinds, content.ResourceContent); hasContentResource && strings.TrimSpace(d.ScopeFamily) == "" {
+		bad = append(bad, "missing scope family for content resource")
+	}
 	if !supportedExecutes(d.Executes) {
 		bad = append(bad, fmt.Sprintf("unsupported execution site %q", d.Executes))
 	}
@@ -613,6 +637,9 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if !effectPermitted[t.Effect] {
 			continue
 		}
+		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
+			continue
+		}
 		covered := true
 		for _, k := range t.ResourceKinds {
 			if !kindCovered[k] {
@@ -625,6 +652,22 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		}
 	}
 	return out
+}
+
+// familyCovered reports whether a grant scope covers the content family. The
+// root scope contains any child; an item scope covers its own family even
+// though it does not contain a different item's identity.
+func familyCovered(g content.Grant, family string) bool {
+	probe := content.GrantScope{Kind: content.ResourceContent, ID: family + "/probe"}
+	for _, s := range g.Scopes {
+		if s.Kind != content.ResourceContent {
+			continue
+		}
+		if s.Contains(probe) || strings.HasPrefix(s.ID, family+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Lookup returns the tool with the given name — the middleware's declaration

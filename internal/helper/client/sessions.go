@@ -168,8 +168,8 @@ type AttachedSession struct {
 	subscriber    [16]byte
 	attachment    proto.AttachmentID
 	epoch         proto.LeaseEpoch
-	data          chan inbound
-	lifecycleData chan inbound
+	data          *stream
+	lifecycleData *stream
 	done          chan struct{}
 	once          sync.Once
 	mu            sync.Mutex
@@ -235,7 +235,7 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	a := &AttachedSession{
 		client: c, generation: params.Session.Generation,
 		session: session, subscriber: subscriber,
-		data: make(chan inbound, 64), lifecycleData: make(chan inbound, 64),
+		data: newStream(), lifecycleData: newStream(),
 		done:   make(chan struct{}),
 		offset: params.Offset, lifecycleOffset: params.LifecycleOffset,
 	}
@@ -265,29 +265,77 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 }
 
 func (a *AttachedSession) deliver(payload []byte) {
-	a.enqueue(a.data, inbound{payload: append([]byte(nil), payload...)})
+	a.data.push(inbound{payload: append([]byte(nil), payload...)})
 }
 
 func (a *AttachedSession) deliverLifecycle(payload []byte) {
-	a.enqueue(a.lifecycleData, inbound{payload: append([]byte(nil), payload...)})
+	a.lifecycleData.push(inbound{payload: append([]byte(nil), payload...)})
 }
 
-// enqueue hands one item to the reader. The room-first attempt is not an
-// optimisation: `done` closes on the PROCESS event, and the helper goes on
-// sending the window's remaining bytes after it — its window has one closer,
-// the pump, and the fd ending is the only event that means no more bytes will
-// arrive. A plain select against a closed done drops those bytes half the time
-// with the queue half empty.
-func (a *AttachedSession) enqueue(q chan inbound, item inbound) {
-	select {
-	case q <- item:
-		return
-	default:
+// stream is one attachment's inbound queue for one carrier, and its whole
+// purpose is that PUSHING NEVER BLOCKS. The connection has a single read loop:
+// it delivers the response every Call is waiting for, and it also hands PTY
+// and lifecycle payloads to their attachment. While that hand-off could block,
+// the read loop's progress depended on a consumer — and a consumer that acked
+// synchronously was waiting on the read loop, so neither could move and the
+// whole client wedged: every session on that helper, plus resize, detach and
+// inventory. A bigger buffer only moves that deadlock.
+//
+// What bounds the queue is not this side but the helper's credit limit: it
+// sends at most creditLimit unacked bytes, and only bytes that have been READ
+// are ever acked, so an undrained carrier stalls the producer after one credit
+// window rather than growing here without end. That is AD-10's backpressure
+// applied where it belongs — at the source — instead of at a channel in the
+// middle of the connection's only reader.
+type stream struct {
+	mu      sync.Mutex
+	items   []inbound
+	changed chan struct{}
+}
+
+func newStream() *stream { return &stream{changed: make(chan struct{})} }
+
+// wait is taken BEFORE a pop, so an item pushed between the pop and the park
+// is not slept through. Same generation-channel shape as the coordinator's own
+// output ring.
+func (s *stream) wait() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.changed
+}
+
+func (s *stream) push(item inbound) {
+	s.mu.Lock()
+	s.items = append(s.items, item)
+	s.signalLocked()
+	s.mu.Unlock()
+}
+
+// unpop returns the unread remainder of a partially copied item to the FRONT
+// of the queue. It replaces a goroutine that pushed the remainder back onto a
+// channel, which could — and on a busy stream would — put it behind a payload
+// that arrived later: bytes delivered out of order to a terminal.
+func (s *stream) unpop(item inbound) {
+	s.mu.Lock()
+	s.items = append([]inbound{item}, s.items...)
+	s.signalLocked()
+	s.mu.Unlock()
+}
+
+func (s *stream) pop() (inbound, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.items) == 0 {
+		return inbound{}, false
 	}
-	select {
-	case q <- item:
-	case <-a.done:
-	}
+	item := s.items[0]
+	s.items = s.items[1:]
+	return item, true
+}
+
+func (s *stream) signalLocked() {
+	close(s.changed)
+	s.changed = make(chan struct{})
 }
 
 // take is the reader's end of the same rule, and the one that names the
@@ -305,23 +353,21 @@ func (a *AttachedSession) enqueue(q chan inbound, item inbound) {
 // would hang the tab open forever instead of losing a line. So the closing
 // event is stated here rather than received: the queue is empty AND the
 // session has ended.
-func (a *AttachedSession) take(q chan inbound, closed <-chan struct{}) (inbound, bool) {
-	select {
-	case item := <-q:
-		return item, true
-	default:
-	}
-	select {
-	case item := <-q:
-		return item, true
-	case <-closed:
-	case <-a.done:
-	}
-	select {
-	case item := <-q:
-		return item, true
-	default:
-		return inbound{}, false
+func (a *AttachedSession) take(q *stream, closed <-chan struct{}) (inbound, bool) {
+	for {
+		wake := q.wait()
+		if item, ok := q.pop(); ok {
+			return item, true
+		}
+		select {
+		case <-wake:
+		case <-closed:
+			item, ok := q.pop()
+			return item, ok
+		case <-a.done:
+			item, ok := q.pop()
+			return item, ok
+		}
 	}
 }
 
@@ -355,13 +401,13 @@ func (a *AttachedSession) applyReset(r proto.SessionReset) {
 		a.mu.Lock()
 		a.pendingLifecycleReset++
 		a.mu.Unlock()
-		a.enqueue(a.lifecycleData, inbound{resetTo: &from})
+		a.lifecycleData.push(inbound{resetTo: &from})
 		return
 	}
 	a.mu.Lock()
 	a.pendingReset++
 	a.mu.Unlock()
-	a.enqueue(a.data, inbound{resetTo: &from, payload: resetNotice(lost)})
+	a.data.push(inbound{resetTo: &from, payload: resetNotice(lost)})
 }
 
 // streamLifecycle is the SessionReset.Stream value naming the lifecycle
@@ -417,13 +463,7 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	}
 	n := copy(p, item.payload)
 	if n < len(item.payload) {
-		rest := inbound{payload: item.payload[n:]}
-		go func() {
-			select {
-			case a.data <- rest:
-			case <-a.done:
-			}
-		}()
+		a.data.unpop(inbound{payload: item.payload[n:]})
 	}
 	// A reset's own payload states the hole; it is not stream bytes, so
 	// it advances no cursor. Neither do bytes read while a reset is still
@@ -484,13 +524,7 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 	}
 	n := copy(p, item.payload)
 	if n < len(item.payload) {
-		rest := inbound{payload: item.payload[n:]}
-		go func() {
-			select {
-			case l.session.lifecycleData <- rest:
-			case <-l.session.done:
-			}
-		}()
+		l.session.lifecycleData.unpop(inbound{payload: item.payload[n:]})
 	}
 	if n > 0 {
 		advance := streamBytes(n)

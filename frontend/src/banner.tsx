@@ -16,7 +16,8 @@
  * reflows the grid down to the PTY.
  *
  * SolidJS implementation (nocx-njrx.6): renders via solid-js/web render()
- * into #panes, cleans up with the returned dispose function.
+ * into an isolated host appended beneath #panes. Never pass #panes directly
+ * to the Solid disposer, because it owns the terminal pane children.
  */
 import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
@@ -70,9 +71,9 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
 }
 
 /**
- * Real banner implementation — renders a Solid component into #panes
- * and self-disposes on choice, matching the imperative predecessor's
- * DOM classes and behaviour exactly.
+ * Real banner implementation — renders a Solid component into an isolated
+ * host beneath #panes and self-disposes on choice, matching the imperative
+ * predecessor's DOM classes and behaviour exactly.
  */
 export class ClipboardBannerImpl implements ClipboardBanner {
   private _shown = false
@@ -104,10 +105,17 @@ export class ClipboardBannerImpl implements ClipboardBanner {
         resolve('dismiss')
         return
       }
-      this._dispose = render(
+      const host = document.createElement('div')
+      host.className = 'clipboard-banner-host'
+      container.append(host)
+      const dispose = render(
         () => <ClipboardBannerComponent onChoice={(choice) => this._decide(choice)} />,
-        container,
+        host,
       )
+      this._dispose = () => {
+        dispose()
+        host.remove()
+      }
     })
   }
 

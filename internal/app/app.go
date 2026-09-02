@@ -642,6 +642,7 @@ func New(opts ...Option) (*App, error) {
 	installLogrusContainment(logger)
 
 	shint := shellintegration.New(logger)
+	remoteInstaller := &remoteInstallerAdapter{inner: shint}
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -683,7 +684,7 @@ func New(opts ...Option) (*App, error) {
 		log:      logger,
 		wrapper:  ssh.NewTypedWrapper(logger, sshCfgResolver, ssh.DefaultControlRoot()),
 		dial:     DialTypedMux,
-		publish:  shint,
+		publish:  remoteInstaller,
 		sessions: sessionWindows{reg: sess},
 		probes:   defaultMasterProbes,
 	}
@@ -1139,7 +1140,7 @@ func New(opts ...Option) (*App, error) {
 		// itself. The carrier carries no payload, so this is now the only
 		// thing that puts a launch carrier on the far host, and without it
 		// a direct-host session can never integrate (design §4.1).
-		transport.WithRemoteInstaller(shint),
+		transport.WithRemoteInstaller(remoteInstaller),
 		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
 		// memory of which resolved destinations carry a committed
 		// integration. The footprint status surface reads it; the
@@ -1670,15 +1671,14 @@ func New(opts ...Option) (*App, error) {
 	// wired into every ConnectConfig the resolver builds.
 	//
 	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
-	// same shellintegration.Impl the in-band bootstrap uses satisfies
-	// ssh.RemoteInstaller without an adapter — the signatures are
-	// identical — and WithRemoteInstaller stamps it on every ConnectConfig
-	// the resolver builds for a SAVED profile. A saved connection in
-	// script mode therefore publishes the integration bundle over SFTP
-	// through P1's publisher before the session starts (design §4), while
-	// direct-host opens (no profile, no resolver) never publish. Before
-	// this line the carrier was reachable from its own tests and nowhere
-	// else (AGENTS.md check 5).
+	// composition-root remoteInstallerAdapter owns the SSH/SFTP transport,
+	// while shellintegration.Impl owns the publisher through its FS seam.
+	// WithRemoteInstaller stamps this adapter on every ConnectConfig the
+	// resolver builds for a SAVED profile. A saved connection in script mode
+	// therefore publishes the integration bundle over SFTP through P1's
+	// publisher before the session starts (design §4), while direct-host opens
+	// (no profile, no resolver) never publish. Before this line the carrier
+	// was reachable from its own tests and nowhere else (AGENTS.md check 5).
 
 	// The lane-registration callback binds a minted lifecycle lane to the
 	// session that owns it, so published facts route to the right
@@ -1755,7 +1755,7 @@ func New(opts ...Option) (*App, error) {
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),
-		connection.WithRemoteInstaller(shint),
+		connection.WithRemoteInstaller(remoteInstaller),
 	)
 	tp.SetProfileResolver(resolver)
 	// The same resolver the transport uses, handed to the API route table.

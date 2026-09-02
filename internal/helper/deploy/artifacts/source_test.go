@@ -25,10 +25,10 @@ var helperArtifactTargets = []string{
 	"nocx-helper-darwin-arm64.gz",
 }
 
-// This ceiling is deliberately above the measured 5.35 MiB stripped helper
-// and far below D3's ~40 MiB failure regime. It leaves room for ordinary
-// helper growth without allowing embedded previous builds to pass silently.
-const maxHelperBytes int64 = 8 * 1024 * 1024
+// The largest stripped target measured after the SSH/SFTP split is 4,212,352
+// bytes (darwin/amd64). A 5 MiB ceiling leaves 1,030,528 bytes (24.5%) for
+// ordinary helper growth while still rejecting a reintroduced client stack.
+const maxHelperBytes int64 = 5 * 1024 * 1024
 
 func TestMakeHelpersIsIdempotent(t *testing.T) {
 	first := artifactSizes(t)

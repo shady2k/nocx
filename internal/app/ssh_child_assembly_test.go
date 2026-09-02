@@ -465,7 +465,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 		wrapper: ssh.NewTypedWrapper(logger,
 			ssh.NewSSHConfigResolver(logger, os.DevNull, ""), sockRoot),
 		dial:     DialTypedMux,
-		publish:  shellintegration.New(logger),
+		publish:  &remoteInstallerAdapter{inner: shellintegration.New(logger)},
 		sessions: harnessTerminals{win: win, done: done},
 		probes:   defaultMasterProbes,
 	}

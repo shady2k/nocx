@@ -10,7 +10,7 @@ import {
   applyReasoningExpanded,
   reasoningStartsExpanded,
 } from './reasoning-expanded'
-import { createReasoningNote } from './ui/reasoning-note'
+import { createDisclosure } from './ui/disclosure'
 
 function freshRoot(): HTMLElement {
   const root = document.createElement('div')
@@ -44,8 +44,8 @@ describe('assistant.expandReasoning — the frontend half', () => {
 
   it('opens the notes ALREADY on screen, and closes them again', () => {
     const root = freshRoot()
-    const a = createReasoningNote()
-    const b = createReasoningNote()
+    const a = createDisclosure({ kind: 'reasoning', summary: 'Thinking' })
+    const b = createDisclosure({ kind: 'reasoning', summary: 'Thinking' })
     root.append(a.el, b.el)
     expect(a.el.open).toBe(false)
 
@@ -61,7 +61,7 @@ describe('assistant.expandReasoning — the frontend half', () => {
   it('leaves a note a person closed by hand alone until the setting itself changes', () => {
     const root = freshRoot()
     applyReasoningExpanded(true, root)
-    const note = createReasoningNote({ expanded: true })
+    const note = createDisclosure({ kind: 'reasoning', summary: 'Thinking', expanded: true })
     root.appendChild(note.el)
     // The person closes this one. The setting is the DEFAULT, not a lock.
     note.el.open = false

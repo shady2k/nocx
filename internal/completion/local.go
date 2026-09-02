@@ -34,7 +34,10 @@ func (c *LocalCompleter) Complete(ctx context.Context, req Request) (*Response, 
 		limit = 200
 	}
 
-	candidates := completeLocalPath(text, req.Cwd, limit)
+	candidates, completed := completeLocalPathContext(ctx, text, req.Cwd, limit)
+	if !completed {
+		return emptyResponse("cancelled"), nil
+	}
 	return &Response{Candidates: candidates}, nil
 }
 
@@ -71,14 +74,22 @@ func emptyResponse(reason string) *Response {
 
 // ── local path completion (mirrors ws_fs_complete.go) ────────────────────
 
-func completeLocalPath(text, cwd string, limit int) []Candidate {
+// completeLocalPathContext walks the directory the text points into and stops
+// the moment ctx is done: a renderer that supersedes a keystroke withdraws the
+// request (rpc.cancel), and the walk must not outlive it. The bool is false
+// exactly when the walk was abandoned, so a cancelled call is never mistaken
+// for a directory with nothing in it.
+func completeLocalPathContext(ctx context.Context, text, cwd string, limit int) ([]Candidate, bool) {
+	if err := ctx.Err(); err != nil {
+		return []Candidate{}, false
+	}
 	if text == "" {
-		return []Candidate{}
+		return []Candidate{}, true
 	}
 
 	base, rest, ok := resolvePathBase(text, cwd)
 	if !ok {
-		return []Candidate{}
+		return []Candidate{}, true
 	}
 
 	dir, prefix := splitDirPrefix(rest)
@@ -89,12 +100,18 @@ func completeLocalPath(text, cwd string, limit int) []Candidate {
 
 	entries, err := os.ReadDir(filepath.Join(base, dir))
 	if err != nil {
-		return []Candidate{}
+		return []Candidate{}, true
+	}
+	if err := ctx.Err(); err != nil {
+		return []Candidate{}, false
 	}
 
 	showHidden := strings.HasPrefix(prefix, ".")
 	out := make([]Candidate, 0, minInt(limit, len(entries)))
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return []Candidate{}, false
+		}
 		name := e.Name()
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
 			continue
@@ -118,7 +135,7 @@ func completeLocalPath(text, cwd string, limit int) []Candidate {
 			break
 		}
 	}
-	return out
+	return out, true
 }
 
 func resolvePathBase(text, cwd string) (base, rest string, ok bool) {

@@ -22,11 +22,28 @@ export interface GrantBlock {
   readonly automatic?: true
 }
 
+/** The rows a mark's window addresses. A block's output rows are
+ *  `.term-line`; the frozen screen's are `.nocx-freeze-frame__row`. One
+ *  question — "which rows does this mark cover" — answered in one place, so
+ *  the window derivation, the granted paint and the reveal cannot disagree
+ *  about it (nocx-hp8p2.7). */
+export function grantRows(markable: HTMLElement): HTMLElement[] {
+  const selector = markable.classList.contains(FROZEN_SCREEN_CLASS)
+    ? '.nocx-freeze-frame__row'
+    : '.term-line'
+  return Array.from(markable.querySelectorAll<HTMLElement>(selector))
+}
+
+/** The frozen screen's own class. A selection lands in one of two markable
+ *  surfaces — a scrollback block, or the pinned screen over a running
+ *  program — and this names the second. */
+const FROZEN_SCREEN_CLASS = 'nocx-freeze-frame'
+
 function selectedWindow(
   blockEl: HTMLElement,
   range: Range,
 ): { start: number; count: number } | null {
-  const rows = Array.from(blockEl.querySelectorAll<HTMLElement>('.term-line'))
+  const rows = grantRows(blockEl)
   const selected = rows
     .map((row, index) => (range.intersectsNode(row) ? index : -1))
     .filter((index) => index >= 0)
@@ -41,9 +58,13 @@ function selectedWindow(
   return { start, count: selected[selected.length - 1] - start + 1 }
 }
 
-function blockOf(node: Node | null): HTMLElement | null {
+/** The markable surface a node is in: a scrollback block, or the frozen
+ *  screen pinned over a running program. Both carry rows a person can select
+ *  and mark; before nocx-hp8p2.7 only the first was reachable, so the
+ *  gesture inside the frame led nowhere. */
+function markableOf(node: Node | null): HTMLElement | null {
   const element = node instanceof Element ? node : (node?.parentElement ?? null)
-  return element?.closest<HTMLElement>('.cmd-block') ?? null
+  return element?.closest<HTMLElement>(`.cmd-block, .${FROZEN_SCREEN_CLASS}`) ?? null
 }
 
 /** Derive one whole-block mark from the block's durable `data-entry-id`.
@@ -62,13 +83,38 @@ export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
   }
 }
 
-/** A selection marks its selected rows; without output rows it marks the whole block. */
-export function grantBlockFromSelection(sel: Selection | null): GrantBlock | null {
+/** A selection marks its selected rows; without output rows it marks the
+ *  whole block.
+ *
+ *  `automatic` is the frozen screen's attachment, when one is pinned. A
+ *  selection inside that screen NARROWS THAT ITEM rather than making a
+ *  second one: the mark carries the attachment's own id plus a row span, so
+ *  the model reads exactly the band and nothing is copied onto the wire
+ *  (nocx-hp8p2.7). It comes back stripped of `automatic`, because it is a
+ *  person mark now — counted on the chip and painted like any other. A
+ *  selection covering the whole screen offers nothing: that is the
+ *  attachment the question already carries. */
+export function grantBlockFromSelection(
+  sel: Selection | null,
+  automatic: GrantBlock | null = null,
+): GrantBlock | null {
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
   const range = sel.getRangeAt(0)
-  const start = blockOf(range.startContainer)
-  const end = blockOf(range.endContainer)
+  const start = markableOf(range.startContainer)
+  const end = markableOf(range.endContainer)
   if (!start || start !== end) return null
+  if (start.classList.contains(FROZEN_SCREEN_CLASS)) {
+    if (!automatic) return null
+    const rows = selectedWindow(start, range)
+    if (!rows) return null
+    return {
+      itemId: automatic.itemId,
+      blockEl: start,
+      command: automatic.command,
+      state: automatic.state,
+      ...rows,
+    }
+  }
   const grant = grantBlockFromElement(start)
   if (!grant) return null
   const window = selectedWindow(start, range)

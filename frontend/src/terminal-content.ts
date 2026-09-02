@@ -90,7 +90,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand, toolCallExpansion } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -118,6 +118,7 @@ import {
   arrangedByCause,
   blocksForPane,
   restoredBody,
+  toolResultForEntry,
   type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
@@ -798,7 +799,9 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     const range = selection.getRangeAt(0)
-    const grant = grantBlockFromSelection(selection)
+    // The frozen screen is markable too, and only this surface knows which
+    // attachment its rows belong to (nocx-hp8p2.7).
+    const grant = grantBlockFromSelection(selection, this.automaticFrozenGrant())
     if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) {
       this.markAffordance?.hide()
       return
@@ -1879,6 +1882,10 @@ export class TerminalContent extends BasePaneContent {
         // ADR-0040 it does not have (nocx-3dteo).
         answerText: (entryId) => answerTextForTurn(this.client, entryId),
         dump: (entryId) => agentClient.dump(entryId),
+        // What a tool call returned, read back from the action entry it was
+        // recorded under — the handle agent.runToolCall sends instead of the
+        // bytes (nocx-hp8p2.13).
+        toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
       })
 
@@ -1916,14 +1923,17 @@ export class TerminalContent extends BasePaneContent {
       this.completion = new CompletionController({
         providers: createShellProviders({
           store: renderer.snapshotStore,
-          queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
-          completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+          queryHistory: (cwd, host, signal) =>
+            queryHistory(this.client, 'directory', cwd, host, undefined, undefined, signal),
+          completeFs: (text, cwd, signal) =>
+            this.client.call<FsComplete>('fs.complete', { text, cwd }, signal),
           // The remote completion adapter (nocx-w7h.15): active only on
           // remote sessions, where it asks the remote shell's own
           // completion machinery — paths from the remote filesystem,
           // command names, and command-specific completions from bash
           // completion functions.
-          completeShell: (params) => this.client.call<ShellComplete>('shell.complete', params),
+          completeShell: (params, signal) =>
+            this.client.call<ShellComplete>('shell.complete', params, signal),
           sessionId: () => this.session?.sessionId ?? '',
           // The host provider is built inside createShellProviders (the
           // assembly it routes is plain code, not the DOM-bound quick-connect
@@ -2061,7 +2071,20 @@ export class TerminalContent extends BasePaneContent {
         // no rows or frame text cross the control plane.
         grants: () => {
           const automatic = this.automaticFrozenGrant()
-          return automatic === null ? this.grantedBlocks : [...this.grantedBlocks, automatic]
+          if (automatic === null) return this.grantedBlocks
+          // A ROW MARK NARROWS THE ATTACHMENT, IT DOES NOT ADD ONE
+          // (nocx-hp8p2.7). A selection inside the frozen screen is marked on
+          // the attachment's own id plus a row span; sending the whole screen
+          // beside it would be two items claiming one id, and the model would
+          // read the screen it was asked to read a band of. The item stays
+          // renderer-owned — which is what `automatic` says about an ITEM,
+          // not about the mark — so the backend still answers it from the
+          // pinned frame, now inside the span.
+          const narrowing = this.grantedBlocks.find((grant) => grant.itemId === automatic.itemId)
+          if (narrowing === undefined) return [...this.grantedBlocks, automatic]
+          return this.grantedBlocks.map((grant) =>
+            grant === narrowing ? { ...grant, automatic: true as const } : grant,
+          )
         },
         onTurnAccepted: () => {
           // Agent asks keep the editor visible by default. A summoned answer
@@ -4671,7 +4694,7 @@ export class TerminalContent extends BasePaneContent {
             // draws it, so a restored turn must not restate it.
             if (cause.kind === 'action') {
               if (cause.opensBlock) return null
-              return restoredBlock(
+              const toolEl = restoredBlock(
                 {
                   ...factsOf(b),
                   id: nextId(),
@@ -4700,6 +4723,17 @@ export class TerminalContent extends BasePaneContent {
                 this.runningActions,
                 this.dumpSource ?? undefined,
               )
+              // A RESTORED CALL EXPANDS THE SAME WAY A LIVE ONE DOES
+              // (nocx-hp8p2.13). The result is on the action entry, which is
+              // this child's own row, so the restore reaches it through the
+              // same reader — a turn read back from the ledger says exactly
+              // what the turn said while it was being written.
+              toolEl.appendChild(
+                toolCallExpansion(cause.entryId, cause.args ?? {}, (actionEntryId) =>
+                  toolResultForEntry(this.client, actionEntryId),
+                ),
+              )
+              return toolEl
             }
             // A block the turn RAN (or a person's, if the ledger
             // mis-seated): it is already a page row, drawn where the turn
@@ -5867,8 +5901,15 @@ export class TerminalContent extends BasePaneContent {
     const settle = this.scrollback
     const owned = this._summonedAnswers
     const tail = owned[owned.length - 1].el
+    // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
+    // element: while the command still runs its output is in the live
+    // region, which BlockManager keeps immediately after the block
+    // (nocx-hp8p2.8). Anchoring on the element alone seated the reply
+    // between `top`'s header and `top`'s own screen.
+    const manager = this.scrollback?.blockManager
+    const commandTail = manager ? manager.tailOf(command.el) : command.el
     const seat = () => {
-      let anchor = command.el
+      let anchor: ChildNode = commandTail.parentNode === parent ? commandTail : command.el
       for (const answer of owned) {
         parent.insertBefore(answer.el, anchor.nextSibling)
         answer.el.classList.remove('nocx-answer-overlay')
@@ -5945,6 +5986,16 @@ export class TerminalContent extends BasePaneContent {
       frameParent.style.position = this._freezeFrameParentPosition
     }
     this._freezeFrameParentPosition = null
+    // A ROW MARK MADE IN THE FROZEN SCREEN GOES WITH THE SCREEN
+    // (nocx-hp8p2.7). Its span is resolved against the PINNED frame — that
+    // is what makes it cost nothing on the wire — so once the pin is gone
+    // the span addresses nothing, and a mark that outlived its surface would
+    // claim rows the ask could no longer serve.
+    const view = this._freezeFrameView
+    if (view !== null && this.grantedBlocks.some((grant) => grant.blockEl === view)) {
+      this.grantedBlocks = this.grantedBlocks.filter((grant) => grant.blockEl !== view)
+      this.grantController?.setBlocks(this.grantedBlocks)
+    }
     this._freezeFrameView?.remove()
     this._freezeFrameView = null
     this._pinnedFrame = null

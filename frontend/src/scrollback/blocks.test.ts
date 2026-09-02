@@ -2020,6 +2020,7 @@ function clickMenuItem(blockEl: HTMLElement, label: string): void {
 function newManager(
   sessionName?: (id: string) => string | null,
   answerText?: (entryId: string) => Promise<string | null>,
+  toolResult?: (actionEntryId: string) => Promise<string | null>,
 ) {
   const inner = document.createElement('div')
   // Attached to the document, like the real scrollback: the settings
@@ -2034,6 +2035,7 @@ function newManager(
     snapshotStore: freshStore(),
     sessionName,
     answerText,
+    toolResult,
   })
   return { inner, xtermContainer, manager }
 }
@@ -2051,8 +2053,8 @@ describe('BlockManager.addAnswerBlock', () => {
   function flowOf(h: { el: HTMLElement }): string[] {
     const out: string[] = []
     const piece = (c: Element): void => {
-      if (c.classList.contains('ui-reasoning')) {
-        out.push(`thinking:${c.querySelector('.ui-reasoning__body')?.textContent ?? ''}`)
+      if (c.classList.contains('ui-disclosure')) {
+        out.push(`thinking:${c.querySelector('.ui-disclosure__body')?.textContent ?? ''}`)
         return
       }
       if (c.classList.contains('term-line')) {
@@ -2191,16 +2193,22 @@ describe('BlockManager.addAnswerBlock', () => {
     applyReasoningExpanded(false)
     const shut = manager.addAnswerBlock('q', '/')
     shut.reasoning('weighing the two options')
-    expect(shut.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(false)
+    expect(
+      shut.el.querySelector<HTMLDetailsElement>('.ui-disclosure[data-kind="reasoning"]')?.open,
+    ).toBe(false)
 
     applyReasoningExpanded(true)
     const open = manager.addAnswerBlock('q', '/')
     open.reasoning('weighing the two options')
-    expect(open.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(true)
+    expect(
+      open.el.querySelector<HTMLDetailsElement>('.ui-disclosure[data-kind="reasoning"]')?.open,
+    ).toBe(true)
 
     // The one already on screen follows the change too — a setting the
     // surface contradicts is the defect.
-    expect(shut.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(true)
+    expect(
+      shut.el.querySelector<HTMLDetailsElement>('.ui-disclosure[data-kind="reasoning"]')?.open,
+    ).toBe(true)
     applyReasoningExpanded(false)
   })
 
@@ -2229,7 +2237,7 @@ describe('BlockManager.addAnswerBlock', () => {
     const h = manager.addAnswerBlock('q', '/')
     h.append('hello world')
     h.close('success')
-    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
+    expect(h.el.querySelector('.ui-disclosure[data-kind="reasoning"]')).toBeNull()
     applyReasoningExpanded(false)
   })
 
@@ -3888,5 +3896,89 @@ describe('the block grant menu action', () => {
     } finally {
       el.remove()
     }
+  })
+})
+
+// nocx-hp8p2.13. A tool call announced itself and then said nothing about
+// its outcome: the arguments were in the header and "what came back" was
+// nowhere on screen. agent.runToolCall names actionEntryId as the handle a
+// later "show me what it returned" reaches through, and this is the reach.
+describe('a tool call expands to what was sent and what came back (nocx-hp8p2.13)', () => {
+  const call = (over: Record<string, unknown> = {}) => ({
+    callId: 'call_1',
+    tool: 'session.read',
+    args: { id: 'att-cf87' },
+    effect: 'observe' as const,
+    opensBlock: false,
+    actionEntryId: 'act-1',
+    ...over,
+  })
+
+  const disclosureOf = (h: { el: HTMLElement }) =>
+    h.el.querySelector<HTMLDetailsElement>('.ui-disclosure[data-kind="tool-result"]')
+
+  it('is closed until a person opens it, and reads the record only then', async () => {
+    const read = vi.fn().mockResolvedValue('{"text":"load 1.00"}')
+    const { manager } = newManager(undefined, undefined, read)
+    const h = manager.addAnswerBlock('what is on screen?', '/')
+    h.toolCall(call())
+
+    const note = disclosureOf(h)
+    expect(note).not.toBeNull()
+    expect(note!.open).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+
+    note!.open = true
+    note!.dispatchEvent(new Event('toggle'))
+    expect(read).toHaveBeenCalledWith('act-1')
+    await vi.waitFor(() =>
+      expect(note!.querySelector('.ui-disclosure__body')?.textContent).toContain('load 1.00'),
+    )
+    // Both halves: what the model asked for and what the tool answered.
+    const body = note!.querySelector('.ui-disclosure__body')?.textContent ?? ''
+    expect(body).toContain('att-cf87')
+    expect(body).toContain('Sent')
+    expect(body).toContain('Returned')
+  })
+
+  it('reads the record once, however often it is opened and shut', async () => {
+    const read = vi.fn().mockResolvedValue('{"text":"once"}')
+    const { manager } = newManager(undefined, undefined, read)
+    const h = manager.addAnswerBlock('q', '/')
+    h.toolCall(call())
+    const note = disclosureOf(h)!
+    for (const open of [true, false, true]) {
+      note.open = open
+      note.dispatchEvent(new Event('toggle'))
+    }
+    await vi.waitFor(() =>
+      expect(note.querySelector('.ui-disclosure__body')?.textContent).toContain('once'),
+    )
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('says the result is not in the record rather than showing an empty box', async () => {
+    // Retention off, an evicted body, a store that cannot be reached: one
+    // sentence, because a person has the same thing to do about all three.
+    const { manager } = newManager(undefined, undefined, vi.fn().mockResolvedValue(null))
+    const h = manager.addAnswerBlock('q', '/')
+    h.toolCall(call())
+    const note = disclosureOf(h)!
+    note.open = true
+    note.dispatchEvent(new Event('toggle'))
+    await vi.waitFor(() =>
+      expect(note.querySelector('.ui-disclosure__body')?.textContent).toContain(
+        'not in the record',
+      ),
+    )
+  })
+
+  it('draws no expansion at all where nothing can read the record', () => {
+    // A bare-bones embedding has no socket. An offer that leads nowhere is
+    // worse than no offer: it says a result is one click away when it is not.
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.toolCall(call())
+    expect(disclosureOf(h)).toBeNull()
   })
 })

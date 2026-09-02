@@ -90,6 +90,8 @@ type toolSeams struct {
 	skillDraft       *SkillDraftRequest
 	skillDraftHTTP   *http.Client
 	fetcher          apifetch.TextFetcher
+	snapshots        *runSnapshots
+	runID            string
 }
 
 type noteSearchRow struct {
@@ -159,7 +161,9 @@ func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.R
 		return "", fmt.Errorf("fetch.url: capability is %T, not *agenttools.URLScope", cap)
 	}
 	var p struct {
-		URL string `json:"url"`
+		URL      string `json:"url"`
+		Start    *int64 `json:"start"`
+		Revision string `json:"revision"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("fetch.url: args: %w", err)
@@ -167,14 +171,18 @@ func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.R
 	if !scope.Allows(p.URL) {
 		return "", errors.New("fetch.url: URL is outside the run's destination grant")
 	}
-	if seams.fetcher == nil {
-		return "", errors.New("fetch.url: URL fetcher is unavailable")
-	}
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
-	result, err := seams.fetcher.FetchText(ctx, p.URL, bound.MaxBytes)
+	start := int64(0)
+	if p.Start != nil {
+		start = *p.Start
+	}
+	if seams.snapshots == nil {
+		return "", errors.New("fetch.url: snapshot store is unavailable")
+	}
+	result, err := seams.snapshots.Fetch(ctx, seams.fetcher, seams.runID, p.URL, start, p.Revision, bound.MaxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -833,10 +841,7 @@ type readScreenIdent struct {
 // fields the window contract needs and never re-validates them.
 type frameBodyWire struct {
 	Rows []struct {
-		Kind  string `json:"kind"`
-		Cells []struct {
-			Char string `json:"char"`
-		} `json:"cells"`
+		Kind string `json:"kind"`
 		Text string `json:"text"`
 	} `json:"rows"`
 	Cursor *struct {

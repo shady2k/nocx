@@ -9,6 +9,7 @@ package transport
 // even when it says "local".
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -66,16 +67,23 @@ type fsCompleteHandlers struct {
 // every half-typed path. The renderer's own applicability rule (local session
 // only) is the hard gate; this handler answers the backend's filesystem
 // regardless, because the backend cannot see the session's host.
-func (h fsCompleteHandlers) handleFsComplete(req jsonrpcRequest) {
+func (h fsCompleteHandlers) handleFsComplete(ctx context.Context, req jsonrpcRequest) {
 	text, cwd, limit, errMsg := parseFsCompleteParams(req)
 	if errMsg != "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
 
 	resp := fsCompleteResponse{Entries: []fsCompleteEntry{}}
 	if text != "" {
-		resp.Entries = completeLocalPath(text, cwd, limit)
+		var ok bool
+		resp.Entries, ok = completeLocalPathContext(ctx, text, cwd, limit)
+		if !ok {
+			return
+		}
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }
@@ -125,14 +133,21 @@ func parseFsCompleteParams(req jsonrpcRequest) (string, string, int, string) {
 //
 // Any listing failure (missing directory, permission, race) answers an empty
 // page — see handleFsComplete for why.
-func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
+// The walk stops the moment ctx is done: a renderer that supersedes a
+// keystroke withdraws the request (rpc.cancel), and the listing must not
+// outlive it. The bool is false exactly when the walk was abandoned, so a
+// cancelled call is never mistaken for a directory with nothing in it.
+func completeLocalPathContext(ctx context.Context, text, cwd string, limit int) ([]fsCompleteEntry, bool) {
+	if err := ctx.Err(); err != nil {
+		return []fsCompleteEntry{}, false
+	}
 	if text == "" {
-		return []fsCompleteEntry{}
+		return []fsCompleteEntry{}, true
 	}
 	// Resolve the base directory the text points into.
 	base, rest, ok := resolvePathBase(text, cwd)
 	if !ok {
-		return []fsCompleteEntry{}
+		return []fsCompleteEntry{}, true
 	}
 
 	dir, prefix := splitDirPrefix(rest)
@@ -147,12 +162,18 @@ func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
 
 	entries, err := os.ReadDir(filepath.Join(base, dir))
 	if err != nil {
-		return []fsCompleteEntry{}
+		return []fsCompleteEntry{}, true
+	}
+	if err := ctx.Err(); err != nil {
+		return []fsCompleteEntry{}, false
 	}
 
 	showHidden := strings.HasPrefix(prefix, ".")
 	out := make([]fsCompleteEntry, 0, min(limit, len(entries)))
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return []fsCompleteEntry{}, false
+		}
 		name := e.Name()
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
 			continue
@@ -180,7 +201,7 @@ func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
 			break
 		}
 	}
-	return out
+	return out, true
 }
 
 // resolvePathBase returns the absolute base directory text points into, the

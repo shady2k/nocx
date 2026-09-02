@@ -1806,7 +1806,6 @@ describe("the person's own instructions to the assistant", () => {
     expect(prompt!.textContent).toContain('<attached or absent>')
     for (const intakeRule of [
       'A link on its own means go there and tell the person what is on it.',
-      'Text on its own means remember this as a note.',
       'When the intent is not plain, ask one question and stop.',
       // The settings artifact shows the prompt WITH attachments, and there
       // the rule carries its exemption: what came with the question is not
@@ -1817,6 +1816,10 @@ describe("the person's own instructions to the assistant", () => {
       expect(systemPromptText).toContain(intakeRule)
       expect(prompt!.textContent).toContain(intakeRule)
     }
+    const noteRule = systemPromptText.match(/Text on its own[^]*?\. /)?.[0]
+    expect(noteRule).toBeTruthy()
+    expect(noteRule).toContain('notes.create')
+    expect(prompt!.textContent).toContain(noteRule!)
     expect(prompt!.textContent).not.toContain('s-real-session')
     expect(prompt!.textContent).not.toContain('/home/real-user/project')
     expect(prompt!.textContent).not.toContain('real-host.example')

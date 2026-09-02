@@ -11,7 +11,7 @@ import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
-import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
+import { createDisclosure, type Disclosure } from '../ui/disclosure'
 import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
@@ -419,8 +419,9 @@ type ToolCallEffect = AgentRunToolCall['effect']
 
 /** One tool call as the turn draws it — the wire's facts
  *  (contracts/agent.runToolCall.schema.json), narrowed to what this surface
- *  needs. Deliberately no result: it has an owner already (the ledger's
- *  attempt, and for the run tool the block the command really opened). */
+ *  needs. Deliberately no result ON THE WIRE: it has an owner already — the
+ *  action entry's own body, which `actionEntryId` below is the handle to,
+ *  and for the run tool the block the command really opened. */
 export interface AnswerToolCall {
   callId: string
   tool: string
@@ -443,7 +444,74 @@ export interface AnswerToolCall {
    *  the effect beside it is sent rather than inferred (ADR-0028 decision
    *  4). */
   opensBlock: boolean
+  /** The LEDGER action entry this call's attempt was recorded under. The
+   *  handle a "show me what it returned" reaches through, rather than a
+   *  second copy of the bytes on the wire (contracts/agent.runToolCall) —
+   *  the call's result is the action entry's own body (nocx-hp8p2.13).
+   *  Optional here for the same reason `args` is: this is the renderer's
+   *  narrowed view, and an embedding that carries no id simply draws no
+   *  expansion. */
+  actionEntryId?: string
 }
+
+/** What is said where the record does not have the result. Retention off,
+ *  an evicted body and a store that cannot be reached are ONE sentence,
+ *  because a person has the same thing to do about all three — the same
+ *  collapse restore-client makes for a block's own output. */
+const TOOL_RESULT_ABSENT = 'The result is not in the record.'
+
+/** The tool call's expansion: what the model sent and what the tool
+ *  answered, in the answer's own disclosure vocabulary (nocx-hp8p2.13).
+ *
+ *  THE ARGUMENTS ARE HERE AS WELL AS IN THE HEADER, and that is not a
+ *  repetition. The header is one line and reads `key=value` — what tells two
+ *  calls apart at a glance; this is the object the call actually ran on,
+ *  laid out, which is what a person opens an expansion to read.
+ *
+ *  NOTHING IS FETCHED UNTIL IT IS OPENED, and then exactly once. A turn may
+ *  hold ten calls, and reading ten bodies to draw ten collapsed boxes is
+ *  work for a screen nobody has looked at. A failure to read is the same
+ *  sentence as an absent record: the caller collapses them, and so does
+ *  this.
+ *
+ *  It is NOT height-capped here. The body scrolls inside its own box (the
+ *  component's tool-result variant), so a long result is bounded on screen
+ *  without being cut — the store already bounds what is KEPT. */
+export function toolCallExpansion(
+  actionEntryId: string,
+  args: Record<string, unknown>,
+  read: ToolResultSource,
+): HTMLElement {
+  const note = createDisclosure({ kind: 'tool-result', summary: 'Sent and returned' })
+  let sent: string
+  try {
+    sent = JSON.stringify(args, null, 2) ?? '{}'
+  } catch {
+    // A value that will not serialise is not worth failing a call's account
+    // over: the header already names the call, and the result is the half
+    // this box was opened for.
+    sent = '{}'
+  }
+  const paint = (returned: string): void => note.set(`Sent\n${sent}\n\nReturned\n${returned}`)
+  paint('…')
+  let asked = false
+  note.el.addEventListener('toggle', () => {
+    if (!note.el.open || asked) return
+    asked = true
+    void read(actionEntryId).then(
+      (body) => paint(body === null || body === '' ? TOOL_RESULT_ABSENT : body),
+      () => paint(TOOL_RESULT_ABSENT),
+    )
+  })
+  return note.el
+}
+
+/** Reads back what one tool call returned: the body recorded on its action
+ *  entry, or null when the record does not have it — retention is off, the
+ *  body was evicted, or the store cannot be reached. The three are one
+ *  answer on purpose: a person has the same thing to do about all of them
+ *  (restore-client.toolResultForEntry). */
+export type ToolResultSource = (actionEntryId: string) => Promise<string | null>
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
  *  and its DOM element. Deliberately NOT a BlockRecord — no xterm lines,
@@ -1658,6 +1726,12 @@ export interface BlockManagerOpts {
   answerText?: AnswerTextSource
   /** Fetches the recorded provider drives for a finished answer turn. */
   dump?: DumpSource
+  /** Reads back what a tool call returned (nocx-hp8p2.13). The manager holds
+   *  no socket, so the caller that does supplies the reader. Absent in a
+   *  bare-bones embedding, and then a call draws NO expansion at all — an
+   *  offer that leads nowhere is worse than no offer, because it says the
+   *  result is one click away when nothing can fetch it. */
+  toolResult?: ToolResultSource
   /** What a RUNNING block's ⋮ menu can do about the command in it
    *  (nocx-92gfl, nocx-23rph). Passed straight to every running block this
    *  manager opens; this manager neither summons nor signals anything.
@@ -1706,6 +1780,8 @@ export class BlockManager {
    *  answer block this manager frames (nocx-v13pd). */
   private _answerText?: AnswerTextSource
   private _dump?: DumpSource
+  /** Reads back what a tool call returned — see BlockManagerOpts. */
+  private _toolResult?: ToolResultSource
   private _runningActions?: RunningBlockActions
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
@@ -1771,6 +1847,7 @@ export class BlockManager {
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
     this._dump = opts.dump
+    this._toolResult = opts.toolResult
     this._runningActions = opts.runningActions
   }
 
@@ -1782,6 +1859,45 @@ export class BlockManager {
   private _own(el: HTMLElement, before: ChildNode | null): void {
     this._scrollbackInner.insertBefore(el, before)
     this._owned.add(el)
+  }
+
+  /** WHERE THE LIVE REGION BELONGS (nocx-hp8p2.8).
+   *
+   *  A running command's output is not inside its block: the block holds
+   *  its header until the freeze, and the bytes are in
+   *  `.xterm-live-container`. So the live region sits immediately AFTER the
+   *  block whose output it is, and everything opened afterwards goes at the
+   *  TAIL of the scrollback, below it.
+   *
+   *  BOTH HALVES ARE NEEDED AND NEITHER WORKS ALONE. With the region
+   *  permanently last — what it was — an answer seated after the command
+   *  block lands between the command and its own output, so a reply reads
+   *  as spliced into the middle of `top`. Seating the answer after the
+   *  region instead, with the region still last, puts the NEXT command
+   *  ABOVE the answer that preceded it, because a new block inserts before
+   *  the region too. Together they order both ways at once, and the order a
+   *  person watched during the run survives the freeze: the rows move into
+   *  the block and the emptied region stays where it is.
+   *
+   *  The region stays a DIRECT child of `.scrollback-inner` — the
+   *  fullscreen rule addresses it there, and the controller measures and
+   *  sizes it as a sibling of the stack — so a block nested inside a turn
+   *  is followed at its turn's seat rather than inside it. */
+  private _liveFollows(el: HTMLElement): void {
+    let seat: HTMLElement = el
+    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
+      seat = seat.parentElement
+    }
+    if (seat.parentElement !== this._scrollbackInner) return
+    this._scrollbackInner.insertBefore(this._xtermContainer, seat.nextSibling)
+  }
+
+  /** The last element belonging to `el`: its live output when the live
+   *  region is this block's, the block itself otherwise. What anything
+   *  seated after a block anchors on — the other half of `_liveFollows`,
+   *  read from the seating side (nocx-hp8p2.8). */
+  tailOf(el: HTMLElement): ChildNode {
+    return el.nextSibling === this._xtermContainer ? this._xtermContainer : el
   }
 
   /** Put a COMMAND block in the next seat: inside the turn that claimed it
@@ -1796,11 +1912,13 @@ export class BlockManager {
     const claim = this._claimedBy
     this._claimedBy = null
     if (!claim) {
-      this._own(el, this._xtermContainer)
+      this._own(el, null)
+      this._liveFollows(el)
       return
     }
     claim.appendChild(el)
     this._owned.add(el)
+    this._liveFollows(el)
     // A turn's working stand-in marks where the answer will continue: a
     // block that lands inside the turn's children goes ABOVE it, and the
     // stand-in returns to the tail — the next output's position
@@ -1917,8 +2035,10 @@ export class BlockManager {
    * defect this repository names most often. Only two things differ, and both
    * follow from WHEN it is drawn: the wording, and the anchor. A restore puts
    * the past above a present that is already there; a reconnect turns the
-   * present into the past, so the mark goes at the tail, above the live
-   * region and below every block the dead session left.
+   * present into the past, so the mark goes at the tail — below every block
+   * the dead session left, and below the live region the dead session's last
+   * command was writing into (nocx-hp8p2.8: the region belongs to that
+   * block, not to the end of the scrollback).
    *
    * It says what actually happened rather than "reconnected". The shell is a
    * new one and the process the old shell was running may still be alive on
@@ -1931,7 +2051,7 @@ export class BlockManager {
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.reconnectBoundary = 'true'
     boundary.textContent = 'New shell — the one above is gone'
-    this._own(boundary, this._xtermContainer)
+    this._own(boundary, null)
   }
 
   /** An id for a block this manager did not create: a RESTORED one, built
@@ -2490,7 +2610,9 @@ export class BlockManager {
     const children = document.createElement('div')
     children.className = 'cmd-children'
     el.appendChild(children)
-    this._own(el, this._xtermContainer)
+    // At the TAIL: below the running command's live output, which is where
+    // an answer about that command belongs (nocx-hp8p2.8).
+    this._own(el, null)
     this._answerBlocks.push({ id, question, el })
 
     // The answer says it is being written, WHERE it will be written. The
@@ -2519,6 +2641,7 @@ export class BlockManager {
     const claimedBy = (): HTMLElement | null => this._claimedBy
     const store = this._snapshotStore
     const sessionName = this._sessionName
+    const toolResult = this._toolResult
     const getContainer = this._getContainer
     const onSelect = (bid: number, sel: boolean): void => {
       if (sel) this._onBlockSelected(bid)
@@ -2558,7 +2681,7 @@ export class BlockManager {
 
     /** The run of prose being written, and the STORE's id for it. */
     let prose: { body: AnswerBody; blockId: string | null } | null = null
-    let reasoningNote: ReasoningNote | null = null
+    let reasoningNote: Disclosure | null = null
     const seenCalls = new Set<string>()
 
     /** Finish the run of prose being written. The next chunk opens a new one,
@@ -2684,6 +2807,15 @@ export class BlockManager {
         // an effect from a tool name (ADR-0028 decision 4).
         cel.dataset.effect = call.effect
         cel.dataset.tool = call.tool
+        // WHAT CAME BACK, ON DEMAND (nocx-hp8p2.13). The header names the
+        // call; this is the rest of the account of it. It is drawn only
+        // where something can actually read the record, and it reads
+        // nothing until a person opens it: a turn of ten calls would
+        // otherwise fetch ten bodies nobody asked to see.
+        const actionEntryId = call.actionEntryId
+        if (actionEntryId !== undefined && actionEntryId !== '' && toolResult) {
+          cel.appendChild(toolCallExpansion(actionEntryId, call.args ?? {}, toolResult))
+        }
         children.appendChild(cel)
         own(cel)
         showTyping()
@@ -2695,7 +2827,11 @@ export class BlockManager {
           // thinking (nocx-y9e88). A note built while the setting was off and
           // then switched on is caught by the applier, which walks what is
           // already on screen — this is the other half of the same rule.
-          reasoningNote = createReasoningNote({ expanded: reasoningStartsExpanded() })
+          reasoningNote = createDisclosure({
+            kind: 'reasoning',
+            summary: 'Thinking',
+            expanded: reasoningStartsExpanded(),
+          })
           // INTO THE OPEN RUN OF PROSE when there is one, so the note lands
           // where it arrived: the same run goes on being written below it,
           // and a note parked outside the block would claim a position the

@@ -1,4 +1,4 @@
-import type { GrantBlock } from './ask-entry'
+import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 
 export type { GrantBlock }
@@ -83,9 +83,16 @@ export class GrantController {
     }
   }
 
-  /** The panel rows include the automatic attachment after person marks. */
+  /** The panel rows include the automatic attachment after person marks —
+   *  unless a person mark has NARROWED it. Marking rows inside the frozen
+   *  screen produces a mark on the screen's own item id plus a row span, and
+   *  that band is what the question carries; listing the whole screen beside
+   *  it would name two attachments where one travels (nocx-hp8p2.7). */
   private panelBlocks(): GrantBlock[] {
-    return this.automaticBlock === null ? [...this.blocks] : [...this.blocks, this.automaticBlock]
+    const automatic = this.automaticBlock
+    if (automatic === null) return [...this.blocks]
+    const narrowed = this.blocks.some((block) => block.itemId === automatic.itemId)
+    return narrowed ? [...this.blocks] : [...this.blocks, automatic]
   }
 
   /**
@@ -194,10 +201,7 @@ export class GrantController {
     grant.blockEl.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     const marked: HTMLElement[] =
       grant.start !== undefined && grant.count !== undefined
-        ? Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
-            grant.start,
-            grant.start + grant.count,
-          )
+        ? grantRows(grant.blockEl).slice(grant.start, grant.start + grant.count)
         : [grant.blockEl]
     for (const element of marked) {
       element.classList.remove('cmd-block-grant-flash')
@@ -214,7 +218,7 @@ export class GrantController {
     if (!this.visible) {
       for (const grant of this.blocks) {
         grant.blockEl.classList.remove('cmd-block-grant-flash')
-        for (const row of grant.blockEl.querySelectorAll<HTMLElement>('.term-line')) {
+        for (const row of grantRows(grant.blockEl)) {
           row.classList.remove('cmd-block-grant-flash')
         }
       }
@@ -222,10 +226,11 @@ export class GrantController {
     }
     for (const grant of this.blocks) {
       if (grant.start !== undefined && grant.count !== undefined) {
-        const rows = Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
-          grant.start,
-          grant.start + grant.count,
-        )
+        // The rows a mark covers are the markable surface's own — a block's
+        // `.term-line`, the frozen screen's `.nocx-freeze-frame__row`
+        // (nocx-hp8p2.7). Reading one selector here painted nothing at all
+        // for a mark made inside the frame.
+        const rows = grantRows(grant.blockEl).slice(grant.start, grant.start + grant.count)
         for (const row of rows) {
           row.dataset.granted = 'true'
           this.paintedRows.add(row)

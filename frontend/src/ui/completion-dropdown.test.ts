@@ -78,6 +78,12 @@ describe('CompletionDropdown', () => {
     expect(badge?.textContent).toBe('path')
   })
 
+  it('shows a function source distinctly from filesystem paths', () => {
+    const { dd } = mount()
+    dd.show([cand({ source: 'function' })], 0)
+    expect(dd.root.querySelector('.ui-floating-panel__source')?.textContent).toBe('function')
+  })
+
   it('a host row carries its own source badge — a host and a path never look alike', () => {
     const { dd } = mount()
     dd.show(

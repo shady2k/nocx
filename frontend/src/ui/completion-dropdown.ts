@@ -50,6 +50,7 @@ const SOURCE_LABEL: Record<string, string> = {
   path: 'path',
   host: 'host',
   snippet: 'snippet',
+  function: 'function',
 }
 
 /** The type word for a path row — `Directory` / `File` (the owner's ask:

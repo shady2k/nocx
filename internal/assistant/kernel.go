@@ -46,6 +46,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -271,6 +272,13 @@ type AttemptLedger interface {
 	// turn's own entry (nocx-h1l4o, ADR-0040). The store assigns the seat;
 	// see content.LedgerRepository.AddCause for why the caller may not.
 	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// CaptureOutput records a BODY for an entry, through the one gate a
+	// durable body passes: output retention, the entry's sensitivity and
+	// the environment's criticality (design §7.4). The action entry of a
+	// tool call gets its result this way (nocx-hp8p2.13) — ADR-0040's tree
+	// gives every other block kind a body and left `action` with none, so
+	// "what came back" had nowhere to be asked from.
+	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
 }
 
 // maxArgsBytes bounds the model's argument JSON — the ingress size bound of
@@ -1685,6 +1693,31 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 
+	// WHAT CAME BACK, RECORDED WHERE IT CAN BE ASKED FOR (nocx-hp8p2.13).
+	// A tool call announced itself and then said nothing about its outcome:
+	// agent.runToolCall carries the arguments and deliberately not the
+	// result, naming actionEntryId as "the handle a later 'show me what it
+	// returned' reaches through, rather than a second copy of the bytes".
+	// The handle reached nothing, because nothing was ever written there —
+	// ADR-0040 gives every block kind a body artifact and drew `action`
+	// with none. This is that body.
+	//
+	// AFTER THE EGRESS GATE, DELIBERATELY. The gate has already screened
+	// this result and either passed it or suspended the run; recording
+	// before it would put bytes in the store that the gate might still
+	// refuse to let leave. On an APPROVED resume the bytes do carry
+	// findings, which is why the record is masked as well as gated — the
+	// belt matters at exactly the one moment the gate has stood down.
+	//
+	// NOT FOR A CALL THAT OPENED A BLOCK. ADR-0040 is explicit that the
+	// block the command opened IS the account of that call, and the turn
+	// draws no child for it at all — so a body here would be a second copy
+	// of that command's own output, stored for a surface that will never
+	// ask for it.
+	if runErr == nil && !decl.OpensBlock {
+		k.recordToolResult(ctx, entryID, out)
+	}
+
 	// A person's Stop is a successful tool exchange carrying an explicit
 	// renderer fact, not a tool error. Preserve that fact in the action
 	// ledger: the command's own exit code may also be 130, so it cannot
@@ -1724,6 +1757,72 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// read is a statement addressed to a model, and the retained declared-call
 	// adapter applies that projection before returning it to the model.
 	return modelResult{text: out, kind: modelToolOutput}, nil
+}
+
+// maxToolResultRecordBytes bounds the body kept for one tool call. It is the
+// tools' own declared result bound (agenttools.ResultBound.MaxBytes), so in
+// practice nothing is cut here — a result the model received was already
+// bounded before it got this far. The check exists because a bound that
+// holds "in practice" is not a bound: masking rewrites the text, and one
+// chunk is what this write is.
+const maxToolResultRecordBytes = 64 << 10
+
+// recordToolResult writes the tool's result as the action entry's own body.
+//
+// MASKED BY THE ONE OWNER, AND FAIL CLOSED. internal/masking is the durable
+// path's masker (ADR-0021, nocx-a21v), and a body it could not read is not
+// written at all: the attempt row still says the call happened and carries
+// no body, which is exactly the state retention leaves behind and which
+// every reader already draws. Writing raw text because detection failed
+// would make this pane a second, unscreened path to bytes the ledger masks
+// everywhere else.
+//
+// NOTHING HERE FAILS THE CALL. The result has already been produced and is
+// on its way to the model; a body that could not be stored is a missing
+// body, not a failed tool. Said in the log, never in the run.
+func (k *effectKernel) recordToolResult(ctx context.Context, entryID, result string) {
+	if k.ledger == nil || entryID == "" || result == "" {
+		return
+	}
+	masked, _, _, err := masking.MaskWithSegments(result)
+	if err != nil {
+		k.warn("agent tool: the result could not be screened for the record — the call is recorded without its body",
+			"entry", entryID, "error", err)
+		return
+	}
+	var truncated *content.Truncation
+	if len(masked) > maxToolResultRecordBytes {
+		masked = truncateRunes(masked, maxToolResultRecordBytes)
+		cut := content.TruncCap
+		truncated = &cut
+	}
+	if _, err := k.ledger.CaptureOutput(ctx, content.CaptureOutput{
+		EntryID:    entryID,
+		ArtifactID: uuid.NewString(),
+		MediaType:  content.MediaText,
+		// The tool produced this text; nobody read it off a terminal grid.
+		CaptureMethod:  content.CaptureRawOutput,
+		CaptureVersion: 1,
+		Truncated:      truncated,
+		Seq:            1,
+		Body:           []byte(masked),
+	}); err != nil {
+		k.warn("agent tool: the result could not be recorded — the call is recorded without its body",
+			"entry", entryID, "error", err)
+	}
+}
+
+// truncateRunes cuts s to at most n bytes without splitting a rune. A body
+// cut mid-rune would reach a reader as a replacement character it cannot
+// tell from one the tool really printed.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // warn is the kernel's logger with the nil check the whole package needs. A

@@ -86,13 +86,12 @@ describe('mountReadScreenHandler — the renderer half of the pull', () => {
     expect(method).toBe('agent.readScreenResolved')
     expect(params.requestId).toBe('req-1')
     expect(params.outcome).toBe('frame')
-    // The frame body is the minted frame's cells + cursor + identity + range
-    // — the same vocabulary the captureFrame push uses. Assert the chars in
-    // order and the identity facts; the per-cell attributes are the
-    // serializer's own output, asserted elsewhere.
-    const rows = params.rows as { kind: string; cells: { char: string }[] }[]
-    expect(rows.map((r) => r.cells.map((c) => c.char).join(''))).toEqual(['hello', 'world'])
-    expect(rows.every((r) => r.kind === 'cells')).toBe(true)
+    // The frame body is the minted frame's rows as TEXT, plus cursor,
+    // identity and range. The cells stay in the renderer, which is what
+    // draws with them (nocx-u3vxd).
+    const rows = params.rows as { kind: string; text: string }[]
+    expect(rows.map((r) => r.text)).toEqual(['hello', 'world'])
+    expect(rows.every((r) => r.kind === 'text')).toBe(true)
     const identity = params.identity as {
       buffer: { kind: string }
       cols: number

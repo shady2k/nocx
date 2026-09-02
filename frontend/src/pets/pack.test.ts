@@ -26,7 +26,10 @@ const TINY: PetPack = {
   id: 'tiny',
   cell: 10,
   fps: 8,
-  clips: { idle: { file: 'idle.png', frames: 2 }, walk: { file: 'walk.png', frames: 2 } },
+  clips: {
+    idle: { takes: [{ file: 'idle.png', frames: 2 }] },
+    walk: { takes: [{ file: 'walk.png', frames: 2 }] },
+  },
   locomotion: { idle: 'idle', walk: 'walk', run: 'walk', fall: 'walk' },
   activity: {
     sit: 'idle',
@@ -104,7 +107,38 @@ describe('loadPack', () => {
         'walk.png': strip(10, 2, [{ x: 1, y: 1, w: 2, h: 2 }]),
       }),
     )
-    expect(loaded.clips.idle).toMatchObject({ url: '/p/idle.png', frames: 2, sheetWidth: 20 })
+    expect(loaded.clips.idle.takes[0]).toMatchObject({
+      url: '/p/idle.png',
+      frames: 2,
+      sheetWidth: 20,
+    })
+  })
+
+  it('keeps a clip’s other takes when one of its sheets is missing', async () => {
+    // A behaviour drawn twice, with one drawing absent: the animal keeps
+    // doing it, from the take that loaded.
+    const twice: PetPack = {
+      ...TINY,
+      clips: {
+        idle: {
+          takes: [
+            { file: 'idle.png', frames: 2 },
+            { file: 'idle2.png', frames: 2 },
+          ],
+        },
+        walk: { takes: [{ file: 'walk.png', frames: 2 }] },
+      },
+    }
+    const loaded = await loadPack(
+      twice,
+      '/p/',
+      sourceOf({
+        'idle.png': strip(10, 2, [{ x: 3, y: 5, w: 4, h: 4 }]),
+        'walk.png': strip(10, 2, [{ x: 3, y: 5, w: 4, h: 4 }]),
+      }),
+    )
+    expect(loaded.clips.idle.takes).toHaveLength(1)
+    expect(loaded.clips.idle.takes[0].url).toBe('/p/idle.png')
   })
 
   it('keeps the rest of the pack when one sheet is missing', async () => {

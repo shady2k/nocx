@@ -652,6 +652,10 @@ export class ScrollbackController {
   ): void {
     const cmd = command || '(empty)'
     this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
+    // The pet learned only about endings before this, so during the minute a
+    // build takes — the minute somebody is actually watching the terminal —
+    // it wandered about as though nothing were happening.
+    this._pet?.attendTo(author)
     this.setRunning()
   }
 
@@ -983,9 +987,21 @@ export class ScrollbackController {
     // 'entered' and 'unknown' are neither success nor failure and must not be
     // read as one: a pet that sulked at every ssh and every abandoned attempt
     // would sulk most of the time.
+    // The author is the block's own, minted at submit and never derived: the
+    // animal answers your command differently from the assistant's, and
+    // guessing which lane a finished block came from is exactly the kind of
+    // derivation the ledger exists to make unnecessary.
     this._pet?.reactTo(
       rec.status === 'success' || rec.status === 'failure' ? rec.status : 'unknown',
+      rec.author,
     )
+    // And if something is STILL running, the animal goes back to watching it.
+    // A freeze waits on a render fence and a start does not, so the verdict
+    // on the last command routinely arrives after the next one has begun;
+    // without this the pet stopped attending the moment it answered, and the
+    // command actually in flight had nobody watching it.
+    const stillRunning = this._blockManager.runningBlock
+    if (stillRunning) this._pet?.attendTo(stillRunning.author)
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()

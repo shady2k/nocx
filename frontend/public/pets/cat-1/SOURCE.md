@@ -14,11 +14,16 @@ Nothing was redrawn. The pack ships six cats; we vendor **Cat-1** only, and its
 files were renamed from `Cat-1-<State>.png` to lower-case `<state>.png` so the
 loader can address them by clip name.
 
-Two of the twelve are not here. `Licking 2` and `Sleeping2` are second takes
-the pack offers as alternates, and `pack.ts` declares one clip per name — so
-they would have sat in the build unreferenced. When the pack format grows
-multi-take clips they come back from the archive above; until then an asset
-nothing plays is weight in every release.
+All twelve are here, and this directory is one of six — `cat-1` … `cat-6`,
+one per colour, each with the same file names.
+
+`Licking 2` and `Sleeping2` are the pack's second drawings of two behaviours
+that repeat often, and `pack.ts` plays them as alternate TAKES: a fresh one is
+chosen each time the clip starts. They were dropped from the first cut, when
+the format still allowed one file per behaviour, and came back with it — a
+cat that washes itself with the identical five frames every time is a loop
+rather than an animal. Cat-3 has no `Itch` sheet at all, which costs it that
+one behaviour and nothing else.
 
 Each file is one horizontal strip of 50×50 cells. The cat occupies roughly
 30×16 of each cell; the loader trims that padding at load time by scanning

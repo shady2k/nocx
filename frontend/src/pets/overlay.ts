@@ -14,7 +14,17 @@
 // Painting is one element with a background-position, not one element per
 // frame — the sprite never enters the document as new nodes.
 
-import { DEFAULT_TUNING, newPet, react, step, type Outcome, type Pet, type PetTuning } from './pet'
+import {
+  attend,
+  DEFAULT_TUNING,
+  newPet,
+  react,
+  step,
+  type Author,
+  type Outcome,
+  type Pet,
+  type PetTuning,
+} from './pet'
 import {
   CAT_PACK,
   clipFor,
@@ -95,6 +105,8 @@ export class PetOverlay {
   private _floor: Ledge = { id: 'floor', x0: 0, x1: 0, y: 0 }
   private _clip = ''
   private _clipT = 0
+  /** Which drawing of the current behaviour is playing. */
+  private _take = 0
   private _last = 0
   private _handle: number | null = null
   /** Pointer position in host coordinates, or null while it is elsewhere.
@@ -201,7 +213,19 @@ export class PetOverlay {
     if (!this._alive) {
       // Dropped in from above the first ledge, so the arrival is a fall
       // rather than a pop: the pet is seen to take its place.
-      this._pet = newPet((this._floor.x0 + this._floor.x1) / 2, -this._height)
+      //
+      // What it has already been TOLD survives the mint. Sprites are fetched
+      // asynchronously and the terminal does not wait for them, so a command
+      // that starts while the pack is still loading reaches a pet that is
+      // about to be replaced — and the animal arrived knowing nothing about
+      // the build it was supposed to be watching.
+      const heard = this._pet
+      this._pet = {
+        ...newPet((this._floor.x0 + this._floor.x1) / 2, -this._height),
+        mood: heard.mood,
+        moodHold: heard.moodHold,
+        attending: heard.attending,
+      }
       this._alive = true
     }
     this._last = 0
@@ -222,10 +246,16 @@ export class PetOverlay {
     return this._clip
   }
 
-  /** A command finished. */
-  reactTo(outcome: Outcome): void {
+  /** A command started: the animal settles down to watch it. */
+  attendTo(author: Author): void {
     if (this._disposed) return
-    this._pet = react(this._pet, outcome, this._tuning)
+    this._pet = attend(this._pet, author, this._tuning)
+  }
+
+  /** A command finished. */
+  reactTo(outcome: Outcome, author: Author = 'shell'): void {
+    if (this._disposed) return
+    this._pet = react(this._pet, outcome, author, this._tuning)
   }
 
   /** The layout moved; re-read it before the next frame. */
@@ -362,9 +392,14 @@ export class PetOverlay {
     if (name !== this._clip) {
       this._clip = name
       this._clipT = 0
+      // A fresh take each time the behaviour starts. A cat washes itself
+      // more than once an hour, and the identical five frames every time is
+      // what turns a living animal back into a loop.
+      this._take = Math.floor(this._rng() * clip.takes.length) % clip.takes.length
     }
+    const take = clip.takes[Math.min(this._take, clip.takes.length - 1)]
     this._clipT += dt * loaded.pack.fps
-    const frame = Math.floor(this._clipT) % clip.frames
+    const frame = Math.floor(this._clipT) % take.frames
 
     const { x0, y0, x1, y1 } = loaded.trim
     const scale = this._height / (y1 - y0)
@@ -373,8 +408,8 @@ export class PetOverlay {
     const s = this._sprite.style
     s.width = `${width}px`
     s.height = `${this._height}px`
-    s.backgroundImage = `url(${clip.url})`
-    s.backgroundSize = `${clip.sheetWidth * scale}px ${clip.sheetHeight * scale}px`
+    s.backgroundImage = `url(${take.url})`
+    s.backgroundSize = `${take.sheetWidth * scale}px ${take.sheetHeight * scale}px`
     s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * scale}px ${-y0 * scale}px`
     // translate, not left/top: the pet moves on the compositor and never
     // asks the pane for a new layout.

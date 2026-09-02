@@ -17,10 +17,27 @@
 
 import type { Activity, Locomotion } from './pet'
 
-interface Clip {
+interface Take {
   /** File name inside the pack directory. */
   readonly file: string
   readonly frames: number
+}
+
+/**
+ * One behaviour, drawn once or several times over.
+ *
+ * A cat washes itself more than once an hour, and playing the identical five
+ * frames every time is what turns a living animal back into a loop. The pack
+ * ships second takes of exactly the two behaviours that repeat most — the
+ * wash and the sleep — and a take is chosen afresh each time the clip starts.
+ */
+interface Clip {
+  readonly takes: readonly Take[]
+}
+
+/** Sugar for the clips that were drawn only once, which is most of them. */
+function once(file: string, frames: number): Clip {
+  return { takes: [{ file, frames }] }
 }
 
 export interface PetPack {
@@ -61,16 +78,26 @@ export const CAT_PACK: PetPack = {
   cell: 50,
   fps: 10,
   clips: {
-    idle: { file: 'idle.png', frames: 10 },
-    walk: { file: 'walk.png', frames: 8 },
-    run: { file: 'run.png', frames: 8 },
-    meow: { file: 'meow.png', frames: 4 },
-    laying: { file: 'laying.png', frames: 8 },
-    itch: { file: 'itch.png', frames: 2 },
-    licking: { file: 'licking1.png', frames: 5 },
-    sitting: { file: 'sitting.png', frames: 1 },
-    sleeping: { file: 'sleeping1.png', frames: 1 },
-    stretching: { file: 'stretching.png', frames: 13 },
+    idle: once('idle.png', 10),
+    walk: once('walk.png', 8),
+    run: once('run.png', 8),
+    meow: once('meow.png', 4),
+    laying: once('laying.png', 8),
+    itch: once('itch.png', 2),
+    licking: {
+      takes: [
+        { file: 'licking1.png', frames: 5 },
+        { file: 'licking2.png', frames: 5 },
+      ],
+    },
+    sitting: once('sitting.png', 1),
+    sleeping: {
+      takes: [
+        { file: 'sleeping1.png', frames: 1 },
+        { file: 'sleeping2.png', frames: 1 },
+      ],
+    },
+    stretching: once('stretching.png', 13),
   },
   locomotion: {
     idle: 'idle',
@@ -99,11 +126,17 @@ interface Trim {
   readonly y1: number
 }
 
-interface LoadedClip {
+interface LoadedTake {
   readonly url: string
   readonly frames: number
   readonly sheetWidth: number
   readonly sheetHeight: number
+}
+
+interface LoadedClip {
+  /** Every take whose sheet actually loaded, in declared order. Never
+   *  empty — a clip with no usable take is not recorded at all. */
+  readonly takes: readonly LoadedTake[]
 }
 
 export interface LoadedPack {
@@ -158,32 +191,38 @@ export async function loadPack(
   let y1 = -Infinity
 
   for (const [name, clip] of Object.entries(pack.clips)) {
-    const url = base + clip.file
-    // Not every colour draws every clip — Cat-3 has no scratch. A pack
-    // missing one sheet loses that ONE behaviour and keeps the rest; only a
-    // pack that yields nothing at all is an error.
-    let img
-    try {
-      img = await (source ?? domImageSource).load(url)
-    } catch {
-      continue
-    }
-    clips[name] = {
-      url,
-      frames: clip.frames,
-      sheetWidth: img.width,
-      sheetHeight: img.height,
-    }
-    for (let y = 0; y < img.height; y++) {
-      for (let x = 0; x < img.width; x++) {
-        if (img.alpha[y * img.width + x] < OPAQUE_ENOUGH) continue
-        const cx = x % pack.cell
-        if (cx < x0) x0 = cx
-        if (cx + 1 > x1) x1 = cx + 1
-        if (y < y0) y0 = y
-        if (y + 1 > y1) y1 = y + 1
+    const takes: LoadedTake[] = []
+    for (const take of clip.takes) {
+      const url = base + take.file
+      // Not every colour draws every sheet — Cat-3 has no scratch. A missing
+      // sheet costs that one take, and a clip whose takes all failed costs
+      // that one behaviour; only a pack that yields nothing at all is an
+      // error. Losing the animal over a drawing the artist did not make
+      // would be the wrong trade.
+      let img
+      try {
+        img = await (source ?? domImageSource).load(url)
+      } catch {
+        continue
+      }
+      takes.push({
+        url,
+        frames: take.frames,
+        sheetWidth: img.width,
+        sheetHeight: img.height,
+      })
+      for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) {
+          if (img.alpha[y * img.width + x] < OPAQUE_ENOUGH) continue
+          const cx = x % pack.cell
+          if (cx < x0) x0 = cx
+          if (cx + 1 > x1) x1 = cx + 1
+          if (y < y0) y0 = y
+          if (y + 1 > y1) y1 = y + 1
+        }
       }
     }
+    if (takes.length > 0) clips[name] = { takes }
   }
 
   if (Object.keys(clips).length === 0) {

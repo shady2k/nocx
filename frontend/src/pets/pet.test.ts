@@ -2,6 +2,7 @@
 // `rng`, so a thousand seconds of cat runs deterministically in a millisecond.
 import { describe, expect, it } from 'vitest'
 import {
+  attend,
   DEFAULT_TUNING,
   FLOOR_ID,
   newPet,
@@ -322,5 +323,134 @@ describe('the flee test uses the animal’s box, not a radius', () => {
   it('falls back to the height when nobody said how wide it is', () => {
     const p = step(standing(A, { x: 200 }), { ...at(190, A.y - 17) }, 1 / 60, seq(0.9))
     expect(p.locomotion).toBe('run')
+  })
+})
+
+describe('watching a command that is running', () => {
+  it('settles down when one starts, and lies for yours', () => {
+    const p = attend(standing(A, { locomotion: 'walk', activity: 'none' }), 'shell')
+    expect(p.attending).toBe('shell')
+    expect(p.locomotion).toBe('idle')
+    expect(p.activity).toBe('lie')
+  })
+
+  it('sits up for the assistant’s, rather than lying down', () => {
+    expect(attend(standing(A), 'agent').activity).toBe('sit')
+  })
+
+  it('does not wander off, descend or run while it is watching', () => {
+    // Every rng value, so this is the whole menu rather than a sample of it.
+    for (let i = 0; i <= 20; i++) {
+      let p = attend(standing(A, { hold: 0.01 }), 'shell')
+      p = step(p, env(), 0.02, seq(i / 20))
+      expect(p.locomotion).not.toBe('run')
+      expect(p.locomotion).not.toBe('fall')
+      expect(p.ledgeId).toBe(A.id)
+    }
+  })
+
+  it('never falls asleep on the job', () => {
+    // A pet that dozed off during your build would report the opposite of
+    // what is happening.
+    let p = attend(standing(A), 'shell')
+    for (let i = 0; i < 60 * (DEFAULT_TUNING.sleepAfter + 5); i++) {
+      p = step(p, env(), 1 / 60, seq(0.99))
+    }
+    expect(p.activity).not.toBe('sleep')
+    expect(p.mood).not.toBe('tired')
+  })
+
+  it('stops watching the moment the command finishes', () => {
+    const watching = attend(standing(A), 'shell')
+    expect(react(watching, 'success', 'shell').attending).toBeNull()
+    expect(react(watching, 'failure', 'agent').attending).toBeNull()
+  })
+
+  it('still gets out of the pointer’s way while watching', () => {
+    // Watching narrows what it chooses to do; it does not glue it down.
+    const p = step(
+      attend(standing(A, { x: 200 }), 'shell'),
+      { ...env(), pointer: { x: 190, y: A.y - 17 } },
+      1 / 60,
+      seq(0.9),
+    )
+    expect(p.locomotion).toBe('run')
+  })
+
+  it('takes the news of a start even mid-air, without interrupting the fall', () => {
+    const falling = { ...newPet(200, 100), locomotion: 'fall' as const }
+    const p = attend(falling, 'agent')
+    expect(p.attending).toBe('agent')
+    expect(p.locomotion).toBe('fall')
+  })
+})
+
+describe('whose command it was', () => {
+  it('answers your command as though it were addressed to the cat', () => {
+    expect(react(standing(A), 'success', 'shell').activity).toBe('meow')
+    expect(react(standing(A), 'failure', 'shell').activity).toBe('scratch')
+  })
+
+  it('answers the assistant’s more quietly', () => {
+    // An agent failing is not the person failing, and a pet that scolded them
+    // for it would be wrong about who did what.
+    expect(react(standing(A), 'success', 'agent').activity).toBe('stretch')
+    expect(react(standing(A), 'failure', 'agent').activity).toBe('lie')
+  })
+
+  it('carries the same mood either way — the verdict is about the command', () => {
+    expect(react(standing(A), 'failure', 'agent').mood).toBe('worried')
+    expect(react(standing(A), 'failure', 'shell').mood).toBe('worried')
+  })
+})
+
+describe('a verdict arriving after the next command has started', () => {
+  // The freeze waits on a render fence and a start does not, so this ordering
+  // is the NORMAL one, not an edge case: press Enter twice in a row and the
+  // answer to the first command lands after the second has begun.
+  it('lets the reaction finish rather than swallowing it', () => {
+    const answered = react(standing(A), 'failure', 'shell')
+    expect(answered.activity).toBe('scratch')
+    const then = attend(answered, 'shell')
+    expect(then.activity).toBe('scratch') // still answering you
+    expect(then.attending).toBe('shell') // and already watching the next one
+  })
+
+  it('and settles to watching once the answer has played out', () => {
+    let p = attend(react(standing(A), 'failure', 'shell'), 'shell')
+    for (let i = 0; i < 60 * 2; i++) p = step(p, env(), 1 / 60, seq(0))
+    // First entry of the watching menu for your lane is lying down.
+    expect(p.attending).toBe('shell')
+    expect(p.activity).toBe('lie')
+  })
+
+  it('an ordinary occupation is interrupted, only an answer is protected', () => {
+    const busy = standing(A, { locomotion: 'walk', activity: 'none', hold: 10 })
+    expect(attend(busy, 'shell').activity).toBe('lie')
+  })
+})
+
+describe('the answer stops being an answer once it is over', () => {
+  // The protection is for a reaction that is still playing, not for whatever
+  // the animal drifted into afterwards. Without a test the flag stayed true
+  // for the rest of the pet's life and only the expiring hold hid it — the
+  // lint noticed the dead assignment before any assertion did.
+  it('an occupation chosen after a reaction is interruptible again', () => {
+    let p = react(standing(A), 'failure', 'shell')
+    expect(p.reacting).toBe(true)
+    // Let the answer play out; the next choice is the animal's own.
+    for (let i = 0; i < 60 * 3; i++) p = step(p, env(), 1 / 60, seq(0.99))
+    expect(p.reacting).toBe(false)
+    expect(attend(p, 'shell').activity).toBe('lie')
+  })
+
+  it('and running from the pointer is not an answer either', () => {
+    const fled = step(
+      react(standing(A, { x: 200 }), 'failure', 'shell'),
+      { ...env(), pointer: { x: 190, y: A.y - 17 } },
+      1 / 60,
+      seq(0.9),
+    )
+    expect(fled.reacting).toBe(false)
   })
 })

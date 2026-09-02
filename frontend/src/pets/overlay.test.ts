@@ -17,12 +17,12 @@ const PACK: PetPack = {
   cell: CELL,
   fps: 10,
   clips: {
-    idle: { file: 'idle.png', frames: 2 },
-    walk: { file: 'walk.png', frames: 2 },
-    run: { file: 'run.png', frames: 2 },
-    meow: { file: 'meow.png', frames: 2 },
-    itch: { file: 'itch.png', frames: 2 },
-    sitting: { file: 'sitting.png', frames: 1 },
+    idle: { takes: [{ file: 'idle.png', frames: 2 }] },
+    walk: { takes: [{ file: 'walk.png', frames: 2 }] },
+    run: { takes: [{ file: 'run.png', frames: 2 }] },
+    meow: { takes: [{ file: 'meow.png', frames: 2 }] },
+    itch: { takes: [{ file: 'itch.png', frames: 2 }] },
+    sitting: { takes: [{ file: 'sitting.png', frames: 1 }] },
   },
   locomotion: { idle: 'idle', walk: 'walk', run: 'run', fall: 'run' },
   activity: {
@@ -347,5 +347,50 @@ describe('changing which animal', () => {
     expect(s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundImage).toContain(
       '/ginger/',
     )
+  })
+})
+
+describe('news that arrives before the sprites do', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('is not lost when the animal is minted', async () => {
+    // Sprites are fetched asynchronously and the terminal does not wait for
+    // them. A command that starts in that window reached a pet about to be
+    // replaced, and the replacement arrived knowing nothing about the build
+    // it was supposed to be watching.
+    const s = stand([200])
+    let release!: (v: { width: number; height: number; alpha: Uint8ClampedArray }) => void
+    const gate = new Promise<{ width: number; height: number; alpha: Uint8ClampedArray }>((r) => {
+      release = r
+    })
+    const pet = new PetOverlay({
+      host: s.host,
+      blocks: s.blocks,
+      pack: PACK,
+      settings: settingsStub(),
+      imageSource: { load: () => gate },
+      // Pinned to the first entry of the watching menu, which for the
+      // assistant's lane is sitting up.
+      rng: () => 0,
+      raf: (cb) => {
+        s.frames.push(cb)
+        return s.frames.length
+      },
+      caf: () => {},
+    })
+    pet.attendTo('agent')
+    const width = CELL * 2
+    const alpha = new Uint8ClampedArray(width * CELL)
+    for (let f = 0; f < 2; f++)
+      for (let y = 5; y < 9; y++)
+        for (let x = 3; x < 7; x++) alpha[y * width + (f * CELL + x)] = 255
+    release({ width, height: CELL, alpha })
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    // Still watching: the animal that landed knows a command is in flight,
+    // so it settles rather than wandering off.
+    expect(pet.playing).toBe('sitting')
   })
 })

@@ -31,6 +31,14 @@ export type Activity = 'none' | 'sit' | 'groom' | 'stretch' | 'lie' | 'scratch' 
  *  reach is a claim the tests cannot check. */
 export type Outcome = 'success' | 'failure' | 'unknown'
 
+/** Who ran the command.
+ *
+ *  Mirrors CommandAuthor without importing it, for the reason Outcome gives:
+ *  the pet must not depend on the ledger's module (AD-8). The author is
+ *  minted at submit and never derived afterwards, so the animal is reacting
+ *  to a fact rather than to a guess about whose work it watched. */
+export type Author = 'shell' | 'agent'
+
 export interface Pet {
   /** The ledge underfoot, by identity. Null while falling. */
   readonly ledgeId: string | null
@@ -48,6 +56,17 @@ export interface Pet {
   readonly boredom: number
   /** Downward speed, px/s. Only meaningful while falling. */
   readonly vy: number
+  /** Whether the current activity is an ANSWER to a finished command rather
+   *  than something the animal chose. Only these are protected from being cut
+   *  short: an ordinary occupation may be interrupted freely. */
+  readonly reacting: boolean
+  /** Whose command is running right now, or null when nothing is.
+   *
+   *  Not a fourth axis and not a mood: it does not colour the animal, it
+   *  narrows what the animal is willing to do. A pet that wandered off mid
+   *  build is a pet that is not watching, and watching is the whole reason it
+   *  lives in a terminal rather than on a desktop. */
+  readonly attending: Author | null
 }
 
 export interface PetTuning {
@@ -100,6 +119,8 @@ export function newPet(x: number, y: number): Pet {
     moodHold: 0,
     boredom: 0,
     vy: 0,
+    reacting: false,
+    attending: null,
   }
 }
 
@@ -111,10 +132,17 @@ const MOOD_OF: Record<Outcome, Mood> = {
   unknown: 'calm',
 }
 
-const REACTION_OF: Record<Outcome, Activity> = {
-  success: 'meow',
-  failure: 'scratch',
-  unknown: 'sit',
+/** What the animal does about an outcome, per author.
+ *
+ *  The two lanes read differently on purpose. Your command is addressed to
+ *  the cat as much as to the shell — it meows back. The assistant's is work
+ *  it merely watched, so the answer is quieter: a stretch for a good one, and
+ *  lying down rather than fretting for a bad one, because an agent failing is
+ *  not the person failing and a pet that scolded them for it would be wrong
+ *  about who did what. */
+const REACTION_OF: Record<Author, Record<Outcome, Activity>> = {
+  shell: { success: 'meow', failure: 'scratch', unknown: 'sit' },
+  agent: { success: 'stretch', failure: 'lie', unknown: 'sit' },
 }
 
 /**
@@ -123,18 +151,54 @@ const REACTION_OF: Record<Outcome, Activity> = {
  * A falling pet is NOT interrupted: it has no say in the matter, and a cat
  * that grooms itself mid-air is the kind of detail that reads as a bug.
  */
-export function react(pet: Pet, outcome: Outcome, tuning: PetTuning = DEFAULT_TUNING): Pet {
+export function react(
+  pet: Pet,
+  outcome: Outcome,
+  author: Author = 'shell',
+  tuning: PetTuning = DEFAULT_TUNING,
+): Pet {
   const mood = MOOD_OF[outcome]
+  // Whatever it was watching is over, whether or not it may react.
+  const done = { ...pet, attending: null }
   if (pet.locomotion === 'fall') {
-    return { ...pet, mood, moodHold: tuning.moodHold }
+    return { ...done, mood, moodHold: tuning.moodHold }
   }
   return {
-    ...pet,
+    ...done,
     locomotion: 'idle',
     mood,
     moodHold: tuning.moodHold,
-    activity: REACTION_OF[outcome],
+    activity: REACTION_OF[author][outcome],
     hold: tuning.reactionHold,
+    reacting: true,
+    boredom: 0,
+  }
+}
+
+/**
+ * A command STARTED. The animal settles down to watch it.
+ *
+ * Separate from `react` because it is not a verdict: nothing has happened
+ * yet. Until now the pet learned only about endings, so during the minute a
+ * build takes — the minute you are actually looking at the terminal — it
+ * wandered about as though nothing were going on.
+ */
+export function attend(pet: Pet, author: Author, tuning: PetTuning = DEFAULT_TUNING): Pet {
+  if (pet.locomotion === 'fall') return { ...pet, attending: author }
+  // A reaction still playing is left to finish. The previous command's
+  // verdict routinely lands AFTER the next command has started — the freeze
+  // waits on a render fence, the start does not — so cutting it off here
+  // would mean the answer to what you just ran is swallowed by the thing you
+  // ran next. The attending menu takes over at the next choice either way.
+  if (pet.reacting && pet.hold > 0) return { ...pet, attending: author, boredom: 0 }
+  return {
+    ...pet,
+    attending: author,
+    locomotion: 'idle',
+    // Your command it lies down for; the assistant's it sits up and watches.
+    activity: author === 'agent' ? 'sit' : 'lie',
+    hold: tuning.reactionHold,
+    reacting: false,
     boredom: 0,
   }
 }
@@ -163,7 +227,31 @@ interface Choice {
  *  Order matters to the tests and so it is stated: the moving choices come
  *  first and the still ones last, so "pin the rng high" means "keep still"
  *  in every mood rather than whichever entry happens to be at the bottom. */
-function menu(mood: Mood): readonly Choice[] {
+function menu(mood: Mood, attending: Author | null): readonly Choice[] {
+  // Watching narrows the menu rather than replacing the mood. It keeps the
+  // animal in place and near the work: no descending to another block, no
+  // running off, no falling asleep on the job. It is still the same creature
+  // — a worried cat watching a build still fidgets — which is why this is a
+  // filter over the mood's menu and not a fifth menu of its own.
+  if (attending !== null) {
+    return attending === 'agent'
+      ? [
+          { locomotion: 'idle', activity: 'sit', hold: 4, weight: 50 },
+          { locomotion: 'idle', activity: 'groom', hold: 3, weight: 18 },
+          { locomotion: 'walk', activity: 'none', hold: 1.6, weight: 18 },
+          { locomotion: 'idle', activity: 'lie', hold: 4, weight: 14 },
+        ]
+      : [
+          { locomotion: 'idle', activity: 'lie', hold: 5, weight: 46 },
+          { locomotion: 'idle', activity: 'sit', hold: 4, weight: 22 },
+          { locomotion: 'idle', activity: 'groom', hold: 3, weight: 18 },
+          { locomotion: 'walk', activity: 'none', hold: 1.6, weight: 14 },
+        ]
+  }
+  return moodMenu(mood)
+}
+
+function moodMenu(mood: Mood): readonly Choice[] {
   const walk = (w: number): Choice => ({
     locomotion: 'walk',
     activity: 'none',
@@ -282,6 +370,7 @@ export function step(
   let activity: Activity = next.activity
   let locomotion: Locomotion = next.locomotion
   let boredom: number = next.boredom
+  let reacting: boolean = next.reacting
 
   // 2. Mood decays. It is a colour on the behaviour, not a state to be stuck in.
   let { mood, moodHold } = next
@@ -295,6 +384,7 @@ export function step(
   if (threat !== 0) {
     locomotion = 'run'
     activity = 'none'
+    reacting = false
     hold = Math.max(hold, 0.5)
     dir = threat
     boredom = 0
@@ -343,7 +433,9 @@ export function step(
 
   // 5. Long enough with nothing to do and the cat goes to sleep. This is the
   //    one activity that is not chosen from the menu — it is arrived at.
-  if (boredom >= tuning.sleepAfter && activity !== 'sleep') {
+  // Watching keeps it awake: a pet that dozed off during your build would be
+  // reporting the opposite of what is happening.
+  if (next.attending === null && boredom >= tuning.sleepAfter && activity !== 'sleep') {
     return {
       ...next,
       x,
@@ -366,7 +458,7 @@ export function step(
   //    afresh every frame is what makes a pet twitch instead of live.
   hold -= dt
   if (hold <= 0) {
-    const c = pick(menu(mood), rng())
+    const c = pick(menu(mood, next.attending), rng())
     if (c.descend === true) {
       return {
         ...next,
@@ -386,6 +478,7 @@ export function step(
     locomotion = c.locomotion
     activity = c.activity
     hold = c.hold
+    reacting = false
     if (c.locomotion !== 'idle' && rng() < 0.5) dir = (dir * -1) as 1 | -1
   }
 
@@ -397,6 +490,7 @@ export function step(
     locomotion,
     activity,
     hold,
+    reacting,
     mood,
     moodHold,
     boredom,

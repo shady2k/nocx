@@ -1302,8 +1302,9 @@ describe('ScrollbackController tells the pet how the command went', () => {
     controller: ScrollbackController,
     sight: (ev: RenderFenceEvent) => void,
     exitCode: number,
+    author: 'shell' | 'agent' = 'shell',
   ): void {
-    controller.beginBlock('ls', '~', 0)
+    controller.beginBlock('ls', '~', 0, undefined, author)
     controller.blockManager.bindAttempt('att-1')
     sight({ hex: FENCE, line: 2, buffer: 'normal' })
     controller.freezeFromAttempt(
@@ -1315,13 +1316,13 @@ describe('ScrollbackController tells the pet how the command went', () => {
   it('says success when the command succeeded', () => {
     const { controller, sight, heard } = petController()
     finish(controller, sight, 0)
-    expect(heard).toHaveBeenCalledWith('success')
+    expect(heard).toHaveBeenCalledWith('success', 'shell')
   })
 
   it('says failure when it did not', () => {
     const { controller, sight, heard } = petController()
     finish(controller, sight, 2)
-    expect(heard).toHaveBeenCalledWith('failure')
+    expect(heard).toHaveBeenCalledWith('failure', 'shell')
   })
 
   it('says unknown for a block that is neither — an environment entry', () => {
@@ -1330,7 +1331,16 @@ describe('ScrollbackController tells the pet how the command went', () => {
     const { controller, heard } = petController()
     controller.beginBlock('ssh prod', '~', 0)
     controller.enterBlock(1)
-    expect(heard).toHaveBeenCalledWith('unknown')
+    expect(heard).toHaveBeenCalledWith('unknown', 'shell')
+  })
+
+  it('says WHOSE command it was, rather than leaving the pet to guess', () => {
+    // The author is minted at submit and carried on the block. Deriving which
+    // lane a finished block came from is exactly what the ledger exists to
+    // make unnecessary.
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 0, 'agent')
+    expect(heard).toHaveBeenCalledWith('success', 'agent')
   })
 
   it('says nothing at all when the pane has no pet', () => {
@@ -1347,6 +1357,61 @@ describe('ScrollbackController tells the pet how the command went', () => {
     })
     controller.scrollbackArea.scrollTo = vi.fn()
     finish(controller, (ev) => fenceCb?.(ev), 0)
+    expect(heard).not.toHaveBeenCalled()
+  })
+})
+
+// ── The pet hears about a command STARTING too (nocx-q4qeh.1) ─────────────
+//
+// Endings were all it ever learned about, so during the minute a build takes
+// — the minute somebody is actually watching the terminal — it wandered
+// about as though nothing were happening.
+describe('ScrollbackController tells the pet a command has started', () => {
+  const protoScrollIntoView = Element.prototype.scrollIntoView?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollIntoView = protoScrollIntoView
+    vi.restoreAllMocks()
+  })
+
+  function petController(): {
+    controller: ScrollbackController
+    heard: ReturnType<typeof vi.spyOn>
+  } {
+    const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer: makeRenderer(),
+      snapshotStore: new CommandSnapshotStore(),
+      pet: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    return { controller, heard }
+  }
+
+  it('tells it when a command of yours begins', () => {
+    const { controller, heard } = petController()
+    controller.beginBlockNow('go build ./...', '~', 0)
+    expect(heard).toHaveBeenCalledWith('shell')
+  })
+
+  it('tells it whose lane the command is in', () => {
+    const { controller, heard } = petController()
+    controller.beginBlockNow('go test ./...', '~', 0, undefined, 'agent')
+    expect(heard).toHaveBeenCalledWith('agent')
+  })
+
+  it('says nothing at all when the pane has no pet', () => {
+    const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer: makeRenderer(),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    controller.beginBlockNow('ls', '~', 0)
     expect(heard).not.toHaveBeenCalled()
   })
 })

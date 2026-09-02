@@ -393,7 +393,12 @@ func (a *AttachedSession) Write(p []byte) (int, error) {
 	})
 	a.client.writeMu.Lock()
 	defer a.client.writeMu.Unlock()
-	if _, err := a.client.conn.Stdin().Write(frame); err != nil {
+	// The inner session frame is the ENVELOPE'S payload, never the lane's:
+	// from the first write until this attachment is closed, every byte this
+	// method puts on the lane is inside exactly one TypeSessionData frame —
+	// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
+	// the way every other producer on this wire wraps its own.
+	if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
 		return 0, err
 	}
 	return len(p), nil

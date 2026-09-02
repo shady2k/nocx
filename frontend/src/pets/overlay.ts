@@ -186,10 +186,12 @@ export class PetOverlay {
   private _take = 0
   private _last = 0
   private _handle: number | null = null
-  /** Pointer position in host coordinates, or null while it is elsewhere.
-   *  Written from a passive listener and read once per frame — never
-   *  measured, so it costs no layout. */
-  private _pointer: { x: number; y: number } | null = null
+  /** Pointer position and buttons in host coordinates, or null while it is
+   *  elsewhere. Written from a passive listener and read once per frame —
+   *  never measured, so it costs no layout. Whether text is being SELECTED
+   *  cannot be carried here, because it is not a property of the event; it is
+   *  read once per frame beside this, which is the same bargain. */
+  private _pointer: { x: number; y: number; buttons: number } | null = null
   /** The drawn width of the animal, from the pack's trim. Kept because the
    *  flee test needs the box and only the painter knows it. */
   private _width = 0
@@ -424,7 +426,11 @@ export class PetOverlay {
       // getBoundingClientRect on each one is the layout thrash this whole
       // module is arranged to avoid. Resize and scroll both invalidate the
       // snapshot, so the rect is never stale for longer than a frame.
-      this._pointer = { x: ev.clientX - this._hostLeft, y: ev.clientY - this._hostTop }
+      this._pointer = {
+        x: ev.clientX - this._hostLeft,
+        y: ev.clientY - this._hostTop,
+        buttons: ev.buttons,
+      }
     }
     const onLeave = () => {
       this._pointer = null
@@ -514,6 +520,14 @@ export class PetOverlay {
         this._measure()
       }
       this._updateMetrics()
+      // The selection is a fact about the DOM, so the pure step cannot ask for
+      // it; the overlay reads it here rather than on every pointermove, which
+      // fires far more often than frames do. `getSelection` returns a live
+      // object and reading `.type` forces no layout, so once a frame is cheap.
+      const pointer =
+        this._pointer === null
+          ? null
+          : { ...this._pointer, selecting: window.getSelection()?.type === 'Range' }
       this._pet = step(
         this._pet,
         {
@@ -523,7 +537,7 @@ export class PetOverlay {
           petScale: this._scale,
           timing: this._timing,
           petWidth: this._width,
-          pointer: this._pointer,
+          pointer,
         },
         dt,
         this._rng,

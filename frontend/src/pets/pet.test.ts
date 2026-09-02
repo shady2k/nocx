@@ -404,12 +404,73 @@ describe('leaving a ledge from the middle', () => {
 })
 
 describe('getting out of the pointer’s way', () => {
-  const at = (x: number, y: number) => ({ ...env(), pointer: { x, y } })
-  function overFrames(pet: Pet, points: readonly { x: number; y: number }[], dt = 0.1): Pet {
+  type PointerSample = { x: number; y: number; buttons?: number; selecting?: boolean }
+  const at = (x: number, y: number, extra: Omit<PointerSample, 'x' | 'y'> = {}) => ({
+    ...env(),
+    pointer: { x, y, ...extra },
+  })
+  function overFrames(pet: Pet, points: readonly PointerSample[], dt = 0.1, rng = seq(0.99)): Pet {
     let current = pet
-    for (const pointer of points) current = step(current, { ...env(), pointer }, dt, seq(0.99))
+    for (const pointer of points) current = step(current, { ...env(), pointer }, dt, rng)
     return current
   }
+
+  it('recognizes a slow two-way stroke over the body', () => {
+    const p = overFrames(standing(A, { x: 200, activity: 'sit', hold: 99 }), [
+      { x: 190, y: A.y - 17 },
+      { x: 194, y: A.y - 17 },
+      { x: 190, y: A.y - 17 },
+      { x: 194, y: A.y - 17 },
+    ])
+    expect(['lie', 'stretch', 'groom']).toContain(p.activity)
+    expect(p.locomotion).toBe('idle')
+  })
+
+  it('does not treat a text selection as a stroke', () => {
+    const p = overFrames(standing(A, { x: 200, activity: 'sit', hold: 99 }), [
+      { x: 190, y: A.y - 17, selecting: true },
+      { x: 194, y: A.y - 17, selecting: true },
+      { x: 190, y: A.y - 17, selecting: true },
+      { x: 194, y: A.y - 17, selecting: true },
+    ])
+    expect(p.activity).toBe('sit')
+  })
+
+  it('does not treat a button-held stroke as petting', () => {
+    const p = overFrames(standing(A, { x: 200, activity: 'sit', hold: 99 }), [
+      { x: 190, y: A.y - 17, buttons: 1 },
+      { x: 194, y: A.y - 17, buttons: 1 },
+      { x: 190, y: A.y - 17, buttons: 1 },
+      { x: 194, y: A.y - 17, buttons: 1 },
+    ])
+    expect(p.activity).toBe('sit')
+  })
+  it('forgets direction changes from a drag before accepting a stroke', () => {
+    const p = overFrames(standing(A, { x: 200, activity: 'sit', hold: 99 }), [
+      { x: 190, y: A.y - 17, buttons: 1 },
+      { x: 194, y: A.y - 17, buttons: 1 },
+      { x: 190, y: A.y - 17, buttons: 1 },
+      { x: 194, y: A.y - 17 },
+    ])
+    expect(p.activity).toBe('sit')
+  })
+
+  it('keeps a second stroke inside the cooling window from answering again', () => {
+    const stroke = [
+      { x: 190, y: A.y - 17 },
+      { x: 194, y: A.y - 17 },
+      { x: 190, y: A.y - 17 },
+      { x: 194, y: A.y - 17 },
+    ]
+    let p = overFrames(standing(A, { x: 200, activity: 'sit', hold: 99 }), stroke, 0.1, seq(0))
+    expect(['lie', 'stretch', 'groom']).toContain(p.activity)
+    const firstWindow = p.pettingWindow
+    p = step(p, env(), 0.3, seq(0.5))
+    p = overFrames(p, stroke, 0.1, seq(0.5))
+    expect(p.pettingWindow).toBe(firstWindow)
+    expect(p.pettingAges).toHaveLength(1)
+    expect(p.pettingAges[0]).toBeGreaterThan(0)
+  })
 
   it('turns to watch a cursor that approaches slowly instead of running', () => {
     const points = [{ x: 400, y: A.y - 17 }]

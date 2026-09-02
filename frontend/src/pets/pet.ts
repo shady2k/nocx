@@ -121,6 +121,14 @@ export interface Pet {
   readonly pointerStill: number
   readonly pointerNear: boolean
   readonly pointerAlarmed: boolean
+  /** Sign of the latest non-zero horizontal pointer movement. */
+  readonly pointerMotion: -1 | 0 | 1
+  /** Ages of recent horizontal direction changes, newest first. */
+  readonly pointerTurnAges: readonly number[]
+  /** Ages of recent petting gestures; the event age owns cooling time. */
+  readonly pettingAges: readonly number[]
+  /** Cooling window chosen for the current petting event, in seconds. */
+  readonly pettingWindow: number
   /** Number of recent calm encounters, with a short grace period. */
   readonly pointerCalm: number
   readonly pointerCalmHold: number
@@ -195,6 +203,10 @@ export function newPet(x: number, y: number): Pet {
     pointerNear: false,
     pointerAlarmed: false,
     pointerCalm: 0,
+    pointerMotion: 0,
+    pointerTurnAges: [],
+    pettingAges: [],
+    pettingWindow: 0,
     pointerCalmHold: 0,
     attendingFor: 0,
     vigilStage: 0,
@@ -585,9 +597,13 @@ export interface StepEnv {
    *  180px wide, so a cursor visibly on top of it is ninety pixels from the
    *  point a radius would measure — and it would sit there unbothered. */
   readonly petWidth?: number
-  /** Where the pointer is, in the same coordinates as the terrain, or null
-   *  when it is not over this pane at all. */
-  readonly pointer?: { readonly x: number; readonly y: number } | null
+  /** Where the pointer is, plus DOM facts measured by the overlay. */
+  readonly pointer?: {
+    readonly x: number
+    readonly y: number
+    readonly buttons?: number
+    readonly selecting?: boolean
+  } | null
 }
 
 /** Ground by identity, floor included. */
@@ -602,6 +618,28 @@ const POINTER_FAST_APPROACH = 180
 const POINTER_STILL_SPEED = 12
 const POINTER_STILL_DELAY = 0.65
 const POINTER_CALM_LIMIT = 3
+const POINTER_PETTING_SPEED = 96
+const POINTER_PETTING_WINDOW = 1
+const POINTER_PETTING_MIN_TURNS = 2
+const PETTING_WINDOW_MIN = 15
+const PETTING_WINDOW_MAX = 30
+const PETTING_ACTIVITIES: readonly Activity[] = ['lie', 'stretch', 'groom']
+
+function pettingReady(
+  pointer: NonNullable<StepEnv['pointer']>,
+  assessment: PointerAssessment,
+  pettingAges: readonly number[],
+): boolean {
+  return (
+    (pointer.buttons ?? 0) === 0 &&
+    pointer.selecting !== true &&
+    assessment.onBody &&
+    assessment.speed <= POINTER_PETTING_SPEED &&
+    assessment.turnAges.length >= POINTER_PETTING_MIN_TURNS &&
+    !assessment.alarmed &&
+    pettingAges.length === 0
+  )
+}
 const POINTER_CALM_DURATION = 8
 const POINTER_CALM_THRESHOLD_STEP = 0.35
 // A slow approach is still movement, so it has its own wider threshold.
@@ -623,6 +661,8 @@ interface PointerAssessment {
   readonly calmHold: number
   readonly alarmed: boolean
   readonly sample: { readonly x: number; readonly y: number } | null
+  readonly motion: -1 | 0 | 1
+  readonly turnAges: readonly number[]
 }
 
 function pointerAssessment(
@@ -639,6 +679,15 @@ function pointerAssessment(
     sample !== null && previous !== null && dt > 0
       ? Math.hypot(sample.x - previous.x, sample.y - previous.y) / dt
       : 0
+  const gestureEligible =
+    sample !== null && (sample.buttons ?? 0) === 0 && sample.selecting !== true
+  const deltaX = gestureEligible && previous !== null ? sample.x - previous.x : 0
+  const motion: -1 | 0 | 1 = deltaX > 0 ? 1 : deltaX < 0 ? -1 : 0
+  const turnAges = gestureEligible
+    ? pet.pointerTurnAges.map((age) => age + dt).filter((age) => age < POINTER_PETTING_WINDOW)
+    : []
+  if (motion !== 0 && pet.pointerMotion !== 0 && motion !== pet.pointerMotion) turnAges.push(0)
+  const lastMotion = gestureEligible ? (motion === 0 ? pet.pointerMotion : motion) : 0
   const centreY = y - env.petHeight / 2
   const halfW = (env.petWidth ?? env.petHeight) / 2
   const dx = sample === null ? 0 : x - sample.x
@@ -681,7 +730,9 @@ function pointerAssessment(
     calm,
     calmHold,
     alarmed,
-    sample,
+    sample: sample === null ? null : { x: sample.x, y: sample.y },
+    motion: lastMotion,
+    turnAges,
   }
 }
 
@@ -736,6 +787,7 @@ export function step(
     noticeableAges: pet.noticeableAges
       .map((age) => age + dt)
       .filter((age) => age < NOTICEABLE_WINDOW),
+    pettingAges: pet.pettingAges.map((age) => age + dt).filter((age) => age < pet.pettingWindow),
   }
 
   // 1. Resolve the world before phases. A block can move or disappear while
@@ -771,6 +823,8 @@ export function step(
     pointerAlarmed: pointer.alarmed,
     pointerCalm: pointer.calm,
     pointerCalmHold: pointer.calmHold,
+    pointerMotion: pointer.motion,
+    pointerTurnAges: pointer.turnAges,
   }
   if (next.attending !== null) next = { ...next, attendingFor: next.attendingFor + dt }
 
@@ -810,6 +864,29 @@ export function step(
   // only chooses the response to it.
   const threat = pointer.near ? pointer.direction : 0
   const onBody = pointer.onBody && pointer.still > 0
+  if (env.pointer != null && pettingReady(env.pointer, pointer, next.pettingAges)) {
+    const activity =
+      PETTING_ACTIVITIES[
+        Math.min(PETTING_ACTIVITIES.length - 1, Math.floor(rng() * PETTING_ACTIVITIES.length))
+      ]
+    return {
+      ...next,
+      x,
+      y,
+      dir,
+      vx: 0,
+      locomotion: 'idle',
+      activity,
+      reacting: false,
+      hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, env.timing),
+      pettingAges: [0],
+      pettingWindow: PETTING_WINDOW_MIN + rng() * (PETTING_WINDOW_MAX - PETTING_WINDOW_MIN),
+      mood,
+      moodHold,
+      boredom: 0,
+      ledgeId: ledge.id,
+    }
+  }
   const slowApproach = pointer.near && pointer.approach > POINTER_SLOW_APPROACH && !pointer.alarmed
   if (threat !== 0 && !(next.reacting && next.hold > 0)) {
     if (pointer.alarmed) {

@@ -97,6 +97,15 @@ function addBlock(s: Stand, top: number): HTMLElement {
   s.blocks.appendChild(b)
   return b
 }
+function pointerMove(s: Stand, x: number, y: number, buttons = 0): void {
+  const event = new Event('pointermove')
+  Object.defineProperties(event, {
+    clientX: { value: x },
+    clientY: { value: y },
+    buttons: { value: buttons },
+  })
+  s.host.dispatchEvent(event)
+}
 
 function stand(blockTops: number[]): Stand {
   const host = document.createElement('div')
@@ -176,6 +185,19 @@ function overlayOn(
 describe('a pet over a pane', () => {
   beforeEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it('reads selection once per frame, not from each passive pointer event', async () => {
+    const s = stand([200])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    const getSelection = vi.spyOn(window, 'getSelection').mockReturnValue(null)
+    pointerMove(s, 300, 183)
+    pointerMove(s, 304, 183)
+    expect(getSelection).not.toHaveBeenCalled()
+    s.pump(1 / 60)
+    expect(getSelection).toHaveBeenCalledTimes(1)
+    getSelection.mockRestore()
   })
 
   it('puts a layer over the pane and nothing inside the blocks', async () => {

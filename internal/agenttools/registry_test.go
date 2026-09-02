@@ -1147,12 +1147,12 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 		t.Fatalf("WriteFile other: %v", err)
 	}
 
-	capability, err := narrowFilesRead(content.Grant{
-		Scopes: []content.GrantScope{
-			{Kind: content.ResourcePath, ID: insideRoot},
-			{Kind: content.ResourcePath, ID: otherRoot},
-		},
-	}, []ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
+	// The grant is minted through the policy matrix: a capability's roots are
+	// the effect ROW's path scopes (nocx-cd6vp), so a bare content.Grant
+	// literal names declaration coverage and no authority. The assertions
+	// below are unchanged.
+	capability, err := narrowFilesRead(pathScopeGrant(insideRoot, otherRoot),
+		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -1186,10 +1186,8 @@ func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
 			t.Fatalf("WriteFile %s: %v", path, err)
 		}
 	}
-	grant := content.Grant{Scopes: []content.GrantScope{
-		{Kind: content.ResourcePath, ID: insideRoot},
-		{Kind: content.ResourcePath, ID: otherRoot},
-	}}
+	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
+	grant := pathScopeGrant(insideRoot, otherRoot)
 	resolved := []ResourceRef{{Kind: content.ResourcePath, ID: inside}}
 	capability, err := narrowFilesEdit(grant, resolved, RunContext{})
 	if err != nil {
@@ -1229,10 +1227,8 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 	}
 	target := filepath.Join(insideRoot, "new.txt")
 	other := filepath.Join(otherRoot, "other.txt")
-	grant := content.Grant{Scopes: []content.GrantScope{
-		{Kind: content.ResourcePath, ID: insideRoot},
-		{Kind: content.ResourcePath, ID: otherRoot},
-	}}
+	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
+	grant := pathScopeGrant(insideRoot, otherRoot)
 	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, RunContext{})
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)

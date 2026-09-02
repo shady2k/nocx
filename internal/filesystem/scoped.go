@@ -121,13 +121,40 @@ func exact(canonical string, files []string) bool {
 // a separator boundary. The separator set covers the provider-native forms:
 // "/" (POSIX local, SFTP) and the OS separator where it differs (Windows
 // local).
+//
+// A root that IS a separator — the filesystem root "/" — is the one root the
+// boundary test cannot express by appending one: root+sep is "//", which no
+// canonical path has, so such a root contained nothing but itself. That is
+// not a corner case in this product. ADR-0028 decision 4, as amended
+// 2026-08-26, makes "/" the run grant's path fence for EVERY run, so the
+// unsatisfiable check made files.read, files.edit and files.create refuse
+// every file in the shipped app (nocx-cd6vp).
+//
+// Accepting "/" does not weaken the check into the lexical predicate
+// content.pathScopeContains is: containment here still compares
+// PROVIDER-CANONICAL identities, so a symlink out of a root is still outside
+// it. What a "/" root legitimately contains is every path the provider could
+// canonicalize, which is exactly what the amendment says a run fence of "/"
+// means. The narrowing a person expressed lives in the effect ROW's scopes,
+// and agenttools.filesystemRoots builds these roots from that row — so a
+// scoped row still refuses a symlink escape by canonical identity.
 func contained(canonical string, roots []string) bool {
 	for _, root := range roots {
 		if canonical == root {
 			return true
 		}
 		for _, sep := range scopeSeparators() {
-			if strings.HasPrefix(canonical, root+string(sep)) {
+			s := string(sep)
+			if root == s {
+				// The root is the separator itself: every path spelled from
+				// it is a descendant, and there is no second separator to
+				// test at the boundary.
+				if strings.HasPrefix(canonical, s) {
+					return true
+				}
+				continue
+			}
+			if strings.HasPrefix(canonical, root+s) {
 				return true
 			}
 		}

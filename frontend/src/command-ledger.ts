@@ -35,6 +35,10 @@ export interface CommandRecord {
    *  afterwards (design §3.1). 'shell' is the human; 'agent' is the
    *  assistant's lane. */
   readonly author: CommandAuthor
+  /** The correlation token this submit minted, before it asked the backend
+   *  for an attempt. The published attempt carries it back, and that
+   *  equality is what binds the two — see bindAttempt. */
+  readonly submitId: string
   status: CommandStatus
   exitCode: number | null
   startedAt: number | null
@@ -45,6 +49,14 @@ export interface CommandRecord {
 }
 
 export interface LedgerOpts {
+  /**
+   * Mints the submit correlation token. Injectable for the same reason the
+   * clock is: a test that cannot name the token cannot assert which record
+   * an attempt bound to. The default is a random one — the value is opaque
+   * and only ever compared for equality.
+   */
+  mintSubmitId?: () => string
+
   /**
    * Injectable wall clock in Unix epoch milliseconds (`Date.now()` units).
    * startedAt is persisted, survives a restart, and renders as "3 days ago"
@@ -58,10 +70,19 @@ export interface LedgerOpts {
   now: () => number
 }
 
+/** The default token: opaque, unique per submit, compared only for equality.
+ *  Hex rather than base64 so it survives every wire and log unescaped. */
+function defaultSubmitId(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return 'sub-' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 export class CommandLedger {
   private _records: CommandRecord[] = []
   private _nextId = 1
   private readonly _now: () => number
+  private readonly _mintSubmitId: () => string
 
   /** attempt id → record id. The binding is projection bookkeeping: an
    *  attempt belongs to exactly one record, and only the record bound to an
@@ -69,6 +90,7 @@ export class CommandLedger {
   private readonly _attemptBindings = new Map<string, number>()
   constructor(opts: LedgerOpts) {
     this._now = opts.now
+    this._mintSubmitId = opts.mintSubmitId ?? defaultSubmitId
   }
 
   /**
@@ -105,6 +127,7 @@ export class CommandLedger {
       startedAt: this._now(),
       endedAt: null,
       author,
+      submitId: this._mintSubmitId(),
       lineOf,
       disposed: false,
     }
@@ -137,15 +160,29 @@ export class CommandLedger {
    *  a shell-originated attempt, which opens no ledger record (its text may
    *  carry a literal password and never persists; the block projection
    *  still gives it structure). Idempotent for a repeated binding. */
-  bindAttempt(attemptId: string): CommandRecord | null {
-    const already = this._attemptBindings.get(attemptId)
+  bindAttempt(attempt: { readonly id: string; readonly submitId?: string }): CommandRecord | null {
+    const already = this._attemptBindings.get(attempt.id)
     if (already !== undefined) return this.resolveID(already) ?? null
-    const pending = this._records.find(
-      (r) => r.status === 'running' && !this._boundRecordIds().has(r.id),
+    // Equality on the submit's own token, and nothing else. This used to
+    // take "the first unbound record still running", which is a guess that
+    // is right until a record is left behind — and one always can be, since
+    // a refused lifecycle.submitAttempt is fail-open: the bytes go out, the
+    // command runs, and no attempt ever claims its record. The next
+    // command's attempt then bound to that stale record, so one command's
+    // exit status was stored under another's text, and an attempt that found
+    // nothing was read as shell-originated — the branch that deliberately
+    // persists nothing, because a line typed at the shell may carry a
+    // literal password. So a finished command could vanish from history and
+    // from the bell with nothing logged (nocx-td6d4.10).
+    const token = attempt.submitId
+    if (token === undefined || token === '') return null
+    const bound = this._boundRecordIds()
+    const rec = this._records.find(
+      (r) => r.submitId === token && r.status === 'running' && !bound.has(r.id),
     )
-    if (pending === undefined) return null
-    this._attemptBindings.set(attemptId, pending.id)
-    return pending
+    if (rec === undefined) return null
+    this._attemptBindings.set(attempt.id, rec.id)
+    return rec
   }
 
   /** Record ids already claimed by an attempt — one attempt per record. */

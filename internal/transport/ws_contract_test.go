@@ -5077,6 +5077,14 @@ func TestLifecycleSubmitAttempt_DTOConformsToContract(t *testing.T) {
 			Command: "ls", Cwd: "", Host: "",
 			Origin: lifecyclepub.OriginApp, StartedAt: started,
 		},
+		// The submit's correlation token, echoed. A caller with no ledger
+		// record to bind sends none, which is the case above.
+		"attempt carrying the submit token": {
+			ID: "att-3", Domain: "dom-3", State: lifecyclepub.AttemptOpen,
+			Command: "make", Cwd: "/srv/app", Host: "",
+			Origin: lifecyclepub.OriginApp, SubmitID: "sub-0123456789abcdef",
+			StartedAt: started,
+		},
 	}
 	for name, dto := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -5115,6 +5123,7 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
 		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
+		"submitId": "sub-0123456789abcdef",
 	}, 41)
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`
@@ -5139,6 +5148,17 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if att, ok := kernel.Attempt(lifecycle.AttemptID(got.ID)); !ok || att.Command != "make" {
 		t.Errorf("kernel attempt = %+v (ok=%v), want the submitted command", att, ok)
+	}
+	// And the submit's own token comes back on it. The renderer binds the
+	// ledger record it opened to this attempt by this equality, so an echo
+	// that is dropped anywhere between the params and the result leaves the
+	// record unbindable — which is how a finished command once vanished from
+	// history and from the bell (nocx-td6d4.10).
+	if got.SubmitID != "sub-0123456789abcdef" {
+		t.Errorf("submitId = %q, want the token the submit sent", got.SubmitID)
+	}
+	if att, ok := kernel.Attempt(lifecycle.AttemptID(got.ID)); !ok || att.SubmitID != "sub-0123456789abcdef" {
+		t.Errorf("kernel attempt submitId = %+v (ok=%v), want the token the submit sent", att, ok)
 	}
 }
 

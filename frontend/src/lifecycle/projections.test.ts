@@ -63,7 +63,8 @@ class FakeBlocks implements BlockProjectionPort {
 
 function makeEnv() {
   const kernel = new LifecycleKernel()
-  const ledger = new CommandLedger({ now: () => 1000 })
+  let minted = 0
+  const ledger = new CommandLedger({ now: () => 1000, mintSubmitId: () => `sub-${++minted}` })
   const blocks = new FakeBlocks()
   const persist = vi.fn<(rec: CommandRecord, attempt: ExecutionAttempt) => Promise<unknown>>(() =>
     Promise.resolve(null),
@@ -80,7 +81,9 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     ledger.open('make {{secret:ci}}', '/repo', '', () => undefined, 'shell')
     kernel.applyFact(promptReady())
     // The shell start attaches: the pending record binds to the attempt.
-    kernel.applyFact(running('d1', 1, { id: 'att-1', origin: 'app', command: 'make sk-live' }))
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-1', origin: 'app', submitId: 'sub-1', command: 'make sk-live' }),
+    )
     const rec = ledger.recordForAttempt('att-1')
     expect(rec).not.toBeUndefined()
     expect(rec?.command).toBe('make {{secret:ci}}') // app text, never the wire line
@@ -116,7 +119,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const { kernel, ledger, blocks, persist } = makeEnv()
     ledger.open('sleep 100', '/', '', () => undefined, 'shell')
     kernel.applyFact(promptReady())
-    kernel.applyFact(running('d1', 1, { id: 'att-1' }))
+    kernel.applyFact(running('d1', 1, { id: 'att-1', origin: 'app', submitId: 'sub-1' }))
     kernel.applyFact(running('d1', 1, { id: 'att-1', state: 'unknown' }))
     const rec = ledger.recordForAttempt('att-1')
     expect(rec?.status).toBe('unknown')
@@ -163,7 +166,9 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const { kernel, ledger, blocks, persist } = makeEnv()
     ledger.open('make', '/repo', '', () => undefined, 'shell')
     kernel.applyFact(promptReady())
-    kernel.applyFact(running('d1', 1, { id: 'att-1', origin: 'app', command: 'make' }))
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-1', origin: 'app', submitId: 'sub-1', command: 'make' }),
+    )
     blocks.events.length = 0
     persist.mockClear()
 
@@ -195,7 +200,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const { kernel, ledger, blocks, persist } = makeEnv()
     ledger.open('make', '/', '', () => undefined, 'shell')
     kernel.applyFact(promptReady())
-    kernel.applyFact(running('d1', 1, { id: 'att-1' }))
+    kernel.applyFact(running('d1', 1, { id: 'att-1', origin: 'app', submitId: 'sub-1' }))
     kernel.applyFact(lostF())
     const rec = ledger.recordForAttempt('att-1')
     expect(rec?.status).toBe('unknown')
@@ -280,7 +285,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const { kernel, ledger, blocks } = makeEnv()
     kernel.applyFact(promptReady('parent', 1))
     const rec = ledger.open('ssh pi@far', '/home/me', '', () => undefined, 'shell')
-    kernel.applyFact(running('parent', 1, { id: 'att-ssh', origin: 'app' }))
+    kernel.applyFact(running('parent', 1, { id: 'att-ssh', origin: 'app', submitId: 'sub-1' }))
     kernel.applyFact(nativeFact()) // suspended, NOT closed
     kernel.applyFact(promptReady('child', 2))
 
@@ -344,7 +349,9 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const { kernel, ledger, blocks, projections } = makeEnv()
     const first = ledger.open('first', '/', '', () => undefined, 'shell')
     kernel.applyFact(promptReady())
-    kernel.applyFact(running('d1', 1, { id: 'att-reused', origin: 'app', command: 'first' }))
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-reused', origin: 'app', submitId: 'sub-1', command: 'first' }),
+    )
     const pending = ledger.open('pending', '/', '', () => undefined, 'shell')
     expect(blocks.events).toEqual(['bind:att-reused'])
 
@@ -356,7 +363,9 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     kernel.reset()
     ledger.open('second', '/', '', () => undefined, 'shell')
     kernel.applyFact(promptReady('d2', 1))
-    kernel.applyFact(running('d2', 1, { id: 'att-reused', origin: 'app', command: 'second' }))
+    kernel.applyFact(
+      running('d2', 1, { id: 'att-reused', origin: 'app', submitId: 'sub-1', command: 'second' }),
+    )
 
     expect(blocks.events).toEqual([
       'bind:att-reused',
@@ -389,3 +398,56 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
 function nativeFact(): LifecycleFact {
   return { lane: LANE, lifecycle: 'native' }
 }
+
+// ── Binding by position, not by identity (nocx-td6d4.10) ────────────────
+//
+// "Is this published attempt the one my submit created" has an authoritative
+// answer and a guessed one, and the codebase uses both. The assistant lane
+// asks by identity: lifecycle.submitAttempt carries a client-minted
+// requestId and the backend binds the run to the attempt by equality
+// (ws_lifecycle.go). A person's Enter carries nothing, so the projection
+// re-derives the pairing here — first unbound record whose status is
+// running — and reads "found nothing" as "the human typed this straight at
+// the shell", the one case that deliberately persists nothing because the
+// line may carry a literal password.
+//
+// The two answers agree until a record is left behind. A submit whose
+// lifecycle.submitAttempt was REFUSED is exactly that: the refusal is
+// fail-open by design — "the bytes still go out and the session stays
+// conventional" (terminal-content.ts) — so the command runs, the record
+// stays running, and no attempt ever claims it. The next command's attempt
+// then finds that stale record first and binds to it, and the outcome of one
+// command is recorded under the text of another.
+describe('an attempt binds the record its own submit opened', () => {
+  it('does not bind a later attempt to the record a refused submit left behind', () => {
+    const { kernel, ledger, persist } = makeEnv()
+    kernel.applyFact(promptReady())
+
+    // Submit one, refused: no attempt is ever published for it. The command
+    // still ran — that is what fail-open means — so its record is left open.
+    ledger.open('deploy staging', '/repo', '', () => undefined, 'shell')
+
+    // Submit two, on a domain that is live this time.
+    ledger.open('echo second', '/repo', '', () => undefined, 'shell')
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-2', origin: 'app', submitId: 'sub-2', command: 'echo second' }),
+    )
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-2', state: 'completed', exitCode: 0, fence: FENCE }),
+    )
+
+    // The attempt belongs to the second submit, so the second submit's record
+    // is what completes and what history is handed.
+    expect(persist).toHaveBeenCalledTimes(1)
+    const [recorded] = persist.mock.calls[0]
+    expect(recorded.command).toBe('echo second')
+    expect(recorded.exitCode).toBe(0)
+
+    // And the abandoned first record is untouched: it was never this
+    // attempt's, and closing it under another command's exit status would be
+    // the same defect wearing the other face.
+    const stale = ledger.records().find((r) => r.command === 'deploy staging')
+    expect(stale?.status).toBe('running')
+    expect(stale?.exitCode).toBeNull()
+  })
+})

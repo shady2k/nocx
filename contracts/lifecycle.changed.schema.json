@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/lifecycle.changed.schema.json",
   "title": "LifecycleChanged",
-  "description": "The lifecycle.changed JSON-RPC notification: the published fact of the authenticated lifecycle protocol (ADR-0024 decision 7, docs/lifecycle-protocol.md). Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing or shape defect would hide, and why it gets the same three checks as a method. Authentication terminates in the backend: this is what the kernel concluded, projected from its read model by the publication layer (internal/lifecyclepub). It therefore never carries the per-epoch capability, a raw channel frame, or the channel's sequence counter — a future refactor that adds any of those fails the no-capability/no-raw-frame wire test, and this schema would reject them anyway. The destination is resolved at emit time — the lane's session's current subscriber — never stored, which is what survives an AD-9 reconnect.",
+  "description": "The lifecycle.changed JSON-RPC notification: the published fact of the authenticated lifecycle protocol (ADR-0024 decision 7, docs/lifecycle-protocol.md). Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape \u2014 which is exactly where an addressing or shape defect would hide, and why it gets the same three checks as a method. Authentication terminates in the backend: this is what the kernel concluded, projected from its read model by the publication layer (internal/lifecyclepub). It therefore never carries the per-epoch capability, a raw channel frame, or the channel's sequence counter \u2014 a future refactor that adds any of those fails the no-capability/no-raw-frame wire test, and this schema would reject them anyway. The destination is resolved at emit time \u2014 the lane's session's current subscriber \u2014 never stored, which is what survives an AD-9 reconnect.",
   "type": "object",
   "additionalProperties": false,
   "required": ["sessionId", "instanceId", "sessionEpoch", "lane", "lifecycle"],
@@ -13,7 +13,7 @@
       "minLength": 1
     },
     "instanceId": {
-      "description": "The backend instance that minted the session owning this lane (AD-7 — server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. The renderer compares it against the pair the open ack carried, so a fact for this sessionId out of a previous backend instance is refused instead of applied to the current projection. Distinct from the domain epoch this fact carries, which is the lifecycle kernel's per-domain counter.",
+      "description": "The backend instance that minted the session owning this lane (AD-7 \u2014 server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. The renderer compares it against the pair the open ack carried, so a fact for this sessionId out of a previous backend instance is refused instead of applied to the current projection. Distinct from the domain epoch this fact carries, which is the lifecycle kernel's per-domain counter.",
       "type": "string"
     },
     "sessionEpoch": {
@@ -26,7 +26,7 @@
       "type": "string"
     },
     "lifecycle": {
-      "description": "The per-lane authority axis (ADR-0024 decision 6): Native | PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost. The buffer axis is deliberately absent — it belongs to the renderer, never to the kernel or this fact.",
+      "description": "The per-lane authority axis (ADR-0024 decision 6): Native | PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost. The buffer axis is deliberately absent \u2014 it belongs to the renderer, never to the kernel or this fact.",
       "type": "string",
       "enum": ["native", "prompt_ready", "running", "desynchronized", "lost"]
     },
@@ -35,17 +35,17 @@
       "type": "string"
     },
     "epoch": {
-      "description": "The generation of that domain — monotonic per kernel instance, never reused, never resumed. A new establishment is a new domain with a new epoch, which is how the renderer knows its projection is stale. Present exactly when domain is.",
+      "description": "The generation of that domain \u2014 monotonic per kernel instance, never reused, never resumed. A new establishment is a new domain with a new epoch, which is how the renderer knows its projection is stale. Present exactly when domain is.",
       "type": "integer",
       "minimum": 1
     },
     "generation": {
-      "description": "The backend-minted establishment generation of the domain (ADR-0024 decision 9): minted fresh for every accept-producing hello and present exactly when the fact names a domain. The renderer returns it in lifecycle.establishAck after committing the presentation that makes an editor available; the backend flushes the pending accept only for the exact generation — no acknowledgement, no accept.",
+      "description": "The backend-minted establishment generation of the domain (ADR-0024 decision 9): minted fresh for every accept-producing hello and present exactly when the fact names a domain. The renderer returns it in lifecycle.establishAck after committing the presentation that makes an editor available; the backend flushes the pending accept only for the exact generation \u2014 no acknowledgement, no accept.",
       "type": "string",
       "pattern": "^est-[0-9a-f]{16}$"
     },
     "attempt": {
-      "description": "The attempt the lifecycle refers to, present when lifecycle is running. One attempt record per domain; the renderer keys the block model on its id and state. Completion fields (exitCode, completedAt, fence) are present exactly when the attempt completed — the kernel sets an exit status exactly once, only from an authenticated completion. fence is the render-ordering rendezvous of decision 7's carve-out: the shell writes the same 32 random bytes to the pty after the command's output, and the visual freeze waits for both this event and the matching fence bytes. A fence with no authenticated event behind it does nothing at all — it carries no authority, which is why it is publishable where the capability is not.",
+      "description": "The attempt the lifecycle refers to, present when lifecycle is running. One attempt record per domain; the renderer keys the block model on its id and state. Completion fields (exitCode, completedAt, fence) are present exactly when the attempt completed \u2014 the kernel sets an exit status exactly once, only from an authenticated completion. fence is the render-ordering rendezvous of decision 7's carve-out: the shell writes the same 32 random bytes to the pty after the command's output, and the visual freeze waits for both this event and the matching fence bytes. A fence with no authenticated event behind it does nothing at all \u2014 it carries no authority, which is why it is publishable where the capability is not.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "state"],
@@ -55,12 +55,12 @@
           "type": "string"
         },
         "state": {
-          "description": "The attempt's status. open: running or awaiting its authenticated start. completed: an authenticated same-domain completion set the exit status exactly once. unknown: abandoned (native-mode escape), lost with its domain, or unrecoverable by an authenticated snapshot — nothing may mark an attempt successful and nothing may assign it an exit code it did not report (decision 5).",
+          "description": "The attempt's status. open: running or awaiting its authenticated start. completed: an authenticated same-domain completion set the exit status exactly once. unknown: abandoned (native-mode escape), lost with its domain, or unrecoverable by an authenticated snapshot \u2014 nothing may mark an attempt successful and nothing may assign it an exit code it did not report (decision 5).",
           "type": "string",
           "enum": ["open", "completed", "unknown"]
         },
         "command": {
-          "description": "The command text. For an attached app attempt this is the app-owned text carrying references — the shell's wire line, which may carry vault-resolved secrets, is ignored outright (decision 5's privacy rule). For a shell-originated attempt it is the shell's line. Either way it is already visible to the renderer through the pty stream, so publishing it widens nothing.",
+          "description": "The command text. For an attached app attempt this is the app-owned text carrying references \u2014 the shell's wire line, which may carry vault-resolved secrets, is ignored outright (decision 5's privacy rule). For a shell-originated attempt it is the shell's line. Either way it is already visible to the renderer through the pty stream, so publishing it widens nothing.",
           "type": "string"
         },
         "origin": {
@@ -83,20 +83,26 @@
           "format": "date-time"
         },
         "fence": {
-          "description": "The completion's render fence: 32 random bytes as 64 lowercase hex chars, written to the pty by the shell after the command's output and carried here for the render-order rendezvous. Present exactly when state is completed. Format-identical to the capability on purpose — the wire test discriminates on value: the capability minted for the domain must never appear in any serialized fact, and a future refactor that confuses the two fails it.",
+          "description": "The completion's render fence: 32 random bytes as 64 lowercase hex chars, written to the pty by the shell after the command's output and carried here for the render-order rendezvous. Present exactly when state is completed. Format-identical to the capability on purpose \u2014 the wire test discriminates on value: the capability minted for the domain must never appear in any serialized fact, and a future refactor that confuses the two fails it.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "submitId": {
+          "type": "string",
+          "description": "The submit's correlation token, echoed from the lifecycle.submitAttempt params that created this attempt. The renderer binds the ledger record it opened at submit to this attempt by equality on this value, rather than searching for a record by position. Absent on a shell-originated attempt, which has no submit behind it, and absent when the submit carried no token. It is a correlation token and never an identity: the attempt id is the backend's (ADR-0024 decision 5).",
+          "minLength": 1,
+          "maxLength": 256
         }
       }
     },
     "destination": {
-      "description": "Where the domain IS, present exactly when the fact names a domain minted for an ssh child (nocx-ax79). It answers the question a nested session could not otherwise answer — which machine will run the next command — because a child domain had no authenticated host source, so a cwd of /home/pi on a far host was indistinguishable from the same path locally. The values are the ones domain_request carried and nothing more (ADR-0025: the destination, never the user's typed options). Descriptive, never authority: the domain id and epoch remain the only authority the renderer is given, and the per-epoch capability and raw frames still never cross (ADR-0024 decision 7). A local domain carries none, and the field disappears in the same fact the domain does.",
+      "description": "Where the domain IS, present exactly when the fact names a domain minted for an ssh child (nocx-ax79). It answers the question a nested session could not otherwise answer \u2014 which machine will run the next command \u2014 because a child domain had no authenticated host source, so a cwd of /home/pi on a far host was indistinguishable from the same path locally. The values are the ones domain_request carried and nothing more (ADR-0025: the destination, never the user's typed options). Descriptive, never authority: the domain id and epoch remain the only authority the renderer is given, and the per-epoch capability and raw frames still never cross (ADR-0024 decision 7). A local domain carries none, and the field disappears in the same fact the domain does.",
       "type": "object",
       "additionalProperties": false,
       "required": ["host"],
       "properties": {
         "host": {
-          "description": "The destination host as the parent's request named it — a hostname, an alias or a literal address. Never re-derived from the prompt text or any other stream-derived guess (AD-6).",
+          "description": "The destination host as the parent's request named it \u2014 a hostname, an alias or a literal address. Never re-derived from the prompt text or any other stream-derived guess (AD-6).",
           "type": "string",
           "minLength": 1
         },
@@ -113,7 +119,7 @@
       }
     },
     "recovery": {
-      "description": "The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable — channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode — an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.",
+      "description": "The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable \u2014 channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode \u2014 an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.",
       "type": "object",
       "additionalProperties": false,
       "required": ["fence", "generation"],
@@ -124,7 +130,7 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "generation": {
-          "description": "The recovery generation the renderer returns in lifecycle.recoverAck — the same minted nonce.",
+          "description": "The recovery generation the renderer returns in lifecycle.recoverAck \u2014 the same minted nonce.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         }

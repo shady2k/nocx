@@ -441,7 +441,7 @@ func (k *Kernel) RecoverLane(lane LaneID) error {
 // app-owned command text, cwd, host, start time — before the bytes that could
 // cause the shell's own start are written to the pty (decision 5). It requires
 // a live, active, non-desynchronized domain at a ready prompt.
-func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host string) (ExecutionAttempt, error) {
+func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host, submitID string) (ExecutionAttempt, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	d, ok := k.registry.Lookup(domain)
@@ -466,6 +466,7 @@ func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host string) (Exec
 		return ExecutionAttempt{}, err
 	}
 	att := k.createAttempt(d, aid, OriginApp, false, command, cwd, host, k.now())
+	att.SubmitID = submitID
 	k.setLifecycle(ls, LifecycleRunning, d.ID, att.ID)
 	return *att, nil
 }

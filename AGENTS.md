@@ -289,16 +289,24 @@ exist survives a release.
 A bug report is a symptom, not a mandate to edit. Five checks, in order — skipping them is
 how two agents ship two answers to one question.
 
-1. **Already filed?**
+1. **Already filed?** Area first — it is the only listing short enough to read whole:
 
    ```bash
-   bd query "status=open" --json | jq -r '.[] | "\(.id) [\(.issue_type)] \(.title)"' | grep -i <keyword>
-   bd list --label <topic> --status all   # decisions, research, design beads
-   bd memories <keyword>                  # what a past session learned the hard way
+   bd list --label <area> --status all   # the closed area list is under Backlog invariants
+   bd search <phrase>                    # then words, for the bead filed in other words
+   bd memories <keyword>                 # what a past session learned the hard way
    ```
 
    A hit is not automatically your task — read it. It may be claimed, blocked, or record
    that the behaviour is deliberate. Work the existing bead rather than opening a second.
+
+   **Search for the behaviour, not for your name for it** — this is the same rule as
+   [Look for the existing answer](#look-for-the-existing-answer-before-you-write-a-second-one),
+   applied to the backlog. Duplicates here are rarely near-copies: `nocx-su4g` said "an
+   empty file named `1` is tracked at the repo root" and `nocx-o8p1l` said "a tracked
+   empty file named 1 sits at the repository root" — nine days apart, one defect, and the
+   second filer had searched. When you cannot phrase it two ways, read the whole area
+   listing instead; that is what the area label is for.
 
 2. **Deliberate?** `docs/vision.md` and the owning epic say what is explicitly out. The
    empty "Sessions" panel is a placeholder a comment in `main.ts` declares; "fixing" it
@@ -429,6 +437,60 @@ occupied. Finish something in flight or take a free epic; never widen the query.
 
 > 13 of 20 epic-level edges once encoded "not yet" rather than overlap and were removed;
 > before that, a bare `bd ready` offered 68 issues and the queue was unusable.
+
+### One area label, and a status that is true
+
+Measured 2026-09-02 over 3145 beads (`nocx-e1xzh`): **only 64 of 791 open beads carried
+an area label** — 479 had none at all, and another 248 had only a roadmap tag like `mvp`,
+which narrows nothing. And **91 of 126 `in_progress` beads had not been touched in over a
+week**, the oldest by 41 days. The second number causes the first: when `in_progress`
+lies, nobody trusts status; when nobody trusts status, filing is cheaper than searching;
+and every new bead makes the next search worse.
+
+- **Every bead carries exactly one area label, from this list and no other.** It is the
+  module map in [`docs/architecture.md`](docs/architecture.md), then the areas that map
+  predates:
+
+  `transport` `session` `pty` `ssh` `shellintegration` `settings` `terminal` `ui`
+  `ui-kit` — the module map itself, with `config` under its code name `settings`, and the
+  frontend's `ipc` folded into `transport` because one protocol has one owner.
+
+  `remote-host` `assistant` `api` `connmgr` `vault` `sandbox` `lifecycle` `content`
+  `workspace` `files` `git` `editor` `update` `coordinator` `notify` `pets` `e2e`
+  `infra` `docs` — the rest of the tree. `remote-host` keeps that name, not `helper`,
+  because this file and `architecture.md` both cite `bd list --label remote-host`.
+
+  Label by the area that **owns the behaviour**, not every area the bead touches: a tab
+  strip that fails to show a badge is `ui`, not `content`. Needing two labels usually
+  means it is two beads — file them.
+
+- **A label never restates a field.** `epic` (165 beads) and `bug` (3) duplicated
+  `issue_type`, which every listing already prints; `assistant-sweep-0830` (42) was a
+  date. All three are deleted. `mvp` and `phase-1/2/3` stay: they are roadmap, they are
+  orthogonal to area, and the rules above already govern them.
+
+- **`in_progress` means a worker is holding it now** — not "started once", not "nearly
+  done". Stopping means setting it back to `open` in the same minute, because an unheld
+  bead sitting in `in_progress` is invisible to `bd ready` and to every colleague looking
+  for work. `nocx-viil` sat `in_progress` for three weeks with its work already shipped —
+  `contracts/session.integrationChanged.schema.json`, `frontend/src/integration/status.ts`
+  and the generated doc all name the bead — and a worker re-derived that entire surface
+  before noticing it existed.
+
+- **An epic's own timestamp is not its liveness**, because an epic does not move when its
+  children do. Of 34 epics that looked stale by their own `updated_at`, only 12 were
+  stale once the children were counted. Ask the children before believing it:
+
+  ```bash
+  bd list --parent <epic> --status open,in_progress,closed --json | jq -r 'map(.updated_at)|max'
+  ```
+
+- **Close with evidence a stranger can check.** Name the file, symbol, test or commit —
+  "duplicate" and "done" are not reasons. For a duplicate, name the survivor and say what
+  makes them one behaviour; two beads touching one file are not duplicates, by the same
+  test the epic-blocking rule uses. And re-read the tree before believing a bead's own
+  notes: `nocx-6hg2w.25` and `nocx-favvl` both recorded "green but NOT committed, blocked
+  on gofumpt" while their commits were already on `main`.
 
 ### Creating an epic
 

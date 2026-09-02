@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EditorView } from '@codemirror/view'
 import {
   CompletionController,
+  docMoveDismissesSurface,
   ghostAcceptable,
   ghostTail,
   QUERY_DEBOUNCE_MS,
@@ -1065,6 +1066,32 @@ describe('ghost tail', () => {
   })
 })
 
+describe('a document that moved out from under the surface', () => {
+  // The seam the e2e caught and no unit test covered: extensions()' update
+  // listener. With the query issued on every keystroke the document and
+  // queryDoc were never apart, so this guard never fired; with the typing
+  // debounce they are apart for the whole window BY DESIGN, and dismissing
+  // there cancelled the scheduled query — typing produced no completion at
+  // all and the ghost never appeared (nocx-7jujk).
+  it('takes the surface down when the document moved and nothing will refresh it', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git st', queryDoc: 'git s', refreshScheduled: false }),
+    ).toBe(true)
+  })
+
+  it('leaves it alone while a refresh is already scheduled', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git st', queryDoc: 'git s', refreshScheduled: true }),
+    ).toBe(false)
+  })
+
+  it('has nothing to do when the document is the one the surface answers', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git s', queryDoc: 'git s', refreshScheduled: false }),
+    ).toBe(false)
+  })
+})
+
 describe('ghost text', () => {
   const ghostEditor = (doc: string) => {
     const e = new FakeEditor(doc)
@@ -1099,6 +1126,43 @@ describe('ghost text', () => {
     expect(controller.handleKey(e)).toBe(true)
     expect(editor.doc).toBe('git status')
     expect(dropdown.isOpen).toBe(false)
+  })
+
+  // The e2e that caught this: typing at the PRODUCTION debounce must still
+  // put a ghost at the caret. Every other ghost test here runs with the
+  // debounce switched off, so the whole deferred path — the one the product
+  // uses — had no unit coverage at all, and shipped red.
+  it('a ghost still lands when the query is deferred by the production debounce', async () => {
+    const editor = ghostEditor('cd Down')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const controller = new CompletionController({
+      providers: [
+        instantProvider('p', () => [
+          cand({
+            id: 'path:Downloads/',
+            insertText: 'Downloads/',
+            kind: 'directory',
+            replacement: { from: 3, to: 7 },
+          }),
+        ]),
+      ],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+      now: () => 1_750_000_000_000,
+    })
+    controller.attach(editor, container)
+    controller.onDocChanged()
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(QUERY_DEBOUNCE_MS)
+    await flush()
+
+    expect(controller.handleKey(key('ArrowRight'))).toBe(true)
+    await flush()
+    expect(editor.doc).toBe('cd Downloads/')
   })
 
   // The owner's report: with `cd Downloads/` ghosted, Right inserted it and

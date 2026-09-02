@@ -252,6 +252,27 @@ export function ghostAcceptable(
   return { ok: true }
 }
 
+/**
+ * Whether a document change should take the completion surface DOWN.
+ *
+ * The guard exists because a document that has moved past the query behind
+ * the surface is showing an answer to a question nobody asked any more. What
+ * it must not do is fire while the answer is on its way: with a typing
+ * debounce (nocx-7jujk) the document is AHEAD of `queryDoc` for the whole
+ * debounce window by design, and dismissing there cancelled the very query
+ * that was about to refresh it — so typing produced no completion at all, and
+ * the ghost never appeared. A scheduled refresh is the difference between
+ * "stale" and "not answered yet".
+ */
+export function docMoveDismissesSurface(input: {
+  doc: string
+  queryDoc: string
+  refreshScheduled: boolean
+}): boolean {
+  if (input.refreshScheduled) return false
+  return input.doc !== input.queryDoc
+}
+
 /** The inline ghost decoration: the completion tail at the caret, only when
  *  every §8.7 precondition holds at render time — the SAME rule the accept
  *  path uses (ghostAcceptable), so a ghost that Right/End would refuse is
@@ -387,7 +408,17 @@ export class CompletionController {
     return [
       EditorView.updateListener.of((u) => {
         if (!u.docChanged) return
-        if (this.editor && this.editor.getDoc() !== this.queryDoc) this.dismiss()
+        const editor = this.editor
+        if (!editor) return
+        if (
+          docMoveDismissesSurface({
+            doc: editor.getDoc(),
+            queryDoc: this.queryDoc,
+            refreshScheduled: this.queryTimer !== undefined,
+          })
+        ) {
+          this.dismiss()
+        }
       }),
       ViewPlugin.fromClass(
         class GhostPlugin {

@@ -541,6 +541,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	}
 	return transport.HostedSessionOpen{
 		Session: sess, Host: cfg.Host, Account: f.account, Generation: generation,
+		HelperCommand: command, Fingerprint: fingerprint,
 		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
 		AbortLifecycle: abortLifecycle,
 		// The two ends of one fact meet here and nowhere else: the

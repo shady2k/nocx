@@ -1304,10 +1304,24 @@ type GitOpenSelection struct {
 // session. Host, Account and Generation are facts used by later projections;
 // Session carries the helper-minted authoritative id.
 type HostedSessionOpen struct {
-	Session        session.Session
-	Host           string
-	Account        string
-	Generation     string
+	Session    session.Session
+	Host       string
+	Account    string
+	Generation string
+	// HelperCommand is the path of the helper binary on the execution host
+	// that the bridge execs. It rides here because it is learned by the
+	// install, at open, and it is the one part of the route back that no
+	// later reader can re-derive without writing to the host again
+	// (nocx-k6p18.30): re-deriving it means an install pass at startup, and
+	// a startup pass that writes to somebody's machine to answer a question
+	// about a session it may not even still have is the wrong trade.
+	HelperCommand string
+	// Fingerprint is the execution machine's host public-key fingerprint —
+	// the consent key the helper selection already decided on (D8). It rides
+	// here so the durable binding can record which machine's consent this
+	// session stands on, and so a later re-adoption re-asks that decision
+	// instead of assuming it.
+	Fingerprint    string
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
@@ -1854,6 +1868,15 @@ func (s *WSServer) getRx(id session.ID) *sessionRx {
 }
 
 func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
+	return s.getOrCreateRxAt(id, 0)
+}
+
+// getOrCreateRxAt is getOrCreateRx for a session whose stream does not start
+// at zero — one taken back from a helper that outlived the previous
+// coordinator (nocx-k6p18.30). `base` is ignored for a receiver that already
+// exists: the ring is the session's, not the caller's, and a second caller
+// naming a different origin for one stream is a bug rather than a rebase.
+func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
 
@@ -1864,7 +1887,7 @@ func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
 	if rx, ok := s.rx[id]; ok {
 		return rx
 	}
-	rx := &sessionRx{ring: newOutputRing()}
+	rx := &sessionRx{ring: newOutputRingAt(base)}
 	s.rx[id] = rx
 	return rx
 }

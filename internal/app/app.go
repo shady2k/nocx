@@ -970,16 +970,24 @@ func New(opts ...Option) (*App, error) {
 		// draining) closes its episode on.
 		historyStatus.Clear()
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
-		// Restart reconciliation (nocx-k6p18.5). `Open` no longer judges the
-		// sessions it inherits — a session can outlive the coordinator that
-		// opened it now, so deleting its row, its recording and its open
-		// block at startup would destroy work that is still going on — and
-		// this is where the verdicts land instead.
+		// Restart reconciliation (nocx-k6p18.5) USED TO RUN HERE, and this
+		// comment is what is left of it because the reason it moved is worth
+		// keeping. `Open` no longer judges the sessions it inherits — a session
+		// can outlive the coordinator that opened it now, so deleting its row,
+		// its recording and its open block at startup would destroy work that
+		// is still going on — and the verdicts landed at this line instead.
 		//
-		// Each active helper contributes one generation-qualified inventory.
-		// A stored row without generation remains unowned and therefore
-		// unknown; no helper is asked to guess.
-		reconcileSessions(ctx, db.Reconcile(), helperReg.inventories(), content.DefaultUnreconciledRetention, slogger)
+		// The pass now runs where the resolver and the transport exist, further
+		// down (nocx-k6p18.30). It was correct here while a verdict needed only
+		// the store and whatever helpers this process already held; on a cold
+		// start it held none, so every carried-over session was
+		// `unknown/noInventory` and the store's age bound did all the work.
+		// Taking a session BACK needs the connection resolver and the
+		// transport's replay ring, and neither exists at this line: the
+		// resolver needs the transport (it asks for a connection password) and
+		// the transport needs the session store. That is the same ordering
+		// argument this file already makes about `Open` — judge nothing until
+		// the thing that can ask has been built.
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -1769,6 +1777,30 @@ func New(opts ...Option) (*App, error) {
 	// resolver, not two — the API route asks the same question a tab asks
 	// and gets the same answer, credentials and jump route included.
 	apiRoutes.setResolver(resolver)
+
+	// RESTART RECONCILIATION AND RE-ADOPTION, in one pass (nocx-k6p18.5,
+	// nocx-k6p18.30). This is the first line at which all three collaborators
+	// exist: the store carried the bindings over at Open, the resolver can turn
+	// a stored connection into a route, and the transport can give a re-adopted
+	// session the ring its recording continues into.
+	//
+	// IT RUNS ON THIS GOROUTINE, before Start opens the listener. The whole
+	// point is that a client asking `sessions.live` finds the session it left
+	// running; a pass racing the first client would answer an empty list to the
+	// window that is already open, which is the symptom this bead was filed
+	// for, reintroduced as a race. What makes a synchronous pass safe is that
+	// each attempt is bounded (readoptAttemptTimeout) — a host that neither
+	// answers nor refuses costs that much and does not cost a start.
+	//
+	// `helperReg.inventories()` is empty here and is passed anyway: it is the
+	// set of helpers this process already holds, which on a cold start is none,
+	// and writing it out is what keeps the two sources of an inventory — held
+	// and re-adopted — visibly the same argument.
+	reconcileSessions(ctx, contentDB.Reconcile(),
+		helperReg.inventories(),
+		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},
+		content.DefaultUnreconciledRetention, slogger)
+
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,

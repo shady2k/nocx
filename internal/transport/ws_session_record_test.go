@@ -72,6 +72,7 @@ type fakeRecorder struct {
 	calls    int
 	reads    int
 	skips    []fakeSkip
+	offsets  []uint64
 	stance   content.SessionOutputStance
 	failWith error
 	readErr  error
@@ -103,6 +104,12 @@ func (r *fakeRecorder) Append(_ context.Context, in content.SessionOutputAppend)
 	if len(r.stream) == 0 {
 		r.firstAt = in.Offset
 	}
+	// Every append's OFFSET, not only the first. The fake concatenates whatever
+	// it is handed, so a recorder writing at the wrong coordinate produces the
+	// right bytes here and a corrupt recording in the real store — which is
+	// exactly how a ring that restarted at zero would pass unnoticed
+	// (nocx-k6p18.30).
+	r.offsets = append(r.offsets, in.Offset)
 	r.stream = append(r.stream, in.Body...)
 	r.appends++
 	return content.SessionOutputResult{Kept: true}, nil
@@ -159,6 +166,13 @@ func (r *fakeRecorder) skipCalls() []fakeSkip {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]fakeSkip(nil), r.skips...)
+}
+
+// appendOffsets is where each run was written, in order.
+func (r *fakeRecorder) appendOffsets() []uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint64(nil), r.offsets...)
 }
 
 func (r *fakeRecorder) firstOffset() uint64 {

@@ -283,6 +283,28 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	a.offset = result.Resume.From
 	a.lifecycleOffset = result.LifecycleResume.From
 	a.mu.Unlock()
+	// A RESET AT ATTACH IS A HOLE LIKE ANY OTHER, and until nocx-k6p18.30 it
+	// was the one hole that reached nobody. applyReset carries a mid-stream
+	// reset to the observer through the queue, in stream order; an attach that
+	// comes back Reset states exactly the same fact about exactly the same
+	// stream — the window's base has moved past where this reader asked to
+	// resume — and it is the FIRST thing true of this attachment. A
+	// coordinator taking a session back after being replaced meets it every
+	// time the host out-produced its window while nobody was listening, which
+	// is the case the epic exists for.
+	//
+	// It goes through the same queue and the same reportHole, at the FRONT, so
+	// there is one path from "bytes were lost" to the recording's Gap and not
+	// two. The front matters: the attachment was registered before the call,
+	// so payloads may already be queued behind it, and this loss precedes
+	// every one of them.
+	if result.Resume.Reset {
+		from := result.Resume.From
+		a.mu.Lock()
+		a.pendingReset++
+		a.mu.Unlock()
+		a.data.unpop(inbound{resetTo: &from, hole: result.Resume.Gap})
+	}
 	return a, nil
 }
 
@@ -479,6 +501,32 @@ func (a *AttachedSession) reportHole(gap *proto.Gap) {
 	obs(uint64(gap.End-gap.Start), gap.Reason)
 }
 
+// AdoptExitStatus carries a status the HELPER already reported — through the
+// inventory, in the same round trip — onto an attachment that will never see
+// the notification for it.
+//
+// WHY IT EXISTS. `notifyExit` fires once, to whoever is bound at that moment
+// (session.go's watchExit). A coordinator that was replaced while a shell was
+// still running, and comes back after it exited, is not that coordinator: it
+// attaches to a session the helper still holds, reads whatever the window kept,
+// and reaches EOF. Without this the exit reads as a LOSS — "was interrupted",
+// with no status — which is exactly the "unknown" the epic set out to end, for
+// a build whose real exit code the helper has been holding the whole time.
+//
+// It is a CARRY and never a derivation. The value comes from the same helper's
+// own inventory row in the same conversation as the attach, so there is one
+// number with one owner, not two answers to "how did it end". It is refused
+// once a status is already recorded, so a notification that does arrive is
+// never overwritten by a staler inventory read.
+func (a *AttachedSession) AdoptExitStatus(status ExitStatus) {
+	a.exitMu.Lock()
+	if a.exit == nil {
+		snapshot := status
+		a.exit = &snapshot
+	}
+	a.exitMu.Unlock()
+}
+
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
 	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At}
 	a.exitMu.Lock()
@@ -641,6 +689,24 @@ func (l *attachedLifecycle) Close() error {
 
 func (a *AttachedSession) Lifecycle() io.ReadWriteCloser {
 	return &attachedLifecycle{session: a, closed: make(chan struct{})}
+}
+
+// WriteGranted reports whether this attachment holds the session's one write
+// capability. It is the same fact Write refuses on and not a second
+// derivation of it: the epoch is minted from 1, so zero names no grant.
+//
+// It is readable because a caller may need to decide BEFORE writing anything.
+// A coordinator taking a session back after being replaced is exactly that
+// caller: the helper serves a second coordinator rather than refusing it (D12)
+// and answers the write request by naming the holder, so "the session is live
+// and somebody else owns its keyboard" is a state that has to be told apart
+// from "the session is mine". Adopting a session this coordinator cannot write
+// to would put a pane on screen whose keystrokes go nowhere — a surface
+// advertising what it cannot deliver.
+func (a *AttachedSession) WriteGranted() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.epoch != 0
 }
 
 func (a *AttachedSession) Write(p []byte) (int, error) {

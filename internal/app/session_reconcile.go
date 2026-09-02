@@ -74,6 +74,7 @@ func reconcileSessions(
 	ctx context.Context,
 	rec content.SessionReconciler,
 	inventories []sessionInventory,
+	readopt sessionReadopter,
 	retention time.Duration,
 	logger *slog.Logger,
 ) {
@@ -93,6 +94,30 @@ func reconcileSessions(
 	answers := make([]map[string]struct{}, len(inventories))
 	failures := make([]error, len(inventories))
 	asked := make([]bool, len(inventories))
+
+	// judgeFrom turns ONE inventory's answer into ONE verdict, and it is the
+	// only place in this file that does. Two callers — an inventory this
+	// coordinator already held, and one a re-adoption brought into existence —
+	// and one rule for both, because "an error is unknown, an answer that names
+	// the session is live, an answer that does not is absent" is a single
+	// decision and two copies of it would be two decisions that agree until
+	// they do not (AD-8).
+	judgeFrom := func(j *content.SessionJudgement, sessionID string, live map[string]struct{}, err error) {
+		switch {
+		case err != nil:
+			j.Verdict = content.VerdictUnknown
+			j.Cause = causeFor(err)
+			j.Detail = err.Error()
+		default:
+			if _, isLive := live[sessionID]; isLive {
+				j.Verdict = content.VerdictLive
+			} else {
+				// The one path to absent: an inventory that owns this id
+				// space was asked, answered, and does not report it.
+				j.Verdict = content.VerdictAbsent
+			}
+		}
+	}
 
 	for _, p := range pending {
 		j := content.SessionJudgement{SessionID: p.SessionID}
@@ -119,30 +144,55 @@ func reconcileSessions(
 			}
 		}
 		switch {
-		case matches == 0:
-			j.Verdict = content.VerdictUnknown
-			j.Cause = content.CauseNoInventory
 		case matches > 1:
 			// Multiple owners indicate duplicate registration. Choosing one
 			// would make a broken ownership map silently first-wins.
 			j.Verdict = content.VerdictUnknown
 			j.Cause = content.CauseAmbiguousInventory
 			j.Detail = "multiple inventories claim this session id space"
-		default:
+		case matches == 1:
 			if !asked[owner] {
 				answers[owner], failures[owner] = inventories[owner].LiveSessions(ctx)
 				asked[owner] = true
 			}
-			if failures[owner] != nil {
+			judgeFrom(&j, p.SessionID, answers[owner], failures[owner])
+		case readopt == nil:
+			j.Verdict = content.VerdictUnknown
+			j.Cause = content.CauseNoInventory
+		default:
+			// NOBODY THIS COORDINATOR ALREADY HOLDS CAN JUDGE IT — which on a
+			// cold start is every carried-over session, because helper channels
+			// are opened by tabs and a process that has opened no tab has none.
+			// This is where the binding stops being only a fact and becomes a
+			// connection: the readopter dials the generation the binding names,
+			// asks it once, and takes the session back if it is there
+			// (nocx-k6p18.30).
+			//
+			// THE ANSWER IS NOT REUSED FOR THE NEXT SESSION, deliberately. Each
+			// carried-over session is offered to the readopter on its own, so
+			// two sessions on one host are two re-adoptions rather than one
+			// re-adoption and one session judged live and left behind. The cost
+			// is one helper channel per session, which is what OpenHosted
+			// already spends and for the same reason.
+			inv, readoptErr := readopt.Readopt(ctx, p)
+			switch {
+			case readoptErr != nil:
+				// A failure is never a verdict, here least of all: this is the
+				// branch a host that is simply switched off arrives on, and
+				// `absent` would delete the recording of a build that is merely
+				// out of reach.
 				j.Verdict = content.VerdictUnknown
-				j.Cause = causeFor(failures[owner])
-				j.Detail = failures[owner].Error()
-			} else if _, live := answers[owner][p.SessionID]; live {
-				j.Verdict = content.VerdictLive
-			} else {
-				// The one path to absent: an inventory that owns this id
-				// space was asked, answered, and does not report it.
-				j.Verdict = content.VerdictAbsent
+				j.Cause = causeFor(readoptErr)
+				j.Detail = readoptErr.Error()
+			case inv == nil || !inv.Owns(p.SessionID):
+				// No route was recorded, or what answered does not own this id
+				// space. Either way nobody may judge it, which is exactly the
+				// answer that stood before re-adoption existed.
+				j.Verdict = content.VerdictUnknown
+				j.Cause = content.CauseNoInventory
+			default:
+				live, liveErr := inv.LiveSessions(ctx)
+				judgeFrom(&j, p.SessionID, live, liveErr)
 			}
 		}
 		if applyErr := rec.Apply(ctx, j); applyErr != nil {

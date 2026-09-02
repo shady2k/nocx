@@ -583,6 +583,18 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			Host:        hosted.Host,
 			Account:     hosted.Account,
 			Generation:  hosted.Generation,
+			// The route back, written in the same statement as the binding
+			// it completes (nocx-k6p18.30). The pane and the profile come
+			// off the config the registry has just accepted, never off the
+			// params: a renderer may name any pane it likes, and the
+			// session is what records which one it actually became the pipe
+			// of. A direct-host open carries no profile, writes none, and
+			// is therefore a session a later coordinator cannot take back —
+			// which is stated by the empty field rather than by a guess.
+			PaneID:        cfg.PaneID,
+			ProfileID:     cfg.ProfileID,
+			HelperCommand: hosted.HelperCommand,
+			Fingerprint:   hosted.Fingerprint,
 		}); err != nil {
 			if hosted != nil && hosted.AbortLifecycle != nil {
 				hosted.AbortLifecycle()

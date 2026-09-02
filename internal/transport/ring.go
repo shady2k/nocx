@@ -130,9 +130,31 @@ type ringHole struct {
 	reason string
 }
 
-func newOutputRing() *outputRing {
+func newOutputRing() *outputRing { return newOutputRingAt(0) }
+
+// newOutputRingAt makes a ring whose stream coordinate STARTS at base rather
+// than at zero (nocx-k6p18.30).
+//
+// A helper-hosted session's stream offset is the host's, counted from the
+// first byte the shell ever produced, and this ring has always used the same
+// coordinate — the two coincided because a session was opened by spawning it,
+// and a spawn's window base is zero. A session taken back from a helper after
+// the coordinator was replaced starts somewhere else entirely: the previous
+// coordinator recorded up to `base`, so that is where the recording ends and
+// where the next byte belongs. Starting at zero would renumber the second half
+// of one stream, which is the second coordinate system
+// contracts/session.output.schema.json names as the defect it exists to avoid.
+//
+// `recorded` starts at base for the same reason and is not merely bookkeeping:
+// it is TRUE, the store holds everything before base, and a persistence cursor
+// that claimed otherwise would have the ring owe bytes nobody is waiting for.
+// `acked` stays zero — nothing has been acked, and a client that attaches will
+// ack from the base it is given.
+func newOutputRingAt(base uint64) *outputRing {
 	return &outputRing{
-		changed: make(chan struct{}),
+		changed:  make(chan struct{}),
+		base:     base,
+		recorded: base,
 	}
 }
 
@@ -457,6 +479,19 @@ func (r *outputRing) oldestLocked() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.base
+}
+
+// recordedLocked is the ring's PERSISTENCE CURSOR: how far this session's bytes
+// have been written durably. It is the recorder loop's own starting point, and
+// it is a DIFFERENT FACT from `base` beside it — a session that ran with no
+// recorder has a base the acks moved and a cursor still at zero, and the
+// distance between them is a hole somebody has to record (nocx-k6p18.2). Takes
+// its own lock, like the two above, so external callers need not know about
+// r.mu.
+func (r *outputRing) recordedLocked() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.recorded
 }
 
 // snapshot returns all buffered bytes starting from offset. When offset is

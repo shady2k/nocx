@@ -237,6 +237,11 @@ type fakeLaneProvider struct {
 	peer     func(in io.Reader, out io.Writer) int
 	startErr error
 
+	laneErr error // when set, every HelperConn fails: an unreachable host
+	// laneBlock, when set, parks every HelperConn on it (or on the caller's
+	// context): a host that accepts nothing and refuses nothing, which is what
+	// a machine behind a black-holing firewall looks like.
+	laneBlock   chan struct{}
 	uname       string // the probe's canned answer; default "Linux x86_64"
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
@@ -248,7 +253,17 @@ type fakeLaneProvider struct {
 	install *fakeInstallConn
 }
 
-func (p *fakeLaneProvider) HelperConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
+func (p *fakeLaneProvider) HelperConn(ctx context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
+	if p.laneErr != nil {
+		return nil, p.laneErr
+	}
+	if p.laneBlock != nil {
+		select {
+		case <-p.laneBlock:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	c := newFakeLaneConn(p.peer)
 	c.startErr = p.startErr
 	p.mu.Lock()

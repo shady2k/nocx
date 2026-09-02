@@ -146,6 +146,21 @@ type PendingSession struct {
 	// Generation is the helper generation that owns SessionID's id space.
 	// Empty means no inventory may judge it.
 	Generation string
+	// PaneID, ProfileID and HelperCommand are the route BACK to this
+	// session — the pane it was the pipe of, the saved connection that
+	// reaches its host, and the helper binary on that host the bridge
+	// execs (nocx-k6p18.30). A verdict never reads them: they are what a
+	// coordinator needs to RE-ADOPT the session rather than merely judge
+	// it. Any of them empty means no route was recorded, and a route is
+	// never inferred from the other fields — that inference is exactly what
+	// the Host/Account/Generation ordering above exists to forbid.
+	PaneID        string
+	ProfileID     string
+	HelperCommand string
+	// Fingerprint is the execution machine's host public-key fingerprint,
+	// the consent key. Re-adoption re-asks the consent decision with it
+	// rather than assuming a decision made in a previous run still stands.
+	Fingerprint string
 	// Since is when this incarnation marked the session unreconciled at Open,
 	// not when the remote command started. It is what the age bound reads and
 	// what the product shows: "not reachable since" is a fact with a date.

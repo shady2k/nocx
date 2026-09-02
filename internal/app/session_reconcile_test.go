@@ -104,7 +104,7 @@ func TestNoFailureModeEverProducesAbsent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingReconciler{pending: onePending()}
 			inv := stubInventory{owns: map[string]bool{aSession: true}, err: tc.err}
-			reconcileSessions(context.Background(), rec, []sessionInventory{inv}, time.Hour, quietLogger())
+			reconcileSessions(context.Background(), rec, []sessionInventory{inv}, nil, time.Hour, quietLogger())
 
 			if len(rec.applied) != 1 {
 				t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -140,7 +140,7 @@ func TestAnInventoryThatAnswersProducesBothVerdicts(t *testing.T) {
 		owns: map[string]bool{aSession: true, gone: true},
 		live: map[string]struct{}{aSession: {}},
 	}
-	reconcileSessions(context.Background(), rec, []sessionInventory{inv}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{inv}, nil, time.Hour, quietLogger())
 
 	if len(rec.applied) != 2 {
 		t.Fatalf("judgements = %+v, want one per session", rec.applied)
@@ -163,7 +163,7 @@ func TestAnInventoryThatAnswersProducesBothVerdicts(t *testing.T) {
 func TestAnInventoryNeverJudgesAnIdSpaceItDoesNotOwn(t *testing.T) {
 	rec := &recordingReconciler{pending: onePending()}
 	inv := stubInventory{owns: map[string]bool{}, live: map[string]struct{}{}}
-	reconcileSessions(context.Background(), rec, []sessionInventory{inv}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{inv}, nil, time.Hour, quietLogger())
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -222,7 +222,7 @@ func TestTargetMatchPreventsAskingTheWrongSameGenerationHost(t *testing.T) {
 		live: map[string]struct{}{other: {}},
 	}
 
-	reconcileSessions(context.Background(), rec, []sessionInventory{hostA, wrongAccount, hostB}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{hostA, wrongAccount, hostB}, nil, time.Hour, quietLogger())
 
 	if hostA.calls != 0 || wrongAccount.calls != 0 || hostB.calls != 1 {
 		t.Fatalf("inventory calls = %d/%d/%d, want host-a 0, host-b/root 0 and host-b/deploy 1",
@@ -243,7 +243,7 @@ func TestGenerationMatchPreventsAskingTheWrongInventory(t *testing.T) {
 	second := &countingGenerationInventory{generation: "generation-b", live: map[string]struct{}{other: {}}}
 	unrelated := &countingGenerationInventory{generation: "generation-c", live: map[string]struct{}{}}
 
-	reconcileSessions(context.Background(), rec, []sessionInventory{first, second, unrelated}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{first, second, unrelated}, nil, time.Hour, quietLogger())
 
 	if first.calls != 1 || second.calls != 1 || unrelated.calls != 0 {
 		t.Fatalf("inventory calls = %d/%d/%d, want one call to each matching generation and none to generation-c", first.calls, second.calls, unrelated.calls)
@@ -265,7 +265,7 @@ func TestAmbiguousInventoryOwnershipLeavesSessionUnknown(t *testing.T) {
 		generation: generation, live: map[string]struct{}{aSession: {}},
 	}
 
-	reconcileSessions(context.Background(), rec, []sessionInventory{first, second}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{first, second}, nil, time.Hour, quietLogger())
 
 	if len(rec.applied) != 1 {
 		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
@@ -293,7 +293,7 @@ func TestExactlyOneInventoryMatchStillProducesLiveAndAbsent(t *testing.T) {
 		generation: "generation-b", live: map[string]struct{}{gone: {}},
 	}
 
-	reconcileSessions(context.Background(), rec, []sessionInventory{matching, nonmatching}, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, []sessionInventory{matching, nonmatching}, nil, time.Hour, quietLogger())
 
 	if len(rec.applied) != 2 {
 		t.Fatalf("judgements = %+v, want one per session", rec.applied)
@@ -316,7 +316,7 @@ func TestExactlyOneInventoryMatchStillProducesLiveAndAbsent(t *testing.T) {
 // delete without replacing the bound is what must never ship.
 func TestWithNothingToAskEverySessionIsUnknownAndTheAgeBoundStillRuns(t *testing.T) {
 	rec := &recordingReconciler{pending: onePending()}
-	reconcileSessions(context.Background(), rec, nil, 42*time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, nil, nil, 42*time.Hour, quietLogger())
 
 	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictUnknown {
 		t.Fatalf("judgements = %+v, want one unknown", rec.applied)
@@ -330,7 +330,7 @@ func TestWithNothingToAskEverySessionIsUnknownAndTheAgeBoundStillRuns(t *testing
 // consume the session: the pass logs it, goes on, and the next pass repeats it.
 func TestAVerdictThatCannotBeWrittenLeavesThePassRunning(t *testing.T) {
 	rec := &recordingReconciler{pending: onePending(), applyErr: errors.New("disk is on fire")}
-	reconcileSessions(context.Background(), rec, nil, time.Hour, quietLogger())
+	reconcileSessions(context.Background(), rec, nil, nil, time.Hour, quietLogger())
 	if len(rec.sweptWith) != 1 {
 		t.Fatalf("the age bound did not run after a failed verdict: %v", rec.sweptWith)
 	}

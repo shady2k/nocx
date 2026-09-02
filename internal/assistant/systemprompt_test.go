@@ -38,11 +38,27 @@ func TestSystemPrompt_ExplainsBareInputAndNeverGuesses(t *testing.T) {
 	for _, want := range []string{
 		"A link on its own means go there and tell the person what is on it.",
 		"When the intent is not plain, ask one question and stop.",
-		"Do not guess, and do not call a tool to check first; notes.create is the requested write for questionless text, not a check.",
+		"Do not guess, and do not call a tool to check first",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt lacks intake rule %q:\n%s", want, got)
 		}
+	}
+	// PROPERTIES, NOT PROSE (nocx-364y7). Two verbatim pins on the note rule
+	// are why this bug survived: they proved the sentence was present and
+	// never that it worked. So assert what must remain true of the wording —
+	// the rule names the tool that performs the act, and the prohibition
+	// beside it exempts that write — and leave the sentences free to change.
+	guardStart := strings.Index(got, "Do not guess, and do not call a tool to check first")
+	if guardStart < 0 {
+		t.Fatalf("prompt lacks the no-attachment guard:\n%s", got)
+	}
+	guardEnd := strings.Index(got[guardStart:], "\n")
+	if guardEnd < 0 {
+		t.Fatalf("no-attachment guard has no terminating newline:\n%s", got)
+	}
+	if guard := got[guardStart : guardStart+guardEnd]; !strings.Contains(guard, "notes.create") {
+		t.Fatalf("the no-attachment guard forbids the note write it sits beside: %q", guard)
 	}
 	noteRuleStart := strings.Index(got, "Text on its own")
 	if noteRuleStart < 0 {
@@ -418,7 +434,7 @@ func TestSystemPrompt_DoesNotForbidReadingWhatItAttached(t *testing.T) {
 		Env: content.Environment{Kind: content.EnvLocal},
 		OS:  "linux",
 	})
-	if !strings.Contains(bare, "do not call a tool to check first; notes.create") {
+	if !strings.Contains(bare, "do not call a tool to check first") {
 		t.Errorf("the rule lost its force where nothing was attached:\n%s", bare)
 	}
 }

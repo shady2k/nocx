@@ -496,9 +496,67 @@ lint-ci:
 	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
 	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
 
+# THE ONE PACKAGE A HOST IS NOT REQUIRED TO BE ABLE TO RUN, and why this
+# target is no longer a bare `go test ./...`.
+#
+# internal/shellintegration drives the shipped script through the OLDEST bash
+# the product must work on — macOS's frozen /bin/bash 3.2.57 — and it FAILS
+# rather than skips when there is none (requireBash32, nocx-cn86). That is
+# deliberate and it is not up for renegotiation: a skip there is exactly how a
+# real 3.2 regression reports green on every Linux machine in the project,
+# which is the shape of defect that shipped once already.
+#
+# macOS has that bash. A Linux host has one only after scripts/install-bash32.sh
+# has been run, and the container images bake it in for precisely this reason.
+# So on a Linux host without the fixture this package CANNOT run here — and
+# before this it took `make ci-full` with it, on twelve tests, permanently.
+# A mandatory gate that can never come back green is a gate nobody runs, which
+# costs more than the checks it was protecting (nocx-9jomd).
+#
+# So the host leg says which package it is not the place for, and where that
+# package IS run, instead of failing on a fixture it was never going to have:
+#
+#   ci-backend runs internal/shellintegration in ubuntu-24.04 with the fixture
+#   installed, twice, once per keyring variant. ci-backend and ci-linux
+#   partition ./... EXACTLY — ci-os-split is the check that keeps the partition
+#   honest — so a package deferred here is by construction run there. Nothing
+#   is dropped from `make ci-full`; one package moves from its host leg to its
+#   containerized leg, which is where the other sixteen platform-specific
+#   packages already are.
+#
+# THE CONDITION IS EVIDENCE, NOT A FLAG. scripts/have-bash32.sh asks this
+# machine for a bash that answers `--version` as 3.2 — the same question, over
+# the same three candidate names, that requireBash32 asks, kept in step by
+# TestBash32Probe_AgreesWithTheSuite. A variable someone exports would answer
+# "was this checked" with "somebody said so", which is a skip with extra steps.
+# Install the fixture and the package comes back here with no flag to unset.
+#
+# WHAT WAS REJECTED. Teaching requireBash32 to pass when "a containerized run
+# covers this" cannot be done from evidence: nothing inside the test process
+# can know whether ci-backend ever ran, so it would have to be told — a skip
+# wearing a state file. And narrowing by test name rather than by package would
+# put the gate in the business of listing which tests touch bash 3.2, a list
+# that goes stale silently the first time one is added.
+BASH32_PKG := internal/shellintegration
+
 test-ci:
 	@echo "=== go test -race ==="
-	$(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./...
+	@set -eu; \
+	  notice=""; \
+	  if bash32=$$(./scripts/have-bash32.sh); then \
+	    echo "GNU bash 3.2 is present ($$bash32): the whole tree runs on this host"; \
+	    pkgs="./..."; \
+	  else \
+	    pkgs="$$($(GO) list ./... | grep -vE 'nocx/$(BASH32_PKG)(/|$$)')"; \
+	    notice="NOT RUN HERE: ./$(BASH32_PKG)/... — this host has no GNU bash 3.2\n\
+  Its suite fails rather than skips without one, deliberately (nocx-cn86).\n\
+  It is run by 'make ci-backend' (ubuntu-24.04, fixture installed, both keyring\n\
+  variants), which 'make ci-full' runs — so ci-full still covers it and this leg\n\
+  does not. To run it here: sudo scripts/install-bash32.sh"; \
+	    printf '%b\n' "$$notice"; \
+	  fi; \
+	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
+	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi
 	@echo ""
 	@echo "=== go test -race -tags release (the shipped profile directory) ==="
 	@# The shipped profile directory lives behind `-tags release`

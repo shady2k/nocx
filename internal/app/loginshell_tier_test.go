@@ -50,7 +50,7 @@ func (f fixedShell) Resolve() loginshell.Shell {
 // named case in its table. A fixture that hard-codes /bin/bash therefore
 // asserts the developer's filesystem layout rather than nocx's behaviour, and
 // on a host without it the test reports `fork/exec /bin/bash: no such file or
-// directory` about a product that never assumed the path (nocx-65v6).
+// directory` about a product that never assumed the path (nocx-9jomd).
 //
 // WHY THIS DOES NOT MAKE THE ASSERTIONS TAUTOLOGICAL. The resolved path is
 // INJECTED through fixedShell, and the assertions compare what the product

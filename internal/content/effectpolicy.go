@@ -192,11 +192,29 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 	return d
 }
 
-// DecisionForInvocation resolves one validated command against the matrix and
-// every matching invocation rule. An unparsed command asks; a disqualified
-// command receives the matrix answer but can never receive a rule exception.
-// A matching permit is an exception to an ask row, while refusal remains
-// final. Among overlapping matching rules, the most restrictive wins.
+// DecisionForInvocation resolves one validated command, and this comment is
+// the ONE place the composition order of the layers it crosses is written
+// down (ADR-0020 §7 as amended: the matrix decides, the narrowed capability
+// enforces). The layers compose most-restrictive-wins, and no layer is an
+// exception to the one after it.
+//
+// The floor runs BEFORE this function and is owned by Floor in floor.go —
+// nothing here can answer it. The EFFECT layer comes first here, owned by
+// this file's matrix row: an unparsed command asks, a refusing row is final and is
+// returned before any rule is read, and a disqualified command receives the
+// matrix answer and can never receive a rule exception. Then the SHAPE layer,
+// owned by InvocationRule.Matches in rules.go: a rule answers only what shape
+// this command line has, a matching permit is an exception to an ask row, and
+// among overlapping matching rules the most restrictive wins. Last the
+// RESOURCE layer, owned by EffectRow.Scopes together with GrantScope.Contains
+// in resource_scope.go: the resources the parser named must lie inside the
+// SELECTED row's scopes, into which WithRunScopes has already folded the run
+// fence — so the fence binds here as part of the row rather than as a second
+// list to consult.
+//
+// A rule is therefore an exception to the effect layer alone. A permit whose
+// invocation names a resource outside its row falls back to asking a person:
+// never to something more permissive, and never past a refusal.
 func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 	if !inv.Parsed {
 		return DecisionAsk
@@ -205,6 +223,7 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 	if base == DecisionRefuse || inv.Disqualified {
 		return base
 	}
+	decision := base
 	matched := false
 	ruleDecision := DecisionPermit
 	for _, rule := range p.Rules {
@@ -216,16 +235,76 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 			ruleDecision = rule.Decision
 		}
 	}
-	if !matched {
-		return base
+	if matched {
+		switch {
+		case base == DecisionAsk && ruleDecision == DecisionPermit:
+			decision = DecisionPermit
+		case restrictiveRank(ruleDecision) > restrictiveRank(base):
+			decision = ruleDecision
+		}
 	}
-	if base == DecisionAsk && ruleDecision == DecisionPermit {
-		return DecisionPermit
+	if decision == DecisionPermit && !p.namedResourcesWithinRow(e, inv.Resources) {
+		return DecisionAsk
 	}
-	if restrictiveRank(ruleDecision) > restrictiveRank(base) {
-		return ruleDecision
+	return decision
+}
+
+// namedResourcesWithinRow is the resource layer of DecisionForInvocation:
+// every resource the command named must fall inside the selected row's
+// scopes. The row is the whole resource authority here because WithRunScopes
+// folds the run fence into every row at mint, which is also why the kernel's
+// own scope check reads the row and never the derived Grant.Scopes union.
+//
+// The bound is kind-wise, the same rule intersectScopeSet applies when a
+// selector meets the fence: a row narrows only the resource kinds it names,
+// and a kind no scope of the row names is not narrowed here. Anything else
+// would make a session-fenced run refuse every path a command mentions, since
+// a command's resources are inferred from a command line rather than declared
+// by a tool — unlike the resolved resources of a declaration, whose kinds the
+// grant's coverage already filtered, and which must therefore be contained
+// outright.
+//
+// Like the kernel's check this is the advisory lexical approximation, not the
+// enforcement: the capability resolves canonical identity (ADR-0020 §7), and
+// a call this predicate lets through can still be refused by it.
+func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) bool {
+	scopes := p.rowFor(e).Scopes
+	if len(scopes) == 0 {
+		return true
 	}
-	return base
+	for _, resource := range report.Resources {
+		child, ok := namedResourceScope(resource)
+		if !ok {
+			continue
+		}
+		bounded, inside := false, false
+		for _, scope := range scopes {
+			if scope.Kind != child.Kind {
+				continue
+			}
+			bounded = true
+			if scope.Contains(child) {
+				inside = true
+				break
+			}
+		}
+		if bounded && !inside {
+			return false
+		}
+	}
+	return true
+}
+
+// namedResourceScope maps one parser-named resource to the canonical scope
+// the policy compares. Only an absolute path has a canonical scope id today;
+// Resource.Path also carries relative operands, URLs and ssh destinations,
+// and none of those is a ResourcePath — a scope form for them is a change to
+// the scope vocabulary, not something to guess at inside a decision.
+func namedResourceScope(r Resource) (GrantScope, bool) {
+	if !isAbsolutePath(r.Path) {
+		return GrantScope{}, false
+	}
+	return GrantScope{Kind: ResourcePath, ID: r.Path}, true
 }
 
 func restrictiveRank(d Decision) int {

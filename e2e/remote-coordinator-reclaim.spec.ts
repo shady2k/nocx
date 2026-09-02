@@ -58,18 +58,43 @@
  *
  * ── THIS SPEC IS RED, AND WHAT IT IS RED ABOUT IS THE POINT ────────────────
  *
- * Everything up to the coordinator replacement passes: the helper installs
- * through the product's consent path, the session is helper-hosted, a command
- * block appears in the pane, the client detach is observed server-side, and
- * the build overruns the host's 4 MiB window with nothing recording. Then the
- * fresh coordinator answers `sessions.live` with `[]` and goes on answering
- * `[]`, because nothing in the coordinator re-adopts a live helper-hosted
- * session across a restart — nocx-k6p18.30. A second defect sits behind it:
- * the palette stores an ssh pane's endpoint on port 22 whatever the profile
- * says, so the fallback dial cannot even find its own key — nocx-xhm9e.
+ * THE RECLAIM ITSELF HOLDS (nocx-k6p18.30, nocx-xhm9e, measured 2026-09-02).
+ * The helper installs through the product's consent path; the session is
+ * helper-hosted with a hostSessionId; a block appears while it runs; the
+ * detach is observed server-side; the build overruns the host's 4 MiB window
+ * with no coordinator alive; a FRESH coordinator lists the session, a fresh
+ * context finds its pane, the host reports the SAME pid and window and no
+ * exit, the detached span is proved by the build's own marker file, the hole
+ * is named `hostWindow`, the build goes on advancing THROUGH the reclaim, and
+ * when it ends the notification centre carries `exit status 7`. Every one of
+ * those was watched passing.
  *
- * Neither is fixable from this file, and neither may be assumed away here. The
- * epic is not finished, and this is the check that says so.
+ * ONE ASSERTION IS RED, and it is the last thing between this file and the
+ * epic's sentence: the restored command block is in the DOM and is invisible.
+ * A re-adopted session gets no lifecycle channel — the capability was minted
+ * by the dead coordinator's kernel — so the pane sees a markerless shell,
+ * enters `unstructured` mode, and every block in `.scrollback-inner` is
+ * `display: none` (style.css `inner-fullscreen-mode`, controller.ts
+ * `setUnstructured`). The same cause takes the command editor away, so the
+ * returned tab cannot start a new command either, and the Git panel says the
+ * session has no shell integration. That is nocx-k6p18.31. It is not fixable
+ * from this file and it may not be assumed away here: a tab that comes back
+ * with its history invisible and its editor gone has not come back.
+ *
+ * WHAT THE MUTATIONS SAY — each applied to the product, run, and reverted on
+ * 2026-09-02, because a check nobody has falsified is a check nobody has
+ * measured. Removing the lifecycle socketpair from
+ * internal/helper/session/spawn_local.go: red in 18.6 s at `promptReady`
+ * (harness.ts:39, from the `promptReady` on the build's own tab below). Deleting the
+ * `interface{ ExitCode() int }` branch from internal/session/session.go's
+ * `ExitOutcome`: red at `expect(returnedPane).toHaveCount(0)` — a status that
+ * classifies as a LOSS never closes the tab, so the mutation is caught one
+ * assertion EARLIER than the bell row it was aimed at. Recording the
+ * host-window hole as `unrecorded` in internal/transport/ws_session_record.go:
+ * red at the recovery card's reason clause. The last two were reached by
+ * neutralising the nocx-k6p18.31 assertion locally; with it in place they sit
+ * behind it, and that neutralised run is also where "every one of those was
+ * watched passing" above comes from.
  */
 import { test as base, expect, type Browser, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -511,7 +536,8 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     //
     // MEASURED FALSIFICATION, and it does not land where you would expect.
     // Removing the lifecycle socketpair from internal/helper/session/
-    // spawn_local.go turns this run red in 22 s — but at `promptReady` above,
+    // spawn_local.go turns this run red in seconds (22 s, and 18.6 s when it
+    // was re-measured on 2026-09-02) — but at `promptReady` above,
     // not here: with no lifecycle channel the pane never shows the command
     // editor at all, so the run dies on a hidden `.nocx-editor-input` one step
     // before it can ask about a block. The mutation IS caught; the assertion
@@ -647,6 +673,17 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     //
     // The block criterion again, and this is the half that matters: blocks
     // survive a coordinator replacement (nocx-k6p18.22, moved here).
+    //
+    // THIS IS THE ONE ASSERTION THIS SPEC IS STILL RED ON, and `toBeVisible`
+    // rather than `toBeAttached` is deliberate. The block IS built and IS in
+    // the DOM — `<div class="cmd-block" data-restored="true"
+    // data-output-evicted="true">`, resolved 123 times in 60 s — and it is
+    // `display: none`, because a re-adopted session has no lifecycle channel
+    // (nocx-k6p18.31), so the pane classifies the shell as markerless, enters
+    // `unstructured` mode, and `.scrollback-inner.inner-fullscreen-mode >
+    // *:not(.xterm-live-container)` hides every block in the stack. A history
+    // a person cannot see has not survived anything, so the weaker assertion
+    // would be this test agreeing with the defect.
     const returnedBlock = returnedPane
       .locator('.cmd-block')
       .filter({ hasText: MARKER_PREFIX })
@@ -660,13 +697,31 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     const notice = returnedPane.locator('.nocx-recovery-notice')
     await expect(notice).toBeVisible({ timeout: 60_000 })
     await expect(notice).toContainText(/of this session's output is missing/i)
-    // And the REASON, in the product's own words. `hostWindow` is a reason
-    // this build has no sentence for, so the card carries the wire's word
-    // verbatim rather than inventing one — which is exactly what must not be
-    // quietly turned into "the recording's size limit dropped it", a sentence
-    // that would send a person to a knob that did nothing.
-    await expect(notice).toContainText('hostWindow')
-    await expect(notice).not.toContainText('size limit')
+    // And the REASON, in the product's own words and IN ITS OWN CLAUSE. The
+    // card accounts for the hole one clause per owner (recovery-notice.tsx
+    // `clauses`), so the word appearing somewhere in the sentence is not the
+    // same fact as the reason being named: `cap` bytes are reported as "the
+    // recording's size limit dropped", and only a reason this build has no
+    // sentence for reaches the reader as the wire's own word. Asserting the
+    // CLAUSE is what makes a host-window hole filed under some other reason
+    // fail here, which is the whole point — a sentence that sent a person to
+    // a retention knob would be sending them to one that did nothing about
+    // the execution host's window.
+    //
+    // MEASURED (2026-09-02): recording the hole as `unrecorded` in
+    // ws_session_record.go's sessionOutputHoleReason turns this clause into
+    // "96.5 kB that was never recorded" and this line goes red.
+    //
+    // A BARE `not.toContainText('size limit')` STOOD HERE AND WAS WRONG, and
+    // the run that would have failed on it is the run where everything works.
+    // This scenario produces TWO holes and both are correctly named: the
+    // host's window reclaimed ~96 kB that no coordinator could ever have
+    // received, and the fresh coordinator's OWN retention then dropped ~3.9 MB
+    // of the 4 MiB replay it did receive — measured as
+    // `[{1797..98304 hostWindow}, {131072..4046848 cap}]`. A card that says
+    // both is the card being honest about two different owners, so a blanket
+    // negative could only ever fail the product for telling the truth.
+    await expect(notice).toContainText(/missing as "hostWindow"/)
 
     // The same fact off the coordinator's own method, where the reason is a
     // field rather than a sentence.

@@ -165,7 +165,7 @@ function main(): void {
   // The window's pet, over the whole shell so the tab strip's underside is
   // terrain like any block edge. One animal per window: it is an ornament of
   // the window, not of whichever pane happens to be in front.
-  mountWindowPet(document.getElementById('app')!)
+  const petOverlay = mountWindowPet(document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
   const verticalStripHost = document.getElementById('vertical-tabstrip')!
   const panes = document.getElementById('panes')!
@@ -385,6 +385,8 @@ function main(): void {
   let lastActivity = 0
   const ACTIVITY_THROTTLE_MS = 3000
   const reportActivity = () => {
+    // The pet consumes the raw event; vault throttling is its own policy.
+    petOverlay.onUserActivity()
     const now = Date.now()
     if (now - lastActivity < ACTIVITY_THROTTLE_MS) return
     lastActivity = now

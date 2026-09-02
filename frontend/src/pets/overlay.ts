@@ -18,9 +18,12 @@
 import {
   attend,
   DEFAULT_TUNING,
+  humanActivity,
   gaitSpeed,
   newPet,
   react,
+  FLOOR_ID,
+  onFloor,
   step,
   type Author,
   type Outcome,
@@ -68,7 +71,11 @@ export interface LedgeSource {
 /** The full terrain sweep reads every block and chip of the active pane, so
  *  it is rate-limited. Between sweeps the animal still follows the ledge it
  *  is standing on, one rectangle per frame. */
+
 const SWEEP_INTERVAL_MS = 100
+
+/** The contact shadow appears only shortly before a ledge landing. */
+const SHADOW_WINDOW = 0.2
 
 const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
@@ -153,6 +160,7 @@ export class PetOverlay {
   private readonly _blocks: HTMLElement
   private readonly _layer: HTMLElement
   private readonly _world: HTMLElement
+  private readonly _shadow: HTMLElement
   private readonly _sprite: HTMLElement
   private readonly _raf: (cb: (t: number) => void) => number
   private readonly _caf: (h: number) => void
@@ -218,8 +226,11 @@ export class PetOverlay {
     this._layer.className = 'pet-layer'
     this._world = document.createElement('div')
     this._world.className = 'pet-world'
+    this._shadow = document.createElement('div')
+    this._shadow.className = 'pet-shadow'
     this._sprite = document.createElement('div')
     this._sprite.className = 'pet-sprite'
+    this._world.appendChild(this._shadow)
     this._world.appendChild(this._sprite)
     this._layer.appendChild(this._world)
 
@@ -334,6 +345,14 @@ export class PetOverlay {
     const reactionInProgress = this._pet.reacting && this._pet.hold > 0
     this._pet = attend(this._pet, author, this._timing, this._tuning)
     if (!reactionInProgress) this._behaviorGeneration++
+  }
+
+  /** Feed the raw human activity signal into the pure pet state machine. */
+  onUserActivity(): void {
+    if (this._disposed) return
+    const waking = this._pet.humanAway && this._pet.locomotion !== 'fall'
+    this._pet = humanActivity(this._pet, this._timing)
+    if (waking) this._behaviorGeneration++
   }
 
   /** A command finished. */
@@ -528,6 +547,18 @@ export class PetOverlay {
   private _paint(dt: number): void {
     const loaded = this._loaded
     if (!loaded) return
+    const preContact =
+      this._pet.locomotion === 'fall' &&
+      this._pet.landingTarget !== null &&
+      this._pet.landingTarget !== FLOOR_ID &&
+      this._pet.landingIn !== null &&
+      this._pet.landingIn <= SHADOW_WINDOW
+    const grounded = this._pet.locomotion !== 'fall' && !onFloor(this._pet)
+    this._shadow.hidden = !(grounded || preContact)
+    const growth = preContact
+      ? 1 - Math.min(1, Math.max(0, this._pet.landingIn! / SHADOW_WINDOW))
+      : 0
+    this._shadow.style.width = `${36 + 6 * growth}%`
     const name = clipFor(loaded.pack, this._pet.locomotion, this._pet.activity, loaded.clips)
     const clip = loaded.clips[name]
     const definition = loaded.pack.clips[name]

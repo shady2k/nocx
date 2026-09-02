@@ -50,6 +50,11 @@ const PAUSE_PACK: PetPack = {
   },
 }
 
+const RETURN_PACK: PetPack = {
+  ...PACK,
+  activity: { ...PACK.activity, stretch: 'meow' },
+}
+
 /** Every clip paints a 4×4 animal at (3,5) of a 10×10 cell. */
 const IMAGES: ImageSource = {
   load(url) {
@@ -208,6 +213,85 @@ describe('a pet over a pane', () => {
     const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(world.style.transform)
     expect(m).not.toBeNull()
     expect(Number(m![2]) + 34).toBeCloseTo(200, 0)
+  })
+
+  it('keeps a hard-edged contact shadow on ground, not on the window floor', async () => {
+    const s = stand([200])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(1 / 60)
+    const shadow = s.host.querySelector<HTMLElement>('.pet-shadow')!
+    const world = s.host.querySelector<HTMLElement>('.pet-world')!
+    expect(shadow.parentElement).toBe(world)
+    expect(shadow.hidden).toBe(true)
+
+    s.pump(3)
+    expect(shadow.hidden).toBe(false)
+    expect(shadow.style.width).toBe('36%')
+
+    const floor = stand([])
+    overlayOn(floor)
+    await vi.waitFor(() => expect(floor.frames.length).toBeGreaterThan(0))
+    floor.pump(3)
+    expect(floor.host.querySelector<HTMLElement>('.pet-shadow')!.hidden).toBe(true)
+  })
+
+  it('widens the shadow during the final 200ms before landing', async () => {
+    const s = stand([200])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    const shadow = s.host.querySelector<HTMLElement>('.pet-shadow')!
+    const layer = s.host.querySelector<HTMLElement>('.pet-layer')!
+    let sawPreContact = false
+    let firstWidth = 0
+    for (let i = 0; i < 60; i++) {
+      s.pump(1 / 60)
+      if (!shadow.hidden) {
+        sawPreContact = true
+        expect(layer.dataset.phase).toBe('none')
+        firstWidth = Number.parseFloat(shadow.style.width)
+        expect(firstWidth).toBeGreaterThanOrEqual(36)
+        expect(firstWidth).toBeLessThan(42)
+        break
+      }
+    }
+    expect(sawPreContact).toBe(true)
+
+    s.pump(0.05)
+    const nearWidth = Number.parseFloat(shadow.style.width)
+    expect(nearWidth).toBeGreaterThan(firstWidth)
+    expect(nearWidth).toBeLessThanOrEqual(42)
+
+    s.pump(0.4)
+    expect(shadow.hidden).toBe(false)
+    expect(shadow.style.width).toBe('36%')
+  })
+
+  it('reacts once to a hundred keystrokes in one return session', async () => {
+    const s = stand([200])
+    const pet = overlayOn(s, () => 0.5, settingsStub(), RETURN_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(5 * 60 + 1)
+    pet.onUserActivity()
+    s.pump(0.05)
+    const firstFrame = s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition
+    for (let i = 1; i < 100; i++) pet.onUserActivity()
+    s.pump(0.05)
+    expect(pet.playing).toBe('meow')
+    expect(s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition).not.toBe(
+      firstFrame,
+    )
+  })
+
+  it('does not treat focus changes as human activity', async () => {
+    const s = stand([200])
+    const pet = overlayOn(s, () => 0.5, settingsStub(), RETURN_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(5 * 60 + 1)
+    s.host.dispatchEvent(new FocusEvent('focus'))
+    s.host.dispatchEvent(new FocusEvent('blur'))
+    s.pump(1 / 60)
+    expect(pet.playing).not.toBe('meow')
   })
   it('holds one airborne frame and tilts with downward speed', async () => {
     const s = stand([200])

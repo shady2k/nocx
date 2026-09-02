@@ -26,6 +26,19 @@
   will-change: transform;
 }
 
+.pet-shadow {
+  position: absolute;
+  left: 50%;
+  bottom: -1px;
+  width: 36%;
+  height: 2px;
+  transform: translateX(-50%);
+  background: var(--color-text-dim);
+  /* No shadow token exists; the dim neutral is the closest cross-theme soft line. */
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .pet-sprite {
   position: absolute;
   top: 0;

@@ -93,6 +93,14 @@ export interface Pet {
   readonly moodHold: number
   /** Seconds spent doing nothing in particular — the road to sleep. */
   readonly boredom: number
+  /** Seconds since the last human activity event. Separate from pet boredom. */
+  readonly humanIdle: number
+  /** Whether human inactivity has crossed the return threshold. */
+  readonly humanAway: boolean
+  /** Seconds until the next swept landing, while descending; null otherwise. */
+  readonly landingIn: number | null
+  /** The ledge or FLOOR_ID the predicted landing will reach. */
+  readonly landingTarget: string | null
   /** Downward speed, px/s. Only meaningful while falling. */
   readonly vy: number
   /** Whether the current activity is an ANSWER to a finished command rather
@@ -200,6 +208,10 @@ export function newPet(x: number, y: number): Pet {
     phaseTurned: false,
     moodHold: 0,
     boredom: 0,
+    humanIdle: 0,
+    humanAway: false,
+    landingIn: null,
+    landingTarget: null,
     vy: 0,
     reacting: false,
     attending: null,
@@ -681,6 +693,29 @@ const VIGIL_SETTLE_AT = 5
 const VIGIL_QUIET_AT = 20
 const VIGIL_CHANGE_AT = 60
 
+const HUMAN_AWAY_AFTER = 5 * 60
+const HUMAN_RETURN_HOLD = 1
+
+/** Record one raw human activity event and wake the pet once per absence. */
+export function humanActivity(pet: Pet, timing: PetTiming): Pet {
+  if (!pet.humanAway || pet.locomotion === 'fall') return { ...pet, humanIdle: 0 }
+  const activity: Activity = 'stretch'
+  return {
+    ...pet,
+    humanIdle: 0,
+    humanAway: false,
+    locomotion: 'idle',
+    activity,
+    hold: chosenHold({ locomotion: 'idle', activity, hold: HUMAN_RETURN_HOLD }, timing),
+    phase: 'none',
+    phaseHold: 0,
+    phaseDuration: 0,
+    phaseTurned: false,
+    reacting: false,
+    boredom: 0,
+  }
+}
+
 /**
  * Advance the pet by `dt` seconds. `rng` returns [0,1).
  *
@@ -696,6 +731,8 @@ export function step(
 ): Pet {
   let next: Pet = {
     ...pet,
+    humanIdle: Math.min(HUMAN_AWAY_AFTER, pet.humanIdle + dt),
+    humanAway: pet.humanAway || pet.humanIdle + dt >= HUMAN_AWAY_AFTER,
     noticeableAges: pet.noticeableAges
       .map((age) => age + dt)
       .filter((age) => age < NOTICEABLE_WINDOW),
@@ -967,14 +1004,17 @@ export function step(
     }
   }
   if (hold <= 0) {
-    const up = next.attending === null ? ledgeAbove(env.terrain, x, y, tuning.jumpReach) : null
+    const up =
+      next.attending === null && !next.humanAway
+        ? ledgeAbove(env.terrain, x, y, tuning.jumpReach)
+        : null
     const offered =
       up === null ? menu(mood, next.attending) : [...menu(mood, next.attending), ASCEND]
     const choices = weightedChoices(
       offered,
       next.recentBehaviors,
       next.attending,
-      next.noticeableAges.length < NOTICEABLE_LIMIT,
+      next.noticeableAges.length < NOTICEABLE_LIMIT && !next.humanAway,
     )
     const c = pick(choices, rng())
     if (c.ascend === true && up !== null) {
@@ -1049,6 +1089,24 @@ export function step(
   }
 }
 
+function landingPrediction(
+  pet: Pet,
+  env: StepEnv,
+  tuning: PetTuning,
+  vy = pet.vy,
+): { readonly in: number; readonly target: string } | null {
+  if (vy < 0) return null
+  const ledge = ledgeCrossed(env.terrain, pet.x, pet.y, env.floor.y)
+  const targetY = ledge?.y ?? env.floor.y
+  if (targetY <= pet.y) return null
+  const gravity = Math.max(0.1, tuning.gravity)
+  const discriminant = vy * vy + 2 * gravity * (targetY - pet.y)
+  return {
+    in: (-vy + Math.sqrt(discriminant)) / gravity,
+    target: ledge?.id ?? FLOOR_ID,
+  }
+}
+
 /** Extra rise above the target, so the arc peaks over the shelf and the
  *  animal is caught coming down instead of grazing the edge. */
 const JUMP_MARGIN = 16
@@ -1061,6 +1119,7 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
   const vy = Math.min(tuning.maxFall, pet.vy + tuning.gravity * dt)
   const from = pet.y
   const to = from + vy * dt
+  const prediction = landingPrediction(pet, env, tuning, vy)
   const landed = ledgeCrossed(env.terrain, pet.x, from, to)
   if (landed) {
     const phaseDuration = landDuration(Math.abs(vy), tuning.maxFall)
@@ -1076,6 +1135,8 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
       phase: 'land',
       phaseHold: phaseDuration,
       phaseDuration,
+      landingIn: null,
+      landingTarget: null,
       phaseTurned: false,
       boredom: 0,
     }
@@ -1094,11 +1155,19 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
       phase: 'land',
       phaseHold: phaseDuration,
       phaseDuration,
+      landingIn: null,
+      landingTarget: null,
       phaseTurned: false,
       boredom: 0,
     }
   }
-  return { ...pet, y: to, vy }
+  return {
+    ...pet,
+    y: to,
+    vy,
+    landingIn: prediction?.in ?? null,
+    landingTarget: prediction?.target ?? null,
+  }
 }
 
 /** True while the pet is standing on the pane's own bottom edge rather than

@@ -5,6 +5,7 @@ import {
   attend as rawAttend,
   DEFAULT_TUNING,
   FLOOR_ID,
+  humanActivity,
   newPet,
   onFloor,
   react as rawReact,
@@ -95,6 +96,14 @@ describe('falling and landing', () => {
     for (let i = 0; i < 120 && p.locomotion === 'fall'; i++) p = step(p, env(), 1 / 60, seq(0.5))
     expect(onFloor(p)).toBe(true)
     expect(p.y).toBe(FLOOR.y)
+  })
+
+  it('reports the next ledge while contact is still 150ms away', () => {
+    const falling: Pet = { ...newPet(200, 180), vy: 100 }
+    const p = step(falling, env([A]), 1 / 60, seq(0.5))
+    expect(p.ledgeId).toBeNull()
+    expect(p.landingIn).toBeGreaterThan(0)
+    expect(p.landingIn).toBeLessThanOrEqual(0.15)
   })
 
   it('does not fall THROUGH a ledge on a single fast frame', () => {
@@ -302,6 +311,45 @@ describe('boredom', () => {
   it('wakes when a command finishes', () => {
     const asleep = standing(A, { activity: 'sleep', mood: 'tired', boredom: 999 })
     expect(react(asleep, 'success').activity).toBe('meow')
+  })
+})
+
+describe('human absence', () => {
+  const quietTuning = { ...DEFAULT_TUNING, sleepAfter: 1e6 }
+
+  it('suppresses autonomous running and jumping after five minutes away', () => {
+    let p = standing(B, {
+      hold: 0,
+      mood: 'pleased',
+      moodHold: 1000,
+    })
+    p = step(p, env(), 5 * 60 + 1, seq(0.99), quietTuning)
+    expect(p.humanAway).toBe(true)
+    expect(p.locomotion).not.toBe('run')
+    expect(p.phase).not.toBe('anticipate')
+  })
+
+  it('wakes, stretches for a second, then returns to the menu', () => {
+    let p = standing(A, { hold: 0 })
+    p = step(p, env([A]), 5 * 60 + 1, seq(0.5), quietTuning)
+    p = humanActivity(p, TIMING)
+    expect(p.humanAway).toBe(false)
+    expect(p.activity).toBe('stretch')
+    expect(p.hold).toBeCloseTo(1.3, 5)
+
+    p = step(p, env([A]), 0.6, seq(0), quietTuning)
+    expect(p.activity).toBe('stretch')
+    p = step(p, env([A]), 0.8, seq(0), quietTuning)
+    expect(p.locomotion).toBe('walk')
+  })
+
+  it('treats later input as the same return session', () => {
+    let p = standing(A, { hold: 0 })
+    p = humanActivity(step(p, env([A]), 5 * 60 + 1, seq(0.5), quietTuning), TIMING)
+    p = step(p, env([A]), 0.4, seq(0), quietTuning)
+    p = humanActivity(p, TIMING)
+    p = step(p, env([A]), 1, seq(0), quietTuning)
+    expect(p.locomotion).toBe('walk')
   })
 })
 

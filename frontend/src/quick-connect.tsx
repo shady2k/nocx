@@ -290,10 +290,57 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Host openers, and the arity the compiler holds them to
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Opening a pane at the destination a host row names. `port` is not optional
+ * decoration: the pane stores the endpoint it applies at, so a call that left
+ * it off stored `:22` for every profile and the restore could no longer match
+ * the pane back to the profile it was opened from (nocx-xhm9e).
+ */
+export type SSHPaneOpener = (profileId: string, host: string, user?: string, port?: number) => Pane
+
+/** The same, for rows that have no profile behind them — aliases and ad-hoc. */
+export type HostPaneOpener = (host: string, user?: string, port?: number) => Pane
+
+declare const ARITY: unique symbol
+
+/**
+ * `F`, unless `F` cannot be CALLED with `N` arguments — then an unsatisfiable
+ * intersection, so the call site is a type error naming the reason.
+ *
+ * This exists because nothing else catches the mistake that shipped
+ * nocx-xhm9e. TypeScript assigns a narrower function to a wider function type
+ * ON PURPOSE (`[1,2].forEach(n => …)` depends on it), so a lambda that spells
+ * three of the four arguments is a legal opener and the port silently becomes
+ * `undefined` — and a test that supplies its own opener cannot see the
+ * composition root supplying a bad one. `Parameters<F>['length']` is a UNION
+ * over the optional tail, so a method taking `(id, host, user?, port?)` has
+ * length `2 | 3 | 4` and `4 extends that` holds, while a three-argument lambda
+ * has length `3` alone and does not.
+ *
+ * The guard is arity only. It cannot see arguments passed in the wrong ORDER,
+ * and a rest-parameter opener (`length: number`) satisfies it vacuously.
+ * `quick-connect.test.tsx` pins it with `@ts-expect-error`, so if a future
+ * TypeScript ever infers `F` as the constraint instead of the argument — which
+ * would make this vacuous everywhere — that directive goes unused and the
+ * type-check fails rather than the guard quietly evaporating.
+ */
+type CallableWith<
+  F extends (...args: never[]) => unknown,
+  N extends number,
+> = N extends Parameters<F>['length']
+  ? unknown
+  : { readonly [ARITY]: 'this opener drops one of the destination arguments' }
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SSH provider — first consumer of the interface
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class SSHQuickConnectProvider implements QuickConnectProvider {
+export class SSHQuickConnectProvider<
+  F extends SSHPaneOpener = SSHPaneOpener,
+> implements QuickConnectProvider {
   readonly id = 'ssh'
   readonly label = 'SSH Connections'
   readonly kinds = ['host'] as const
@@ -301,13 +348,10 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
   constructor(
     private profileClient: ProfileClient,
     /** The pane opener, taking the whole destination the row names. The
-     *  PORT is not optional decoration: the pane stores the endpoint it
-     *  applies at, and a call that left the port off stored `:22` for every
-     *  profile, so the restore could not match the pane back to its profile
-     *  (nocx-xhm9e). The composition root passes the manager's method itself
-     *  rather than a lambda re-listing these arguments, so there is no
-     *  second parameter list to forget one in. */
-    private newSSHPane: (profileId: string, host: string, user?: string, port?: number) => Pane,
+     *  composition root passes the manager's method itself rather than a
+     *  lambda re-listing these arguments, so there is no second parameter
+     *  list to forget one in; `CallableWith` refuses one that has fewer. */
+    private newSSHPane: F & CallableWith<F, 4>,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -330,14 +374,19 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
 // SSH alias provider — live, read-only aliases from ~/.ssh/config
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
+export class SSHAliasQuickConnectProvider<
+  F extends HostPaneOpener = HostPaneOpener,
+> implements QuickConnectProvider {
   readonly id = 'ssh-aliases'
   readonly label = 'SSH Aliases'
   readonly kinds = ['host'] as const
 
   constructor(
     private profileClient: ProfileClient,
-    private newPaneByHost: (host: string, user?: string, port?: number) => Pane,
+    // A lambda is unavoidable here — the alias has no profile, so the root
+    // supplies the empty id — which is exactly the shape that lost the port
+    // for saved profiles. `CallableWith` holds it to all three.
+    private newPaneByHost: F & CallableWith<F, 3>,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -526,12 +575,14 @@ const SECRET_KIND_DETAIL: Record<string, string> = {
 // ad-hoc connection to a host that merely shares its name.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class AdHocQuickConnectProvider implements QuickConnectProvider {
+export class AdHocQuickConnectProvider<
+  F extends HostPaneOpener = HostPaneOpener,
+> implements QuickConnectProvider {
   readonly id = 'ad-hoc'
   readonly label = 'Quick Connect'
   readonly kinds = ['host'] as const
 
-  constructor(private newPaneByHost: (host: string, user?: string, port?: number) => Pane) {}
+  constructor(private newPaneByHost: F & CallableWith<F, 3>) {}
 
   getItems(): QuickConnectItem[] {
     return []

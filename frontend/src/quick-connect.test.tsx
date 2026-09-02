@@ -13,6 +13,7 @@ import {
   type QuickConnectProvider,
   type SecretsProviderDeps,
 } from './quick-connect'
+import type { Pane } from './panes'
 
 afterEach(() => {
   cleanup()
@@ -103,6 +104,34 @@ describe('ActionsQuickConnectProvider', () => {
 })
 
 /* ── SSH provider ───────────────────────────────────────────────────── */
+
+// The compiler is the guard on the opener's arity, and this is the check that
+// the guard is still ON. The defect it stands for (nocx-xhm9e) lived in the
+// COMPOSITION ROOT — a lambda spelling three of the four destination
+// arguments — where no test that supplies its own opener can reach it, and
+// which TypeScript otherwise accepts by design. So there is nothing to run:
+// the assertion is that these lines do not compile. If a future TypeScript
+// infers `F` from the constraint rather than from the argument, `CallableWith`
+// becomes vacuous, these directives go unused and `tsc` fails — which is the
+// one failure mode a purely type-level guard has.
+declare const openerProbe: {
+  newSSHPane(profileId: string, host: string, user?: string, port?: number): Pane
+}
+// @ts-expect-error an opener that cannot take the port is not an SSH opener
+void new SSHQuickConnectProvider({} as never, (id, host, user) =>
+  openerProbe.newSSHPane(id, host, user),
+)
+// @ts-expect-error an opener that cannot take the port is not a host opener
+void new SSHAliasQuickConnectProvider({} as never, (host, user) =>
+  openerProbe.newSSHPane('', host, user),
+)
+// @ts-expect-error an opener that cannot take the port is not a host opener
+void new AdHocQuickConnectProvider((host, user) => openerProbe.newSSHPane('', host, user))
+// …while the whole destination is accepted, which is what makes the three
+// above evidence of the guard rather than of a broken signature.
+void new AdHocQuickConnectProvider((host, user, port) =>
+  openerProbe.newSSHPane('', host, user, port),
+)
 
 describe('SSHQuickConnectProvider', () => {
   it('returns items from listProfiles', async () => {

@@ -81,6 +81,10 @@ export interface LifecycleChanged {
      * The completion's render fence: 32 random bytes as 64 lowercase hex chars, written to the pty by the shell after the command's output and carried here for the render-order rendezvous. Present exactly when state is completed. Format-identical to the capability on purpose — the wire test discriminates on value: the capability minted for the domain must never appear in any serialized fact, and a future refactor that confuses the two fails it.
      */
     fence?: string
+    /**
+     * The submit's correlation token, echoed from the lifecycle.submitAttempt params that created this attempt. The renderer binds the ledger record it opened at submit to this attempt by equality on this value, rather than searching for a record by position. Absent on a shell-originated attempt, which has no submit behind it, and absent when the submit carried no token. It is a correlation token and never an identity: the attempt id is the backend's (ADR-0024 decision 5).
+     */
+    submitId?: string
   }
   /**
    * Where the domain IS, present exactly when the fact names a domain minted for an ssh child (nocx-ax79). It answers the question a nested session could not otherwise answer — which machine will run the next command — because a child domain had no authenticated host source, so a cwd of /home/pi on a far host was indistinguishable from the same path locally. The values are the ones domain_request carried and nothing more (ADR-0025: the destination, never the user's typed options). Descriptive, never authority: the domain id and epoch remain the only authority the renderer is given, and the per-epoch capability and raw frames still never cross (ADR-0024 decision 7). A local domain carries none, and the field disappears in the same fact the domain does.

@@ -165,7 +165,7 @@ export class LifecycleProjections {
     if (attempt.state === 'open') {
       if (this._bound.has(attempt.id)) return
       this._bound.add(attempt.id)
-      const rec = this.ledger.bindAttempt(attempt.id)
+      const rec = this.ledger.bindAttempt(attempt)
       if (rec === null) {
         // Shell-originated: the attempt's line is the shell's own, which
         // may carry a literal password — no ledger record, no history.

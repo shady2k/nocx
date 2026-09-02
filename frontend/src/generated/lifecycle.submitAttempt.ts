@@ -45,4 +45,8 @@ export interface LifecycleSubmitAttempt {
    * When the attempt was created, RFC 3339 with sub-second precision. The block model derives duration from startedAt and completedAt.
    */
   startedAt: string
+  /**
+   * The submit's correlation token, echoed from the lifecycle.submitAttempt params that created this attempt. The renderer binds the ledger record it opened at submit to this attempt by equality on this value, rather than searching for a record by position. Absent on a shell-originated attempt, which has no submit behind it, and absent when the submit carried no token. It is a correlation token and never an identity: the attempt id is the backend's (ADR-0024 decision 5).
+   */
+  submitId?: string
 }

@@ -6444,10 +6444,16 @@ export class TerminalContent extends BasePaneContent {
     // there is nothing to restore. The submitted line still opens a ledger
     // record and a running block (the app-owned ordering ADR-0024 §5 keeps).
     let ledgerId: number | null = null
+    // The correlation token this submit minted, carried on the record it just
+    // opened and sent with the attempt request below, so the published
+    // attempt names the record instead of the projection guessing which one
+    // it belongs to (nocx-td6d4.10).
+    let submitId: string | null = null
     if (this.ledger) {
       let markerLine: () => number | undefined = () => undefined
       const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine(), author)
       ledgerId = rec.id
+      submitId = rec.submitId
       const m = this.renderer?.registerMarker() ?? null
       if (m) {
         markerLine = () => m.line()
@@ -6509,6 +6515,7 @@ export class TerminalContent extends BasePaneContent {
         // same mapping history-client.ts makes, because both calls write
         // one column (design §3.1, nocx-iadtt).
         source: author === 'agent' ? 'assistant' : 'user',
+        ...(submitId ? { submitId } : {}),
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
       .then(write, write)

@@ -2,17 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/lifecycle.submitAttempt.schema.json",
   "title": "LifecycleSubmitAttempt",
-  "description": "The lifecycle.submitAttempt JSON-RPC result: the app-originated ExecutionAttempt as the kernel created it at editor submit (ADR-0024 decision 5, docs/lifecycle-protocol.md). The call runs synchronously BEFORE the bytes that can cause the shell's own start event are written to the pty, so the later authenticated start attaches to this attempt and replaces nothing — the attempt id, the app-owned command text (references intact, never the resolved send line), cwd and host all stay app-owned. The attempt is always created open and its origin is always app; the schema pins both. The state and lifecycle of the domain are not echoed here — the running lifecycle.changed fact carries them, and the renderer keys its state machine on that fact alone.",
+  "description": "The lifecycle.submitAttempt JSON-RPC result: the app-originated ExecutionAttempt as the kernel created it at editor submit (ADR-0024 decision 5, docs/lifecycle-protocol.md). The call runs synchronously BEFORE the bytes that can cause the shell's own start event are written to the pty, so the later authenticated start attaches to this attempt and replaces nothing \u2014 the attempt id, the app-owned command text (references intact, never the resolved send line), cwd and host all stay app-owned. The attempt is always created open and its origin is always app; the schema pins both. The state and lifecycle of the domain are not echoed here \u2014 the running lifecycle.changed fact carries them, and the renderer keys its state machine on that fact alone.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "domain", "state", "command", "cwd", "host", "origin", "startedAt"],
   "properties": {
     "id": {
-      "description": "The attempt id, server-assigned. The renderer correlates nothing with it directly — the published running fact carries the same id and the block projection binds on it.",
+      "description": "The attempt id, server-assigned. The renderer correlates nothing with it directly \u2014 the published running fact carries the same id and the block projection binds on it.",
       "type": "string"
     },
     "domain": {
-      "description": "The domain the attempt was opened on — the id the caller submitted to. An attempt belongs to exactly one domain and cannot cross an activation boundary.",
+      "description": "The domain the attempt was opened on \u2014 the id the caller submitted to. An attempt belongs to exactly one domain and cannot cross an activation boundary.",
       "type": "string"
     },
     "state": {
@@ -21,7 +21,7 @@
       "enum": ["open"]
     },
     "command": {
-      "description": "The app-owned command text as submitted — the reference-intact record line. The shell's wire line, which may carry vault-resolved secrets, is ignored on attachment (decision 5's privacy rule).",
+      "description": "The app-owned command text as submitted \u2014 the reference-intact record line. The shell's wire line, which may carry vault-resolved secrets, is ignored on attachment (decision 5's privacy rule).",
       "type": "string"
     },
     "cwd": {
@@ -33,7 +33,7 @@
       "type": "string"
     },
     "origin": {
-      "description": "Where the attempt came from. Always app: this call is the app-originated half of decision 5 — a shell-originated attempt is created only by an authenticated start with nothing pending.",
+      "description": "Where the attempt came from. Always app: this call is the app-originated half of decision 5 \u2014 a shell-originated attempt is created only by an authenticated start with nothing pending.",
       "type": "string",
       "enum": ["app"]
     },
@@ -41,6 +41,12 @@
       "description": "When the attempt was created, RFC 3339 with sub-second precision. The block model derives duration from startedAt and completedAt.",
       "type": "string",
       "format": "date-time"
+    },
+    "submitId": {
+      "type": "string",
+      "description": "The submit's correlation token, echoed from the lifecycle.submitAttempt params that created this attempt. The renderer binds the ledger record it opened at submit to this attempt by equality on this value, rather than searching for a record by position. Absent on a shell-originated attempt, which has no submit behind it, and absent when the submit carried no token. It is a correlation token and never an identity: the attempt id is the backend's (ADR-0024 decision 5).",
+      "minLength": 1,
+      "maxLength": 256
     }
   }
 }

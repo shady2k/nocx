@@ -30,14 +30,21 @@ const (
 // outright (the wire line may carry vault-resolved secrets while the app's
 // text carries references — decision 5's privacy rule).
 type ExecutionAttempt struct {
-	ID          AttemptID
-	Domain      DomainID
-	Lane        LaneID
-	Command     string // app-owned text; for shell-originated attempts, the shell's line
-	Cwd         string
-	Host        string
-	StartedAt   time.Time
-	Origin      AttemptOrigin
+	ID        AttemptID
+	Domain    DomainID
+	Lane      LaneID
+	Command   string // app-owned text; for shell-originated attempts, the shell's line
+	Cwd       string
+	Host      string
+	StartedAt time.Time
+	Origin    AttemptOrigin
+	// SubmitID is the correlation token the renderer minted for the submit
+	// that created this attempt, echoed back so the renderer can bind the
+	// ledger record it opened to this attempt by equality. Empty for a
+	// shell-originated attempt, which has no submit behind it. It is a
+	// correlation token and never an identity: ID is the backend's
+	// (decision 5), and nothing may be looked up by SubmitID here.
+	SubmitID    string
 	Started     bool // true once an authenticated start attached or created it
 	State       AttemptState
 	ExitCode    *int // set exactly once, only by an authenticated completion

@@ -182,7 +182,7 @@ func TestPublisherPublishesOnTransitions(t *testing.T) {
 	mustAckEstablishment(t, pub, r, "L", h)
 
 	// App-originated submit: Running(attempt) with the app-owned text.
-	att, err := pub.SubmitAttempt(h.Domain, "make", "/work/nocx", "local")
+	att, err := pub.SubmitAttempt(h.Domain, "make", "/work/nocx", "local", "sub-0123456789abcdef")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
@@ -199,6 +199,20 @@ func TestPublisherPublishesOnTransitions(t *testing.T) {
 	}
 	if run.Attempt.Command != "make" || run.Attempt.Origin != lifecyclepub.OriginApp {
 		t.Fatalf("app attempt must keep its app-owned text and origin, got %+v", run.Attempt)
+	}
+	// And the submit's correlation token rides the PUBLISHED fact, which is
+	// the copy the renderer binds on. The result of the call names it too,
+	// but the fact is emitted here — before the handler writes that reply,
+	// with its store work in between — so a token present only in the reply
+	// would arrive after the fact that needed it (nocx-td6d4.10).
+	if run.Attempt.SubmitID != "sub-0123456789abcdef" {
+		t.Fatalf("published attempt must carry the submit token, got %+v", run.Attempt)
+	}
+	// A shell-originated attempt has no submit behind it and must carry
+	// none: an empty token binds no record, which is what keeps the shell's
+	// own line — possibly a literal password — out of the store.
+	if att.Origin != lifecycle.OriginApp || att.SubmitID != "sub-0123456789abcdef" {
+		t.Fatalf("kernel attempt = %+v, want the app origin and the submitted token", att)
 	}
 
 	// The shell's start attaches to the pending app attempt: the projection
@@ -412,7 +426,7 @@ func TestPublisherAbandonPublishesUnknown(t *testing.T) {
 	h, _ := pub.RequestDomain("L", nil, "T")
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
 	mustAckEstablishment(t, pub, r, "L", h)
-	att, err := pub.SubmitAttempt(h.Domain, "sleep 1000", "/", "local")
+	att, err := pub.SubmitAttempt(h.Domain, "sleep 1000", "/", "local", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +494,7 @@ func TestPublisherForwardsErrors(t *testing.T) {
 		t.Fatal("RequestDomain on an unbound transport must error")
 	}
 	// SubmitAttempt for an unknown domain.
-	if _, err := pub.SubmitAttempt("dom-nope", "x", "/", "local"); err == nil {
+	if _, err := pub.SubmitAttempt("dom-nope", "x", "/", "local", ""); err == nil {
 		t.Fatal("SubmitAttempt for an unknown domain must error")
 	}
 	if got := len(r.all()); got != 0 {
@@ -567,7 +581,7 @@ func TestPublisherAcceptFlushedOnlyOnAcknowledgement(t *testing.T) {
 		t.Fatalf("stale ack flushed the accept: %v", got)
 	}
 	// The domain is not live before the ack: events are rejected.
-	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local"); !errors.Is(err, lifecycle.ErrDomainPending) {
+	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); !errors.Is(err, lifecycle.ErrDomainPending) {
 		t.Fatalf("submit before the ack = %v, want not past accept", err)
 	}
 	// The exact generation's ack is the closing event.
@@ -577,7 +591,7 @@ func TestPublisherAcceptFlushedOnlyOnAcknowledgement(t *testing.T) {
 	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
 		t.Fatalf("after ack: %v, want exactly one accept", got)
 	}
-	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local"); err != nil {
+	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); err != nil {
 		t.Fatalf("submit after the ack must succeed, got %v", err)
 	}
 	// A duplicate ack is refused — the establishment is resolved.

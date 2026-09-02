@@ -108,6 +108,30 @@ vi.mock('./ui/toast', () => ({
   showToast: vi.fn(),
 }))
 
+/**
+ * The token the renderer minted for its most recent submit, read off the
+ * lifecycle.submitAttempt params it actually sent.
+ *
+ * The published fact must echo it, exactly as the backend does
+ * (internal/lifecyclepub/publisher.go): the ledger record and the attempt are
+ * bound by equality on this value, so a fact that carries no token — or
+ * someone else's — binds nothing. That is deliberate. Binding used to be
+ * "the first unbound record still running", which silently handed one
+ * command's exit status to another command's row (nocx-td6d4.10).
+ */
+function submitToken(client: ClientFake): string {
+  const calls = client.dispatcher.call.mock.calls as Array<[string, Record<string, unknown>?]>
+  for (let i = calls.length - 1; i >= 0; i--) {
+    const [method, params] = calls[i]
+    if (method === 'lifecycle.submitAttempt' && typeof params?.submitId === 'string') {
+      return params.submitId
+    }
+  }
+  // No submit was made, so the backend would echo no token — and an attempt
+  // with none binds no record, which is exactly the shell-originated case.
+  return ''
+}
+
 describe('the old attachment surface is deleted', () => {
   it('leaves no attachment vocabulary in the grant-owned frontend files', () => {
     const productionFiles = [
@@ -2930,7 +2954,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-g', state: 'open', origin: 'app', command: 'echo sk-proj-abcdef' },
+        attempt: {
+          id: 'att-g',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'echo sk-proj-abcdef',
+        },
       })
       // Completed WITH a fence that has not been sighted: the logical freeze
       // lands now and the VISUAL one defers, so the element still reads
@@ -3044,7 +3074,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
       })
       const live = withScrollback.scrollback.blockManager.blocks[0]
       expect(live.el.dataset.entryId).toBe('att-1')
@@ -3167,7 +3203,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
       })
       handler({
         lane: 'lane-1',
@@ -3253,7 +3295,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
       })
       handler({
         lane: 'lane-1',
@@ -3308,7 +3356,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'agent-command' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'agent-command',
+        },
       })
       handler({
         lane: 'lane-1',
@@ -3450,7 +3504,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'echo hello' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'echo hello',
+        },
       })
       expect(withScrollback.scrollback.mode).toBe('running')
       expect(
@@ -3575,7 +3635,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read x',
+        },
       })
       // Still gone, still writable: the lifecycle only RECONCILES here — the
       // commit already removed the composer — and reconciling must not
@@ -4410,12 +4476,19 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // the person's end of the interval: this line was typed, so the row
       // this call opens is the person's, whatever the assistant is doing in
       // the same pane at the same moment.
+      const token = submitToken(client)
+      expect(token).toMatch(/^sub-[0-9a-f]{32}$/)
       expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
         domain: 'd1',
         command: 'make deploy',
         cwd: FIXTURE_CWD,
         host: '',
         source: 'user',
+        // The correlation token this submit minted, carried so the published
+        // attempt can name the record this submit opened rather than leaving
+        // the projection to pick one (nocx-td6d4.10). Its value is opaque —
+        // only its presence and its equality with the record's are meaning.
+        submitId: token,
       })
       expect(session.send).not.toHaveBeenCalled()
       // The running block opened at submit, before any fact could arrive —
@@ -4431,6 +4504,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         cwd: FIXTURE_CWD,
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
       await vi.waitFor(() =>
@@ -4445,6 +4519,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
           id: 'att-9',
           state: 'open',
           origin: 'app',
+          submitId: submitToken(client),
           command: 'make deploy',
         },
       })
@@ -4501,6 +4576,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         cwd: FIXTURE_CWD,
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
 
@@ -4569,8 +4645,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
           cwd: FIXTURE_CWD,
           host: '',
           source: 'user',
+          submitId: submitToken(client),
         }),
       )
+      expect(submitToken(client)).toMatch(/^sub-[0-9a-f]{32}$/)
       expect(session.send).not.toHaveBeenCalled()
       resolveAttempt({
         id: 'att-10',
@@ -4580,6 +4658,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         cwd: FIXTURE_CWD,
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
       await vi.waitFor(() =>
@@ -5083,6 +5162,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         cwd: '',
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
     })
@@ -6879,7 +6959,13 @@ describe('a frozen block sends what it printed (nocx-2f0f)', () => {
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-c', state: 'open', origin: 'app', command: 'echo hello' },
+        attempt: {
+          id: 'att-c',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'echo hello',
+        },
       })
       handler({
         lane: 'lane-1',
@@ -7989,6 +8075,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
         cwd: '',
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
     })
@@ -8216,6 +8303,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
         cwd: '',
         host: '',
         origin: 'app',
+        submitId: submitToken(client),
         startedAt: '2026-08-08T12:00:00Z',
       })
     })
@@ -8359,7 +8447,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       lifecycle: 'running',
       domain: 'd1',
       epoch: 1,
-      attempt: { id: 'att-run', state: 'open', origin: 'app', command },
+      attempt: {
+        id: 'att-run',
+        state: 'open',
+        origin: 'app',
+        submitId: submitToken(client),
+        command,
+      },
     })
     return handler
   }
@@ -9778,7 +9872,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
+        attempt: {
+          id: 'att-run',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 300',
+        },
       })
       expect(ed.isVisible).toBe(false)
       rendererOf(content).captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
@@ -9864,7 +9964,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
+        attempt: {
+          id: 'att-run',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'sleep 300',
+        },
       })
 
       const stop = itemNamed(runningBlockMenu(content), 'stop')
@@ -9898,7 +10004,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-shared', state: 'open', origin: 'app', command: 'top' },
+        attempt: {
+          id: 'att-shared',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'top',
+        },
       })
       sessionOf(content).signal.mockResolvedValue({
         signal: 'stop',
@@ -10094,7 +10206,13 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       lifecycle: 'running',
       domain: 'd1',
       epoch: 1,
-      attempt: { id: 'att-run', state: 'open', origin: 'app', command },
+      attempt: {
+        id: 'att-run',
+        state: 'open',
+        origin: 'app',
+        submitId: submitToken(client),
+        command,
+      },
     })
   }
 
@@ -10339,6 +10457,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
           cwd: '',
           host: '',
           origin: 'app',
+          submitId: submitToken(client),
           startedAt: '2026-08-08T12:00:00Z',
         })
       })
@@ -10494,7 +10613,13 @@ describe('summoning answers instead of vanishing (nocx-og42r)', () => {
       lifecycle: 'running',
       domain: 'd1',
       epoch: 1,
-      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'htop' },
+      attempt: {
+        id: 'att-run',
+        state: 'open',
+        origin: 'app',
+        submitId: submitToken(contentClient),
+        command: 'htop',
+      },
     })
   }
 
@@ -10618,7 +10743,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       lifecycle: 'running',
       domain: 'd1',
       epoch: 1,
-      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'top' },
+      attempt: {
+        id: 'att-run',
+        state: 'open',
+        origin: 'app',
+        submitId: submitToken(client),
+        command: 'top',
+      },
     })
     return handler
   }
@@ -10952,7 +11083,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-first', state: 'open', origin: 'app', command: 'first call' },
+        attempt: {
+          id: 'att-first',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'first call',
+        },
       })
       expect(ed.isVisible).toBe(false)
       handler({
@@ -10987,7 +11124,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-second', state: 'open', origin: 'app', command: 'second call' },
+        attempt: {
+          id: 'att-second',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'second call',
+        },
       })
       expect(ed.isVisible).toBe(false)
       handler({
@@ -11519,7 +11662,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-run-2', state: 'open', origin: 'app', command: 'ls' },
+        attempt: {
+          id: 'att-run-2',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'ls',
+        },
       })
       const commands = Array.from(
         inner.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="command"]'),

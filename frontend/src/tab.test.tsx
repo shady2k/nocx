@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { createSignal } from 'solid-js'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
 import { Tab, type TabProps } from './tab'
 
@@ -178,6 +179,24 @@ describe('Tab', () => {
     subject()
     const el = document.querySelector('.nocx-tab-title')
     expect(el).toBeTruthy()
+  })
+
+  // THE ELEMENT IS NOT THE TITLE. The assertion above passes on a tab that
+  // renders `<span class="nocx-tab-title"></span>` and nothing inside it,
+  // which is what every tab in the app did for the length of nocx-07cf4 —
+  // caught only by twelve e2e specs that waited on a non-empty title on their
+  // way to something else, and by nothing here at all.
+  it('renders the title it is given', () => {
+    subject({ title: 'repos/nocx' })
+    expect(document.querySelector('.nocx-tab-title')?.textContent).toBe('repos/nocx')
+  })
+
+  it('renders a title that changes, not the one it first mounted with', () => {
+    const [title, setTitle] = createSignal('repos/nocx')
+    render(() => <Tab {...defaults} title={title()} />)
+    expect(document.querySelector('.nocx-tab-title')?.textContent).toBe('repos/nocx')
+    setTitle('vim')
+    expect(document.querySelector('.nocx-tab-title')?.textContent).toBe('vim')
   })
 
   it('has nocx-tab-indicator element', () => {

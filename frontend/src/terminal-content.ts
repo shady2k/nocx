@@ -3169,10 +3169,29 @@ export class TerminalContent extends BasePaneContent {
       // the import that would create a path. The backend routes facts to
       // this session's lane; the kernel adopts the first lane and rejects
       // the rest.
-      // The session and everything hanging off it. Extracted so it can run
-      // again: a reconnect rebuilds exactly this and nothing above it.
-      if (!(await this._bindSession(signal, renderer, false))) return
-
+      // SUBSCRIBED BEFORE THE BIND, because the bind is what delivers the
+      // bytes these two read. `onCwd` installs an OSC 7 parser handler and
+      // `onTitle` an OSC 0/2 listener at SUBSCRIBE time, so a sequence xterm
+      // has already parsed is dispatched to nobody and is gone — neither has
+      // a last-value replay behind it.
+      //
+      // For a pane that OPENS its own session the old order never showed:
+      // xterm parses asynchronously, so the shell's first prompt was still
+      // queued while these lines ran and the handlers won the race. A
+      // RECLAIMED session made that race deterministic and lost it. Its
+      // recovered recording is written during the bind, and since
+      // nocx-k6p18.6 the bind AWAITS `awaitWriteBarrier()` over exactly those
+      // bytes — so by the time it returned, the OSC 7 and OSC 0/2 the
+      // replayed scrollback carries had been parsed and discarded. The pane
+      // then kept the reclaim's lane seed, whose cwd is '' by design (ipc.ts
+      // `reclaimSession`: a reclaim carries the session, never the pane's
+      // own facts), `directoryLabel('')` is '', and every reclaimed tab drew
+      // an empty title (nocx-07cf4).
+      //
+      // Registered ONCE, here, and not inside the bind: a rebind reuses this
+      // renderer and a second registration would report one OSC 7 twice.
+      // `this.env` is null until the first open, which both bodies already
+      // tolerate — nothing writes to this renderer before a session exists.
       renderer.onTitle((title: string) => {
         // An OSC 0/2 title is attributed to the ACTIVE domain (the stream
         // has no writer identity; the domain that was active when the bytes
@@ -3198,6 +3217,11 @@ export class TerminalContent extends BasePaneContent {
         // parent's authenticated activation (bead nocx-u7uh.11).
         this.env?.recordCwd(path)
       })
+
+      // The session and everything hanging off it. Extracted so it can run
+      // again: a reconnect rebuilds exactly this and nothing above it.
+      if (!(await this._bindSession(signal, renderer, false))) return
+
       renderer.onBell(() => {
         // TWO facts, not one, and neither replaces the other. The tab dot is
         // "something happened in a pane you are not looking at" — local,

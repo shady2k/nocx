@@ -12604,6 +12604,66 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane is still named after where it is (nocx-07cf4)
+// ═══════════════════════════════════════════════════════════════════════════
+// A tab is named by its pane and a pane by its cwd, and for a session this
+// window OPENED the cwd arrives in the open ack. A RECLAIM carries no cwd —
+// `ipc.reclaimSession` passes '' on purpose, because a reclaim hands over the
+// session and never the pane's own facts — so the only statement of where a
+// reclaimed pane is, is the OSC 7 in the scrollback the claim recovered.
+//
+// That makes the SUBSCRIPTION ORDER load-bearing: `renderer.onCwd` installs
+// its OSC 7 parser handler at subscribe time and has no last-value replay, so
+// a sequence parsed before it is dispatched to nobody. Twelve e2e specs were
+// the only thing watching this, and only because they waited on a non-empty
+// tab title on their way to something else.
+describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () => {
+  const RECLAIM_GRID = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  /** A pane that takes a live session back and whose recovered scrollback
+   *  carries an OSC 7.
+   *
+   *  The renderer mock is programmed BEFORE the mount, because that is when
+   *  the bytes are parsed: `awaitWriteBarrier` is exactly "xterm has finished
+   *  parsing everything written so far", and a reclaiming bind awaits it over
+   *  the recovered write (nocx-k6p18.6). Firing the report from inside the
+   *  barrier is therefore where the real OSC 7 comes out — and it is the one
+   *  moment a subscription installed after the bind has already missed. */
+  const reclaimingPaneReporting = async (cwd: string) => {
+    const { XtermRenderer } = await import('./renderers/xterm')
+    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+      const renderer = createRendererMock()
+      renderer.awaitWriteBarrier.mockImplementation(() => {
+        renderer._fireCwd('', cwd)
+        return Promise.resolve()
+      })
+      return renderer as unknown as InstanceType<typeof XtermRenderer>
+    })
+    // No cwd on the handle, which is what a reclaim actually looks like.
+    const session = makeSession({
+      cwd: '',
+      recovered: { bytes: 32, gaps: [], size: RECLAIM_GRID },
+      pendingData: 'the screen this window was away for',
+    })
+    return mountTerminal(makeClipboard(), {
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+    })
+  }
+
+  it('names the tab from the OSC 7 in the scrollback the claim recovered', async () => {
+    const { tab, teardown } = await reclaimingPaneReporting(FIXTURE_CWD)
+    try {
+      // The pane's own title, not `displayTitle`: the descriptor's fallback
+      // would answer 'Terminal' for a pane that was never named, and the
+      // defect this guards is exactly a pane that is never named.
+      await vi.waitFor(() => expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL))
+    } finally {
+      teardown()
+    }
+  })
+})
+
 describe('replayed completion restores a durable block outcome (nocx-gm21o)', () => {
   it('lands OSC 133 D on the restored entry rather than leaving it unknown', async () => {
     const session = makeSession({

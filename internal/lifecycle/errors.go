@@ -29,12 +29,17 @@ var (
 	ErrDomainDesynchronized = errors.New("lifecycle: domain is desynchronized; only a snapshot restores it")
 	ErrDomainNotTop         = errors.New("lifecycle: domain is not the top of its lane stack")
 	ErrLaneBusy             = errors.New("lifecycle: lane already has a live top-level domain")
-	ErrUnknownParent        = errors.New("lifecycle: unknown parent domain")
-	ErrParentNotLive        = errors.New("lifecycle: parent domain is not live")
-	ErrParentActive         = errors.New("lifecycle: parent domain must be suspended before the child establishes")
-	ErrParentNotTop         = errors.New("lifecycle: parent domain is not the top of the lane stack")
-	ErrNotSuspended         = errors.New("lifecycle: domain is not suspended")
-	ErrNotLost              = errors.New("lifecycle: lane is not lost; only a lost lane may be recovered")
+	// ErrDomainExists refuses an adoption naming a domain id this kernel
+	// already holds. Adoption installs an identity minted elsewhere, so it
+	// is the one path that can collide with a live record; overwriting one
+	// would silently re-point a live shell's authority at another domain.
+	ErrDomainExists  = errors.New("lifecycle: domain id is already registered")
+	ErrUnknownParent = errors.New("lifecycle: unknown parent domain")
+	ErrParentNotLive = errors.New("lifecycle: parent domain is not live")
+	ErrParentActive  = errors.New("lifecycle: parent domain must be suspended before the child establishes")
+	ErrParentNotTop  = errors.New("lifecycle: parent domain is not the top of the lane stack")
+	ErrNotSuspended  = errors.New("lifecycle: domain is not suspended")
+	ErrNotLost       = errors.New("lifecycle: lane is not lost; only a lost lane may be recovered")
 
 	// Handshake (decision 3).
 	ErrHandshakeRateLimited = errors.New("lifecycle: too many failed handshakes on this lane")

@@ -1325,6 +1325,25 @@ type HostedSessionOpen struct {
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
+	// IntegrationShell, IntegrationStatus and IntegrationReason are what the
+	// opener already knows about this session's shell integration, for the
+	// axis session.integrationChanged renders (nocx-k6p18.31).
+	//
+	// They are carried only by an opener that has no other way to say it. The
+	// ORDINARY open does not fill them in and must not: a remote session's
+	// launch-time refusal is the ssh channel's own answer and
+	// registerRemoteIntegration reads it there, which is the one owner of
+	// that question. A RE-ADOPTION has no ssh channel and no launch — it
+	// attached to a shell that was started by a process that no longer
+	// exists — so the only thing that knows whether its lifecycle channel
+	// came back is the pass that tried to bring it back.
+	//
+	// An empty status is not "unknown", it is "do not register": absence on
+	// this axis is how "conventional by design" is expressed, and a session
+	// with nothing to say must go on saying nothing.
+	IntegrationShell  string
+	IntegrationStatus string
+	IntegrationReason ssh.RefusalReason
 	// ObserveOutputHoles installs the coordinator's handler for stretches of
 	// this session's output that never crossed the wire — the execution
 	// host's bounded window reclaimed them before this machine could receive

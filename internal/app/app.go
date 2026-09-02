@@ -1742,6 +1742,11 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
+	// The same seam for a HELPER-hosted session's channel, opened or taken
+	// back (nocx-k6p18.31). One sink and not two: the axis does not care
+	// which transport carried the lane, and the loss cause spelling has one
+	// owner either way.
+	helperReg.lifecycleLoss = ptf.noteLifecycleLoss
 	// The third seam onto the same axis (nocx-cgzc): the observer says the
 	// shell was replaced before it ever answered, and the transport decides
 	// whether that still applies. The factory does not decide it, because

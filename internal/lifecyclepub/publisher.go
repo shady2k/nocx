@@ -246,6 +246,7 @@ func originString(o lifecycle.AttemptOrigin) string {
 type Kernel interface {
 	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
 	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
+	AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
 	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) ([]lifecycle.Outbound, error)
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) ([]lifecycle.Outbound, error)
 	Deliver(out lifecycle.Outbound) error
@@ -470,6 +471,35 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 		p.last[lane] = f
 		p.mu.Unlock()
 	}
+	return h, nil
+}
+
+// AdoptDomain forwards a takeover of a still-living domain to the kernel
+// (nocx-k6p18.31) and PUBLISHES the resulting lane, which is the one way it
+// differs from RequestDomain above.
+//
+// RequestDomain publishes nothing because minting a Pending domain moves no
+// lifecycle: the handshake is what makes a lane live, and the renderer keys
+// enhanced mode on the fact the handshake produces. An adoption IS that
+// moment — the shell is already past its accept, so the lane goes live in one
+// step and the renderer has to be told, or the pane it just took back would
+// hold a live authenticated domain and go on rendering as a plain terminal.
+//
+// The published fact carries no establishment generation, and that is
+// deliberate rather than an omission: decision 9 defers an accept until the
+// renderer acknowledges the presentation, and there is no accept here to
+// defer. The shell was accepted by the coordinator that is gone and never
+// un-accepted. The renderer's own guard is the field's presence, so nothing
+// there needs to know about this path.
+func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
+	h, err := p.kernel.AdoptDomain(lane, domain, epoch, capability, recovery, t)
+	if err != nil {
+		return h, err
+	}
+	p.mu.Lock()
+	p.known[lane] = struct{}{}
+	p.mu.Unlock()
+	p.publishLane(lane)
 	return h, nil
 }
 

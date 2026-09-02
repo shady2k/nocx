@@ -52,7 +52,52 @@ const (
 	OpCloseSession = "close-session"
 	// OpSignal sends one signal to the session's process group.
 	OpSignal = "signal"
+	// OpAdoptLifecycle hands a REPLACING coordinator the lifecycle launch the
+	// helper spawned a session's shell with, so it can take over the domain
+	// the shell is still speaking on (nocx-k6p18.31).
+	//
+	// It exists because the helper is the only party that still holds that
+	// identity. The capability is minted by a coordinator's kernel at spawn
+	// and reaches the shell through the helper; when the coordinator is
+	// replaced, the shell goes on stamping every frame with a domain no live
+	// kernel recognises, and the replacement drops all of them. The shell
+	// cannot be told anything new — its end of the channel is a descriptor
+	// handed over at spawn and it never re-handshakes — so the only leg that
+	// can be re-established is the coordinator's, and this is what
+	// re-establishes it.
+	//
+	// WHY GIVING A BEARER VALUE BACK IS NOT A WIDENING. ADR-0024 §13 draws
+	// the boundary at hostile bytes on the terminal and at a DESCENDANT of
+	// the shell that inherited the descriptor; neither can reach this op,
+	// which is answered only over an authenticated coordinator↔helper
+	// connection — the same connection the value travelled out on, in the
+	// same direction class, to the same trust class that minted it. A caller
+	// that can reach it already holds the session's keyboard and its whole
+	// output stream. What it must NOT become is a field of the inventory:
+	// `sessions` is asked constantly and by callers with no adoption to do,
+	// and a bearer value that rides every listing is a bearer value with no
+	// bound on who has seen it. Hence a separate op, asked once, per session.
+	OpAdoptLifecycle = "adopt-lifecycle"
 )
+
+// AdoptLifecycleParams names the session whose lifecycle identity the caller
+// intends to take over.
+type AdoptLifecycleParams struct {
+	Session HostSessionID `json:"session"`
+}
+
+// AdoptLifecycleResult is the launch the helper spawned this session's shell
+// with, or null when the session is conventional and there is nothing to
+// adopt.
+//
+// Null is an ANSWER and is always present rather than omitted, for the reason
+// every other nullable field on this wire is: a coordinator must be able to
+// tell "this session has no lifecycle channel" from "this generation does not
+// answer the question", because the first is a conventional pane that is
+// correct as it stands and the second is a degrade the product has to state.
+type AdoptLifecycleResult struct {
+	Lifecycle *LifecycleLaunch `json:"lifecycle"`
+}
 
 // CloseSessionParams deliberately ends one helper-hosted session.
 type CloseSessionParams struct {

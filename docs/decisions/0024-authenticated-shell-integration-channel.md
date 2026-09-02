@@ -683,6 +683,97 @@ intent — a `ps` while the session runs, a log somebody greps a week later. Act
 inspection needs a process already able to attach to the shell it is inspecting,
 which is the compromised-shell case this ADR excluded from the start.
 
+## Amendment (2026-09-02) — a domain survives its coordinator, and the helper is where its identity lives
+
+`nocx-k6p18.31`. This closes the last "Revisit when" bullet below, **and it
+closes it the other way round from how that bullet guessed.**
+
+### What was measured
+
+The helper now owns the PTY, so it also spawns the shell and holds the parent
+end of the lifecycle socketpair (`internal/helper/session/spawn_local.go`); the
+coordinator reaches the shell's frames as a second bounded byte window relayed
+over the coordinator↔helper connection. Quit nocx and start it again, and
+`nocx-k6p18.30` takes the session back: the process is the same, the output is
+live, the ledger's blocks are restored. But the shell goes on stamping every
+frame with the domain, epoch and capability the DEAD coordinator's kernel
+minted, and the replacement recognises none of it.
+
+The symptom is worse than "no new blocks". With no live domain the lane is
+`Native`, and a pane on a native lane is presented as a conventional terminal:
+`.scrollback-inner.inner-fullscreen-mode` hides every restored block with
+`display: none`, and there is no editor to type into at all. Measured on the
+acceptance run: the returned tab had its whole history built, in the DOM, and
+invisible.
+
+### The decision
+
+**A replacing coordinator ADOPTS the running domain rather than establishing a
+fresh one, and the helper is the party that hands the identity back.** A new op,
+`session.adopt-lifecycle`, answers with the `LifecycleLaunch` the helper spawned
+that session's shell with, or with null for a conventional session; the new
+kernel installs the domain `Established` on the re-attached carrier
+(`Kernel.AdoptDomain`) and the shell notices nothing.
+
+### Why not a fresh epoch, which is what this ADR expected
+
+The bullet below assumed nocx could tell the shell something. It cannot. The
+shell's end of the channel is a descriptor handed over at spawn, it sends one
+`hello` per shell and never re-handshakes, and there is no frame it is written
+to read that could re-key it. A fresh epoch would therefore require a new
+shell-side protocol act — the one thing this whole level exists to avoid asking
+a far host for — and it would buy nothing, because **an epoch exists to make
+STALE authority stale and this authority is not stale.** The shell is the same
+shell, on the same channel, holding the same secret, with no gap in which
+anything else could have taken its place.
+
+Nor is this "reviving a `Lost` domain", which §12 of the protocol forbids. That
+rule governs a kernel that WATCHED its transport die and revoked authority, so
+that a renderer already fallen back to a native prompt can never be told the old
+authority is good again. No kernel here saw a loss: one was killed, and the
+other never knew the domain. **What died is the registry that could address the
+domain, not the domain.**
+
+### Decision 10's threat model, re-read against this
+
+Nothing about authentication changes: every frame still carries the per-epoch
+bearer, and the kernel still validates domain, transport, epoch and capability
+before it consults any state. The two actors decision 10 names are unaffected —
+hostile output still cannot reach a transport that is not the tty, and a
+descendant that inherited the descriptor still cannot produce the capability,
+which is exactly the measurement that made the capability mandatory rather than
+belt-and-braces.
+
+What changes is the SET OF HOLDERS, by one: the replacing coordinator. The value
+travels back over the same authenticated coordinator↔helper connection it
+travelled out on, to the same trust class that minted it — a caller that can ask
+this question already holds the session's write capability and its entire output
+stream, and could spawn a new integrated shell of its own in one call. The
+boundary is the Unix account, as `contracts/helper/README.md` already states for
+this whole wire, and same-user inspection is excluded from the model by decision
+10 as amended.
+
+Two constraints make that argument hold rather than merely sound plausible, and
+both are enforced in code:
+
+- **The bearer is not inventory.** It is answered only to a caller that names
+  one session, on an op of its own, never as a field of `sessions` — which is
+  asked constantly, by callers with no adoption to do.
+- **The re-attachment resumes at the lifecycle window's HEAD, not its base.**
+  This is the one new vector adoption would otherwise open: the helper retains
+  the frames the previous coordinator already consumed, and they carry a
+  capability the adopted domain still honours, so a replay from the base would
+  re-deliver authenticated commands into the new kernel.
+
+### And when it cannot be done, the pane says so
+
+Three ways it fails — a helper generation from before the op (two are resident
+at once by design), a session the helper reports no launch for, and a refusal
+from the kernel — and all three leave `session.integrationChanged` at
+`conventional` with `channel-unavailable`. None of them refuses the
+re-adoption: the session comes back either way, and the difference is whether it
+goes on producing blocks or states that it cannot.
+
 ## What this deliberately leaves open
 
 - ~~**Whether the capability ever touches a named file.**~~ **Closed
@@ -752,7 +843,11 @@ manufacture authority out of terminal bytes.
   as the local path does, and the forwarded-port transport becomes unnecessary
   rather than supplemented. Worth knowing before anyone spends much on the
   forwarded-port path — it is the right answer today and the disposable one later.
-- Reattachment after a relay reconnect is designed, which needs its own
-  authenticated epoch rather than resumption of an old one.
+- ~~Reattachment after a relay reconnect is designed, which needs its own
+  authenticated epoch rather than resumption of an old one.~~ **Closed
+  2026-09-02 (`nocx-k6p18.31`), against its own guess:** the reattachment that
+  actually arrived is a COORDINATOR being replaced under a shell that never
+  noticed, and a fresh epoch there would be ceremony over an authority that
+  never went stale. See the amendment above.
 - A supported shell cannot write to a non-tty transport from its prompt hooks —
   then the answer is a helper binary, not an in-band tier.

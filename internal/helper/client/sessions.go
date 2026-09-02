@@ -108,6 +108,45 @@ func (c *Client) CloseSession(ctx context.Context, id HostSessionID) error {
 	}, nil)
 }
 
+// ErrLifecycleAdoptUnsupported is a helper generation that does not know the
+// adopt-lifecycle op. It is a fact about the GENERATION, not a failure of the
+// session: two generations are resident at once by design, and a session held
+// by an older one can be taken back — its output is live and its ledger is
+// restored — with no way to re-establish its lifecycle channel. The caller
+// turns it into the statement the product shows, never into silence.
+var ErrLifecycleAdoptUnsupported = errors.New("helper: this generation does not hand back a session lifecycle launch")
+
+// AdoptLifecycle asks the helper for the lifecycle identity it spawned a
+// session's shell with, so a REPLACING coordinator can take over the domain
+// that shell is still speaking on (nocx-k6p18.31).
+//
+// Three answers, and they are three different situations:
+//
+//	(launch, nil)   adopt it; the shell has been speaking to nobody.
+//	(nil, nil)      this session has no lifecycle channel. A conventional
+//	                pane, correct as it stands, and nothing to state.
+//	(nil, err)      the question could not be answered. ErrLifecycleAdopt-
+//	                Unsupported for an older generation; anything else is
+//	                the connection. Either way the pane is degraded and the
+//	                product says so.
+func (c *Client) AdoptLifecycle(ctx context.Context, id HostSessionID) (*proto.LifecycleLaunch, error) {
+	var result proto.AdoptLifecycleResult
+	err := c.Call(ctx, proto.ServiceSession, proto.OpAdoptLifecycle, proto.AdoptLifecycleParams{
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(id.Generation),
+			Session:    id.Session,
+		},
+	}, &result)
+	if err != nil {
+		var refusal *RefusalError
+		if errors.As(err, &refusal) && refusal.Code == proto.ErrCodeUnknownOp {
+			return nil, ErrLifecycleAdoptUnsupported
+		}
+		return nil, err
+	}
+	return result.Lifecycle, nil
+}
+
 // Signal sends one signal to the helper-owned process group.
 func (c *Client) Signal(ctx context.Context, id HostSessionID, sig int) error {
 	return c.Call(ctx, proto.ServiceSession, proto.OpSignal, proto.SignalParams{

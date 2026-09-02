@@ -33,14 +33,10 @@ interface Take {
  */
 interface Clip {
   readonly mode: ClipMode
-  /** Seconds to hold the final frame of a looping clip before playing it
-   *  again. A number, deliberately, and not yet a [min, max] range: a range
-   *  would have to be resolved somewhere, and the only honest place to
-   *  resolve it is the same draw that decides everything else the animal
-   *  does at random. That draw is nocx-99ejl's, so the range arrives with
-   *  it. Declaring the wider type now and quietly reading 0 out of it would
-   *  be a setting that does nothing, which is worse than not offering it. */
-  readonly pause?: number
+  /** Seconds to hold the final frame of a looping clip. A range is resolved
+   *  once when a cycle starts, by the injected random source in the painter,
+   *  so a pause never changes halfway through a frame interval. */
+  readonly pause?: number | readonly [number, number]
   readonly takes: readonly Take[]
 }
 
@@ -49,7 +45,7 @@ function once(file: string, frames: number): Clip {
   return { mode: 'once', takes: [{ file, frames }] }
 }
 
-function loop(file: string, frames: number, pause?: number): Clip {
+function loop(file: string, frames: number, pause?: number | readonly [number, number]): Clip {
   return { mode: 'loop', pause, takes: [{ file, frames }] }
 }
 
@@ -69,6 +65,10 @@ export interface PetPack {
   readonly activity: Readonly<Record<Exclude<Activity, 'none'>, string>>
   /** Body-lengths travelled by one complete gait cycle. */
   readonly strideBodies: Readonly<{ walk: number; run: number }>
+
+  /** Fixed frames for rising, apex and falling. Undefined means the fall
+   *  clip is held on one frame rather than animated. */
+  readonly airFrames?: Readonly<{ rise: number; apex: number; fall: number }>
 }
 
 /**
@@ -99,7 +99,7 @@ export const CAT_PACK: PetPack = {
   cell: 50,
   fps: 10,
   clips: {
-    idle: loop('idle.png', 10, 0.8),
+    idle: loop('idle.png', 10, [0.4, 2.0]),
     walk: loop('walk.png', 8),
     run: loop('run.png', 8),
     meow: once('meow.png', 4),
@@ -144,6 +144,24 @@ export const CAT_PACK: PetPack = {
   // scales without changing the gait's proportions. Run covers three body
   // lengths per cycle, versus one for walk, making the ratio explicit.
   strideBodies: { walk: 1, run: 3 },
+
+  // The air poses reuse run.png without advancing its gait cycle. The
+  // indices are chosen by reasoning about push-off, apex and landing phases;
+  // this headless worktree cannot confirm the artwork visually.
+  airFrames: { rise: 1, apex: 3, fall: 6 },
+}
+
+/** Select the fixed airborne pose from signed vertical speed. A narrow band
+ *  around zero is the apex; stronger motion in either direction gets its
+ *  directional pose. Packs without declarations return null and let callers
+ *  hold their fall clip on one frame. */
+export function airFrame(pack: PetPack, vy: number, maxFall: number): number | null {
+  const frames = pack.airFrames
+  if (frames === undefined) return null
+  const threshold = Math.max(1, maxFall * 0.2)
+  if (vy < -threshold) return frames.rise
+  if (vy > threshold) return frames.fall
+  return frames.apex
 }
 
 /** The rectangle inside a cell that any frame of the pack actually paints. */

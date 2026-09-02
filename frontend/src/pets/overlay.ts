@@ -30,6 +30,7 @@ import {
 } from './pet'
 import {
   CAT_PACK,
+  airFrame,
   clipFor,
   loadPack,
   packBase,
@@ -172,6 +173,7 @@ export class PetOverlay {
   private _behaviorGeneration = 0
   private _paintedGeneration = -1
   private _clipT = 0
+  private _clipPause = 0
   /** Which drawing of the current behaviour is playing. */
   private _take = 0
   private _last = 0
@@ -540,31 +542,52 @@ export class PetOverlay {
       this._doing = doing
       this._clip = name
       this._clipT = 0
-      // A fresh take each time the behaviour starts. A cat washes itself
-      // more than once an hour, and the identical five frames every time is
-      // what turns a living animal back into a loop.
+      // A fresh take and pause are chosen only when the behaviour starts.
+      // Resolving a range here, rather than per frame, keeps the final pose
+      // stable for the whole pause while still giving repeated cycles variety.
       this._take = Math.floor(this._rng() * clip.takes.length) % clip.takes.length
+      const pause = definition.pause ?? 0
+      this._clipPause =
+        definition.mode === 'loop'
+          ? typeof pause === 'number'
+            ? pause
+            : pause[0] + this._rng() * (pause[1] - pause[0])
+          : 0
     }
     const take = clip.takes[Math.min(this._take, clip.takes.length - 1)]
     // The clip plays at the ratio of actual speed to the gait's own speed, so
     // a cat still accelerating draws its walk correspondingly slower and the
-    // contact foot stays put. `gaitSpeed` is pet.ts's, not a copy of it —
-    // written out here as well it would be the same arithmetic in two places,
-    // and the two would drift precisely where this matters.
+    // contact foot stays put. Airborne poses are discrete, so their clip time
+    // does not advance at all.
     const moving = this._pet.locomotion === 'walk' || this._pet.locomotion === 'run'
     const baseSpeed = gaitSpeed(this._pet.locomotion, this._timing, this._scale)
     const rate = moving && baseSpeed > 0 ? Math.abs(this._pet.vx) / baseSpeed : 1
-    this._clipT += dt * rate
+    if (this._pet.locomotion !== 'fall') this._clipT += dt * rate
     const cycle = take.frames / loaded.pack.fps
-    const phase =
-      definition.mode === 'loop' ? this._clipT % (cycle + (definition.pause ?? 0)) : this._clipT
+    if (definition.mode === 'loop') {
+      while (this._clipT >= cycle + this._clipPause) {
+        this._clipT -= cycle + this._clipPause
+        const pause = definition.pause ?? 0
+        this._clipPause =
+          typeof pause === 'number' ? pause : pause[0] + this._rng() * (pause[1] - pause[0])
+      }
+    }
+    const phase = this._clipT
+    const airborne = this._pet.locomotion === 'fall'
+    const fixedAirFrame = airborne
+      ? airFrame(loaded.pack, this._pet.vy, this._tuning.maxFall)
+      : null
     const frame =
-      definition.mode === 'loop'
-        ? Math.min(
-            take.frames - 1,
-            Math.floor(Math.min(phase, cycle - Number.EPSILON) * loaded.pack.fps),
-          )
-        : Math.min(take.frames - 1, Math.floor(phase * loaded.pack.fps))
+      fixedAirFrame !== null
+        ? Math.min(take.frames - 1, Math.max(0, fixedAirFrame))
+        : airborne
+          ? 0
+          : definition.mode === 'loop'
+            ? Math.min(
+                take.frames - 1,
+                Math.floor(Math.min(phase, cycle - Number.EPSILON) * loaded.pack.fps),
+              )
+            : Math.min(take.frames - 1, Math.floor(phase * loaded.pack.fps))
 
     const { x0, y0 } = loaded.trim
     const width = this._width
@@ -606,6 +629,10 @@ export class PetOverlay {
         expressionScaleY = 0.94 + 0.06 * rebound + 0.04 * bump
       }
     }
+    const tilt =
+      this._pet.locomotion === 'fall'
+        ? Math.max(-1, Math.min(1, this._pet.vy / Math.max(1, this._tuning.maxFall))) * 4
+        : 0
     const world = this._world.style
     world.width = `${width}px`
     world.height = `${this._height}px`
@@ -620,6 +647,6 @@ export class PetOverlay {
     s.backgroundImage = `url(${take.url})`
     s.backgroundSize = `${take.sheetWidth * this._scale}px ${take.sheetHeight * this._scale}px`
     s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * this._scale}px ${-y0 * this._scale}px`
-    s.transform = `scale(${expressionScaleX}, ${expressionScaleY})`
+    s.transform = `rotate(${tilt}deg) scale(${expressionScaleX}, ${expressionScaleY})`
   }
 }

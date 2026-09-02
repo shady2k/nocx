@@ -37,6 +37,19 @@ const PACK: PetPack = {
   strideBodies: { walk: 1, run: 3 },
 }
 
+const AIR_PACK: PetPack = {
+  ...PACK,
+  airFrames: { rise: 1, apex: 0, fall: 1 },
+}
+
+const PAUSE_PACK: PetPack = {
+  ...PACK,
+  clips: {
+    ...PACK.clips,
+    idle: { ...PACK.clips.idle, pause: [0.4, 2.0] },
+  },
+}
+
 /** Every clip paints a 4×4 animal at (3,5) of a 10×10 cell. */
 const IMAGES: ImageSource = {
   load(url) {
@@ -138,12 +151,13 @@ function overlayOn(
   s: Stand,
   rng = () => 0.99,
   settings: ReturnType<typeof settingsStub> = settingsStub(),
+  pack: PetPack = PACK,
 ): PetOverlay {
   return new PetOverlay({
     settings,
     host: s.host,
     blocks: s.blocks,
-    pack: PACK,
+    pack,
     imageSource: IMAGES,
     rng,
     raf: (cb) => {
@@ -180,7 +194,7 @@ describe('a pet over a pane', () => {
     expect(world.parentElement).toBe(layer)
     expect(sprite.parentElement).toBe(world)
     expect(world.style.transform).toMatch(/^translate\(.*\) scaleX\([-\d]+\)$/)
-    expect(sprite.style.transform).toBe('scale(1, 1)')
+    expect(sprite.style.transform).toBe('rotate(0deg) scale(1, 1)')
   })
 
   it('falls in and comes to rest ON a command block', async () => {
@@ -195,7 +209,45 @@ describe('a pet over a pane', () => {
     expect(m).not.toBeNull()
     expect(Number(m![2]) + 34).toBeCloseTo(200, 0)
   })
+  it('holds one airborne frame and tilts with downward speed', async () => {
+    const s = stand([200])
+    overlayOn(s, () => 0.99, settingsStub(), AIR_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(1 / 60)
+    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
+    const first = sprite.style.backgroundPosition
+    expect(first).toContain('px')
+    expect(sprite.style.transform).toMatch(/^rotate\([0-9.]+deg\) scale\(1, 1\)$/)
+    s.pump(0.1)
+    expect(sprite.style.backgroundPosition).toBe(first)
+  })
 
+  it('keeps the one-frame fallback for packs without airborne poses', async () => {
+    const s = stand([200])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(1 / 60)
+    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
+    const first = sprite.style.backgroundPosition
+    s.pump(0.2)
+    expect(sprite.style.backgroundPosition).toBe(first)
+  })
+
+  it('carries a pause range into drawing timing', () => {
+    expect(timingFrom(PAUSE_PACK).locomotion.idle.pause).toEqual([0.4, 2.0])
+  })
+
+  it('resolves one pause per loop cycle without growing the accumulator', async () => {
+    const draws = vi.fn(() => 0)
+    const s = stand([200])
+    const pet = overlayOn(s, draws, settingsStub(), PAUSE_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    pet.attendTo('shell')
+    const before = draws.mock.calls.length
+    s.pump(30)
+    expect(draws.mock.calls.length - before).toBeLessThan(200)
+  })
   it('drops when the block under it is removed, rather than jumping to another', async () => {
     const s = stand([150, 300])
     overlayOn(s)

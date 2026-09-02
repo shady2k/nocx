@@ -1,7 +1,7 @@
 // The pack loader (nocx-q4qeh.1). The image source is injected, so the trim
 // rule is testable without a canvas.
 import { describe, expect, it } from 'vitest'
-import { CAT_PACK, clipFor, loadPack, type ImageSource, type PetPack } from './pack'
+import { CAT_PACK, airFrame, clipFor, loadPack, type ImageSource, type PetPack } from './pack'
 
 /** A strip of `frames` cells, painting one rectangle per cell at the offsets
  *  given. Anything not listed stays transparent. */
@@ -194,9 +194,15 @@ describe('clipFor', () => {
     for (const name of ['sitting', 'sleeping']) {
       expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'hold' })
     }
-    expect(CAT_PACK.clips.idle).toMatchObject({ pause: 0.8 })
+    expect(CAT_PACK.clips.idle).toMatchObject({ pause: [0.4, 2.0] })
     // Strides are body-length coefficients; timingFrom applies the loaded
     // trim width, so the run/walk ratio remains three.
     expect(CAT_PACK.strideBodies).toEqual({ walk: 1, run: 3 })
+  })
+  it('declares reasoned air poses from the run strip', () => {
+    expect(CAT_PACK.airFrames).toEqual({ rise: 1, apex: 3, fall: 6 })
+    expect(airFrame(CAT_PACK, -500, 900)).toBe(1)
+    expect(airFrame(CAT_PACK, -10, 900)).toBe(3)
+    expect(airFrame(CAT_PACK, 500, 900)).toBe(6)
   })
 })

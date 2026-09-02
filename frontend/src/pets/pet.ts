@@ -21,15 +21,15 @@
 import type { Ledge } from './terrain'
 import { ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
 
+type ClipPause = number | readonly [number, number]
 export type ClipMode = 'loop' | 'once' | 'hold'
 
 /** Timing data copied from the loaded drawing, not a pack dependency. */
 interface ClipTiming {
   readonly mode: ClipMode
   readonly duration: number
-  readonly pause: number
+  readonly pause: ClipPause
 }
-
 /**
  * The pure state machine receives this as data. Passing the logical state
  * maps keeps `pet.ts` independent of pack loading; passing a pack or a
@@ -74,6 +74,10 @@ export interface Pet {
   readonly vx: number
   readonly locomotion: Locomotion
   readonly mood: Mood
+  /** The two most recent chosen occupations, newest first. */
+  readonly recentBehaviors: readonly string[]
+  /** Ages of noticeable autonomous events inside the rolling minute. */
+  readonly noticeableAges: readonly number[]
   readonly activity: Activity
   /** Seconds left of the current occupation. */
   readonly hold: number
@@ -163,6 +167,8 @@ export function newPet(x: number, y: number): Pet {
     vx: 0,
     locomotion: 'fall',
     mood: 'calm',
+    recentBehaviors: [],
+    noticeableAges: [],
     activity: 'none',
     hold: 0,
     phase: 'none',
@@ -365,7 +371,11 @@ interface Choice {
    *  part of a minute to reach an edge. Without a way to leave from the
    *  middle it stays on the ledge it landed on for as long as anyone watches,
    *  which is exactly the "decoration stuck to the screen" this feature is
-   *  trying not to be. */
+   *  trying not to be. Descending is deliberately outside the noticeable
+   *  budget: it is a quiet escape down, unlike the expressive jump upward,
+   *  and excluding it keeps a full budget from trapping the animal on one
+   *  ledge.
+   */
   readonly descend?: boolean
 }
 
@@ -466,6 +476,51 @@ function pick(choices: readonly Choice[], r: number): Choice {
   return choices[choices.length - 1]
 }
 
+const NOTICEABLE_WINDOW = 60
+const NOTICEABLE_LIMIT = 2
+const REPETITION_EXEMPT: Record<string, true> = { sit: true, lie: true, sleep: true }
+
+function choiceKey(choice: Choice): string {
+  if (choice.ascend === true) return 'jump'
+  if (choice.descend === true) return 'descend'
+  return choice.locomotion === 'idle' ? choice.activity : choice.locomotion
+}
+
+function isNoticeableChoice(choice: Choice): boolean {
+  return choice.ascend === true || choice.locomotion === 'run'
+}
+
+function weightedChoices(
+  choices: readonly Choice[],
+  recent: readonly string[],
+  attending: Author | null,
+  canNotice: boolean,
+): readonly Choice[] {
+  if (attending !== null) return choices
+  return choices.map((choice) => {
+    const key = choiceKey(choice)
+    const recentAt = recent.indexOf(key)
+    const repetitionScale =
+      REPETITION_EXEMPT[key] === true ? 1 : recentAt === 0 ? 0 : recentAt === 1 ? 0.25 : 1
+    // The budget never forces a more visible outcome than the walk it limits:
+    // it reduces future walks while leaving an already-reached edge to turn.
+    const edgeScale =
+      choice.locomotion === 'walk' &&
+      choice.ascend !== true &&
+      choice.descend !== true &&
+      !canNotice
+        ? 0.25
+        : 1
+    const noticeScale = isNoticeableChoice(choice) && !canNotice ? 0 : 1
+    return { ...choice, weight: choice.weight * repetitionScale * noticeScale * edgeScale }
+  })
+}
+
+function rememberChoice(pet: Pet, choice: Choice): readonly string[] {
+  if (pet.attending !== null) return pet.recentBehaviors
+  return [choiceKey(choice), ...pet.recentBehaviors].slice(0, 2)
+}
+
 // ── The step ───────────────────────────────────────────────────────────────
 
 /** The bottom of the pane is ground too, and the pet must be able to STAND
@@ -513,7 +568,12 @@ export function step(
   rng: () => number,
   tuning: PetTuning = DEFAULT_TUNING,
 ): Pet {
-  let next = pet
+  let next: Pet = {
+    ...pet,
+    noticeableAges: pet.noticeableAges
+      .map((age) => age + dt)
+      .filter((age) => age < NOTICEABLE_WINDOW),
+  }
 
   // 1. Resolve the world before phases. A block can move or disappear while
   //    a visual transition is paused; the pet must ride it or fall at once.
@@ -588,7 +648,10 @@ export function step(
     x += vx * dt
     const past = vx < 0 && x <= ledge.x0 ? -1 : vx > 0 && x >= ledge.x1 ? 1 : 0
     if (past !== 0) {
-      // Cornered by the pointer: leave, rather than turn round into it.
+      // The budget never forces a more visible outcome than the walk it
+      // limits: once the edge is reached, turning is unavoidable. A turn
+      // reached with a full window is therefore not charged as discretionary.
+      const chargeTurn = next.attending === null && next.noticeableAges.length < NOTICEABLE_LIMIT
       if (threat === past || rng() < tuning.stepOff) {
         // Off the end, and whatever is below catches it. The landing is the
         // ordinary swept one, so the animal may drop past several ledges or
@@ -620,6 +683,7 @@ export function step(
       vx = 0
       return {
         ...next,
+        noticeableAges: chargeTurn ? [...next.noticeableAges, 0] : next.noticeableAges,
         x,
         y,
         dir,
@@ -675,18 +739,25 @@ export function step(
   if (activity === 'sleep') {
     return { ...next, x, y, dir, vx, mood: 'tired', moodHold: 0, boredom, ledgeId: ledge.id }
   }
-
   // 6. Finish the current occupation before starting another one. Deciding
   //    afresh every frame is what makes a pet twitch instead of live.
   hold -= dt
   if (hold <= 0) {
     const up = next.attending === null ? ledgeAbove(env.terrain, x, y, tuning.jumpReach) : null
-    const choices =
+    const offered =
       up === null ? menu(mood, next.attending) : [...menu(mood, next.attending), ASCEND]
+    const choices = weightedChoices(
+      offered,
+      next.recentBehaviors,
+      next.attending,
+      next.noticeableAges.length < NOTICEABLE_LIMIT,
+    )
     const c = pick(choices, rng())
     if (c.ascend === true && up !== null) {
       return {
         ...next,
+        recentBehaviors: rememberChoice(next, c),
+        noticeableAges: [...next.noticeableAges, 0],
         x,
         y,
         dir,
@@ -711,6 +782,7 @@ export function step(
     if (c.descend === true) {
       return {
         ...next,
+        recentBehaviors: rememberChoice(next, c),
         x,
         y,
         dir,
@@ -729,6 +801,10 @@ export function step(
     activity = c.activity
     hold = chosenHold(c, env.timing)
     reacting = false
+    next = { ...next, recentBehaviors: rememberChoice(next, c) }
+    if (c.locomotion === 'run' && next.attending === null) {
+      next = { ...next, noticeableAges: [...next.noticeableAges, 0] }
+    }
     if (c.locomotion !== 'idle' && rng() < 0.5) dir = (dir * -1) as 1 | -1
   }
 

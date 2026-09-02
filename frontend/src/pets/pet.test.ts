@@ -779,3 +779,137 @@ describe('motion phases', () => {
     expect(landed.phaseHold).toBeLessThanOrEqual(0.22)
   })
 })
+
+describe('airborne and ordinary-choice policy', () => {
+  const wide: Ledge = { id: 'wide', x0: -1e6, x1: 1e6, y: 200 }
+  const wideEnv = env([wide])
+
+  it('descends without the jump anticipation phase', () => {
+    const after = step(standing(A, { x: 200, hold: 0.01 }), env(), 0.02, seq(0.3))
+    expect(after.locomotion).toBe('fall')
+    expect(after.phase).toBe('none')
+  })
+
+  it('turns at an exhausted budget instead of falling off the ledge', () => {
+    const edge: Ledge = { id: 'edge', x0: 100, x1: 300, y: 200 }
+    const p = standing(edge, {
+      locomotion: 'walk',
+      dir: 1,
+      x: edge.x1 - 1,
+      hold: 100,
+      noticeableAges: [0, 1],
+    })
+    const after = step(p, env([edge]), 0.5, seq(0.99))
+    expect(after.locomotion).toBe('walk')
+    expect(after.phase).toBe('turn')
+  })
+
+  it('never repeats a non-exempt occupation across many seeded choices', () => {
+    const exempt = new Set(['sit', 'lie', 'sleep'])
+    let seed = 0x12345678
+    const rng = () => {
+      seed = (1664525 * seed + 1013904223) >>> 0
+      return seed / 0x100000000
+    }
+    let p = standing(wide, { hold: 0 })
+    for (let i = 0; i < 5000; i++) {
+      p = step(p, wideEnv, 0.01, rng)
+      const [latest, previous] = p.recentBehaviors
+      if (latest !== undefined && latest === previous && !exempt.has(latest)) {
+        throw new Error(`repeated occupation: ${latest}`)
+      }
+      p = {
+        ...p,
+        x: 0,
+        y: wide.y,
+        ledgeId: wide.id,
+        locomotion: 'idle',
+        activity: 'sit',
+        hold: 0,
+        vx: 0,
+        vy: 0,
+        phase: 'none',
+        phaseHold: 0,
+        phaseDuration: 0,
+        phaseTurned: false,
+      }
+    }
+  })
+
+  it('keeps noticeable non-watching events within two per rolling minute', () => {
+    let seed = 0xabcdef01
+    const rng = () => {
+      seed = (1103515245 * seed + 12345) >>> 0
+      return seed / 0x100000000
+    }
+    let p = standing(wide, { hold: 0, mood: 'pleased', moodHold: 1000 })
+    const samples: number[] = []
+    for (let i = 0; i < 7200; i++) {
+      p = step(p, wideEnv, 0.1, rng)
+      samples.push(p.noticeableAges.length)
+      expect(p.noticeableAges.length).toBeLessThanOrEqual(2)
+      p = {
+        ...p,
+        x: 0,
+        y: wide.y,
+        ledgeId: wide.id,
+        locomotion: 'idle',
+        activity: 'sit',
+        hold: 0,
+        vx: 0,
+        vy: 0,
+        phase: 'none',
+        phaseHold: 0,
+        phaseDuration: 0,
+        phaseTurned: false,
+      }
+    }
+    const ordered = [...samples].sort((a, b) => a - b)
+    expect(ordered[Math.floor(ordered.length * 0.95)]).toBeLessThanOrEqual(2)
+    expect(Math.max(...samples)).toBeGreaterThan(0)
+  })
+
+  it('preserves mood signatures while damping remembered choices', () => {
+    const draw = (mood: 'calm' | 'worried', recentBehaviors: readonly string[]) => {
+      let seed = 17
+      const counts = new Map<string, number>()
+      for (let i = 0; i < 800; i++) {
+        seed = (1664525 * seed + 1013904223) >>> 0
+        const r = () => seed / 0x100000000
+        const p = step(
+          standing(wide, {
+            hold: 0,
+            mood,
+            moodHold: 1000,
+            recentBehaviors,
+          }),
+          wideEnv,
+          0.01,
+          r,
+        )
+        const key = p.recentBehaviors[0] ?? 'none'
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+      return counts
+    }
+    const calm = draw('calm', [])
+    const worried = draw('worried', [])
+    const dampedWorried = draw('worried', ['walk', 'scratch'])
+    const share = (counts: Map<string, number>, keys: readonly string[]) =>
+      keys.reduce((sum, key) => sum + (counts.get(key) ?? 0), 0) / 800
+    const worriedSignature = share(worried, ['sit', 'lie', 'scratch'])
+    const dampedSignature = share(dampedWorried, ['sit', 'lie', 'scratch'])
+    expect(dampedSignature).toBeGreaterThan(worriedSignature * 0.8)
+    expect(dampedSignature).toBeGreaterThan(share(calm, ['sit', 'lie', 'groom', 'stretch']))
+  })
+
+  it('does not spend memory or budget on the observing menu', () => {
+    let p = attend(standing(wide, { hold: 0 }), 'shell')
+    for (let i = 0; i < 30; i++) {
+      p = step(p, wideEnv, 1, seq(0))
+      p = { ...p, hold: 0 }
+    }
+    expect(p.recentBehaviors).toEqual([])
+    expect(p.noticeableAges).toEqual([])
+  })
+})

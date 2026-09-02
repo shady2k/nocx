@@ -1099,8 +1099,8 @@ type Gap struct {
 // invented its own synonym would be telling a user about the same hole in a
 // second set of words.
 //
-// The two that matter are two DIFFERENT FACTS about who had the bytes, and
-// that is why one value cannot serve for both:
+// The three that matter are three DIFFERENT FACTS about who had the bytes,
+// and that is why one value cannot serve for any two of them:
 const (
 	// GapReasonCap — the bytes were here and the per-command retention cap
 	// took them to stay inside its bound. Actionable: the knob that dropped
@@ -1115,6 +1115,27 @@ const (
 	// byte (frontend/src/ipc.ts) — and the two are deliberately the same
 	// word because they are the same sentence to a user.
 	GapReasonUnrecorded = "unrecorded"
+	// GapReasonHostWindow — the EXECUTION HOST's own bounded output window
+	// reclaimed the bytes before this machine could receive them (AD-9 on
+	// the helper's side of the wire, internal/helper/proto's Gap). A third
+	// distinct fact, and the distinction is what a person does next: `cap`
+	// means we had the bytes and the retention bound here evicted them, so
+	// the knob that dropped them is on this machine; `unrecorded` means
+	// nobody was recording, so no bound acted at all; this one means nothing
+	// on this machine could have kept them, because they never crossed the
+	// wire — the knob that governs it is the session's WindowBytes on the
+	// host, and raising retention here would change nothing.
+	//
+	// The helper's own word for the same cause is proto.GapReasonWindow
+	// ("window"), and this is deliberately not that string. The two live on
+	// different sides of a frozen ABI: proto's vocabulary is per generation
+	// and is read by one coordinator, while this one is the store's and is
+	// read by a person, where a bare "window" would be ambiguous with the
+	// coordinator's OWN replay window (internal/transport's ring) — a
+	// recording read a week later would not say which window lost the bytes.
+	// They meet in exactly one place, transport's sessionOutputHoleReason,
+	// so there is one translation and not a vocabulary.
+	GapReasonHostWindow = "hostWindow"
 	// GapReasonUnknown — a hole whose reason nothing recorded. It is what a
 	// reader says INSTEAD OF GUESSING; see sessionOutputGapReason in
 	// internal/transport, which named the cap here until a second legitimate

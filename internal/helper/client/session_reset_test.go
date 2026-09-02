@@ -116,6 +116,16 @@ func hostedFakeShell(t *testing.T) (*client.Client, *fakeProcess) {
 // the hole is STATED where it happened rather than only logged, the stream
 // continues afterwards — which is only possible if the ack that follows was
 // accepted — and the session is never reported as over.
+//
+// The hole is stated THROUGH THE OBSERVER and never in the byte stream. An
+// earlier version of this fix spliced a line of nocx's own text between the
+// two stretches, which made session.output's own sentence false — "the
+// backend hands back what the session printed and never interprets it"
+// (AD-6) — and left that line in a recording for ever, indistinguishable
+// from one the shell printed. So the second assertion here has two halves
+// that must hold together: the coordinator was told the hole's width, in
+// stream order, before it read a byte from the far side of it, and every
+// byte it did read came out of the shell.
 func TestALiveResetIsAppliedAndTheSessionSurvivesIt(t *testing.T) {
 	c, proc := hostedFakeShell(t)
 
@@ -152,6 +162,27 @@ func TestALiveResetIsAppliedAndTheSessionSurvivesIt(t *testing.T) {
 		t.Fatalf("shell output: %v", printErr)
 	}
 
+	// The observer is the seam the recorder is reached through: the
+	// coordinator's own hole record is written from it (internal/transport),
+	// and it must fire between the bytes the hole sits between, not when the
+	// notification happened to arrive.
+	type hole struct {
+		lost   uint64
+		reason string
+		// seenAt is how many bytes the reader had taken when the hole was
+		// stated: the assertion that it was stated in stream order and not
+		// when the notification happened to arrive.
+		seenAt int
+	}
+	var holeMu sync.Mutex
+	var holes []hole
+	var readSoFar int
+	attached.OnOutputHole(func(lost uint64, reason string) {
+		holeMu.Lock()
+		holes = append(holes, hole{lost: lost, reason: reason, seenAt: readSoFar})
+		holeMu.Unlock()
+	})
+
 	read := make(chan []byte, 1)
 	go func() {
 		var seen []byte
@@ -159,6 +190,9 @@ func TestALiveResetIsAppliedAndTheSessionSurvivesIt(t *testing.T) {
 		for {
 			n, readErr := attached.Read(buf)
 			if n > 0 {
+				holeMu.Lock()
+				readSoFar = len(seen)
+				holeMu.Unlock()
 				seen = append(seen, buf[:n]...)
 				if bytes.Contains(seen, []byte(marker)) {
 					read <- seen
@@ -183,13 +217,33 @@ func TestALiveResetIsAppliedAndTheSessionSurvivesIt(t *testing.T) {
 		t.Fatalf("the stream stopped at the reset: the output produced after it never arrived.\ngot %d bytes ending %q",
 			len(seen), tailOf(seen))
 	}
-	notice := bytes.Index(seen, []byte("[nocx]"))
-	if notice < 0 {
-		t.Fatalf("the hole was not stated to the reader: no reset notice in %d bytes of output.\nended %q",
+	holeMu.Lock()
+	got := append([]hole(nil), holes...)
+	holeMu.Unlock()
+	if len(got) == 0 {
+		t.Fatalf("the hole was not stated to the coordinator: no output hole observed over %d bytes of output.\nended %q",
 			len(seen), tailOf(seen))
 	}
-	if at := bytes.Index(seen, []byte(marker)); at < notice {
-		t.Fatalf("the reset was applied out of order: the notice is at %d and the post-reset output at %d", notice, at)
+	if got[0].lost == 0 {
+		t.Fatal("the hole was stated without its width: a gap of nothing is a gap nobody can report")
+	}
+	if got[0].reason != proto.GapReasonWindow {
+		t.Fatalf("the hole was stated with reason %q, not the helper's own %q", got[0].reason, proto.GapReasonWindow)
+	}
+	// In stream order: the observer fired before the reader reached a byte
+	// produced after the hole. Anything later would have the coordinator
+	// recording the hole under bytes that came after it.
+	if at := bytes.Index(seen, []byte(marker)); got[0].seenAt > at {
+		t.Fatalf("the hole was stated out of order: observed after %d bytes, and the post-reset output starts at %d",
+			got[0].seenAt, at)
+	}
+	// AD-6, and session.output's own words: every byte handed over is the
+	// session's. A coordinator that spliced its own sentence in here would
+	// have it replayed out of the recording a week later as if the shell had
+	// printed it.
+	if foreign := bytes.ReplaceAll(bytes.ReplaceAll(seen, []byte(marker), nil), []byte("a"), nil); len(foreign) != 0 {
+		t.Fatalf("the coordinator wrote %d bytes of its own into the session's output: %q",
+			len(foreign), foreign)
 	}
 	select {
 	case <-attached.Done():

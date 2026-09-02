@@ -192,6 +192,9 @@ type AttachedSession struct {
 	// refused as behind.
 	pendingReset          int
 	pendingLifecycleReset int
+	// holeObs is the coordinator's observer for a hole in this session's
+	// output — see OnOutputHole. Guarded by mu; fired outside it.
+	holeObs func(lost uint64, reason string)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -204,9 +207,15 @@ type inbound struct {
 	// payload is what Read hands to its caller.
 	payload []byte
 	// resetTo, when non-nil, is where the stream resumes. The cursor takes
-	// this value as the item is consumed, and payload then carries the
-	// statement of the hole rather than stream bytes — so it is NOT acked.
+	// this value as the item is consumed, and the item carries no stream
+	// bytes of its own — so nothing is acked for it.
 	resetTo *proto.StreamOffset
+	// hole is what the helper says was lost, in its own Gap shape: the range
+	// of this session's output that the host's window reclaimed before this
+	// reader could receive it. Carried on the item rather than reported when
+	// the notification arrives, because WHERE the hole sits is the whole of
+	// what a reader needs from it, and that is only known in stream order.
+	hole *proto.Gap
 }
 
 // Spawn creates a helper-owned shell and returns its inventory entry.
@@ -376,28 +385,26 @@ func (a *AttachedSession) take(q *stream, closed <-chan struct{}) (inbound, bool
 // subscriber's sent and acked cursors to the base; this is the coordinator
 // growing the ear for it. Two things are applied and both are required: the
 // cursor moves to the base, which is what makes the next ack acceptable
-// instead of behind, and the hole is STATED to the reader between the bytes it
-// sits between, which is what keeps the renderer from splicing two
-// non-adjacent stretches of output together and calling it a screen.
+// instead of behind, and the hole is STATED between the bytes it sits
+// between, which is what keeps a reader from splicing two non-adjacent
+// stretches of output together and calling it a screen.
 //
-// The statement is in-band because on this side of the boundary the byte
-// stream is the only thing that reaches the renderer: the coordinator's own
-// mid-stream reset (contracts, ipc.ts) is answered at attach and has no
-// notification shape, so a control-plane reset here would be a wire break in
-// three packages. What that costs is one line of nocx's own text in a
-// recording; what the alternative costs is a soft degrade visible only in a
-// log, which is the shape AGENTS.md names.
+// The statement is NOT in the byte stream, and an earlier version of this fix
+// put it there — a line of nocx's own text between the two stretches. It read
+// well and it was wrong twice over: session.output's contract says in its own
+// words that "the backend hands back what the session printed and never
+// interprets it (AD-6)", and a recording replays those bytes for ever, so a
+// person scrolling back a week later would read a sentence the shell never
+// printed and have no way to tell. The hole already has an owner in this
+// codebase — internal/content's Gap, with its start, its end and its reason —
+// and the coordinator reaches it through OnOutputHole.
 func (a *AttachedSession) applyReset(r proto.SessionReset) {
 	from := r.Resume.From
-	lost := uint64(0)
-	if r.Resume.Gap != nil && r.Resume.Gap.End > r.Resume.Gap.Start {
-		lost = uint64(r.Resume.Gap.End - r.Resume.Gap.Start)
-	}
 	if r.Stream == streamLifecycle {
-		// No notice on this carrier: the lifecycle stream is a framed
-		// protocol, not a terminal, and text spliced into it would be a
-		// second defect rather than a statement of the first. Its own
-		// resynchronisation belongs to the channel that frames it.
+		// No hole is reported on this carrier: the lifecycle stream is a
+		// framed protocol, not a terminal, and there is no recording of it
+		// for a gap to be a gap in. Its own resynchronisation belongs to the
+		// channel that frames it.
 		a.mu.Lock()
 		a.pendingLifecycleReset++
 		a.mu.Unlock()
@@ -407,18 +414,56 @@ func (a *AttachedSession) applyReset(r proto.SessionReset) {
 	a.mu.Lock()
 	a.pendingReset++
 	a.mu.Unlock()
-	a.data.push(inbound{resetTo: &from, payload: resetNotice(lost)})
+	a.data.push(inbound{resetTo: &from, hole: r.Resume.Gap})
 }
 
 // streamLifecycle is the SessionReset.Stream value naming the lifecycle
 // carrier; empty names the PTY output stream.
 const streamLifecycle = "lifecycle"
 
-func resetNotice(lost uint64) []byte {
-	if lost == 0 {
-		return []byte("\r\n[nocx] output was dropped by the host's window; the stream continues here\r\n")
+// OnOutputHole installs the observer for a stretch of this session's output
+// that never reached this coordinator, and it is the seam the durable record
+// of that hole is written from (internal/transport's recorder, which owns the
+// content store this package must not depend on).
+//
+// IT FIRES IN STREAM ORDER, from the reader's own goroutine, as the reset is
+// consumed: after the last byte before the hole has been handed over and
+// before the first byte after it. That is the whole reason it is a callback
+// on the read path rather than a channel — the coordinator's ring is written
+// by the same goroutine that reads here, so a hole reported from anywhere
+// else would land at an offset that is not the hole's.
+//
+// `lost` is the helper's own count and never a second derivation of it: the
+// helper computed it from this subscriber's cursor when it reclaimed the
+// window, and two derivations of one number agree everywhere anybody looks.
+// `reason` is the helper's word for the cause (proto.GapReasonWindow today),
+// carried through untranslated so a generation naming a cause this one has
+// never heard of is still reported as itself.
+func (a *AttachedSession) OnOutputHole(f func(lost uint64, reason string)) {
+	a.mu.Lock()
+	a.holeObs = f
+	a.mu.Unlock()
+}
+
+// reportHole tells the observer what the reset said was lost. A reset whose
+// gap the helper did not name states no bounds, and inventing them here —
+// from the distance between the cursor and the resume point — would be the
+// second derivation OnOutputHole exists to avoid, so it is logged and not
+// guessed. proto.Resume's contract is that the gap is present exactly when
+// the reset is, so this is a defensive branch rather than a live one.
+func (a *AttachedSession) reportHole(gap *proto.Gap) {
+	a.mu.Lock()
+	obs := a.holeObs
+	a.mu.Unlock()
+	if obs == nil {
+		return
 	}
-	return fmt.Appendf(nil, "\r\n[nocx] the host's window dropped %d bytes of output; the stream continues here\r\n", lost)
+	if gap == nil || gap.End <= gap.Start {
+		a.client.log.Warn("session reset named no gap; the hole cannot be recorded",
+			"session", proto.SessionHex(a.session))
+		return
+	}
+	obs(uint64(gap.End-gap.Start), gap.Reason)
 }
 
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
@@ -460,14 +505,18 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 			a.pendingReset--
 		}
 		a.mu.Unlock()
+		// Here, and not when the notification arrived: this is the point in
+		// the byte stream the hole sits at, and the observer's whole job is
+		// to say where.
+		a.reportHole(item.hole)
 	}
 	n := copy(p, item.payload)
 	if n < len(item.payload) {
 		a.data.unpop(inbound{payload: item.payload[n:]})
 	}
-	// A reset's own payload states the hole; it is not stream bytes, so
-	// it advances no cursor. Neither do bytes read while a reset is still
-	// queued behind them — see pendingReset.
+	// A reset carries no stream bytes of its own, so it advances no cursor.
+	// Neither do bytes read while a reset is still queued behind them — see
+	// pendingReset.
 	if n > 0 && item.resetTo == nil {
 		advance := streamBytes(n)
 		a.mu.Lock()

@@ -543,6 +543,12 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		Session: sess, Host: cfg.Host, Account: f.account, Generation: generation,
 		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
 		AbortLifecycle: abortLifecycle,
+		// The two ends of one fact meet here and nowhere else: the
+		// attachment knows a stretch of output never crossed the wire, and
+		// the transport's ring is the only thing that can place it at an
+		// offset. Neither package learns the other's job — this passes a
+		// function, and the content store stays where it is (nocx-k6p18.25).
+		ObserveOutputHoles: attached.OnOutputHole,
 	}, true, nil
 }
 

@@ -571,7 +571,7 @@ func TestSessionRecording_RetentionOffKeepsNothingAndDropsNothing(t *testing.T) 
 		t.Fatal("the session lost its ring")
 	}
 	waittest.WaitForTimeout(t, "the ring to hold what was produced", wantWithin, func() bool {
-		data, _, needsReset := rx.ring.snapshot(0)
+		data, _, needsReset, _ := rx.ring.snapshot(0)
 		return !needsReset && len(data) == 64<<10
 	})
 }

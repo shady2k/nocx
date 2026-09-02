@@ -344,6 +344,62 @@ describe('dispatcher endpoint state machine', () => {
   })
 })
 
+describe('abortable RPC calls', () => {
+  it('withdraws an in-flight request on the backend when its signal aborts', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const abort = new AbortController()
+    const pending = d.call('shell.complete', { line: 'git st' }, abort.signal)
+    pending.catch(() => {})
+    const request = socket().requests()[0]
+    if (request.id === undefined) throw new Error('no request id')
+
+    abort.abort()
+
+    const cancel = socket()
+      .sent.filter((message): message is string => typeof message === 'string')
+      .map((message) => JSON.parse(message) as { method?: string; params?: { id?: number } })
+      .find((message) => message.method === 'rpc.cancel')
+    expect(cancel).toEqual({ jsonrpc: '2.0', method: 'rpc.cancel', params: { id: request.id } })
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('still withdraws the request after a vault-sealed retry gave it a new id', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    d.onVaultSealed = () => Promise.resolve()
+    await connected(d)
+    const abort = new AbortController()
+    const pending = d.call('history.query', { scope: 'everywhere' }, abort.signal)
+    pending.catch(() => {})
+    const first = socket().requests()[0].id
+    if (first === undefined) throw new Error('no request id')
+
+    // The vault was sealed: the dispatcher raises the unlock and re-sends the
+    // request VERBATIM under a fresh id, keeping the caller's promise alive.
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: first,
+      error: { code: -32001, message: 'sealed', data: { reason: 'vault-sealed' } },
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    const resent = socket().requests()
+    const retried = resent[resent.length - 1].id
+    if (retried === undefined || retried === first) throw new Error('no retry')
+
+    // The caller's signal must still reach the backend — and name the id the
+    // backend is actually working on, not the one it has already answered.
+    abort.abort()
+
+    const cancels = socket()
+      .sent.filter((message): message is string => typeof message === 'string')
+      .map((message) => JSON.parse(message) as { method?: string; params?: { id?: number } })
+      .filter((message) => message.method === 'rpc.cancel')
+    expect(cancels).toEqual([{ jsonrpc: '2.0', method: 'rpc.cancel', params: { id: retried } }])
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
 describe('dispatcher heartbeat', () => {
   it('pings an idle socket and stays online when the response arrives', async () => {
     const d = new Dispatcher(new TestEndpointProvider())

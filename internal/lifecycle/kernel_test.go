@@ -96,7 +96,7 @@ func TestAttemptUnknownOnTransportLossNeverSuccessful(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "long job", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "long job", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "long job")))
 
 	if err := k.TransportLost("T"); err != nil {
@@ -119,7 +119,7 @@ func TestDomainClosedUnknownsOpenAttempts(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "sudo ls", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "sudo ls", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "sudo ls")))
 	mustIngest(t, k, "T", env("L", h, 3, closeEvt()))
 	if got, _ := k.Attempt(att.ID); got.State != AttemptUnknown {
@@ -132,7 +132,7 @@ func TestAbandonAttempt(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "thing", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "thing", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "thing")))
 	if err := k.AbandonAttempt(att.ID); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestGapDesynchronizesAndOnlySnapshotRestores(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "make")))
 
 	p.reset()
@@ -199,7 +199,7 @@ func TestSnapshotReconcilesOpenAttemptAsUnknown(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "lost in gap", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "lost in gap", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "lost in gap")))
 
 	p.reset()
@@ -248,7 +248,7 @@ func TestSnapshotContradictionsRejected(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 
 	p.reset()
@@ -283,7 +283,7 @@ func TestSnapshotValidationPrecedesMutation(t *testing.T) {
 	h := establish(t, k, "T", p, "L", nil)
 	// A foreign-domain attempt on a second lane.
 	hO := establish(t, k, "T", p, "L2", nil)
-	foreign, err := k.SubmitAttempt(hO.Domain, "other", "/", "other")
+	foreign, err := k.SubmitAttempt(hO.Domain, "other", "/", "other", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestSnapshotRecoversLostCompletionViaShellAlias(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	shellID := AttemptID("s-7-0")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make"))) // attach + alias
 
@@ -359,7 +359,7 @@ func TestSnapshotUnknownShellIDNeverInventsSuccess(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	shellID := AttemptID("s-7-0")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
 
@@ -387,7 +387,7 @@ func TestSnapshotActiveAttemptResolvesViaShellAlias(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	shellID := AttemptID("s-7-0")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
 
@@ -417,7 +417,7 @@ func TestSnapshotNeverCreatesAnAlias(t *testing.T) {
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
 	// An app attempt whose start was lost entirely: no alias was recorded.
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 
 	p.reset()
 	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
@@ -446,9 +446,9 @@ func TestSnapshotAliasResolutionIsPerDomain(t *testing.T) {
 	hA := establish(t, k, "T", p, "LA", nil)
 	hB := establish(t, k, "T", p, "LB", nil)
 	shared := AttemptID("s-1-0")
-	attA, _ := k.SubmitAttempt(hA.Domain, "a", "/", "local")
+	attA, _ := k.SubmitAttempt(hA.Domain, "a", "/", "local", "")
 	mustIngest(t, k, "T", env("LA", hA, 2, startEvt(&shared, "a")))
-	attB, _ := k.SubmitAttempt(hB.Domain, "b", "/", "local")
+	attB, _ := k.SubmitAttempt(hB.Domain, "b", "/", "local", "")
 	mustIngest(t, k, "T", env("LB", hB, 2, startEvt(&shared, "b")))
 
 	p.reset()
@@ -478,7 +478,7 @@ func TestShellAliasLivesUntilTheDomainEnds(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "make", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/", "local", "")
 	shellID := AttemptID("s-4-0")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make"))) // interval opens
 	if got, _ := k.Attempt(att.ID); got.shellID != shellID {
@@ -587,7 +587,7 @@ func TestStaleChildAliasNeverResolvesAfterParentRestored(t *testing.T) {
 	hA := establish(t, k, "T", p, "L", nil)
 	mustIngest(t, k, "T", env("L", hA, 2, suspendEvt()))
 	hB := establish(t, k, "T", p, "L", &hA.Domain)
-	attB, _ := k.SubmitAttempt(hB.Domain, "child make", "/", "local")
+	attB, _ := k.SubmitAttempt(hB.Domain, "child make", "/", "local", "")
 	childAlias := AttemptID("s-" + string(hB.Domain) + "-0")
 	mustIngest(t, k, "T", env("L", hB, 2, startEvt(&childAlias, "child make")))
 	if got, _ := k.Attempt(attB.ID); got.shellID != childAlias {
@@ -624,7 +624,7 @@ func TestDesyncBudgetExhaustionRevokesDomain(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 
 	p.reset()
@@ -765,7 +765,7 @@ func TestStartAttachRules(t *testing.T) {
 	// report in a snapshot. The app id stays authoritative (constraint b):
 	// the attempt keeps its id and app-owned text, and no attempt appears
 	// under the shell id.
-	att, _ := k.SubmitAttempt(h.Domain, "app cmd", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "app cmd", "/", "local", "")
 	shellID := AttemptID("s-1-0")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "evil")))
 	if got, _ := k.Attempt(att.ID); !got.Started || got.Command != "app cmd" || got.shellID != shellID {
@@ -789,7 +789,7 @@ func TestStartAttachRules(t *testing.T) {
 	// The anonymous start still attaches to the next app attempt.
 	mustIngest(t, k, "T", env("L", h, 5, completeEvt(att.ID, 0, fence(0x01))))
 	mustIngest(t, k, "T", env("L", h, 6, promptReadyEvt()))
-	att2, _ := k.SubmitAttempt(h.Domain, "app cmd 2", "/", "local")
+	att2, _ := k.SubmitAttempt(h.Domain, "app cmd 2", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 7, startEvt(nil, "evil2")))
 	if got, _ := k.Attempt(att2.ID); !got.Started || got.Command != "app cmd 2" {
 		t.Fatalf("anonymous start must attach to the app attempt, got %+v", got)
@@ -838,7 +838,7 @@ func TestStartRequiresPromptReady(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 	mustIngest(t, k, "T", env("L", h, 3, completeEvt(att.ID, 0, fence(0x01))))
 	// The lane is Running with a closed attempt, awaiting prompt_ready: a
@@ -853,7 +853,7 @@ func TestPromptReadyOverOpenAttemptRejected(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 	if _, err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrPromptOverAttempt) {
 		t.Fatalf("prompt_ready over an open attempt must be rejected, got %v", err)
@@ -865,7 +865,7 @@ func TestCompleteValidation(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local", "")
 
 	// Complete before start: rejected.
 	if _, err := k.Ingest("T", env("L", h, 2, completeEvt(att.ID, 0, fence(0x02)))); !errors.Is(err, ErrAttemptNotStarted) {
@@ -891,7 +891,7 @@ func TestCompleteCannotCrossDomains(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	hA := establish(t, k, "T", p, "L", nil)
-	att, _ := k.SubmitAttempt(hA.Domain, "sudo", "/", "local")
+	att, _ := k.SubmitAttempt(hA.Domain, "sudo", "/", "local", "")
 	mustIngest(t, k, "T", env("L", hA, 2, startEvt(&att.ID, "sudo")))
 	mustIngest(t, k, "T", env("L", hA, 3, suspendEvt()))
 	hB := establish(t, k, "T", p, "L", &hA.Domain)
@@ -979,7 +979,7 @@ func TestSuspendedDomainEventsRejected(t *testing.T) {
 			t.Fatalf("suspended-domain event %s must be rejected, got %v", evt.Kind, err)
 		}
 	}
-	if _, err := k.SubmitAttempt(hA.Domain, "x", "/", "local"); !errors.Is(err, ErrDomainInactive) {
+	if _, err := k.SubmitAttempt(hA.Domain, "x", "/", "local", ""); !errors.Is(err, ErrDomainInactive) {
 		t.Fatalf("submit into a suspended domain must be rejected, got %v", err)
 	}
 }
@@ -1136,7 +1136,7 @@ func TestOversizeCommandRejected(t *testing.T) {
 	for i := range big {
 		big[i] = 'x'
 	}
-	if _, err := k.SubmitAttempt(h.Domain, string(big), "/", "local"); !errors.Is(err, ErrOversizeCommand) {
+	if _, err := k.SubmitAttempt(h.Domain, string(big), "/", "local", ""); !errors.Is(err, ErrOversizeCommand) {
 		t.Fatalf("oversize submit must be rejected, got %v", err)
 	}
 	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, string(big)))); !errors.Is(err, ErrOversizeCommand) {
@@ -1155,7 +1155,7 @@ func TestCompleteWithoutAttemptIDResolvesByContext(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	att, err := k.SubmitAttempt(h.Domain, "echo hi", "/home/dev", "local")
+	att, err := k.SubmitAttempt(h.Domain, "echo hi", "/home/dev", "local", "")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
@@ -1179,7 +1179,7 @@ func TestCompleteWithForeignAttemptIDRejected(t *testing.T) {
 	p := &fakePort{}
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
-	if _, err := k.SubmitAttempt(h.Domain, "echo hi", "/home/dev", "local"); err != nil {
+	if _, err := k.SubmitAttempt(h.Domain, "echo hi", "/home/dev", "local", ""); err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
 	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, "echo hi"))); err != nil {

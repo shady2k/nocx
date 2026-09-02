@@ -107,6 +107,7 @@ type Attempt struct {
 	State       string     `json:"state"`
 	Command     string     `json:"command,omitempty"`
 	Origin      string     `json:"origin,omitempty"`
+	SubmitID    string     `json:"submitId,omitempty"`
 	StartedAt   time.Time  `json:"startedAt,omitempty"`
 	ExitCode    *int       `json:"exitCode,omitempty"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
@@ -182,6 +183,7 @@ func attemptFact(att lifecycle.ExecutionAttempt) *Attempt {
 		State:     attemptStateString(att.State),
 		Command:   att.Command,
 		Origin:    originString(att.Origin),
+		SubmitID:  att.SubmitID,
 		StartedAt: att.StartedAt,
 	}
 	if att.ExitCode != nil {
@@ -252,7 +254,7 @@ type Kernel interface {
 	EstablishmentTimeout(domain lifecycle.DomainID) error
 	TransportLost(t lifecycle.TransportID) error
 	RecoverLane(lane lifecycle.LaneID) error
-	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host string) (lifecycle.ExecutionAttempt, error)
+	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error)
 	AbandonAttempt(id lifecycle.AttemptID) error
 	State(lane lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
@@ -868,8 +870,8 @@ func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
 // SubmitAttempt forwards an app-originated attempt (created synchronously at
 // editor submit, before the pty bytes) and publishes the lane's move to
 // running.
-func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host string) (lifecycle.ExecutionAttempt, error) {
-	att, err := p.kernel.SubmitAttempt(domain, command, cwd, host)
+func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error) {
+	att, err := p.kernel.SubmitAttempt(domain, command, cwd, host, submitID)
 	if err != nil {
 		return att, err
 	}

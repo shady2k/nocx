@@ -341,7 +341,7 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	if aerr := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); aerr != nil {
 		t.Fatalf("AcknowledgeEstablishment: %v", aerr)
 	}
-	att, err := pub.SubmitAttempt(h.Domain, "make", "/work", "local")
+	att, err := pub.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}

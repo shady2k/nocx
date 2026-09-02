@@ -34,6 +34,46 @@ async function disableWailsRuntime(page: import('@playwright/test').Page) {
   })
 }
 
+// RUNS ON BOTH BROWSERS, unlike everything below it. The Chromium-only note
+// above is about reading and writing the clipboard, which needs permissions
+// WebKit does not grant under Playwright. This test never touches a clipboard:
+// the banner is what a BLOCKED OSC 52 write raises, so the assertion is about
+// the panes surviving the answer. Do not "fix" a WebKit failure here by adding
+// a skip — a failure here means the panes are gone, on the browser closest to
+// the shipped WKWebView.
+test('answering the OSC 52 banner preserves every open terminal pane', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('.nocx-tab')).toHaveCount(1)
+  await promptReady(page)
+
+  await page.locator('[aria-label="New tab"]').click()
+  await expect(page.locator('.nocx-tab')).toHaveCount(2)
+  await promptReady(page)
+
+  await clickIntoEditor(page)
+  await page.keyboard.type(`printf '\\033]52;c;Tk9DWA==\\007'`)
+  await page.keyboard.press('Enter')
+
+  const banner = page.locator('.clipboard-banner')
+  await expect(banner).toBeVisible()
+  await banner.getByRole('button', { name: "Don't show again" }).click()
+  await expect(banner).toHaveCount(0)
+  await expect(page.locator('.pane')).toHaveCount(2)
+
+  const tabs = page.locator('.nocx-tab')
+  const titles = page.locator('.nocx-tab-title')
+  const markers = [`OSC52-A-${Date.now().toString(36)}`, `OSC52-B-${Date.now().toString(36)}`]
+
+  for (const [index, marker] of markers.entries()) {
+    await tabs.nth(index).click()
+    await promptReady(page)
+    await clickIntoEditor(page)
+    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    await page.keyboard.press('Enter')
+    await expect(titles.nth(index)).toContainText(marker)
+  }
+})
+
 // ── copy-on-select ──────────────────────────────────────────────────────
 
 test.describe('copy-on-select', () => {

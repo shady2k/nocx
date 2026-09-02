@@ -16,7 +16,9 @@
  * reflows the grid down to the PTY.
  *
  * SolidJS implementation (nocx-njrx.6): renders via solid-js/web render()
- * into #panes, cleans up with the returned dispose function.
+ * into a host of its own, appended beneath #panes. Never pass #panes itself
+ * to render() — App.tsx states the invariant, and nocx-3hv2t is what
+ * breaking it costs.
  */
 import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
@@ -70,9 +72,9 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
 }
 
 /**
- * Real banner implementation — renders a Solid component into #panes
- * and self-disposes on choice, matching the imperative predecessor's
- * DOM classes and behaviour exactly.
+ * Real banner implementation — renders a Solid component into an isolated
+ * host beneath #panes and self-disposes on choice, matching the imperative
+ * predecessor's DOM classes and behaviour exactly.
  */
 export class ClipboardBannerImpl implements ClipboardBanner {
   private _shown = false
@@ -104,10 +106,23 @@ export class ClipboardBannerImpl implements ClipboardBanner {
         resolve('dismiss')
         return
       }
-      this._dispose = render(
+      // A host of our own, because Solid's disposer ends with
+      // `element.textContent = ''` — it empties whatever it was rendered
+      // into. Handed #panes, it removed every terminal pane on the way out
+      // (nocx-3hv2t). The class carries no styles and is not expected to:
+      // it is an identity hook, so a stray host is nameable in the DOM and
+      // in a test rather than being an anonymous div among the panes.
+      const host = document.createElement('div')
+      host.className = 'clipboard-banner-host'
+      container.append(host)
+      const dispose = render(
         () => <ClipboardBannerComponent onChoice={(choice) => this._decide(choice)} />,
-        container,
+        host,
       )
+      this._dispose = () => {
+        dispose()
+        host.remove()
+      }
     })
   }
 

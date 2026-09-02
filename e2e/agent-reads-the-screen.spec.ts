@@ -140,11 +140,9 @@ test.afterAll(async () => {
 
 /** One frame of the renderer's own answer to a readScreen request — the
  *  thing this spec exists to observe. */
-interface ResolvedCell {
-  char?: string
-}
 interface ResolvedRow {
-  cells?: ResolvedCell[]
+  kind?: string
+  text?: string
 }
 interface ResolvedFrame {
   requestId?: string
@@ -225,11 +223,9 @@ async function recorded(page: Page): Promise<SpecRecord> {
   return page.evaluate(() => window.__nocxScreenSpec ?? { asks: [], raised: [], resolved: [] })
 }
 
-/** The frame's text as a person would read it: rows of cells, joined. */
+/** The frame's text as a person would read it: its rows, joined. */
 function frameText(frame: ResolvedFrame): string {
-  return (frame.rows ?? [])
-    .map((row) => (row.cells ?? []).map((c) => c.char ?? '').join(''))
-    .join('\n')
+  return (frame.rows ?? []).map((row) => row.text ?? '').join('\n')
 }
 
 async function openApp(page: Page): Promise<void> {
@@ -477,7 +473,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     //    (ws_agent_locates_itself_test.go) cannot report, because there the
     //    renderer is the test. This is the app's own answer to the broker,
     //    off its own socket: a frame outcome for this session, carrying the
-    //    marker in its cells.
+    //    marker in its rows.
     const { resolved } = await recorded(page)
     expect(resolved.length).toBe(1)
     const frame = resolved[0]

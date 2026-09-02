@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer answers an agent.readScreenRequest with a closed outcome. outcome=frame carries renderer-owned rows, cells, cursor, buffer identity and range; outcome=failed carries why the frame could not be produced, so the run receives an honest answer instead of hanging. requestId is the broker-minted id from the request, echoed back.
+ * Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer answers an agent.readScreenRequest with a closed outcome. outcome=frame carries renderer-owned text rows, cursor, buffer identity and range; outcome=failed carries why the frame could not be produced, so the run receives an honest answer instead of hanging. requestId is the broker-minted id from the request, echoed back.
  */
 export type AgentReadScreenResolved = {
   [k: string]: unknown
@@ -28,31 +28,14 @@ export type AgentReadScreenResolved = {
    */
   error?: string
   /**
-   * The frame's rows, in order; each is a cells row (live frame shape).
+   * The frame's rows, in order; each is the row's TEXT — the cells' characters joined in column order, blanks kept, so the row's width is the screen's. The renderer keeps the cells locally to DRAW with; no consumer of this resolution reads a cell attribute (nocx-u3vxd).
    */
   rows?: {
-    kind: 'cells'
-    cells: {
-      /**
-       * The cell's character.
-       */
-      char: string
-      /**
-       * The cell's attributes (fg/bg resolved to CSS colors, flags).
-       */
-      attrs: {
-        fg?: string | null
-        bg?: string | null
-        bold?: boolean
-        italic?: boolean
-        dim?: boolean
-        underline?: boolean
-        inverse?: boolean
-        blink?: boolean
-        strikethrough?: boolean
-        overline?: boolean
-      }
-    }[]
+    kind: 'text'
+    /**
+     * The row's characters. Bounded at eight runes per column of the widest permitted geometry.
+     */
+    text: string
   }[]
   /**
    * The cursor's absolute buffer line and column at capture time.

@@ -59,6 +59,10 @@ type fakeLedger struct {
 	// the way the store does (one counter per turn) so a test can assert
 	// the causal index without an sqlite file.
 	causes []fakeCause
+	// captures is every body handed to CaptureOutput, and refuseCapture is
+	// the store's "not stored, and that is not a failure" answer.
+	captures      []content.CaptureOutput
+	refuseCapture bool
 }
 
 // fakeCause is one recorded containment: which turn, which entry it caused,
@@ -120,6 +124,25 @@ func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.Fin
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+// captures is every body CaptureOutput was handed, in call order — what a
+// tool call recorded as its result (nocx-hp8p2.13).
+func (f *fakeLedger) CaptureOutput(_ context.Context, in content.CaptureOutput) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log = append(f.log, "capture:"+in.EntryID)
+	if f.refuseCapture {
+		return false, nil
+	}
+	f.captures = append(f.captures, in)
+	return true, nil
+}
+
+func (f *fakeLedger) recordedCaptures() []content.CaptureOutput {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]content.CaptureOutput(nil), f.captures...)
 }
 
 func (f *fakeLedger) recordedSubmissions() []fakeSubmission {

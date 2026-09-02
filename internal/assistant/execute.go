@@ -841,10 +841,7 @@ type readScreenIdent struct {
 // fields the window contract needs and never re-validates them.
 type frameBodyWire struct {
 	Rows []struct {
-		Kind  string `json:"kind"`
-		Cells []struct {
-			Char string `json:"char"`
-		} `json:"cells"`
+		Kind string `json:"kind"`
 		Text string `json:"text"`
 	} `json:"rows"`
 	Cursor *struct {

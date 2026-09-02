@@ -187,3 +187,67 @@ describe('whole-block grants', () => {
     expect(grantBlockFromSelection(selection)).toBeNull()
   })
 })
+
+describe('marks inside the frozen screen (nocx-hp8p2.7)', () => {
+  function frameOf(rows: string[]): HTMLElement {
+    const frame = document.createElement('div')
+    frame.className = 'nocx-freeze-frame'
+    for (const text of rows) {
+      const row = document.createElement('div')
+      row.className = 'nocx-freeze-frame__row'
+      row.textContent = text
+      frame.appendChild(row)
+    }
+    document.body.appendChild(frame)
+    return frame
+  }
+
+  function selectRows(frame: HTMLElement, from: number, to: number): Selection {
+    const rows = frame.querySelectorAll<HTMLElement>('.nocx-freeze-frame__row')
+    const range = document.createRange()
+    range.setStart(rows[from].firstChild!, 0)
+    range.setEnd(rows[to].firstChild!, rows[to].textContent.length)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+    return selection
+  }
+
+  const automatic = (blockEl: HTMLElement) =>
+    ({
+      itemId: 'att-screen',
+      blockEl,
+      command: 'top',
+      state: 'running',
+      automatic: true,
+    }) as const
+
+  it('marks the selected rows on the automatic attachment, not a second item', () => {
+    const { block } = blockOf('item-20', 'top', true)
+    const frame = frameOf(['load 1.00', 'PID USER', 'nocx  0.1', 'idle'])
+    const grant = grantBlockFromSelection(selectRows(frame, 1, 2), automatic(block))
+    expect(grant).toEqual({
+      // The automatic attachment's OWN id, so the model reads a band of the
+      // pinned frame rather than a second whole screen.
+      itemId: 'att-screen',
+      blockEl: frame,
+      command: 'top',
+      state: 'running',
+      start: 1,
+      count: 2,
+    })
+    // Not an automatic attachment any more: it is a person mark and counts.
+    expect(grant).not.toHaveProperty('automatic')
+  })
+
+  it('collapses a selection covering the whole screen — that is the attachment already', () => {
+    const { block } = blockOf('item-21', 'top', true)
+    const frame = frameOf(['a', 'b', 'c'])
+    expect(grantBlockFromSelection(selectRows(frame, 0, 2), automatic(block))).toBeNull()
+  })
+
+  it('offers nothing when no frozen screen is attached', () => {
+    const frame = frameOf(['a', 'b', 'c'])
+    expect(grantBlockFromSelection(selectRows(frame, 0, 1), null)).toBeNull()
+  })
+})

@@ -74,35 +74,23 @@ const (
 	// Therefore only count is bounded here; start has no ceiling, and the
 	// check below rejects integer overflow.
 	maxAttachedWindowLines = 2_000
-	// maxCellRunes bounds one cell's character (a wide glyph is one or two
-	// runes; anything more is not a terminal cell).
-	maxCellRunes = 8
+	// maxRowRunesPerCol bounds a frame row against the geometry it claims:
+	// one column holds one glyph, and a glyph is at most this many runes (a
+	// base plus combining marks). Anything wider is not a row of that screen.
+	maxRowRunesPerCol = 8
 )
 
 // ── wire shapes ───────────────────────────────────────────────────────────
 
+// frameRowWire is one row of a frame: its TEXT. The cells' attributes never
+// travelled anywhere — both consumers join the characters and drop the rest
+// (internal/assistant/blocks.go's session.read text, internal/content's
+// frameText) — and sending them cost a measured 878 KB for one `top` screen
+// whose text is ~9 KB (nocx-u3vxd). The renderer keeps its own cells, which
+// is where the drawing happens (AD-6).
 type frameRowWire struct {
-	Kind  string          `json:"kind"` // "cells" | "text"
-	Cells []frameCellWire `json:"cells,omitempty"`
-	Text  string          `json:"text,omitempty"`
-}
-
-type frameCellWire struct {
-	Char  string         `json:"char"`
-	Attrs frameAttrsWire `json:"attrs"`
-}
-
-type frameAttrsWire struct {
-	Fg            *string `json:"fg"`
-	Bg            *string `json:"bg"`
-	Bold          bool    `json:"bold"`
-	Italic        bool    `json:"italic"`
-	Dim           bool    `json:"dim"`
-	Underline     bool    `json:"underline"`
-	Inverse       bool    `json:"inverse"`
-	Blink         bool    `json:"blink"`
-	Strikethrough bool    `json:"strikethrough"`
-	Overline      bool    `json:"overline"`
+	Kind string `json:"kind"` // "text"
+	Text string `json:"text"`
 }
 
 type frameCursorWire struct {
@@ -704,10 +692,18 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 // names the item without naming the window is answered inside the mark
 // rather than past it (nocx-hp8p2.15). A whole-block mark carries no span
 // and bounds nothing.
+//
+// AN AUTOMATIC ITEM CAN CARRY A SPAN TOO, and it means the same thing: rows
+// selected inside the frozen screen a summon attached narrow THAT item
+// rather than adding a second one (nocx-hp8p2.7). Excluding automatic items
+// here read `automatic` as "nobody marked this", which is true of the whole
+// screen and false of a band of it — the span itself is what says a person
+// chose, and an attachment with no span is skipped by the check below either
+// way.
 func markedSessionWindows(attached []assistant.AttachedContentItem) []assistant.MarkedSessionWindow {
 	marks := make([]assistant.MarkedSessionWindow, 0, len(attached))
 	for _, item := range attached {
-		if item.Automatic || item.Start == nil || item.Count == nil || *item.Count <= 0 {
+		if item.Start == nil || item.Count == nil || *item.Count <= 0 {
 			continue
 		}
 		marks = append(marks, assistant.MarkedSessionWindow{
@@ -2379,26 +2375,20 @@ func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identit
 		cursor.Line < 0 || cursor.Line >= maxFrameRows+id.Rows {
 		return "cursor is out of bounds", 0
 	}
+	// A row is bounded by the geometry it claims rather than pinned to it:
+	// a wide glyph occupies two columns as one rune, so a full row is
+	// legitimately SHORTER than cols, while a cell of combining marks is
+	// longer. The ceiling is what one screen's worth of columns can hold.
 	var totalChars int
 	for _, row := range rows {
-		if row.Kind != "cells" {
-			return "a live frame row must be cells", 0
+		if row.Kind != "text" {
+			return "a live frame row must be text", 0
 		}
-		if len(row.Cells) != id.Cols {
-			return "a live frame row must carry exactly identity.cols cells", 0
+		n := utf8.RuneCountInString(row.Text)
+		if n > id.Cols*maxRowRunesPerCol {
+			return "a live frame row is wider than its columns can hold", 0
 		}
-		for _, c := range row.Cells {
-			if utf8.RuneCountInString(c.Char) > maxCellRunes {
-				return "a cell carries more than a terminal glyph", 0
-			}
-			totalChars += utf8.RuneCountInString(c.Char)
-			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Fg)); n > 64 {
-				return "a cell attribute exceeds the length bound", 0
-			}
-			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Bg)); n > 64 {
-				return "a cell attribute exceeds the length bound", 0
-			}
-		}
+		totalChars += n
 	}
 	if totalChars > maxFrameChars {
 		return "frame is too large: character budget exceeded", 0

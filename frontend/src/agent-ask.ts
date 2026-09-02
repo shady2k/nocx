@@ -241,6 +241,10 @@ export class AgentInputTarget implements InputTarget {
         // It is what tells the turn to let that block take the next seat
         // instead of drawing a child that restates it.
         opensBlock: c.opensBlock,
+        // The LEDGER action entry the attempt was recorded under — the
+        // handle the call's expansion reaches its result through, rather
+        // than a second copy of the bytes on this wire (nocx-hp8p2.13).
+        actionEntryId: c.actionEntryId,
       })
     })
     // The model's thinking, into its own note and never into the answer

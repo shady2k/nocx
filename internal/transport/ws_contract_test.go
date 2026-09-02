@@ -5807,14 +5807,8 @@ func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
 	body, err := json.Marshal(readScreenResolvedParams{
 		Outcome: "frame",
-		Rows: []frameRowWire{{
-			Kind: "cells",
-			Cells: []frameCellWire{
-				{Char: "h", Attrs: frameAttrsWire{}},
-				{Char: "i", Attrs: frameAttrsWire{}},
-			},
-		}},
-		Cursor: &frameCursorWire{Line: 0, Col: 0},
+		Rows:    []frameRowWire{{Kind: "text", Text: "hi"}},
+		Cursor:  &frameCursorWire{Line: 0, Col: 0},
 		Identity: &frameIdentityWire{
 			Buffer: frameBufferWire{Kind: "normal"},
 			Cols:   2, Rows: 1, Generation: 1,

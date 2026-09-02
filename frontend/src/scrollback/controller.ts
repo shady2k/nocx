@@ -52,6 +52,9 @@ export interface ScrollbackControllerOpts {
   answerText?: (entryId: string) => Promise<string | null>
   /** The recorded provider drives for one finished answer turn. */
   dump?: (entryId: string) => Promise<AgentDump>
+  /** Reads back what a tool call returned, for the call's own expansion
+   *  (nocx-hp8p2.13). Absent and a call draws none. */
+  toolResult?: (actionEntryId: string) => Promise<string | null>
   /** What a RUNNING block's ⋮ menu can do about the command in it — passed
    *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
    *  neither summons the editor nor signals a session. */
@@ -189,6 +192,7 @@ export class ScrollbackController {
       sessionName: opts.sessionName,
       answerText: opts.answerText,
       dump: opts.dump,
+      toolResult: opts.toolResult,
       runningActions: opts.runningActions,
     })
 

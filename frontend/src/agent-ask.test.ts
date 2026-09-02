@@ -219,6 +219,11 @@ describe('AgentInputTarget', () => {
       args: { path: '/repo/a.txt', start: 3 },
       effect: 'observe',
       resource: { kind: 'path', id: '/repo/a.txt' },
+      // And the LEDGER handle: the call's expansion reaches its result
+      // through this entry rather than through a second copy of the bytes
+      // on this wire (nocx-hp8p2.13).
+      actionEntryId: 'entry-action-1',
+      opensBlock: undefined,
     })
     const callOrder = (handle.toolCall as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
     const deltaOrder = (handle.append as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
@@ -245,6 +250,8 @@ describe('AgentInputTarget', () => {
       args: {},
       effect: 'observe',
       resource: undefined,
+      actionEntryId: 'entry-action-9',
+      opensBlock: undefined,
     })
   })
 

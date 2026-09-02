@@ -312,3 +312,66 @@ func TestCaptureOutput_StoresNothingForACriticalEnvironment(t *testing.T) {
 		t.Fatal("the entry went with the output")
 	}
 }
+
+// AN ACTION ENTRY HAS A BODY, AND IT IS THE TOOL'S RESULT (nocx-hp8p2.13).
+// ADR-0040's tree gives every block kind an artifact and drew `action` with
+// none, so "show me what that call returned" had nothing to reach. The write
+// is the same one a command's output takes — one path, so retention,
+// sensitivity and criticality decide the same way for both — and what comes
+// back out is what the answer's expansion draws.
+func TestCaptureOutput_AnActionEntryKeepsItsToolResult(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: "local", Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: "local", Criticality: content.CriticalityRoutine,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+	entryID := submitAction(t, led, "00000000-0000-7000-8000-0000000000c1", "session.read", content.EffectObserve, nil)
+	if _, err := led.StartExecution(ctx, content.StartExecution{
+		EntryID: entryID, Attempt: 1,
+	}); err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+
+	const result = `{"sessionId":"pane-a","text":"load 1.00"}`
+	in := content.CaptureOutput{
+		EntryID:    entryID,
+		ArtifactID: "00000000-0000-7000-8000-0000000000b1",
+		// Text the TOOL produced; nobody read it off a terminal grid.
+		MediaType:      content.MediaText,
+		CaptureMethod:  content.CaptureRawOutput,
+		CaptureVersion: 1,
+		Seq:            1,
+		Body:           []byte(result),
+	}
+	stored, err := led.CaptureOutput(ctx, in)
+	if err != nil {
+		t.Fatalf("CaptureOutput: %v", err)
+	}
+	if !stored {
+		t.Fatal("the tool result was not stored on a store that retains output")
+	}
+	if got := bodyOf(t, led, in.ArtifactID); got != result {
+		t.Fatalf("body = %q, want %q", got, result)
+	}
+	// And it is reachable from the ENTRY, which is the handle
+	// agent.runToolCall sends: ledger.get lists the artifacts of an entry,
+	// and the renderer asks for this one by media type.
+	entry, err := led.Entry(ctx, entryID)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry(%q) = %v, %v", entryID, entry, err)
+	}
+	art, err := led.Artifact(ctx, in.ArtifactID)
+	if err != nil || art == nil {
+		t.Fatalf("Artifact(%q) = %v, %v", in.ArtifactID, art, err)
+	}
+	if art.EntryID != entryID || art.MediaType != content.MediaText ||
+		art.CaptureMethod != content.CaptureRawOutput {
+		t.Fatalf("artifact = entry %q %q/%q, want the action entry's own text body",
+			art.EntryID, art.MediaType, art.CaptureMethod)
+	}
+}

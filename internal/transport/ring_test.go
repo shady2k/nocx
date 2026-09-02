@@ -9,6 +9,13 @@ import (
 
 // TestOutputRing_CancellableWaitForData verifies that waitForData returns
 // when ctx is cancelled without needing data or ring closure (DEFECT 5 fix).
+// newOutputRing is a ring at stream offset zero, which is what a spawned
+// session's window base is and what every test here wants. It lives in a test
+// file rather than beside newOutputRingAt because nocx-k6p18.30 moved the
+// production path to the base-carrying constructor, and a convenience wrapper
+// no shipped call site reaches is dead code the ratchet is right to name.
+func newOutputRing() *outputRing { return newOutputRingAt(0) }
+
 func TestOutputRing_CancellableWaitForData(t *testing.T) {
 	ring := newOutputRing()
 

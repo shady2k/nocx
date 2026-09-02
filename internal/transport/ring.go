@@ -130,8 +130,6 @@ type ringHole struct {
 	reason string
 }
 
-func newOutputRing() *outputRing { return newOutputRingAt(0) }
-
 // newOutputRingAt makes a ring whose stream coordinate STARTS at base rather
 // than at zero (nocx-k6p18.30).
 //

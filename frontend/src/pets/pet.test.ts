@@ -357,16 +357,76 @@ describe('leaving a ledge from the middle', () => {
 
 describe('getting out of the pointer’s way', () => {
   const at = (x: number, y: number) => ({ ...env(), pointer: { x, y } })
+  function overFrames(pet: Pet, points: readonly { x: number; y: number }[], dt = 0.1): Pet {
+    let current = pet
+    for (const pointer of points) current = step(current, { ...env(), pointer }, dt, seq(0.99))
+    return current
+  }
 
-  it('runs away from a cursor that comes close', () => {
-    const p = step(standing(A, { x: 200 }), at(190, A.y - 17), 1 / 60, seq(0.9))
+  it('turns to watch a cursor that approaches slowly instead of running', () => {
+    const points = [{ x: 400, y: A.y - 17 }]
+    for (let x = 390; x >= 270; x -= 10) points.push({ x, y: A.y - 17 })
+    const p = overFrames(standing(A, { x: 200, activity: 'groom' }), points)
+    expect(p.locomotion).not.toBe('run')
+    expect(p.activity).toBe('sit')
+  })
+
+  it('runs from a fast approach within 150 milliseconds', () => {
+    const p = overFrames(standing(A, { x: 200 }), [
+      { x: 400, y: A.y - 17 },
+      { x: 260, y: A.y - 17 },
+    ])
+    expect(p.locomotion).toBe('run')
+  })
+
+  it('sits after a nearby cursor stays still', () => {
+    const points = Array.from({ length: 8 }, () => ({ x: 250, y: A.y - 17 }))
+    const p = overFrames(standing(A, { x: 200, activity: 'groom' }), points)
+    expect(p.locomotion).toBe('idle')
+    expect(p.activity).toBe('sit')
+  })
+
+  it('walks aside when a still cursor is directly on its body', () => {
+    const p = overFrames(standing(A, { x: 200, activity: 'groom' }), [{ x: 200, y: A.y - 17 }], 0.1)
+    expect(p.locomotion).toBe('walk')
+    expect(p.locomotion).not.toBe('run')
+  })
+
+  it('remembers calm cursor encounters only briefly', () => {
+    let p = standing(A, { x: 200, activity: 'groom' })
+    for (let encounter = 0; encounter < 3; encounter++) {
+      p = overFrames(p, [
+        { x: 250, y: A.y - 17 },
+        { x: 250, y: A.y - 17 },
+      ])
+      p = overFrames(p, [{ x: 400, y: A.y - 17 }])
+    }
+    expect(p.pointerCalm).toBeGreaterThan(0)
+    p = step(p, env(), 9, seq(0.99))
+    expect(p.pointerCalm).toBe(0)
+  })
+
+  it('runs away from a cursor that comes close quickly', () => {
+    const p = overFrames(standing(A, { x: 200 }), [
+      { x: 400, y: A.y - 17 },
+      { x: 190, y: A.y - 17 },
+    ])
     expect(p.locomotion).toBe('run')
     expect(p.dir).toBe(1) // pointer is to its left, so it goes right
   })
 
-  it('runs the other way for a cursor on the other side', () => {
-    const p = step(standing(A, { x: 200 }), at(215, A.y - 17), 1 / 60, seq(0.9))
-    expect(p.dir).toBe(-1)
+  it('turns at the edge for a calm nearby cursor instead of falling', () => {
+    const pointer = at(A.x1 - 40, A.y)
+    let p = step(
+      standing(A, { x: A.x1 - 5, locomotion: 'walk', dir: 1, vx: 40, hold: 9 }),
+      pointer,
+      0.1,
+      seq(0.99),
+    )
+    p = step(p, pointer, 0.1, seq(0.99))
+    expect(p.pointerAlarmed).toBe(false)
+    expect(p.locomotion).not.toBe('fall')
+    expect(p.phase).toBe('turn')
   })
 
   it('ignores a cursor that is not near it', () => {
@@ -381,32 +441,43 @@ describe('getting out of the pointer’s way', () => {
   })
 
   it('measures from the animal’s middle, so a cursor on its head counts', () => {
-    // `y` is where it stands; a cursor level with the head of a 34px cat is
-    // 17px above that, and must still be a threat.
-    const p = step(standing(A, { x: 200 }), at(200, A.y - 30), 1 / 60, seq(0.9))
+    // `y` is where it stands; 17px above that is the head of a 34px cat.
+    const p = overFrames(standing(A, { x: 200 }), [
+      { x: 400, y: A.y - 30 },
+      { x: 200, y: A.y - 30 },
+    ])
     expect(p.locomotion).toBe('run')
   })
 
   it('interrupts even a settled occupation', () => {
-    const p = step(
-      standing(A, { x: 200, activity: 'sleep', hold: 99 }),
-      at(200, A.y),
-      1 / 60,
-      seq(0.9),
-    )
+    const p = overFrames(standing(A, { x: 200, activity: 'sleep', hold: 99 }), [
+      { x: 400, y: A.y },
+      { x: 200, y: A.y },
+    ])
     expect(p.locomotion).toBe('run')
     expect(p.activity).toBe('none')
   })
+  it('runs the other way for a cursor on the other side', () => {
+    const p = overFrames(standing(A, { x: 200 }), [
+      { x: 400, y: A.y - 17 },
+      { x: 215, y: A.y - 17 },
+    ])
+    expect(p.locomotion).toBe('run')
+    expect(p.dir).toBe(-1)
+  })
 
-  it('steps off the ledge rather than turning back into the cursor', () => {
-    // Cornered at the right end with the pointer on its left: turning round
-    // would walk it into the thing it is running from.
-    const p = step(
+  it('steps off the ledge rather than turning back into a fast cursor', () => {
+    // Cornered at the right end with a fast pointer on its left: turning
+    // round would walk it into the thing it is running from.
+    const far = { ...at(500, A.y) }
+    const close = { ...far, pointer: { x: A.x1 - 40, y: A.y } }
+    let p = step(
       standing(A, { x: A.x1 - 1, locomotion: 'run', dir: 1, hold: 9 }),
-      at(A.x1 - 40, A.y),
-      0.2,
-      seq(0.99), // above the step-off chance: only the cornering can do this
+      far,
+      0.01,
+      seq(0.99),
     )
+    p = step(p, close, 0.2, seq(0.99))
     expect(p.locomotion).toBe('fall')
     expect(p.ledgeId).toBeNull()
   })
@@ -422,10 +493,12 @@ describe('the flee test uses the animal’s box, not a radius', () => {
 
   it('a cursor on a WIDE pet’s flank is still a threat', () => {
     // At 96px tall the cat is about 180px wide. A radius around its position
-    // puts its own shoulder outside the threat, and it sits there while the
-    // cursor rests on it — which is what happened in the browser.
-    const wide = { ...env(), petHeight: 96, petWidth: 180, pointer: { x: 200 - 85, y: A.y - 48 } }
-    expect(step(standing(A, { x: 200 }), wide, 1 / 60, seq(0.9)).locomotion).toBe('run')
+    // puts its own shoulder outside the threat.
+    const start = { ...env(), petHeight: 96, petWidth: 180, pointer: { x: 400, y: A.y - 48 } }
+    const close = { ...start, pointer: { x: 115, y: A.y - 48 } }
+    let p = step(standing(A, { x: 200 }), start, 0.1, seq(0.9))
+    p = step(p, close, 0.1, seq(0.9))
+    expect(p.locomotion).toBe('run')
   })
 
   it('and a cursor well beyond the flank is not', () => {
@@ -435,7 +508,10 @@ describe('the flee test uses the animal’s box, not a radius', () => {
   })
 
   it('falls back to the height when nobody said how wide it is', () => {
-    const p = step(standing(A, { x: 200 }), { ...at(190, A.y - 17) }, 1 / 60, seq(0.9))
+    const start = { ...at(400, A.y - 17) }
+    const close = { ...start, pointer: { x: 190, y: A.y - 17 } }
+    let p = step(standing(A, { x: 200 }), start, 0.1, seq(0.9))
+    p = step(p, close, 0.1, seq(0.9))
     expect(p.locomotion).toBe('run')
   })
 })
@@ -482,12 +558,10 @@ describe('watching a command that is running', () => {
 
   it('still gets out of the pointer’s way while watching', () => {
     // Watching narrows what it chooses to do; it does not glue it down.
-    const p = step(
-      attend(standing(A, { x: 200 }), 'shell'),
-      { ...env(), pointer: { x: 190, y: A.y - 17 } },
-      1 / 60,
-      seq(0.9),
-    )
+    const first = { ...env(), pointer: { x: 400, y: A.y - 17 } }
+    const close = { ...first, pointer: { x: 190, y: A.y - 17 } }
+    let p = step(attend(standing(A, { x: 200 }), 'shell'), first, 0.1, seq(0.9))
+    p = step(p, close, 0.1, seq(0.9))
     expect(p.locomotion).toBe('run')
   })
 
@@ -496,6 +570,51 @@ describe('watching a command that is running', () => {
     const p = attend(falling, 'agent')
     expect(p.attending).toBe('agent')
     expect(p.locomotion).toBe('fall')
+  })
+
+  it('changes pose during a long command and returns to watching', () => {
+    let p = attend(standing(A), 'shell')
+    const activities = new Set<string>()
+    for (let i = 0; i < 300; i++) {
+      p = step(p, env(), 0.25, seq(0.99))
+      activities.add(p.activity)
+    }
+    expect([...activities].some((activity) => ['stretch', 'scratch'].includes(activity))).toBe(true)
+    expect(p.attending).toBe('shell')
+    expect(p.ledgeId).toBe(A.id)
+  })
+
+  it('does not repeat the long-command thresholds', () => {
+    let p = attend(standing(A), 'shell')
+    let specialTransitions = 0
+    let previous = p.activity
+    for (let i = 0; i < 600; i++) {
+      p = step(p, env(), 0.25, seq(0.99))
+      if (
+        ['stretch', 'scratch'].includes(p.activity) &&
+        !['stretch', 'scratch'].includes(previous)
+      ) {
+        specialTransitions++
+      }
+      previous = p.activity
+    }
+    expect(specialTransitions).toBe(1)
+  })
+
+  it('uses a neutral pose for the agent vigil change', () => {
+    let p = attend(standing(A), 'agent')
+    for (let i = 0; i < 239; i++) p = step(p, env(), 0.25, seq(0.99))
+    p = step(p, env(), 0.25, seq(0.99))
+    expect(p.activity).toBe('groom')
+  })
+
+  it('freezes in a quiet pose after the final vigil gesture', () => {
+    let p = attend(standing(A), 'agent')
+    for (let i = 0; i < 300; i++) p = step(p, env(), 0.25, seq(0.99))
+    expect(p.attending).toBe('agent')
+    expect(p.locomotion).toBe('idle')
+    expect(p.activity).toBe('sit')
+    expect(p.hold).toBe(0)
   })
 })
 

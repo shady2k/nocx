@@ -106,6 +106,19 @@ export interface Pet {
    * build is a pet that is not watching, and watching is the whole reason it
    * lives in a terminal rather than on a desktop. */
   readonly attending: Author | null
+  /** The last pointer sample and the derived encounter history. */
+  readonly pointer: { readonly x: number; readonly y: number } | null
+  readonly pointerSpeed: number
+  readonly pointerApproach: number
+  readonly pointerStill: number
+  readonly pointerNear: boolean
+  readonly pointerAlarmed: boolean
+  /** Number of recent calm encounters, with a short grace period. */
+  readonly pointerCalm: number
+  readonly pointerCalmHold: number
+  /** Elapsed time and one-shot milestones for the current command. */
+  readonly attendingFor: number
+  readonly vigilStage: number
 }
 
 export interface PetTuning {
@@ -167,6 +180,16 @@ export function newPet(x: number, y: number): Pet {
     vx: 0,
     locomotion: 'fall',
     mood: 'calm',
+    pointer: null,
+    pointerSpeed: 0,
+    pointerApproach: 0,
+    pointerStill: 0,
+    pointerNear: false,
+    pointerAlarmed: false,
+    pointerCalm: 0,
+    pointerCalmHold: 0,
+    attendingFor: 0,
+    vigilStage: 0,
     recentBehaviors: [],
     noticeableAges: [],
     activity: 'none',
@@ -301,7 +324,7 @@ export function react(
 ): Pet {
   const mood = MOOD_OF[outcome]
   // Whatever it was watching is over, whether or not it may react.
-  const done = { ...pet, attending: null }
+  const done = { ...pet, attending: null, attendingFor: 0, vigilStage: 0 }
   if (pet.locomotion === 'fall') {
     return { ...done, mood, moodHold: tuning.moodHold }
   }
@@ -334,17 +357,23 @@ export function attend(
   timing: PetTiming,
   tuning: PetTuning = DEFAULT_TUNING,
 ): Pet {
-  if (pet.locomotion === 'fall') return { ...pet, attending: author }
+  if (pet.locomotion === 'fall') {
+    return { ...pet, attending: author, attendingFor: 0, vigilStage: 0 }
+  }
   // A reaction still playing is left to finish. The previous command's
   // verdict routinely lands AFTER the next command has started — the freeze
   // waits on a render fence and a start does not — so cutting it off here
   // would mean the answer to what you just ran is swallowed by the thing you
   // ran next. The attending menu takes over at the next choice either way.
-  if (pet.reacting && pet.hold > 0) return { ...pet, attending: author, boredom: 0 }
+  if (pet.reacting && pet.hold > 0) {
+    return { ...pet, attending: author, attendingFor: 0, vigilStage: 0, boredom: 0 }
+  }
   const activity = author === 'agent' ? 'sit' : 'lie'
   return {
     ...pet,
     attending: author,
+    attendingFor: 0,
+    vigilStage: 0,
     locomotion: 'idle',
     // reactionHold is an attention cadence, not a clip length. Once drawings
     // may override it; loop and hold drawings leave it unchanged.
@@ -555,6 +584,103 @@ function groundOf(env: StepEnv, id: string | null): Ledge | null {
   return ledgeById(env.terrain, id)
 }
 
+const POINTER_FAST_SPEED = 240
+const POINTER_FAST_APPROACH = 180
+// Speed below this means the pointer is stationary for the sit timer.
+const POINTER_STILL_SPEED = 12
+const POINTER_STILL_DELAY = 0.65
+const POINTER_CALM_LIMIT = 3
+const POINTER_CALM_DURATION = 8
+const POINTER_CALM_THRESHOLD_STEP = 0.35
+// A slow approach is still movement, so it has its own wider threshold.
+const POINTER_SLOW_APPROACH = 24
+
+function pointerIsAlarming(speed: number, approach: number, calm: number): boolean {
+  const calmScale = calmThresholdScale(calm)
+  return speed >= POINTER_FAST_SPEED * calmScale || approach >= POINTER_FAST_APPROACH * calmScale
+}
+
+interface PointerAssessment {
+  readonly near: boolean
+  readonly onBody: boolean
+  readonly direction: 1 | -1
+  readonly speed: number
+  readonly approach: number
+  readonly still: number
+  readonly calm: number
+  readonly calmHold: number
+  readonly alarmed: boolean
+  readonly sample: { readonly x: number; readonly y: number } | null
+}
+
+function pointerAssessment(
+  pet: Pet,
+  env: StepEnv,
+  x: number,
+  y: number,
+  dt: number,
+  tuning: PetTuning,
+): PointerAssessment {
+  const sample = env.pointer ?? null
+  const previous = pet.pointer
+  const speed =
+    sample !== null && previous !== null && dt > 0
+      ? Math.hypot(sample.x - previous.x, sample.y - previous.y) / dt
+      : 0
+  const centreY = y - env.petHeight / 2
+  const halfW = (env.petWidth ?? env.petHeight) / 2
+  const dx = sample === null ? 0 : x - sample.x
+  const dy = sample === null ? 0 : centreY - sample.y
+  const distance = Math.hypot(dx, dy)
+  // The animal's BOX plus a margin, not a radius round its position. Two
+  // reasons, both learned by watching a cat ignore a cursor sitting on it:
+  // `y` is where it STANDS, so its body is the `petHeight` above that; and a
+  // 96px cat is 180px wide, so its own edges are further from its centre than
+  // any sensible radius.
+  const near =
+    sample !== null &&
+    Math.abs(dx) <= halfW + tuning.fleeRadius &&
+    Math.abs(dy) <= env.petHeight / 2 + tuning.fleeRadius
+  const onBody = near && Math.abs(dx) <= halfW && Math.abs(dy) <= env.petHeight / 2
+  const direction = dx >= 0 ? 1 : -1
+  const approach =
+    sample !== null && previous !== null && distance > 0 && dt > 0
+      ? ((sample.x - previous.x) * dx + (sample.y - previous.y) * dy) / distance / dt
+      : 0
+  const still = near && speed <= POINTER_STILL_SPEED ? pet.pointerStill + dt : 0
+  let calm = pet.pointerCalm
+  let calmHold = Math.max(0, pet.pointerCalmHold - (near ? 0 : dt))
+  let alarmed = pet.pointerAlarmed
+  const alarming = near && pointerIsAlarming(speed, approach, calm)
+  if (near && !pet.pointerNear) alarmed = alarming
+  else if (alarming) alarmed = true
+  if (!near && pet.pointerNear && !pet.pointerAlarmed) {
+    calm = Math.min(POINTER_CALM_LIMIT, calm + 1)
+    calmHold = POINTER_CALM_DURATION
+  }
+  if (!near && calmHold === 0) calm = 0
+  return {
+    near,
+    onBody,
+    direction,
+    speed,
+    approach,
+    still,
+    calm,
+    calmHold,
+    alarmed,
+    sample,
+  }
+}
+
+function calmThresholdScale(calm: number): number {
+  return 1 + calm * POINTER_CALM_THRESHOLD_STEP
+}
+
+const VIGIL_SETTLE_AT = 5
+const VIGIL_QUIET_AT = 20
+const VIGIL_CHANGE_AT = 60
+
 /**
  * Advance the pet by `dt` seconds. `rng` returns [0,1).
  *
@@ -594,6 +720,23 @@ export function step(
     }
   }
 
+  // Pointer history is advanced before every early return, including a fall
+  // and a paused motion phase. The overlay only supplies positions; keeping
+  // the measurement here means each encounter remains part of the pure state.
+  const pointer = pointerAssessment(next, env, next.x, next.y, dt, tuning)
+  next = {
+    ...next,
+    pointer: pointer.sample,
+    pointerSpeed: pointer.speed,
+    pointerApproach: pointer.approach,
+    pointerStill: pointer.still,
+    pointerNear: pointer.near,
+    pointerAlarmed: pointer.alarmed,
+    pointerCalm: pointer.calm,
+    pointerCalmHold: pointer.calmHold,
+  }
+  if (next.attending !== null) next = { ...next, attendingFor: next.attendingFor + dt }
+
   if (next.phase === 'takeoff') {
     const phaseHold = next.phaseHold - dt
     next =
@@ -626,17 +769,34 @@ export function step(
   moodHold = Math.max(0, moodHold - dt)
   if (moodHold === 0 && mood !== 'tired') mood = 'calm'
 
-  // 3. The pointer. Close enough and the animal stops whatever it was doing
-  //    and moves away — except for a reaction whose once clip still has a
-  //    frame to show. A verdict is the one activity nothing may cut short.
-  const threat = nearPointer(env, x, y, tuning)
+  // 3. The pointer. `pointer.alarmed` is the one threat decision; this step
+  // only chooses the response to it.
+  const threat = pointer.near ? pointer.direction : 0
+  const onBody = pointer.onBody && pointer.still > 0
+  const slowApproach = pointer.near && pointer.approach > POINTER_SLOW_APPROACH && !pointer.alarmed
   if (threat !== 0 && !(next.reacting && next.hold > 0)) {
-    locomotion = 'run'
-    activity = 'none'
-    reacting = false
-    hold = Math.max(hold, 0.5)
-    dir = threat
-    boredom = 0
+    if (pointer.alarmed) {
+      locomotion = 'run'
+      activity = 'none'
+      reacting = false
+      hold = Math.max(hold, 0.5)
+      dir = threat
+      boredom = 0
+    } else if (onBody) {
+      locomotion = 'walk'
+      activity = 'none'
+      reacting = false
+      hold = Math.max(hold, 0.5)
+      dir = threat
+      boredom = 0
+    } else if (pointer.still >= POINTER_STILL_DELAY || slowApproach) {
+      locomotion = 'idle'
+      activity = 'sit'
+      reacting = false
+      hold = Math.max(hold, POINTER_STILL_DELAY)
+      dir = -threat as 1 | -1
+      boredom = 0
+    }
   }
 
   // 4. Move with a signed velocity. The displayed scale and pack stride are
@@ -652,7 +812,9 @@ export function step(
       // limits: once the edge is reached, turning is unavoidable. A turn
       // reached with a full window is therefore not charged as discretionary.
       const chargeTurn = next.attending === null && next.noticeableAges.length < NOTICEABLE_LIMIT
-      if (threat === past || rng() < tuning.stepOff) {
+      const corneredByPointer = pointer.alarmed && threat === past
+      const voluntaryStepOff = rng() < tuning.stepOff
+      if (next.attending === null && (corneredByPointer || voluntaryStepOff)) {
         // Off the end, and whatever is below catches it. The landing is the
         // ordinary swept one, so the animal may drop past several ledges or
         // all the way to the floor — which is the point: this is how it gets
@@ -713,7 +875,48 @@ export function step(
         gaitSpeed('run', env.timing, env.petScale),
       ),
     )
+
     boredom += dt
+  }
+  // Watching has its own clock, independent of output and of the ordinary
+  // occupation hold. Milestones are one-shot; stage 3 is deliberately
+  // terminal, so a long command never loops a two-minute routine forever.
+  if (next.attending !== null && locomotion !== 'run') {
+    let stage = next.vigilStage
+    let vigilActivity: Activity | null = null
+    if (stage < 1 && next.attendingFor >= VIGIL_SETTLE_AT) {
+      stage = 1
+      vigilActivity = next.attending === 'shell' ? 'sit' : 'lie'
+    } else if (stage < 2 && next.attendingFor >= VIGIL_QUIET_AT) {
+      stage = 2
+      vigilActivity = next.attending === 'shell' ? 'lie' : 'sit'
+    } else if (stage < 3 && next.attendingFor >= VIGIL_CHANGE_AT) {
+      stage = 3
+      vigilActivity = next.attending === 'shell' ? 'stretch' : 'groom'
+    }
+    if (vigilActivity !== null) {
+      const vigilHold = chosenHold(
+        { locomotion: 'idle', activity: vigilActivity, hold: tuning.reactionHold },
+        env.timing,
+      )
+      return {
+        ...next,
+        x,
+        y,
+        dir,
+        vx,
+        locomotion: 'idle',
+        activity: vigilActivity,
+        hold: vigilHold,
+        reacting: false,
+        mood,
+        moodHold,
+        boredom,
+        ledgeId: ledge.id,
+        vigilStage: stage,
+      }
+    }
+    if (stage !== next.vigilStage) next = { ...next, vigilStage: stage }
   }
 
   // 5. Long enough with nothing to do and the cat goes to sleep. This is the
@@ -742,6 +945,27 @@ export function step(
   // 6. Finish the current occupation before starting another one. Deciding
   //    afresh every frame is what makes a pet twitch instead of live.
   hold -= dt
+  if (hold <= 0 && next.attending !== null && next.vigilStage >= 3 && locomotion === 'idle') {
+    // After the final gesture, observation intentionally freezes in a quiet
+    // pose until the command ends. A pointer alarm has already changed
+    // locomotion to run above, so it is never swallowed by this guard.
+    const quiet = next.attending === 'shell' ? 'lie' : 'sit'
+    return {
+      ...next,
+      x,
+      y,
+      dir,
+      vx,
+      locomotion: 'idle',
+      activity: quiet,
+      hold: 0,
+      reacting: false,
+      mood,
+      moodHold,
+      boredom,
+      ledgeId: ledge.id,
+    }
+  }
   if (hold <= 0) {
     const up = next.attending === null ? ledgeAbove(env.terrain, x, y, tuning.jumpReach) : null
     const offered =
@@ -823,27 +1047,6 @@ export function step(
     boredom,
     ledgeId: ledge.id,
   }
-}
-
-/**
- * Which way to run from the pointer, or 0 when it is not a threat.
- *
- * The animal's BOX plus a margin, not a radius round its position. Two
- * reasons, both learned by watching a cat ignore a cursor sitting on it:
- * `y` is where it STANDS, so its body is the `petHeight` above that; and a
- * 96px cat is 180px wide, so its own edges are further from its centre than
- * any sensible radius.
- */
-function nearPointer(env: StepEnv, x: number, y: number, tuning: PetTuning): 0 | 1 | -1 {
-  const p = env.pointer
-  if (!p) return 0
-  const halfW = (env.petWidth ?? env.petHeight) / 2
-  const dx = x - p.x
-  const dy = y - env.petHeight / 2 - p.y
-  if (Math.abs(dx) > halfW + tuning.fleeRadius) return 0
-  if (Math.abs(dy) > env.petHeight / 2 + tuning.fleeRadius) return 0
-  // Directly on top of it: pick a side rather than freezing.
-  return dx >= 0 ? 1 : -1
 }
 
 /** Extra rise above the target, so the arc peaks over the shelf and the

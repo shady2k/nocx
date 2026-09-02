@@ -187,7 +187,7 @@ func SystemPrompt(f SystemPromptFacts) string {
 		"of the same call.\n")
 	b.WriteString("\nWhat a person's input means\n")
 	b.WriteString("A link on its own means go there and tell the person what is on it. " +
-		"Text on its own means remember this as a note. " +
+		"Text on its own, with no question, means save it as a note with notes.create; text that is a question or context for a question is part of that question instead. " +
 		"When the intent is not plain, ask one question and stop. ")
 	// THE RULE AND THE ATTACHMENT MUST NOT CONTRADICT EACH OTHER
 	// (nocx-hp8p2.4). "Do not call a tool to check first" is about going
@@ -207,7 +207,7 @@ func SystemPrompt(f SystemPromptFacts) string {
 			"but what is attached above is already yours: read it before you answer, " +
 			"because it is why the question was asked here.\n")
 	} else {
-		b.WriteString("Do not guess, and do not call a tool to check first.\n")
+		b.WriteString("Do not guess, and do not call a tool to check first; notes.create is the requested write for questionless text, not a check.\n")
 	}
 
 	b.WriteString("\nHow to answer\n")

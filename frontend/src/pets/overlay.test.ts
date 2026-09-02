@@ -7,8 +7,8 @@
 // computes no layout, so the rectangles are stated — the arithmetic they feed
 // is what is under test, and the pixels are confirmed in the browser.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { PetOverlay } from './overlay'
-import type { ImageSource, PetPack } from './pack'
+import { PetOverlay, timingFrom } from './overlay'
+import { loadPack, type ImageSource, type PetPack } from './pack'
 
 const CELL = 10
 
@@ -17,12 +17,12 @@ const PACK: PetPack = {
   cell: CELL,
   fps: 10,
   clips: {
-    idle: { takes: [{ file: 'idle.png', frames: 2 }] },
-    walk: { takes: [{ file: 'walk.png', frames: 2 }] },
-    run: { takes: [{ file: 'run.png', frames: 2 }] },
-    meow: { takes: [{ file: 'meow.png', frames: 2 }] },
-    itch: { takes: [{ file: 'itch.png', frames: 2 }] },
-    sitting: { takes: [{ file: 'sitting.png', frames: 1 }] },
+    idle: { mode: 'loop', pause: 0, takes: [{ file: 'idle.png', frames: 2 }] },
+    walk: { mode: 'loop', takes: [{ file: 'walk.png', frames: 2 }] },
+    run: { mode: 'loop', takes: [{ file: 'run.png', frames: 2 }] },
+    meow: { mode: 'once', takes: [{ file: 'meow.png', frames: 2 }] },
+    itch: { mode: 'once', takes: [{ file: 'itch.png', frames: 2 }] },
+    sitting: { mode: 'hold', takes: [{ file: 'sitting.png', frames: 1 }] },
   },
   locomotion: { idle: 'idle', walk: 'walk', run: 'run', fall: 'run' },
   activity: {
@@ -34,6 +34,7 @@ const PACK: PetPack = {
     meow: 'meow',
     sleep: 'idle',
   },
+  strideBodies: { walk: 1, run: 3 },
 }
 
 /** Every clip paints a 4×4 animal at (3,5) of a 10×10 cell. */
@@ -209,6 +210,41 @@ describe('a pet over a pane', () => {
     pet.reactTo('failure')
     s.pump(1 / 60)
     expect(pet.playing).toBe('itch')
+  })
+
+  it('keeps a once clip through its final frame before changing activity', async () => {
+    const s = stand([200])
+    const pet = overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    pet.reactTo('success')
+    pet.attendTo('shell')
+    s.pump(0.15)
+    expect(pet.playing).toBe('meow')
+    s.pump(0.1)
+    expect(pet.playing).not.toBe('meow')
+  })
+
+  it('restarts a repeated reaction even when it uses the same clip', async () => {
+    const s = stand([200])
+    const pet = overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    pet.reactTo('success')
+    s.pump(0.19)
+    const lateFrame = s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition
+    pet.reactTo('success')
+    s.pump(0.05)
+    const restarted = s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition
+    expect(restarted).not.toBe(lateFrame)
+  })
+
+  it('derives pixel strides from the loaded trim and body-length factors', async () => {
+    const loaded = await loadPack(PACK, '/', IMAGES)
+    const timing = timingFrom(PACK, loaded)
+    expect(loaded.trim).toEqual({ x0: 3, y0: 5, x1: 7, y1: 9 })
+    expect(timing.strides).toEqual({ walk: 4, run: 12 })
+    expect(timing.strides.run / timing.strides.walk).toBe(3)
   })
 
   it('leaves the terminal untouched when the pack will not load', async () => {

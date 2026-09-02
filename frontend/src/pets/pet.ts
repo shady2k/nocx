@@ -18,6 +18,27 @@
 import type { Ledge } from './terrain'
 import { ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
 
+export type ClipMode = 'loop' | 'once' | 'hold'
+
+/** Timing data copied from the loaded drawing, not a pack dependency. */
+interface ClipTiming {
+  readonly mode: ClipMode
+  readonly duration: number
+  readonly pause: number
+}
+
+/**
+ * The pure state machine receives this as data. Passing the logical state
+ * maps keeps `pet.ts` independent of pack loading; passing a pack or a
+ * clip-selector function would make this module own rendering policy.
+ */
+export interface PetTiming {
+  readonly fps: number
+  readonly locomotion: Readonly<Record<Locomotion, ClipTiming>>
+  readonly activity: Readonly<Record<Exclude<Activity, 'none'>, ClipTiming>>
+  readonly strides: Readonly<{ walk: number; run: number }>
+}
+
 export type Locomotion = 'idle' | 'walk' | 'run' | 'fall'
 type Mood = 'calm' | 'pleased' | 'worried' | 'tired'
 export type Activity = 'none' | 'sit' | 'groom' | 'stretch' | 'lie' | 'scratch' | 'meow' | 'sleep'
@@ -45,6 +66,8 @@ export interface Pet {
   readonly x: number
   readonly y: number
   readonly dir: 1 | -1
+  /** Signed horizontal speed, px/s; direction changes brake through zero. */
+  readonly vx: number
   readonly locomotion: Locomotion
   readonly mood: Mood
   readonly activity: Activity
@@ -76,8 +99,11 @@ export interface PetTuning {
   readonly maxFall: number
   /** Doing nothing for this long sends the pet to sleep. */
   readonly sleepAfter: number
-  /** How long a reaction to a command holds the pet's attention. */
+  /** Minimum attention interval between choices while a command runs.
+   *  This is not a clip length; reactions use their drawing's duration. */
   readonly reactionHold: number
+  /** Seconds to linearly accelerate or brake a gait. */
+  readonly gaitRamp: number
   /** How long a mood lasts before it decays back to calm. */
   readonly moodHold: number
   /** How far up the animal can reach, in pixels.
@@ -109,6 +135,7 @@ export const DEFAULT_TUNING: PetTuning = {
   maxFall: 900,
   sleepAfter: 45,
   reactionHold: 1.4,
+  gaitRamp: 0.18,
   moodHold: 12,
   stepOff: 0.4,
   fleeRadius: 70,
@@ -121,6 +148,7 @@ export function newPet(x: number, y: number): Pet {
     x,
     y,
     dir: 1,
+    vx: 0,
     locomotion: 'fall',
     mood: 'calm',
     activity: 'none',
@@ -154,6 +182,49 @@ const REACTION_OF: Record<Author, Record<Outcome, Activity>> = {
   agent: { success: 'stretch', failure: 'lie', unknown: 'sit' },
 }
 
+function timingFor(timing: PetTiming, locomotion: Locomotion, activity: Activity): ClipTiming {
+  return locomotion === 'idle' && activity !== 'none'
+    ? timing.activity[activity]
+    : timing.locomotion[locomotion]
+}
+
+/** The drawing sets a lifetime only for a once clip; other modes keep caller hold. */
+function chosenHold(
+  choice: Pick<Choice, 'locomotion' | 'activity' | 'hold'>,
+  timing: PetTiming,
+): number {
+  const clip = timingFor(timing, choice.locomotion, choice.activity)
+  return clip.mode === 'once' ? clip.duration : choice.hold
+}
+
+function approach(
+  current: number,
+  target: number,
+  dt: number,
+  ramp: number,
+  reference = 0,
+): number {
+  if (current === target) return target
+  const change =
+    (Math.max(Math.abs(current), Math.abs(target), reference) / Math.max(0.1, ramp)) * dt
+  if (Math.abs(target - current) <= change) return target
+  return current + Math.sign(target - current) * change
+}
+
+/** How fast this gait travels, in display pixels per second.
+ *
+ *  Exported because the PAINTER needs the same number: the clip's playback
+ *  rate is the ratio of actual speed to this one, so that a cat still
+ *  getting up to speed draws its walk cycle correspondingly slower. Written
+ *  out a second time in overlay.ts it was the same expression twice, which
+ *  is how the two drift and the feet start sliding again in exactly the
+ *  state — accelerating — this task existed to fix. */
+export function gaitSpeed(locomotion: Locomotion, timing: PetTiming, scale: number): number {
+  if (locomotion === 'walk') return (timing.strides.walk / timing.locomotion.walk.duration) * scale
+  if (locomotion === 'run') return (timing.strides.run / timing.locomotion.run.duration) * scale
+  return 0
+}
+
 /**
  * A command finished. The pet stops what it was doing and reacts.
  *
@@ -163,7 +234,8 @@ const REACTION_OF: Record<Author, Record<Outcome, Activity>> = {
 export function react(
   pet: Pet,
   outcome: Outcome,
-  author: Author = 'shell',
+  author: Author,
+  timing: PetTiming,
   tuning: PetTuning = DEFAULT_TUNING,
 ): Pet {
   const mood = MOOD_OF[outcome]
@@ -172,13 +244,16 @@ export function react(
   if (pet.locomotion === 'fall') {
     return { ...done, mood, moodHold: tuning.moodHold }
   }
+  const activity = REACTION_OF[author][outcome]
   return {
     ...done,
     locomotion: 'idle',
     mood,
     moodHold: tuning.moodHold,
-    activity: REACTION_OF[author][outcome],
-    hold: tuning.reactionHold,
+    activity,
+    // Once reactions finish when their drawing finishes. Loop and hold
+    // reactions keep the caller's reaction cadence instead.
+    hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, timing),
     reacting: true,
     boredom: 0,
   }
@@ -192,21 +267,28 @@ export function react(
  * build takes — the minute you are actually looking at the terminal — it
  * wandered about as though nothing were going on.
  */
-export function attend(pet: Pet, author: Author, tuning: PetTuning = DEFAULT_TUNING): Pet {
+export function attend(
+  pet: Pet,
+  author: Author,
+  timing: PetTiming,
+  tuning: PetTuning = DEFAULT_TUNING,
+): Pet {
   if (pet.locomotion === 'fall') return { ...pet, attending: author }
   // A reaction still playing is left to finish. The previous command's
   // verdict routinely lands AFTER the next command has started — the freeze
-  // waits on a render fence, the start does not — so cutting it off here
+  // waits on a render fence and a start does not — so cutting it off here
   // would mean the answer to what you just ran is swallowed by the thing you
   // ran next. The attending menu takes over at the next choice either way.
   if (pet.reacting && pet.hold > 0) return { ...pet, attending: author, boredom: 0 }
+  const activity = author === 'agent' ? 'sit' : 'lie'
   return {
     ...pet,
     attending: author,
     locomotion: 'idle',
-    // Your command it lies down for; the assistant's it sits up and watches.
-    activity: author === 'agent' ? 'sit' : 'lie',
-    hold: tuning.reactionHold,
+    // reactionHold is an attention cadence, not a clip length. Once drawings
+    // may override it; loop and hold drawings leave it unchanged.
+    activity,
+    hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, timing),
     reacting: false,
     boredom: 0,
   }
@@ -343,6 +425,10 @@ export interface StepEnv {
   /** The pane's own bottom edge, as ground. */
   readonly floor: Ledge
   readonly petHeight: number
+  /** Source-to-display scale, computed once by the painter from the trim. */
+  readonly petScale: number
+  /** Clip modes and durations, supplied as data so this module stays pure. */
+  readonly timing: PetTiming
   /** How wide the animal is drawn. The flee test is against its BOX plus a
    *  margin, not against a radius round its position: at 96px tall the cat is
    *  180px wide, so a cursor visibly on top of it is ninety pixels from the
@@ -378,7 +464,15 @@ export function step(
   //    never quietly moved to another ledge, which would read as a teleport.
   const standing = groundOf(env, next.ledgeId)
   if (next.locomotion !== 'fall' && standing === null) {
-    next = { ...next, locomotion: 'fall', ledgeId: null, vy: 0, activity: 'none', hold: 0 }
+    next = {
+      ...next,
+      locomotion: 'fall',
+      ledgeId: null,
+      vy: 0,
+      vx: 0,
+      activity: 'none',
+      hold: 0,
+    }
   }
 
   if (next.locomotion === 'fall') return fall(next, env, dt, tuning)
@@ -388,6 +482,7 @@ export function step(
   const y = ledge.y
   let x = Math.min(Math.max(next.x, ledge.x0), ledge.x1)
   let dir = next.dir
+  let vx = next.vx
   let hold: number = next.hold
   let activity: Activity = next.activity
   let locomotion: Locomotion = next.locomotion
@@ -400,10 +495,10 @@ export function step(
   if (moodHold === 0 && mood !== 'tired') mood = 'calm'
 
   // 3. The pointer. Close enough and the animal stops whatever it was doing
-  //    and moves away — the only interaction the pet has, since the layer
-  //    deliberately takes no clicks.
+  //    and moves away — except for a reaction whose once clip still has a
+  //    frame to show. A verdict is the one activity nothing may cut short.
   const threat = nearPointer(env, x, y, tuning)
-  if (threat !== 0) {
+  if (threat !== 0 && !(next.reacting && next.hold > 0)) {
     locomotion = 'run'
     activity = 'none'
     reacting = false
@@ -412,11 +507,14 @@ export function step(
     boredom = 0
   }
 
-  // 4. Move, and turn round at the end of the world rather than falling off it.
+  // 4. Move with a signed velocity. The displayed scale and pack stride are
+  //    the sole source of the gait target; braking is explicit so a reversal
+  //    cannot snap the feet to the other side of the body.
   if (locomotion === 'walk' || locomotion === 'run') {
-    const speed = locomotion === 'run' ? tuning.runSpeed : tuning.walkSpeed
-    x += dir * speed * dt
-    const past = x <= ledge.x0 ? -1 : x >= ledge.x1 ? 1 : 0
+    const target = dir * gaitSpeed(locomotion, env.timing, env.petScale)
+    vx = approach(vx, target, dt, tuning.gaitRamp)
+    x += vx * dt
+    const past = vx < 0 && x <= ledge.x0 ? -1 : vx > 0 && x >= ledge.x1 ? 1 : 0
     if (past !== 0) {
       // Cornered by the pointer: leave, rather than turn round into it.
       if (threat === past || rng() < tuning.stepOff) {
@@ -435,6 +533,7 @@ export function step(
           x: past > 0 ? ledge.x1 : ledge.x0,
           y,
           dir: past > 0 ? 1 : -1,
+          vx: 0,
           ledgeId: null,
           locomotion: 'fall',
           activity: 'none',
@@ -447,9 +546,20 @@ export function step(
       }
       x = past > 0 ? ledge.x1 : ledge.x0
       dir = past > 0 ? -1 : 1
+      vx = 0
     }
     boredom = 0
   } else {
+    vx = approach(
+      vx,
+      0,
+      dt,
+      tuning.gaitRamp,
+      Math.max(
+        gaitSpeed('walk', env.timing, env.petScale),
+        gaitSpeed('run', env.timing, env.petScale),
+      ),
+    )
     boredom += dt
   }
 
@@ -463,6 +573,7 @@ export function step(
       x,
       y,
       dir,
+      vx,
       mood: 'tired',
       moodHold: 0,
       locomotion: 'idle',
@@ -473,7 +584,7 @@ export function step(
     }
   }
   if (activity === 'sleep') {
-    return { ...next, x, y, dir, mood: 'tired', moodHold: 0, boredom, ledgeId: ledge.id }
+    return { ...next, x, y, dir, vx, mood: 'tired', moodHold: 0, boredom, ledgeId: ledge.id }
   }
 
   // 6. Finish the current occupation before starting another one. Deciding
@@ -490,6 +601,7 @@ export function step(
         x,
         y,
         dir,
+        vx: 0,
         ledgeId: null,
         locomotion: 'fall',
         activity: 'none',
@@ -509,6 +621,7 @@ export function step(
         x,
         y,
         dir,
+        vx: 0,
         ledgeId: null,
         locomotion: 'fall',
         activity: 'none',
@@ -521,7 +634,7 @@ export function step(
     }
     locomotion = c.locomotion
     activity = c.activity
-    hold = c.hold
+    hold = chosenHold(c, env.timing)
     reacting = false
     if (c.locomotion !== 'idle' && rng() < 0.5) dir = (dir * -1) as 1 | -1
   }
@@ -530,6 +643,7 @@ export function step(
     ...next,
     x,
     y,
+    vx,
     dir,
     locomotion,
     activity,

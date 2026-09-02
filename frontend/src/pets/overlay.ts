@@ -17,12 +17,14 @@
 import {
   attend,
   DEFAULT_TUNING,
+  gaitSpeed,
   newPet,
   react,
   step,
   type Author,
   type Outcome,
   type Pet,
+  type PetTiming,
   type PetTuning,
 } from './pet'
 import {
@@ -72,6 +74,41 @@ const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.pane.active .nocx-chip', edge: 'top' },
 ]
 
+export function timingFrom(pack: PetPack, loaded: LoadedPack | null = null): PetTiming {
+  const clipTiming = (name: string) => {
+    const definition = pack.clips[name]
+    const takes = loaded?.clips[name]?.takes ?? definition.takes
+    // Unequal takes share the longest duration; a shorter sheet remains on
+    // its final frame instead of ending the behaviour early.
+    const frames = Math.max(...takes.map((take) => take.frames))
+    return {
+      mode: definition.mode,
+      duration: frames / pack.fps,
+      pause: definition.pause ?? 0,
+    }
+  }
+  // Built mutable and handed over as readonly. `PetTiming` is readonly
+  // because the state machine must not be able to edit its own rules; the
+  // one place allowed to write these tables is the one assembling them.
+  const locomotion: Record<string, ReturnType<typeof clipTiming>> = {}
+  for (const [key, clip] of Object.entries(pack.locomotion)) locomotion[key] = clipTiming(clip)
+  const activity: Record<string, ReturnType<typeof clipTiming>> = {}
+  for (const [key, clip] of Object.entries(pack.activity)) activity[key] = clipTiming(clip)
+  // Before the image arrives, use the cell as a temporary body width. The
+  // loaded trim replaces it so the actual drawing owns the source-pixel scale.
+  const bodyWidth = loaded === null ? pack.cell : loaded.trim.x1 - loaded.trim.x0
+  const strides = {
+    walk: bodyWidth * pack.strideBodies.walk,
+    run: bodyWidth * pack.strideBodies.run,
+  }
+  return {
+    fps: pack.fps,
+    locomotion: locomotion as PetTiming['locomotion'],
+    activity: activity as PetTiming['activity'],
+    strides,
+  }
+}
+
 export interface PetOverlayOpts {
   /** The element the pet is drawn over. Must be a positioned ancestor of
    *  nothing in particular — the layer is appended to it and sized to it. */
@@ -118,6 +155,7 @@ export class PetOverlay {
   private readonly _caf: (h: number) => void
   private readonly _rng: () => number
   private readonly _tuning: PetTuning
+  private _timing: PetTiming
 
   private _loaded: LoadedPack | null = null
   private _loadedBase = ''
@@ -128,6 +166,9 @@ export class PetOverlay {
   private _terrain: Ledge[] = []
   private _floor: Ledge = { id: 'floor', x0: 0, x1: 0, y: 0 }
   private _clip = ''
+  private _doing = ''
+  private _behaviorGeneration = 0
+  private _paintedGeneration = -1
   private _clipT = 0
   /** Which drawing of the current behaviour is playing. */
   private _take = 0
@@ -140,6 +181,7 @@ export class PetOverlay {
   /** The drawn width of the animal, from the pack's trim. Kept because the
    *  flee test needs the box and only the painter knows it. */
   private _width = 0
+  private _scale = 1
   private _nextLedgeId = 0
   private _lastSweep = -1e9
   private _hostLeft = 0
@@ -176,6 +218,7 @@ export class PetOverlay {
 
     this._pet = newPet(0, 0)
     this._opts = opts
+    this._timing = timingFrom(opts.pack ?? CAT_PACK)
     this._settings = opts.settings ?? {
       enabled: petsEnabled,
       height: petHeight,
@@ -221,6 +264,7 @@ export class PetOverlay {
         if (this._disposed || !this._running || token !== this._loadToken) return
         this._loaded = loaded
         this._loadedBase = base
+        this._timing = timingFrom(loaded.pack, loaded)
         this._clip = ''
         this._begin()
       })
@@ -280,13 +324,16 @@ export class PetOverlay {
   /** A command started: the animal settles down to watch it. */
   attendTo(author: Author): void {
     if (this._disposed) return
-    this._pet = attend(this._pet, author, this._tuning)
+    const reactionInProgress = this._pet.reacting && this._pet.hold > 0
+    this._pet = attend(this._pet, author, this._timing, this._tuning)
+    if (!reactionInProgress) this._behaviorGeneration++
   }
 
   /** A command finished. */
   reactTo(outcome: Outcome, author: Author = 'shell'): void {
     if (this._disposed) return
-    this._pet = react(this._pet, outcome, author, this._tuning)
+    this._behaviorGeneration++
+    this._pet = react(this._pet, outcome, author, this._timing, this._tuning)
   }
 
   /** The layout moved; re-read it before the next frame. */
@@ -440,12 +487,15 @@ export class PetOverlay {
         this._lastSweep = t
         this._measure()
       }
+      this._updateMetrics()
       this._pet = step(
         this._pet,
         {
           terrain: this._terrain,
           floor: this._floor,
           petHeight: this._height,
+          petScale: this._scale,
+          timing: this._timing,
           petWidth: this._width,
           pointer: this._pointer,
         },
@@ -458,6 +508,13 @@ export class PetOverlay {
     }
     this._handle = this._raf(frame)
   }
+  private _updateMetrics(): void {
+    const loaded = this._loaded
+    if (!loaded) return
+    const { x0, y0, x1, y1 } = loaded.trim
+    this._scale = this._height / (y1 - y0)
+    this._width = (x1 - x0) * this._scale
+  }
 
   // ── paint ────────────────────────────────────────────────────────────────
 
@@ -466,8 +523,16 @@ export class PetOverlay {
     if (!loaded) return
     const name = clipFor(loaded.pack, this._pet.locomotion, this._pet.activity, loaded.clips)
     const clip = loaded.clips[name]
-    if (!clip) return
-    if (name !== this._clip) {
+    const definition = loaded.pack.clips[name]
+    if (!clip || !definition) return
+    const doing = `${this._pet.locomotion}/${this._pet.activity}`
+    if (
+      this._behaviorGeneration !== this._paintedGeneration ||
+      doing !== this._doing ||
+      name !== this._clip
+    ) {
+      this._paintedGeneration = this._behaviorGeneration
+      this._doing = doing
       this._clip = name
       this._clipT = 0
       // A fresh take each time the behaviour starts. A cat washes itself
@@ -476,13 +541,28 @@ export class PetOverlay {
       this._take = Math.floor(this._rng() * clip.takes.length) % clip.takes.length
     }
     const take = clip.takes[Math.min(this._take, clip.takes.length - 1)]
-    this._clipT += dt * loaded.pack.fps
-    const frame = Math.floor(this._clipT) % take.frames
+    // The clip plays at the ratio of actual speed to the gait's own speed, so
+    // a cat still accelerating draws its walk correspondingly slower and the
+    // contact foot stays put. `gaitSpeed` is pet.ts's, not a copy of it —
+    // written out here as well it would be the same arithmetic in two places,
+    // and the two would drift precisely where this matters.
+    const moving = this._pet.locomotion === 'walk' || this._pet.locomotion === 'run'
+    const baseSpeed = gaitSpeed(this._pet.locomotion, this._timing, this._scale)
+    const rate = moving && baseSpeed > 0 ? Math.abs(this._pet.vx) / baseSpeed : 1
+    this._clipT += dt * rate
+    const cycle = take.frames / loaded.pack.fps
+    const phase =
+      definition.mode === 'loop' ? this._clipT % (cycle + (definition.pause ?? 0)) : this._clipT
+    const frame =
+      definition.mode === 'loop'
+        ? Math.min(
+            take.frames - 1,
+            Math.floor(Math.min(phase, cycle - Number.EPSILON) * loaded.pack.fps),
+          )
+        : Math.min(take.frames - 1, Math.floor(phase * loaded.pack.fps))
 
-    const { x0, y0, x1, y1 } = loaded.trim
-    const scale = this._height / (y1 - y0)
-    const width = (x1 - x0) * scale
-    this._width = width
+    const { x0, y0 } = loaded.trim
+    const width = this._width
     // What the animal is doing, on the element, in the app's own vocabulary.
     //
     // The alternative is a test reading which PNG the sprite happens to be
@@ -499,8 +579,8 @@ export class PetOverlay {
     s.width = `${width}px`
     s.height = `${this._height}px`
     s.backgroundImage = `url(${take.url})`
-    s.backgroundSize = `${take.sheetWidth * scale}px ${take.sheetHeight * scale}px`
-    s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * scale}px ${-y0 * scale}px`
+    s.backgroundSize = `${take.sheetWidth * this._scale}px ${take.sheetHeight * this._scale}px`
+    s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * this._scale}px ${-y0 * this._scale}px`
     // translate, not left/top: the pet moves on the compositor and never
     // asks the pane for a new layout.
     s.transform =

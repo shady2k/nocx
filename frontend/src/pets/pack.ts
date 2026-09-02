@@ -15,7 +15,7 @@
 // stretch. One trim for the whole pack keeps the frames in the relationship
 // the artist drew them in.
 
-import type { Activity, Locomotion } from './pet'
+import type { Activity, ClipMode, Locomotion } from './pet'
 
 interface Take {
   /** File name inside the pack directory. */
@@ -32,12 +32,29 @@ interface Take {
  * wash and the sleep — and a take is chosen afresh each time the clip starts.
  */
 interface Clip {
+  readonly mode: ClipMode
+  /** Seconds to hold the final frame of a looping clip before playing it
+   *  again. A number, deliberately, and not yet a [min, max] range: a range
+   *  would have to be resolved somewhere, and the only honest place to
+   *  resolve it is the same draw that decides everything else the animal
+   *  does at random. That draw is nocx-99ejl's, so the range arrives with
+   *  it. Declaring the wider type now and quietly reading 0 out of it would
+   *  be a setting that does nothing, which is worse than not offering it. */
+  readonly pause?: number
   readonly takes: readonly Take[]
 }
 
-/** Sugar for the clips that were drawn only once, which is most of them. */
+/** Sugar for clips whose timing is declared by the frame strip. */
 function once(file: string, frames: number): Clip {
-  return { takes: [{ file, frames }] }
+  return { mode: 'once', takes: [{ file, frames }] }
+}
+
+function loop(file: string, frames: number, pause?: number): Clip {
+  return { mode: 'loop', pause, takes: [{ file, frames }] }
+}
+
+function hold(file: string, frames: number): Clip {
+  return { mode: 'hold', takes: [{ file, frames }] }
 }
 
 export interface PetPack {
@@ -50,6 +67,8 @@ export interface PetPack {
   readonly locomotion: Readonly<Record<Locomotion, string>>
   /** Which clip plays for a given activity, when standing still. */
   readonly activity: Readonly<Record<Exclude<Activity, 'none'>, string>>
+  /** Body-lengths travelled by one complete gait cycle. */
+  readonly strideBodies: Readonly<{ walk: number; run: number }>
 }
 
 /**
@@ -80,20 +99,22 @@ export const CAT_PACK: PetPack = {
   cell: 50,
   fps: 10,
   clips: {
-    idle: once('idle.png', 10),
-    walk: once('walk.png', 8),
-    run: once('run.png', 8),
+    idle: loop('idle.png', 10, 0.8),
+    walk: loop('walk.png', 8),
+    run: loop('run.png', 8),
     meow: once('meow.png', 4),
-    laying: once('laying.png', 8),
+    laying: loop('laying.png', 8),
     itch: once('itch.png', 2),
     licking: {
+      mode: 'once',
       takes: [
         { file: 'licking1.png', frames: 5 },
         { file: 'licking2.png', frames: 5 },
       ],
     },
-    sitting: once('sitting.png', 1),
+    sitting: hold('sitting.png', 1),
     sleeping: {
+      mode: 'hold',
       takes: [
         { file: 'sleeping1.png', frames: 1 },
         { file: 'sleeping2.png', frames: 1 },
@@ -118,6 +139,11 @@ export const CAT_PACK: PetPack = {
     meow: 'meow',
     sleep: 'sleeping',
   },
+  // The stride is expressed in body lengths rather than source pixels. The
+  // loaded trim supplies the body width, so another cell size or drawing
+  // scales without changing the gait's proportions. Run covers three body
+  // lengths per cycle, versus one for walk, making the ratio explicit.
+  strideBodies: { walk: 1, run: 3 },
 }
 
 /** The rectangle inside a cell that any frame of the pack actually paints. */

@@ -27,8 +27,8 @@ const TINY: PetPack = {
   cell: 10,
   fps: 8,
   clips: {
-    idle: { takes: [{ file: 'idle.png', frames: 2 }] },
-    walk: { takes: [{ file: 'walk.png', frames: 2 }] },
+    idle: { mode: 'loop', pause: 0, takes: [{ file: 'idle.png', frames: 2 }] },
+    walk: { mode: 'loop', takes: [{ file: 'walk.png', frames: 2 }] },
   },
   locomotion: { idle: 'idle', walk: 'walk', run: 'walk', fall: 'walk' },
   activity: {
@@ -40,6 +40,7 @@ const TINY: PetPack = {
     meow: 'idle',
     sleep: 'idle',
   },
+  strideBodies: { walk: 1, run: 3 },
 }
 
 function sourceOf(sheets: Record<string, ReturnType<typeof strip>>): ImageSource {
@@ -121,12 +122,13 @@ describe('loadPack', () => {
       ...TINY,
       clips: {
         idle: {
+          mode: 'loop',
           takes: [
             { file: 'idle.png', frames: 2 },
             { file: 'idle2.png', frames: 2 },
           ],
         },
-        walk: { takes: [{ file: 'walk.png', frames: 2 }] },
+        walk: { mode: 'loop', takes: [{ file: 'walk.png', frames: 2 }] },
       },
     }
     const loaded = await loadPack(
@@ -181,5 +183,20 @@ describe('clipFor', () => {
     const names = new Set(Object.keys(CAT_PACK.clips))
     for (const c of Object.values(CAT_PACK.locomotion)) expect(names).toContain(c)
     for (const c of Object.values(CAT_PACK.activity)) expect(names).toContain(c)
+  })
+  it('declares clip playback modes, idle pause, and measured gait strides', () => {
+    for (const name of ['idle', 'walk', 'run', 'laying']) {
+      expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'loop' })
+    }
+    for (const name of ['meow', 'stretching', 'itch', 'licking']) {
+      expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'once' })
+    }
+    for (const name of ['sitting', 'sleeping']) {
+      expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'hold' })
+    }
+    expect(CAT_PACK.clips.idle).toMatchObject({ pause: 0.8 })
+    // Strides are body-length coefficients; timingFrom applies the loaded
+    // trim width, so the run/walk ratio remains three.
+    expect(CAT_PACK.strideBodies).toEqual({ walk: 1, run: 3 })
   })
 })

@@ -2,24 +2,66 @@
 // `rng`, so a thousand seconds of cat runs deterministically in a millisecond.
 import { describe, expect, it } from 'vitest'
 import {
-  attend,
+  attend as rawAttend,
   DEFAULT_TUNING,
   FLOOR_ID,
   newPet,
   onFloor,
-  react,
+  react as rawReact,
   step,
   type Pet,
+  type PetTiming,
   type StepEnv,
 } from './pet'
+import { CAT_PACK } from './pack'
 import type { Ledge } from './terrain'
 
 const FLOOR: Ledge = { id: FLOOR_ID, x0: 0, x1: 900, y: 580 }
 const A: Ledge = { id: 'blk:1', x0: 100, x1: 300, y: 200 }
 const B: Ledge = { id: 'blk:2', x0: 100, x1: 300, y: 400 }
 
+const timing = (mode: 'loop' | 'once' | 'hold', duration: number) => ({
+  mode,
+  duration,
+  pause: mode === 'loop' ? 0 : 0,
+})
+
+const TIMING: PetTiming = {
+  fps: 10,
+  locomotion: {
+    idle: timing('loop', 1),
+    walk: timing('loop', 0.8),
+    run: timing('loop', 0.8),
+    fall: timing('loop', 0.8),
+  },
+  activity: {
+    sit: timing('hold', 0.1),
+    groom: timing('once', 0.5),
+    stretch: timing('once', 1.3),
+    lie: timing('loop', 0.8),
+    scratch: timing('once', 0.2),
+    meow: timing('once', 0.4),
+    sleep: timing('hold', 0.1),
+  },
+  strides: { walk: 32, run: 48 },
+}
+
+const ENV_DEFAULTS = { petScale: 1, timing: TIMING }
+
+function attend(pet: Pet, author: 'shell' | 'agent' = 'shell'): Pet {
+  return rawAttend(pet, author, TIMING)
+}
+
+function react(
+  pet: Pet,
+  outcome: 'success' | 'failure' | 'unknown',
+  author: 'shell' | 'agent' = 'shell',
+): Pet {
+  return rawReact(pet, outcome, author, TIMING)
+}
+
 function env(terrain: readonly Ledge[] = [A, B]): StepEnv {
-  return { terrain, floor: FLOOR, petHeight: 34 }
+  return { terrain, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
 }
 
 /** Deterministic rng cycling through the given values. */
@@ -131,6 +173,59 @@ describe('walking', () => {
       expect(p.x).toBeLessThanOrEqual(A.x1)
     }
   })
+  it('ramps gait speed up and down instead of snapping it', () => {
+    const target = TIMING.strides.walk / TIMING.locomotion.walk.duration
+    let p = standing(A, { locomotion: 'walk', hold: 100 })
+    p = step(p, env(), 0.09, seq(0.5))
+    expect(p.vx).toBeGreaterThan(0)
+    expect(p.vx).toBeLessThan(target)
+    p = step(p, env(), 0.09, seq(0.5))
+    expect(p.vx).toBeCloseTo(target, 5)
+    p = step({ ...p, locomotion: 'idle' }, env(), 0.09, seq(0.5))
+    expect(p.vx).toBeGreaterThan(0)
+    p = step(p, env(), 0.09, seq(0.5))
+    expect(p.vx).toBe(0)
+  })
+
+  it('derives gait speed from the same scale at small and large sizes', () => {
+    const walk = (petScale: number) =>
+      step(
+        standing(A, { locomotion: 'walk', hold: 100 }),
+        { ...env(), petScale },
+        DEFAULT_TUNING.gaitRamp,
+        seq(0.5),
+      ).vx
+    expect(walk(2)).toBeCloseTo(walk(0.5) * 4, 5)
+  })
+
+  it('keeps the contact foot within one source pixel per animation frame', () => {
+    const ledge: Ledge = { id: 'stride', x0: 0, x1: 2000, y: 200 }
+    for (const petScale of [0.5, 2]) {
+      const startX = 800
+      const sourceStride = TIMING.strides.walk / TIMING.locomotion.walk.duration / CAT_PACK.fps
+      const target = (TIMING.strides.walk / TIMING.locomotion.walk.duration) * petScale
+      const p = step(
+        standing(ledge, { x: startX, locomotion: 'walk', vx: target, hold: 100 }),
+        { ...env([ledge]), petScale },
+        1 / CAT_PACK.fps,
+        seq(0.5),
+      )
+      expect(Math.abs(p.x - startX - sourceStride * petScale)).toBeLessThan(1)
+    }
+  })
+
+  it('uses per-frame run displacement derived from the full stride', () => {
+    const startX = A.x0 + 50
+    const sourceStride = TIMING.strides.run / TIMING.locomotion.run.duration / CAT_PACK.fps
+    const target = TIMING.strides.run / TIMING.locomotion.run.duration
+    const p = step(
+      standing(A, { x: startX, locomotion: 'run', vx: target, hold: 100 }),
+      env(),
+      1 / CAT_PACK.fps,
+      seq(0.5),
+    )
+    expect(Math.abs(p.x - startX - sourceStride)).toBeLessThan(1)
+  })
 })
 
 describe('reacting to a command', () => {
@@ -140,11 +235,26 @@ describe('reacting to a command', () => {
     expect(react(standing(A), 'failure').activity).toBe('scratch')
     expect(react(standing(A), 'failure').mood).toBe('worried')
   })
-
   it('interrupts whatever the pet was doing', () => {
     const busy = standing(A, { locomotion: 'walk', activity: 'none', hold: 99 })
     const r = react(busy, 'success')
     expect(r.locomotion).toBe('idle')
+  })
+  it('uses the reaction clip length rather than reactionHold', () => {
+    const r = react(standing(A), 'success')
+    expect(r.hold).toBe(4 / TIMING.fps)
+    expect(r.hold).not.toBe(DEFAULT_TUNING.reactionHold)
+  })
+
+  it('keeps the caller hold for a hold-mode reaction', () => {
+    const r = react(standing(A), 'unknown')
+    expect(r.activity).toBe('sit')
+    expect(r.hold).toBe(DEFAULT_TUNING.reactionHold)
+  })
+
+  it('keeps the caller hold for a loop-mode reaction', () => {
+    const r = react(standing(A), 'failure', 'agent')
+    expect(r.activity).toBe('lie')
     expect(r.hold).toBe(DEFAULT_TUNING.reactionHold)
   })
 
@@ -234,7 +344,7 @@ describe('leaving a ledge from the middle', () => {
     const visited = new Set<string | null>()
     const rng = seq(0.05, 0.6, 0.3, 0.9, 0.12, 0.44)
     for (let i = 0; i < 60 * 60; i++) {
-      p = step(p, { terrain: wide, floor: FLOOR, petHeight: 34 }, 1 / 60, rng)
+      p = step(p, { terrain: wide, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }, 1 / 60, rng)
       if (p.locomotion !== 'fall') visited.add(p.ledgeId)
     }
     expect(visited.size).toBeGreaterThan(1)
@@ -418,7 +528,10 @@ describe('a verdict arriving after the next command has started', () => {
 
   it('and settles to watching once the answer has played out', () => {
     let p = attend(react(standing(A), 'failure', 'shell'), 'shell')
-    for (let i = 0; i < 60 * 2; i++) p = step(p, env(), 1 / 60, seq(0))
+    expect(p.hold).toBe(TIMING.activity.scratch.duration)
+    for (let i = 0; i < 60 * 2; i++) {
+      p = step(p, env(), 1 / 60, seq(0))
+    }
     // First entry of the watching menu for your lane is lying down.
     expect(p.attending).toBe('shell')
     expect(p.activity).toBe('lie')
@@ -444,14 +557,15 @@ describe('the answer stops being an answer once it is over', () => {
     expect(attend(p, 'shell').activity).toBe('lie')
   })
 
-  it('and running from the pointer is not an answer either', () => {
-    const fled = step(
+  it('does not let the pointer cut a reaction clip short', () => {
+    const answering = step(
       react(standing(A, { x: 200 }), 'failure', 'shell'),
       { ...env(), pointer: { x: 190, y: A.y - 17 } },
       1 / 60,
       seq(0.9),
     )
-    expect(fled.reacting).toBe(false)
+    expect(answering.reacting).toBe(true)
+    expect(answering.activity).toBe('scratch')
   })
 })
 
@@ -464,7 +578,7 @@ describe('going back up', () => {
     { id: 'blk:1', x0: 100, x1: 300, y: 200 },
     { id: 'blk:2', x0: 100, x1: 300, y: 260 },
   ]
-  const stacked: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34 }
+  const stacked: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
 
   it('jumps to the ledge above and is caught by it coming down', () => {
     let p = standing(stack[1], { hold: 0.01, x: 200 })
@@ -514,7 +628,7 @@ describe('the jump is aimed, not a fixed leap', () => {
       { id: 'blk:1', x0: 100, x1: 900, y: 620 },
       { id: 'floor', x0: 8, x1: 900, y: 860 },
     ]
-    const envFar: StepEnv = { terrain: far, floor: far[1], petHeight: 34 }
+    const envFar: StepEnv = { terrain: far, floor: far[1], petHeight: 34, ...ENV_DEFAULTS }
     let p = standing(far[1], { hold: 0.01, x: 400 })
     p = step(p, envFar, 0.02, seq(0.999))
     expect(p.locomotion).toBe('fall')
@@ -527,12 +641,12 @@ describe('the jump is aimed, not a fixed leap', () => {
       { id: 'blk:1', x0: 100, x1: 900, y: 300 },
       { id: 'blk:2', x0: 100, x1: 900, y: 340 },
     ]
-    const envNear: StepEnv = { terrain: near, floor: FLOOR, petHeight: 34 }
+    const envNear: StepEnv = { terrain: near, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
     const far: Ledge[] = [
       { id: 'blk:1', x0: 100, x1: 900, y: 140 },
       { id: 'blk:2', x0: 100, x1: 900, y: 340 },
     ]
-    const envFar: StepEnv = { terrain: far, floor: FLOOR, petHeight: 34 }
+    const envFar: StepEnv = { terrain: far, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
     const hop = step(standing(near[1], { hold: 0.01, x: 400 }), envNear, 0.02, seq(0.999))
     const leap = step(standing(far[1], { hold: 0.01, x: 400 }), envFar, 0.02, seq(0.999))
     expect(Math.abs(leap.vy)).toBeGreaterThan(Math.abs(hop.vy) * 1.5)
@@ -543,7 +657,12 @@ describe('the jump is aimed, not a fixed leap', () => {
       { id: 'blk:1', x0: 100, x1: 900, y: 100 },
       { id: 'floor', x0: 8, x1: 900, y: 860 },
     ]
-    const e: StepEnv = { terrain: unreachable, floor: unreachable[1], petHeight: 34 }
+    const e: StepEnv = {
+      terrain: unreachable,
+      floor: unreachable[1],
+      petHeight: 34,
+      ...ENV_DEFAULTS,
+    }
     const p = step(standing(unreachable[1], { hold: 0.01, x: 400 }), e, 0.02, seq(0.999))
     expect(p.vy).toBeGreaterThanOrEqual(0)
   })

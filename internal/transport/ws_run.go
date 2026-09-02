@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -254,6 +255,13 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	}
 
 	cfg := s.effectiveRunLease()
+	// THE MODEL'S OWN BOUND FOR ITS OWN CALL, clamped in one place
+	// (RunLeaseConfig.withAskedQuiet): it may ask for LESS silence than the
+	// person allows and gets it; asking for more is clamped and said out
+	// loud in the result. Read before the integration gate so a call that
+	// asked is still told what happened to its ask.
+	asked := assistant.RunQuietBoundFromContext(ctx)
+	cfg, clamped := cfg.withAskedQuiet(asked)
 	if cfg.needsShellIntegration() && !s.runLeaseIntegrationAvailable(sid) {
 		if degradation := assistant.RunLeaseDegradationFromContext(ctx); degradation != nil {
 			degradation.Add(assistant.RunLeaseUnavailableBounds(cfg.Inactivity > 0, cfg.OutputBudget > 0)...)
@@ -298,18 +306,63 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 		lease.submissionDelivered = true
 		lease.mu.Unlock()
 	}
-	defer s.broker.unregisterRunLease(lease)
+	// A PARKED RUN KEEPS EVERY REGISTRATION IT HAD. The identity bridge to
+	// its lifecycle attempt and the turn's hold on its lease are what let a
+	// continuation name the same execution and what let a person's Stop
+	// still reach it; unregistering them at the park would leave a live
+	// command with no owner. Both are released by whatever ends the run —
+	// the ordinary return here, or endParkedRun.
+	parked := false
+	defer func() {
+		if !parked {
+			s.broker.unregisterRunLease(lease)
+		}
+	}()
 	if control := agentRunControlFromContext(ctx); control != nil {
 		if !control.attachRunLease(lease) {
 			return nil, fmt.Errorf("run: %w", context.Canceled)
 		}
-		defer control.detachRunLease(lease)
+		defer func() {
+			if !parked {
+				control.detachRunLease(lease)
+			}
+		}()
 	}
 	var body json.RawMessage
+	var requestID string
 	err := lease.supervise(ctx, func(ctx context.Context) error {
-		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)
+		var reqErr error
+		requestID, reqErr = s.broker.RequestParkable(ctx, kind,
+			runRequestParams{SessionID: sessionID, Command: command}, &body, lease.parkC)
+		return reqErr
 	})
+	if errors.Is(err, errRunParked) || errors.Is(err, ErrRequestParked) {
+		// The quiet bound asked the model. Nothing was killed and nothing
+		// was withdrawn: the command is still running, the request is still
+		// armed, and the answer travels back as a tool result.
+		parked = true
+		s.parkRun(sid, requestID, kind, lease)
+		stillRunning := &assistant.RunStillRunningError{
+			RunID:       requestID,
+			Quiet:       cfg.Inactivity,
+			Remaining:   lease.remainingWallClock(),
+			Renewals:    lease.renewalCount(),
+			ClampedFrom: clampedFrom(clamped, asked),
+		}
+		if attempt, ok := s.broker.runAttemptForLease(lease); ok {
+			stillRunning.EntryID = attempt
+		}
+		return nil, stillRunning
+	}
 	if err != nil {
+		// THE PARK AND THE VERDICT CAN RACE. The broker's select may take the
+		// park branch in the same instant the wall clock fires, which leaves
+		// a park record for a run that is being terminalized — and nothing
+		// else would ever withdraw its pending request. A no-op in the
+		// ordinary case, where nothing was parked.
+		if requestID != "" {
+			s.broker.withdrawParked(requestID, err)
+		}
 		// The two branches below cannot both match, and saying so is the point
 		// of this comment. RunLeaseError is minted in exactly one place, under
 		// `reason != ""` (run_lease.go); the pre-execution case requires
@@ -337,7 +390,124 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 		}
 		return nil, fmt.Errorf("run: %w", err)
 	}
-	return body, nil
+	return withLeaseBounds(body, cfg, asked, clamped), nil
+}
+
+// clampedFrom is what a call ASKED for when the ask was above the person's
+// ceiling, and zero otherwise. One expression, so "was it clamped" and "from
+// what" can never disagree.
+func clampedFrom(clamped bool, asked time.Duration) time.Duration {
+	if !clamped {
+		return 0
+	}
+	return asked
+}
+
+// leaseBoundsWire is what the run's own bounds look like in the tool result:
+// the numbers this execution was actually held to, and whether the call's
+// own ask was cut down to reach them.
+//
+// IT IS ON THE RESULT AND NOT ONLY IN A SENTENCE because a clamp that a
+// model learns about only when the bound fires is a clamp it cannot plan
+// around: the number it believes in and the number nocx enforces differ for
+// the whole run. AGENTS.md rule 3's paired test is the other half of this —
+// a call asking below gets what it asked for, and says so here too.
+type leaseBoundsWire struct {
+	QuietSeconds     float64 `json:"quietSeconds"`
+	WallClockSeconds float64 `json:"wallClockSeconds"`
+	Clamped          bool    `json:"clamped,omitempty"`
+	AskedSeconds     float64 `json:"askedSeconds,omitempty"`
+}
+
+// withLeaseBounds merges the run's effective bounds into the resolved body.
+// The renderer never sees them and never sends them: they are the backend's
+// own statement about the lease it armed, joined to the renderer's answer at
+// the one place that holds both.
+func withLeaseBounds(body json.RawMessage, cfg RunLeaseConfig, asked time.Duration, clamped bool) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return body
+	}
+	bounds := leaseBoundsWire{
+		QuietSeconds:     cfg.Inactivity.Seconds(),
+		WallClockSeconds: cfg.WallClock.Seconds(),
+		Clamped:          clamped,
+	}
+	if clamped {
+		bounds.AskedSeconds = asked.Seconds()
+	}
+	raw, err := json.Marshal(bounds)
+	if err != nil {
+		return body
+	}
+	fields["leaseBounds"] = raw
+	merged, err := json.Marshal(fields)
+	if err != nil {
+		return body
+	}
+	return merged
+}
+
+// RequestRunWait implements assistant.RunWaiter: the continuation of a run
+// whose quiet bound asked the model (ADR-0020 decision 2's renewable clause,
+// nocx-6dzxq).
+//
+// "continue" re-attaches to the SAME broker request — the command was never
+// cancelled and never restarted — under a re-opened quiet interval and the
+// SAME wall clock, which has been running since the first submission. "stop"
+// ends it through the one parked-run ending, and the run reports the stop
+// (content.TermAgentDeclined) rather than a timeout, because a timeout is
+// not what happened.
+func (s *WSServer) RequestRunWait(ctx context.Context, runID string, decision assistant.RunDecision) (json.RawMessage, error) {
+	if s.broker == nil {
+		return nil, errors.New("run: no renderer request broker is wired")
+	}
+	switch decision {
+	case assistant.RunStop:
+		leaseErr, _, ok := s.endParkedRun(runID, content.TermAgentDeclined)
+		if !ok {
+			return nil, fmt.Errorf("run: %w", assistant.ErrRunNotWaiting)
+		}
+		return nil, fmt.Errorf("run: %w", leaseErr)
+	case assistant.RunKeepWaiting:
+	default:
+		return nil, fmt.Errorf("run: %q is not a decision about a waiting command", string(decision))
+	}
+
+	asked := assistant.RunQuietBoundFromContext(ctx)
+	p, cfg, clamped, parkC, ok := s.resumeParkedRun(runID, asked)
+	if !ok {
+		return nil, fmt.Errorf("run: %w", assistant.ErrRunNotWaiting)
+	}
+	var body json.RawMessage
+	err := p.lease.superviseResume(ctx, func(ctx context.Context) error {
+		return s.broker.ResumeParked(ctx, runID, &body, parkC)
+	})
+	if errors.Is(err, errRunParked) || errors.Is(err, ErrRequestParked) {
+		s.parkRun(p.sid, runID, p.kind, p.lease)
+		return nil, &assistant.RunStillRunningError{
+			RunID:       runID,
+			Quiet:       cfg.Inactivity,
+			Remaining:   p.lease.remainingWallClock(),
+			Renewals:    p.lease.renewalCount(),
+			ClampedFrom: clampedFrom(clamped, asked),
+		}
+	}
+	if err != nil {
+		// Same race as in RequestRun: a park recorded in the instant a bound
+		// fired leaves a pending request nobody would withdraw.
+		s.broker.withdrawParked(runID, err)
+		var leaseErr *assistant.RunLeaseError
+		if errors.As(err, &leaseErr) {
+			if attempt, ok := s.broker.runAttemptForLease(p.lease); ok {
+				leaseErr.EntryID = attempt
+			}
+		}
+		s.broker.unregisterRunLease(p.lease)
+		return nil, fmt.Errorf("run: %w", err)
+	}
+	s.broker.unregisterRunLease(p.lease)
+	return withLeaseBounds(body, cfg, asked, clamped), nil
 }
 
 // ── agent.laneInteractivity — the renderer's interactivity report ─────────

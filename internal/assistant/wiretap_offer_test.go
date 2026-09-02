@@ -113,21 +113,33 @@ func TestClientAsk_TagsToolOfferOnModelRequest(t *testing.T) {
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
 		t.Fatalf("log = %q: %v", logs.String(), err)
 	}
-	if record["run"] != "run-7" || record["count"] != float64(3) {
-		t.Fatalf("offer record = %v, want run-7 and three permitted tools", record)
+	if record["run"] != "run-7" {
+		t.Fatalf("offer record = %v, want run-7", record)
 	}
 	tools, ok := record["tools"].([]any)
 	if !ok {
-		t.Fatalf("tools = %v, want session.run", record["tools"])
+		t.Fatalf("tools = %v, want the session tools", record["tools"])
 	}
-	foundRun := false
+	offered := make(map[string]bool, len(tools))
 	for _, tool := range tools {
-		if tool == "session.run" {
-			foundRun = true
-		}
+		name, _ := tool.(string)
+		offered[name] = true
 	}
-	if !foundRun {
+	// WHAT THE ASSERTION SAYS, rather than how many rows happened to be in
+	// the table the day it was written. A session-scoped grant offers the
+	// session tools, and it offers session.wait wherever it offers
+	// session.run — because a quiet command's question can only be answered
+	// by the run that started the command, and a run offered the carrier and
+	// not its continuation would be asked something it has no way to answer
+	// (nocx-6dzxq).
+	if !offered["session.run"] {
 		t.Fatalf("tools = %v, want default-grant session.run", tools)
+	}
+	if !offered["session.wait"] {
+		t.Fatalf("tools = %v, want session.wait beside session.run — a run that can start a command must be able to answer nocx's question about it", tools)
+	}
+	if record["count"] != float64(len(tools)) {
+		t.Fatalf("offer record count = %v, want the %d tools it listed", record["count"], len(tools))
 	}
 }
 

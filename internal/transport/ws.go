@@ -235,6 +235,11 @@ type WSServer struct {
 	// means the package default (defaultRunLease); every bound zero
 	// disables the lease and restores the pre-lease broker timeout.
 	runLeaseCfg RunLeaseConfig
+	// parkedRuns holds the runs whose quiet bound asked the model and whose
+	// answer has not come back yet (run_park.go). A parked run is still
+	// executing and still under its lease's wall clock; this registry is
+	// only the handle session.wait resumes or stops it through.
+	parkedRuns parkedRunRegistry
 	// lanes is the per-session lane interactivity state (ADR-0020 decision
 	// 3): the awaiting-takeover transition decided in Go from the
 	// renderer's agent.laneInteractivity reports. RequestRun refuses a

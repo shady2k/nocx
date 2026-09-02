@@ -218,3 +218,18 @@ func narrowRun(grant content.Grant, resources []ResourceRef, _ RunContext) (Capa
 	}
 	return NewRunner(scopes), nil
 }
+
+// narrowRunWait is the session.wait row's capability constructor. Same
+// authority as narrowRun — the right to keep waiting on a command travels
+// with the right to have started it — in the capability type the renderer
+// dispatch switch distinguishes it by.
+func narrowRunWait(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	scoped := grantedResources(grant, resources)
+	scopes := make([]content.GrantScope, 0, len(scoped))
+	for _, ref := range scoped {
+		if ref.Kind == content.ResourceSession {
+			scopes = append(scopes, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
+		}
+	}
+	return NewRunWatcher(scopes), nil
+}

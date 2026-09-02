@@ -225,19 +225,35 @@ func TestRunLease_EscalationReachesKillWhenTheExecutionIgnoresEverySignal(t *tes
 	}
 }
 
-func TestRunLease_InactivityFiresAndIsDistinctFromWallClock(t *testing.T) {
-	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
-	// Wall-clock far longer than the test: only the inactivity bound can
-	// explain the outcome.
-	lease, _ := newUnitLease(t, sess, RunLeaseConfig{WallClock: 30 * time.Second, Inactivity: 50 * time.Millisecond, SignalGrace: 50 * time.Millisecond})
-
+// The two time bounds are still two different mechanisms, and since
+// nocx-6dzxq they have two different OUTCOMES: silence asks, the ceiling
+// kills. This test asserted the old outcome — that silence terminalized with
+// content.TermInactivity — and had to change, because that is exactly the
+// behaviour the bead removed: a healthy `df` against a stuck mount was being
+// killed for two minutes of normal silence.
+func TestRunLease_InactivityParksWhileTheWallClockStillTerminalizes(t *testing.T) {
+	// Wall-clock far longer than the test: only the quiet bound can explain
+	// this outcome.
+	quiet := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, _ := newParkableLease(t, quiet, RunLeaseConfig{WallClock: 30 * time.Second, Inactivity: 50 * time.Millisecond, SignalGrace: 50 * time.Millisecond})
 	err := lease.supervise(context.Background(), func(ctx context.Context) error {
 		lease.onAttemptStart()
-		return blockForever(nil)(ctx)
+		return waitOnParkable(lease, nil)(ctx)
 	})
-	le := leaseErrorOf(t, err)
-	if le.Reason != content.TermInactivity {
-		t.Fatalf("reason = %s, want inactivity — a silent execution is wedged, not slow", le.Reason)
+	if !errors.Is(err, errRunParked) {
+		t.Fatalf("the quiet bound returned %v, want the park — silence is a question, not a verdict", err)
+	}
+	if got := quiet.got(); len(got) != 0 {
+		t.Fatalf("the quiet bound signalled %v; a quiet command is not a wedged one", got)
+	}
+
+	// The same silence under the ceiling: the wall clock is still a verdict
+	// and still kills, which is what makes the two bounds distinct.
+	wall := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	ceiling, _ := newParkableLease(t, wall, RunLeaseConfig{WallClock: 50 * time.Millisecond, SignalGrace: 50 * time.Millisecond})
+	le := leaseErrorOf(t, ceiling.supervise(context.Background(), waitOnParkable(ceiling, nil)))
+	if le.Reason != content.TermTimeout {
+		t.Fatalf("reason = %s, want timeout — the ceiling is the bound that ends a run", le.Reason)
 	}
 }
 

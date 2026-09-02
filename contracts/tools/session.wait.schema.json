@@ -1,27 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nocx.local/contracts/tools/session.run.schema.json",
-  "title": "SessionRunParams",
-  "description": "Params of the session.run agent tool (design §4.1): run a command in a session — the agent's lane — through the same submit path a person uses (the renderer's ordinary orchestration: block, ledger entry, attempt, output artifact, all minted at submit). The backend never writes to the PTY (design §2.1 — rejected). The session the tool may run in is bounded by the grant's session scopes, enforced by the narrowed capability (ADR-0028 decision 4); the window contract of the return (design §4.4) is the tool's return contract, not a parameter. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list.",
+  "$id": "https://nocx.local/contracts/tools/session.wait.schema.json",
+  "title": "SessionWaitParams",
+  "description": "Params of the session.wait agent tool (ADR-0020 decision 2's renewable clause, nocx-6dzxq): answer nocx about a command you started that is still running and has gone quiet. It never starts anything and it never re-runs the command — `continue` re-attaches to the SAME execution, which has been running the whole time. Reach for it only with a run id nocx handed you in a 'STILL RUNNING' result. It is a separate tool from session.run because it carries no command: the effect of a command is decided from its text, and a continuation has none to decide from. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["command"],
+  "required": ["runId", "decision"],
   "properties": {
-    "command": {
+    "runId": {
       "type": "string",
       "minLength": 1,
-      "description": "The command to submit, exactly as a person would type it."
+      "maxLength": 128,
+      "description": "The run nocx asked you about, exactly as it named it. It identifies one execution, not a session and not a command, so an answer can never land on a different command running in the same place."
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["continue", "stop"],
+      "description": "`continue` keeps waiting on that same execution — it is not restarted and nothing is re-run. `stop` ends it: the process group is signalled and the run reports that you stopped it. There is no third answer; a command nobody is waiting on is what this question exists to prevent."
     },
     "quietSeconds": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "Optional. How long this command may print NOTHING before nocx asks you whether it is still worth waiting for. Ask for less than the person's limit when you know the command should be chatty and silence would mean it is wedged; leave it out and the person's limit applies. You can only ask for LESS: a larger number is cut down to the person's limit and the result says so. It is not a deadline — the command is not stopped when it is reached, you are asked."
+      "description": "Optional, and only meaningful with `continue`. How long the command may print nothing before you are asked again. You can only ask for LESS than the person's limit; a larger number is cut down and the result says so. It cannot extend the person's overall limit on the command, which keeps running from when the command started."
     }
   },
   "$defs": {
     "result": {
-      "title": "SessionRunResult",
-      "description": "What session.run hands back to whoever asked for it — the model under a declared call. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
+      "title": "SessionWaitResult",
+      "description": "What session.wait hands back when the command it was waiting on FINALLY ENDS: the same shape session.run returns, deliberately — there is one answer for 'this command finished', and a second one would be a second thing to learn. If the command is still quiet when the new bound is reached you get another 'STILL RUNNING' message instead of this, and may answer again. `stop` never produces this shape at all: it produces a message saying the command was ended, so a stopped command can never read as one that returned nothing.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -51,7 +57,7 @@
         "status": {
           "type": "string",
           "enum": ["success", "failure", "entered", "unknown"],
-          "description": "The block's frozen status vocabulary. `entered` means the command was submitted to a program that owns the terminal rather than run to completion."
+          "description": "The block's frozen status vocabulary."
         },
         "stopped": {
           "type": "boolean",
@@ -71,14 +77,8 @@
           "additionalProperties": false,
           "required": ["start", "end"],
           "properties": {
-            "start": {
-              "type": "integer",
-              "description": "First line of the window that was asked for, counting from 0."
-            },
-            "end": {
-              "type": "integer",
-              "description": "One past the last line of the window that was asked for."
-            }
+            "start": { "type": "integer" },
+            "end": { "type": "integer" }
           },
           "description": "The span asked for: the whole output."
         },
@@ -87,16 +87,10 @@
           "additionalProperties": false,
           "required": ["start", "end"],
           "properties": {
-            "start": {
-              "type": "integer",
-              "description": "First line of the window actually returned, counting from 0."
-            },
-            "end": {
-              "type": "integer",
-              "description": "One past the last line of the window actually returned."
-            }
+            "start": { "type": "integer" },
+            "end": { "type": "integer" }
           },
-          "description": "The span actually returned. Narrower than `window` when the output was clamped; `total` says how much more there is."
+          "description": "The span actually returned. Narrower than `window` when the output was clamped."
         },
         "truncated": {
           "type": "boolean",
@@ -124,12 +118,12 @@
             "quietSeconds": {
               "type": "number",
               "minimum": 0,
-              "description": "The silence bound this command was actually held to: after this long with no output, nocx asks you whether to keep waiting. 0 means no silence bound was armed at all (shell integration is unavailable in this session)."
+              "description": "The silence bound this continuation was held to. 0 means none was armed."
             },
             "wallClockSeconds": {
               "type": "number",
               "minimum": 0,
-              "description": "The person's ceiling for this command, counted from when it started and reset by nothing. Nothing you do can extend it."
+              "description": "The person's ceiling for the command, counted from when it started. Unchanged by any continuation."
             },
             "clamped": {
               "type": "boolean",
@@ -141,7 +135,7 @@
               "description": "What this call asked for, present only when it was clamped."
             }
           },
-          "description": "The two bounds this execution ran under. Present whenever nocx armed a lease for it."
+          "description": "The two bounds this execution ran under."
         }
       },
       "allOf": [

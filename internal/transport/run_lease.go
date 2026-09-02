@@ -7,6 +7,39 @@ package transport
 // INT → TERM → KILL against the execution's OWN process group, so
 // cancellation reaches the command's children rather than only the shell.
 //
+// THE ESCALATION LADDER FOR A QUIET COMMAND HAS EXACTLY TWO RUNGS, and only
+// the first of them is built here (nocx-6dzxq):
+//
+//	the quiet bound is reached  ->  NOCX ASKS THE MODEL
+//	                            ->  the model, at its own discretion, may
+//	                                ask the person
+//
+// The second rung is NOT built here because it already exists: the model can
+// answer the turn in words, or propose a call that raises an ordinary
+// approval. A path from this file to a human would be a second owner for
+// "how a person is asked about a run" (AD-8) and would wake somebody for the
+// exact question the model was handed so that they would not be woken. If
+// you came here looking for the missing human path: it is missing on
+// purpose. Do not add one.
+//
+// AND THIS IS NOT decision 3's awaiting-takeover, however similar the two
+// look from a distance. There, a program has activated the alternate screen
+// or blocked on stdin: it WANTS INPUT, only a person can supply it, and the
+// lease SUSPENDS so an interactive program is not killed for being
+// interactive. Here nobody wants input at all — a command is merely quiet,
+// and what is wanted is a JUDGEMENT about whether the silence is expected.
+// The model has the command and the task in front of it and is the party
+// that can make that judgement, so the model is who is asked. Same lease,
+// different answerer, different reason; neither is a special case of the
+// other.
+//
+// The quiet bound therefore does NOT terminalize. It PARKS: the broker
+// request stays armed, the renderer is never told to cancel, the command
+// keeps running, and the tool call returns to the model with the question
+// and the handle to continue with (ws_run.go's RequestRunWait). The wall
+// clock is the only bound that still kills, and it keeps running across
+// every renewal — see the ceiling note on defaultRunLease.
+//
 // The lease lives in the backend even though the command it bounds was
 // submitted by the renderer (design §2.2): signals, deadlines and teardown
 // are things the product does on a person's behalf — a human does not send
@@ -48,6 +81,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 )
 
 // RunLeaseConfig bounds one run execution. Zero disables the corresponding
@@ -63,9 +97,11 @@ type RunLeaseConfig struct {
 	// resolution — the bounded ceiling of decision 2. It is the ONLY bound
 	// when the renderer never answers at all.
 	WallClock time.Duration
-	// Inactivity bounds the silence: no output for this long ends the
-	// execution. Independent of WallClock so a command can be slow AND
-	// alive — only a command that is both silent and endless is wedged.
+	// Inactivity bounds the silence: no output for this long PARKS the
+	// execution and asks the model whether to keep waiting. It does not end
+	// it — see the ladder in this file's header. Independent of WallClock so
+	// a command can be slow AND alive; the timer restarts on every byte,
+	// which is what makes silence a different question from duration.
 	Inactivity time.Duration
 	// OutputBudget bounds what one execution produces, in bytes of
 	// terminal output. When it fires the run is terminalized with a reason
@@ -84,23 +120,72 @@ func (cfg RunLeaseConfig) needsShellIntegration() bool {
 	return cfg.Inactivity > 0 || cfg.OutputBudget > 0
 }
 
-// DefaultRunLeaseConfig is the production lease, named at the composition
-// root the way the lane capacity is: the transport's own default and the
-// production value are the SAME value, and this accessor is what lets the
-// composition root say so explicitly (and a future settings surface flip
-// one bound in one place).
+// DefaultRunLeaseConfig is the production lease's non-settings half, named
+// at the composition root the way the lane capacity is: the output budget
+// and the escalation grace are product decisions with no control on any
+// screen. The two TIME bounds it carries are only fallbacks — the person
+// owns them (settings.AgentRunWallClockMinutes and
+// settings.AgentRunQuietMinutes), and effectiveRunLease reads them on every
+// run. The comment that used to stand here predicted "a future settings
+// surface flip one bound in one place"; that surface exists now, and this is
+// no longer where either number is decided.
 func DefaultRunLeaseConfig() RunLeaseConfig { return defaultRunLease }
 
-// defaultRunLease is the product's lease: the pre-lease runRequestTimeout
-// stays as the wall-clock ceiling (continuity — the bound that existed was
-// ten minutes), inactivity and the output budget are the new bounds the
-// decision adds, and the escalation grace is the time a well-behaved
-// program gets to exit on each signal.
+// defaultRunLease is the product's lease when NO settings registry is wired
+// (a unit test, cmd/devharness). Both time bounds are read back from the
+// settings declarations that own them rather than restated, so the number a
+// person sees on the screen and the number a registry-less backend uses can
+// never drift apart. effectiveRunLease reads the person's current values on
+// every run.
+//
+// A CONSEQUENCE OF 10/10 WORTH KNOWING BEFORE YOU DELETE SOMETHING. The
+// quiet timer restarts on every byte of output; the wall clock restarts on
+// nothing. With both ceilings at ten minutes the quiet bound therefore
+// cannot fire BEFORE the wall clock: a command that has been silent for ten
+// minutes has, by construction, also been running for ten. That is not a
+// bug and the quiet bound is not dead code — it is exactly the fix the
+// reported case needed (a healthy `df` against a stuck mount was being
+// killed after two minutes of normal silence), and it becomes load-bearing
+// again the moment somebody raises "Stop an assistant's command after" above
+// "Ask about a silent command after", which is what those two settings are
+// for. The ordering is the person's to choose; nothing here enforces one.
 var defaultRunLease = RunLeaseConfig{
-	WallClock:    10 * time.Minute,
-	Inactivity:   2 * time.Minute,
+	WallClock:    settingMinutes(settings.AgentRunWallClockMinutes.DefaultValue()),
+	Inactivity:   settingMinutes(settings.AgentRunQuietMinutes.DefaultValue()),
 	OutputBudget: 4 << 20, // 4 MiB
 	SignalGrace:  time.Second,
+}
+
+// settingMinutes converts a settings number declared in minutes into a
+// duration. One conversion, so the unit stated on the screen and the unit
+// the lease is armed with are the same statement.
+func settingMinutes(v float64) time.Duration {
+	if v <= 0 {
+		return 0
+	}
+	return time.Duration(v * float64(time.Minute))
+}
+
+// withAskedQuiet applies the model's own quiet bound to this run's config.
+// ADR-0047's spirit binds here: a program may ASK, it never CHOOSES. A call
+// asking for LESS silence than the person allows gets exactly what it asked
+// for; a call asking for more is clamped to the person's number and the tool
+// result says so — a silent clamp would be a bound the model believes in and
+// nobody enforces. Zero means the call asked for nothing and the person's
+// number applies unchanged.
+//
+// THIS IS THE ONLY PLACE A MODEL-SUPPLIED BOUND MEETS THE PERSON'S. The wall
+// clock has no asked form at all: it is the ceiling, and a renewal that could
+// move it would not be a renewal, it would be the removal of the bound.
+func (cfg RunLeaseConfig) withAskedQuiet(asked time.Duration) (RunLeaseConfig, bool) {
+	if asked <= 0 || cfg.Inactivity <= 0 {
+		return cfg, false
+	}
+	if asked >= cfg.Inactivity {
+		return cfg, asked > cfg.Inactivity
+	}
+	cfg.Inactivity = asked
+	return cfg, false
 }
 
 // defaultRunSignalGrace is the escalation's per-signal patience when the
@@ -150,9 +235,17 @@ type runLease struct {
 	// used only to name the exact ledger attempt.
 	submissionDelivered bool
 
+	// parkC is closed exactly once, by the quiet bound, to tell the broker
+	// request to STOP WAITING WITHOUT WITHDRAWING. It is a channel and not a
+	// context cancellation on purpose: cancelling the request's context is
+	// what makes the broker send agent.runCancel and drop the pending id,
+	// which is precisely the kill this bound no longer performs.
+	parkC chan struct{}
+
 	mu                sync.Mutex
 	cancel            context.CancelFunc
 	wallTimer         *time.Timer
+	wallDeadline      time.Time
 	inactTimer        *time.Timer
 	unwatch           func()
 	lastOutput        time.Time
@@ -162,6 +255,76 @@ type runLease struct {
 	done              bool
 	suspended         bool
 	cancelStarted     bool
+	// parked is set by the quiet bound and never cleared: it is a fact about
+	// THIS wait, and a resumed wait is a new one. renewals counts how many
+	// times the model answered "keep waiting" on this execution — carried on
+	// the lease because the lease is what the run's bounds belong to, and
+	// reported to the model so it can see it is in a loop.
+	parked   bool
+	renewals int
+	// parkedEnd is how a PARKED lease ends. While a caller is waiting on the
+	// broker request, cancelling its context is enough: the caller returns
+	// and escalates on its own goroutine. A parked run has no such caller,
+	// so whatever ends it must withdraw the request AND run the escalation
+	// itself, and this is that one function. Installed by the parked-run
+	// registry at park, cleared when a continuation takes the run back.
+	parkedEnd func(reason content.TerminationReason) foregroundOutcome
+}
+
+// errRunParked is supervise's answer when the quiet bound asked the model
+// instead of killing: not a failure and not a terminalization — the command
+// is still running, and the caller must park the broker request rather than
+// withdraw it. It never leaves the transport.
+var errRunParked = errors.New("run lease: the quiet bound parked the run")
+
+// setParkedEnd installs (or clears, with nil) the parked termination path.
+func (l *runLease) setParkedEnd(end func(reason content.TerminationReason) foregroundOutcome) {
+	l.mu.Lock()
+	l.parkedEnd = end
+	l.mu.Unlock()
+}
+
+// takeBack moves a parked lease back under a caller that is waiting again:
+// the parked termination path is cleared and the new caller's cancellation
+// installed in ONE critical section, so a bound firing in between can never
+// find neither of them. It refuses when the run has already ended — a bound
+// fired, the person cancelled the turn — which is what the continuation
+// reports instead of waiting on an execution that is gone.
+func (l *runLease) takeBack(cancel context.CancelFunc) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done || l.firedReason != "" || l.cancelStarted {
+		return false
+	}
+	l.parkedEnd = nil
+	l.cancel = cancel
+	return true
+}
+
+// remainingWallClock is what is left of the person's ceiling. Reported to
+// the model with the quiet bound's question so "keep waiting" is a decision
+// against a number rather than a reflex. Zero when no wall clock is armed.
+func (l *runLease) remainingWallClock() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.wallDeadline.IsZero() {
+		return 0
+	}
+	if d := time.Until(l.wallDeadline); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// isParked reports whether the quiet bound asked the model about this run
+// AND no verdict has been reached since. The second half is what makes it
+// safe to read as "keep this lease alive": a wall clock that fired while the
+// model was being asked is a verdict, and a verdict always wins over a
+// question — the ceiling ends the run whatever anybody was about to answer.
+func (l *runLease) isParked() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.parked && l.firedReason == ""
 }
 
 // supervise runs fn (the broker request) under the lease, INLINE on the
@@ -186,8 +349,20 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	}
 	enabled := cfg.WallClock > 0 || cfg.Inactivity > 0 || cfg.OutputBudget > 0
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer l.disarm()
+	// A PARKED LEASE IS NOT TORN DOWN. Its wall timer is the person's
+	// ceiling, armed once at the first submission and never re-armed, so it
+	// keeps running while the model is being asked and across every renewal
+	// — which is what makes "renewals stop at the person's number" true by
+	// construction rather than by a counter somebody has to remember to
+	// check. The caller (RequestRun) hands the still-armed lease to the
+	// parked-run registry and replaces its cancellation handle there.
+	defer func() {
+		if l.isParked() {
+			return
+		}
+		cancel()
+		l.disarm()
+	}()
 
 	// The cancellation handle is armed before broker delivery even when the
 	// ordinary lease bounds are disabled. agent.cancel owns this exact request,
@@ -202,6 +377,12 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	}
 	if enabled {
 		if cfg.WallClock > 0 {
+			// ARMED ONCE, HERE, AND NEVER AGAIN. Every continuation of this
+			// run re-opens only the quiet interval; this deadline is the
+			// person's ceiling and it keeps counting through every park and
+			// every renewal. That is what makes the ceiling a ceiling
+			// rather than a budget somebody has to remember to decrement.
+			l.wallDeadline = time.Now().Add(cfg.WallClock)
 			l.wallTimer = time.AfterFunc(cfg.WallClock, func() { l.fire(content.TermTimeout) })
 		}
 		if l.lane != nil {
@@ -223,6 +404,14 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	}
 
 	err := fn(ctx)
+
+	// The quiet bound's outcome is read FIRST and returns without disarming:
+	// nothing was terminalized, nothing is escalated, and the command is
+	// still running. errRunParked is the caller's signal to park the broker
+	// request and ask the model.
+	if l.isParked() {
+		return errRunParked
+	}
 
 	// Disarm before the verdict: every trigger is stopped or neutered, so
 	l.disarm()
@@ -258,6 +447,66 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	return err
 }
 
+// superviseResume supervises a CONTINUATION of an execution that is already
+// running: the model answered "keep waiting", so a new caller is waiting on
+// the same broker request under the same lease.
+//
+// It is deliberately not supervise. supervise ARMS the bounds — the wall
+// clock above all — and arming them again is precisely the bug this whole
+// arrangement exists to avoid: a re-armed ceiling is a ceiling the model can
+// push away by asking. So this re-points only the cancellation handle at the
+// new caller's context (a bound firing must reach the goroutine that is
+// actually waiting) and leaves every timer exactly as it was.
+func (l *runLease) superviseResume(ctx context.Context, fn func(ctx context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	if !l.takeBack(cancel) {
+		cancel()
+		l.mu.Lock()
+		reason := l.firedReason
+		l.mu.Unlock()
+		if reason != "" {
+			// A bound fired in the instant this continuation was taking the
+			// run back. The parked ending already withdrew and escalated;
+			// this reports what actually happened rather than a cancellation
+			// nobody caused.
+			return &assistant.RunLeaseError{Reason: reason, Err: context.Canceled}
+		}
+		return context.Canceled
+	}
+	defer func() {
+		if l.isParked() {
+			return
+		}
+		cancel()
+		l.disarm()
+	}()
+
+	err := fn(ctx)
+
+	if l.isParked() {
+		return errRunParked
+	}
+	l.disarm()
+	l.mu.Lock()
+	reason := l.firedReason
+	l.mu.Unlock()
+	if reason != "" {
+		leaseErr := &assistant.RunLeaseError{Reason: reason, Err: err}
+		// The submission was delivered long ago — this execution has been
+		// running since before the first park — so the escalation always
+		// applies here. There is no SubmissionExpired case to consider.
+		l.escalate()
+		return leaseErr
+	}
+	if err != nil && (errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrRequestDisconnected) ||
+		errors.Is(err, ErrRequestUndelivered)) {
+		l.escalate()
+	}
+	return err
+}
+
 // fire records the bound that ended the run and cancels the broker
 // request's context. It runs on an observer's goroutine (a timer's, the
 // pump's via the ring hook, the read loop's via the lane callback) and must
@@ -272,7 +521,18 @@ func (l *runLease) fire(reason content.TerminationReason) {
 	}
 	l.firedReason = reason
 	cancel := l.cancel
+	parkedEnd := l.parkedEnd
 	l.mu.Unlock()
+	// A PARKED run has nobody waiting on the broker request, so cancelling
+	// its context would reach no select and the command would outlive its
+	// ceiling. parkedEnd withdraws and escalates instead, inline on this
+	// timer's own goroutine — the same runtime-managed goroutine class the
+	// lease already runs its bounds on, and still nothing this file spawned
+	// (ADR-0026).
+	if parkedEnd != nil {
+		parkedEnd(reason)
+		return
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -326,14 +586,15 @@ func (l *runLease) onOutput(n int) {
 
 // checkInactivity is the inactivity timer's own callback — the timer
 // re-arms itself while output flows, so the deadline is exact (silence
-// since the LAST byte, never the last check). On genuine silence it fires
-// the inactivity bound. Reset from inside the AfterFunc callback is the
+// since the LAST byte, never the last check). On genuine silence it PARKS
+// the run: the model is asked whether the silence is expected, and the
+// command is left running while it answers. Reset from inside the AfterFunc callback is the
 // standard self-rescheduling timer pattern: the timer is expired while its
 // function runs, which is exactly the state Reset is documented for, and
 // no other goroutine resets it.
 func (l *runLease) checkInactivity() {
 	l.mu.Lock()
-	if !l.accountingStarted || l.done || l.suspended || l.firedReason != "" {
+	if !l.accountingStarted || l.done || l.suspended || l.parked || l.firedReason != "" {
 		l.mu.Unlock()
 		return
 	}
@@ -346,12 +607,50 @@ func (l *runLease) checkInactivity() {
 		}
 		return
 	}
-	l.firedReason = content.TermInactivity
-	cancel := l.cancel
+	// SILENCE IS NOT A VERDICT. No firedReason is recorded — the execution
+	// was not terminalized and content.TermInactivity is deliberately not
+	// written here — and no context is cancelled, so the renderer is never
+	// told to withdraw the command it is running. The park channel is what
+	// releases the broker request's wait; the timers stay armed and the wall
+	// clock keeps counting.
+	l.parked = true
+	parkC := l.parkC
 	l.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if parkC != nil {
+		close(parkC)
 	}
+}
+
+// resumeQuiet re-opens the quiet interval on a lease that parked: the model
+// answered "keep waiting", so the silence is measured again from NOW under
+// the (possibly narrower) bound this continuation asked for. The wall timer
+// is untouched — that is the point of the whole arrangement.
+func (l *runLease) resumeQuiet(quiet time.Duration, parkC chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done || l.firedReason != "" {
+		return
+	}
+	l.parked = false
+	l.renewals++
+	l.parkC = parkC
+	l.cfg.Inactivity = quiet
+	l.lastOutput = time.Now()
+	if l.inactTimer != nil {
+		l.inactTimer.Stop()
+		l.inactTimer = nil
+	}
+	if quiet > 0 && l.accountingStarted {
+		l.inactTimer = time.AfterFunc(quiet, l.checkInactivity)
+	}
+}
+
+// renewalCount is how many times the model answered "keep waiting" on this
+// execution. Reported to the model so a loop is visible to the party in it.
+func (l *runLease) renewalCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.renewals
 }
 
 // onLane is the lane-state callback, fired synchronously by the reporting
@@ -441,7 +740,14 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 	}
 	l.cancelStarted = true
 	cancel := l.cancel
+	parkedEnd := l.parkedEnd
 	l.mu.Unlock()
+	// A parked run is ended through its one termination path, which already
+	// withdraws the request and runs the ladder. Going round it here would
+	// leave the broker request pending with nobody able to resolve it.
+	if parkedEnd != nil {
+		return parkedEnd(content.TermUserKilled)
+	}
 	if cancel == nil {
 		// The control attached this lease before supervise armed the broker
 		// request. Nothing owned by the assistant exists yet: mark the
@@ -474,13 +780,33 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 	return stopProcessGroup(l.log, l.sid, l.sess, pgid, l.cfg.SignalGrace)
 }
 
-// effectiveRunLease returns the server's lease config: the config named by
-// WithRunLease when it names any bound, the package default otherwise.
+// effectiveRunLease returns the bounds THIS run is supervised under: the
+// config named by WithRunLease when it names any bound (the package default
+// otherwise), with both time bounds replaced by the person's current
+// settings whenever a registry is wired.
+//
+// THIS IS THE SETTINGS→LEASE PATH, and it is read here — once, when a run
+// starts — deliberately. The value is snapshotted into the lease at
+// construction and never re-read, so changing a number changes what the NEXT
+// command is bound by and can never move a bound under a command that is
+// already running. A person raising the ceiling does not rescue the command
+// that is about to be killed; a person lowering it does not kill one
+// mid-flight.
 func (s *WSServer) effectiveRunLease() RunLeaseConfig {
+	cfg := defaultRunLease
 	if s.runLeaseCfg.WallClock > 0 || s.runLeaseCfg.Inactivity > 0 || s.runLeaseCfg.OutputBudget > 0 {
-		return s.runLeaseCfg
+		cfg = s.runLeaseCfg
 	}
-	return defaultRunLease
+	if s.settings == nil {
+		return cfg
+	}
+	if v, err := s.settings.GetNumber(settings.AgentRunWallClockMinutes); err == nil {
+		cfg.WallClock = settingMinutes(v)
+	}
+	if v, err := s.settings.GetNumber(settings.AgentRunQuietMinutes); err == nil {
+		cfg.Inactivity = settingMinutes(v)
+	}
+	return cfg
 }
 
 // runLeaseIntegrationAvailable reports whether sid currently has an
@@ -514,10 +840,11 @@ func (s *WSServer) runLeaseIntegrationAvailable(sid session.ID) bool {
 // one, and the lane state carries the awaiting-takeover transition.
 func (s *WSServer) newRunLease(sid session.ID, cfg RunLeaseConfig) *runLease {
 	l := &runLease{
-		log:  s.log.With("component", "run-lease"),
-		sid:  sid,
-		lane: s.laneInteractivity,
-		cfg:  cfg,
+		log:   s.log.With("component", "run-lease"),
+		sid:   sid,
+		lane:  s.laneInteractivity,
+		cfg:   cfg,
+		parkC: make(chan struct{}),
 	}
 	if sess, err := s.registry.Get(sid); err == nil {
 		if sg, ok := sess.(runLeaseSession); ok {

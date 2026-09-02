@@ -1045,6 +1045,16 @@ func leaseResult(tool string, leaseErr *RunLeaseError) string {
 	return "TERMINATED: nocx ended your call to " + tool + ": " + sentence + ". Do not treat this as a command result or retry it without explaining why."
 }
 
+// runNotWaitingResult is the model-visible answer for a continuation that
+// named a run which is no longer waiting. It follows leaseResult's contract:
+// the sentence is the CALL'S RESULT, so the model reads what happened and
+// carries on, instead of the whole turn dying over a race it could not win.
+func runNotWaitingResult(tool string) string {
+	return "NOT WAITING: nocx did not run your call to " + tool +
+		": that command is no longer waiting to be answered about — it finished on its own, or it was already stopped. " +
+		"Nothing was changed by this call. Do not answer about it again; if you need to know how it ended, read the session."
+}
+
 // ── the attempt ───────────────────────────────────────────────────────────
 
 // recordProposal writes the escalation's ledger facts BEFORE the run
@@ -1387,7 +1397,7 @@ func (m *effectKernel) seams() toolSeams {
 // type switch is the exhaustiveness proof: a second InRenderer tool extends
 // the switch or it does not compile.
 //
-// `run` is the only row here. readScreen was the other, until session.read
+// `run` and its continuation `wait` are the rows here. readScreen was another, until session.read
 // took its job (nocx-2ryxf.1) — and session.read is Dynamic, not InRenderer,
 // because which side owns the answer depends on whether the item is still
 // running. Its arm of that switch, and the ScreenReader capability it
@@ -1404,6 +1414,8 @@ func (m *effectKernel) executeInRenderer(ctx context.Context, decl agenttools.To
 			// interval.
 			m.noteCause(context.WithoutCancel(ctx), entryID)
 		})
+	case *agenttools.RunWatcher:
+		return executeRunWait(ctx, cap, m.requester, rawArgs)
 	default:
 		return "", fmt.Errorf("tool %q: capability is %T, not a renderer-executable capability", decl.Name, capability)
 	}
@@ -1820,6 +1832,36 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// existed, so it remains a run-level failure and its sentence belongs in
 	// agent.runState.Error.
 	if runErr != nil {
+		// THE QUIET BOUND'S QUESTION, which is not a failure: nothing was
+		// terminalized, the command is still executing, and the model is
+		// being asked whether to keep waiting (ADR-0020 decision 2's
+		// renewable clause, nocx-6dzxq). It reaches the model the way a
+		// refusal does — as the CALL'S RESULT — because a framework error
+		// would end the stream and there would be nobody left to answer.
+		//
+		// The attempt closes as completed, not failed: this call did what
+		// it was asked (it submitted the command and it waited), and the
+		// command's own outcome belongs to the block the renderer opened,
+		// not to this attempt. A renewal is therefore a ledger fact by the
+		// route ADR-0020 decision 4 already provides — each continuation is
+		// its own attempt of its own action entry — and needs no new
+		// termination reason and no change to the executions CHECK set.
+		var stillRunning *RunStillRunningError
+		if errors.As(runErr, &stillRunning) {
+			_ = k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess)
+			return modelResult{
+				text: RunStillRunningSentence(decl.Name, stillRunning),
+				kind: modelNocxMessage,
+			}, nil
+		}
+		// A CONTINUATION THAT ARRIVED TOO LATE is the model losing a race
+		// nocx started: the command finished between the question and the
+		// answer. The call did nothing and changed nothing, so it is a
+		// result the model reads — never a failed run.
+		if errors.Is(runErr, ErrRunNotWaiting) {
+			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			return modelResult{text: runNotWaitingResult(decl.Name), kind: modelNocxMessage}, nil
+		}
 		var leaseErr *RunLeaseError
 		if errors.As(runErr, &leaseErr) {
 			_ = k.closeAttempt(ctx, execID, leaseErr.Reason, content.EntryFailure)

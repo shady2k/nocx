@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -58,6 +59,46 @@ type procSource interface {
 	argvFormat() argvFormat
 	// comm is a process's command name, as the kernel truncates it.
 	comm(pid int) (string, error)
+	// status is the process-status triple: when the kernel says the process
+	// began, who its parent is now, and what state it is in.
+	//
+	// ONE CALL FOR THREE FACTS because that is how both kernels hand them
+	// over — macOS's kern.proc.pid answer already carries all three beside
+	// the p_comm this source reads anyway, and Linux's /proc/<pid>/stat is a
+	// single line holding all three. Three methods would be three reads of
+	// one file on Linux and three identical sysctls on macOS, and would
+	// invite three inconsistent snapshots of a thing that changes.
+	//
+	// A field the source could not fill is left at its zero value and the
+	// judgement is Observe's, exactly as it is for cwd: this half answers,
+	// the other half decides what counts as missing.
+	status(pid int) (procStatus, error)
+}
+
+// procStatus is the kernel's answer to the process-status triple, in units
+// this package owns rather than in either kernel's own spelling.
+//
+// StartTime is an ABSOLUTE INSTANT and not the raw counter Linux keeps. That
+// is a real conversion with a real cost — /proc/<pid>/stat measures start in
+// clock ticks since boot, so procfsSource has to learn the boot instant to
+// answer at all — and the alternative was worse. Ticks-since-boot plus a boot
+// identifier would put the SAME FIELD in two different units depending on
+// which kernel answered, and every reader would have to hold both
+// derivations; macOS has no such counter to report, so the field would be a
+// darwin instant next to a linux pair, which is two facts wearing one name.
+// An instant is what the reader wants in both cases and is what the wire
+// carries everywhere else (proto.FormatTime).
+type procStatus struct {
+	// StartTime is when the kernel says the process began. The zero time
+	// means the source could not work it out.
+	StartTime time.Time
+	// Ppid is the parent as the kernel reports it now. Zero means unknown:
+	// no process the helper spawns has a parent of 0, so the zero value
+	// cannot collide with an answer.
+	Ppid int
+	// State is the normalised kernel state, empty when the source could not
+	// read it or answered a code the closed vocabulary cannot spell.
+	State proto.ProcessState
 }
 
 // Observe answers what this OS says about the shell and about whatever holds
@@ -93,6 +134,29 @@ func (i *osInspector) Observe(pid, foregroundPgid int) *proto.Observation {
 	}
 	if len(obs.Argv) == 0 {
 		obs.Unavailable = append(obs.Unavailable, proto.DiagnosticArgv)
+	}
+
+	// The process-status triple. One read, three verdicts: a source that
+	// answered the read but could not fill one field names THAT field, so a
+	// reader is never told a parent is unknown because a start time was.
+	status, err := i.src.status(pid)
+	if err != nil {
+		status = procStatus{}
+	}
+	if !status.StartTime.IsZero() {
+		obs.StartTime = proto.FormatTime(status.StartTime)
+	} else {
+		obs.Unavailable = append(obs.Unavailable, proto.DiagnosticStartTime)
+	}
+	if status.Ppid > 0 {
+		obs.Ppid = status.Ppid
+	} else {
+		obs.Unavailable = append(obs.Unavailable, proto.DiagnosticPpid)
+	}
+	if status.State != "" {
+		obs.State = status.State
+	} else {
+		obs.Unavailable = append(obs.Unavailable, proto.DiagnosticState)
 	}
 
 	// A zero foreground group, or the shell's own, means no job is running:

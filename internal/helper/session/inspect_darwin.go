@@ -5,8 +5,11 @@ package session
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // NewInspector is the composition root's per-OS choice; see the linux sibling
@@ -31,6 +34,9 @@ func NewInspector() Inspector {
 //	argv                kern.procargs2.<pid>
 //	command name        kern.proc.pid.<pid> -> kinfo_proc.kp_proc.p_comm
 //	liveness            the same call failing is how a dead pid is detected
+//	start time          the same answer -> kp_proc.p_starttime
+//	parent              the same answer -> kp_eproc.e_ppid
+//	process state       the same answer -> kp_proc.p_stat
 //
 // NOT ANSWERED: the working directory. macOS exposes no sysctl for another
 // process's cwd — KERN_PROC's subtypes are pid/pgrp/tty/uid/all and none of
@@ -101,4 +107,64 @@ func (darwinSource) comm(pid int) (string, error) {
 		name = name[:i]
 	}
 	return strings.TrimSpace(name), nil
+}
+
+// macOS's process states, from <sys/proc.h>. Named here rather than used as
+// bare integers because 3 and 4 are one apart and mean "asleep at a prompt"
+// and "suspended", which is the whole distinction the state field exists for.
+const (
+	darwinSIDL   int8 = 1 // being created by fork
+	darwinSRUN   int8 = 2 // runnable
+	darwinSSLEEP int8 = 3 // asleep on an address
+	darwinSSTOP  int8 = 4 // suspended, or held by a debugger
+	darwinSZOMB  int8 = 5 // exited, awaiting collection by its parent
+)
+
+// status answers the process-status triple from the SAME kern.proc.pid call
+// that already answers comm and liveness — one sysctl, and kinfo_proc carries
+// all three beside the command name. This is the platform on which
+// nocx-k6p18.12's "free" is literally true: no new syscall, no new dependency,
+// no new parse.
+func (darwinSource) status(pid int) (procStatus, error) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return procStatus{}, err
+	}
+	out := procStatus{
+		Ppid:  int(kp.Eproc.Ppid),
+		State: darwinProcessState(kp.Proc.P_stat),
+	}
+	// p_starttime is an absolute wall-clock timeval, so unlike Linux's
+	// ticks-since-boot it needs no boot instant to become one — which is why
+	// the wire carries an instant rather than a counter: this platform has no
+	// counter to send.
+	if tv := kp.Proc.P_starttime; tv.Sec > 0 {
+		out.StartTime = time.Unix(tv.Sec, int64(tv.Usec)*int64(time.Microsecond))
+	}
+	return out, nil
+}
+
+// darwinProcessState maps <sys/proc.h>'s codes onto the closed vocabulary.
+//
+// SIDL — a process still being forked — has no member there and answers the
+// empty state, which Observe reports as unavailable. It is not a session shell
+// the helper spawned minutes ago, and giving it a plausible name would be
+// inventing a value rather than reporting one. macOS also does not
+// distinguish an uninterruptible wait from an ordinary one, so a process Linux
+// would call `uninterruptible` is reported `sleeping` here: less precise, and
+// still true.
+func darwinProcessState(code int8) proto.ProcessState {
+	switch code {
+	case darwinSRUN:
+		return proto.ProcessRunning
+	case darwinSSLEEP:
+		return proto.ProcessSleeping
+	case darwinSSTOP:
+		return proto.ProcessStopped
+	case darwinSZOMB:
+		return proto.ProcessZombie
+	case darwinSIDL:
+		return ""
+	}
+	return ""
 }

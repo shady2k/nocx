@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ageLabel,
   cardLocation,
+  cardProcess,
   cardTitle,
   overviewGroups,
   paneState,
@@ -17,6 +18,7 @@ function facts(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFacts {
     title: null,
     host: null,
     cwd: { state: 'unobserved' },
+    process: { observed: false },
     branch: null,
     agentStatus: null,
     runningCommand: null,
@@ -154,6 +156,80 @@ describe('where a card says it is', () => {
     // pane at a prompt is titled by its cwd — printing that cwd again under
     // it is one fact twice.
     expect(cardLocation(facts({ title: '~/repos/nocx', cwd: knownCwd('~/repos/nocx') }))).toBeNull()
+  })
+})
+
+describe("what the card says about the session's own process", () => {
+  const NOW = Date.parse('2026-09-02T12:00:00Z')
+  const THREE_HOURS_EARLIER = NOW - 3 * 60 * 60 * 1000
+
+  it('names the state, the age and the parent when the helper answered all three', () => {
+    expect(
+      cardProcess(
+        facts({
+          process: {
+            observed: true,
+            processState: 'sleeping',
+            startTimeMs: THREE_HOURS_EARLIER,
+            ppid: 4242,
+          },
+        }),
+        NOW,
+      ),
+    ).toBe('Sleeping · started 3h ago · parent 4242')
+  })
+
+  it('tells a suspended shell apart from a live one, which nothing else in the product can', () => {
+    const stopped = cardProcess(
+      facts({
+        process: { observed: true, processState: 'stopped', startTimeMs: null, ppid: null },
+      }),
+      NOW,
+    )
+    const sleeping = cardProcess(
+      facts({
+        process: { observed: true, processState: 'sleeping', startTimeMs: null, ppid: null },
+      }),
+      NOW,
+    )
+    expect(stopped).toContain('Stopped')
+    expect(sleeping).toContain('Sleeping')
+    expect(stopped).not.toBe(sleeping)
+  })
+
+  it('says which of the three it does not know, one at a time', () => {
+    const observed = {
+      observed: true,
+      processState: 'running',
+      startTimeMs: THREE_HOURS_EARLIER,
+      ppid: 4242,
+    } as const
+
+    expect(cardProcess(facts({ process: { ...observed, processState: null } }), NOW)).toBe(
+      'State unavailable · started 3h ago · parent 4242',
+    )
+    expect(cardProcess(facts({ process: { ...observed, startTimeMs: null } }), NOW)).toBe(
+      'Running · start time unavailable · parent 4242',
+    )
+    expect(cardProcess(facts({ process: { ...observed, ppid: null } }), NOW)).toBe(
+      'Running · started 3h ago · parent unavailable',
+    )
+  })
+
+  it('says nothing at all when nobody could be asked, and something whenever one was', () => {
+    // The distinction the two levels exist for. "No helper answered for this
+    // pane" is silence; "the helper answered and knew none of the three" is a
+    // sentence, because a reader must not read the second as the first and go
+    // looking for the answer in the launch record.
+    expect(cardProcess(facts({ process: { observed: false } }), NOW)).toBeNull()
+    expect(
+      cardProcess(
+        facts({
+          process: { observed: true, processState: null, startTimeMs: null, ppid: null },
+        }),
+        NOW,
+      ),
+    ).toBe('State unavailable · start time unavailable · parent unavailable')
   })
 })
 

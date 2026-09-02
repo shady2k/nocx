@@ -433,7 +433,11 @@ function OverviewCards(props: { group: OverviewGroup; onPick: (paneId: string) =
               title={card.title}
               meta={card.location ?? undefined}
               status={{ tone: stateTone(card.state), text: card.stateText }}
-              detail={[...(card.quote === null ? [] : [card.quote]), ...card.excerpt]}
+              detail={[
+                ...(card.process === null ? [] : [card.process]),
+                ...(card.quote === null ? [] : [card.quote]),
+                ...card.excerpt,
+              ]}
               actions={null}
               selected={card.isActive}
               onActivate={() => props.onPick(card.paneId)}

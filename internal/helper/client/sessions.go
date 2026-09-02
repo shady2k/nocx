@@ -35,7 +35,17 @@ type Observation struct {
 	Argv              []string `json:"argv"`
 	ForegroundPgid    int      `json:"foregroundPgid,omitempty"`
 	ForegroundCommand string   `json:"foregroundCommand,omitempty"`
-	Unavailable       []string `json:"unavailable"`
+	// StartTime is the KERNEL's start time for the process, RFC 3339 with
+	// nanoseconds — not SessionEntry.StartedAt, which is when the helper
+	// spawned it. The pair is the pid-reuse guard and the two are allowed to
+	// disagree; see proto.Observation.StartTime.
+	StartTime string `json:"startTime,omitempty"`
+	Ppid      int    `json:"ppid,omitempty"`
+	// State is proto.ProcessState's closed vocabulary, carried as a string
+	// for the same reason Unavailable is: this boundary exposes no proto
+	// types above it.
+	State       string   `json:"state,omitempty"`
+	Unavailable []string `json:"unavailable"`
 }
 
 type WindowSpan struct {
@@ -134,6 +144,9 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 			Argv:              make([]string, 0, len(in.Observed.Argv)),
 			ForegroundPgid:    in.Observed.ForegroundPgid,
 			ForegroundCommand: in.Observed.ForegroundCommand,
+			StartTime:         in.Observed.StartTime,
+			Ppid:              in.Observed.Ppid,
+			State:             string(in.Observed.State),
 			Unavailable:       make([]string, 0, len(in.Observed.Unavailable)),
 		}
 		out.Observed.Argv = append(out.Observed.Argv, in.Observed.Argv...)

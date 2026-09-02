@@ -11,7 +11,12 @@ import type { WorkspaceColour } from '../layout/workspace-colours'
 
 import type { CommandStatus } from '../command-ledger'
 import type { PaneActivity } from '../pane-observation'
-import type { OverviewBlockFacts, OverviewPaneFacts, OverviewSnapshot } from './overview-port'
+import type {
+  OverviewBlockFacts,
+  OverviewPaneFacts,
+  OverviewSnapshot,
+  ProcessState,
+} from './overview-port'
 
 /**
  * What a pane is doing, in the vocabulary a person uses when they are looking
@@ -141,6 +146,50 @@ function cwdText(f: OverviewPaneFacts): string {
     case 'unobserved':
       return 'Directory not observed'
   }
+}
+
+/**
+ * The kernel's word for what the shell's process is doing.
+ *
+ * IT IS NOT PaneState, and the two must never be folded together. `paneState`
+ * is the product's judgement about what the PERSON has to do — an agent that
+ * has stopped on a question is `waiting`, whatever the kernel thinks of the
+ * process holding it. This is the OS's answer about one process, and the whole
+ * reason nocx-k6p18.12 put it on the wire is that a shell suspended by ^Z and
+ * a shell sitting at a prompt look identical everywhere else in this product.
+ */
+const PROCESS_STATE_LABEL: Record<ProcessState, string> = {
+  running: 'Running',
+  sleeping: 'Sleeping',
+  uninterruptible: 'Uninterruptible',
+  stopped: 'Stopped',
+  zombie: 'Zombie',
+}
+
+/**
+ * What the OS says about the session's process: its state, how long it has
+ * been up, and who its parent is — or, for each of those independently, that
+ * the helper asked and could not answer.
+ *
+ * EVERY PART IS PRINTED, including the ones that are ordinary. A line that
+ * appeared only when something was wrong would make "we do not know" and "it
+ * is fine" the same silence, which is the defect the whole `unavailable`
+ * vocabulary exists to prevent — and it is the one this surface already
+ * learned once, about a directory.
+ *
+ * Null only when nobody could be asked at all: a pane with no helper-owned
+ * session has no process for the OS to describe, and inventing a line for it
+ * would be the launch-record fallback wearing different clothes.
+ */
+export function cardProcess(f: OverviewPaneFacts, now: number): string | null {
+  if (!f.process.observed) return null
+  const { processState, startTimeMs, ppid } = f.process
+  const age = ageLabel(startTimeMs, now)
+  return [
+    processState === null ? 'State unavailable' : PROCESS_STATE_LABEL[processState],
+    age === null ? 'start time unavailable' : `started ${age} ago`,
+    ppid === null ? 'parent unavailable' : `parent ${ppid}`,
+  ].join(' · ')
 }
 
 /**
@@ -289,6 +338,9 @@ export interface OverviewCard {
   readonly location: string | null
   readonly state: PaneState
   readonly stateText: string
+  /** What the OS says about the session's process — see cardProcess. Null
+   *  when no helper answered for this pane at all. */
+  readonly process: string | null
   /** The one line under the status — see cardQuote. Null when the card has
    *  nothing to add that its title and status do not already say. */
   readonly quote: string | null
@@ -331,6 +383,7 @@ export function overviewGroups(snapshot: OverviewSnapshot, now = Date.now()): Ov
       location: cardLocation(f),
       state: paneState(f),
       stateText: stateText(f, now),
+      process: cardProcess(f, now),
       quote: cardQuote(f),
       excerpt: f.excerpt,
       isActive: f.paneId === snapshot.activePaneId,

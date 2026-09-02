@@ -467,6 +467,117 @@ describe('PaneManager', () => {
     })
   })
 
+  it("projects the helper's process diagnostics and never reads a value it named unavailable", async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    const sessionId = client._sessions[1].sessionId
+    const entry = (observed: {
+      startTime?: string
+      ppid?: number
+      state?: string
+      unavailable: string[]
+    }) => ({
+      hostSessionId: { generation: 'generation-a', session: sessionId },
+      workspace: 'workspace-a',
+      // The helper's OWN record of the spawn, three hours off the kernel's
+      // answer below. It is here so a reader that substituted one for the
+      // other would be caught rather than agreed with.
+      startedAt: '2026-09-01T00:00:00.000Z',
+      launch: {
+        shell: '/bin/sh',
+        cwd: '/launch',
+        pid: 12,
+        pgid: 12,
+        cols: 80,
+        rows: 24,
+        windowBytes: 0,
+      },
+      observed: { source: 'procfs', cwd: '/observed', ...observed },
+      window: { base: 0, written: 0 },
+      writer: null,
+      writerEpoch: 0,
+      exit: null,
+    })
+    const paneFacts = () =>
+      manager
+        .overviewPort()
+        .snapshot()
+        .workspaces.flatMap((workspace) => workspace.panes)
+        .find((candidate) => candidate.host === 'host.example.com')
+
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2026-09-01T03:00:00.000Z',
+        ppid: 4242,
+        state: 'sleeping',
+        unavailable: [],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(paneFacts()?.process).toEqual({
+      observed: true,
+      processState: 'sleeping',
+      startTimeMs: Date.parse('2026-09-01T03:00:00.000Z'),
+      ppid: 4242,
+    })
+
+    // THE CASE THE `unavailable` CHECK EXISTS FOR, and the only one where it
+    // does any work: every value is PRESENT and the helper has said it could
+    // not answer for it. Driving this with the fields omitted would pass with
+    // the check deleted, through the undefined branch — which is exactly how
+    // nocx-k6p18.13's first version of this test proved nothing.
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2020-01-01T00:00:00.000Z',
+        ppid: 999,
+        state: 'running',
+        unavailable: ['startTime', 'ppid', 'state'],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(
+      paneFacts()?.process,
+      'the overview read process values the helper reported as unavailable',
+    ).toEqual({ observed: true, processState: null, startTimeMs: null, ppid: null })
+
+    // And each is judged ALONE: one named diagnostic must not take the other
+    // two down with it.
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2026-09-01T03:00:00.000Z',
+        ppid: 4242,
+        state: 'running',
+        unavailable: ['ppid'],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(paneFacts()?.process).toEqual({
+      observed: true,
+      processState: 'running',
+      startTimeMs: Date.parse('2026-09-01T03:00:00.000Z'),
+      ppid: null,
+    })
+  })
+
+  it('says nobody could be asked about the process when no helper holds the session', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    client.listHelperSessions.mockResolvedValue([])
+    await manager.refreshHelperSessions()
+    const pane = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(pane?.process).toEqual({ observed: false })
+  })
+
   // ── fallback title consistency (badge vs title after close) ───────────
 
   it('fallback title is the directory, not a number that would disagree with the badge', async () => {

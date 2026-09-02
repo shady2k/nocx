@@ -53,6 +53,7 @@ import type {
   OverviewPaneFacts,
   OverviewPort,
   OverviewSnapshot,
+  ProcessObservation,
 } from './overview/overview-port'
 import { LayoutStore } from './layout/layout-store'
 import type { UIStateClient } from './uistate-client'
@@ -1192,6 +1193,26 @@ export class PaneManager {
     return request
   }
 
+  /**
+   * The helper's observation of the pane's session, or null when no helper
+   * answered for it.
+   *
+   * ONE JOIN, used by every projection below it. AD-7 as amended makes the
+   * execution host mint the session identity, so the coordinator's session id
+   * IS the helper's `hostSessionId.session` and the lookup is a lookup rather
+   * than a type confusion — establishing which cost nocx-k6p18.13 a wrong
+   * turn. A second copy of it here would be a second place for that to be
+   * re-derived wrongly.
+   */
+  private helperObservationFor(
+    content: PaneContent | undefined,
+  ): NonNullable<SessionEntry['observed']> | null {
+    const origin = content?.activeOrigin?.() ?? null
+    const sessionId = origin?.kind === 'ssh' ? origin.sessionId : content?.lineage?.()?.sessionId
+    if (!sessionId) return null
+    return this.helperSessions.get(sessionId)?.observed ?? null
+  }
+
   private cwdObservationFor(content: PaneContent | undefined): CwdObservation {
     const origin = content?.activeOrigin?.() ?? null
     if (origin?.kind === 'local') {
@@ -1201,20 +1222,60 @@ export class PaneManager {
       return { state: 'unobserved' }
     }
 
-    const sessionId = origin?.kind === 'ssh' ? origin.sessionId : content?.lineage?.()?.sessionId
-    if (!sessionId) return { state: 'unobserved' }
-
-    const entry = this.helperSessions.get(sessionId)
-    if (!entry || entry.observed === null) return { state: 'unobserved' }
-    const observedCwd = entry.observed.cwd
+    const observed = this.helperObservationFor(content)
+    if (observed === null) return { state: 'unobserved' }
+    const observedCwd = observed.cwd
     if (
-      entry.observed.unavailable.includes('cwd') ||
+      observed.unavailable.includes('cwd') ||
       observedCwd === undefined ||
       observedCwd.trim() === ''
     ) {
       return { state: 'unavailable' }
     }
     return { state: 'known', cwd: observedCwd }
+  }
+
+  /**
+   * The helper's three derived process diagnostics (nocx-k6p18.12), each
+   * judged on its own.
+   *
+   * `unavailable` is consulted per FIELD and before the value, which is the
+   * only order that works: the helper may name a diagnostic unavailable and
+   * still carry a value for it — a start time from an earlier answer, a
+   * parent that has since changed — and a reader that looked at the value
+   * first would show it. That is the same defect the cwd projection above
+   * exists to prevent, in three more places.
+   *
+   * There is no local-session branch. These facts come from the helper's
+   * inspector and nothing on this machine produces them, so a local pane's
+   * answer is honestly "nobody could be asked" rather than a value assembled
+   * out of what the renderer happens to know.
+   */
+  private processObservationFor(content: PaneContent | undefined): ProcessObservation {
+    const observed = this.helperObservationFor(content)
+    if (observed === null) return { observed: false }
+
+    const unavailable = (name: 'startTime' | 'ppid' | 'state'): boolean =>
+      observed.unavailable.includes(name)
+
+    let startTimeMs: number | null = null
+    if (!unavailable('startTime') && observed.startTime !== undefined) {
+      const parsed = Date.parse(observed.startTime)
+      // An instant that does not parse is not an instant. NaN would flow into
+      // an age and print as a duration, which is a value invented at the last
+      // possible moment.
+      if (Number.isFinite(parsed)) startTimeMs = parsed
+    }
+    // Zero is not a parent any session the helper spawned can have, so it is
+    // the same absence the wire's omission is rather than a second state.
+    const ppid =
+      unavailable('ppid') || observed.ppid === undefined || observed.ppid <= 0
+        ? null
+        : observed.ppid
+    const processState =
+      unavailable('state') || observed.state === undefined ? null : observed.state
+
+    return { observed: true, processState, startTimeMs, ppid }
   }
 
   /**
@@ -3101,6 +3162,7 @@ export class PaneManager {
       title,
       host: live?.host ?? (row.endpoint || null),
       cwd,
+      process: this.processObservationFor(content),
       // No per-pane branch exists in the renderer: D10 makes the git panel
       // follow the ACTIVE tab and the session the sole owner of "which
       // repository", so a branch per card would need a second owner of that

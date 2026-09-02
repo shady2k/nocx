@@ -63,11 +63,29 @@
           "minimum": 0
         },
         "foregroundCommand": { "type": "string" },
+        "startTime": {
+          "description": "When the KERNEL says this process began, RFC 3339 with nanoseconds and an offset. It is NOT `startedAt` one level up: that is the helper's own record of when it spawned, which is authority, and this is what the OS says about whatever process wears that pid now, which is evidence. The pair is the PID-REUSE GUARD — a pid alone cannot say whether the process answering today is the one we launched, and (pid, startTime) can — so they must be two fields and they are allowed to disagree; that disagreement is the only way anything can notice a recycled pid. They are told apart by where they sit rather than by a longer name, because every field in here is already scoped by `observed`. The resolution differs by platform and neither is exact: macOS reports microseconds, Linux hundredths of a second. It is an identity, not a stopwatch.",
+          "type": "string",
+          "minLength": 1
+        },
+        "ppid": {
+          "description": "The parent as the OS reports it NOW. Evidence rather than a constant: a helper that dies leaves its sessions reparented, and the entry then says so instead of implying the helper still owns them. Absent means it was not answered, and `unavailable` then names it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "description": "The kernel's process state, normalised into one closed vocabulary — because the two kernels spell it differently and a field carrying `R` from one and `2` from the other would be two facts wearing one name. Linux's /proc/<pid>/stat gives a letter, macOS's kinfo_proc gives an SRUN/SSLEEP/SSTOP/SZOMB integer, and both are mapped by the helper rather than by the reader, which cannot know which kernel answered. `uninterruptible` exists because Linux distinguishes it and a shell hung on a dead network mount is precisely the session a person is looking for; macOS does not distinguish it and reports `sleeping`, which is less precise and still true. A code outside this set is reported by naming `state` in `unavailable` — never as a value invented to fill the field. This is the fact that makes a stopped shell and a live one tell apart, which they cannot be today.",
+          "type": "string",
+          "enum": ["running", "sleeping", "uninterruptible", "stopped", "zombie"]
+        },
         "unavailable": {
           "description": "Every diagnostic above that this inspector was asked for and could NOT supply. Always present — [] when everything asked for was answered — because a missing diagnostic and a stale one must not look alike. Every other field here is omitted when empty, so a diagnostic the OS could not answer arrives as nothing at all, and a reader with nothing falls back to the LAUNCH record: a value that was true once and goes stale the moment the user cds. That is a stale value presented as a current observation, which is exactly the lie the authority/evidence split exists to prevent, arriving by the back door. macOS is where it bites and why this field exists: there is no /proc, and the only route to another process's working directory is proc_pidinfo(PROC_PIDVNODEPATHINFO) in libproc, which needs cgo — refused by the helper's size argument — so the shipped platform answers argv and the foreground command through sysctl and reports ['cwd'] here. The rule is per-OBSERVATION and not per-platform: a /proc read that was refused is named the same way, because the reader's problem is identical and the reason is not its business. The vocabulary is closed so a reader can switch on it exhaustively; a free-form string would let a later generation invent a name nothing understands, which is the defect additionalProperties:false refuses one level up.",
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "enum": ["cwd", "argv", "foregroundCommand"] }
+          "items": {
+            "type": "string",
+            "enum": ["cwd", "argv", "foregroundCommand", "startTime", "ppid", "state"]
+          }
         }
       }
     },

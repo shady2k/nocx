@@ -25,7 +25,16 @@ func contractInventoryEntry() helperclient.SessionEntry {
 		Launch: helperclient.LaunchRecord{
 			Shell: "/bin/bash", Cwd: "/srv", Pid: 41, Pgid: 41, Cols: 80, Rows: 24, WindowBytes: 262144,
 		},
-		Observed:    &helperclient.Observation{Source: "proc", Cwd: "/srv", Argv: []string{}, Unavailable: []string{}},
+		// The process-status triple is POPULATED here on purpose. A fixture
+		// that leaves a field at its zero value marshals nothing for it —
+		// every one of them is omitempty — so the schema never sees the key
+		// and a misspelt json tag passes the gate. That is the shape
+		// vault.status's missing defaultProvider had.
+		Observed: &helperclient.Observation{
+			Source: "proc", Cwd: "/srv", Argv: []string{},
+			StartTime: "2026-08-31T20:59:00.5Z", Ppid: 40, State: "sleeping",
+			Unavailable: []string{},
+		},
 		Window:      helperclient.WindowSpan{Base: 0, Written: 12},
 		Writer:      nil,
 		WriterEpoch: 0,
@@ -68,6 +77,25 @@ func TestSessionsInventory_OverTheWireConformsToContract(t *testing.T) {
 	if observed == nil || observed.Source != "proc" || observed.Cwd != "/srv" || observed.Argv == nil || len(observed.Argv) != 0 {
 		t.Fatalf("observation = %+v, want proc /srv and an explicit empty argv", observed)
 	}
+	if observed.StartTime != "2026-08-31T20:59:00.5Z" || observed.Ppid != 40 || observed.State != "sleeping" {
+		t.Fatalf("process-status triple = %q/%d/%q off the real socket, want the values the handler was given", observed.StartTime, observed.Ppid, observed.State)
+	}
+}
+
+// TestSessionsInventory_UnavailableDiagnosticsConformToContract is the other
+// half. The wire's `unavailable` vocabulary is a closed enum, so a helper that
+// names a diagnostic the schema does not know produces a payload the renderer
+// refuses — and the three added by nocx-k6p18.12 have to be in that set or an
+// inspector that could not read /proc/<pid>/stat emits an invalid inventory.
+func TestSessionsInventory_UnavailableDiagnosticsConformToContract(t *testing.T) {
+	schema := loadSchema(t, "sessions.inventory.schema.json")
+	entry := contractInventoryEntry()
+	entry.Observed = &helperclient.Observation{
+		Source: "proc", Argv: []string{},
+		Unavailable: []string{"cwd", "argv", "foregroundCommand", "startTime", "ppid", "state"},
+	}
+	raw := mustMarshal(hostSessionInventoryResult{Sessions: []helperclient.SessionEntry{entry}})
+	validateJSON(t, schema, raw, "sessions.inventory DTO naming every diagnostic unavailable")
 }
 
 func TestSessionsInventory_UnwiredIsUnavailable(t *testing.T) {

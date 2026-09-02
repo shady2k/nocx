@@ -19,6 +19,7 @@ export function fakePane(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFac
     title: null,
     host: null,
     cwd: { state: 'unobserved' },
+    process: { observed: false },
     branch: null,
     agentStatus: null,
     runningCommand: null,

@@ -193,6 +193,12 @@ type SessionEntry struct {
 	// duration because the reader is a different process on a different
 	// machine, and "how long ago" is a question only the reader's own clock
 	// can answer honestly.
+	//
+	// It is the HELPER's record and not the kernel's. Observation.StartTime
+	// is the kernel's answer about the process wearing this pid now, and the
+	// pair is the pid-reuse guard: the two disagreeing is the only way
+	// anything can notice that the pid was recycled. Never read one for the
+	// other.
 	StartedAt string `json:"startedAt"`
 	// Launch is what the helper recorded when it spawned. AUTHORITY (D10).
 	Launch LaunchRecord `json:"launch"`
@@ -274,6 +280,42 @@ type Observation struct {
 	// wants. Zero and empty when the shell itself is in the foreground.
 	ForegroundPgid    int    `json:"foregroundPgid,omitempty"`
 	ForegroundCommand string `json:"foregroundCommand,omitempty"`
+	// StartTime is when the KERNEL says this process began, RFC 3339 with
+	// nanoseconds — the same spelling FormatTime gives every other time on
+	// this wire.
+	//
+	// # Why this is not SessionEntry.StartedAt under a second name (nocx-k6p18.12)
+	//
+	// The two are adjacent and they are not the same fact, and the reason
+	// they must both exist is the reason they may disagree. StartedAt is the
+	// HELPER's record of when it spawned — authority, one entry up, and
+	// unfalsifiable by anything read later. StartTime is the OS's answer
+	// about whatever process now wears that pid — evidence, in here with the
+	// rest of the evidence, and it is the PID-REUSE GUARD: a pid alone cannot
+	// say whether the process answering today is the one we launched, and
+	// (pid, startTime) can. Merge them and the guard has nothing to compare
+	// against; give the evidence the authority's name and a reader cannot
+	// tell which one it is holding.
+	//
+	// So they are told apart by WHERE THEY SIT rather than by a longer name:
+	// `entry.startedAt` is what we did, `entry.observed.startTime` is what
+	// the kernel says, and every field inside `observed` is already scoped by
+	// that. A `processStartTime` here would be the only field in the record
+	// carrying a prefix its siblings do not need.
+	//
+	// Its resolution differs by platform and neither platform is exact:
+	// macOS reports microseconds, Linux reports hundredths of a second (see
+	// the procfs source). It is an identity, not a stopwatch.
+	StartTime string `json:"startTime,omitempty"`
+	// Ppid is the parent the OS reports NOW. It is evidence rather than a
+	// constant: a helper that dies leaves its sessions reparented, and the
+	// entry then says so instead of implying the helper still owns them.
+	Ppid int `json:"ppid,omitempty"`
+	// State is the kernel's process state, in the closed vocabulary
+	// ProcessState declares. It is the answer to "is this shell running,
+	// sleeping, stopped or a zombie", which a stopped session and a live one
+	// are indistinguishable without.
+	State ProcessState `json:"state,omitempty"`
 	// Unavailable names every diagnostic above that this inspector was asked
 	// for and could not supply. It is ALWAYS present — `[]` when everything
 	// asked for was answered — and never omitted, for the same reason
@@ -322,6 +364,52 @@ const (
 	// WAS a foreground group to ask about: a shell alone in the foreground is
 	// an answer, said by omission, and not a diagnostic that went missing.
 	DiagnosticForegroundCommand Diagnostic = "foregroundCommand"
+	// DiagnosticStartTime is the kernel's own start time for the process —
+	// the pid-reuse guard, and the fact whose absence quietly turns every
+	// liveness answer into "some process has this pid".
+	DiagnosticStartTime Diagnostic = "startTime"
+	// DiagnosticPpid is the parent pid.
+	DiagnosticPpid Diagnostic = "ppid"
+	// DiagnosticState is the kernel's process state. It is named unavailable
+	// both when the status read failed and when the kernel answered a code
+	// this closed vocabulary cannot spell: inventing a value for a state we
+	// cannot name is the same defect as leaving the field blank, one step
+	// further from being noticed.
+	DiagnosticState Diagnostic = "state"
+)
+
+// ProcessState is the kernel's process state, normalised into one closed
+// vocabulary — because the two kernels spell it differently and a field
+// carrying `R` from one and `2` from the other would be two facts wearing one
+// name. Linux's /proc/<pid>/stat gives a letter, macOS's kinfo_proc gives an
+// SRUN/SSLEEP/SSTOP/SZOMB integer, and both are mapped here rather than at the
+// reader, which cannot know which kernel answered.
+//
+// The set is the INTERSECTION plus what one platform can say and the other
+// cannot lie about. `uninterruptible` exists because Linux distinguishes it
+// and a shell hung on a dead network mount is precisely the session a person
+// is looking for; macOS does not distinguish it and reports `sleeping`, which
+// is less precise and still true. A code outside this set is reported as the
+// state being UNAVAILABLE — never as a value invented to fill the field.
+type ProcessState string
+
+const (
+	// ProcessRunning is on a CPU or on a run queue. Linux `R`, macOS SRUN.
+	ProcessRunning ProcessState = "running"
+	// ProcessSleeping is an interruptible wait — what an idle shell at a
+	// prompt is. Linux `S`, macOS SSLEEP.
+	ProcessSleeping ProcessState = "sleeping"
+	// ProcessUninterruptible is a wait no signal can break, which is how a
+	// shell on a wedged mount looks. Linux `D`; macOS cannot distinguish it
+	// and answers ProcessSleeping.
+	ProcessUninterruptible ProcessState = "uninterruptible"
+	// ProcessStopped is suspended — SIGSTOP, ^Z, or a debugger. Linux `T`
+	// and `t`, macOS SSTOP. This is the state that makes a dead-looking
+	// session explicable.
+	ProcessStopped ProcessState = "stopped"
+	// ProcessZombie has exited and nobody has reaped it. Linux `Z`, macOS
+	// SZOMB. The session's window still exists; the shell does not.
+	ProcessZombie ProcessState = "zombie"
 )
 
 // WindowSpan is the current extent of a session's output window: Base is the

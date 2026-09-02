@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -209,6 +210,11 @@ func TestNothingIsNamedUnavailableWhenEverythingWasAnswered(t *testing.T) {
 		argvBlob: map[int][]byte{4242: []byte("/bin/zsh\x00-l\x00")},
 		format:   argvPlain,
 		comms:    map[int]string{4300: "cargo"},
+		statuses: map[int]procStatus{4242: {
+			StartTime: time.Unix(1_756_000_000, 0),
+			Ppid:      4100,
+			State:     proto.ProcessRunning,
+		}},
 	}}
 	obs := insp.Observe(4242, 4300)
 	if obs == nil {
@@ -310,6 +316,7 @@ type fakeSource struct {
 	argvBlob map[int][]byte
 	format   argvFormat
 	comms    map[int]string
+	statuses map[int]procStatus
 }
 
 var errFakeNoAnswer = errors.New("this fake has no answer for that pid")
@@ -338,4 +345,136 @@ func (f fakeSource) comm(pid int) (string, error) {
 		return c, nil
 	}
 	return "", errFakeNoAnswer
+}
+
+func (f fakeSource) status(pid int) (procStatus, error) {
+	if st, ok := f.statuses[pid]; ok {
+		return st, nil
+	}
+	return procStatus{}, errFakeNoAnswer
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The process-status triple (nocx-k6p18.12): start time, parent, kernel state
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Three facts that arrive together from one source read on both platforms, and
+// each judged on its own — a source that answers two of the three names only
+// the third missing, because "the read failed" and "the read succeeded and one
+// field was empty" are different facts and a reader has to be able to act on
+// the difference.
+
+// TestTheProcessStatusTripleIsReportedOnAnOrdinaryMachine is the
+// succeeds-on-a-normal-machine half of every pair below it. Without it the
+// suite could pass with the whole triple deleted, which is how contentkey
+// shipped a key nobody could obtain.
+func TestTheProcessStatusTripleIsReportedOnAnOrdinaryMachine(t *testing.T) {
+	began := time.Date(2026, 9, 2, 10, 11, 12, 500_000_000, time.UTC)
+	insp := &osInspector{src: fakeSource{
+		name:     "procfs",
+		live:     map[int]bool{4242: true},
+		cwds:     map[int]string{4242: "/home/dev"},
+		argvBlob: map[int][]byte{4242: []byte("/bin/zsh\x00-l\x00")},
+		format:   argvPlain,
+		statuses: map[int]procStatus{4242: {
+			StartTime: began,
+			Ppid:      4100,
+			State:     proto.ProcessSleeping,
+		}},
+	}}
+
+	obs := insp.Observe(4242, 0)
+	if obs == nil {
+		t.Fatal("no observation for a live process")
+	}
+	if obs.StartTime != proto.FormatTime(began) {
+		t.Errorf("StartTime = %q, want %q — the pid-reuse guard is worthless if the instant is not carried", obs.StartTime, proto.FormatTime(began))
+	}
+	if obs.Ppid != 4100 {
+		t.Errorf("Ppid = %d, want 4100", obs.Ppid)
+	}
+	if obs.State != proto.ProcessSleeping {
+		t.Errorf("State = %q, want %q", obs.State, proto.ProcessSleeping)
+	}
+	if len(obs.Unavailable) != 0 {
+		t.Errorf("Unavailable = %v, want empty: everything asked for was answered", obs.Unavailable)
+	}
+}
+
+// TestAProcessStatusReadThatFailedNamesAllThreeRatherThanLeavingThemZero is
+// AGENTS.md rule 3 for the new fields. A zero start time, a zero ppid and an
+// empty state are all plausible-looking values, and a reader that receives
+// them without a name falls back to the launch record — which is the stale
+// value the authority/evidence split exists to prevent.
+func TestAProcessStatusReadThatFailedNamesAllThreeRatherThanLeavingThemZero(t *testing.T) {
+	insp := &osInspector{src: fakeSource{
+		name: "procfs",
+		live: map[int]bool{4242: true},
+		// no statuses entry: the source cannot answer the triple at all
+	}}
+	obs := insp.Observe(4242, 0)
+	if obs == nil {
+		t.Fatal("a live process whose status read failed produced no observation: the process existing IS evidence")
+	}
+	for _, want := range []proto.Diagnostic{proto.DiagnosticStartTime, proto.DiagnosticPpid, proto.DiagnosticState} {
+		if !slices.Contains(obs.Unavailable, want) {
+			t.Errorf("Unavailable = %v, want it to name %q", obs.Unavailable, want)
+		}
+	}
+	if obs.StartTime != "" || obs.Ppid != 0 || obs.State != "" {
+		t.Errorf("a failed status read left values behind: %+v", obs)
+	}
+}
+
+// TestEachFactOfTheTripleIsJudgedOnItsOwn — a source that answered the read
+// but could not fill one field names THAT field and no other. Collapsing the
+// three into one verdict would report a parent we have as unknown, and would
+// report a start time we do NOT have as known the moment the other two
+// succeeded.
+func TestEachFactOfTheTripleIsJudgedOnItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status procStatus
+		want   proto.Diagnostic
+		absent []proto.Diagnostic
+	}{
+		{
+			name:   "the kernel gave no start time",
+			status: procStatus{Ppid: 4100, State: proto.ProcessRunning},
+			want:   proto.DiagnosticStartTime,
+			absent: []proto.Diagnostic{proto.DiagnosticPpid, proto.DiagnosticState},
+		},
+		{
+			name:   "the kernel gave no parent",
+			status: procStatus{StartTime: time.Unix(1, 0), State: proto.ProcessRunning},
+			want:   proto.DiagnosticPpid,
+			absent: []proto.Diagnostic{proto.DiagnosticStartTime, proto.DiagnosticState},
+		},
+		{
+			name:   "the kernel's state code is one this vocabulary cannot spell",
+			status: procStatus{StartTime: time.Unix(1, 0), Ppid: 4100},
+			want:   proto.DiagnosticState,
+			absent: []proto.Diagnostic{proto.DiagnosticStartTime, proto.DiagnosticPpid},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insp := &osInspector{src: fakeSource{
+				name:     "procfs",
+				live:     map[int]bool{4242: true},
+				statuses: map[int]procStatus{4242: tc.status},
+			}}
+			obs := insp.Observe(4242, 0)
+			if obs == nil {
+				t.Fatal("no observation")
+			}
+			if !slices.Contains(obs.Unavailable, tc.want) {
+				t.Errorf("Unavailable = %v, want it to name %q", obs.Unavailable, tc.want)
+			}
+			for _, no := range tc.absent {
+				if slices.Contains(obs.Unavailable, no) {
+					t.Errorf("Unavailable = %v, must not name %q: that fact WAS answered", obs.Unavailable, no)
+				}
+			}
+		})
+	}
 }

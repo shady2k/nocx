@@ -40,7 +40,16 @@ export interface SessionEntry {
     argv?: string[]
     foregroundPgid?: number
     foregroundCommand?: string
-    unavailable: string[]
+    startTime?: string
+    ppid?: number
+    /**
+     * The kernel's process state, normalised by the helper into one closed vocabulary. See contracts/helper/identities.schema.json for why it is normalised rather than carried in each kernel's own spelling.
+     */
+    state?: 'running' | 'sleeping' | 'uninterruptible' | 'stopped' | 'zombie'
+    /**
+     * Every diagnostic above that the inspector was asked for and could not supply. Always present, [] when everything was answered. A reader that ignores it falls back to the launch record and presents a value that was true once as a current observation.
+     */
+    unavailable: ('cwd' | 'argv' | 'foregroundCommand' | 'startTime' | 'ppid' | 'state')[]
   } | null
   window: {
     base: number

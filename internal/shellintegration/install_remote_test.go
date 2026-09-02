@@ -212,7 +212,7 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
 	}
 
@@ -253,7 +253,7 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 
 	// A second call short-circuits: the tree is byte-identical.
 	before := activationSnapshot(t, root)
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("second EnsureInstalledRemote: %v", err)
 	}
 	after := activationSnapshot(t, root)
@@ -379,7 +379,7 @@ func TestEnsureInstalledRemote_ModesOverSFTP(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	if err := s.EnsureInstalledRemote(context.Background(), client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(context.Background(), sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
 	}
 
@@ -435,7 +435,7 @@ func TestEnsureInstalledRemote_LeavesRcFilesByteIdentical(t *testing.T) {
 	}
 
 	// Direction one: no rc files exist, a publish creates none.
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
 	}
 	for _, p := range rcPaths() {
@@ -468,7 +468,7 @@ func TestEnsureInstalledRemote_LeavesRcFilesByteIdentical(t *testing.T) {
 		before[p] = readFileT(t, p)
 	}
 
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote over existing rc files: %v", err)
 	}
 
@@ -496,7 +496,7 @@ func TestEnsureInstalledRemote_ReadonlyHomeFailsOpenThenConverges(t *testing.T) 
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
 	}
 
@@ -513,7 +513,7 @@ func TestEnsureInstalledRemote_ReadonlyHomeFailsOpenThenConverges(t *testing.T) 
 	}
 	before := activationSnapshot(t, root)
 
-	err := s.EnsureInstalledRemote(ctx, client, remoteHome)
+	err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome)
 	if err == nil {
 		t.Fatal("publish into a read-only home succeeded; want a typed refusal")
 	}
@@ -532,7 +532,7 @@ func TestEnsureInstalledRemote_ReadonlyHomeFailsOpenThenConverges(t *testing.T) 
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatalf("chmod root writable: %v", err)
 	}
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote after restore: %v", err)
 	}
 	m := readManifestT(t, root)
@@ -612,7 +612,7 @@ func TestEnsureInstalledRemote_SymlinkedRootRefused(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	err := New(testLogger()).EnsureInstalledRemote(context.Background(), client, remoteHome)
+	err := New(testLogger()).EnsureInstalledRemote(context.Background(), sftpFSForClient(t, client), remoteHome)
 	if err == nil {
 		t.Fatal("publish through a symlinked ~/.nocx succeeded; want a refusal")
 	}
@@ -640,7 +640,7 @@ func TestGetRemoteHome(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	home, err := New(testLogger()).GetRemoteHome(client)
+	home, err := New(testLogger()).GetRemoteHome(remoteCommandRunner{client: client})
 	if err != nil {
 		t.Fatalf("GetRemoteHome: %v", err)
 	}
@@ -661,8 +661,39 @@ func mustSFTPClient(t *testing.T, client *gossh.Client) *sftp.Client {
 	if err != nil {
 		t.Fatalf("sftp client: %v", err)
 	}
+
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+type sftpFS struct {
+	*ssh.SFTPFS
+}
+
+func (f sftpFS) Create(path string, mode os.FileMode) (File, error) {
+	fh, err := f.SFTPFS.Create(path, mode)
+	if err != nil {
+		return nil, err
+	}
+	return fh, nil
+}
+
+func sftpFSForClient(t *testing.T, client *gossh.Client) FS {
+	t.Helper()
+	return sftpFS{SFTPFS: ssh.NewSFTPFS(mustSFTPClient(t, client))}
+}
+
+type remoteCommandRunner struct {
+	client *gossh.Client
+}
+
+func (r remoteCommandRunner) Output(command string) ([]byte, error) {
+	sess, err := r.client.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+	return sess.Output(command)
 }
 
 // activationSnapshot returns a deterministic digest of the activation under
@@ -724,7 +755,7 @@ func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
 	client := dialRemoteTestSSHClient(t, srv)
 	defer func() { _ = client.Close() }()
 
-	if err := s.EnsureInstalledRemote(ctx, client, remoteHome); err != nil {
+	if err := s.EnsureInstalledRemote(ctx, sftpFSForClient(t, client), remoteHome); err != nil {
 		t.Fatalf("EnsureInstalledRemote: %v", err)
 	}
 	root := filepath.Join(remoteHome, dirName)
@@ -735,7 +766,7 @@ func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
 		t.Fatalf("user edit: %v", err)
 	}
 
-	removed, conflicts, err := s.UninstallRemote(ctx, client, remoteHome)
+	removed, conflicts, err := s.UninstallRemote(ctx, sftpFSForClient(t, client), remoteHome)
 	if err != nil {
 		t.Fatalf("UninstallRemote: %v", err)
 	}
@@ -766,7 +797,7 @@ func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
 	}
 
 	// A second uninstall finds nothing to remove — idempotent, no error.
-	removed2, conflicts2, err := s.UninstallRemote(ctx, client, remoteHome)
+	removed2, conflicts2, err := s.UninstallRemote(ctx, sftpFSForClient(t, client), remoteHome)
 	if err != nil {
 		t.Fatalf("second UninstallRemote: %v", err)
 	}

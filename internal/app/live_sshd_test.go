@@ -815,7 +815,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -887,7 +887,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 // SSH_FX_FAILURE, and a subsequent enhanced session establishes its domain.
 func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := shellintegration.New(log.NewSlogAdapter(nil))
+	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
 	client := fx.rawClient(t)
 	if err := installer.EnsureInstalledRemote(context.Background(), client, fx.home); err != nil {
 		t.Fatalf("first remote publish: %v", err)
@@ -918,7 +918,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	// The refusal is synchronous: no domain may ever be minted. The native
 	// prompt is the observable that the bootstrap has finished and the
@@ -976,7 +976,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -1045,7 +1045,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellZsh, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
 		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },

@@ -9,19 +9,7 @@ import (
 )
 
 func TestHelperDependencyGraphHasNoEmbeddedArtifacts(t *testing.T) {
-	root := moduleRoot(t)
-	cmd := exec.Command("go", "list", "-deps", "-f", "{{.Dir}}", "./cmd/nocx-helper") // #nosec G204 — "go" and all arguments are fixed test literals
-	cmd.Dir = root
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go list helper dependencies: %v\n%s", err, output)
-	}
-
-	modulePrefix := root + string(filepath.Separator)
-	for _, dir := range strings.Fields(string(output)) {
-		if !strings.HasPrefix(dir, modulePrefix) {
-			continue
-		}
+	for _, dir := range helperDependencyDirs(t) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("read dependency directory %q: %v", dir, err)
@@ -40,6 +28,47 @@ func TestHelperDependencyGraphHasNoEmbeddedArtifacts(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestHelperDependencyGraphHasNoSSHClient(t *testing.T) {
+	root := moduleRoot(t)
+	cmd := exec.Command("go", "list", "-deps", "./cmd/nocx-helper") // #nosec G204 — "go" and all arguments are fixed test literals
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list helper dependencies: %v\n%s", err, output)
+	}
+
+	for _, pkg := range strings.Fields(string(output)) {
+		switch pkg {
+		case "golang.org/x/crypto/ssh",
+			"golang.org/x/crypto/ssh/agent",
+			"golang.org/x/crypto/ssh/knownhosts",
+			"github.com/pkg/sftp",
+			"github.com/shady2k/nocx/internal/ssh":
+			t.Fatalf("helper dependency graph reaches forbidden SSH package: %s", pkg)
+		}
+	}
+}
+
+func helperDependencyDirs(t *testing.T) []string {
+	t.Helper()
+	root := moduleRoot(t)
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{.Dir}}", "./cmd/nocx-helper") // #nosec G204 — "go" and all arguments are fixed test literals
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list helper dependencies: %v\n%s", err, output)
+	}
+
+	modulePrefix := root + string(filepath.Separator)
+	var dirs []string
+	for _, dir := range strings.Fields(string(output)) {
+		if strings.HasPrefix(dir, modulePrefix) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 func embedsHelperArtifacts(file, source string) bool {

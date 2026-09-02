@@ -609,11 +609,15 @@ func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
 	}
 	eff := effectiveSize(cfg.clientSize())
 	epoch := r.epochCounter.Add(1)
+	var opts []ssh.ConnectOption
+	if cfg.Remote != nil {
+		opts = sshOptionsFromConfig(cfg.Remote)
+	}
 	s := &realSession{
 		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
-		sshOpts: nil, ch: ch, size: eff, log: r.log.With("session_id", string(id)),
+		sshOpts: opts, ch: ch, size: eff, log: r.log.With("session_id", string(id)),
 		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}),
 	}
 	r.mu.Lock()

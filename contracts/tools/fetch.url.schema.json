@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/fetch.url.schema.json",
   "title": "FetchURLParams",
-  "description": "Fetch one http:// or https:// URL from the machine running nocx. The request is direct, never through a terminal pane's remote host, and only bounded UTF-8 text is returned.",
+  "description": "Fetch one http:// or https:// URL from the machine running nocx. The request is direct, never through a terminal pane's remote host, and returns bounded UTF-8 text windows from one run-scoped snapshot.",
   "type": "object",
   "additionalProperties": false,
   "required": ["url"],
@@ -10,23 +10,92 @@
     "url": {
       "type": "string",
       "format": "uri",
-      "description": "The complete web URL to fetch."
+      "description": "The complete web URL to fetch; repeat the original URL for a continuation."
+    },
+    "start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "First byte of the decoded UTF-8 text to return. Omit for the first window; continue at the previous window's end."
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque run-scoped snapshot revision from an earlier result. Required for continuation windows."
     }
   },
   "$defs": {
     "result": {
       "title": "FetchURLResult",
-      "description": "The complete UTF-8 response text returned by the fetch.url assistant tool. HTML is retained as markup rather than being lossy-extracted; oversize responses are refused, so a successful result is never silently short.",
+      "description": "One bounded byte window from the complete decoded UTF-8 response captured under revision. JSON responses are indented and HTML responses are reduced to readable text before this window is made. The result keeps the original authorized URL identity, and a continuation repeats that URL and revision with start set to window.end; an expired revision is refused rather than re-fetched.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["url", "contentType", "text", "truncated", "omitted", "lossy"],
+      "required": [
+        "url",
+        "contentType",
+        "total",
+        "revision",
+        "window",
+        "returned",
+        "text",
+        "truncated",
+        "dropped",
+        "remaining",
+        "lossy"
+      ],
       "properties": {
         "url": { "type": "string", "format": "uri" },
         "contentType": { "type": "string" },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes in the complete decoded UTF-8 text."
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque revision identifying the run-scoped snapshot."
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "First decoded UTF-8 byte returned, inclusive."
+            },
+            "end": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "One past the last decoded UTF-8 byte returned; always a UTF-8 boundary."
+            }
+          }
+        },
+        "returned": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decoded UTF-8 bytes represented by text in this window."
+        },
         "text": { "type": "string" },
-        "truncated": { "type": "boolean", "const": false },
-        "omitted": { "type": "integer", "minimum": 0, "const": 0 },
-        "lossy": { "type": "boolean", "const": false }
+        "truncated": {
+          "type": "boolean",
+          "description": "True when bytes remain after this window."
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decoded UTF-8 bytes omitted after this window because of the result bound."
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decoded UTF-8 bytes still omitted after this window."
+        },
+        "lossy": {
+          "type": "boolean",
+          "description": "Whether charset decoding substituted replacement characters or HTML presentation extraction changed the response."
+        }
       }
     }
   }

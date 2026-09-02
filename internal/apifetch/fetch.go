@@ -10,9 +10,11 @@
 // The assistant's text fetch extends this package instead of creating a sibling:
 // both operations need the same guarded transport, route table and exchange
 // bounds, while their response interpretation is explicit (JSON import versus
-// UTF-8 text). A sibling would make it possible for the assistant to acquire a
-// second HTTP client and silently diverge from the address and credential
-// boundary owned by httppolicy.
+// UTF-8 text). Presentation-specific shaping belongs to the assistant, which
+// decides whether to return source markup, pretty-print JSON, or extract HTML.
+// A sibling would make it possible for the assistant to acquire a second HTTP
+// client and silently diverge from the address and credential boundary owned by
+// httppolicy.
 //
 // WHAT IT REUSES, AND WHY IT IS NOT A SECOND SENDER. The route table is
 // apisend's own (apisend.Routes): `direct` dials from this machine and
@@ -34,6 +36,7 @@
 package apifetch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,6 +44,8 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -50,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/log"
+	"golang.org/x/net/html/charset"
 )
 
 const component = "apifetch"
@@ -82,22 +88,34 @@ type Fetcher interface {
 	Fetch(ctx context.Context, rawURL string, route apicoll.Route) ([]byte, error)
 }
 
-// TextResult is the assistant fetch's honest text representation. The body is
-// retained as UTF-8 text, including HTML markup; no lossy HTML extraction is
-// hidden from the model. Truncated is always false for a successful result:
-// oversize bodies are refused before a short answer can look complete.
-type TextResult struct {
-	URL         string `json:"url"`
-	ContentType string `json:"contentType"`
-	Text        string `json:"text"`
-	Truncated   bool   `json:"truncated"`
-	Omitted     int64  `json:"omitted"`
-	Lossy       bool   `json:"lossy"`
+// TextRequest asks the guarded fetch seam for one complete decoded document.
+//
+// MaxBytes is the absolute acquisition ceiling, not the assistant's response
+// window. The assistant keeps the complete document in its run-scoped
+// snapshot and applies the smaller result bound there.
+type TextRequest struct {
+	URL      string
+	MaxBytes int64
+}
+
+// TextDocument is the complete decoded document acquired by the fetch seam.
+// Text is decoded source text, not a presentation guarantee, and may contain
+// markup. Callers may transform it for their presentation. Lossy reports either
+// replacement characters from charset decoding or such a lossy presentation
+// transformation.
+// URL is metadata from the HTTP request; callers that authorize a URL keep
+// their original request identity rather than replacing it with a redirect
+// target.
+type TextDocument struct {
+	URL         string
+	ContentType string
+	Text        string
+	Lossy       bool
 }
 
 // TextFetcher is the assistant-facing extension of the guarded fetch seam.
 type TextFetcher interface {
-	FetchText(ctx context.Context, rawURL string, maxBytes int64) (TextResult, error)
+	FetchText(ctx context.Context, request TextRequest) (TextDocument, error)
 }
 
 // Client is the Fetcher over a route table.
@@ -142,29 +160,41 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, route apicoll.Route) 
 	return nil, fmt.Errorf("%w: %s", ErrNotADocument, u.Redacted())
 }
 
-// FetchText gets a direct-route HTTP response as complete UTF-8 text. The
-// assistant deliberately cannot select a pane's connection route: the route
-// argument is fixed to direct here by the tool executor.
-func (c *Client) FetchText(ctx context.Context, rawURL string, maxBytes int64) (TextResult, error) {
-	if maxBytes <= 0 {
-		return TextResult{}, fmt.Errorf("%s: text ceiling must be positive", component)
+// FetchText gets a direct-route HTTP response as a complete UTF-8 document.
+// The assistant applies its per-result window after this seam returns; this
+// method only enforces the absolute acquisition ceiling in request.MaxBytes.
+func (c *Client) FetchText(ctx context.Context, request TextRequest) (TextDocument, error) {
+	if request.MaxBytes <= 0 {
+		return TextDocument{}, fmt.Errorf("%s: text ceiling must be positive", component)
 	}
-	resp, u, err := c.get(ctx, rawURL, apicoll.Route{Kind: apicoll.RouteDirect})
+	resp, u, err := c.get(ctx, request.URL, apicoll.Route{Kind: apicoll.RouteDirect})
 	if err != nil {
-		return TextResult{}, err
+		return TextDocument{}, err
 	}
 	contentType := resp.Header.Get("Content-Type")
-	if !textContentType(contentType) {
-		return TextResult{}, fmt.Errorf("%w: content type %q", ErrNotText, contentType)
-	}
-	body, err := readBody(resp, maxBytes)
+	body, err := readBody(resp, request.MaxBytes)
 	if err != nil {
-		return TextResult{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
+		return TextDocument{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
 	}
-	if !utf8.Valid(body) {
-		return TextResult{}, fmt.Errorf("%w: body at %s is not valid UTF-8", ErrNotText, u.Redacted())
+	if charsetErr := validateDeclaredCharset(contentType); charsetErr != nil {
+		return TextDocument{}, charsetErr
 	}
-	return TextResult{URL: u.String(), ContentType: contentType, Text: string(body)}, nil
+	// The header remains metadata and a decoding hint; the body is the only
+	// witness for whether this response is text or binary.
+	text, lossy, err := decodeText(body, contentType)
+	if err != nil {
+		return TextDocument{}, fmt.Errorf("%s: decoding %s: %w", component, u.Redacted(), err)
+	}
+	if sampleLooksBinary(body, contentType) {
+		return TextDocument{}, fmt.Errorf("%w: body at %s looks binary", ErrNotText, u.Redacted())
+	}
+
+	// request.MaxBytes is authoritative for decoded text too. Reject expanded
+	// UTF-8 rather than retaining a document beyond the acquisition ceiling.
+	if int64(len(text)) > request.MaxBytes {
+		return TextDocument{}, fmt.Errorf("%w (decoded text exceeds the limit of %d bytes)", ErrTooLarge, request.MaxBytes)
+	}
+	return TextDocument{URL: request.URL, ContentType: contentType, Text: text, Lossy: lossy}, nil
 }
 
 func (c *Client) get(ctx context.Context, rawURL string, route apicoll.Route) (*http.Response, *url.URL, error) {
@@ -215,17 +245,119 @@ func readBody(resp *http.Response, maxBytes int64) ([]byte, error) {
 	return body, nil
 }
 
-func textContentType(value string) bool {
-	if value == "" {
+func sampleLooksBinary(body []byte, contentType string) bool {
+	sampleSize := len(body)
+	if sampleSize > 4096 {
+		sampleSize = 4096
+	}
+	if bytes.IndexByte(body[:sampleSize], 0) >= 0 {
 		return true
 	}
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
+	if sampleSize == 0 {
 		return false
 	}
-	return mediaType == "text/plain" || mediaType == "text/html" ||
-		mediaType == "text/markdown" || mediaType == "application/json" ||
-		mediaType == "application/xml" || mediaType == "application/xhtml+xml"
+	text, _, err := decodeText(body[:sampleSize], contentType)
+	if err != nil {
+		return true
+	}
+	replacements := strings.Count(text, "\ufffd")
+	characters := utf8.RuneCountInString(text)
+	return replacements >= 3 && characters > 0 && replacements*100 > characters
+}
+
+func validateDeclaredCharset(contentType string) error {
+	if _, params, err := mime.ParseMediaType(contentType); err == nil {
+		if label, ok := params["charset"]; ok {
+			if _, name := charset.Lookup(label); name == "" {
+				return fmt.Errorf("%w: unsupported charset %q", ErrNotText, label)
+			}
+		}
+	}
+	return nil
+}
+
+var xmlEncodingDeclaration = regexp.MustCompile(`(?is)^\x{FEFF}?\s*<\?xml\b[^>]*\bencoding\s*=\s*["']([^"']+)["']`)
+
+func decodeText(body []byte, contentType string) (text string, lossy bool, err error) {
+	if len(body) == 0 {
+		return "", false, nil
+	}
+	effectiveContentType, err := contentTypeForDecode(body, contentType)
+	if err != nil {
+		return "", false, err
+	}
+	// Header charset beats the XML declaration, which beats charset.NewReader's
+	// content sniffing: transport metadata is closer to the bytes than XML's
+	// document-level opinion.
+	reader, err := charset.NewReader(bytes.NewReader(body), effectiveContentType)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrNotText, err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", ErrNotText, err)
+	}
+	text = string(decoded)
+	valid := utf8.ValidString(text)
+	lossy = !valid || strings.Contains(text, "\ufffd")
+	if !valid {
+		text = replaceInvalidUTF8(text)
+	}
+	return text, lossy, nil
+}
+
+func contentTypeForDecode(body []byte, contentType string) (string, error) {
+	_, params, parseErr := mime.ParseMediaType(contentType)
+	if parseErr == nil {
+		if _, headerCharset := params["charset"]; headerCharset {
+			return contentType, nil
+		}
+	} else if contentType != "" {
+		return contentType, nil
+	}
+	declarationCharset, ok := xmlDeclarationCharset(body)
+	if !ok {
+		return contentType, nil
+	}
+	if _, name := charset.Lookup(declarationCharset); name == "" {
+		return "", fmt.Errorf("%w: unsupported charset %q", ErrNotText, declarationCharset)
+	}
+	return contentTypeWithCharset(contentType, declarationCharset), nil
+}
+
+func xmlDeclarationCharset(body []byte) (string, bool) {
+	match := xmlEncodingDeclaration.FindSubmatch(body)
+	if len(match) != 2 {
+		return "", false
+	}
+	return strings.TrimSpace(string(match[1])), true
+}
+
+func contentTypeWithCharset(contentType, label string) string {
+	if contentType == "" {
+		return "text/plain; charset=" + label
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return contentType + "; charset=" + label
+	}
+	params["charset"] = label
+	return mime.FormatMediaType(mediaType, params)
+}
+
+func replaceInvalidUTF8(text string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(text))
+	for offset := 0; offset < len(text); {
+		r, size := utf8.DecodeRuneInString(text[offset:])
+		if r == utf8.RuneError && size == 1 {
+			normalized.WriteRune(utf8.RuneError)
+		} else {
+			normalized.WriteString(text[offset : offset+size])
+		}
+		offset += size
+	}
+	return normalized.String()
 }
 
 // transport builds the guarded transport for one route.

@@ -46,6 +46,10 @@ export interface SessionEntry {
     base: number
     written: number
   }
+  lifecycleWindow: {
+    base: number
+    written: number
+  }
   writer: string | null
   writerEpoch: number
   exit: {

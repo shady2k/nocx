@@ -77,3 +77,12 @@ playwright-report/
 # Python bytecode from the AppImage packaging scripts
 __pycache__/
 *.pyc
+
+# Helper build output left in the PRE-nocx-k6p18.19 location. The artifacts
+# moved to internal/helper/deploy/artifacts/bin/ and their .gitignore moved
+# with them, so any tree where `make helpers` had run before that change is
+# left with four untracked binaries here — invisible to the person who built
+# them and one `git add -A` away from a 4.7 MB commit. They are stale output,
+# never an input; the guard stays because the leftovers outlive the branch
+# that made them.
+internal/helper/deploy/artifacts/*.gz

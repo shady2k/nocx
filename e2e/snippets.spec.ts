@@ -1,4 +1,17 @@
-import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
+import {
+  appReadyForInput,
+  bindEndpoint,
+  expect,
+  promptReady,
+  test,
+  VaultBackend,
+  type Page,
+} from './harness'
+import { mkdtempSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+import { readStand } from './stand'
 
 /**
  * e2e: a snippet a person saved reaches a running program, filled in, and
@@ -122,6 +135,23 @@ async function programWaitingOnStdin(page: Page, command: string): Promise<numbe
 
 test.describe('a saved snippet reaches a running program', () => {
   test.use({ viewport: { width: 1280, height: 800 } })
+
+  let backend: VaultBackend
+  let endpoint: { port: number; token: string }
+
+  test.beforeAll(async () => {
+    const root = mkdtempSync(join(tmpdir(), 'nocx-snippets-'))
+    backend = new VaultBackend(readStand().server, { root })
+    endpoint = await backend.start()
+  })
+
+  test.afterAll(() => {
+    backend?.stop()
+  })
+
+  test.beforeEach(async ({ page }) => {
+    await bindEndpoint(page, endpoint)
+  })
 
   test.afterEach(async ({ page }) => {
     await page.goto('/')
@@ -358,10 +388,11 @@ test.describe('a saved snippet reaches a running program', () => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await appReadyForInput(page)
-    // This stand has no vault set up, so the reference cannot resolve. The
-    // rule under test is the one §11.1 states: an unresolved name refuses
-    // the whole fire — the literal {{secret:…}} must never reach a running
-    // program's stdin.
+    // This describe owns a fresh disposable backend, so it cannot inherit a
+    // vault from the shared stand. Its uninitialized vault makes the reference
+    // genuinely unresolved. The rule under test is the one §11.1 states:
+    // an unresolved name refuses the whole fire — the literal {{secret:…}}
+    // must never reach a running program's stdin.
     await createSnippet(page, 'e2e fill', 'psql {{secret:e2e-absent}}')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')

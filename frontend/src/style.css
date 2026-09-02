@@ -32,6 +32,7 @@
 @import './styles/components/select.css';
 @import './styles/components/floating-panel.css';
 @import './styles/components/checkbox.css';
+@import './styles/components/pet.css';
 @import './styles/components/radio.css';
 @import './styles/components/file-input.css';
 @import './styles/components/drop-zone.css';

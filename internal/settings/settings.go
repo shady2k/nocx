@@ -932,6 +932,40 @@ var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
 // Secrets, Backup & Restore, Connections) name these ids in their registry
 // entries in settings.tsx; generated sections arrive through the
 // RegisterSectionGroup calls below.
+// ── Pets ───────────────────────────────────────────────────────────────
+
+// PetsEnabled is whether a terminal gets an animal living on it.
+//
+// A decoration with a switch, and the switch is the point: a pet is the one
+// feature in nocx that moves on its own while you are trying to read, so the
+// person who does not want it must be able to say so once and never see it
+// again. Off means the sprite pack is never even fetched.
+var PetsEnabled = MustRegisterBool(BoolSpec{
+	Key:         "pets.enabled",
+	Section:     "Pets",
+	Label:       "Keep a pet",
+	Description: "A small animal lives on the top edges of your finished command blocks and reacts to how each command turned out. It cannot be clicked, never takes focus, and covers nothing you can interact with.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
+// PetsSize is how tall the animal is drawn, in CSS pixels.
+//
+// Pixel art, so the honest range is small: below about sixteen the animal
+// stops being legible as an animal, and above about ninety-six it stops
+// being a decoration and starts being furniture standing on your output.
+var PetsSize = MustRegisterNumber(NumberSpec{
+	Key:         "pets.size",
+	Section:     "Pets",
+	Label:       "Pet size",
+	Description: "How tall the animal is drawn. It also decides which command blocks it can stand on: a block with less clear space above it than the animal is tall is not offered as ground.",
+	DataClass:   PublicConfig,
+	Default:     34,
+	Min:         fp(16),
+	Max:         fp(96),
+	Unit:        "px",
+})
+
 func init() {
 	RegisterGroup(SettingsGroup{ID: "assistant", Title: "Assistant", Order: 0})
 	RegisterGroup(SettingsGroup{ID: "vault", Title: "Vault", Order: 1})
@@ -942,6 +976,7 @@ func init() {
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
+	RegisterSectionGroup("Pets", "application")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).

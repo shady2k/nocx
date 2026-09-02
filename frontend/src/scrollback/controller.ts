@@ -15,6 +15,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
+import { PetOverlay } from '../pets/overlay'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -32,6 +33,10 @@ export interface ScrollbackControllerOpts {
   renderer: TerminalRenderer
   /** The renderer's per-tab command-existence snapshot store (OSC 636). */
   snapshotStore: CommandSnapshotStore
+  /** Give this pane a pet. Off unless the composition root asks for it, so
+   *  that every test constructing a controller gets a terminal and not a
+   *  sprite loader (AD-8: wired in one place, never defaulted on here). */
+  pet?: boolean
   /** Injectable clock. */
   now?: () => number
   /** Fired after the scrollback is cleared (a `clear` command): the ask
@@ -109,6 +114,10 @@ export class ScrollbackController {
    *  block is gone. */
   private _onClear?: () => void
 
+  /** The pane's pet, if it is switched on. A decoration: everything here
+   *  tolerates its absence, and nothing waits on it. */
+  private _pet: PetOverlay | null = null
+
   constructor(opts: ScrollbackControllerOpts) {
     this._renderer = opts.renderer
     this._onClear = opts.onClear
@@ -172,6 +181,17 @@ export class ScrollbackController {
     // Insert the layout as the first child of the pane (before the editor,
     // which is absolute-positioned).
     opts.pane.insertBefore(this.scrollbackLayout, opts.pane.firstChild)
+
+    // The pet is drawn over the scroller and hangs from the LAYOUT, not from
+    // `scrollbackInner`: that container is owned by BlockManager, and a
+    // second inserter into it is what let `clear` miss half the scrollback
+    // once already (see the note above).
+    if (opts.pet === true) {
+      this._pet = new PetOverlay({
+        host: this.scrollbackArea,
+        blocks: this.scrollbackInner,
+      })
+    }
 
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
@@ -668,6 +688,10 @@ export class ScrollbackController {
     if (rec) {
       this._settleFrozen(rec, followIntent)
     }
+    // The command's outcome is the pet's whole emotional life. An exit code
+    // nobody reported is 'unknown', not a failure — a pet that sulks at every
+    // command whose status was never published would sulk most of the time.
+    this._pet?.reactTo(exitCode === null ? 'unknown' : exitCode === 0 ? 'success' : 'failure')
   }
 
   /**
@@ -1035,6 +1059,8 @@ export class ScrollbackController {
     this._cancelGlides()
     this._followObserver?.disconnect()
     this._followObserver = null
+    this._pet?.dispose()
+    this._pet = null
     this._blockManager.dispose()
     this.scrollbackLayout.remove()
   }

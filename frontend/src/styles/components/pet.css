@@ -1,0 +1,36 @@
+/* The pet layer (nocx-q4qeh.1).
+ *
+ * A decoration that must never take a click, never take a scroll and never
+ * change the layout of the pane it lives over. It sits above the scrollback
+ * and below every real surface — a dialog, a menu or a panel covers it,
+ * which is correct: a cat is not more important than what the user opened.
+ *
+ * The sprite is positioned entirely by `transform` from overlay.ts. Nothing
+ * here paints the animal; the pack does. */
+
+.pet-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pet-sprite {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background-repeat: no-repeat;
+  /* Pixel art. Any smoothing turns a 16-pixel-tall cat into a smudge. */
+  image-rendering: pixelated;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
+/* Motion is the entire feature, so there is no reduced-motion variant that
+ * keeps a moving cat. Asked for less motion, we show none. */
+@media (prefers-reduced-motion: reduce) {
+  .pet-layer {
+    display: none;
+  }
+}

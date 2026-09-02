@@ -1766,6 +1766,7 @@ export class TerminalContent extends BasePaneContent {
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
+        pet: true,
         pane: target,
         renderer,
         now: () => performance.now(),

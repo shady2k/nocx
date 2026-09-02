@@ -100,6 +100,7 @@ import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expa
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
+import { applyPetsSettings, PETS_ENABLED_KEY, PETS_SIZE_KEY } from './pets/setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -1770,6 +1771,7 @@ function main(): void {
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
         applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
         applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
+        applyPetsSettings(snap.values[PETS_ENABLED_KEY], snap.values[PETS_SIZE_KEY])
       } catch {
         // The shell remains usable with declared defaults until the next
         // connection state transition supplies a fresh snapshot.

@@ -50,7 +50,14 @@ export function applyReasoningExpanded(
   const changed = root.dataset.reasoningExpanded !== next
   root.dataset.reasoningExpanded = next
   if (!changed) return
-  for (const el of root.querySelectorAll<HTMLDetailsElement>('details.ui-reasoning')) {
+  // THE SETTING IS ABOUT THINKING, and the kind attribute is what keeps it
+  // there. The disclosure component now draws a tool call's result too
+  // (nocx-hp8p2.13); a selector on the identity class alone would open every
+  // tool result in the pane the moment somebody asked to watch the model
+  // think.
+  for (const el of root.querySelectorAll<HTMLDetailsElement>(
+    'details.ui-disclosure[data-kind="reasoning"]',
+  )) {
     el.open = on
   }
 }

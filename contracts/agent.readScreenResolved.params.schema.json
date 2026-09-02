@@ -15,36 +15,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "cells"],
+        "required": ["kind", "text"],
         "properties": {
-          "kind": { "type": "string", "const": "cells" },
-          "cells": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["char", "attrs"],
-              "properties": {
-                "char": { "type": "string" },
-                "attrs": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "fg": { "type": ["string", "null"] },
-                    "bg": { "type": ["string", "null"] },
-                    "bold": { "type": "boolean" },
-                    "italic": { "type": "boolean" },
-                    "dim": { "type": "boolean" },
-                    "underline": { "type": "boolean" },
-                    "inverse": { "type": "boolean" },
-                    "blink": { "type": "boolean" },
-                    "strikethrough": { "type": "boolean" },
-                    "overline": { "type": "boolean" }
-                  }
-                }
-              }
-            }
-          }
+          "kind": { "type": "string", "const": "text" },
+          "text": { "type": "string", "maxLength": 16384 }
         }
       }
     },

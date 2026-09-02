@@ -256,6 +256,70 @@ describe('a pet over a pane', () => {
     expect(Number(m![2]) + 34).toBeCloseTo(200, 0)
   })
 
+  it('drops when the block carrying the pet leaves the pane', async () => {
+    const s = stand([200])
+    const block = s.blocks.querySelector<HTMLElement>('.cmd-block')!
+    let top = 200
+    block.getBoundingClientRect = () => rect(50, top, 550, top + 40)
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    s.host.dispatchEvent(new Event('scroll'))
+    s.pump(1 / 60)
+
+    const beforeWorld = s.host.querySelector<HTMLElement>('.pet-world')!
+    const before =
+      Number(/translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(beforeWorld.style.transform)![2]) + 34
+    expect(before).toBeCloseTo(200, 0)
+
+    top = 1000
+    s.pump(0.5)
+    const afterWorld = s.host.querySelector<HTMLElement>('.pet-world')!
+    const after =
+      Number(/translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(afterWorld.style.transform)![2]) + 34
+    expect(after).toBeGreaterThan(before)
+    expect(after).toBeLessThan(s.host.getBoundingClientRect().height)
+  })
+  it('keeps an edge block inside the pane from the first painted frame', async () => {
+    const s = stand([200])
+    const block = s.blocks.querySelector<HTMLElement>('.cmd-block')!
+    block.getBoundingClientRect = () => rect(0, 200, 600, 240)
+    overlayOn(s, () => 0.99, settingsStub(true, 96))
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+
+    for (let frame = 0; frame < 60; frame++) {
+      pointerMove(s, 310, 183)
+      s.pump(1 / 60)
+    }
+    pointerMove(s, 260, 183)
+    for (let frame = 0; frame < 300; frame++) {
+      s.pump(1 / 60)
+      const world = s.host.querySelector<HTMLElement>('.pet-world')!
+      const match = /translate\(([-\d.]+)px,/.exec(world.style.transform)
+      expect(match).not.toBeNull()
+      const left = Number(match![1])
+      const width = Number.parseFloat(world.style.width)
+      expect(left).toBeGreaterThanOrEqual(0)
+      expect(left + width).toBeLessThanOrEqual(s.host.getBoundingClientRect().width)
+    }
+  })
+  it('keeps the visible animal inside the pane at maximum size', async () => {
+    const s = stand([])
+    overlayOn(s, () => 0.99, settingsStub(true, 96))
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+
+    for (let frame = 0; frame < 180; frame++) {
+      s.pump(1 / 60)
+      const world = s.host.querySelector<HTMLElement>('.pet-world')!
+      const match = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(world.style.transform)
+      expect(match).not.toBeNull()
+      const left = Number(match![1])
+      const width = Number.parseFloat(world.style.width)
+      expect(left).toBeGreaterThanOrEqual(0)
+      expect(left + width).toBeLessThanOrEqual(s.host.getBoundingClientRect().width)
+    }
+  })
+
   it('keeps a hard-edged contact shadow on ground, not on the window floor', async () => {
     const s = stand([200])
     overlayOn(s)

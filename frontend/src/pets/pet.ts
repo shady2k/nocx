@@ -19,7 +19,7 @@
 // of pet in a millisecond and get the same answer every time.
 
 import type { Ledge } from './terrain'
-import { ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
+import { isLedgeUsable, ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
 
 type ClipPause = number | readonly [number, number]
 export type ClipMode = 'loop' | 'once' | 'transition'
@@ -135,6 +135,8 @@ export interface Pet {
   readonly pointerStill: number
   readonly pointerNear: boolean
   readonly pointerAlarmed: boolean
+  /** The pet is holding its blocked-edge response until alarm clears. */
+  readonly pointerCornered: boolean
   /** Sign of the latest non-zero horizontal pointer movement. */
   readonly pointerMotion: -1 | 0 | 1
   /** Ages of recent horizontal direction changes, newest first. */
@@ -216,6 +218,7 @@ export function newPet(x: number, y: number): Pet {
     pointerStill: 0,
     pointerNear: false,
     pointerAlarmed: false,
+    pointerCornered: false,
     pointerCalm: 0,
     pointerMotion: 0,
     pointerTurnAges: [],
@@ -752,8 +755,9 @@ export interface StepEnv {
 
 /** Ground by identity, floor included. */
 function groundOf(env: StepEnv, id: string | null): Ledge | null {
-  if (id === FLOOR_ID) return env.floor
-  return ledgeById(env.terrain, id)
+  const ground = id === FLOOR_ID ? env.floor : ledgeById(env.terrain, id)
+  if (ground === null) return null
+  return isLedgeUsable(ground, env.petHeight, env.floor.y) ? ground : null
 }
 
 const POINTER_FAST_SPEED = 240
@@ -855,8 +859,8 @@ function pointerAssessment(
   const still = near && speed <= POINTER_STILL_SPEED ? pet.pointerStill + dt : 0
   let calm = pet.pointerCalm
   let calmHold = Math.max(0, pet.pointerCalmHold - (near ? 0 : dt))
-  let alarmed = pet.pointerAlarmed
   const alarming = near && pointerIsAlarming(speed, approach, calm)
+  let alarmed = pet.pointerAlarmed
   if (near && !pet.pointerNear) alarmed = alarming
   else if (alarming) alarmed = true
   if (!near && pet.pointerNear && !pet.pointerAlarmed) {
@@ -965,6 +969,7 @@ export function step(
     pointerStill: pointer.still,
     pointerNear: pointer.near,
     pointerAlarmed: pointer.alarmed,
+    pointerCornered: pointer.alarmed ? next.pointerCornered : false,
     pointerCalm: pointer.calm,
     pointerCalmHold: pointer.calmHold,
     pointerMotion: pointer.motion,
@@ -1041,7 +1046,15 @@ export function step(
     const slowApproach =
       pointer.near && pointer.approach > POINTER_SLOW_APPROACH && !pointer.alarmed
     if (threat !== 0 && !(next.reacting && next.hold > 0)) {
-      if (pointer.alarmed) {
+      if (pointer.alarmed && next.pointerCornered) {
+        locomotion = 'idle'
+        activity = 'sit'
+        reacting = false
+        hold = Math.max(hold, POINTER_STILL_DELAY)
+        dir = -threat as 1 | -1
+        vx = 0
+        boredom = 0
+      } else if (pointer.alarmed) {
         locomotion = 'run'
         activity = 'none'
         reacting = false
@@ -1080,8 +1093,30 @@ export function step(
       // reached with a full window is therefore not charged as discretionary.
       const chargeTurn = next.attending === null && next.noticeableAges.length < NOTICEABLE_LIMIT
       const corneredByPointer = pointer.alarmed && threat === past
+      x = past > 0 ? ledge.x1 : ledge.x0
+      if (corneredByPointer) {
+        // A threat at the edge has nowhere to flee. Stop at the boundary and
+        // face the pointer instead of repeatedly falling and landing in place.
+        return {
+          ...next,
+          x,
+          y,
+          dir: -threat as 1 | -1,
+          vx: 0,
+          ledgeId: ledge.id,
+          locomotion: 'idle',
+          activity: 'sit',
+          hold: Math.max(hold, POINTER_STILL_DELAY),
+          reacting: false,
+          pointerCornered: true,
+          clip: next.pointerCornered ? next.clip : EMPTY_CLIP,
+          mood,
+          moodHold,
+          boredom: 0,
+        }
+      }
       const voluntaryStepOff = rng() < tuning.stepOff
-      if (next.attending === null && (corneredByPointer || voluntaryStepOff)) {
+      if (next.attending === null && ledge.id !== FLOOR_ID && voluntaryStepOff) {
         // Off the end, and whatever is below catches it. The landing is the
         // ordinary swept one, so the animal may drop past several ledges or
         // all the way to the floor — which is the point: this is how it gets
@@ -1089,12 +1124,12 @@ export function step(
         //
         // It leaves AT the edge, not one pixel past it. Command blocks are
         // all the same width, so a step that overshot by a pixel would miss
-        // every block below by the same pixel and land on the floor every
-        // single time — the animal would live on the floor and visit the
-        // blocks only on the way down.
+        // every one of them and land on the floor every single time — the
+        // animal would live on the floor and visit the blocks only on the way
+        // down.
         return {
           ...next,
-          x: past > 0 ? ledge.x1 : ledge.x0,
+          x,
           y,
           dir: past > 0 ? 1 : -1,
           vx: 0,
@@ -1108,7 +1143,6 @@ export function step(
           boredom: 0,
         }
       }
-      x = past > 0 ? ledge.x1 : ledge.x0
       vx = 0
       return {
         ...next,

@@ -40,7 +40,14 @@ import {
   type LoadedPack,
   type PetPack,
 } from './pack'
-import { DEFAULT_TERRAIN, deriveTerrain, type Ledge, type LedgeCandidate } from './terrain'
+import {
+  DEFAULT_TERRAIN,
+  constrainLedgeToViewport,
+  deriveTerrain,
+  isLedgeUsable,
+  type Ledge,
+  type LedgeCandidate,
+} from './terrain'
 import { onPetsSettingsChanged, petHeight, petPack, petsEnabled } from './setting'
 
 /** One kind of ground: what to find, and which of its edges can be stood on. */
@@ -204,6 +211,7 @@ export class PetOverlay {
    *  layout thrash this module is arranged to avoid. */
   private _standingOn: { id: string; el: HTMLElement; source: LedgeSource } | null = null
   private _stale = true
+  private _viewport = { width: 0, height: 0 }
   private _disposed = false
   private _running = false
   /** Whether an animal is currently living in this layer. Distinct from
@@ -296,6 +304,7 @@ export class PetOverlay {
 
   private _begin(): void {
     this._watch()
+    this._updateMetrics()
     this._measure()
     // A pet already living here KEEPS living. Minting one unconditionally is
     // what made dragging the size slider rain cats: every value the drag
@@ -473,12 +482,20 @@ export class PetOverlay {
       }
     }
     const viewport = { width: host.width, height: host.height }
+    this._viewport = viewport
     this._terrain = deriveTerrain(candidates, {
       ...DEFAULT_TERRAIN,
       petHeight: this._height,
+      petWidth: this._width,
       viewport,
     })
-    this._floor = { id: 'floor', x0: 8, x1: Math.max(8, host.width - 8), y: host.height }
+    const halfBody = this._width / 2
+    this._floor = {
+      id: 'floor',
+      x0: 8 + halfBody,
+      x1: Math.max(8 + halfBody, host.width - 8 - halfBody),
+      y: host.height,
+    }
     this._stale = false
   }
 
@@ -492,9 +509,23 @@ export class PetOverlay {
     }
     const r = held.el.getBoundingClientRect()
     const y = (held.source.edge === 'top' ? r.top : r.bottom) - this._hostTop
-    const x0 = r.left - this._hostLeft + DEFAULT_TERRAIN.inset
-    const x1 = r.right - this._hostLeft - DEFAULT_TERRAIN.inset
-    this._terrain = this._terrain.map((l) => (l.id === held.id ? { id: l.id, x0, x1, y } : l))
+    const surface = constrainLedgeToViewport(
+      {
+        id: held.id,
+        x0: r.left - this._hostLeft + DEFAULT_TERRAIN.inset,
+        x1: r.right - this._hostLeft - DEFAULT_TERRAIN.inset,
+        y,
+      },
+      this._width,
+      this._viewport.width,
+    )
+    if (!isLedgeUsable(surface, this._height, this._viewport.height, DEFAULT_TERRAIN.minWidth)) {
+      this._terrain = this._terrain.filter((l) => l.id !== held.id)
+      this._standingOn = null
+      this._stale = true
+      return
+    }
+    this._terrain = this._terrain.map((l) => (l.id === held.id ? surface : l))
   }
 
   // ── the clock ────────────────────────────────────────────────────────────

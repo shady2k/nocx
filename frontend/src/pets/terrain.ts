@@ -39,6 +39,8 @@ export interface Ledge {
 export interface TerrainOpts {
   /** How tall the animal is. Doubles as the clearance a ledge must have. */
   readonly petHeight: number
+  /** The drawn body width, used to keep the animal inside the viewport. */
+  readonly petWidth: number
   /** Narrower than this and there is nowhere to walk. */
   readonly minWidth: number
   /** The area the pet is confined to. */
@@ -49,27 +51,62 @@ export interface TerrainOpts {
 
 export const DEFAULT_TERRAIN: Omit<TerrainOpts, 'viewport'> = {
   petHeight: 34,
+  petWidth: 0,
   minWidth: 56,
   inset: 8,
+}
+
+/** Whether a live ledge can still hold the animal in this viewport. */
+export function isLedgeUsable(
+  ledge: Ledge,
+  petHeight: number,
+  viewportHeight: number,
+  minWidth = 0,
+): boolean {
+  return ledge.y >= petHeight && ledge.y <= viewportHeight && ledge.x1 - ledge.x0 >= minWidth
+}
+
+/**
+ * Intersect a ledge's existing span with the pane interval that can show the
+ * entire animal. A block or chip may still be narrower than the animal and
+ * may be overhung; only the part at a pane edge is trimmed.
+ */
+export function constrainLedgeToViewport(
+  ledge: Ledge,
+  petWidth: number,
+  viewportWidth: number,
+): Ledge {
+  const halfBody = Math.max(0, petWidth / 2)
+  const minX = halfBody
+  const maxX = Math.max(minX, viewportWidth - halfBody)
+  const clamp = (x: number) => Math.min(maxX, Math.max(minX, x))
+  const x0 = clamp(ledge.x0)
+  const x1 = clamp(ledge.x1)
+  return { ...ledge, x0: Math.min(x0, x1), x1: Math.max(x0, x1) }
 }
 
 /**
  * Turn candidate rectangles into the ledges a pet of this size can use.
  *
  * Returned top-to-bottom, so a caller picking "the ledge below y" can scan
- * forwards and stop at the first hit.
+ * forwards and stop at the first hit. Existing block and chip geometry is
+ * inset by `inset`; the only additional operation is intersection with the
+ * pane's body-safe interval.
  */
 export function deriveTerrain(candidates: readonly LedgeCandidate[], opts: TerrainOpts): Ledge[] {
   const out: Ledge[] = []
   for (const c of candidates) {
     const y = c.top
+    const surface = {
+      id: c.id,
+      x0: c.left + opts.inset,
+      x1: c.right - opts.inset,
+      y,
+    }
+    const ledge = constrainLedgeToViewport(surface, opts.petWidth, opts.viewport.width)
     // Off the top, or below the floor: not reachable at all.
-    if (y < opts.petHeight) continue
-    if (y > opts.viewport.height) continue
-    const x0 = c.left + opts.inset
-    const x1 = c.right - opts.inset
-    if (x1 - x0 < opts.minWidth) continue
-    out.push({ id: c.id, x0, x1, y })
+    if (!isLedgeUsable(ledge, opts.petHeight, opts.viewport.height, opts.minWidth)) continue
+    out.push(ledge)
   }
   out.sort((a, b) => a.y - b.y)
   return out

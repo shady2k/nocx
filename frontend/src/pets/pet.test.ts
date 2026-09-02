@@ -124,6 +124,14 @@ describe('losing the ground', () => {
     expect(after.y).toBeCloseTo(A.y, 0)
   })
 
+  it('drops when a held block leaves the visible viewport', () => {
+    const movedAway: Ledge = { ...A, y: FLOOR.y + 1 }
+    const after = step(standing(A), env([movedAway]), 1 / 60, seq(0.5))
+    expect(after.locomotion).toBe('fall')
+    expect(after.ledgeId).toBeNull()
+    expect(after.y).toBeCloseTo(A.y, 0)
+  })
+
   it('carries the pet when its block merely moves, as on a scroll', () => {
     const p = standing(A)
     const moved: Ledge = { ...A, y: 120 }
@@ -578,6 +586,13 @@ describe('getting out of the pointer’s way', () => {
     expect(p.locomotion).not.toBe('fall')
     expect(p.phase).toBe('turn')
   })
+  it('keeps the pointer alarm latched while a nearby cursor slows', () => {
+    let p = step(standing(A, { x: 200 }), { ...at(500, A.y) }, 0.01, seq(0.99))
+    p = step(p, { ...at(250, A.y) }, 0.1, seq(0.99))
+    expect(p.pointerAlarmed).toBe(true)
+    p = step(p, { ...at(250, A.y) }, 0.1, seq(0.99))
+    expect(p.pointerAlarmed).toBe(true)
+  })
 
   it('ignores a cursor that is not near it', () => {
     const p = step(
@@ -616,20 +631,84 @@ describe('getting out of the pointer’s way', () => {
     expect(p.dir).toBe(-1)
   })
 
-  it('steps off the ledge rather than turning back into a fast cursor', () => {
-    // Cornered at the right end with a fast pointer on its left: turning
-    // round would walk it into the thing it is running from.
+  it('stops and faces a pointer without blinking at a blocked edge', () => {
     const far = { ...at(500, A.y) }
-    const close = { ...far, pointer: { x: A.x1 - 40, y: A.y } }
     let p = step(
       standing(A, { x: A.x1 - 1, locomotion: 'run', dir: 1, hold: 9 }),
       far,
-      0.01,
+      1 / 60,
       seq(0.99),
     )
-    p = step(p, close, 0.2, seq(0.99))
+    p = step(p, { ...at(A.x1 - 40, A.y) }, 0.2, seq(0.99))
+    expect(p.pointerCornered).toBe(true)
+    let previousPhase = p.phase
+    let landEntries = 0
+    const positions = new Set<number>([p.x])
+    for (let frame = 0; frame < 120; frame++) {
+      const close = {
+        ...at(A.x1 - (frame % 2 === 0 ? 40 : 45), A.y),
+      }
+      p = step(p, close, 1 / 60, seq(0.99))
+      positions.add(p.x)
+      if (p.phase === 'land' && previousPhase !== 'land') landEntries++
+      previousPhase = p.phase
+    }
+    expect(p.locomotion).toBe('idle')
+    expect(p.activity).toBe('sit')
+    expect(p.pointerAlarmed).toBe(true)
+    expect(p.x).toBe(A.x1)
+    expect(landEntries).toBe(0)
+    expect(positions.size).toBe(1)
+  })
+
+  it('advances the corner pose clip instead of restarting it each frame', () => {
+    const far = { ...at(500, A.y) }
+    let p = step(
+      standing(A, { x: A.x1 - 1, locomotion: 'run', dir: 1, hold: 9 }),
+      far,
+      1 / 60,
+      seq(0.99),
+    )
+    p = step(p, { ...at(A.x1 - 40, A.y) }, 0.2, seq(0.99))
+    const firstElapsed = p.clip.elapsed
+    p = step(p, { ...at(A.x1 - 80, A.y) }, 0.1, seq(0.99))
+    expect(p.pointerCornered).toBe(true)
+    expect(p.clip.elapsed).toBeGreaterThan(firstElapsed)
+  })
+
+  it('does not step off the pane floor', () => {
+    const p = step(
+      standing(FLOOR, { x: FLOOR.x1 - 1, locomotion: 'run', dir: 1, hold: 9 }),
+      env(),
+      0.5,
+      seq(0),
+    )
+    expect(p.locomotion).not.toBe('fall')
+    expect(p.x).toBe(FLOOR.x1)
+    expect(p.phase).toBe('turn')
+  })
+
+  it('can leave a pointer corner by jumping once the way is clear', () => {
+    const upper: Ledge = { id: 'upper', x0: 100, x1: 300, y: 100 }
+    const e = env([upper, A])
+    const close = { ...e, pointer: { x: A.x1 - 40, y: A.y } }
+    let p = step(
+      {
+        ...standing(A, { x: A.x1 - 1, locomotion: 'run', dir: 1, hold: 0 }),
+        pointer: { x: 500, y: A.y },
+      },
+      close,
+      0.2,
+      seq(0.99),
+    )
+    expect(p.locomotion).toBe('idle')
+    expect(p.x).toBe(A.x1)
+
+    p = step(p, { ...e, pointer: null }, 1, seq(0.999))
+    expect(p.phase).toBe('anticipate')
+    p = step(p, e, 0.15, seq(0.5))
     expect(p.locomotion).toBe('fall')
-    expect(p.ledgeId).toBeNull()
+    expect(p.vy).toBeLessThan(0)
   })
 
   it('does nothing at all when the pointer is elsewhere', () => {

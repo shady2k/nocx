@@ -13,6 +13,7 @@ import {
 
 const OPTS: TerrainOpts = {
   petHeight: 34,
+  petWidth: 0,
   minWidth: 56,
   inset: 8,
   viewport: { width: 900, height: 600 },
@@ -43,6 +44,38 @@ describe('deriveTerrain', () => {
   it('refuses a ledge too narrow to walk on', () => {
     // 100..170 insets to 108..162 — 54px, under the 56 minimum.
     expect(deriveTerrain([block('sliver', 200, 100, 170)], OPTS)).toEqual([])
+  })
+
+  it('keeps block geometry independent of pet width', () => {
+    expect(deriveTerrain([block('wide', 200, 100, 300)], OPTS)).toEqual<Ledge[]>([
+      { id: 'wide', x0: 108, x1: 292, y: 200 },
+    ])
+  })
+  it('clips a ledge at the pane edges by half the body width', () => {
+    const opts = { ...OPTS, petWidth: 94 }
+    expect(deriveTerrain([block('edge', 200, 0, 900)], opts)).toEqual<Ledge[]>([
+      { id: 'edge', x0: 47, x1: 853, y: 200 },
+    ])
+  })
+
+  it('keeps a chip as ground when its visible body overhangs', () => {
+    expect(deriveTerrain([block('chip', 200, 100, 177)], { ...OPTS, petWidth: 94 })).toEqual<
+      Ledge[]
+    >([{ id: 'chip', x0: 108, x1: 169, y: 200 }])
+  })
+
+  it('keeps the measured candidate count at both pet sizes', () => {
+    const widths = [1332, 84, 52, 77, 1319, 44, 53, 64, 155]
+    const candidates = widths.map((width, i) => {
+      const left = width >= 500 ? 0 : 300
+      return block(String(i), 100 + i * 40, left, left + width)
+    })
+    const standard = deriveTerrain(candidates, { ...OPTS, petWidth: 94 })
+    const maximum = deriveTerrain(candidates, { ...OPTS, petWidth: 180 })
+    expect(standard).toHaveLength(5)
+    expect(maximum).toHaveLength(5)
+    expect(standard.map((l) => l.id)).toEqual(['0', '1', '3', '4', '8'])
+    expect(maximum.map((l) => l.id)).toEqual(['0', '1', '3', '4', '8'])
   })
 
   it('returns ledges top to bottom whatever order they arrived in', () => {

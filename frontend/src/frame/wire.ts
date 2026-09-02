@@ -12,10 +12,7 @@
 import type { CapturedFrame } from './types'
 
 export interface ReadScreenFrameWire {
-  rows: {
-    kind: 'cells'
-    cells: { char: string; attrs: Record<string, unknown> }[]
-  }[]
+  rows: { kind: 'text'; text: string }[]
   cursor: { line: number; col: number }
   identity: {
     buffer: { kind: 'normal' | 'alternate'; altSession?: number | null }
@@ -50,13 +47,16 @@ export function liveFrameToWire(frame: CapturedFrame): ReadScreenFrameWire {
       if (row.kind !== 'cells') {
         throw new Error('liveFrameToWire: a live frame row must be cells')
       }
-      return {
-        kind: 'cells',
-        cells: row.cells.map((c) => ({
-          char: c.char,
-          attrs: c.attrs as unknown as Record<string, unknown>,
-        })),
-      }
+      // THE ATTRIBUTES DO NOT TRAVEL, and nothing on the far side misses
+      // them: both backend consumers already join the row's characters and
+      // throw the rest away (internal/assistant/blocks.go's session.read
+      // text, internal/content's frameText). Sending them cost a measured
+      // 878 KB for one `top` screen whose text is ~9 KB — the renderer keeps
+      // the cells locally, which is where the drawing happens (nocx-u3vxd).
+      //
+      // Blanks are kept rather than trimmed: the row's width IS the screen's
+      // width, and session.read's Text is byte-for-byte what it was before.
+      return { kind: 'text' as const, text: row.cells.map((c) => c.char).join('') }
     }),
     cursor: frame.cursor,
     identity: {

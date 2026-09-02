@@ -67,11 +67,28 @@ export interface AgentApprovalRequested {
     /**
      * The resource kind, from the ledger's closed set.
      */
-    kind: 'path' | 'session' | 'environment' | 'credential' | 'destination'
+    kind: 'path' | 'session' | 'environment' | 'credential' | 'destination' | 'content'
     /**
      * The resource's id.
      */
     id: string
+  } | null
+  /**
+   * Skill write only: the first static scan finding in the proposed body.
+   */
+  finding?: {
+    patternId: string
+    line: string
+    lineNumber: number
+  } | null
+  /**
+   * Skill write only: the classifier verdict or bounded failure fact.
+   */
+  classifier?: {
+    consulted: boolean
+    verdict?: 'clear' | 'suspect'
+    model?: string
+    reason: string
   } | null
   /**
    * Egress only: the findings are in an ERROR string the tool returned rather than in its result — the surface reads the two differently.

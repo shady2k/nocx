@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
@@ -73,35 +74,23 @@ const (
 	// Therefore only count is bounded here; start has no ceiling, and the
 	// check below rejects integer overflow.
 	maxAttachedWindowLines = 2_000
-	// maxCellRunes bounds one cell's character (a wide glyph is one or two
-	// runes; anything more is not a terminal cell).
-	maxCellRunes = 8
+	// maxRowRunesPerCol bounds a frame row against the geometry it claims:
+	// one column holds one glyph, and a glyph is at most this many runes (a
+	// base plus combining marks). Anything wider is not a row of that screen.
+	maxRowRunesPerCol = 8
 )
 
 // ── wire shapes ───────────────────────────────────────────────────────────
 
+// frameRowWire is one row of a frame: its TEXT. The cells' attributes never
+// travelled anywhere — both consumers join the characters and drop the rest
+// (internal/assistant/blocks.go's session.read text, internal/content's
+// frameText) — and sending them cost a measured 878 KB for one `top` screen
+// whose text is ~9 KB (nocx-u3vxd). The renderer keeps its own cells, which
+// is where the drawing happens (AD-6).
 type frameRowWire struct {
-	Kind  string          `json:"kind"` // "cells" | "text"
-	Cells []frameCellWire `json:"cells,omitempty"`
-	Text  string          `json:"text,omitempty"`
-}
-
-type frameCellWire struct {
-	Char  string         `json:"char"`
-	Attrs frameAttrsWire `json:"attrs"`
-}
-
-type frameAttrsWire struct {
-	Fg            *string `json:"fg"`
-	Bg            *string `json:"bg"`
-	Bold          bool    `json:"bold"`
-	Italic        bool    `json:"italic"`
-	Dim           bool    `json:"dim"`
-	Underline     bool    `json:"underline"`
-	Inverse       bool    `json:"inverse"`
-	Blink         bool    `json:"blink"`
-	Strikethrough bool    `json:"strikethrough"`
-	Overline      bool    `json:"overline"`
+	Kind string `json:"kind"` // "text"
+	Text string `json:"text"`
 }
 
 type frameCursorWire struct {
@@ -467,7 +456,11 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
-	Standing agentApprovalStanding     `json:"standing"`
+	// Finding is static-scan evidence attached to a proposed skill write.
+	Finding *assistant.SkillScanFinding `json:"finding,omitempty"`
+	// Classifier is the model gate's verdict or bounded failure fact.
+	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
+	Standing   agentApprovalStanding         `json:"standing"`
 }
 
 type agentApprovalStanding struct {
@@ -553,10 +546,12 @@ type agentHandlers struct {
 	dumpOp capability.LedgerOperation
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
-	configOp  capability.ConfigOperation
-	noteOp    capability.NoteOperation
-	snippetOp capability.SnippetOperation
-	log       log.Logger
+	configOp   capability.ConfigOperation
+	noteOp     capability.NoteOperation
+	snippetOp  capability.SnippetOperation
+	skills     assistant.SkillLibrary
+	agentTools agenttools.Registry
+	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
 	// service, so the ask refuses before the call.
@@ -607,6 +602,9 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
+	// skillsEnabled reads the global declaration for each ask; nil preserves
+	// the direct-construction test seam's historical enabled default.
+	skillsEnabled func() bool
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -619,6 +617,14 @@ type agentHandlers struct {
 	state        *connState
 	clientID     string
 	r            Responder
+}
+
+func (s *WSServer) skillsEnabled() bool {
+	if s.settings == nil {
+		return true
+	}
+	enabled, err := s.settings.GetBool(settings.SkillsEnabled)
+	return err == nil && enabled
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -664,12 +670,16 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+//   - The skills index is supplied by the caller from the registry-granted
+//     skill source; this function records it in prompt facts and does not
+//     derive which skills the run may read.
+func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, skills []assistant.SkillRef) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
+		Skills:               skills,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -682,10 +692,18 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 // names the item without naming the window is answered inside the mark
 // rather than past it (nocx-hp8p2.15). A whole-block mark carries no span
 // and bounds nothing.
+//
+// AN AUTOMATIC ITEM CAN CARRY A SPAN TOO, and it means the same thing: rows
+// selected inside the frozen screen a summon attached narrow THAT item
+// rather than adding a second one (nocx-hp8p2.7). Excluding automatic items
+// here read `automatic` as "nobody marked this", which is true of the whole
+// screen and false of a band of it — the span itself is what says a person
+// chose, and an attachment with no span is skipped by the check below either
+// way.
 func markedSessionWindows(attached []assistant.AttachedContentItem) []assistant.MarkedSessionWindow {
 	marks := make([]assistant.MarkedSessionWindow, 0, len(attached))
 	for _, item := range attached {
-		if item.Automatic || item.Start == nil || item.Count == nil || *item.Count <= 0 {
+		if item.Start == nil || item.Count == nil || *item.Count <= 0 {
 			continue
 		}
 		marks = append(marks, assistant.MarkedSessionWindow{
@@ -716,6 +734,34 @@ func (h agentHandlers) personalParagraph() string {
 		return ""
 	}
 	return h.personalInstructions()
+}
+
+func skillRefsForGrant(grant *content.Grant, source assistant.SkillLibrary, registry agenttools.Registry) []assistant.SkillRef {
+	if grant == nil || source == nil {
+		return nil
+	}
+	offered := false
+	for _, tool := range registry.ForGrant(*grant) {
+		if tool.Name == "skills.read" {
+			offered = true
+			break
+		}
+	}
+	if !offered {
+		return nil
+	}
+	index := source.Index()
+	refs := make([]assistant.SkillRef, 0, len(index))
+	for _, item := range index {
+		child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + item.Name}
+		for _, scope := range grant.Scopes {
+			if scope.Contains(child) {
+				refs = append(refs, assistant.SkillRef{Name: item.Name, Description: item.Description})
+				break
+			}
+		}
+	}
+	return refs
 }
 
 // personalInstructionsText reads the person's own paragraph out of the
@@ -887,6 +933,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 
 	// The STREAM runs off the read loop on its own admission (the ask
 	// response is already sent). The task context derives from the
+	skillRefs := []assistant.SkillRef(nil)
+	if h.skillsEnabled == nil || h.skillsEnabled() {
+		skillRefs = skillRefsForGrant(runGrant, h.skills, h.agentTools)
+	}
 	// connection, so a disconnect cancels the stream and the run
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
@@ -921,7 +971,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
+		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
 		automaticSessionItems: automaticSessionItems(attached),
 		markedSessionWindows:  markedSessionWindows(attached),
 	}
@@ -1007,6 +1057,40 @@ func (h agentHandlers) resolveEndpointMaterial(
 	return secret, headers, nil
 }
 
+// skillDraftResolver adapts the config operation and endpoint credential
+// resolver to the assistant's summarizing seam. An unassigned summarizing
+// role deliberately spends the answering role's resolved endpoint; all other
+// role refusals remain visible rather than silently changing providers.
+func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
+	return assistant.SkillDraftResolverFunc(func(ctx context.Context) (assistant.SkillDraftTarget, error) {
+		if h.configOp == nil {
+			return assistant.SkillDraftTarget{}, errors.New("skill draft: config operation is not wired")
+		}
+		var target assistant.SkillDraftTarget
+		err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
+			endpoint, model, resolveErr := svc.ResolveRole(profile.RoleSummarizing)
+			if errors.Is(resolveErr, profile.ErrRoleUnassigned) {
+				endpoint, model, resolveErr = svc.ResolveRole(profile.RoleAnswering)
+			}
+			if resolveErr != nil {
+				return resolveErr
+			}
+			key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
+			if materialErr != nil {
+				return materialErr
+			}
+			target = assistant.SkillDraftTarget{
+				Key:     key,
+				BaseURL: endpoint.BaseURL,
+				Model:   model,
+				Headers: headers,
+			}
+			return nil
+		})
+		return target, err
+	})
+}
+
 // askRunContext is the durable run identity and non-secret input handed to the
 // stream task. Secret material is resolved by that task and never persisted.
 type askRunContext struct {
@@ -1035,6 +1119,10 @@ type askRunContext struct {
 	// the pendingRuns copy; never wire-facing as a struct.
 	prose    content.ProseBlock
 	question string
+	// draft carries the bounded conversation used by a skills.create trigger.
+	// It crosses approval suspension so the same generated proposal is
+	// validated and approved on resume without a second model call.
+	draft    *assistant.SkillDraftRequest
 	endpoint profile.Endpoint
 	model    string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
@@ -1214,6 +1302,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// separate from prose inside that message, and is never the tool output.
 	const conversationBudget = 12000
 	priorTurns, priorErr := h.priorTurns(ctx, rc)
+	draftTurns := make([]content.PriorTurn, 0, len(priorTurns)+1)
+	draftTurns = append(draftTurns, priorTurns...)
 	if priorErr != nil {
 		h.log.Warn("the previous conversation could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
@@ -1244,6 +1334,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				total -= len(message.Content)
 			}
 			turnMessages = turnMessages[1:]
+			if len(draftTurns) > 0 {
+				draftTurns = draftTurns[1:]
+			}
 			trimmed = true
 		}
 		if trimmed {
@@ -1256,6 +1349,16 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
+	draftTurns = append(draftTurns, content.PriorTurn{Question: rc.question})
+	if rc.draft == nil && h.skills != nil && h.configOp != nil {
+		rc.draft = assistant.NewSkillDraftRequest(assistant.ComposeDraftInput(draftTurns, nil), h.skillDraftResolver())
+		h.pendingRunsMu.Lock()
+		if stored, ok := h.pendingRuns[rc.runID]; ok {
+			stored.draft = rc.draft
+			h.pendingRuns[rc.runID] = stored
+		}
+		h.pendingRunsMu.Unlock()
+	}
 
 	// The deltas continue where the last drive of this run stopped: a
 	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
@@ -1279,6 +1382,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:        h.requester,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
+		Skills:           h.skills,
+		SkillDraft:       rc.draft,
 		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
@@ -1551,6 +1656,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
+		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -2269,26 +2375,20 @@ func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identit
 		cursor.Line < 0 || cursor.Line >= maxFrameRows+id.Rows {
 		return "cursor is out of bounds", 0
 	}
+	// A row is bounded by the geometry it claims rather than pinned to it:
+	// a wide glyph occupies two columns as one rune, so a full row is
+	// legitimately SHORTER than cols, while a cell of combining marks is
+	// longer. The ceiling is what one screen's worth of columns can hold.
 	var totalChars int
 	for _, row := range rows {
-		if row.Kind != "cells" {
-			return "a live frame row must be cells", 0
+		if row.Kind != "text" {
+			return "a live frame row must be text", 0
 		}
-		if len(row.Cells) != id.Cols {
-			return "a live frame row must carry exactly identity.cols cells", 0
+		n := utf8.RuneCountInString(row.Text)
+		if n > id.Cols*maxRowRunesPerCol {
+			return "a live frame row is wider than its columns can hold", 0
 		}
-		for _, c := range row.Cells {
-			if utf8.RuneCountInString(c.Char) > maxCellRunes {
-				return "a cell carries more than a terminal glyph", 0
-			}
-			totalChars += utf8.RuneCountInString(c.Char)
-			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Fg)); n > 64 {
-				return "a cell attribute exceeds the length bound", 0
-			}
-			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Bg)); n > 64 {
-				return "a cell attribute exceeds the length bound", 0
-			}
-		}
+		totalChars += n
 	}
 	if totalChars > maxFrameChars {
 		return "frame is too large: character budget exceeded", 0
@@ -2451,7 +2551,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2470,14 +2570,14 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
-			noteOp: noteOp, snippetOp: snippetOp,
+			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
-			personalInstructions: s.personalInstructionsText,
-			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
+			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
+			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
 	}

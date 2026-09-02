@@ -10,10 +10,10 @@ import (
 )
 
 type fakeTextFetcher struct {
-	result apifetch.TextResult
+	result apifetch.TextDocument
 }
 
-func (f fakeTextFetcher) FetchText(context.Context, string, int64) (apifetch.TextResult, error) {
+func (f fakeTextFetcher) FetchText(context.Context, apifetch.TextRequest) (apifetch.TextDocument, error) {
 	return f.result, nil
 }
 
@@ -24,14 +24,19 @@ func TestExecuteFetchURLReturnsTheFetchedPage(t *testing.T) {
 		}),
 		&agenttools.URLScope{URLs: []string{"https://example.test/page"}},
 		json.RawMessage(`{"url":"https://example.test/page"}`),
-		toolSeams{fetcher: fakeTextFetcher{result: apifetch.TextResult{
-			URL: "https://example.test/page", ContentType: "text/html", Text: "Hello from the page",
-		}}},
+		toolSeams{
+			fetcher:   fakeTextFetcher{result: apifetch.TextDocument{URL: "https://example.test/page", ContentType: "text/html", Text: "Hello from the page"}},
+			snapshots: newRunSnapshots(),
+			runID:     "run-fetch-test",
+		},
 	)
 	if err != nil {
 		t.Fatalf("executeFetchURL: %v", err)
 	}
-	if out != `{"url":"https://example.test/page","contentType":"text/html","text":"Hello from the page","truncated":false,"omitted":0,"lossy":false}` {
+	result := fetchWindowResult(t, out)
+	if result["url"] != "https://example.test/page" || result["contentType"] != "text/html" ||
+		result["text"] != "Hello from the page" || result["truncated"] != false ||
+		result["remaining"] != float64(0) || result["revision"] == "" {
 		t.Fatalf("result = %s", out)
 	}
 }

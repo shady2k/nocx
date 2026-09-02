@@ -270,3 +270,51 @@ func TestExecuteSessionRead_LiveScreenBoundsTextAndReturnedEnd(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// A ROW MARK INSIDE THE FROZEN SCREEN BOUNDS ITS READ (nocx-hp8p2.7).
+// The screen a summon attaches is a renderer-owned item; marking rows in it
+// narrows THAT item — the same id plus a span — so the model reads the band
+// a person chose rather than the whole screen. The mark is authority, the
+// same way it is for a block (nocx-hp8p2.15), and a window the model asks
+// for itself is still honoured.
+func TestExecuteSessionRead_AutomaticItemIsBoundedByItsMark(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want *FrameRegion
+	}{
+		{
+			name: "a read naming only the item is answered inside the mark",
+			args: `{"id":"att-shell"}`,
+			want: &FrameRegion{Start: 3, End: 5},
+		},
+		{
+			name: "a window the model asked for is honoured",
+			args: `{"id":"att-shell","start":10,"count":1}`,
+			want: &FrameRegion{Start: 10, End: 11},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := agenttools.NewSessionReader(
+				[]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}},
+				[]string{"att-shell"},
+				[]agenttools.MarkedSessionWindow{{ItemID: "att-shell", Start: 3, Count: 2}},
+			)
+			req := &recordingRequester{body: liveFrameBody("marked band")}
+			source := &sessionSourceFake{err: errors.New("item not found")}
+
+			if _, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(tc.args)); err != nil {
+				t.Fatalf("executeSessionRead: %v", err)
+			}
+			calls := req.calls()
+			if len(calls) != 1 {
+				t.Fatalf("renderer calls = %d, want 1", len(calls))
+			}
+			got := calls[0].region
+			if got == nil || *got != *tc.want {
+				t.Fatalf("region = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // fakeBlocks is the session source with a call log and scripted answers.
@@ -144,6 +145,18 @@ func toolsDirFS(t *testing.T) fs.FS {
 	return os.DirFS(realToolsFS)
 }
 
+// newClientWithTestToolsFS keeps filesystem-backed schema fixtures on the
+// production client assembly path without restoring a production-only
+// no-skill-roots constructor.
+func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
+	reg, err := assembleToolRegistry(toolsFS, nil)
+	if err != nil {
+		return nil, err
+	}
+	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
+	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
+}
+
 // ── the middleware ───────────────────────────────────────────────────────
 
 // The wiring gap is honest: a run whose block seam is not wired refuses the
@@ -249,7 +262,7 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 	p.Requester = &blocksOnlyRequester{blocks: src}
 	p.Messages = []Message{{Role: "user", Content: "did df fail, and why?"}}
 
-	cl, err := newClient(nil, toolsDirFS(t), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -325,7 +338,7 @@ func TestAsk_AMarkedWindowIsReadEvenWhenTheModelOmitsTheCount(t *testing.T) {
 	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-df", Start: 5, Count: 1}}
 	p.Messages = []Message{{Role: "user", Content: "what does this mean?"}}
 
-	cl, err := newClient(nil, toolsDirFS(t), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -379,7 +392,7 @@ func TestAsk_AWiderWindowAroundAMarkIsHonoured(t *testing.T) {
 	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-log", Start: 20, Count: 1}}
 	p.Messages = []Message{{Role: "user", Content: "what does this line mean?"}}
 
-	cl, err := newClient(nil, toolsDirFS(t), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

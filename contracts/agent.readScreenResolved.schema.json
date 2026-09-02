@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.readScreenResolved.schema.json",
   "title": "AgentReadScreenResolved",
-  "description": "Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer answers an agent.readScreenRequest with a closed outcome. outcome=frame carries renderer-owned rows, cells, cursor, buffer identity and range; outcome=failed carries why the frame could not be produced, so the run receives an honest answer instead of hanging. requestId is the broker-minted id from the request, echoed back.",
+  "description": "Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer answers an agent.readScreenRequest with a closed outcome. outcome=frame carries renderer-owned text rows, cursor, buffer identity and range; outcome=failed carries why the frame could not be produced, so the run receives an honest answer instead of hanging. requestId is the broker-minted id from the request, echoed back.",
   "type": "object",
   "additionalProperties": false,
   "required": ["requestId", "outcome"],
@@ -23,46 +23,20 @@
     },
     "rows": {
       "type": "array",
-      "description": "The frame's rows, in order; each is a cells row (live frame shape).",
+      "description": "The frame's rows, in order; each is the row's TEXT — the cells' characters joined in column order, blanks kept, so the row's width is the screen's. The renderer keeps the cells locally to DRAW with; no consumer of this resolution reads a cell attribute (nocx-u3vxd).",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "cells"],
+        "required": ["kind", "text"],
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["cells"]
+            "enum": ["text"]
           },
-          "cells": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["char", "attrs"],
-              "properties": {
-                "char": {
-                  "type": "string",
-                  "description": "The cell's character."
-                },
-                "attrs": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "description": "The cell's attributes (fg/bg resolved to CSS colors, flags).",
-                  "properties": {
-                    "fg": { "type": ["string", "null"] },
-                    "bg": { "type": ["string", "null"] },
-                    "bold": { "type": "boolean" },
-                    "italic": { "type": "boolean" },
-                    "dim": { "type": "boolean" },
-                    "underline": { "type": "boolean" },
-                    "inverse": { "type": "boolean" },
-                    "blink": { "type": "boolean" },
-                    "strikethrough": { "type": "boolean" },
-                    "overline": { "type": "boolean" }
-                  }
-                }
-              }
-            }
+          "text": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "The row's characters. Bounded at eight runes per column of the widest permitted geometry."
           }
         }
       }

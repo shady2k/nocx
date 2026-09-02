@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // knownMatcher is the vault-comparison seam whose answer is computed from
@@ -66,7 +67,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -126,7 +127,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -168,7 +169,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -233,6 +234,36 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	}
 	if !strings.Contains(out, "the file's contents") {
 		t.Fatalf("result = %s, want the file's contents in the window", out)
+	}
+}
+
+func TestExecuteSkillsReadReturnsNormalizedPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "deploy", "references"), 0o700); err != nil {
+		t.Fatalf("mkdir references: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), "---\nname: deploy\ndescription: deployment instructions\n---\n\nbody")
+	writeFile(t, filepath.Join(root, "deploy", "references", "guide.md"), "guide")
+
+	source := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceAuthored}}, nil)
+	cap := agenttools.NewContentScope([]agenttools.ResourceRef{{
+		Kind: content.ResourceContent,
+		ID:   "content",
+	}})
+	got, err := executeSkillsRead(context.Background(), cap, json.RawMessage(`{"name":"deploy","path":"./references/guide.md"}`), toolSeams{skills: source})
+	if err != nil {
+		t.Fatalf("executeSkillsRead: %v", err)
+	}
+
+	var result skillReadResult
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Path != "references/guide.md" {
+		t.Fatalf("result path = %q, want normalized path", result.Path)
+	}
+	if result.Content != "guide" {
+		t.Fatalf("result content = %q, want guide", result.Content)
 	}
 }
 
@@ -317,7 +348,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, clErr := newClientWithTestToolsFS(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -351,5 +382,51 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	}
 	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, Attachments{}, nil, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
+	}
+}
+
+// THE MASKING BELT IS FOR THE ONE MOMENT THE GATE STANDS DOWN (nocx-hp8p2.13).
+// The egress gate refuses-and-asks on a finding, so a result reaching the
+// durable record normally carries none. An APPROVED resume is the exception:
+// the person authorised sending those exact bytes to the provider, and they
+// go. What must not follow is a second, unmasked copy of them in the store —
+// the pane's "show me what it returned" would then be a path around the
+// masking every other durable row obeys (ADR-0021, nocx-a21v).
+func TestMiddleware_ApprovedEgressResultIsRecordedMasked(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	const secret = "sk-proj-abcdefghijklmnopqrstuvwx"
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+	writeFile(t, filepath.Join(dir, "a.txt"), "the key is "+secret)
+
+	ledger := &fakeLedger{}
+	approvals := NewApprovalStore()
+	mw := middlewareFor(t, grant, ledger, approvals)
+
+	// The gate finds the key and suspends, retaining the exact bytes.
+	if _, err := wrappedEndpoint(mw, "files.read", "call_1", args); err == nil {
+		t.Fatal("the gate passed a result carrying a key; want a suspension")
+	}
+	if len(ledger.recordedCaptures()) != 0 {
+		t.Fatal("a withheld result was recorded before the person decided")
+	}
+
+	// The person approves: the retained bytes go to the model as they are.
+	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
+	if err != nil {
+		t.Fatalf("approved resume: %v", err)
+	}
+	if !strings.Contains(out, secret) {
+		t.Fatalf("the model received %q, want the exact approved bytes", out)
+	}
+	captures := ledger.recordedCaptures()
+	if len(captures) != 1 {
+		t.Fatalf("captures = %d, want the call's own body", len(captures))
+	}
+	body := string(captures[0].Body)
+	if strings.Contains(body, secret) {
+		t.Fatalf("recorded body = %q, want the key masked out of the durable record", body)
+	}
+	if !strings.Contains(body, "the key is ") {
+		t.Fatalf("recorded body = %q, want the rest of the result kept", body)
 	}
 }

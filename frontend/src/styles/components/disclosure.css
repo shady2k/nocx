@@ -1,0 +1,46 @@
+/* Disclosure (ui/README table) — the model's thinking and a tool call's
+   result, collapsed, beside the answer. Colours are tokens only
+   (ADR-0013 §4).
+
+   Quieter than the tool-call line, which is quieter than the answer: the
+   ranking is deliberate. The answer is what was asked for; a call is a fact
+   about what happened; the thinking and what a call returned are available
+   and nothing more. */
+.ui-disclosure {
+  margin: 4px 0;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-disclosure__summary {
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  color: var(--color-text-dim);
+  /* The native marker stays: it is the affordance a person already knows
+     for a disclosure, and replacing it with a glyph of ours would be a
+     hand-rolled control wearing a native element's clothes. */
+}
+
+.ui-disclosure__body {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--color-border);
+  /* The model's own line breaks are the only structure thinking has, and a
+     tool result is JSON whose own newlines are its structure. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* A TOOL RESULT IS BOUNDED ON SCREEN, NOT CUT (nocx-hp8p2.13). The store
+   already bounds what is kept — a tool's declared result window, 64 KiB —
+   so the question here is only how much of it a person's answer is allowed
+   to become. It scrolls inside its own box: nothing is hidden and nothing
+   is truncated into an ellipsis somebody then copies. Thinking is not
+   capped, because a person who opens it opened it to read it. */
+.ui-disclosure[data-kind='tool-result'] .ui-disclosure__body {
+  max-height: 18em;
+  overflow: auto;
+  font-family: var(--font-family-mono);
+}

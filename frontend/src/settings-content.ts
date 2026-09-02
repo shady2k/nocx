@@ -16,6 +16,7 @@ import type { SurfaceType, SingletonKey } from './pane-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
+import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
 
@@ -58,6 +59,7 @@ export class SettingsContent extends SolidPaneContent {
      *  main.tsx's would be the same wiring written twice — agreeing until the
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
+    private readonly skillsStore?: SkillsStore,
   ) {
     super()
   }
@@ -76,6 +78,7 @@ export class SettingsContent extends SolidPaneContent {
           policyClient: this.policyClient,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
+          skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,

@@ -33,9 +33,9 @@ export interface RolesAssignResult {
 }
 export interface Role {
   /**
-   * The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead).
+   * The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead); 'summarizing' drafts reusable skills from the person's own words.
    */
-  role: 'answering' | 'classifier'
+  role: 'answering' | 'classifier' | 'summarizing'
   /**
    * The assigned endpoint's backend-minted id, or null when the role has no assignment.
    */

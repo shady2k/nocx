@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -423,6 +424,12 @@ type WSServer struct {
 	// endpoints.probe and agent.status's last-probe fact. When nil, the
 	// endpoints.probe method answers -32601 "agent not available".
 	assistantClient assistant.Client
+	// skillLibrary is the single filesystem-backed owner for skills.read and
+	// the skills mutation tools.
+	skillLibrary assistant.SkillLibrary
+	// agentTools is the registry used to decide which declarations this run
+	// may be offered. It is the same assembled table used by the assistant.
+	agentTools agenttools.Registry
 	// agentFetcher is the guarded direct-network capability for fetch.url.
 	// It is kept separate from the model client because the tool must use the
 	// same apifetch route/policy owner without exposing a remote pane route.
@@ -976,6 +983,17 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
+// WithSkillSource attaches the single skill library used by assistant asks.
+func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
+	return func(ws *WSServer) { ws.skillLibrary = source }
+}
+
+// WithAgentToolRegistry attaches the registry used by the assistant engine.
+// Prompt indexing asks this registry which declarations the grant permits.
+func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
+	return func(ws *WSServer) { ws.agentTools = reg }
+}
+
 // WithAgentFetcher attaches the guarded direct-network seam used by fetch.url.
 // Without it the declaration remains policy-visible but execution refuses
 // honestly as unavailable; production wires the same route table as imports.
@@ -1494,7 +1512,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

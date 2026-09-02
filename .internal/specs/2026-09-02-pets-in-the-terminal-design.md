@@ -32,33 +32,33 @@ the ledger has not.
 **§3.1 / `nocx-iadtt` — the author is minted at submit and never derived.** The pet reads
 `BlockRecord.author` to tell your command from the assistant's. It does not infer.
 
-**AD-8 — one owner per behaviour, interface-first.** Four modules, one of which may touch
-a document (§4).
+**AD-8 — one owner per behaviour, interface-first.** Six modules and one component, of which exactly one may touch a document (§4).
 
 **ADR-0036 / ADR-0037 — the HTTP upload and download routes beside the socket.** Not
 crossed, and this is worth stating because it looks as though it might be: the pack that
 ships is a static frontend asset, served by the same vite/embed path as `appicon-96.png`.
-A future user-supplied pack (§8) would need a read path and therefore its own decision.
+A future user-supplied pack (§9) would need a read path and therefore its own decision.
 
 **`frontend/src/ui/README.md` — the kit grows by variants.** The pet needed one control
-the kit did not have (§6).
+the kit did not have (§8).
 
 ## 3. Terrain: the landscape is the scrollback
 
-nocx already draws the only landscape a screenmate needs. Every frozen command block is a
-rectangle whose TOP edge can be stood on, and each block wears chips — the directory, the
-duration, the exit badge — which are painted, raised and about sixty pixels wide. Those
-are what the old screenmates actually walked on: a Neko walked title bars and window
-edges, not the desktop.
+nocx already draws the only landscape a screenmate needs. Every command block is a
+rectangle whose TOP edge can be stood on — a RUNNING one too, deliberately: the block
+exists from the moment you press Enter, and a pet that waited for the fence would have
+nowhere to stand at exactly the moment you are watching. Each block also wears chips: the
+directory, the duration, the exit badge. Those are what the old screenmates actually
+walked on — a Neko walked title bars and window edges, not the desktop.
 
 Ground is declared as a list of `{selector, edge}`, plus the window's own bottom edge as a
 floor with a reserved id, so every rule has exactly one kind of ground to reason about:
 
-|                           | edge   | why                                                   |
-| ------------------------- | ------ | ----------------------------------------------------- |
-| `.tabbar`                 | bottom | the one shelf that does not move when you change tabs |
-| `.pane.active .cmd-block` | top    | the command you ran                                   |
-| `.pane.active .nocx-chip` | top    | the directory, the duration, the exit badge           |
+|                           | edge   | why                                                                                                       |
+| ------------------------- | ------ | --------------------------------------------------------------------------------------------------------- |
+| `.tabbar`                 | bottom | the one shelf that does not move when you change tabs                                                     |
+| `.pane.active .cmd-block` | top    | the command you ran, running ones included                                                                |
+| `.pane.active .nocx-chip` | top    | every chip the pane wears: a block's directory, duration and exit badge, and the editor's own row of them |
 
 Blocks come from the ACTIVE pane only: a pet standing on a block in a pane you cannot see
 would be a pet you cannot see.
@@ -66,13 +66,17 @@ would be a pet you cannot see.
 Three rules, each bought by watching the mockup fail:
 
 **A ledge needs head clearance.** The block's top edge is the floor, so the body occupies
-the space ABOVE it — which belongs to the previous block, or to nothing at all near the
-top of the pane. Without this the animal walks off the top of the screen. It also means
+the space ABOVE it. The test is against the top of the WINDOW and nothing else — `y >=
+petHeight` — so it is what keeps the animal from walking off the top of the screen, and it
+is not a claim that the body never overlaps whatever is drawn above. It also means
 the pet's declared size decides which blocks are ground, so changing the size re-derives
 the terrain rather than merely rescaling the sprite.
 
-**A ledge needs width.** A sliver is a place to stand, not a place to walk, and a pet that
-turns round every frame reads as broken.
+**A ledge needs width.** 56px AFTER the inset, so an element narrower than 72px is not
+ground at all — which excludes most single chips and keeps the wide ones. A sliver is a
+place to stand, not a place to walk. The animal's own width is deliberately NOT part of
+this test: a cat wider than its perch is a cat on a perch, which is what the genre looks
+like.
 
 **Landing is swept, not sampled.** "Is the pet inside a ledge now" misses every ledge
 thinner than one frame of travel, and a tenth of a second of falling covers more than the
@@ -91,14 +95,30 @@ jump rather than a lift.
 rectangle, precisely so that a block removed under it can be detected: it falls. It is
 never quietly moved to another ledge, which would read as a teleport.
 
+An identity is minted once per element and never reused. Reset per sweep it did not
+advance for elements already marked, so the next new block was handed a name another
+element still held — and the animal teleported onto it instead of falling, which is the
+one thing the identity exists to prevent. An identity that is reused is worse than none.
+
 ### Geometry is a snapshot
 
-Read into a snapshot refreshed by `ResizeObserver`, a `MutationObserver` on the block
-container, and the scroller's `scroll` event. Calling `getBoundingClientRect` inside the
-animation frame is the obvious shortcut and turns every scroll of the terminal into a
-layout-thrashing benchmark: each call forces the style and layout the scroll just
-invalidated, sixty times a second, for as long as the pet exists. The pointer position is
-converted against the same cached rect for the same reason.
+Two speeds, because the two costs are not alike.
+
+The **ledge underfoot** is refreshed every frame, from ONE rectangle, so the animal rides a
+scroll without lagging behind the block it stands on.
+
+The **full sweep** reads every block and chip of the active pane, so it runs only when
+something says the layout moved, and at most every 100 ms. Calling
+`getBoundingClientRect` for all of them inside the animation frame is the obvious shortcut
+and turns every scroll of a long scrollback into a layout-thrashing benchmark.
+
+What says the layout moved: a `ResizeObserver` on the shell; a `MutationObserver` watching
+childList AND the `class` attribute — which pane is ACTIVE is a class, so without it
+switching tabs left the animal on the geometry of a pane nobody can see; and `scroll` on
+the DOCUMENT in the capture phase, because a scroll event does not bubble and the animal
+lives over the window rather than inside the scroller it is watching.
+
+The pointer position is converted against the same cached rect, for the same reason.
 
 ## 4. Modules
 
@@ -115,7 +135,7 @@ converted against the same cached rect for the same reason.
 `pet.ts` and `terrain.ts` take time as `dt` and chance as `rng`, so a thousand seconds of
 cat runs deterministically in a millisecond and every rule is testable without a browser.
 
-### One animal per WINDOW
+### One ambient animal per WINDOW
 
 The pet is an ornament of the window, not of a pane. A per-pane pet lived inside the
 scrollback it was walking on, so it died with the tab and was born again in the next one —
@@ -125,8 +145,13 @@ and threading a window ornament through the pane manager's constructor would put
 signature that is about the window's parts. This is the shape `reconnect-setting.ts`
 already uses, for the same reason.
 
-The layer therefore spans `#app`, above the panes and below every real surface: a dialog,
-a menu or a panel covers it. A cat is not more important than what the user opened.
+The layer therefore spans `#app`, above the panes and below the overlays that matter — a
+dialog, a menu, the connection overlay. A cat is not more important than what the user
+opened.
+
+The settings page mounts a SECOND overlay for its preview (§8). That is the exception the
+word "ambient" carries: one animal lives in the window, and one more is a sample of it
+inside a page you opened on purpose.
 
 ## 5. Behaviour: three axes, not one enum
 
@@ -182,9 +207,14 @@ for it would be wrong about who did what. `entered` and abandoned are deliberate
 read as failure — neither is a verdict on the command, and a cat that sulked at every
 `ssh` would sulk most of the time.
 
+**A reaction reaches a FALLING animal as a mood only.** It has no say in the matter, and a
+cat that groomed itself mid-air reads as a bug — so the table above describes a pet with
+its feet on something.
+
 **The verdict routinely arrives AFTER the next command has started.** The freeze waits on
 a render fence and the start does not. So a reaction is protected while it plays
-(`reacting` marks an answer; an ordinary occupation is interrupted freely), and after
+(`reacting` marks an answer; an ordinary occupation is interrupted freely, and the pointer
+overrides even an answer — getting out of the way outranks having the last word), and after
 answering, the controller returns the animal to watching whatever is still running.
 
 **News can arrive before the sprites do.** Sprites are fetched asynchronously and the
@@ -208,6 +238,9 @@ not an animal. A missing sheet costs one take; a clip whose takes all failed cos
 behaviour; only a pack that yields nothing is an error — Cat-3 has no scratch, and losing
 the animal over a drawing the artist did not make would be the wrong trade.
 
+`LICENSE.txt` and `SOURCE.md` sit in `cat-1` and cover all six directories: they are one
+download of one pack.
+
 The trim is computed once as the UNION over every frame of every clip. Per-frame cropping
 re-centres the animal on itself, which flattens the walk's bob and deletes the crouch that
 makes the stretch read as a stretch.
@@ -219,19 +252,24 @@ Declared in Go (`internal/settings/settings.go`), so the page renders itself.
 - **`pets.enabled`** (default on). Off means the pack is never fetched: a decoration
   somebody declined should cost them no bytes, and "loaded but hidden" is how a disabled
   feature quietly keeps running.
-- **`pets.size`**, 16–96 px. Also decides which blocks are ground (§3).
-- **`pets.pack`**, the six colours.
+- **`pets.size`**, 16–96 px, default 34. Also decides which blocks are ground (§3).
+- **`pets.pack`**, the six colours, default `cat-1`. The LIST lives there and nowhere else:
+  the renderer sanitises the value into a path segment and never repeats the vocabulary.
 
 All three are live — read in the `settings.changed` loop beside the theme, because someone
-turning the pet off is looking at the pane while they do it.
+turning the pet off is looking at the pane while they do it. And nothing about the pet
+happens before the FIRST answer arrives: the window mounts its animal before the snapshot,
+the declared default is on, and acting on it early fetched the pack for a person who had
+switched pets off. A failed fetch still counts as an answer, or the animal never appears.
 
 **The slider is a VARIANT of the number control, not a sixth `ControlKind`**, following
 the reasoning `multiline` already states one field above it in the same struct: the value,
 its bounds, its unit and its refusals are the number control's in every respect, and a kind
 of its own would mean paired cases doing the same thing in `validateValue`, `coerceValue`
-and the `settings.set` handler. Only the affordance differs. It commits on release and
-reports live while dragging — a drag passes through every value between its ends and none
-of them was chosen.
+and the `settings.set` handler. Only the affordance differs. It commits on release, and what is live during the
+drag is the READOUT, not the animal: a drag passes through every value between its ends and
+none of them was chosen, so writing each one made the settings revision tick sixty times a
+second. The pet resizes when the value lands.
 
 **The preview runs the real overlay** over a mock scrollback. Drawn separately it would be
 a second implementation of how the pet looks, agreeing with the terminal until the day one
@@ -251,7 +289,7 @@ of them changed.
   appdir, execute nothing) and a read path that ADR-0036/0037 do not currently allow.
   `nocx-q4qeh.2`.
 - **A second species.** The vocabulary is "which pet" rather than "which colour" so that
-  this costs a directory and a row.
+  this costs a directory and a row in the Go declaration.
 
 ## 10. What would make this wrong
 

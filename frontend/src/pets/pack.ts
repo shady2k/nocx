@@ -52,24 +52,26 @@ export interface PetPack {
   readonly activity: Readonly<Record<Exclude<Activity, 'none'>, string>>
 }
 
-/** The six colours the pack ships. The id is the directory under
- *  `public/pets/`; the label is what the settings page offers. */
-const CAT_COLOURS = [
-  { id: 'cat-1', label: 'Ginger' },
-  { id: 'cat-2', label: 'Black' },
-  { id: 'cat-3', label: 'Brown' },
-  { id: 'cat-4', label: 'Sphynx' },
-  { id: 'cat-5', label: 'White longhair' },
-  { id: 'cat-6', label: 'Grey' },
-] as const
-
-/** Where a colour's files live. Unknown ids fall back to the first colour
- *  rather than to nothing: a setting written by a newer build must leave the
- *  older one with a cat, not with an empty pane. */
+/**
+ * Where a colour's files live.
+ *
+ * There is deliberately no list of colours here. `pets.pack` declares them in
+ * Go (internal/settings/settings.go), and a second copy in TypeScript is the
+ * defect AGENTS.md names: the two agreed until they did not — the labels had
+ * already drifted to "Ginger" against "Ginger cat" — and adding a species
+ * would have meant remembering both. This sanitises a value into a path
+ * segment and nothing more; WHICH values exist is the settings declaration's
+ * business.
+ */
 export function packBase(id: string): string {
-  const known = CAT_COLOURS.some((c) => c.id === id)
-  return `./pets/${known ? id : CAT_COLOURS[0].id}/`
+  const safe = /^[a-z0-9-]{1,32}$/.test(id) ? id : DEFAULT_PACK_ID
+  return `./pets/${safe}/`
 }
+
+/** Matches the Go declaration's default, and is what an unusable id falls
+ *  back to: a value written by a newer build must leave the older one with a
+ *  cat, not with an empty pane. */
+const DEFAULT_PACK_ID = 'cat-1'
 
 /** The pack that ships in the box: luizmelo's Pet Cats, CC0.
  *  See `public/pets/cat-1/SOURCE.md` for provenance. */

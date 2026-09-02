@@ -71,6 +71,14 @@ interface Stand {
   pump(seconds: number): void
 }
 
+function addBlock(s: Stand, top: number): HTMLElement {
+  const b = document.createElement('div')
+  b.className = 'cmd-block'
+  b.getBoundingClientRect = () => rect(50, top, 550, top + 40)
+  s.blocks.appendChild(b)
+  return b
+}
+
 function stand(blockTops: number[]): Stand {
   const host = document.createElement('div')
   const blocks = document.createElement('div')
@@ -396,5 +404,45 @@ describe('news that arrives before the sprites do', () => {
     // Still watching: the animal that landed knows a command is in flight,
     // so it settles rather than wandering off.
     expect(pet.playing).toBe('sitting')
+  })
+})
+
+describe('ledges keep their names', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('a block that arrives later never inherits another ledge’s identity', async () => {
+    // The counter used to be reset per sweep and advanced only for unmarked
+    // elements, so the next new block was handed an id another element
+    // already held. The pet then TELEPORTED onto it instead of falling —
+    // which is the one thing the identity exists to prevent.
+    const s = stand([150, 300])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(2)
+
+    addBlock(s, 450)
+    addBlock(s, 500)
+    await new Promise((r) => setTimeout(r, 0))
+    s.pump(0.3)
+
+    const ids = [...s.blocks.querySelectorAll<HTMLElement>('.cmd-block')].map(
+      (e) => e.dataset.petLedge,
+    )
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.every((v) => v !== undefined)).toBe(true)
+  })
+
+  it('an element keeps the name it was given across sweeps', async () => {
+    const s = stand([150])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(2)
+    const first = s.blocks.querySelector<HTMLElement>('.cmd-block')!.dataset.petLedge
+    addBlock(s, 400)
+    await new Promise((r) => setTimeout(r, 0))
+    s.pump(0.3)
+    expect(s.blocks.querySelector<HTMLElement>('.cmd-block')!.dataset.petLedge).toBe(first)
   })
 })

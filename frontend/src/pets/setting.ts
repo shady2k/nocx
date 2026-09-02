@@ -21,6 +21,15 @@ export const PETS_PACK_DEFAULT = 'cat-1'
 const SIZE_MIN = 16
 const SIZE_MAX = 96
 
+/** Whether the backend has answered yet.
+ *
+ *  The window mounts its pet before the first settings snapshot arrives, and
+ *  the declared default is ON — so a person who had switched pets off got the
+ *  sprite pack fetched anyway, every launch, before the answer landed. "Off
+ *  means the pack is never fetched" has to survive the gap between the window
+ *  opening and the backend answering, which is exactly where a launch lives. */
+let known = false
+
 let enabled = PETS_ENABLED_DEFAULT
 let size = PETS_SIZE_DEFAULT
 let pack = PETS_PACK_DEFAULT
@@ -39,7 +48,8 @@ export function applyPetsSettings(
   sizeValue: unknown,
   packValue: unknown,
 ): void {
-  const before = `${enabled}/${size}/${pack}`
+  const before = known ? `${enabled}/${size}/${pack}` : '\u0000'
+  known = true
   if (typeof enabledValue === 'boolean') enabled = enabledValue
   // Not checked against a list here. `packBase` decides what an unknown id
   // means, in one place, so a value written by a newer build leaves the older
@@ -55,7 +65,14 @@ export function applyPetsSettings(
 }
 
 export function petsEnabled(): boolean {
-  return enabled
+  return known && enabled
+}
+
+/** Whether an answer has arrived at all. Nothing about the pet should happen
+ *  before it: the declared default is on, and acting on it early is how a
+ *  setting somebody changed gets ignored for the first seconds of a launch. */
+export function petsSettingsKnown(): boolean {
+  return known
 }
 
 export function petHeight(): number {
@@ -74,6 +91,7 @@ export function onPetsSettingsChanged(listener: Listener): () => void {
 
 /** Test seam: put the module back to its declared defaults. */
 export function resetPetsSettings(): void {
+  known = false
   enabled = PETS_ENABLED_DEFAULT
   size = PETS_SIZE_DEFAULT
   pack = PETS_PACK_DEFAULT

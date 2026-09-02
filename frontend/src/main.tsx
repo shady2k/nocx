@@ -1796,6 +1796,10 @@ function main(): void {
           snap.values[PETS_PACK_KEY],
         )
       } catch {
+        // Including the pet's: it does not exist until an answer has arrived,
+        // so a failed fetch must still be an answer or the animal never
+        // appears at all.
+        applyPetsSettings(undefined, undefined, undefined)
         // The shell remains usable with declared defaults until the next
         // connection state transition supplies a fresh snapshot.
       }

@@ -61,6 +61,11 @@ export interface LedgeSource {
  *  Blocks are taken from the ACTIVE pane only. A pet standing on a block in a
  *  pane you cannot see would be a pet you cannot see.
  */
+/** The full terrain sweep reads every block and chip of the active pane, so
+ *  it is rate-limited. Between sweeps the animal still follows the ledge it
+ *  is standing on, one rectangle per frame. */
+const SWEEP_INTERVAL_MS = 100
+
 const DEFAULT_LEDGES: readonly LedgeSource[] = [
   { selector: '.tabbar', edge: 'bottom' },
   { selector: '.pane.active .cmd-block', edge: 'top' },
@@ -135,13 +140,15 @@ export class PetOverlay {
   /** The drawn width of the animal, from the pack's trim. Kept because the
    *  flee test needs the box and only the painter knows it. */
   private _width = 0
+  private _nextLedgeId = 0
+  private _lastSweep = -1e9
   private _hostLeft = 0
   private _hostTop = 0
   /** The element the animal is standing on, so its rectangle can be refreshed
    *  on its own each frame. One getBoundingClientRect is nothing; sweeping
    *  every block and chip of a long scrollback sixty times a second is the
    *  layout thrash this module is arranged to avoid. */
-  private _standingOn: { el: HTMLElement; source: LedgeSource } | null = null
+  private _standingOn: { id: string; el: HTMLElement; source: LedgeSource } | null = null
   private _stale = true
   private _disposed = false
   private _running = false
@@ -310,16 +317,27 @@ export class PetOverlay {
     }
     if (typeof MutationObserver !== 'undefined') {
       const mo = new MutationObserver(mark)
-      // childList only, and no attributes: the editor rewrites its own
-      // attributes on every keystroke, and a pet that re-derived the whole
-      // terrain per character typed would be measuring the window rather than
-      // living in it.
-      mo.observe(this._blocks, { childList: true, subtree: true })
+      // `class` as well as childList: which pane is active is a CLASS, so
+      // without it switching tabs left the animal walking on the geometry of
+      // a pane nobody can see. The filter is what keeps this affordable —
+      // the editor rewrites other attributes on every keystroke.
+      mo.observe(this._blocks, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class'],
+      })
       this._observers.push(mo)
     }
-    const scroller = this._blocks.parentElement ?? this._host
-    scroller.addEventListener('scroll', mark, { passive: true })
-    this._observers.push({ disconnect: () => scroller.removeEventListener('scroll', mark) })
+    // On the DOCUMENT, in the capture phase. A scroll event does not bubble,
+    // and the animal lives over the whole window rather than inside the
+    // scroller it is watching, so a listener on its own host heard nothing:
+    // every ordinary scroll of the scrollback left the terrain snapshot
+    // describing where the blocks USED to be.
+    document.addEventListener('scroll', mark, { capture: true, passive: true })
+    this._observers.push({
+      disconnect: () => document.removeEventListener('scroll', mark, { capture: true }),
+    })
 
     // The pointer, so the animal can get out of its way. Listened for on the
     // HOST rather than the layer: the layer takes no pointer events at all
@@ -353,7 +371,6 @@ export class PetOverlay {
     this._hostLeft = host.left
     this._hostTop = host.top
     const candidates: LedgeCandidate[] = []
-    let n = 0
     this._standingOn = null
     for (const source of this._opts.ledges ?? DEFAULT_LEDGES) {
       for (const el of this._blocks.querySelectorAll<HTMLElement>(source.selector)) {
@@ -362,8 +379,14 @@ export class PetOverlay {
         // Minted here rather than read off the element: the pet needs an
         // identity that is stable across a re-measure and unique within the
         // window, and neither blocks nor tabs carry one.
-        const id = `l:${(el.dataset.petLedge ??= String(++n))}`
-        if (id === this._pet.ledgeId) this._standingOn = { el, source }
+        // The counter lives on the overlay, not on the measurement. Reset
+        // per sweep it did not advance for elements that were already
+        // marked — `??=` skips its right-hand side — so the next new block
+        // was handed an id another element already held, and the pet
+        // teleported onto it instead of falling. An identity that is reused
+        // is worse than no identity at all.
+        const id = `l:${(el.dataset.petLedge ??= String(++this._nextLedgeId))}`
+        if (id === this._pet.ledgeId) this._standingOn = { id, el, source }
         candidates.push({
           id,
           left: r.left - host.left,
@@ -382,6 +405,21 @@ export class PetOverlay {
     this._stale = false
   }
 
+  /** Keep the ledge underfoot current without re-deriving the world. */
+  private _follow(): void {
+    const held = this._standingOn
+    if (held === null) return
+    if (!held.el.isConnected) {
+      this._stale = true
+      return
+    }
+    const r = held.el.getBoundingClientRect()
+    const y = (held.source.edge === 'top' ? r.top : r.bottom) - this._hostTop
+    const x0 = r.left - this._hostLeft + DEFAULT_TERRAIN.inset
+    const x1 = r.right - this._hostLeft - DEFAULT_TERRAIN.inset
+    this._terrain = this._terrain.map((l) => (l.id === held.id ? { id: l.id, x0, x1, y } : l))
+  }
+
   // ── the clock ────────────────────────────────────────────────────────────
 
   private _start(): void {
@@ -393,7 +431,15 @@ export class PetOverlay {
       if (this._disposed) return
       const dt = this._last === 0 ? 1 / 60 : Math.min(0.1, (t - this._last) / 1000)
       this._last = t
-      if (this._stale) this._measure()
+      // The ledge underfoot is refreshed EVERY frame, from one rectangle, so
+      // the animal rides a scroll smoothly. The full sweep is what costs — it
+      // reads every block and chip of the pane — so it runs only when
+      // something said the layout moved, and at most this often.
+      this._follow()
+      if (this._stale && t - this._lastSweep >= SWEEP_INTERVAL_MS) {
+        this._lastSweep = t
+        this._measure()
+      }
       this._pet = step(
         this._pet,
         {

@@ -490,18 +490,18 @@ func (f *fakeSession) Liveness() session.LivenessState {
 }
 
 // WorkspaceID reports the default for capability tests.
-func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
-func (f *fakeSession) Kind() session.Kind { return f.kind }
-func (f *fakeSession) PaneID() string { return "" }
-func (f *fakeSession) OpenedAt() time.Time { return f.openedAt }
-func (f *fakeSession) Host() string { return f.host }
-func (f *fakeSession) Cwd() string { return "/home/test" }
-func (f *fakeSession) ProfileID() string { return "" }
-func (f *fakeSession) CredentialID() string { return "" }
+func (f *fakeSession) WorkspaceID() workspace.ID         { return workspace.Default }
+func (f *fakeSession) Kind() session.Kind                { return f.kind }
+func (f *fakeSession) PaneID() string                    { return "" }
+func (f *fakeSession) OpenedAt() time.Time               { return f.openedAt }
+func (f *fakeSession) Host() string                      { return f.host }
+func (f *fakeSession) Cwd() string                       { return "/home/test" }
+func (f *fakeSession) ProfileID() string                 { return "" }
+func (f *fakeSession) CredentialID() string              { return "" }
 func (f *fakeSession) SandboxInfo() *sandbox.SessionInfo { return nil }
-func (f *fakeSession) Write([]byte) (int, error) { return 0, nil }
-func (f *fakeSession) EnqueueWrite([]byte) bool { return true }
-func (f *fakeSession) EffectiveSize() session.Size { return session.DefaultSize() }
+func (f *fakeSession) Write([]byte) (int, error)         { return 0, nil }
+func (f *fakeSession) EnqueueWrite([]byte) bool          { return true }
+func (f *fakeSession) EffectiveSize() session.Size       { return session.DefaultSize() }
 
 func (f *fakeSession) Resize(context.Context, session.Size) error {
 	return nil

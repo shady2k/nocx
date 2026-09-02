@@ -45,7 +45,14 @@ import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connection-overlay'
 import { IconButton } from './ui/icon-button'
-import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import {
+  BellIcon,
+  CheckCircleIcon,
+  PlugIcon,
+  RefreshIcon,
+  SettingsIcon,
+  ShieldIcon,
+} from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountClientHost } from './client-host'
@@ -101,6 +108,9 @@ import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
+import { createSandboxConvertController } from './sandbox-convert'
+import { showSandboxPermissions } from './sandbox-permissions-dialog'
+import type { SandboxStatus } from './ipc'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
 import { SnippetsClient } from './snippets/snippets-client'
@@ -405,7 +415,6 @@ function main(): void {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
-  const SANDBOX_ENABLED_KEY = 'sandbox.enabled'
 
   // The declared default, painted BEFORE the snapshot arrives: the first
   // frame must not show the opposite of what the backend is about to say.
@@ -483,6 +492,49 @@ function main(): void {
   // endpoints destination rather than growing a second one.
   tm.onOpenRoles = () => openSettingsPane().openPage('roles')
   tm.onActivity = reportActivity
+  const [sandboxEnabled, setSandboxEnabled] = createSignal(false)
+  const [sandboxStatus, setSandboxStatus] = createSignal<SandboxStatus | null>(null)
+  const [sandboxInFlight, setSandboxInFlight] = createSignal(false)
+  const sandboxController = createSandboxConvertController({
+    shieldInput: () => ({
+      enabled: sandboxEnabled(),
+      status: sandboxStatus(),
+      origin: tm.activeOrigin(),
+      sandboxed:
+        tm.activeTerminalContent()?.sandboxInfo() !== null &&
+        tm.activeTerminalContent()?.sandboxInfo() !== undefined,
+    }),
+    inFlight: () => sandboxInFlight(),
+    setInFlight: (value) => {
+      setSandboxInFlight(value)
+    },
+    paneManager: tm,
+    getSandboxState: async () => {
+      const [snapshot, status] = await Promise.all([
+        profileClient.getSnapshot(),
+        client.sandboxStatus(),
+      ])
+      setSandboxStatus(status)
+      const enabled = snapshot.values['sandbox.enabled'] === true
+      setSandboxEnabled(enabled)
+      return { enabled, status }
+    },
+    getSnapshot: () => profileClient.getSnapshot(),
+    getProfile: (paneId) => client.sandboxProfileResolve(paneId),
+    openDirectory: () => dialogClient.openDirectoryDialog(),
+    showPermissions: (options) => showSandboxPermissions(options),
+    reportOpenError: (message) => showToast({ level: 'danger', message }),
+    reportConversionError: () =>
+      showToast({ level: 'danger', message: 'Sandbox conversion could not be completed' }),
+    reportRefusal: (message) => showToast({ level: 'warning', message }),
+  })
+  tm.onSandboxCommand = (doc) => sandboxController.runCommand(doc)
+  void profileClient
+    .getSnapshot()
+    .then((snapshot) => {
+      setSandboxEnabled(snapshot.values['sandbox.enabled'] === true)
+    })
+    .catch(() => {})
 
   // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
   // The broker's pull: the backend asks the renderer to produce a session's
@@ -1030,15 +1082,11 @@ function main(): void {
         // same signal, so a settings batch cannot expose a partial hidden set.
         setHiddenKindIds(hiddenNotificationKinds(snap.values))
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
-        sandboxEnabled = snap.values[SANDBOX_ENABLED_KEY] === true
         if (next !== placement) {
           placement = next
           const newStrip = next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
           wireQuickConnect(newStrip)
           tm.replaceStrip(newStrip)
-          currentStrip = newStrip
-        } else {
-          currentStrip.setSandboxEnabled(sandboxEnabled)
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
@@ -1298,6 +1346,21 @@ function main(): void {
       () => activeOrigin(),
       sidebarWidthCtrl,
       () => activeSurfaceType() === SURFACE_SETTINGS,
+      [
+        {
+          id: 'sandbox',
+          title: 'Sandbox',
+          icon: ShieldIcon,
+          visible: () => {
+            const origin = activeOrigin()
+            const sandboxInfo = tm.activeTerminalContent()?.sandboxInfo()
+            const sandboxed = sandboxInfo !== null && sandboxInfo !== undefined
+            return sandboxEnabled() || (origin !== null && sandboxed)
+          },
+          disabled: () => sandboxInFlight(),
+          onActivate: () => void sandboxController.open(),
+        },
+      ],
     )
   }
 
@@ -1441,67 +1504,11 @@ function main(): void {
     },
   }
 
-  const getSandboxState = async (): Promise<{
-    enabled: boolean
-    status: SandboxStatus | null
-  }> => {
-    const snap = await profileClient.getSnapshot()
-    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
-    let status: SandboxStatus | null = null
-    if (enabled) {
-      try {
-        status = await client.sandboxStatus()
-      } catch {
-        status = null
-      }
-    }
-    return { enabled, status }
-  }
-
-  const reportSandboxOpenError = (message: string) => {
-    showToast({
-      level: 'danger',
-      message: `Could not open a sandboxed tab: ${message}`,
-    })
-  }
-
-  const openSandboxedTab = async () => {
-    let state: Awaited<ReturnType<typeof getSandboxState>>
-    try {
-      state = await getSandboxState()
-    } catch (err) {
-      reportSandboxOpenError((err as Error).message || 'sandbox status unavailable')
-      return
-    }
-    if (!state.enabled) return
-    if (!state.status?.available) {
-      reportSandboxOpenError(
-        `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
-      )
-      return
-    }
-
-    await openSandboxedShell({
-      getSnapshot: () => profileClient.getSnapshot(),
-      openDirectory: () => dialogClient.openDirectoryDialog(),
-      showPermissions: showSandboxPermissions,
-      newSandboxedTab: (workspace, launch) => tm.newSandboxedTab(workspace, launch),
-      reportError: reportSandboxOpenError,
-    })
-  }
-
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
       () => tm.newPane(),
       () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
-      // Sandboxed shell… action (ADR-0037): live flag and backend status on
-      // every open; then one fresh snapshot, the workspace picker, and
-      // permission confirmation. Cancellation creates nothing.
-      {
-        state: getSandboxState,
-        open: () => void openSandboxedTab(),
-      },
     ),
     sshProvider,
     // Snippets: one kind set of its own (the 'snippets' variant), so its
@@ -1604,8 +1611,6 @@ function main(): void {
   tm.onSnippetAccepted = (id) => fireSnippetById(id)
 
   function wireQuickConnect(strip: typeof tabStrip) {
-    strip.setSandboxEnabled(sandboxEnabled)
-    strip.onNewSandboxedTab = () => void openSandboxedTab()
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
     // The snippets action (design §10.3): the library without knowing the
@@ -1647,10 +1652,9 @@ function main(): void {
   // Chosen to match the command-palette convention. The tab-strip caret
   // (wireQuickConnect above) stays the plain server list. Does not collide
   // with PaneManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
-  // CodeMirror (which does not register this binding in its keymap). Match the
-  // physical key so the chord survives non-Latin keyboard layouts.
+  // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyP') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
       e.preventDefault()
       qc.showPalette()
     }
@@ -1662,7 +1666,7 @@ function main(): void {
   // (or focuses it when it is already there) instead of opening another
   // anything.
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyO') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'o') {
       e.preventDefault()
       sidebar?.revealView('ports')
     }

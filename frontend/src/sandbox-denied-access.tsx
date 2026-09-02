@@ -54,6 +54,7 @@ export interface SandboxAccessClient {
   sandboxAccessList(limit?: number): Promise<SandboxAccessList>
   sandboxAccessResolve(
     eventId: string,
+    paneId: string,
     decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
   ): Promise<SandboxAccessResolve>
   onSandboxAccessChanged(callback: (change: SandboxAccessChanged) => void): () => void
@@ -170,7 +171,7 @@ export function SandboxDeniedAccessSection(props: SandboxDeniedAccessSectionProp
     setResolving(event.id)
     setActionError('')
     try {
-      await props.client.sandboxAccessResolve(event.id, decision)
+      await props.client.sandboxAccessResolve(event.id, event.paneId, decision)
       await load()
     } catch {
       setActionError(
@@ -185,7 +186,7 @@ export function SandboxDeniedAccessSection(props: SandboxDeniedAccessSectionProp
     <div class="sandbox-denied-access">
       <PageSection
         title="Denied access"
-        description="Denied filesystem attempts from sandboxed shells. This diagnostic inbox is bounded and kept only in memory; new rules apply to future sandboxed tabs."
+        description="Denied filesystem attempts from sandbox sessions. This diagnostic inbox is bounded and kept only in memory; new rules apply to future sessions."
       >
         <Show when={state() === 'loading'}>
           <EmptyState title="Loading sandbox access" />

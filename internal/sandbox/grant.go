@@ -15,9 +15,9 @@ const (
 	ProfileSourceLegacy    = "legacy"
 )
 
-// GrantProvenance records which profile sourced a pane grant. It is stored
-// inside sandbox_grants.payload and surfaced by sandbox.grant.get, never
-// invented by the renderer.
+// GrantProvenance is the backend-owned provenance stored inside the
+// authority_grants payload and surfaced by sandbox access APIs, never invented
+// by the renderer.
 type GrantProvenance struct {
 	// WorkspaceID is the layout workspace the pane belonged to when the grant
 	// was minted (backend-owned provenance, never the renderer's claim).
@@ -31,7 +31,7 @@ type GrantProvenance struct {
 	ProfileRevision *int64 `json:"profileRevision"`
 }
 
-// GrantPayload is the stored sandbox_grants.payload envelope: the realized
+// GrantPayload is the stored authority_grants payload envelope: the realized
 // enforcement metadata plus the provenance that sourced it.
 type GrantPayload struct {
 	Realized   *SessionInfo     `json:"realized"`

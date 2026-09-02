@@ -2,6 +2,7 @@
 // correlation, notification routing, disconnect/reconnect behaviour, and
 // typed subscribe/unsubscribe.  WSClient and ProfileClient consume it.
 
+import { fixedEndpoint } from './endpoint'
 import type {
   Endpoint,
   EndpointFailure,
@@ -166,8 +167,7 @@ export class Dispatcher {
   private _heartbeatResponseTimer: TimerHandle | null = null
   private _heartbeatSocket: WebSocket | null = null
   private _heartbeatRequestID: number | null = null
-
-  constructor(private readonly provider: EndpointProvider) {
+  constructor(private readonly provider: EndpointProvider = fixedEndpoint(0)) {
     this.subscribe('control.saturated', (params: unknown) => {
       // Consume the generated params type (the contract file must be
       // reachable from main() — dead-exports ratchet). The notification's

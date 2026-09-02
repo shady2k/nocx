@@ -78,6 +78,8 @@ export interface SandboxConversionDeps {
 }
 
 export interface SandboxConvertController {
+  /** Open a sandboxed replacement for the active pane. */
+  open(): Promise<void>
   /** Convert the active tab (apply or remove). */
   toggle(): Promise<void>
   /** Replace an active sandboxed tab with a newly confirmed sandbox grant. */
@@ -90,6 +92,7 @@ export function createSandboxConvertController(
   deps: SandboxConversionDeps,
 ): SandboxConvertController {
   return {
+    open: () => convert(deps, 'toggle'),
     toggle: () => convert(deps, 'toggle'),
     relaunch: () => convert(deps, 'relaunch'),
     runCommand: (doc) => runCommand(deps, doc),
@@ -158,9 +161,9 @@ async function applySandbox(
     deps.reportOpenError(err instanceof Error ? err.message : 'sandbox status unavailable')
     return
   }
-  if (!state.enabled) return
-  if (!state.status?.available) {
-    const reason = state.status?.detail || state.status?.reason || 'status-unavailable'
+  const enforce = state.status?.enforce
+  if (!enforce || !enforce.available) {
+    const reason = enforce?.detail || enforce?.reason || 'status-unavailable'
     deps.reportOpenError(`Sandbox unavailable (${reason})`)
     return
   }
@@ -169,7 +172,7 @@ async function applySandbox(
   await openSandboxedShell(
     {
       getSnapshot: () => deps.getSnapshot(),
-      getProfile: (paneId) => deps.getProfile(paneId),
+      getProfile: (paneId: string) => deps.getProfile(paneId),
       openDirectory: () => deps.openDirectory(),
       showPermissions: (options) => deps.showPermissions(options),
       newSandboxedTab: (_workspace, launch) => {

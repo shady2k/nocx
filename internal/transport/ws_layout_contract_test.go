@@ -90,14 +90,14 @@ func TestLayoutReadDTOConformsToContract(t *testing.T) {
 			{ID: tabID1, WorkspaceID: wsID1, Layout: content.LayoutRow},
 			{ID: tabID2, WorkspaceID: wsID1, Name: &name, Colour: &colour, Position: 1, Pinned: true, Layout: content.LayoutColumn},
 		}),
-		Panes: wirePanes([]content.Pane{{ID: paneID1, TabID: tabID1, Cwd: "/repos/nocx", Kind: content.PaneLocal, SizeShare: 1}}, map[string]struct{}{paneID1: {}}),
+		Panes: wirePanes([]content.Pane{{ID: paneID1, TabID: tabID1, Cwd: "/repos/nocx", Kind: content.PaneLocal, SizeShare: 1}}),
 	}
 	validateJSON(t, schema, mustMarshal(full), "layout.read DTO (populated)")
 	empty := layoutReadResponse{
 		DefaultWorkspaceID: "workspace:default",
 		Workspaces:         wireWorkspaces(nil),
 		Tabs:               wireTabs(nil),
-		Panes:              wirePanes(nil, nil),
+		Panes:              wirePanes(nil),
 	}
 	validateJSON(t, schema, mustMarshal(empty), "layout.read DTO (empty)")
 	if got := string(mustMarshal(empty)); got != `{"defaultWorkspaceId":"workspace:default","workspaces":[],"tabs":[],"panes":[]}` {

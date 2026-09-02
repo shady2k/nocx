@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.delete.params.schema.json",
+  "title": "SandboxProfileDeleteParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceId", "expectedRevision"],
+  "properties": {
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "expectedRevision": { "type": "integer", "minimum": 0 }
+  }
+}

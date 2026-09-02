@@ -160,6 +160,8 @@ export interface SidebarAction {
   readonly title: string
   readonly icon: Component
   readonly onActivate: () => void
+  readonly disabled?: () => boolean
+  readonly visible?: () => boolean
 }
 
 /** The sidebar's remembered state, and the seam that records a change.
@@ -307,6 +309,7 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
+  topActions: readonly SidebarAction[]
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
@@ -551,6 +554,23 @@ function SidebarSolid(props: SidebarSolidProps) {
             )
           }}
         </For>
+        <For each={props.topActions}>
+          {(action) => (
+            <Show when={action.visible?.() !== false}>
+              <IconButton
+                size="lg"
+                data-action={action.id}
+                title={action.title}
+                ariaLabel={action.title}
+                disabled={action.disabled?.() === true}
+                tabIndex={action.id === tabbableId() ? 0 : -1}
+                onClick={() => handleActionClick(action)}
+              >
+                <action.icon />
+              </IconButton>
+            </Show>
+          )}
+        </For>
       </div>
 
       {/* Spacer pushes bottom zone to the bottom */}
@@ -600,21 +620,10 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           views that need real scope provide one.
  * @param getActiveOrigin    reactive accessor for the active tab's origin
  *                           (see SidebarViewProps.activeOrigin). Defaults
- *                           to null — views that need real scope provide
- *                           one (the Files panel, design §5.4).
- * @param resize             the width controller (nocx-qmcu), created by
- *                           the composition root from the UI-state
- *                           document's width. When present the panel
- *                           renders the kit ResizeHandle and drags resize
- *                           #sidebar.
- * @param getActivePaneIsSettings reactive accessor for "the active tab is a
- *                           Settings tab" (nocx-3e3b): while true, the
- *                           panel collapses transiently on arrival — the
- *                           user's pre-Settings state is restored on
- *                           departure, and neither the collapsed preference
- *                           nor the width is written. Defaults to false —
- *                           the shell without a Settings surface never
- *                           collapses for it.
+ *                           to null — views that need real scope provide one.
+ * @param getActivePaneIsSettings reactive accessor for the Settings surface.
+ *                           Defaults to false.
+ * @param topActions         action descriptors in the top activity-bar zone.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -626,6 +635,7 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
+  topActions: readonly SidebarAction[] = [],
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
@@ -666,6 +676,7 @@ export function mountSidebar(
         panel={panel}
         views={views}
         actions={actions}
+        topActions={topActions}
         persistence={persistence ?? null}
         state={state}
         storeActions={storeActions}

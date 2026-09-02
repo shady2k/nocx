@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 
 	"github.com/shady2k/nocx/internal/sandbox"
 )
@@ -24,19 +25,41 @@ func (h sandboxHandlers) handleStatus(ctx context.Context, req jsonrpcRequest) {
 	}
 	st := h.svc.Status(ctx)
 	_ = h.r.TryResult(req.ID, mustMarshal(sandboxStatusResponse{
-		Available: st.Available,
-		Backend:   st.Backend,
-		Reason:    st.Reason,
-		Detail:    st.Detail,
-		ABI:       st.ABI,
+		Learn:   st.Learn,
+		Enforce: st.Enforce,
 	}))
+}
+
+func sandboxRPCError(code int, message, reason string) RPCError {
+	return RPCError{Code: code, Message: message, Data: &vaultErrorData{Reason: reason}}
+}
+
+func sandboxOpenError(err error) (RPCError, bool) {
+	var statusErr *sandbox.StatusError
+	if errors.As(err, &statusErr) {
+		reason := statusErr.Status.Enforce.Reason
+		if reason == "" {
+			reason = statusErr.Status.Reason
+		}
+		return sandboxRPCError(-32011, "Filesystem sandbox backend unavailable", reason), true
+	}
+	var setupErr *sandbox.SetupError
+	if errors.As(err, &setupErr) {
+		reason := setupErr.Reason
+		if reason == "" {
+			reason = "setup-failed"
+		}
+		code := -32012
+		if reason == sandbox.ReasonPolicyTooLarge {
+			code = -32007
+		}
+		return sandboxRPCError(code, "Filesystem sandbox setup failed", reason), true
+	}
+	return RPCError{}, false
 }
 
 // sandboxStatusResponse is the wire shape of sandbox.status.
 type sandboxStatusResponse struct {
-	Available bool   `json:"available"`
-	Backend   string `json:"backend"`
-	Reason    string `json:"reason,omitempty"`
-	Detail    string `json:"detail,omitempty"`
-	ABI       int    `json:"abi,omitempty"`
+	Learn   sandbox.ModeStatus `json:"learn"`
+	Enforce sandbox.ModeStatus `json:"enforce"`
 }

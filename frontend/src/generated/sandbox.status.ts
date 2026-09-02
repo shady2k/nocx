@@ -10,12 +10,18 @@
  */
 
 /**
- * Result of the sandbox.status JSON-RPC method. Reports native backend availability for an interactive sandboxed shell.
+ * Result of sandbox.status. Learn and Enforce are independently available; Learn is unrestricted and best effort.
  */
 export interface SandboxStatus {
+  learn: ModeStatus
+  enforce: ModeStatus
+}
+export interface ModeStatus {
   available: boolean
   backend: 'landlock' | 'seatbelt' | 'unsupported'
   reason?: string
   detail?: string
   abi?: number
+  state: 'available' | 'unavailable' | 'degraded'
+  coverage: string[]
 }

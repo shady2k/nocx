@@ -17,7 +17,6 @@ import type { PaneContent, ContentDescriptor, SurfaceType, SingletonKey } from '
 // build() where it cannot.
 
 export const SURFACE_ID_SETTINGS = 'settings'
-export const SURFACE_ID_SANDBOX_STATISTICS = 'sandbox-statistics'
 
 /** The API workbench (design §9.1). One pane, singleton-keyed: a request
  *  opens INSIDE it rather than as its own tab, so there is exactly one of it

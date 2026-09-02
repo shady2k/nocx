@@ -1,9 +1,6 @@
 import type { Component } from 'solid-js'
 
-/**
- * Shield — Lucide `shield` under ISC.
- * Uses currentColor so it follows the container's text colour.
- */
+/** Shield — Lucide `shield-check` under ISC. */
 const ShieldIcon: Component = () => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
@@ -15,7 +12,8 @@ const ShieldIcon: Component = () => (
     stroke-linejoin="round"
     aria-hidden="true"
   >
-    <path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z" />
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="m9 12 2 2 4-4" />
   </svg>
 )
 

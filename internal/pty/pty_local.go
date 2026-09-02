@@ -301,6 +301,7 @@ func (lp *LocalPty) SandboxInfo() *sandbox.SessionInfo {
 		return nil
 	}
 	return &sandbox.SessionInfo{
+		Mode:            lp.prepared.Mode,
 		Backend:         lp.prepared.Backend,
 		Workspace:       lp.prepared.Policy.Workspace,
 		WritableRoots:   append([]string(nil), lp.prepared.Policy.WritableRoots...),

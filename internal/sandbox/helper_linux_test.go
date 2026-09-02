@@ -271,6 +271,61 @@ func TestObservedPolicyPathDoesNotHideSymlinkEscapeDenial(t *testing.T) {
 	}
 }
 
+func TestLinuxLearnObserverReportsCandidateWithoutBlocking(t *testing.T) {
+	command, err := exec.LookPath("touch")
+	if err != nil {
+		t.Skipf("touch is not on PATH: %v", err)
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	outside := filepath.Join(root, "outside")
+	cache := filepath.Join(root, "cache")
+	for _, dir := range []string{workspace, outside, cache} {
+		if mkdirErr := os.Mkdir(dir, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	}
+	candidate := filepath.Join(outside, "candidate.txt")
+	inbox := NewAccessInbox(nil)
+	svc := NewWithAccess(log.NewSlogAdapter(nil), cache, inbox)
+	prepared, err := svc.Prepare(t.Context(), Request{
+		Mode:      ModeLearn,
+		Workspace: workspace,
+		Identity:  SessionIdentity{SessionID: "learn", InstanceID: "instance", Epoch: 1},
+	}, CommandSpec{Path: command, Args: []string{candidate}, Dir: workspace, Env: os.Environ()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer prepared.Close()
+	if err := prepared.Cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := prepared.WaitReady(t.Context()); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if err := prepared.Cmd.Wait(); err != nil {
+		t.Fatalf("Learn command was blocked: %v", err)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("Learn command did not create candidate: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		page := inbox.List(AccessListOptions{Limit: 10})
+		if len(page.Events) > 0 {
+			event := page.Events[0]
+			if event.Path != candidate || event.Access != AccessReadWrite || event.Source != AccessSourceLinuxSeccomp {
+				t.Fatalf("event = %#v", event)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Learn candidate did not reach access inbox")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestLinuxAccessMonitorReportsListenerFailure(t *testing.T) {
 	failed := make(chan error, 1)
 	monitor := newLinuxAccessMonitor(-1, NewAccessInbox(nil).BeginSession(SessionIdentity{

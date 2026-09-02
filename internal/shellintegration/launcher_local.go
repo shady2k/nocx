@@ -154,6 +154,11 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 // carries is never readable by another user. The shell removes the whole
 // directory at the top of the .zshrc, before any user code runs; the caller
 // removes it on spawn failure.
+// WriteLocalZDOTDIR creates a private transient ZDOTDIR in the system temp directory.
+func WriteLocalZDOTDIR(rc string) (string, error) {
+	return writeLocalZDOTDIRIn(rc, os.TempDir())
+}
+
 func writeLocalZDOTDIRIn(rc, parent string) (string, error) {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {

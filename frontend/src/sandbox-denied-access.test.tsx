@@ -92,7 +92,9 @@ describe('SandboxDeniedAccessSection', () => {
     })
     fireEvent.input(keywords, { target: { value: 'report' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add workspace read-write' }))
-    await waitFor(() => expect(resolve).toHaveBeenCalledWith(event.id, 'workspaceReadWrite'))
+    await waitFor(() =>
+      expect(resolve).toHaveBeenCalledWith(event.id, event.paneId, 'workspaceReadWrite'),
+    )
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
     expect(keywords.value).toBe('report')
   })

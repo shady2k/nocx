@@ -39,6 +39,7 @@ describe('openSandboxedShell', () => {
       }),
     )
     expect(d.newSandboxedTab).toHaveBeenCalledWith('/workspace', {
+      mode: 'enforce',
       settingsRevision: 7,
       profileRevision: 4,
       addWritable: ['/d'],
@@ -65,10 +66,12 @@ describe('openSandboxedShell', () => {
     await openSandboxedShell(d, { paneId: 'pane-1' })
 
     const launch = vi.mocked(d.newSandboxedTab).mock.calls[0][1] as Record<string, unknown>
-    // The launch object carries only the revision and four deltas — no baseline.
+    // The launch object carries the selected mode, revisions, and four deltas
+    // — no baseline or effective root.
     expect(Object.keys(launch).sort()).toEqual([
       'addReadOnly',
       'addWritable',
+      'mode',
       'profileRevision',
       'removeReadOnly',
       'removeWritable',

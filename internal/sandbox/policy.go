@@ -842,6 +842,26 @@ func sandboxEnv(env []string, home, tmp string) []string {
 	return out
 }
 
+// learnEnv marks an unrestricted observe-only session without redirecting its
+// HOME or temporary directories.
+func learnEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	seen := false
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if key != "NOCX_SANDBOX" || !ok {
+			out = append(out, kv)
+			continue
+		}
+		out = append(out, "NOCX_SANDBOX=filesystem")
+		seen = true
+	}
+	if !seen {
+		out = append(out, "NOCX_SANDBOX=filesystem")
+	}
+	return out
+}
+
 // RemoveRuntimeRoot best-effort deletes a per-session runtime tree. Deletion
 // is not secure erase (design spec §5.3).
 func RemoveRuntimeRoot(root string) {

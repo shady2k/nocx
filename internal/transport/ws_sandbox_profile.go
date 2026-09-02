@@ -1,7 +1,7 @@
 package transport
 
-// sandbox.profile.get / sandbox.profile.set / sandbox.grant.get — the
-// workspace-profile and grant-provenance surface (design 2026-08-23 §4).
+// sandbox.profile.get / sandbox.profile.set / sandbox.run.get — the
+// workspace-profile and run provenance surface (design 2026-08-23 §4).
 //
 // Profiles are PrivateMetadata (paths appear only in these explicit results);
 // they are durable defaults, never authority. The renderer never chooses the
@@ -33,14 +33,15 @@ func (s *WSServer) profileLayout() sandboxProfileLayout {
 }
 
 // sandboxProfileLayout is the narrow layout seam the profile handlers need.
-// It is the content.LayoutRepository read/write surface for profiles and the
-// grant query; never the whole server.
+// It is the content.LayoutRepository read/write surface for profiles and
+// pane-grant provenance; never the whole server.
 type sandboxProfileLayout interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+	InsertPaneGrantIfCurrent(ctx context.Context, paneID string, grant content.Grant, expectation content.PaneGrantExpectation, payload string) error
 	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*content.WorkspaceSandboxProfile, error)
 	SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile content.WorkspaceSandboxProfile) (int64, error)
 	DeleteWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64) error
-	SandboxGrantForPane(ctx context.Context, paneID string) (*content.SandboxGrant, error)
+	PaneGrant(ctx context.Context, paneID string) (*content.StoredGrant, error)
 }
 
 // workspaceProfileReader is the read half shared with the open handler.
@@ -147,15 +148,12 @@ type sandboxProfileDeleteResult struct {
 	WorkspaceID string `json:"workspaceId"`
 }
 
-type sandboxGrantGetResult struct {
-	IssuedAt   int64                   `json:"issuedAt"`
-	Realized   *sandbox.SessionInfo    `json:"realized"`
-	Provenance sandbox.GrantProvenance `json:"provenance"`
+type sandboxProfileGetParams struct {
+	WorkspaceID string `json:"workspaceId"`
+	PaneID      string `json:"paneId"` // accepted for pre-split clients
 }
 
-// ── params and validators ─────────────────────────────────────────────────
-
-type sandboxProfileGetParams struct {
+type sandboxProfileResolveParams struct {
 	PaneID string `json:"paneId"`
 }
 
@@ -171,7 +169,7 @@ type sandboxProfileDeleteParams struct {
 	ExpectedRevision int64  `json:"expectedRevision"`
 }
 
-type sandboxGrantGetParams struct {
+type sandboxRunGetParams struct {
 	PaneID string `json:"paneId"`
 }
 
@@ -184,6 +182,25 @@ func validatePaneID(value string) string {
 
 func validateSandboxProfileGetRaw(raw json.RawMessage) string {
 	var params sandboxProfileGetParams
+	if msg := decodeSandboxAccessObject(raw, &params); msg != "" {
+		return msg
+	}
+	if params.WorkspaceID != "" {
+		return validateStringBound("workspaceId", params.WorkspaceID, maxIDRunes)
+	}
+	return validatePaneID(params.PaneID)
+}
+
+func validateSandboxProfileResolveRaw(raw json.RawMessage) string {
+	var params sandboxProfileResolveParams
+	if msg := decodeSandboxAccessObject(raw, &params); msg != "" {
+		return msg
+	}
+	return validatePaneID(params.PaneID)
+}
+
+func validateSandboxRunGetRaw(raw json.RawMessage) string {
+	var params sandboxRunGetParams
 	if msg := decodeSandboxAccessObject(raw, &params); msg != "" {
 		return msg
 	}
@@ -243,14 +260,6 @@ func validateSandboxProfileDeleteRaw(raw json.RawMessage) string {
 	return ""
 }
 
-func validateSandboxGrantGetRaw(raw json.RawMessage) string {
-	var params sandboxGrantGetParams
-	if msg := decodeSandboxAccessObject(raw, &params); msg != "" {
-		return msg
-	}
-	return validatePaneID(params.PaneID)
-}
-
 // ── handlers ──────────────────────────────────────────────────────────────
 
 func (h sandboxProfileHandlers) handleProfileGet(ctx context.Context, req jsonrpcRequest) {
@@ -259,13 +268,21 @@ func (h sandboxProfileHandlers) handleProfileGet(ctx context.Context, req jsonrp
 		return
 	}
 	var params sandboxProfileGetParams
-	if msg := decodeSandboxAccessObject(req.Params, &params); msg != "" || params.PaneID == "" {
+	if msg := decodeSandboxAccessObject(req.Params, &params); msg != "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	workspaceID, err := h.layout.WorkspaceForPane(ctx, params.PaneID)
-	if err != nil {
-		_ = h.r.TryError(req.ID, sandboxProfileError(req, err))
+	workspaceID := params.WorkspaceID
+	if workspaceID == "" && params.PaneID != "" {
+		var err error
+		workspaceID, err = h.layout.WorkspaceForPane(ctx, params.PaneID)
+		if err != nil {
+			_ = h.r.TryError(req.ID, sandboxProfileError(req, err))
+			return
+		}
+	}
+	if workspaceID == "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
 	snap, err := h.settings.GetSnapshot()
@@ -286,6 +303,16 @@ func (h sandboxProfileHandlers) handleProfileGet(ctx context.Context, req jsonrp
 		WritablePaths: eff.WritablePaths,
 		ReadOnlyPaths: eff.ReadOnlyPaths,
 	}))
+}
+
+func (h sandboxProfileHandlers) handleProfileResolve(ctx context.Context, req jsonrpcRequest) {
+	var params sandboxProfileResolveParams
+	if msg := decodeSandboxAccessObject(req.Params, &params); msg != "" || params.PaneID == "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
+		return
+	}
+	req.Params = mustMarshal(sandboxProfileGetParams{PaneID: params.PaneID})
+	h.handleProfileGet(ctx, req)
 }
 
 func (h sandboxProfileHandlers) handleProfileSet(ctx context.Context, req jsonrpcRequest) {
@@ -337,17 +364,38 @@ func (h sandboxProfileHandlers) handleProfileDelete(ctx context.Context, req jso
 	_ = h.r.TryResult(req.ID, mustMarshal(sandboxProfileDeleteResult{WorkspaceID: params.WorkspaceID}))
 }
 
-func (h sandboxProfileHandlers) handleGrantGet(ctx context.Context, req jsonrpcRequest) {
+type sandboxCandidatePolicy struct {
+	WritableRoots []string `json:"writableRoots"`
+	ReadOnlyRoots []string `json:"readOnlyRoots"`
+}
+
+type sandboxRunProvenance struct {
+	WorkspaceID      string `json:"workspaceId"`
+	Source           string `json:"source"`
+	SettingsRevision int64  `json:"settingsRevision"`
+	ProfileRevision  *int64 `json:"profileRevision"`
+}
+
+type sandboxRunGetResult struct {
+	Mode            sandbox.RunMode        `json:"mode"`
+	IssuedAt        int64                  `json:"issuedAt"`
+	Backend         string                 `json:"backend"`
+	ShellFolder     string                 `json:"shellFolder"`
+	CandidatePolicy sandboxCandidatePolicy `json:"candidatePolicy"`
+	Provenance      sandboxRunProvenance   `json:"provenance"`
+}
+
+func (h sandboxProfileHandlers) handleRunGet(ctx context.Context, req jsonrpcRequest) {
 	if h.layout == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "sandbox grants not available"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "sandbox run provenance not available"})
 		return
 	}
-	var params sandboxGrantGetParams
+	var params sandboxRunGetParams
 	if msg := decodeSandboxAccessObject(req.Params, &params); msg != "" || params.PaneID == "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	grant, err := h.layout.SandboxGrantForPane(ctx, params.PaneID)
+	grant, err := h.layout.PaneGrant(ctx, params.PaneID)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "sandbox grant lookup failed"})
 		return
@@ -357,22 +405,39 @@ func (h sandboxProfileHandlers) handleGrantGet(ctx context.Context, req jsonrpcR
 		return
 	}
 	realized, provenance, err := sandbox.DecodeGrantPayload([]byte(grant.Payload))
-	if err != nil {
+	if err != nil || realized == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "sandbox grant is malformed"})
 		return
 	}
 	if provenance.ProfileSource == sandbox.ProfileSourceLegacy {
-		workspaceID, workspaceErr := h.layout.WorkspaceForPane(ctx, params.PaneID)
-		if workspaceErr != nil {
+		provenance.WorkspaceID, err = h.layout.WorkspaceForPane(ctx, params.PaneID)
+		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "sandbox grant lookup failed"})
 			return
 		}
-		provenance.WorkspaceID = workspaceID
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(sandboxGrantGetResult{
-		IssuedAt:   grant.IssuedAt,
-		Realized:   realized,
-		Provenance: provenance,
+	source := provenance.ProfileSource
+	profileRevision := provenance.ProfileRevision
+	settingsRevision := int64(0)
+	if source == sandbox.ProfileSourceStandard && profileRevision != nil {
+		settingsRevision = *profileRevision
+		profileRevision = nil
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(sandboxRunGetResult{
+		Mode:        realized.Mode,
+		IssuedAt:    grant.IssuedAt,
+		Backend:     realized.Backend,
+		ShellFolder: realized.Workspace,
+		CandidatePolicy: sandboxCandidatePolicy{
+			WritableRoots: append([]string(nil), realized.WritableRoots...),
+			ReadOnlyRoots: append([]string(nil), realized.ReadOnlyRoots...),
+		},
+		Provenance: sandboxRunProvenance{
+			WorkspaceID:      provenance.WorkspaceID,
+			Source:           source,
+			SettingsRevision: settingsRevision,
+			ProfileRevision:  profileRevision,
+		},
 	}))
 }
 

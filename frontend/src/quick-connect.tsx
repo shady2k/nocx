@@ -112,14 +112,26 @@ export interface QuickConnectItem {
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
-  /** A second thing this row can do, shown as an icon at its trailing edge. */
+  /** A second thing this row can do, shown as an icon at its trailing edge.
+   *  OPTIONAL and rare: a row's meaning is its `run`, and an action beside it
+   *  is for a genuine SECOND destination rather than for a remedy after a
+   *  refusal — snippets offer "copy this instead of inserting it", which a
+   *  person wants before anything has gone wrong (nocx-8rtr.2).
+   *
+   *  It is a mouse affordance: the row is a listbox option, and a focusable
+   *  control inside one breaks the roving the field owns, so the button is
+   *  taken out of the tab order. A keyboard route is nocx-2jbxg, deliberately
+   *  not invented here — a chord on this surface is inherited by the server
+   *  list, the command palette and the secret picker at once. */
   readonly action?: {
+    /** A THUNK, not an element: a provider builds its rows wherever it likes,
+     *  including a test with no DOM, and an eagerly-built icon would need one
+     *  there. It is called during render, where there is always a document. */
     readonly icon: () => JSX.Element
+    /** Required: an icon-only control with no accessible name is a defect. */
     readonly ariaLabel: string
     readonly run: () => void
   }
-  /** When true, the row renders disabled and run is a no-op. */
-  readonly disabled?: boolean
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -242,15 +254,9 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
-    /** Sandbox action state (ADR-0033 §3.1-§3.2, ADR-0035): live flag,
-     *  native backend + launch intent status, and picker→tab flow. */
-    private sandbox?: {
-      state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
-      open: () => void
-    },
   ) {}
 
-  async getItems(): Promise<QuickConnectItem[]> {
+  getItems(): QuickConnectItem[] {
     const items: QuickConnectItem[] = [
       {
         id: '__local__',
@@ -279,32 +285,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     if (this.drillCommand) {
       items.push(drillItem(this.drillCommand))
     }
-    if (!this.sandbox) return items
-    // The flag gates VISIBILITY only; the backend also rejects a request
-    // while it is off, so UI and wire agree even if this read is stale.
-    // The action launches the user's configured interactive shell; sandboxing
-    // changes only its filesystem policy.
-    let state: { enabled: boolean; status: SandboxStatus | null }
-    try {
-      state = await this.sandbox.state()
-    } catch {
-      return items
-    }
-    if (!state.enabled) return items
-
-    const backend = state.status?.backend ?? 'unknown'
-    const reason = state.status?.reason ?? ''
-    const backendUnavailable = !state.status?.available
-    items.push({
-      id: '__sandboxed_local__',
-      kind: 'command',
-      label: 'Sandboxed shell…',
-      detail: backendUnavailable
-        ? `Sandbox unavailable (${reason})`
-        : `Open a filesystem-isolated local shell (${backend})`,
-      disabled: backendUnavailable,
-      run: () => this.sandbox!.open(),
-    })
     return items
   }
 }
@@ -920,20 +900,18 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   function activate(index: number) {
+    // Whatever this is — a row, a drill step, a walk-back — the person has
+    // moved past the refusal that was on screen.
+    props.onNoticeDone?.()
     if (drill()) {
       const choice = drillFiltered()[index]
       if (!choice) return
-      // The person has moved past the refusal that was on screen.
-      props.onNoticeDone?.()
       chooseStep(choice)
       return
     }
     const list = filteredItems()
     const item = list[index]
-    // Disabled rows are status, not actions. The renderer enforces this
-    // contract instead of relying on a fail-closed backend rejection.
-    if (!item || item.disabled) return
-    props.onNoticeDone?.()
+    if (!item) return
     if (item.drill) {
       // A command that needs a target drills in — no second dialog, no
       // dead end (nocx-4t37).
@@ -1077,11 +1055,9 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     classList={{
                       'quick-connect__item--selected': selectedIndex() === index(),
                       'quick-connect__item--system': item.system === true,
-                      'quick-connect__item--disabled': item.disabled === true,
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
-                    aria-disabled={item.disabled === true}
                     // The row is not a focus target: the field is. Without
                     // this the mouse silently moves the caret out of the
                     // one place this surface takes input, and the next

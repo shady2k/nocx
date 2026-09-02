@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.status.params.schema.json",
+  "title": "SandboxStatusParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

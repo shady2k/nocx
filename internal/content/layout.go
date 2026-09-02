@@ -205,6 +205,30 @@ type Pane struct {
 	SizeShare float64
 }
 
+type WorkspaceSandboxProfile struct {
+	SchemaVersion int      `json:"schemaVersion"`
+	Revision      int64    `json:"revision"`
+	WritablePaths []string `json:"writablePaths"`
+	ReadOnlyPaths []string `json:"readOnlyPaths"`
+}
+
+// PaneGrantExpectation binds issuance to the pane's current workspace policy.
+type PaneGrantExpectation struct {
+	WorkspaceID              string
+	WorkspaceProfileRevision *int64
+}
+
+// StoredGrant is the durable projection of either an execution or pane grant.
+type StoredGrant struct {
+	Version   int
+	IssuedAt  int64
+	ExpiresAt *int64
+	Policy    EffectPolicy
+	Effects   []Effect
+	Scopes    []GrantScope
+	Payload   string
+}
+
 // Replacement is the identity of the tab that appears when the last tab in
 // the APPLICATION closes (nocx-isoph.3, §4.4 of the workspaces UX design). It
 // is a parameter rather than something the backend invents for two reasons,
@@ -445,6 +469,13 @@ type LayoutRepository interface {
 	// owner of "which workspace is this in" and it cannot go out of step with
 	// a pane that was dragged elsewhere.
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+	InsertPaneGrantIfCurrent(ctx context.Context, paneID string, grant Grant, expectation PaneGrantExpectation, payload string) error
+	RemovePaneGrant(ctx context.Context, paneID string) error
+	PaneGrant(ctx context.Context, paneID string) (*StoredGrant, error)
+	OpenPaneGrants(ctx context.Context) (map[string]StoredGrant, error)
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*WorkspaceSandboxProfile, error)
+	SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error)
+	DeleteWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64) error
 	// Panes returns one tab's panes in id order. A pane has no stored
 	// position: §5 gives the member a SHARE and the set a direction, and
 	// nothing else. Ordering within a tab becomes a user-visible operation

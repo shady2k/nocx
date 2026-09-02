@@ -2268,16 +2268,62 @@ type openParentParams struct {
 // removeWritable, addReadOnly and removeReadOnly are optional bounded deltas.
 // Populated by decodeOpenSandbox, never by a permissive Unmarshal.
 type openSandboxParams struct {
-	Workspace        string
-	SettingsRevision int
-	// ProfileRevision is the nullable per-workspace profile revision the
-	// dialog displayed (design 2026-08-23 §4.3): null for a standard-source
-	// launch, the exact sandboxProfile.revision for a workspace-source one.
-	ProfileRevision *int64
-	AddWritable     []string
-	RemoveWritable  []string
-	AddReadOnly     []string
-	RemoveReadOnly  []string
+	Workspace        string          `json:"workspace"`
+	Mode             sandbox.RunMode `json:"mode"`
+	SettingsRevision int             `json:"settingsRevision"`
+	ProfileRevision  *int64          `json:"profileRevision"`
+	AddWritable      []string        `json:"addWritable"`
+	RemoveWritable   []string        `json:"removeWritable"`
+	AddReadOnly      []string        `json:"addReadOnly"`
+	RemoveReadOnly   []string        `json:"removeReadOnly"`
+}
+
+const maxSandboxPaths = 32
+
+func decodeOpenParams(data []byte) (openParams, error) {
+	var p openParams
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return p, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return p, errors.New("open params: trailing JSON")
+		}
+		return p, err
+	}
+	if p.Sandbox == nil {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return p, err
+		}
+		if rawSandbox, ok := raw["sandbox"]; ok && bytes.Equal(bytes.TrimSpace(rawSandbox), []byte("null")) {
+			return p, errors.New("sandbox: null is not valid")
+		}
+		return p, nil
+	}
+	sb := p.Sandbox
+	if sb.Workspace == "" || sb.Mode == "" {
+		return p, errors.New("sandbox: workspace and mode required")
+	}
+	if sb.Mode != sandbox.ModeLearn && sb.Mode != sandbox.ModeEnforce {
+		return p, errors.New("sandbox: mode must be learn or enforce")
+	}
+	if sb.SettingsRevision < 0 {
+		return p, errors.New("sandbox: settingsRevision must be >= 0")
+	}
+	for _, paths := range [][]string{sb.AddWritable, sb.RemoveWritable, sb.AddReadOnly, sb.RemoveReadOnly} {
+		if len(paths) > maxSandboxPaths {
+			return p, fmt.Errorf("sandbox: at most %d paths per delta", maxSandboxPaths)
+		}
+	}
+	return p, nil
+}
+
+func canonicalizeOpenCwd(path string) (string, error) {
+	return sandbox.CanonicalizeWorkspace(path)
 }
 
 // resizeParams is the payload of the "resize" RPC method.

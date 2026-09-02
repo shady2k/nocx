@@ -1,7 +1,7 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
         sandbox-smoke-linux sandbox-smoke-linux-artifact \
-        sandbox-smoke-macos sandbox-smoke-macos-artifact
+        sandbox-smoke-macos sandbox-smoke-macos-artifact \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 

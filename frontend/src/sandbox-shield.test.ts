@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ActiveOrigin } from './pane-content'
 import { shieldState } from './sandbox-shield'
+import type { SandboxStatus } from './ipc'
 
 const localOrigin: ActiveOrigin = {
   paneId: 1,
@@ -12,9 +13,14 @@ const localOrigin: ActiveOrigin = {
   host: null,
 }
 
+const availableStatus: SandboxStatus = {
+  learn: { available: true, backend: 'landlock', state: 'available', coverage: [] },
+  enforce: { available: true, backend: 'landlock', state: 'available', coverage: [] },
+}
+
 const base = {
   enabled: true,
-  status: { available: true },
+  status: availableStatus,
   origin: localOrigin,
   sandboxed: false,
 }
@@ -27,16 +33,32 @@ describe('shieldState', () => {
       { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' },
     ],
     [
-      { ...base, status: { available: false, reason: 'landlock-abi-too-old' } },
+      {
+        ...base,
+        status: {
+          ...availableStatus,
+          enforce: {
+            ...availableStatus.enforce,
+            available: false,
+            reason: 'landlock-abi-too-old',
+            state: 'unavailable' as const,
+          },
+        },
+      },
       { kind: 'disabled', reason: 'Sandbox unavailable (landlock-abi-too-old)' },
     ],
     [
       {
         ...base,
         status: {
-          available: false,
-          reason: 'landlock-abi-too-old',
-          detail: 'kernel Landlock ABI 2 is below the required floor of 3',
+          ...availableStatus,
+          enforce: {
+            ...availableStatus.enforce,
+            available: false,
+            reason: 'landlock-abi-too-old',
+            detail: 'kernel Landlock ABI 2 is below the required floor of 3',
+            state: 'unavailable' as const,
+          },
         },
       },
       {
@@ -66,7 +88,7 @@ describe('shieldState', () => {
     ],
     [base, { kind: 'ready', workspace: '/repo', action: 'apply' }],
     [
-      { ...base, enabled: false, status: { available: false }, sandboxed: true },
+      { ...base, enabled: false, sandboxed: true },
       { kind: 'ready', workspace: '/repo', action: 'remove' },
     ],
   ])('maps eligibility %#', (input, expected) => {

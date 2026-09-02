@@ -58,7 +58,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/reveal"
-	"github.com/shady2k/nocx/internal/sandbox
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -283,6 +283,22 @@ func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db con
 	}
 	if err := db.Layout().ClearWindow(ctx); err != nil {
 		logger.Warn("clean start could not close the last session's tabs; they may reopen later", "error", err)
+	}
+}
+
+// sweepPaneGrantsOnStartup removes grants whose owning pane survived an
+// unclean process exit. Grants are runtime authority, not durable user
+// configuration; every restored pane must start without stale authority.
+func sweepPaneGrantsOnStartup(ctx context.Context, db content.ContentDB, logger *slog.Logger) {
+	grants, err := db.Layout().OpenPaneGrants(ctx)
+	if err != nil {
+		logger.Warn("sandbox grant startup sweep failed", "error", err)
+		return
+	}
+	for paneID := range grants {
+		if err := db.Layout().RemovePaneGrant(ctx, paneID); err != nil {
+			logger.Warn("sandbox grant startup removal failed", "pane_id", paneID, "error", err)
+		}
 	}
 }
 
@@ -856,7 +872,10 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
-	accessInbox.SetGrantStore(sandboxGrantStore{registry: settingsRegistry})
+	accessInbox.SetGrantStore(sandboxGrantStore{
+		registry: settingsRegistry,
+		layout:   func() sandboxWorkspaceProfiles { return contentDB.Layout() },
+	})
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -981,6 +1000,7 @@ func New(opts ...Option) (*App, error) {
 		// draining) closes its episode on.
 		historyStatus.Clear()
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
+		sweepPaneGrantsOnStartup(ctx, db, slogger)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -3151,8 +3171,19 @@ func (m apiSecretMaterial) Material(ctx context.Context, id credential.SecretID)
 	return m.resolver.Resolve(ctx, id, credential.Operation("send an API request"))
 }
 
+type sandboxSettingsStore interface {
+	AppendSandboxPath(profile *settings.PathList, path string) (int, error)
+	GetSnapshot() (settings.SettingsSnapshot, error)
+}
+
+type sandboxWorkspaceProfiles interface {
+	WorkspaceSandboxProfile(context.Context, string) (*content.WorkspaceSandboxProfile, error)
+	SetWorkspaceSandboxProfile(context.Context, string, int64, content.WorkspaceSandboxProfile) (int64, error)
+}
+
 type sandboxGrantStore struct {
-	registry *settings.Registry
+	registry sandboxSettingsStore
+	layout   func() sandboxWorkspaceProfiles
 }
 
 func (s sandboxGrantStore) AppendSandboxPath(access sandbox.AccessClass, path string) (int, error) {
@@ -3164,4 +3195,50 @@ func (s sandboxGrantStore) AppendSandboxPath(access sandbox.AccessClass, path st
 	default:
 		return 0, sandbox.ErrInvalidAccessDecision
 	}
+}
+
+func (s sandboxGrantStore) PromoteSandboxPath(workspaceID string, access sandbox.AccessClass, path string) (int64, error) {
+	if workspaceID == content.DefaultWorkspaceID || s.layout == nil {
+		revision, err := s.AppendSandboxPath(access, path)
+		return int64(revision), err
+	}
+	profiles := s.layout()
+	if profiles == nil {
+		return 0, sandbox.ErrAccessGrantUnavailable
+	}
+	profile, err := profiles.WorkspaceSandboxProfile(context.Background(), workspaceID)
+	if err != nil {
+		return 0, sandbox.ErrAccessGrantUnavailable
+	}
+	expected := int64(0)
+	if profile != nil {
+		expected = profile.Revision
+	} else {
+		snapshot, snapshotErr := s.registry.GetSnapshot()
+		if snapshotErr != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		profile = &content.WorkspaceSandboxProfile{
+			WritablePaths: snapshotPaths(snapshot.Values[settings.SandboxAllowedWritablePaths.Key()]),
+			ReadOnlyPaths: snapshotPaths(snapshot.Values[settings.SandboxAllowedReadOnlyPaths.Key()]),
+		}
+	}
+	switch access {
+	case sandbox.AccessReadOnly:
+		profile.ReadOnlyPaths = append(profile.ReadOnlyPaths, path)
+	case sandbox.AccessReadWrite:
+		profile.WritablePaths = append(profile.WritablePaths, path)
+	default:
+		return 0, sandbox.ErrInvalidAccessDecision
+	}
+	revision, err := profiles.SetWorkspaceSandboxProfile(context.Background(), workspaceID, expected, *profile)
+	if err != nil {
+		return 0, sandbox.ErrAccessGrantUnavailable
+	}
+	return revision, nil
+}
+
+func snapshotPaths(value any) []string {
+	paths, _ := value.([]string)
+	return append([]string(nil), paths...)
 }

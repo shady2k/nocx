@@ -80,6 +80,26 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := sandboxAccessHandlers{inbox: s.sandboxAccess, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolve(ctx, req) }
 		}),
+		regResponder(s.lane, "sandbox.profile.get", params(validateSandboxProfileGetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileGet(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.resolve", params(validateSandboxProfileResolveRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileResolve(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.set", params(validateSandboxProfileSetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileSet(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.delete", params(validateSandboxProfileDeleteRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileDelete(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.run.get", params(validateSandboxRunGetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleRunGet(ctx, req) }
+		}),
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }

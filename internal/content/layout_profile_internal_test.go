@@ -194,7 +194,7 @@ func TestConcurrentProfileWritesSerializeWithoutLostUpdates(t *testing.T) {
 	}
 }
 
-func TestSandboxGrantInsertionRechecksWorkspaceProfileAtomically(t *testing.T) {
+func TestPaneGrantInsertionRechecksWorkspaceProfileAtomically(t *testing.T) {
 	_, _, layout := lifecycleStore(t)
 	ctx := t.Context()
 	seedProfileWorkspace(t, layout, "ws-1")
@@ -211,45 +211,50 @@ func TestSandboxGrantInsertionRechecksWorkspaceProfileAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advance profile: %v", err)
 	}
-	grant := SandboxGrant{
-		PaneID: "pane-ws-1", Version: 1, IssuedAt: 42, Workspace: "/workspace", Payload: `{}`,
+	grant := Grant{
+		Version: 1,
+		Scopes:  []GrantScope{{Kind: ResourcePath, ID: "/workspace"}},
+		Effects: []Effect{EffectObserve},
 	}
-	if err := layout.InsertSandboxGrantIfCurrent(ctx, grant, SandboxGrantExpectation{
+	if err := layout.InsertPaneGrantIfCurrent(ctx, "pane-ws-1", grant, PaneGrantExpectation{
 		WorkspaceID: "ws-1", WorkspaceProfileRevision: &staleRevision,
-	}); !errors.Is(err, ErrSandboxGrantStale) {
-		t.Fatalf("stale insertion error = %v, want ErrSandboxGrantStale", err)
+	}, `{"realized":{"backend":"landlock"}}`); !errors.Is(err, ErrPaneGrantStale) {
+		t.Fatalf("stale insertion error = %v, want ErrPaneGrantStale", err)
 	}
-	if exists, err := layout.SandboxGrantExists(ctx, grant.PaneID); err != nil || exists {
-		t.Fatalf("grant after stale insertion = %v, %v; want false, nil", exists, err)
+	if stored, err := layout.PaneGrant(ctx, "pane-ws-1"); err != nil || stored != nil {
+		t.Fatalf("grant after stale insertion = %#v, %v; want nil, nil", stored, err)
 	}
-	if err := layout.InsertSandboxGrantIfCurrent(ctx, grant, SandboxGrantExpectation{
+	if err := layout.InsertPaneGrantIfCurrent(ctx, "pane-ws-1", grant, PaneGrantExpectation{
 		WorkspaceID: "ws-1", WorkspaceProfileRevision: &revision,
-	}); err != nil {
+	}, `{"realized":{"backend":"landlock"}}`); err != nil {
 		t.Fatalf("current insertion: %v", err)
 	}
 }
 
-func TestSandboxGrantForPane(t *testing.T) {
+func TestPaneGrantIsReadFromAuthorityGrants(t *testing.T) {
 	_, _, layout := lifecycleStore(t)
 	ctx := context.Background()
 	seedProfileWorkspace(t, layout, "ws-1")
 
-	if grant, err := layout.SandboxGrantForPane(ctx, "pane-ws-1"); err != nil || grant != nil {
+	if grant, err := layout.PaneGrant(ctx, "pane-ws-1"); err != nil || grant != nil {
 		t.Fatalf("no grant = %#v, %v; want nil, nil", grant, err)
 	}
-	if err := layout.InsertSandboxGrant(ctx, SandboxGrant{
-		PaneID: "pane-ws-1", Version: 1, IssuedAt: 42, Workspace: "/workspace", Payload: `{"realized":{"backend":"landlock"}}`,
-	}); err != nil {
-		t.Fatalf("InsertSandboxGrant: %v", err)
+	if err := layout.InsertPaneGrantIfCurrent(ctx, "pane-ws-1", Grant{
+		Version: 1,
+		Scopes:  []GrantScope{{Kind: ResourcePath, ID: "/workspace"}},
+		Effects: []Effect{EffectObserve},
+	}, PaneGrantExpectation{WorkspaceID: "ws-1"}, `{"realized":{"backend":"landlock"}}`); err != nil {
+		t.Fatalf("InsertPaneGrantIfCurrent: %v", err)
 	}
-	grant, err := layout.SandboxGrantForPane(ctx, "pane-ws-1")
+	grant, err := layout.PaneGrant(ctx, "pane-ws-1")
 	if err != nil || grant == nil {
 		t.Fatalf("grant = %#v, %v", grant, err)
 	}
-	if grant.PaneID != "pane-ws-1" || grant.IssuedAt != 42 || grant.Workspace != "/workspace" {
+	if grant.Version != 1 || grant.Payload != `{"realized":{"backend":"landlock"}}` {
 		t.Fatalf("grant = %#v", grant)
 	}
-	if grant, err := layout.SandboxGrantForPane(ctx, "pane-missing"); err != nil || grant != nil {
-		t.Fatalf("missing grant = %#v, %v; want nil, nil", grant, err)
+	open, err := layout.OpenPaneGrants(ctx)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("open grants = %#v, %v; want one pane grant", open, err)
 	}
 }

@@ -25,6 +25,7 @@ import {
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
+import type { InternalCommandOutcome } from './sandbox-command'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -62,6 +63,8 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
 const MAX_ROWS = 30
 
 export interface EditorActions {
+  /** Intercept host-owned slash commands before ordinary shell submission. */
+  internalCommand?: (doc: string) => InternalCommandOutcome
   submit: (doc: string, plan?: SubmitPlan) => void
   /** Enter on an empty (or whitespace-only) draft. It is not a command — no
    *  block, no attempt, no ledger record — but it IS a keystroke a shell
@@ -717,6 +720,12 @@ export class CommandEditor {
       if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
     }
+    const internal = this.actions.internalCommand?.(doc)
+    if (internal?.kind === 'consumed') {
+      this.clearDoc()
+      return
+    }
+    if (internal?.kind === 'refused') return
     const hook = this.actions.beforeSubmit
     if (!hook) {
       this.commit(doc)

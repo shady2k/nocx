@@ -41,6 +41,7 @@ type helperPayload struct {
 	Policy          *Policy     `json:"policy"`
 	Command         CommandSpec `json:"command"`
 	AccessMonitorFD int         `json:"accessMonitorFd,omitempty"`
+	ObserveOnly     bool        `json:"observeOnly,omitempty"`
 }
 
 // helperFDs parses the internal descriptor locations. Ordinary shell
@@ -93,14 +94,18 @@ func helperMain(policyFD, statusFD int) int {
 		return helperReport(statusFD, "invalid policy: "+err.Error())
 	}
 
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-		return helperReport(statusFD, "prctl(PR_SET_NO_NEW_PRIVS): "+err.Error())
-	}
+	if !payload.ObserveOnly {
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			return helperReport(statusFD, "prctl(PR_SET_NO_NEW_PRIVS): "+err.Error())
+		}
 
-	cfg := strictConfig(landlockABIVersion())
-	rules := buildRules(payload.Policy)
-	if err := cfg.RestrictPaths(rules...); err != nil {
-		return helperReport(statusFD, "landlock: "+err.Error())
+		cfg := strictConfig(landlockABIVersion())
+		rules := buildRules(payload.Policy)
+		if err := cfg.RestrictPaths(rules...); err != nil {
+			return helperReport(statusFD, "landlock: "+err.Error())
+		}
+	} else if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return helperReport(statusFD, "prctl(PR_SET_NO_NEW_PRIVS): "+err.Error())
 	}
 
 	if payload.AccessMonitorFD >= 3 {

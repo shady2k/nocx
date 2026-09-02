@@ -42,7 +42,7 @@ func NewWithAccess(logger log.Logger, cacheDir string, access *AccessInbox) Serv
 
 func (s *linuxService) Status(_ context.Context) Status {
 	abi, err := detectABI()
-	return statusForABI(abi, err)
+	return statusModes(statusForABI(abi, err))
 }
 
 func (s *linuxService) NewRuntimeRoot() (string, error) {
@@ -64,7 +64,7 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		return nil, NewSetupErrorf("empty command path")
 	}
 	status := s.Status(ctx)
-	if !status.Available {
+	if req.Mode == ModeEnforce && !status.Enforce.Available {
 		return nil, &StatusError{Status: status}
 	}
 
@@ -88,10 +88,14 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if projectionErr := materializeHomeProjections(runtimeRoot, pol); projectionErr != nil {
 		return fail(projectionErr)
 	}
-	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
-	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
-	// already consumed the base PATH above.
-	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
+	// Learn keeps the ordinary environment and filesystem unrestricted; the
+	// helper still installs the observer before exec. Enforce receives the
+	// disposable HOME/TMP projection and Landlock rules.
+	if req.Mode == ModeEnforce {
+		spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
+	} else {
+		spec.Env = learnEnv(spec.Env)
+	}
 
 	monitorEnabled := s.access != nil && req.Identity.valid()
 	var accessSession *AccessSession
@@ -102,7 +106,12 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if monitorEnabled {
 		monitorChildFD = 5 + len(spec.ExtraFiles)
 	}
-	payload := helperPayload{Policy: pol, Command: spec, AccessMonitorFD: monitorChildFD}
+	payload := helperPayload{
+		Policy:          pol,
+		Command:         spec,
+		AccessMonitorFD: monitorChildFD,
+		ObserveOnly:     req.Mode == ModeLearn,
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fail(NewSetupErrorf("serialize policy: %v", err))
@@ -176,6 +185,7 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	var accessMonitor *linuxAccessMonitor
 	pc := &PreparedCommand{
 		Cmd:        cmd,
+		Mode:       req.Mode,
 		Backend:    BackendLandlock,
 		Policy:     pol,
 		policyFile: policyFile,

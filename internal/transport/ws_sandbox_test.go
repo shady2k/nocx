@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/sandbox"
@@ -37,7 +38,10 @@ type sandboxTestService struct {
 	lastReq  sandbox.Request
 }
 
-func (s *sandboxTestService) Status(context.Context) sandbox.Status { return s.status }
+func (s *sandboxTestService) Status(context.Context) sandbox.Status {
+	return normalizedSandboxStatus(s.status)
+}
+
 func (s *sandboxTestService) NewRuntimeRoot() (string, error) {
 	return sandbox.NewRuntimeRoot(os.TempDir())
 }
@@ -47,15 +51,37 @@ func (s *sandboxTestService) Prepare(_ context.Context, req sandbox.Request, _ s
 	s.prepared++
 	s.lastReq = req
 	s.mu.Unlock()
-	if !s.status.Available {
-		return nil, &sandbox.StatusError{Status: s.status}
+	if !normalizedSandboxStatus(s.status).Enforce.Available {
+		return nil, &sandbox.StatusError{Status: normalizedSandboxStatus(s.status)}
 	}
 	if s.prepErr != nil {
 		return nil, s.prepErr
 	}
 	// A real, short-lived payload: the PTY opens, the process exits.
 	cmd := exec.Command("/usr/bin/true") //nolint:gosec // fixed test payload
-	return &sandbox.PreparedCommand{Cmd: cmd, Backend: s.status.Backend, Policy: s.policy}, nil
+	return &sandbox.PreparedCommand{Cmd: cmd, Backend: normalizedSandboxStatus(s.status).Enforce.Backend, Policy: s.policy}, nil
+}
+
+func normalizedSandboxStatus(st sandbox.Status) sandbox.Status {
+	if st.Enforce.Backend != "" || st.Learn.Backend != "" {
+		return st
+	}
+	mode := sandbox.ModeStatus{
+		Available: st.Available,
+		Backend:   st.Backend,
+		Reason:    st.Reason,
+		Detail:    st.Detail,
+		ABI:       st.ABI,
+		State:     sandbox.StatusStateUnavailable,
+		Coverage:  []string{sandbox.CoverageUnavailable},
+	}
+	if st.Available {
+		mode.State = sandbox.StatusStateAvailable
+		mode.Coverage = []string{sandbox.CoverageNative}
+	}
+	st.Learn = mode
+	st.Enforce = mode
+	return st
 }
 
 func (s *sandboxTestService) prepareCount() int {
@@ -103,6 +129,31 @@ func newSandboxHarness(t *testing.T, svc *sandboxTestService, loggers ...log.Log
 	return ws, reg
 }
 
+func newSandboxHarnessWithContent(t *testing.T, svc *sandboxTestService) (*WSServer, *settings.Registry) {
+	t.Helper()
+	logger := log.Logger(log.NewSlogAdapter(nil))
+	db := newLayoutStore(t)
+	if _, err := db.Layout().CreateWorkspace(t.Context(),
+		content.Workspace{ID: wsID1, Name: "Sandbox test", Position: 0},
+		content.Tab{ID: tabID1, WorkspaceID: wsID1, Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: paneID1, TabID: tabID1, Cwd: t.TempDir(), Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("seed layout: %v", err)
+	}
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), newTestStore())
+	sess := session.New(logger, &sandboxPTYFactory{svc: svc})
+	ws := NewWSServer(logger, sess,
+		WithSettingsRegistry(reg),
+		WithSandboxService(svc),
+		WithContentDB(db))
+	ctx := t.Context()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return ws, reg
+}
+
 // snapshotRevision reads the registry's current revision so a test can send a
 // matching settingsRevision without hardcoding a count of mutations.
 func snapshotRevision(t *testing.T, reg *settings.Registry) int {
@@ -120,8 +171,10 @@ func snapshotRevision(t *testing.T, reg *settings.Registry) int {
 func sandboxOpenParams(workspace string, revision int) map[string]any {
 	return map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"paneId": "018f6f2e-7b5a-7abc-8def-0123456789ab",
 		"sandbox": map[string]any{
 			"workspace":        workspace,
+			"mode":             "enforce",
 			"settingsRevision": revision,
 		},
 	}
@@ -177,7 +230,6 @@ func openError(t *testing.T, resp json.RawMessage) (code int, reason string) {
 	if env.Error == nil {
 		t.Fatalf("expected error, got %s", resp)
 	}
-	reason = ""
 	if env.Error.Data != nil {
 		reason = env.Error.Data.Reason
 	}
@@ -193,10 +245,8 @@ func TestSandboxStatus_ReportsBackend(t *testing.T) {
 	resp := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
 	var result struct {
 		Result struct {
-			Available bool            `json:"available"`
-			Backend   string          `json:"backend"`
-			ABI       int             `json:"abi"`
-			Intent    json.RawMessage `json:"intent"`
+			Learn   sandbox.ModeStatus `json:"learn"`
+			Enforce sandbox.ModeStatus `json:"enforce"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
 	}
@@ -206,11 +256,11 @@ func TestSandboxStatus_ReportsBackend(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("sandbox.status error: %+v", result.Error)
 	}
-	if !result.Result.Available || result.Result.Backend != sandbox.BackendLandlock || result.Result.ABI != 9 {
-		t.Errorf("sandbox.status = %+v, want available landlock ABI 9", result.Result)
+	if !result.Result.Enforce.Available || result.Result.Enforce.Backend != sandbox.BackendLandlock || result.Result.Enforce.ABI != 9 {
+		t.Errorf("sandbox.status enforce = %+v, want available landlock ABI 9", result.Result.Enforce)
 	}
-	if result.Result.Intent != nil {
-		t.Errorf("sandbox.status unexpectedly carries a launch intent: %s", result.Result.Intent)
+	if result.Result.Learn.Available != result.Result.Enforce.Available {
+		t.Errorf("sandbox.status learn = %+v, want same availability as enforce", result.Result.Learn)
 	}
 }
 
@@ -459,10 +509,14 @@ func TestOpen_SandboxStrictShapes(t *testing.T) {
 	rev := snapshotRevision(t, reg)
 
 	base := func(sandbox any) map[string]any {
-		return map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "sandbox": sandbox}
+		return map[string]any{
+			"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+			"paneId":  "018f6f2e-7b5a-7abc-8def-0123456789ab",
+			"sandbox": sandbox,
+		}
 	}
 	valid := func() map[string]any {
-		return map[string]any{"workspace": wsPath, "settingsRevision": rev}
+		return map[string]any{"workspace": wsPath, "mode": "enforce", "settingsRevision": rev}
 	}
 
 	cases := []struct {
@@ -563,9 +617,18 @@ func TestDecodeOpenParams_TrailingData(t *testing.T) {
 func TestSandboxBaselines_RejectsBadSnapshot(t *testing.T) {
 	writableKey := settings.SandboxAllowedWritablePaths.Key()
 	readOnlyKey := settings.SandboxAllowedReadOnlyPaths.Key()
+	base := t.TempDir()
+	writablePath := filepath.Join(base, "w")
+	readOnlyPath := filepath.Join(base, "r")
+	if err := os.MkdirAll(writablePath, 0o750); err != nil {
+		t.Fatalf("mkdir writable: %v", err)
+	}
+	if err := os.MkdirAll(readOnlyPath, 0o750); err != nil {
+		t.Fatalf("mkdir read-only: %v", err)
+	}
 	valid := map[string]any{
-		writableKey: []string{"/w"},
-		readOnlyKey: []string{"/r"},
+		writableKey: []string{writablePath},
+		readOnlyKey: []string{readOnlyPath},
 	}
 
 	cases := []struct {
@@ -592,11 +655,11 @@ func TestSandboxBaselines_RejectsBadSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandboxBaselines(valid) = %v", err)
 	}
-	if !reflect.DeepEqual(writable, []string{"/w"}) {
-		t.Errorf("writable = %v, want deep copy of [/w]", writable)
+	if !reflect.DeepEqual(writable, []string{writablePath}) {
+		t.Errorf("writable = %v, want deep copy of [%s]", writable, writablePath)
 	}
-	if !reflect.DeepEqual(readOnly, []string{"/r"}) {
-		t.Errorf("readOnly = %v, want deep copy of [/r]", readOnly)
+	if !reflect.DeepEqual(readOnly, []string{readOnlyPath}) {
+		t.Errorf("readOnly = %v, want deep copy of [%s]", readOnly, readOnlyPath)
 	}
 }
 

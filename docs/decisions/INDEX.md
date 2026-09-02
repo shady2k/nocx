@@ -105,6 +105,8 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0053 | [A tool declares the classes it can reach](0053-a-tool-declares-the-classes-it-can-reach.md)                                      | Accepted 2026-08-31                   |
 | 0054 | [A table is a stack of rows that carries a grid](0054-a-table-is-a-stack-of-rows-that-carries-a-grid.md)                          | Accepted 2026-08-31                   |
 
+| 0055 | [Sandbox Learn/Enforce modes and workspace policy authority](0055-sandbox-learn-enforce-and-workspace-policy.md) | Accepted 2026-09-03 |
+
 ## Adding one
 
 Take the next free number, name the file after the decision rather than the area, and

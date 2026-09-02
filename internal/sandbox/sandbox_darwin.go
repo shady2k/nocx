@@ -60,7 +60,7 @@ func MaybeHelper() bool {
 // Status probes /usr/bin/sandbox-exec; a successful probe is cached for the
 // app lifetime (probe.go).
 func (s *darwinService) Status(ctx context.Context) Status {
-	return s.probe.status(ctx)
+	return statusModes(s.probe.status(ctx))
 }
 
 func (s *darwinService) NewRuntimeRoot() (string, error) {
@@ -147,7 +147,10 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 		return nil, NewSetupErrorf("empty command path")
 	}
 	status := s.Status(ctx)
-	if !status.Available {
+	if req.Mode == ModeEnforce && !status.Enforce.Available && !status.Available {
+		return nil, &StatusError{Status: status}
+	}
+	if req.Mode == ModeLearn && !status.Learn.Available {
 		return nil, &StatusError{Status: status}
 	}
 
@@ -183,7 +186,11 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if projectionErr := materializeHomeProjections(runtimeRoot, pol); projectionErr != nil {
 		return fail(projectionErr)
 	}
-	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
+	if req.Mode == ModeEnforce {
+		spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
+	} else {
+		spec.Env = learnEnv(spec.Env)
+	}
 
 	var accessToken string
 	if s.access != nil && req.Identity.valid() {
@@ -191,7 +198,12 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 			accessToken = "nocx-sandbox-" + id
 		}
 	}
-	profile, err := renderProfile(pol, accessToken)
+	var profile string
+	if req.Mode == ModeLearn {
+		profile, err = renderLearnProfile(accessToken)
+	} else {
+		profile, err = renderProfile(pol, accessToken)
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -242,6 +254,7 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 
 	pc := &PreparedCommand{
 		Cmd:     cmd,
+		Mode:    req.Mode,
 		Backend: BackendSeatbelt,
 		Policy:  pol,
 		waitReady: func(ctx context.Context) error {

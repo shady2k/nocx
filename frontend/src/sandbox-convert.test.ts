@@ -20,6 +20,20 @@ const localOrigin: ActiveOrigin = {
 
 const oldPane: SandboxPane = { id: 1, wireId: 'pane-wire-1' }
 const newPane: SandboxPane = { id: 2, wireId: 'pane-wire-2' }
+const availableStatus: SandboxStatus = {
+  learn: {
+    available: true,
+    backend: 'landlock',
+    state: 'available',
+    coverage: [],
+  },
+  enforce: {
+    available: true,
+    backend: 'landlock',
+    state: 'available',
+    coverage: [],
+  },
+}
 interface SandboxPaneManagerFake extends SandboxPaneManagerPort {
   activeOrigin: Mock<SandboxPaneManagerPort['activeOrigin']>
   paneOf: Mock<SandboxPaneManagerPort['paneOf']>
@@ -57,7 +71,7 @@ function makeDeps(overrides: Partial<SandboxConversionDeps> = {}): {
   const deps: SandboxConversionDeps = {
     shieldInput: () => ({
       enabled: true,
-      status: { available: true, backend: 'landlock' },
+      status: availableStatus,
       origin: localOrigin,
       sandboxed: false,
     }),
@@ -69,7 +83,7 @@ function makeDeps(overrides: Partial<SandboxConversionDeps> = {}): {
     getSandboxState: vi.fn(() =>
       Promise.resolve({
         enabled: true,
-        status: { available: true, backend: 'landlock' } satisfies SandboxStatus,
+        status: availableStatus,
       }),
     ),
     getSnapshot: vi.fn(() => Promise.resolve({ values: {}, revision: 7 })),
@@ -123,7 +137,7 @@ describe('createSandboxConvertController.runCommand', () => {
     const { deps } = makeDeps({
       shieldInput: () => ({
         enabled: true,
-        status: { available: true },
+        status: availableStatus,
         origin: { ...localOrigin, cwdVerified: false },
         sandboxed: false,
       }),
@@ -155,7 +169,6 @@ describe('createSandboxConvertController.runCommand', () => {
     const controller = createSandboxConvertController(deps)
     expect(controller.runCommand('/sandbox')).toEqual({ kind: 'consumed' })
     expect(inFlight.value).toBe(true)
-    // Drain the apply flow (dialog → newSandboxedPane → install → replace).
     await vi.waitFor(() => expect(paneManager.newSandboxedPane).toHaveBeenCalledTimes(1))
     await vi.waitFor(() => expect(inFlight.value).toBe(false))
     expect(paneManager.newSandboxedPane).toHaveBeenCalledWith(
@@ -170,7 +183,7 @@ describe('createSandboxConvertController.runCommand', () => {
     const { deps, paneManager, inFlight } = makeDeps({
       shieldInput: () => ({
         enabled: true,
-        status: { available: true },
+        status: availableStatus,
         origin: localOrigin,
         sandboxed: true,
       }),
@@ -204,7 +217,7 @@ describe('createSandboxConvertController.toggle', () => {
     const remove = makeDeps({
       shieldInput: () => ({
         enabled: true,
-        status: { available: true },
+        status: availableStatus,
         origin: localOrigin,
         sandboxed: true,
       }),
@@ -217,7 +230,7 @@ describe('createSandboxConvertController.toggle', () => {
     const relaunch = makeDeps({
       shieldInput: () => ({
         enabled: true,
-        status: { available: true },
+        status: availableStatus,
         origin: localOrigin,
         sandboxed: true,
       }),
@@ -233,10 +246,15 @@ describe('createSandboxConvertController.toggle', () => {
 
   it('reports the backend reason when the fresh status is unavailable', async () => {
     const unavailable: SandboxStatus = {
-      available: false,
-      backend: 'landlock',
-      reason: 'landlock-abi-too-old',
-      detail: 'kernel Landlock ABI 2 is below the required floor of 3',
+      learn: availableStatus.learn,
+      enforce: {
+        available: false,
+        backend: 'landlock',
+        reason: 'landlock-abi-too-old',
+        detail: 'kernel Landlock ABI 2 is below the required floor of 3',
+        state: 'unavailable',
+        coverage: [],
+      },
     }
     const { deps, paneManager } = makeDeps({
       getSandboxState: vi.fn(() => Promise.resolve({ enabled: true, status: unavailable })),

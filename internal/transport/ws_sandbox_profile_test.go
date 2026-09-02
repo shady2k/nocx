@@ -1,6 +1,6 @@
 package transport
 
-// sandbox.profile.get / set / delete / grant.get and the open profileRevision
+// sandbox.profile.get / set / delete / run.get and the open profileRevision
 // gate (design 2026-08-23 §4.3): the backend resolves pane → workspace and
 // composes the effective profile, never trusting a renderer-supplied source.
 
@@ -69,7 +69,7 @@ func TestSandboxProfileLifecycleOverTheWire(t *testing.T) {
 	rCanon, _ := filepath.EvalSymlinks(rDir)
 
 	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
-	ws, reg := newSandboxHarness(t, svc)
+	ws, reg := newSandboxHarnessWithContent(t, svc)
 	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
 		t.Fatalf("SetBool: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSandboxProfileLifecycleOverTheWire(t *testing.T) {
 
 func TestSandboxProfileSetRefusesDefaultWorkspace(t *testing.T) {
 	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
-	ws, _ := newSandboxHarness(t, svc)
+	ws, _ := newSandboxHarnessWithContent(t, svc)
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
@@ -171,27 +171,6 @@ func TestSandboxProfileSetRefusesDefaultWorkspace(t *testing.T) {
 	})
 	if code := profileRPCError(t, raw); code != -32602 {
 		t.Fatalf("profile.set on default = code %d, want -32602 (%s)", code, raw)
-	}
-}
-
-func TestSandboxGrantGetReturnsNullWithoutGrant(t *testing.T) {
-	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
-	ws, _ := newSandboxHarness(t, svc)
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	raw := jsonrpcCall(t, conn, "sandbox.grant.get", map[string]any{"paneId": paneID1})
-	var env struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Error != nil {
-		t.Fatalf("grant.get = %s, err %v", raw, err)
-	}
-	if string(env.Result) != "null" {
-		t.Fatalf("grant.get result = %s, want null", env.Result)
 	}
 }
 
@@ -208,7 +187,7 @@ func TestOpenSandboxWorkspaceProfileRevisionGate(t *testing.T) {
 		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
 		policy: &sandbox.Policy{Workspace: wCanon, WritableRoots: []string{wCanon}, ReadOnlyRoots: []string{}},
 	}
-	ws, reg := newSandboxHarness(t, svc)
+	ws, reg := newSandboxHarnessWithContent(t, svc)
 	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
 		t.Fatalf("SetBool: %v", err)
 	}

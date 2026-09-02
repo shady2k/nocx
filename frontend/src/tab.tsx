@@ -63,9 +63,7 @@ export interface TabProps {
   preview?: string
   /** When true, the tab offers a save action (alias adoption). */
   adoptable?: boolean
-  /** True once the session confirmed a sandboxed local tab (lock/shield
-   *  marker renders; ADR-0030 §3.3). */
-  sandboxed?: boolean
+  /** Triggered when the user clicks the save action. */
   onAdopt?: () => void
   /** The environment degraded or became uncertain (nocx-4t37.2): renders
    *  the small warning mark in the status line. */
@@ -265,11 +263,6 @@ export function Tab(props: TabProps) {
               aria-label={props.warningLabel ?? 'Environment degraded'}
               title={props.warningLabel ?? 'Shell integration degraded or uncertain'}
             />
-          </Show>
-          <Show when={props.sandboxed === true}>
-            <span class="nocx-tab-sandboxed-marker" aria-label="Sandboxed">
-              {'\u26e8'}
-            </span>
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>

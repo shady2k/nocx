@@ -223,7 +223,7 @@ const SandboxPermissionsDialog: Component<
             Cancel
           </Button>
           <Button variant="primary" onClick={confirm}>
-            Open sandboxed tab
+            Open sandbox session
           </Button>
         </>
       }

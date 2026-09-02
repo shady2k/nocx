@@ -74,6 +74,7 @@ import type {
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import type { InternalCommandOutcome } from './sandbox-command'
 import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -832,6 +833,8 @@ export class PaneManager {
    *  editor arbiter both land here. The composition root opens the
    *  palette (design §10.1). */
   onSnippetChord?: () => void
+  /** Host-owned command routing installed by the composition root. */
+  onSandboxCommand?: (doc: string) => InternalCommandOutcome
   /** The snippet library the completion provider in every pane reads, and
    *  the acceptance it delegates (design §10.2). Set once by the
    *  composition root; handed to each TerminalContent as it is built. */
@@ -1210,24 +1213,12 @@ export class PaneManager {
    * race impossible to close at the call site.
    */
   private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
-    // No store is a DEGRADE, not a refusal: the id is minted and simply
-    // names no row, which `registered: false` states rather than leaving the
-    // caller to infer it from a promise that never settles.
+    return this.mintPaneAt(kind, endpoint, '')
+  }
+
+  private mintPaneAt(kind: 'local' | 'ssh', endpoint: string | null, cwd: string): PaneIdentity {
     if (!this.layoutAvailable) return { paneId: uuidv7(), registered: Promise.resolve(false) }
-    // Into the workspace the window is SHOWING, not into the default: the
-    // strip draws one workspace's tabs, so a tab that opened somewhere else
-    // would either vanish on arrival or drag the window away from where the
-    // person was working. The default is where it goes when that is where
-    // they are.
-    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
-    // ONE handler with both arms, not a .then() and a .catch(): two handlers
-    // on the same promise leave the first one's rejection unhandled, which
-    // surfaces as a process-level unhandled rejection rather than as the
-    // toast below.
-    //
-    // Its BOOLEAN is the pane's readiness, so the two answers the session
-    // needs — "there is a row" and "there is not, for either reason" — come
-    // off the one handler that already knew them.
+    const opened = this.layout.openTab({ kind, endpoint, cwd }, this.currentWorkspaceId())
     const registered = opened.created.then(
       () => {
         this.registered.add(opened.paneId)
@@ -1265,10 +1256,58 @@ export class PaneManager {
   newPane(): Pane {
     return this.buildLocalPane(this.mintPane('local', null))
   }
+  /** Open a local pane at a verified cwd without changing the source pane. */
+  newLocalPaneAt(cwd: string): { pane: Pane; created: Promise<boolean> } {
+    const identity = this.mintPaneAt('local', null, cwd)
+    const pane = this.buildLocalPane(identity)
+    return { pane, created: identity.registered }
+  }
 
-  /** The chrome and content of a LOCAL terminal pane with a given identity —
-   *  one implementation for a pane the user just asked for and a pane the
-   *  chain already holds, because "a local pane" must not mean two things. */
+  /** Open a local pane whose session enters the requested sandbox mode. */
+  newSandboxedPane(
+    workspace: string,
+    launch: import('./ipc').SandboxLaunch,
+  ): { pane: Pane; created: Promise<boolean> } {
+    const identity = this.mintPaneAt('local', null, workspace)
+    const pane = this.buildLocalPane(identity, true, undefined, { workspace, launch })
+    return { pane, created: identity.registered }
+  }
+
+  paneOf(paneId: number): Pane | undefined {
+    return this.panes.find((pane) => pane.id === paneId)
+  }
+
+  tabOf(paneId: number): unknown {
+    return this.paneOf(paneId)
+  }
+
+  captureConversionTranscript(
+    paneId: number,
+  ): import('./terminal-content').ConversionTranscript | null {
+    const content = this.paneOf(paneId)?.content
+    return content instanceof TerminalContent ? content.captureConversionTranscript() : null
+  }
+
+  installConversionTranscript(
+    paneId: number,
+    transcript: import('./terminal-content').ConversionTranscript | null,
+    boundaryLabel: string,
+  ): Promise<boolean> {
+    const content = this.paneOf(paneId)?.content
+    return content instanceof TerminalContent
+      ? content.installConversionTranscript(transcript, boundaryLabel)
+      : Promise.resolve(false)
+  }
+
+  replaceTabPosition(oldPaneId: number, newPaneId: number): void {
+    const oldIndex = this.panes.findIndex((pane) => pane.id === oldPaneId)
+    const newIndex = this.panes.findIndex((pane) => pane.id === newPaneId)
+    if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return
+    const [pane] = this.panes.splice(newIndex, 1)
+    this.panes.splice(oldIndex, 0, pane)
+    this.panesChanged()
+    if (this.layoutAvailable) this.syncStripOrder()
+  }
   private buildLocalPane(
     identity: PaneIdentity,
     activateNow = true,
@@ -1276,6 +1315,7 @@ export class PaneManager {
      *  that takes it back (adoptionFor). Undefined for a pane the user just
      *  asked for — there is nothing running to take. */
     adoptSession?: () => Promise<SessionHandle>,
+    sandbox?: { workspace: string; launch: import('./ipc').SandboxLaunch },
   ): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
@@ -1297,6 +1337,8 @@ export class PaneManager {
         // pane's own name (nocx-vnzek). Only this manager can answer it —
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
+        sandbox,
+        internalCommand: (doc) => this.onSandboxCommand?.(doc) ?? { kind: 'notHandled' },
         adoptSession,
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),

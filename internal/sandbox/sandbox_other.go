@@ -31,7 +31,7 @@ func NewWithAccess(logger log.Logger, cacheDir string, access *AccessInbox) Serv
 func MaybeHelper() bool { return false }
 
 func (unsupportedService) Status(_ context.Context) Status {
-	return Status{Available: false, Backend: BackendUnsupported, Reason: ReasonUnsupportedPlatform}
+	return statusModes(Status{Available: false, Backend: BackendUnsupported, Reason: ReasonUnsupportedPlatform})
 }
 
 func (unsupportedService) NewRuntimeRoot() (string, error) {

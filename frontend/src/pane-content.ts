@@ -102,8 +102,6 @@ export interface ActiveOrigin {
  */
 export interface PaneHost {
   setTitle(title: string): void
-  /** Update the tab's tooltip (ADR-0033 §3.3 — sandbox tooltip). */
-  updateTooltip(tooltip: string): void
   requestAttention(): void
   requestClose(): void
   /**
@@ -123,7 +121,7 @@ export interface PaneHost {
    * accumulated: the state where every tab but one carries the mark is the
    * state where the mark says nothing at all.
    */
-  contentSettled(): void
+  contentSettled?(): void
 }
 
 // ── Content (B.4, B.6) ────────────────────────────────────────────────────

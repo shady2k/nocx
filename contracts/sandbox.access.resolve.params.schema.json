@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.resolve.params.schema.json",
+  "title": "SandboxAccessResolveParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventId", "paneId", "decision"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1 },
+    "paneId": { "type": "string", "minLength": 1 },
+    "decision": { "type": "string", "enum": ["dismiss", "workspaceReadOnly", "workspaceReadWrite"] }
+  }
+}

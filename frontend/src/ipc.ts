@@ -17,24 +17,19 @@ import type { SessionObservationChanged } from './generated/session.observationC
 import { isDriverState } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
-import type { TabClose } from './generated/tab.close'
-import type { SandboxStatus } from './generated/sandbox.status'
 import type { SandboxAccessChanged } from './generated/sandbox.access.changed'
 import type {
-  SandboxAccessList,
   Event as SandboxAccessEvent,
+  SandboxAccessList,
 } from './generated/sandbox.access.list'
 import type { SandboxAccessResolve } from './generated/sandbox.access.resolve'
 import type { SandboxAccessStatus } from './generated/sandbox.access.status'
 import type { SandboxProfileGet } from './generated/sandbox.profile.get'
 import type { SandboxProfileSet } from './generated/sandbox.profile.set'
 import type { SandboxProfileDelete } from './generated/sandbox.profile.delete'
-import type { SandboxGrantGet } from './generated/sandbox.grant.get'
-
-// ── Sandbox wire types (ADR-0030 §3.3, §4.2) ────────────────────────────
-
+import type { ModeStatus, SandboxStatus as WireSandboxStatus } from './generated/sandbox.status'
+import type { SandboxRunGet } from './generated/sandbox.run.get'
 export type {
-  SandboxStatus,
   SandboxAccessChanged,
   SandboxAccessEvent,
   SandboxAccessList,
@@ -43,31 +38,15 @@ export type {
   SandboxProfileGet,
   SandboxProfileSet,
   SandboxProfileDelete,
-  SandboxGrantGet,
+  SandboxRunGet,
 }
-/** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3, ADR-0036 §8). */
-interface HomeProjection {
-  readonly hostPath: string
-  readonly relativePath: string
-}
-
-export interface SessionSandboxInfo {
-  readonly backend: 'landlock' | 'seatbelt'
-  readonly workspace: string
-  readonly writableRoots: string[]
-  readonly readOnlyRoots: string[]
-  readonly homeProjections: HomeProjection[]
+export type SandboxStatus = WireSandboxStatus & {
+  readonly learn: ModeStatus
+  readonly enforce: ModeStatus
 }
 
-/**
- * The per-launch sandbox permission deltas (ADR-0036 §5): the settings
- * revision the permission dialog displayed, plus the user's four class-scoped
- * deltas — ephemeral additions and exact baseline removals for read-only and
- * read-write folders. It never carries either baseline, the effective roots,
- * Git/runtime roots, or any native-backend clause — the backend is the sole
- * policy author.
- */
 export interface SandboxLaunch {
+  readonly mode: 'learn' | 'enforce'
   readonly settingsRevision: number
   readonly profileRevision: number | null
   readonly addWritable: string[]
@@ -76,9 +55,13 @@ export interface SandboxLaunch {
   readonly removeReadOnly: string[]
 }
 
-/** The complete sandboxed open request: canonical workspace + deltas. */
-export interface SandboxRequest extends SandboxLaunch {
+export interface SessionSandboxInfo {
+  readonly mode: 'learn' | 'enforce'
+  readonly backend: 'landlock' | 'seatbelt'
   readonly workspace: string
+  readonly writableRoots: string[]
+  readonly readOnlyRoots: string[]
+  readonly homeProjections: Array<{ readonly hostPath: string; readonly relativePath: string }>
 }
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
@@ -98,7 +81,42 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
-  sandbox?: Open['sandbox']
+  workspaceId?: string
+  sandbox?: SessionSandboxInfo | null
+  parent?: Open['parent']
+}
+
+/**
+ * What an open carries beyond its geometry and its destination.
+ *
+ * NAMED rather than positional, for the reason TerminalContentHooks is named
+ * (see terminal-content.ts): `user` and `paneId` are both optional strings in
+ * adjacent slots on openSSHSessionByHost, so two bare positionals would let
+ * every misalignment type-check — which is exactly the defect that put
+ * onSetupVault into the onAdoptabilityChange slot.
+ */
+export interface OpenAnchor {
+  /**
+   * The pane this session is the pipe of: the renderer-minted UUIDv7 the
+   * layout chain stores (design §7). The renderer is the only end that knows
+   * it — the backend walks pane -> tab -> workspace from here, and told
+   * nothing it can only answer "the default", which leaves every block this
+   * session records anchored on nothing (nocx-rtg0.29).
+   *
+   * ABSENT AND EMPTY ARE DIFFERENT ANSWERS on the wire. validateOpenRaw
+   * treats an absent paneId as legitimate — a session attached to no
+   * recorded pane — and refuses a malformed one with -32602. An empty string
+   * is the second, so the openers below drop the key rather than send it
+   * blank.
+   */
+  paneId?: string
+}
+
+/** The paneId as the wire wants it: the key, or no key at all. One helper for
+ *  all three openers, because "how an absent pane is expressed" is one fact
+ *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
+function paneParam(anchor: OpenAnchor): { paneId?: string } {
+  return anchor.paneId ? { paneId: anchor.paneId } : {}
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -394,8 +412,41 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
-    /** Immutable sandbox metadata for a sandboxed session; undefined for ordinary/SSH sessions (ADR-0030 §3.3). */
-    readonly sandbox?: SessionSandboxInfo,
+    /** The session that opened this one, as the backend ADMITTED it, or null
+     *  for a root session (nocx-9hu9d). The full identity, never a bare id:
+     *  an id alone re-resolves to whatever holds it now.
+     *
+     *  PROVENANCE ONLY (nocx-wtv3p, ADR-0020 §5). It says "A created B" and
+     *  confers nothing: no surface may read it to decide that one tab may
+     *  observe, drive or close another, and the backend refuses such an
+     *  attempt whatever the renderer believes
+     *  (internal/transport/ws_lineage_prohibitions_test.go). The one thing it
+     *  is read for is the ASK in PaneManager.closePane — naming what a close
+     *  would leave running, which is the opposite of acting on them. */
+    readonly parent: Open['parent'] = null,
+    /** The workspace the backend resolved this session into (nocx-fraus).
+     *
+     *  IT CARRIES NO BEHAVIOUR, and the contract says so: nothing reads
+     *  authority, addressability or reachability from it, and §5.5 forbids
+     *  any surface before the fence epic from describing a workspace as
+     *  safe, isolated or contained. It is read as PROVENANCE — what the
+     *  backend resolved from the pane the renderer named — which is why it
+     *  is decoded here rather than dropped: this ack is the only message
+     *  that carries it. */
+    readonly workspaceId: string = '',
+    /** What a reclaim recovered from the backend's recording before it
+     *  attached (nocx-22k1c.2), or null for a handle that was never
+     *  reclaimed — an open starts an empty session and has nothing to
+     *  recover.
+     *
+     *  It is READ BY THE SURFACE THAT DRAWS THE PANE, which is the only
+     *  thing that can say what is missing where a person will see it. The
+     *  bytes are already queued for the terminal by the time this handle
+     *  exists; what this carries is the part the terminal cannot show —
+     *  the ranges nothing kept. A recovered scrollback with a silent hole
+     *  in it is the one outcome worse than a short one. */
+    readonly recovered: SessionRecovery | null = null,
+    readonly sandbox: SessionSandboxInfo | null = null,
   ) {}
 
   send(data: string): void {
@@ -829,58 +880,35 @@ export class WSClient {
       })
       .then((result) => this._registerHandle(result, { cols, rows }))
   }
-
-  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0036).
-  // The renderer sends the canonical workspace plus the four bounded
-  // class-scoped permission deltas the launch dialog confirmed — never a
-  // baseline, effective roots, Git/runtime roots, or a native-backend clause.
-  // The backend reads both baselines from the same settings revision,
-  // canonicalizes everything, and enforces the policy before the session is
-  // registered. Fails closed: any enforcement error rejects with the typed
-  // wire error.
   openSandboxedSession(
     cols: number,
     rows: number,
-    request: SandboxRequest,
+    workspace: string,
+    request: SandboxLaunch,
+    anchor: OpenAnchor = {},
   ): Promise<SessionHandle> {
-    const sandbox: {
-      workspace: string
-      settingsRevision: number
-      profileRevision: number | null
-      addWritable?: string[]
-      removeWritable?: string[]
-      addReadOnly?: string[]
-      removeReadOnly?: string[]
-    } = {
-      workspace: request.workspace,
-      settingsRevision: request.settingsRevision,
-      profileRevision: request.profileRevision,
-    }
-    // Empty deltas are omitted, not sent as empty arrays: the DTO treats the
-    // four arrays as optional, so only non-empty deltas ride the wire.
-    if (request.addWritable.length > 0) sandbox.addWritable = request.addWritable
-    if (request.removeWritable.length > 0) sandbox.removeWritable = request.removeWritable
-    if (request.addReadOnly.length > 0) sandbox.addReadOnly = request.addReadOnly
-    if (request.removeReadOnly.length > 0) sandbox.removeReadOnly = request.removeReadOnly
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
-        sandbox,
+        sandbox: { workspace, ...request },
+        ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
-  // sandboxStatus queries the backend's sandbox availability (ADR-0030 §4.2).
-  // Returns {available, backend, reason} or null when no sandbox service is
-  // wired (dev-web harness without a native backend).
   sandboxStatus(): Promise<SandboxStatus | null> {
     return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
   }
-  sandboxProfileGet(paneId: string): Promise<SandboxProfileGet> {
-    return this.dispatcher.call<SandboxProfileGet>('sandbox.profile.get', { paneId })
+
+  sandboxProfileGet(workspaceId: string): Promise<SandboxProfileGet> {
+    return this.dispatcher.call<SandboxProfileGet>('sandbox.profile.get', { workspaceId })
+  }
+
+  sandboxProfileResolve(paneId: string): Promise<SandboxProfileGet> {
+    return this.dispatcher.call<SandboxProfileGet>('sandbox.profile.resolve', { paneId })
   }
 
   sandboxProfileSet(
@@ -907,8 +935,8 @@ export class WSClient {
     })
   }
 
-  sandboxGrantGet(paneId: string): Promise<SandboxGrantGet> {
-    return this.dispatcher.call<SandboxGrantGet>('sandbox.grant.get', { paneId })
+  sandboxRunGet(paneId: string): Promise<SandboxRunGet> {
+    return this.dispatcher.call<SandboxRunGet>('sandbox.run.get', { paneId })
   }
 
   sandboxAccessStatus(): Promise<SandboxAccessStatus | null> {
@@ -921,10 +949,12 @@ export class WSClient {
 
   sandboxAccessResolve(
     eventId: string,
+    paneId: string,
     decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
   ): Promise<SandboxAccessResolve> {
     return this.dispatcher.call<SandboxAccessResolve>('sandbox.access.resolve', {
       eventId,
+      paneId,
       decision,
     })
   }
@@ -938,11 +968,6 @@ export class WSClient {
     })
   }
 
-  // openDirectory opens the native folder picker and returns the chosen
-  // absolute path, or '' when cancelled (ADR-0030 §4.3).
-  openDirectory(): Promise<string> {
-    return this.dispatcher.call<string>('dialog.openDirectory', {})
-  }
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
@@ -1014,6 +1039,8 @@ export class WSClient {
       result?.desiredMode ?? 'script',
       result?.parent ?? null,
       result?.workspaceId ?? '',
+      null,
+      result?.sandbox ?? null,
     )
   }
 
@@ -1043,13 +1070,6 @@ export class WSClient {
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
     })
-    return new SessionHandle(
-      this,
-      sid,
-      result?.cwd ?? '',
-      result?.desiredMode ?? 'script',
-      result?.sandbox,
-    )
   }
 
   // --- reattach -----------------------------------------------------------

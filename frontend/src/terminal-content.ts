@@ -3,6 +3,11 @@
 // Extracted from Tab so the chrome layer never touches a session or renderer.
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface ConversionTranscript {
+  readonly text?: string
+  readonly blocks?: Node[]
+}
+
 import { XtermRenderer } from './renderers/xterm'
 import type { MarkerAdapter } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
@@ -123,7 +128,7 @@ import { toolCallTitle } from './scrollback/tool-call-title'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SandboxLaunch, SessionSandboxInfo } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -364,6 +369,12 @@ export interface TerminalContentHooks {
    *  behind it — the liveness notifications and whether the session has ended
    *  — so it is the owner, and every surface reads the same answer. */
   onConnectionConditionChange?: (condition: ConnectionCondition) => void
+  /** Host-owned commands (for example `/sandbox`) are decided before the
+   *  ordinary shell handoff. The editor keeps the draft only when the host
+   *  explicitly refuses the command. */
+  internalCommand?: (doc: string) => import('./sandbox-command').InternalCommandOutcome
+  /** Sandbox launch data for a local replacement pane. */
+  sandbox?: { workspace: string; launch: SandboxLaunch }
   /** Where this pane reads "is what my session prints being written down"
    *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
    *  and the card has to be able to say both halves; the fact belongs to
@@ -1267,6 +1278,36 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
+  /** Snapshot of the previous pane's rendered command blocks. The clone is
+   * detached before the old pane closes, so conversion never moves live DOM
+   * owned by the source terminal. */
+  captureConversionTranscript(): ConversionTranscript | null {
+    const inner = this.scrollback?.scrollbackInner
+    if (!inner) return null
+    const blocks = [...inner.querySelectorAll<HTMLElement>('.cmd-block')].map((block) =>
+      block.cloneNode(true),
+    )
+    return blocks.length > 0 ? { blocks } : null
+  }
+
+  /** Install a detached transcript after the new session is ready. */
+  async installConversionTranscript(
+    transcript: ConversionTranscript | null,
+    boundaryLabel: string,
+  ): Promise<boolean> {
+    if (!(await this.ready)) return false
+    const inner = this.scrollback?.scrollbackInner
+    if (!inner) return false
+    if (transcript?.blocks) {
+      const boundary = document.createElement('div')
+      boundary.className = 'sandbox-conversion-boundary'
+      boundary.textContent = boundaryLabel
+      inner.insertBefore(boundary, inner.firstChild)
+      for (const block of transcript.blocks) inner.insertBefore(block, inner.firstChild)
+    }
+    return true
+  }
+
   /**
    * Resolves true when the renderer mounts and the PTY session opens;
    * resolves false when mount() throws. Never rejects. The initial-tab
@@ -1347,6 +1388,9 @@ export class TerminalContent extends BasePaneContent {
       // "This machine" for a local session rather than nothing at all.
       machine: machineName(this._user, this._host),
     }
+  }
+  sandboxInfo(): SessionSandboxInfo | null {
+    return this.session?.sandbox ?? null
   }
 
   /** This tab's session and the session that opened it, as the backend
@@ -1721,6 +1765,16 @@ export class TerminalContent extends BasePaneContent {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    const sandbox = this.hooks.sandbox
+    if (sandbox) {
+      return this.client.openSandboxedSession(
+        this.cols,
+        this.rows,
+        sandbox.workspace,
+        sandbox.launch,
+        anchor,
+      )
+    }
     if (!this.sshOpts) {
       return this.client.openSession(this.cols, this.rows, anchor)
     }
@@ -2183,9 +2237,9 @@ export class TerminalContent extends BasePaneContent {
       // never touches it — it is the confirmation that Enter goes to the
       // shell (nocx-4wtlh).
       this.indicator = new TargetIndicator(() => this.toggleInputTarget())
-
       this.editor = new CommandEditor(
         {
+          internalCommand: this.hooks.internalCommand,
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
           // with references is resolved through vault.resolveLine; the
           // RESOLVED line goes to the PTY, the reference-intact line to the
@@ -3428,17 +3482,6 @@ export class TerminalContent extends BasePaneContent {
           return
         }
       }
-      if (this.hooks.sandbox) {
-        const message = err instanceof Error ? err.message : String(err)
-        showToast({
-          level: 'danger',
-          message: `Sandboxed shell failed to start: ${message}`,
-        })
-        this._readyResolve(false)
-        log.error('nocx: sandboxed terminal failed', { error: message })
-        host.requestClose()
-        return
-      }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
@@ -3960,7 +4003,7 @@ export class TerminalContent extends BasePaneContent {
     this._settled = true
     clearTimeout(this._settleTimer)
     this._settleTimer = undefined
-    this.host?.contentSettled()
+    this.host?.contentSettled?.()
   }
 
   private scheduleLiveResize(): void {

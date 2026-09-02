@@ -627,7 +627,7 @@ func TestDialogOpenFileForUpload_UnavailableWithoutWails(t *testing.T) {
 // half-answer.
 func TestDialogOpenFileForUpload_UnavailableWhenTheServiceCannotMint(t *testing.T) {
 	h := newInventoryHarness(t)
-	h.ws.SetDialogService(&fakeDialogService{filePath: "/home/dev/.ssh/id_ed25519"})
+	h.ws.SetDialogService(&fakeDialogService{path: "/home/dev/.ssh/id_ed25519"})
 	resp := jsonrpcCall(t, h.conn, "dialog.openFileForUpload", map[string]any{})
 	var envelope struct {
 		Error *jsonrpcErrorObj `json:"error"`

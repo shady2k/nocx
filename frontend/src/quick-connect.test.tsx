@@ -82,8 +82,7 @@ describe('ActionsQuickConnectProvider', () => {
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    const items = await provider.getItems()
-    items[0].run()
+    provider.getItems()[0].run()
 
     expect(newPane).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
@@ -94,75 +93,12 @@ describe('ActionsQuickConnectProvider', () => {
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    const items = await provider.getItems()
-    items[1].run()
+    provider.getItems()[1].run()
 
     // Not a tab: this entry used to be an unconfigured profile, and running it
     // opened a terminal on an empty host that failed to start.
     expect(newConnection).toHaveBeenCalledOnce()
     expect(newPane).not.toHaveBeenCalled()
-  })
-
-  it('does not expose the sandbox action while the feature flag is off', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
-      state: vi.fn().mockResolvedValue({ enabled: false, status: null }),
-      open: vi.fn(),
-    })
-
-    const items = await provider.getItems()
-
-    expect(items.map((item) => item.id)).toEqual(['__local__', '__new_connection__'])
-  })
-
-  it('exposes the stable sandbox action and invokes the picker flow when available', async () => {
-    const open = vi.fn()
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
-      state: vi.fn().mockResolvedValue({
-        enabled: true,
-        status: {
-          available: true,
-          backend: 'landlock',
-          abi: 9,
-        },
-      }),
-      open,
-    })
-
-    const items = await provider.getItems()
-    const item = items[items.length - 1]
-
-    expect(item).toMatchObject({
-      id: '__sandboxed_local__',
-      label: 'Sandboxed shell…',
-      disabled: false,
-    })
-    expect(item?.detail).toContain('filesystem-isolated local shell (landlock)')
-    item?.run()
-    expect(open).toHaveBeenCalledOnce()
-  })
-
-  it('surfaces the typed backend reason as a disabled sandbox row', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
-      state: vi.fn().mockResolvedValue({
-        enabled: true,
-        status: {
-          available: false,
-          backend: 'landlock',
-          reason: 'landlock-abi-too-old',
-          abi: 2,
-        },
-      }),
-      open: vi.fn(),
-    })
-
-    const items = await provider.getItems()
-    const item = items[items.length - 1]
-
-    expect(item).toMatchObject({
-      id: '__sandboxed_local__',
-      disabled: true,
-      detail: 'Sandbox unavailable (landlock-abi-too-old)',
-    })
   })
 })
 
@@ -386,40 +322,6 @@ describe('QuickConnectController', () => {
 
     expect(newPane).toHaveBeenCalledOnce()
     expect(dialog?.open).toBe(false)
-  })
-
-  it('keeps a disabled status row inert for keyboard and pointer activation', async () => {
-    const ctrl = makeController()
-    const run = vi.fn()
-    ctrl.mount(container, [
-      {
-        id: 'status',
-        label: 'Status',
-        kinds: ['command'] as const,
-        getItems: () => [
-          {
-            id: 'disabled',
-            kind: 'command' as const,
-            label: 'Sandboxed shell…',
-            disabled: true,
-            run,
-          },
-        ],
-      },
-    ])
-    ctrl.showPalette()
-    await waitForItems()
-
-    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
-    const input = container.querySelector<HTMLElement>('.quick-connect__search input')
-    const row = container.querySelector<HTMLElement>('.quick-connect__item')
-    expect(row?.getAttribute('aria-disabled')).toBe('true')
-
-    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    row!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-
-    expect(run).not.toHaveBeenCalled()
-    expect(dialog?.open).toBe(true)
   })
 
   it('typing in the search input filters the list', async () => {

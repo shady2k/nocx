@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.set.params.schema.json",
+  "title": "SandboxProfileSetParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceId", "expectedRevision", "writablePaths", "readOnlyPaths"],
+  "properties": {
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "writablePaths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "readOnlyPaths": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

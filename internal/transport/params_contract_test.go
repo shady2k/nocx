@@ -709,6 +709,34 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"host.attentionActivated": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		"sandbox.status": {
+			[]byte(`{}`),
+		},
+		"sandbox.access.status": {
+			[]byte(`{}`),
+		},
+		"sandbox.access.list": {
+			[]byte(`{}`),
+			[]byte(`{"limit":200}`),
+		},
+		"sandbox.access.resolve": {
+			[]byte(`{"eventId":"0123456789abcdef0123456789abcdef","paneId":"pane-1","decision":"dismiss"}`),
+		},
+		"sandbox.profile.get": {
+			[]byte(`{"workspaceId":"workspace-1"}`),
+		},
+		"sandbox.profile.resolve": {
+			[]byte(`{"paneId":"pane-1"}`),
+		},
+		"sandbox.profile.set": {
+			[]byte(`{"workspaceId":"workspace-1","expectedRevision":0,"writablePaths":[],"readOnlyPaths":[]}`),
+		},
+		"sandbox.profile.delete": {
+			[]byte(`{"workspaceId":"workspace-1","expectedRevision":0}`),
+		},
+		"sandbox.run.get": {
+			[]byte(`{"paneId":"pane-1"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

@@ -86,7 +86,7 @@ func TestSandboxAccessHandlersListEncodesEmptyArray(t *testing.T) {
 }
 
 func TestSandboxAccessValidatorsAreClosedAndBounded(t *testing.T) {
-	if got := validateSandboxAccessResolveRaw(json.RawMessage(`{"eventId":"0123456789abcdef0123456789abcdef","decision":"always"}`)); got == "" {
+	if got := validateSandboxAccessResolveRaw(json.RawMessage(`{"eventId":"0123456789abcdef0123456789abcdef","paneId":"0198f2b0-0000-7000-8000-000000000021","decision":"always"}`)); got == "" {
 		t.Fatal("unknown decision accepted")
 	}
 	if got := validateSandboxAccessListRaw(json.RawMessage(`{"limit":201}`)); got == "" {
@@ -95,7 +95,7 @@ func TestSandboxAccessValidatorsAreClosedAndBounded(t *testing.T) {
 	if got := validateSandboxAccessListRaw(json.RawMessage(`{"after":1}`)); got == "" {
 		t.Fatal("unknown pagination field accepted")
 	}
-	if got := validateSandboxAccessResolveRaw(json.RawMessage(`{"eventId":"0123456789abcdef0123456789abcdef","decision":"dismiss"}`)); got != "" {
+	if got := validateSandboxAccessResolveRaw(json.RawMessage(`{"eventId":"0123456789abcdef0123456789abcdef","paneId":"0198f2b0-0000-7000-8000-000000000021","decision":"dismiss"}`)); got != "" {
 		t.Fatalf("valid resolve rejected: %s", got)
 	}
 }

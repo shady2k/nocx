@@ -101,6 +101,11 @@ var (
 	// on purpose — a partial list would need a second rule for where
 	// everything else goes, and two rules for one order disagree eventually.
 	ErrNotAPermutation = errors.New("content: reorder is not a permutation of the container's members")
+	// ErrPaneGrantExists means the pane already carries sandbox authority.
+	ErrPaneGrantExists        = errors.New("content: pane grant already exists")
+	ErrPaneGrantStale         = errors.New("content: pane grant context is stale")
+	ErrSandboxProfileRevision = errors.New("content: sandbox profile revision mismatch")
+	ErrSandboxProfileAbsent   = errors.New("content: sandbox profile is absent")
 )
 
 // ── the create key ───────────────────────────────────────────────────────
@@ -1359,4 +1364,341 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+const workspaceSandboxProfileSchemaVersion = 1
+
+func decodeWorkspacePayload(raw string) (map[string]json.RawMessage, error) {
+	out := make(map[string]json.RawMessage)
+	if raw == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("content: workspaces.payload is not a JSON object: %w", err)
+	}
+	return out, nil
+}
+
+func workspaceSandboxProfileFrom(m map[string]json.RawMessage) (*WorkspaceSandboxProfile, error) {
+	raw, ok := m["sandboxProfile"]
+	if !ok {
+		return nil, nil
+	}
+	var profile WorkspaceSandboxProfile
+	if err := json.Unmarshal(raw, &profile); err != nil {
+		return nil, fmt.Errorf("content: workspace sandboxProfile is malformed: %w", err)
+	}
+	if profile.SchemaVersion != workspaceSandboxProfileSchemaVersion {
+		return nil, fmt.Errorf("content: workspace sandboxProfile schema version %d is unsupported", profile.SchemaVersion)
+	}
+	return &profile, nil
+}
+
+func workspacePayloadFor(ctx context.Context, tx *sql.Tx, workspaceID string) (string, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT payload FROM workspaces WHERE id = ?`, workspaceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrNoSuchWorkspace, workspaceID)
+	}
+	return raw, err
+}
+
+func (s *sqliteContent) WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*WorkspaceSandboxProfile, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT payload FROM workspaces WHERE id = ?`, workspaceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrNoSuchWorkspace, workspaceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	m, err := decodeWorkspacePayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	return workspaceSandboxProfileFrom(m)
+}
+
+func (s *sqliteContent) SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error) {
+	if workspaceID == DefaultWorkspaceID {
+		return 0, ErrDefaultWorkspace
+	}
+	if s.closed.Load() {
+		return 0, ErrClosed
+	}
+	var newRevision int64
+	err := s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			raw, err := workspacePayloadFor(ctx, tx, workspaceID)
+			if err != nil {
+				return err
+			}
+			m, err := decodeWorkspacePayload(raw)
+			if err != nil {
+				return err
+			}
+			current, err := workspaceSandboxProfileFrom(m)
+			if err != nil {
+				return err
+			}
+			var currentRevision int64
+			if current != nil {
+				currentRevision = current.Revision
+			}
+			if currentRevision != expectedRevision {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileRevision, workspaceID)
+			}
+			newRevision = currentRevision + 1
+			profile.SchemaVersion = workspaceSandboxProfileSchemaVersion
+			profile.Revision = newRevision
+			encoded, err := json.Marshal(profile)
+			if err != nil {
+				return err
+			}
+			m["sandboxProfile"] = encoded
+			full, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE workspaces SET payload = ? WHERE id = ?`, string(full), workspaceID)
+			return err
+		})
+	})
+	return newRevision, err
+}
+
+func (s *sqliteContent) DeleteWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64) error {
+	if workspaceID == DefaultWorkspaceID {
+		return ErrDefaultWorkspace
+	}
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			raw, err := workspacePayloadFor(ctx, tx, workspaceID)
+			if err != nil {
+				return err
+			}
+			m, err := decodeWorkspacePayload(raw)
+			if err != nil {
+				return err
+			}
+			current, err := workspaceSandboxProfileFrom(m)
+			if err != nil {
+				return err
+			}
+			if current == nil {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileAbsent, workspaceID)
+			}
+			if current.Revision != expectedRevision {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileRevision, workspaceID)
+			}
+			delete(m, "sandboxProfile")
+			full, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE workspaces SET payload = ? WHERE id = ?`, string(full), workspaceID)
+			return err
+		})
+	})
+}
+
+func (s *sqliteContent) InsertPaneGrantIfCurrent(ctx context.Context, paneID string, grant Grant, expectation PaneGrantExpectation, payload string) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var workspaceID, workspacePayload string
+		if scanErr := tx.QueryRowContext(ctx, `SELECT w.id, w.payload
+			FROM panes p JOIN tabs t ON t.id = p.tab_id
+			JOIN workspaces w ON w.id = t.workspace_id WHERE p.id = ?`, paneID).
+			Scan(&workspaceID, &workspacePayload); scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				return ErrNoSuchPane
+			}
+			return scanErr
+		}
+		if expectation.WorkspaceID != "" && workspaceID != expectation.WorkspaceID {
+			return fmt.Errorf("%w: workspace changed", ErrPaneGrantStale)
+		}
+		profileMap, err := decodeWorkspacePayload(workspacePayload)
+		if err != nil {
+			return err
+		}
+		profile, err := workspaceSandboxProfileFrom(profileMap)
+		if err != nil {
+			return err
+		}
+		switch {
+		case expectation.WorkspaceProfileRevision == nil && profile != nil:
+			return fmt.Errorf("%w: profile source changed", ErrPaneGrantStale)
+		case expectation.WorkspaceProfileRevision != nil && (profile == nil || profile.Revision != *expectation.WorkspaceProfileRevision):
+			return fmt.Errorf("%w: profile revision changed", ErrPaneGrantStale)
+		}
+		policyJSON, err := json.Marshal(grant.Policy)
+		if err != nil {
+			return fmt.Errorf("content: pane grant policy: %w", err)
+		}
+		if payload == "" {
+			payload = "{}"
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO authority_grants
+			(pane_id, version, issued_at, expires_at, policy, payload)
+			VALUES (?, ?, ?, NULL, ?, ?)`,
+			paneID, grant.Version, time.Now().UnixMilli(), string(policyJSON), payload)
+		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed: authority_grants.pane_id") {
+				return ErrPaneGrantExists
+			}
+			return err
+		}
+		grantID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		for _, scope := range grant.Scopes {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (?, ?, ?)`,
+				grantID, string(scope.Kind), scope.ID); err != nil {
+				return err
+			}
+		}
+		for _, effect := range grant.Effects {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO grant_effects (grant_id, effect) VALUES (?, ?)`,
+				grantID, string(effect)); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+func (s *sqliteContent) RemovePaneGrant(ctx context.Context, paneID string) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM authority_grants WHERE pane_id = ?`, paneID)
+		return err
+	})
+}
+
+func (s *sqliteContent) PaneGrant(ctx context.Context, paneID string) (*StoredGrant, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	var id int64
+	var policyJSON, payload string
+	var version, issuedAt int
+	err := s.db.QueryRowContext(ctx, `SELECT id, version, issued_at, policy, payload
+		FROM authority_grants WHERE pane_id = ?`, paneID).
+		Scan(&id, &version, &issuedAt, &policyJSON, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var policy EffectPolicy
+	if err := json.Unmarshal([]byte(policyJSON), &policy); err != nil {
+		return nil, fmt.Errorf("content: pane grant policy: %w", err)
+	}
+	stored := &StoredGrant{Version: version, IssuedAt: int64(issuedAt), Policy: policy, Payload: payload}
+	if err := s.populateGrantParts(ctx, id, stored); err != nil {
+		return nil, err
+	}
+	return stored, nil
+}
+
+func (s *sqliteContent) OpenPaneGrants(ctx context.Context) (map[string]StoredGrant, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	type row struct {
+		paneID string
+		id     int64
+		stored StoredGrant
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT pane_id, id, version, issued_at, policy, payload
+		FROM authority_grants WHERE pane_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	var pending []row
+	for rows.Next() {
+		var item row
+		var policyJSON string
+		var version, issuedAt int
+		if scanErr := rows.Scan(&item.paneID, &item.id, &version, &issuedAt, &policyJSON, &item.stored.Payload); scanErr != nil {
+			_ = rows.Close()
+			return nil, scanErr
+		}
+		var policy EffectPolicy
+		if unmarshalErr := json.Unmarshal([]byte(policyJSON), &policy); unmarshalErr != nil {
+			_ = rows.Close()
+			return nil, unmarshalErr
+		}
+		item.stored.Version = version
+		item.stored.IssuedAt = int64(issuedAt)
+		item.stored.Policy = policy
+		pending = append(pending, item)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return nil, rowsErr
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]StoredGrant, len(pending))
+	for _, item := range pending {
+		if err := s.populateGrantParts(ctx, item.id, &item.stored); err != nil {
+			return nil, err
+		}
+		out[item.paneID] = item.stored
+	}
+	return out, nil
+}
+
+func (s *sqliteContent) populateGrantParts(ctx context.Context, grantID int64, stored *StoredGrant) error {
+	effectRows, err := s.db.QueryContext(ctx, `SELECT effect FROM grant_effects WHERE grant_id = ? ORDER BY effect`, grantID)
+	if err != nil {
+		return err
+	}
+	for effectRows.Next() {
+		var effect string
+		if scanErr := effectRows.Scan(&effect); scanErr != nil {
+			_ = effectRows.Close()
+			return scanErr
+		}
+		stored.Effects = append(stored.Effects, Effect(effect))
+	}
+	if closeErr := effectRows.Close(); closeErr != nil {
+		return closeErr
+	}
+	scopeRows, err := s.db.QueryContext(ctx, `SELECT resource_kind, resource_id FROM grant_scopes WHERE grant_id = ? ORDER BY resource_kind, resource_id`, grantID)
+	if err != nil {
+		return err
+	}
+	for scopeRows.Next() {
+		var kind, id string
+		if scanErr := scopeRows.Scan(&kind, &id); scanErr != nil {
+			_ = scopeRows.Close()
+			return scanErr
+		}
+		stored.Scopes = append(stored.Scopes, GrantScope{Kind: ResourceKind(kind), ID: id})
+	}
+	return scopeRows.Close()
 }

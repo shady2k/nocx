@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.run.get.schema.json",
+  "title": "SandboxRunGet",
+  "description": "Result of sandbox.run.get. null means Off; candidatePolicy is enforced only when mode is enforce.",
+  "oneOf": [
+    { "type": "null" },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "issuedAt", "backend", "shellFolder", "candidatePolicy", "provenance"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["learn", "enforce"] },
+        "issuedAt": { "type": "integer", "minimum": 0 },
+        "backend": { "type": "string", "enum": ["landlock", "seatbelt"] },
+        "shellFolder": { "type": "string", "minLength": 1, "pattern": "^/" },
+        "candidatePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["writableRoots", "readOnlyRoots"],
+          "properties": {
+            "writableRoots": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
+            "readOnlyRoots": { "type": "array", "items": { "type": "string", "pattern": "^/" } }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workspaceId", "source", "settingsRevision", "profileRevision"],
+          "properties": {
+            "workspaceId": { "type": "string", "minLength": 1 },
+            "source": { "type": "string", "enum": ["standard", "workspace"] },
+            "settingsRevision": { "type": "integer", "minimum": 0 },
+            "profileRevision": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -125,6 +125,29 @@ func renderProfile(p *Policy, messages ...string) (string, error) {
 	return b.String(), nil
 }
 
+// renderLearnProfile builds a permissive Seatbelt profile that reports file
+// operations without denying them. The monitor consumes Unified Log records;
+// the candidate policy remains the only source of classification.
+func renderLearnProfile(message string) (string, error) {
+	profile, err := renderProfile(&Policy{WritableRoots: []string{"/"}}, message)
+	if err != nil {
+		return "", err
+	}
+	profile = strings.Replace(
+		profile,
+		`(allow file-read* (subpath "/"))`,
+		`(allow file-read* (subpath "/") (with report))`,
+		1,
+	)
+	profile = strings.Replace(
+		profile,
+		`(allow file-write* (subpath "/"))`,
+		`(allow file-write* (subpath "/") (with report))`,
+		1,
+	)
+	return profile, nil
+}
+
 // escapeSBPL validates and escapes a path for use inside a quoted SBPL
 // string. Control characters (including newline and NUL) are rejected before
 // rendering; backslash and double quote are escaped.

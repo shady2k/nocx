@@ -62,11 +62,6 @@ describe('Select', () => {
     expect(sel).toHaveProperty('disabled', true)
   })
 
-  it('uses the supplied accessible label', () => {
-    subject({ ariaLabel: 'Filter by application' })
-    expect(screen.getByRole('combobox', { name: 'Filter by application' })).toBeTruthy()
-  })
-
   it('is natively keyboard-operable (Arrow keys, typeahead)', () => {
     subject()
     const sel = screen.getByRole('combobox')

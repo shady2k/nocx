@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/shady2k/nocx/internal/sandbox"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 type sandboxAccessHandlers struct {
@@ -38,6 +39,7 @@ func decodeSandboxAccessObject(raw json.RawMessage, dst any) string {
 
 type sandboxAccessResolveParams struct {
 	EventID  string                 `json:"eventId"`
+	PaneID   string                 `json:"paneId"`
 	Decision sandbox.AccessDecision `json:"decision"`
 }
 
@@ -60,8 +62,11 @@ func validateSandboxAccessResolveRaw(raw json.RawMessage) string {
 	if msg := decodeSandboxAccessObject(raw, &params); msg != "" {
 		return msg
 	}
-	if !isLowerHex(params.EventID, 32) {
-		return "eventId must be 32 lowercase hex characters"
+	if _, err := session.IDToBytes(session.ID(params.EventID)); err != nil {
+		return "eventId must be a 32-character lowercase hex id"
+	}
+	if msg := validatePaneID(params.PaneID); msg != "" {
+		return msg
 	}
 	switch params.Decision {
 	case sandbox.AccessDecisionDismiss, sandbox.AccessDecisionWorkspaceReadOnly, sandbox.AccessDecisionWorkspaceReadWrite:
@@ -97,11 +102,15 @@ func (h sandboxAccessHandlers) handleResolve(_ context.Context, req jsonrpcReque
 		return
 	}
 	var params sandboxAccessResolveParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	if msg := decodeSandboxAccessObject(req.Params, &params); msg != "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	event, err := h.inbox.Resolve(sandbox.AccessResolveRequest{EventID: params.EventID, Decision: params.Decision})
+	event, err := h.inbox.Resolve(sandbox.AccessResolveRequest{
+		EventID:  params.EventID,
+		PaneID:   params.PaneID,
+		Decision: params.Decision,
+	})
 	if err == nil {
 		_ = h.r.TryResult(req.ID, mustMarshal(event))
 		return

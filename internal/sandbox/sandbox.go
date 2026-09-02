@@ -16,6 +16,41 @@ import (
 	"sync"
 )
 
+// RunMode is the authority mode of a sandboxed session.
+type RunMode string
+
+const (
+	ModeLearn   RunMode = "learn"
+	ModeEnforce RunMode = "enforce"
+)
+
+// ModeStatus describes one mode independently: Learn can remain usable when
+// native enforcement is unavailable, while Enforce must fail closed.
+type ModeStatus struct {
+	Available bool     `json:"available"`
+	Backend   string   `json:"backend"`
+	Reason    string   `json:"reason,omitempty"`
+	Detail    string   `json:"detail,omitempty"`
+	ABI       int      `json:"abi,omitempty"`
+	State     string   `json:"state"`
+	Coverage  []string `json:"coverage"`
+}
+
+const (
+	StatusStateAvailable   = "available"
+	StatusStateUnavailable = "unavailable"
+	StatusStateDegraded    = "degraded"
+)
+
+const (
+	CoverageOpenAt             = "openat"
+	CoverageOpenAt2            = "openat2"
+	CoverageNative             = "native"
+	CoverageSeatbeltUnifiedLog = "seatbelt-unified-log"
+	CoverageReportedFileOps    = "reported file operations"
+	CoverageUnavailable        = "unavailable"
+)
+
 // Backend names are frozen wire values (design spec §4.2).
 const (
 	BackendLandlock    = "landlock"
@@ -44,14 +79,10 @@ const (
 const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
 
 // Request carries the backend-owned policy inputs for one sandboxed tab
-// (design spec §6). GlobalWritable and GlobalReadOnly are the persisted
-// baselines of additional writable and read-only directories; Add*/Remove*
-// are the class-scoped per-tab deltas. RuntimeRoot is minted by the
-// composition root for a sandboxed enhanced launch so its private bootstrap
-// artefact is born inside the tree the native backend will enforce; it is
-// never decoded from the renderer. The backend canonicalizes every user path
-// and never mutates the caller's slices.
+// (design spec §6). GlobalWritable and GlobalReadOnly are persisted baselines.
+// Mode selects Learn (observe only) or Enforce (fail closed).
 type Request struct {
+	Mode           RunMode
 	Workspace      string
 	GlobalWritable []string
 	GlobalReadOnly []string
@@ -75,17 +106,58 @@ type Request struct {
 // Status reports backend availability. It is the payload of sandbox.status
 // and the reason surfaced by the Quick Connect "Sandbox unavailable" row.
 type Status struct {
-	Available bool   `json:"available"`
-	Backend   string `json:"backend"`
-	Reason    string `json:"reason,omitempty"`
-	Detail    string `json:"detail,omitempty"`
-	ABI       int    `json:"abi,omitempty"`
+	Learn   ModeStatus `json:"learn"`
+	Enforce ModeStatus `json:"enforce"`
+	// Legacy fields remain source-compatible for platform probes; transport
+	// emits only Learn and Enforce.
+	Available bool   `json:"-"`
+	Backend   string `json:"-"`
+	Reason    string `json:"-"`
+	Detail    string `json:"-"`
+	ABI       int    `json:"-"`
 }
 
 // CommandSpec is the ordinary shell command pty.NewLocal builds today:
 // shell detection, cmd.Dir, and the scrubbed/UTF-8-forced environment. The
 // backend wraps it (helper re-exec on Linux, sandbox-exec on macOS) or, for
 // an ordinary request, pty.NewLocal never touches this package at all.
+
+func statusModes(st Status) Status {
+	if st.Learn.Backend == "" {
+		learnAvailable := st.Backend != BackendUnsupported
+		learnState := StatusStateUnavailable
+		coverage := []string{CoverageUnavailable}
+		if learnAvailable {
+			learnState = StatusStateAvailable
+			switch st.Backend {
+			case BackendLandlock:
+				coverage = []string{CoverageOpenAt, CoverageOpenAt2}
+			case BackendSeatbelt:
+				coverage = []string{CoverageSeatbeltUnifiedLog, CoverageReportedFileOps}
+			}
+		}
+		st.Learn = ModeStatus{
+			Available: learnAvailable, Backend: st.Backend,
+			Detail: "Filesystem access is unrestricted; observations are best effort.",
+			State:  learnState, Coverage: coverage,
+		}
+	}
+	if st.Enforce.Backend == "" {
+		enforceState := StatusStateUnavailable
+		coverage := []string{CoverageUnavailable}
+		if st.Available {
+			enforceState = StatusStateAvailable
+			coverage = []string{CoverageNative}
+		}
+		st.Enforce = ModeStatus{
+			Available: st.Available, Backend: st.Backend, Reason: st.Reason,
+			Detail: st.Detail, ABI: st.ABI, Coverage: coverage,
+			State: enforceState,
+		}
+	}
+	return st
+}
+
 type CommandSpec struct {
 	Path       string
 	Args       []string
@@ -102,6 +174,7 @@ type CommandSpec struct {
 // tab (design spec §3.3).
 type PreparedCommand struct {
 	Cmd     *exec.Cmd
+	Mode    RunMode
 	Backend string
 	Policy  *Policy
 
@@ -155,6 +228,7 @@ type Service interface {
 // and returned in the open result (design spec §3.3, §4.5). Ordinary and SSH
 // sessions have none.
 type SessionInfo struct {
+	Mode            RunMode          `json:"mode"`
 	Backend         string           `json:"backend"`
 	Workspace       string           `json:"workspace"`
 	WritableRoots   []string         `json:"writableRoots"`
@@ -169,6 +243,7 @@ func (s *SessionInfo) Clone() *SessionInfo {
 		return nil
 	}
 	return &SessionInfo{
+		Mode:            s.Mode,
 		Backend:         s.Backend,
 		Workspace:       s.Workspace,
 		WritableRoots:   append([]string(nil), s.WritableRoots...),

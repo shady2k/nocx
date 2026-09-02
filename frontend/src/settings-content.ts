@@ -19,9 +19,7 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
-import type { SandboxAccessClient } from './sandbox-access-settings'
-import type { AboutClient } from './about-client'
-import type { ClipboardAccess } from './clipboard'
+import type { SandboxAccessClient } from './sandbox-denied-access'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -64,8 +62,6 @@ export class SettingsContent extends SolidPaneContent {
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
     private readonly sandboxAccessClient?: SandboxAccessClient,
-    private readonly aboutClient?: AboutClient,
-    private readonly clipboard?: ClipboardAccess,
   ) {
     super()
   }
@@ -81,13 +77,12 @@ export class SettingsContent extends SolidPaneContent {
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
-          policyClient: this.policyClient,
-          endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,
+          policyClient: this.policyClient,
           sandboxAccessClient: this.sandboxAccessClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {

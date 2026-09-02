@@ -71,6 +71,10 @@ const (
 // error.
 var ErrValidation = errors.New("settings: validation failed")
 
+// ErrRevisionMismatch means a dependent cross-store operation observed a
+// stale settings snapshot.
+var ErrRevisionMismatch = errors.New("settings: revision mismatch")
+
 // ValidationError wraps ErrValidation with context.
 type ValidationError struct {
 	SettingKey string
@@ -1492,7 +1496,72 @@ func (r *Registry) AppendSandboxPath(p *PathList, path string) (int, error) {
 	return revision, nil
 }
 
-// ── getSnapshot ─────────────────────────────────────────────────────────
+func (r *Registry) snapshotLocked() SettingsSnapshot {
+	values := make(map[string]any, len(allDecls))
+	var overridden []string
+	for _, d := range allDecls {
+		if d.Control() == ControlSecret {
+			continue
+		}
+		if v, ok := r.values[d.Key()]; ok {
+			if d.Control() == ControlPaths {
+				values[d.Key()] = copyPathsValue(v)
+			} else {
+				values[d.Key()] = v
+			}
+			overridden = append(overridden, d.Key())
+		} else {
+			values[d.Key()] = d.Default()
+		}
+	}
+	if overridden == nil {
+		overridden = []string{}
+	}
+	return SettingsSnapshot{Values: values, Overridden: overridden, Revision: r.revision}
+}
+
+// WithSnapshot checks expectedRevision and invokes fn while the settings
+// revision is held stable. expectedRevision zero means the current revision.
+// The callback must use the snapshot for dependent writes and must not call
+// back into Registry.
+func (r *Registry) WithSnapshot(expectedRevision int, fn func(SettingsSnapshot) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if expectedRevision != 0 && expectedRevision != r.revision {
+		return ErrRevisionMismatch
+	}
+	return fn(r.snapshotLocked())
+}
+
+// SandboxProfile is a validated pair of canonical path-list values.
+type SandboxProfile struct {
+	Paths []string
+}
+
+// SandboxProfileFromSnapshot extracts the two sandbox path lists without
+// coercing malformed JSON values.
+func SandboxProfileFromSnapshot(snapshot SettingsSnapshot) (*SandboxProfile, *SandboxProfile, error) {
+	read := func(key string) (*SandboxProfile, error) {
+		value, ok := snapshot.Values[key]
+		if !ok {
+			return nil, fmt.Errorf("sandbox profile: missing %q", key)
+		}
+		paths, ok := value.([]string)
+		if !ok {
+			return nil, fmt.Errorf("sandbox profile: %q is not []string", key)
+		}
+		return &SandboxProfile{Paths: copyStrings(paths)}, nil
+	}
+	writable, err := read(SandboxAllowedWritablePaths.Key())
+	if err != nil {
+		return nil, nil, err
+	}
+	readOnly, err := read(SandboxAllowedReadOnlyPaths.Key())
+	if err != nil {
+		return nil, nil, err
+	}
+	return writable, readOnly, nil
+}
 
 // GetSnapshot returns the current snapshot of all non-secret settings:
 // effective values, which keys have stored overrides, and the current
@@ -2090,6 +2159,27 @@ func canonicalPaths(key string, value any) ([]string, error) {
 	return out, nil
 }
 
+// CanonicalizeSandboxProfile applies one canonicalization pass to both
+// classes and validates their cross-class containment relation.
+func CanonicalizeSandboxProfile(writable, readOnly []string) ([]string, []string, error) {
+	canonicalWritable, err := canonicalPaths(SandboxAllowedWritablePaths.Key(), writable)
+	if err != nil {
+		return nil, nil, err
+	}
+	canonicalReadOnly, err := canonicalPaths(SandboxAllowedReadOnlyPaths.Key(), readOnly)
+	if err != nil {
+		return nil, nil, err
+	}
+	values := map[string]any{
+		SandboxAllowedWritablePaths.Key(): canonicalWritable,
+		SandboxAllowedReadOnlyPaths.Key(): canonicalReadOnly,
+	}
+	if err := checkSandboxPathConflict(SandboxAllowedReadOnlyPaths.Key(), values); err != nil {
+		return nil, nil, err
+	}
+	return canonicalWritable, canonicalReadOnly, nil
+}
+
 // pathStrings converts a path-list candidate to []string. It accepts []string
 // (the typed setter) and []any (a JSON-decoded array of strings); anything
 // else is rejected as "expected an array of strings".
@@ -2267,6 +2357,7 @@ var sandboxPathKeys = map[string]bool{
 	"sandbox.allowedWritablePaths": true,
 	"sandbox.allowedReadOnlyPaths": true,
 }
+
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:

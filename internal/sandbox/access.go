@@ -115,6 +115,7 @@ type AccessPage struct {
 
 type AccessResolveRequest struct {
 	EventID  string
+	PaneID   string
 	Decision AccessDecision
 }
 
@@ -427,6 +428,9 @@ func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 	event := &i.events[index]
 	if event.State != AccessStatePending {
 		return AccessEvent{}, ErrAccessEventResolved
+	}
+	if req.PaneID != "" && event.PaneID != req.PaneID {
+		return AccessEvent{}, ErrAccessGrantUnavailable
 	}
 	switch req.Decision {
 	case AccessDecisionDismiss:

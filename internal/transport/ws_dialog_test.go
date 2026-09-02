@@ -27,11 +27,7 @@ type fakeDialogService struct {
 }
 
 func (f *fakeDialogService) OpenFile(_ context.Context) (string, error) {
-	return f.filePath, f.fileErr
-}
-
-func (f *fakeDialogService) OpenDirectory(_ context.Context) (string, error) {
-	return f.directoryPath, f.directoryErr
+	return f.path, f.err
 }
 
 func (f *fakeDialogService) OpenDirectory(_ context.Context) (string, error) {
@@ -63,28 +59,9 @@ func TestDialogOpenFile_UnavailableWithoutService(t *testing.T) {
 	}
 }
 
-func TestDialogOpenDirectory_UnavailableWithoutService(t *testing.T) {
-	h := newInventoryHarness(t)
-	resp := jsonrpcCall(t, h.conn, "dialog.openDirectory", map[string]any{})
-	var errResult struct {
-		Error *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &errResult); err != nil {
-		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
-	}
-	if errResult.Error == nil {
-		t.Fatalf("expected 'not available' error, got %s", string(resp))
-	}
-	if errResult.Error.Code != -32601 {
-		t.Errorf("code = %d, want -32601 (method not available)", errResult.Error.Code)
-	}
-}
-
 func TestDialogOpenFile_ReturnsAbsolutePath(t *testing.T) {
 	h := newInventoryHarness(t)
-	h.ws.SetDialogService(&fakeDialogService{filePath: "/home/dev/.ssh/id_ed25519"})
+	h.ws.SetDialogService(&fakeDialogService{path: "/home/dev/.ssh/id_ed25519"})
 
 	resp := jsonrpcCall(t, h.conn, "dialog.openFile", map[string]any{})
 	var result struct {
@@ -108,7 +85,7 @@ func TestDialogOpenFile_ReturnsAbsolutePath(t *testing.T) {
 // change", never as an error.
 func TestDialogOpenFile_CancelledYieldsEmptyPath(t *testing.T) {
 	h := newInventoryHarness(t)
-	h.ws.SetDialogService(&fakeDialogService{filePath: ""})
+	h.ws.SetDialogService(&fakeDialogService{path: ""})
 
 	resp := jsonrpcCall(t, h.conn, "dialog.openFile", map[string]any{})
 	var result struct {

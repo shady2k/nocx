@@ -100,9 +100,6 @@ export interface PaneView {
    *  tree stays in the vertical one (§4.3). */
   readonly depth?: number
   onDisplayChange: (() => void) | null
-  /** True once the session confirmed a sandboxed local tab (lock/shield
-   *  marker renders; ADR-0030 §3.3). */
-  readonly sandboxed?: boolean
 }
 
 /**
@@ -786,16 +783,6 @@ abstract class TabStripBase implements TabStrip {
                 <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
-                <Show when={sandboxEnabled()}>
-                  <IconButton
-                    ariaLabel="New sandboxed tab"
-                    title="New sandboxed tab"
-                    square
-                    onClick={() => this.onNewSandboxedTab?.()}
-                  >
-                    <ShieldIcon />
-                  </IconButton>
-                </Show>
                 <IconButton
                   ariaLabel="More"
                   title="More"
@@ -992,15 +979,6 @@ abstract class TabStripBase implements TabStrip {
               <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
-              <Show when={sandboxEnabled()}>
-                <IconButton
-                  ariaLabel="New sandboxed tab"
-                  title="New sandboxed tab"
-                  onClick={() => this.onNewSandboxedTab?.()}
-                >
-                  <ShieldIcon />
-                </IconButton>
-              </Show>
               <IconButton
                 ariaLabel="More"
                 title="More"

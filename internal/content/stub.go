@@ -419,6 +419,41 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	return "", ErrNotImplemented
 }
 
+func (s *layoutStub) InsertPaneGrantIfCurrent(_ context.Context, paneID string, _ Grant, _ PaneGrantExpectation, _ string) error {
+	s.log.Info("content stub: LayoutRepository.InsertPaneGrantIfCurrent", "pane", paneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) RemovePaneGrant(_ context.Context, paneID string) error {
+	s.log.Info("content stub: LayoutRepository.RemovePaneGrant", "pane", paneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) PaneGrant(_ context.Context, paneID string) (*StoredGrant, error) {
+	s.log.Info("content stub: LayoutRepository.PaneGrant", "pane", paneID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) OpenPaneGrants(_ context.Context) (map[string]StoredGrant, error) {
+	s.log.Info("content stub: LayoutRepository.OpenPaneGrants")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) WorkspaceSandboxProfile(_ context.Context, workspaceID string) (*WorkspaceSandboxProfile, error) {
+	s.log.Info("content stub: LayoutRepository.WorkspaceSandboxProfile", "workspace", workspaceID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) SetWorkspaceSandboxProfile(_ context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error) {
+	s.log.Info("content stub: LayoutRepository.SetWorkspaceSandboxProfile", "workspace", workspaceID, "expected_revision", expectedRevision, "writable", len(profile.WritablePaths))
+	return 0, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteWorkspaceSandboxProfile(_ context.Context, workspaceID string, expectedRevision int64) error {
+	s.log.Info("content stub: LayoutRepository.DeleteWorkspaceSandboxProfile", "workspace", workspaceID, "expected_revision", expectedRevision)
+	return ErrNotImplemented
+}
+
 func (s *layoutStub) ClearWindow(_ context.Context) error {
 	s.log.Info("content stub: LayoutRepository.ClearWindow")
 	return ErrNotImplemented

@@ -27,14 +27,16 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { EditableRowList } from './ui/row-list'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { SkillsSection } from './skills-section'
 import type { SkillsStore } from './skills-store'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
+import { SandboxDeniedAccessSection, type SandboxAccessClient } from './sandbox-denied-access'
+import { classConflict } from './sandbox-path-classes'
 import type { PolicyClient } from './policy-client'
-import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -251,10 +253,10 @@ export interface SettingsComponentProps {
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
+  /** Sandbox access inbox and policy surface. */
   sandboxAccessClient?: SandboxAccessClient
   ref?: { current: SettingsComponentHandle | null }
 }
-
 // ── Root component ─────────────────────────────────────────────────────
 
 export function SettingsComponent(props: SettingsComponentProps) {
@@ -472,12 +474,21 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   /** The typed page registry — generated sections + component pages. */
   const settingsPages = createMemo<SettingsPage[]>(() => {
-    const generated: SettingsPage[] = sections().map((s) => ({
-      kind: 'generated' as const,
-      id: s,
-      title: s,
-      groupId: sectionGroups()[s],
-    }))
+    const sandboxKeys: Record<string, true> = {
+      'sandbox.enabled': true,
+      'sandbox.allowedWritablePaths': true,
+      'sandbox.allowedReadOnlyPaths': true,
+    }
+    const generated: SettingsPage[] = sections()
+      .filter((section) =>
+        declarations().some((decl) => decl.section === section && !sandboxKeys[decl.key]),
+      )
+      .map((s) => ({
+        kind: 'generated' as const,
+        id: s,
+        title: s,
+        groupId: sectionGroups()[s],
+      }))
     const backupPage: SettingsPage = {
       kind: 'component',
       id: 'backup',
@@ -688,13 +699,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
         />
       ),
     }
-    const sandboxAccessPage: SettingsPage = {
+    const sandboxPage: SettingsPage = {
       kind: 'component',
-      id: 'sandbox-access',
-      title: 'Sandbox access',
+      id: 'sandbox',
+      title: 'Sandbox',
       groupId: 'developer',
       scrollMode: 'page',
-      renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
+      renderContent: () => <SandboxDeniedAccessSection client={props.sandboxAccessClient} />,
     }
     return [
       connectionPage,
@@ -708,7 +719,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       rolesPage,
       policyPage,
       aboutPage,
-      sandboxAccessPage,
+      ...(props.sandboxAccessClient ? [sandboxPage] : []),
     ]
   })
 
@@ -778,13 +789,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
    */
   createEffect(() => {
     if (sections().length === 0) return
+    if (
+      !props.sandboxAccessClient &&
+      declarations().every(
+        (decl) =>
+          decl.key === 'sandbox.allowedWritablePaths' ||
+          decl.key === 'sandbox.allowedReadOnlyPaths',
+      )
+    )
+      return
     const first = settingsPages()[0]
     if (first === undefined) return
     // The guard reads are untracked: the effect must fire only when the data
-    // arrives, never in reaction to the user's own navigation. Tracking
-    // activeComponentPage here let a click's first write (acp → null) re-run
-    // the effect BEFORE sectionFilter was set, re-selecting Connections and
-    // yanking the click back to the top of the rail.
+    // arrives, never in reaction to the user's own navigation.
     if (untrack(() => sectionFilter() !== null || activeComponentPage() !== null)) return
     if (untrack(() => searchQuery() !== '')) return
     handleNavClick(first)
@@ -909,39 +926,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         })
       }
     }
-  }
-
-  /** Append a picked directory to a `paths` setting and save the complete
-   *  array (ADR-0034 §4.1). A cancelled picker (empty path) is a no-op; an
-   *  unavailable native runtime surfaces in the row's existing error slot.
-   *  An exact match in the peer sandbox path list is refused immediately with
-   *  visible feedback — the backend is authoritative for aliases/containment. */
-  async function addPath(decl: Declaration): Promise<void> {
-    if (!props.dialogClient) return
-    try {
-      const picked = await props.dialogClient.openDirectoryDialog()
-      if (!picked.path) return
-      // Refuse an exact pick already active in the peer sandbox path list.
-      const peerKey = sandboxPeerKey(decl.key)
-      if (peerKey !== null && pathsValue(peerKey).includes(picked.path)) {
-        setErrors(decl.key, 'This path is already active in the peer sandbox list')
-        return
-      }
-      setErrors(decl.key, undefined as never)
-      const current = pathsValue(decl.key)
-      const next = current.includes(picked.path) ? current : [...current, picked.path]
-      await saveSetting(decl.key, next)
-    } catch (err) {
-      setErrors(decl.key, (err as Error).message)
-    }
-  }
-
-  /** Remove one entry from a `paths` setting and save the complete remaining
-   *  array. The row's remove control sends the whole array — no incremental
-   *  edit state exists (ADR-0034 §4.1). */
-  async function removePath(decl: Declaration, index: number): Promise<void> {
-    const next = pathsValue(decl.key).filter((_, i) => i !== index)
-    await saveSetting(decl.key, next)
   }
 
   async function resetSetting(key: string): Promise<void> {
@@ -1145,33 +1129,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return values[key]
   }
 
-  /** The current string array for a `paths` control, tolerant of a backend
-   *  value that is not (yet) an array — the screen never validates, so a
-   *  non-array reads as empty rather than throwing mid-render. */
-  function pathsValue(key: string): string[] {
-    const v = effectiveValue(key)
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-  }
-
-  /** The peer sandbox path-list key, or null when key is not a sandbox path class. */
-  function sandboxPeerKey(key: string): string | null {
-    if (key === 'sandbox.allowedWritablePaths') return 'sandbox.allowedReadOnlyPaths'
-    if (key === 'sandbox.allowedReadOnlyPaths') return 'sandbox.allowedWritablePaths'
-    return null
-  }
-
-  /** What this surface may say about a pick, before the backend decides. */
-  function sandboxClassConflictFor(key: string, path: string): string | null {
-    const target = sandboxPathClass(key)
-    if (target === null) return null
-    return classConflict(
-      target,
-      path,
-      pathsValue(SANDBOX_READ_ONLY_PATHS_KEY),
-      pathsValue(SANDBOX_WRITABLE_PATHS_KEY),
-    )
-  }
-
   /**
    * Has the user actually changed this setting away from its default?
    *
@@ -1362,7 +1319,87 @@ export function SettingsComponent(props: SettingsComponentProps) {
     )
   }
 
-  function SettingRow(props: { decl: Declaration; visible: boolean }) {
+  function PathSetting(props: {
+    decl: Declaration
+    value: () => unknown
+    dialogClient?: DialogClient
+  }) {
+    const paths = (): string[] => {
+      const raw = props.value()
+      return Array.isArray(raw)
+        ? raw.filter((path): path is string => typeof path === 'string')
+        : []
+    }
+    const pathsFor = (key: string): string[] => {
+      if (key === props.decl.key) return paths()
+      const raw = effectiveValue(key)
+      return Array.isArray(raw)
+        ? raw.filter((path): path is string => typeof path === 'string')
+        : []
+    }
+    const savePaths = (next: string[]): void => {
+      void saveSetting(props.decl.key, next)
+    }
+    const conflict = (path: string): string | null => {
+      const readOnly = props.decl.key === 'sandbox.allowedReadOnlyPaths'
+      const other = readOnly
+        ? pathsFor('sandbox.allowedWritablePaths')
+        : pathsFor('sandbox.allowedReadOnlyPaths')
+      return classConflict(
+        readOnly ? 'readOnly' : 'readWrite',
+        path,
+        readOnly ? pathsFor(props.decl.key) : other,
+        readOnly ? other : pathsFor(props.decl.key),
+      )
+    }
+    const addPath = async (): Promise<void> => {
+      if (!props.dialogClient) return
+      try {
+        const chosen = await props.dialogClient.openDirectoryDialog()
+        if (chosen.path === '' || paths().includes(chosen.path)) return
+        const reason = conflict(chosen.path)
+        if (reason !== null) {
+          setErrors(props.decl.key, reason)
+          return
+        }
+        savePaths([...paths(), chosen.path])
+      } catch (err) {
+        setErrors(props.decl.key, (err as Error).message)
+      }
+    }
+    return (
+      <div class="ui-settings-paths">
+        <EditableRowList
+          rows={paths()}
+          ariaLabel={props.decl.label}
+          addLabel="Add folder"
+          error={errors[props.decl.key]}
+          emptyLabel="No folders configured"
+          onAdd={() => void addPath()}
+          onRemove={(index) => savePaths(paths().filter((_, i) => i !== index))}
+          removeLabel={(index) => `Remove folder ${index + 1}`}
+          renderRow={(row, index) => (
+            <div class="ui-settings-paths-row">
+              <span class="ui-settings-path-value">{row()}</span>
+              <TextField
+                value={row()}
+                onInput={(value) => {
+                  const next = paths()
+                  next[index] = value
+                  savePaths(next)
+                }}
+              />
+            </div>
+          )}
+        />
+        <Show when={errors[props.decl.key]}>
+          {(error) => <p class="ui-settings-error">{error()}</p>}
+        </Show>
+      </div>
+    )
+  }
+
+  function SettingRow(props: { decl: Declaration; visible: boolean; dialogClient?: DialogClient }) {
     // eslint-disable-next-line solid/reactivity
     const decl = props.decl
     const eff = () => effectiveValue(decl.key)
@@ -1420,19 +1457,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
           }
         >
-          <Show when={decl.control !== 'paths'}>
-            {/* One line: the control and its reset affordance, side by side. The
-                wrapper is the surface's own, so the reset sits level with the
-                control without the surface reaching into Field's column. */}
-            <div class="ui-settings-control-line">
-              <Show when={decl.control === 'toggle'}>
-                <Checkbox
-                  variant="switch"
-                  checked={!!eff()}
-                  ariaLabel={decl.label}
-                  onChange={(c) => void saveSetting(decl.key, c)}
-                />
-              </Show>
+          {/* One line: the control and its reset affordance, side by side. The
+              wrapper is the surface's own, so the reset sits level with the
+              control without the surface reaching into Field's column. */}
+          <div class="ui-settings-control-line">
+            <Show when={decl.control === 'toggle'}>
+              <Checkbox
+                variant="switch"
+                checked={!!eff()}
+                ariaLabel={decl.label}
+                onChange={(c) => void saveSetting(decl.key, c)}
+              />
+            </Show>
 
             <Show when={decl.control === 'text'}>
               {/* multiline is a VARIANT of the same kit component, declared
@@ -1457,22 +1493,54 @@ export function SettingsComponent(props: SettingsComponentProps) {
               />
             </Show>
 
-              <Show when={decl.control === 'number'}>
-                <TextField
-                  type="number"
-                  value={displayValue(eff(), decl)}
-                  min={decl.min}
-                  max={decl.max}
-                  unit={decl.unit}
-                  caption={numberRangeCaption(decl, numeric())}
-                  captionAlign="end"
-                  error={numberRangeError(decl, numeric())}
-                  onInput={(v) => {
-                    const n = Number(v)
-                    void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
+            <Show when={decl.control === 'number'}>
+              <TextField
+                type="number"
+                value={displayValue(eff(), decl)}
+                min={decl.min}
+                max={decl.max}
+                unit={decl.unit}
+                caption={numberRangeCaption(decl, numeric())}
+                captionAlign="end"
+                error={numberRangeError(decl, numeric())}
+                onInput={(v) => {
+                  const n = Number(v)
+                  void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
+                }}
+              />
+            </Show>
+
+            <Show when={decl.control === 'paths'}>
+              <PathSetting decl={decl} value={eff} dialogClient={props.dialogClient} />
+            </Show>
+            <Show when={decl.control === 'select'}>
+              <Select
+                value={displayValue(eff(), decl)}
+                onChange={(v) => void saveSetting(decl.key, v)}
+                options={decl.options ?? []}
+              />
+            </Show>
+
+            <Show when={decl.control === 'secret'}>
+              <div class="ui-settings-secret">
+                <span class="ui-settings-secret-status">
+                  {secretStates[decl.key] ? 'Configured' : 'Not configured'}
+                </span>
+                <Button
+                  variant="default"
+                  onClick={() => {
+                    const value = prompt('Enter new value for "' + decl.label + '":')
+                    if (value === null) return
+                    void saveSecret(decl.key, value)
                   }}
-                />
-              </Show>
+                >
+                  Replace
+                </Button>
+                <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
+                  Clear
+                </Button>
+              </div>
+            </Show>
 
             <ProvenanceBadge decl={decl} />
           </div>
@@ -1651,7 +1719,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
                               return <MatrixBlock matrix={block.matrix} section={section} />
                             }
                             const decl = block.decl
-                            return <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                            return (
+                              <SettingRow
+                                decl={decl}
+                                visible={visibleKeys().has(decl.key)}
+                                dialogClient={props.dialogClient}
+                              />
+                            )
                           }}
                         </For>
                       }
@@ -1659,7 +1733,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
                       <Section title="What the person added" divided>
                         <For each={sectionDecls()}>
                           {(decl) => (
-                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                            <SettingRow
+                              decl={decl}
+                              visible={visibleKeys().has(decl.key)}
+                              dialogClient={props.dialogClient}
+                            />
                           )}
                         </For>
                       </Section>

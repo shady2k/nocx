@@ -1,8 +1,8 @@
 # Sandbox grant model and shield conversion
 
-- **Status:** Approved; entry-point and diagnostics/profile sections amended by [ADR-0044](../../decisions/0044-sandbox-command-statistics-and-workspace-profiles.md)
+- **Status:** Superseded by [ADR-0055](../../decisions/0055-sandbox-learn-enforce-and-workspace-policy.md); retained as historical design input
 - **Date:** 2026-08-22
-- **Decision:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
+- **Historical decision:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
 
 ## Goal
 

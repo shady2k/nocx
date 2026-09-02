@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-08-22
 
+> The persistence and launch model in this record is superseded by
+> [ADR-0055](0055-sandbox-learn-enforce-and-workspace-policy.md). The
+> historical shield/conversion rationale remains useful; current authority
+> uses `authority_grants` with pane subjects and explicit Learn/Enforce modes.
+
 ## Context
 
 PR #91 represented non-restorability as `panes.ephemeral`. That field names a consequence, not the authority that caused it, and spends schema version 12 on a boolean that cannot answer which policy was granted. ADR-0020 already treats authority as an immutable grant. Agent-run `authority_grants` are execution-subject grants and remain unchanged.

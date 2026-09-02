@@ -38,6 +38,24 @@ export interface Open {
    */
   desiredMode: 'auto' | 'raw' | 'script' | 'relay'
   /**
+   * Immutable realized sandbox metadata for a sandboxed local session (ADR-0033, ADR-0036). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.
+   */
+  sandbox?: {
+    backend: 'landlock' | 'seatbelt'
+    workspace: string
+    writableRoots: string[]
+    readOnlyRoots: string[]
+    /**
+     * Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.
+     *
+     * @maxItems 129
+     */
+    homeProjections: {
+      hostPath: string
+      relativePath: string
+    }[]
+  }
+  /**
    * The geometry the BACKEND decided this session runs at (nocx-eidfb.1). The open params carry {cols, rows, xpixel, ypixel} as the client's MEASUREMENT — only a webview knows its own font metrics and pane geometry — and this carries what was done with it, so a renderer learns the size its session took rather than assuming its own report was adopted. NEVER absent and never zero: a session with no client attached holds a named default (80x24), which is the state this field exists to make expressible — before it, a session whose window had gone away had no size at all. The channel is created at this size and never spawned-then-resized (AD-1's resize contract is unchanged; what moved is who chose the number). Which client's measurement it took is decided in one place: the client that attached LAST is the active one and the shared channel follows it (nocx-eidfb.2), so a session handed from one window to another runs at the geometry of the window someone is actually looking at, and returns to the default when the last of them detaches. It is the SESSION's size, not the window's: rendering at it rather than at the window's own geometry is deliberately not implied here (nocx-eidfb.3).
    */
   effectiveSize: {
@@ -57,21 +75,6 @@ export interface Open {
      * Height of the grid in pixels, or 0 — see xpixel.
      */
     ypixel: number
-  }
-  sandbox?: {
-    backend: 'landlock' | 'seatbelt'
-    workspace: string
-    writableRoots: string[]
-    readOnlyRoots: string[]
-    /**
-     * Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.
-     *
-     * @maxItems 129
-     */
-    homeProjections: {
-      hostPath: string
-      relativePath: string
-    }[]
   }
   /**
    * The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make "this session has no parent" indistinguishable from "this backend does not say". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says "A created B" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).

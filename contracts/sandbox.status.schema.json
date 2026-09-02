@@ -2,15 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/sandbox.status.schema.json",
   "title": "SandboxStatus",
-  "description": "Result of the sandbox.status JSON-RPC method. Reports native backend availability for an interactive sandboxed shell.",
+  "description": "Result of sandbox.status. Learn and Enforce are independently available; Learn is unrestricted and best effort.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["available", "backend"],
+  "required": ["learn", "enforce"],
   "properties": {
-    "available": { "type": "boolean" },
-    "backend": { "type": "string", "enum": ["landlock", "seatbelt", "unsupported"] },
-    "reason": { "type": "string" },
-    "detail": { "type": "string" },
-    "abi": { "type": "integer", "minimum": 0 }
+    "learn": { "$ref": "#/$defs/modeStatus" },
+    "enforce": { "$ref": "#/$defs/modeStatus" }
+  },
+  "$defs": {
+    "modeStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "backend", "state", "coverage"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "backend": { "type": "string", "enum": ["landlock", "seatbelt", "unsupported"] },
+        "reason": { "type": "string" },
+        "detail": { "type": "string" },
+        "abi": { "type": "integer", "minimum": 0 },
+        "state": { "type": "string", "enum": ["available", "unavailable", "degraded"] },
+        "coverage": { "type": "array", "items": { "type": "string" } }
+      }
+    }
   }
 }

@@ -448,7 +448,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 15
+const schemaVersion = 16
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first — a habit kept for readability rather than for correctness,
@@ -463,7 +463,7 @@ var rebuildDropOrder = []string{
 	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
 	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
-	"sandbox_grants", "panes", "tabs",
+	"panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"retention_watermark",
 	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
@@ -955,25 +955,18 @@ CREATE TABLE IF NOT EXISTS executions (
 
 CREATE TABLE IF NOT EXISTS authority_grants (
   id           INTEGER PRIMARY KEY,
-  execution_id INTEGER NOT NULL UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  execution_id INTEGER UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  pane_id      TEXT UNIQUE REFERENCES panes(id) ON DELETE CASCADE,
   version      INTEGER NOT NULL,
-  issued_at    INTEGER NOT NULL,           -- backend wall clock
-  expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
-  -- policy is the decision MATRIX as JSON (ADR-0020 §7 as amended
-  -- 2026-08-16); the CHECK replaced the old preset enum, and the column
-  -- stays SQLite's discipline in a weaker form: a grant whose policy is
-  -- not even JSON cannot be recorded.
+  issued_at    INTEGER NOT NULL,
+  expires_at   INTEGER,
   policy       TEXT NOT NULL CHECK (json_valid(policy)),
-  payload      TEXT NOT NULL DEFAULT '{}'
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS sandbox_grants (
-  id         INTEGER PRIMARY KEY,
-  pane_id    TEXT NOT NULL UNIQUE REFERENCES panes(id),
-  version    INTEGER NOT NULL,
-  issued_at  INTEGER NOT NULL,           -- backend wall clock
-  workspace  TEXT NOT NULL,
-  payload    TEXT NOT NULL DEFAULT '{}'  -- realized policy roots (JSON)
+  payload      TEXT NOT NULL DEFAULT '{}',
+  CHECK (
+    (execution_id IS NOT NULL AND pane_id IS NULL AND expires_at IS NOT NULL)
+    OR
+    (execution_id IS NULL AND pane_id IS NOT NULL AND expires_at IS NULL)
+  )
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS grant_scopes (

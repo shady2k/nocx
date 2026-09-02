@@ -291,6 +291,16 @@ func (s *realSession) livenessLocked() LivenessState {
 	if s.liveness.Liveness.Terminal() {
 		return s.liveness
 	}
+	if s.ch == nil {
+		if s.liveness.Liveness == "" {
+			s.liveness = LivenessState{
+				Liveness:   LivenessAlive,
+				Epoch:      s.livenessEpochs.Add(1),
+				ObservedAt: time.Now(),
+			}
+		}
+		return s.liveness
+	}
 	select {
 	case <-s.ch.Done():
 		cause, _ := s.ExitOutcome()

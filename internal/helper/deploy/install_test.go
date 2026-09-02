@@ -191,7 +191,8 @@ func TestPruneKeepsTheNamedDirectory(t *testing.T) {
 	}
 	keep := filepath.Base(filepath.Dir(installed))
 	// A stale sibling: a directory that matches our naming pattern but is
-	// not the version in use (a superseded content hash).
+	// not the directory in use — a superseded protocol version, a
+	// superseded content hash, or both.
 	stale := filepath.Join("/home/u", ".nocx", "helper", "1-linux-amd64-"+strings.Repeat("0", 64))
 	fs.mkdirAll(stale)
 	fs.touch(filepath.Join(stale, ".install-complete"))

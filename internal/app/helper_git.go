@@ -409,9 +409,17 @@ type helperRegistry struct {
 	consent   *consent.Store
 	registry  *session.Reg
 	lifecycle lifecyclechannel.Kernel
-	mu        sync.Mutex
-	hosts     map[session.ID]*hostHelper
-	closing   map[string]struct{}
+	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
+	// session integration axis, the same seam the local pty factory uses.
+	// It is a separate seam from the published facts for the same reason it
+	// is there: a channel that ends establishes nothing new, so no fact
+	// moves and the product would otherwise learn nothing (nocx-dvql).
+	// Nil (tests, or a server without the wiring) reports nowhere and the
+	// loss is still logged by the adapter.
+	lifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
+	mu            sync.Mutex
+	hosts         map[session.ID]*hostHelper
+	closing       map[string]struct{}
 }
 
 // OpenHosted applies the same helper resolver used by git.open, then spawns
@@ -462,6 +470,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		var lifecycleErr error
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
 			log.NewSlogAdapter(r.log), r.lifecycle, coordinatorConn,
+			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
 		)
 		if lifecycleErr != nil {
 			_ = peerConn.Close()
@@ -1048,4 +1057,15 @@ func (r *refRepo) Close() error {
 	err := r.Repo.Close()
 	r.once.Do(r.released)
 	return err
+}
+
+// reportLifecycleLoss is the adapter's loss sink for every helper-hosted
+// session, opened or taken back. A method rather than the field itself so a
+// registry without the wiring is one nil check here instead of one at each
+// construction site.
+func (r *helperRegistry) reportLifecycleLoss(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	if r == nil || r.lifecycleLoss == nil {
+		return
+	}
+	r.lifecycleLoss(lane, cause)
 }

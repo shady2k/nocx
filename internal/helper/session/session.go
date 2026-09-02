@@ -165,7 +165,14 @@ type attachment struct {
 
 // hostSession is one PTY and everything the helper knows about it.
 type hostSession struct {
-	lifecycleWin    *window
+	lifecycleWin *window
+	// lifecycleLaunch is the coordinator-minted identity this session's
+	// shell was started with, kept so a REPLACING coordinator can take the
+	// domain over instead of dropping every frame the shell sends
+	// (nocx-k6p18.31). Immutable after spawn and nil for a conventional
+	// session. It is never part of the inventory: it carries bearer values,
+	// and it is answered only to a caller that asks for it by session id.
+	lifecycleLaunch *proto.LifecycleLaunch
 	id              proto.HostSessionID
 	raw             [16]byte
 	workspace       proto.WorkspaceID

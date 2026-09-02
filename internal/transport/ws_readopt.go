@@ -77,6 +77,12 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	}
 	if hosted.Session == nil {
 		s.removeRx(sid)
+		// The re-attachment succeeded far enough to have taken a lifecycle
+		// domain over; refusing it here without this would leave that domain
+		// in the kernel with a carrier nothing reads (nocx-k6p18.31). Both
+		// arms below dispose it for the same reason, and it is the same
+		// AbortLifecycle handleOpen already runs on its own failure paths.
+		abortLifecycle(hosted)
 		return fmt.Errorf("transport: re-attaching session %s returned no session", string(sid))
 	}
 	if hosted.Session.ID() != sid {
@@ -86,6 +92,7 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 		// silently accepted a substitution would attach one pane's ring to
 		// another pane's shell.
 		s.removeRx(sid)
+		abortLifecycle(hosted)
 		return fmt.Errorf("transport: re-attaching session %s answered for %s",
 			string(sid), string(hosted.Session.ID()))
 	}
@@ -120,9 +127,33 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	rx.monitorOnce.Do(func() {
 		go s.monitorExit(rx, hosted.Session)
 	})
+	// THE ORDER OF THE THREE CALLS BELOW IS THE WHOLE OF WHETHER THE PANE
+	// SAYS ANYTHING (nocx-k6p18.31), and each one names what the next needs.
+	//
+	// The axis first: noteIntegrationLive refuses a session that is not on it,
+	// so a lane registered before the axis would publish a live domain into
+	// nothing and the pane would sit at `starting` for ever.
+	//
+	// The lane second: PublishLifecycle routes by lane, and an unregistered
+	// lane is dropped with a debug line. The adoption's own publication has
+	// already happened by now — inside the re-attachment, before this package
+	// was told anything — which is why the replay below is not optional.
+	//
+	// The bridge third, and the replay last: the bridge is what lets the
+	// shell's next frame arrive, and the replay is what delivers the fact the
+	// adoption produced while nobody was listening. Without it the pane holds
+	// an authenticated domain and renders as a plain terminal, which is
+	// precisely the silent degrade this step exists to end.
+	if hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
+		s.RegisterIntegration(sid, hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason)
+	}
+	if hosted.LifecycleLane != "" {
+		s.RegisterLifecycleLane(hosted.LifecycleLane, sid)
+	}
 	if hosted.StartLifecycle != nil {
 		hosted.StartLifecycle()
 	}
+	s.replayLifecycleFacts(sid)
 	return nil
 }
 
@@ -156,4 +187,12 @@ func (s *WSServer) recordedThrough(ctx context.Context, sid session.ID) uint64 {
 		return 0
 	}
 	return rec.Produced
+}
+
+// abortLifecycle disposes a re-attachment's lifecycle channel when the
+// transport refuses the session it belongs to. Safe on an open that has none.
+func abortLifecycle(hosted HostedSessionOpen) {
+	if hosted.AbortLifecycle != nil {
+		hosted.AbortLifecycle()
+	}
 }

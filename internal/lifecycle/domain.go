@@ -129,3 +129,14 @@ func (r *DomainRegistry) nextEpoch() uint64 {
 	r.epochCounter++
 	return r.epochCounter
 }
+
+// adoptEpoch lifts the counter past an epoch minted by ANOTHER process's
+// registry (Kernel.AdoptDomain). Without it "never reused" would hold only
+// within one coordinator, and the first domain this kernel minted after
+// taking over a running session would carry a number already in use on the
+// same transport.
+func (r *DomainRegistry) adoptEpoch(e uint64) {
+	if e > r.epochCounter {
+		r.epochCounter = e
+	}
+}

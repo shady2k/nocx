@@ -292,6 +292,7 @@ func (s *Service) Ops() []string {
 	return []string{
 		proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
+		proto.OpAdoptLifecycle,
 	}
 }
 
@@ -313,6 +314,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.CloseSessionParams{})
 	case proto.OpSignal:
 		return host.SchemaFor(proto.SignalParams{})
+	case proto.OpAdoptLifecycle:
+		return host.SchemaFor(proto.AdoptLifecycleParams{})
 	}
 	return nil
 }
@@ -422,6 +425,16 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return proto.SignalResult{}, nil
+	case proto.OpAdoptLifecycle:
+		var p proto.AdoptLifecycleParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		hs, err := s.find(p.Session)
+		if err != nil {
+			return nil, err
+		}
+		return proto.AdoptLifecycleResult{Lifecycle: hs.lifecycleLaunch}, nil
 	}
 	return nil, fmt.Errorf("session: no op %q", op)
 }
@@ -522,6 +535,11 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		win:             newWindow(bound),
 		lifecycleWin:    lifecycleWin,
 		lifecycleBudget: lifecycleBudget,
+		// Retained for the life of the session, and only when there is a
+		// window behind it: a launch kept for a shell that never got a
+		// channel would be an identity a replacing coordinator could adopt
+		// and then hear nothing on (nocx-k6p18.31).
+		lifecycleLaunch: adoptableLaunch(p.Lifecycle, lifecycleWin),
 		log:             s.log,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
@@ -778,4 +796,21 @@ func randomID() ([16]byte, error) {
 	var b [16]byte
 	_, err := rand.Read(b[:])
 	return b, err
+}
+
+// adoptableLaunch is the guard on what may be handed back for adoption: the
+// launch, but only for a session that actually got a lifecycle window.
+//
+// The two can differ. A spawn may carry a launch and still produce no
+// channel — the spawner declines shell integration for a shell it does not
+// support, and the process then satisfies no LifecycleProcess. Handing the
+// launch back for such a session would let a replacing coordinator adopt a
+// domain nothing will ever speak on, and the product would show a pane
+// reporting itself integrated while no command in it ever produces a block:
+// the exact silent degrade this op exists to end, reintroduced one layer up.
+func adoptableLaunch(launch *proto.LifecycleLaunch, win *window) *proto.LifecycleLaunch {
+	if launch == nil || win == nil {
+		return nil
+	}
+	return launch
 }

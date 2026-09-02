@@ -218,6 +218,7 @@ type stubAdopter struct {
 	adopted  []session.ID
 	attempts int
 	lastErr  error
+	open     transport.HostedSessionOpen
 }
 
 func (a *stubAdopter) ReadoptHostedSession(ctx context.Context, sid session.ID, reattach transport.HostedSessionReattach) error {
@@ -239,8 +240,26 @@ func (a *stubAdopter) ReadoptHostedSession(ctx context.Context, sid session.ID, 
 	}
 	a.mu.Lock()
 	a.adopted = append(a.adopted, hosted.Session.ID())
+	a.open = hosted
 	a.mu.Unlock()
+	// The transport's own half starts the lifecycle bridge here (see
+	// ws_readopt.go). The double does it too, because a re-adoption whose
+	// bridge never starts is a channel that never delivers a frame — and a
+	// test that skipped it would be watching a different mechanism.
+	if hosted.StartLifecycle != nil {
+		hosted.StartLifecycle()
+	}
 	return nil
+}
+
+// lastOpen is what the re-attachment handed the transport: the lane to
+// register and the sentence the integration axis will say. It is read rather
+// than re-derived, because those two fields are the whole of whether a
+// returned pane says anything about itself.
+func (a *stubAdopter) lastOpen() transport.HostedSessionOpen {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.open
 }
 
 func (a *stubAdopter) adoptedIDs() []session.ID {
@@ -321,6 +340,13 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 	}
 	if !selected {
 		t.Fatal("the helper was not selected for a consented machine, so there is nothing to take back")
+	}
+	// The transport starts the lifecycle bridge after the open ack; without
+	// it the shell's hello never reaches the adapter and the handshake bound
+	// expires, which would leave every test below watching a session that
+	// never integrated in the first place.
+	if opened.StartLifecycle != nil {
+		opened.StartLifecycle()
 	}
 	return content.PendingSession{
 		SessionID: string(opened.Session.ID()), Host: opened.Host,

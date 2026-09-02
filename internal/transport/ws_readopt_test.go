@@ -29,6 +29,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -305,4 +306,127 @@ func TestTheHostsLostWindowIsRecordedAsAHostWindowGap(t *testing.T) {
 			"a recorder was running the whole time", skips[0].reason, content.GapReasonHostWindow)
 	}
 	_ = ch.Close()
+}
+
+// THE THIRD PROPERTY (nocx-k6p18.31): a re-adopted session that says something
+// about itself is HEARD. The re-attachment is the only thing that knows whether
+// this pane's lifecycle channel came back, and its answer has to reach two
+// places here — the integration axis the product renders, and the lane registry
+// every published lifecycle fact is routed through. A lane registered and an
+// axis left empty is a pane that produces blocks and cannot say it is
+// integrated; an axis filled in and no lane is the reverse. Both, or the pane
+// is back to the silence this bead was filed for.
+func TestATakenBackSessionsIntegrationAndLaneAreBothRegistered(t *testing.T) {
+	rec := newFakeRecorder()
+	ws, reg := readoptServer(t, rec)
+	ch := newReadoptChannel(nil)
+	t.Cleanup(func() { _ = ch.Close() })
+
+	started := false
+	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-axis"),
+		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
+			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+				session.ID("sid-axis"), ch)
+			if adoptErr != nil {
+				return HostedSessionOpen{}, adoptErr
+			}
+			return HostedSessionOpen{
+				Session:           sess,
+				LifecycleLane:     lifecycle.LaneID("lane-taken-back"),
+				IntegrationShell:  "/bin/bash",
+				IntegrationStatus: IntegrationStarting,
+				StartLifecycle:    func() { started = true },
+			}, nil
+		})
+	if err != nil {
+		t.Fatalf("take the session back: %v", err)
+	}
+	if !started {
+		t.Fatal("the lifecycle bridge was never started, so no frame the shell sends can arrive")
+	}
+	ws.lifecycleMu.Lock()
+	sid, laneKnown := ws.lifecycleLanes[lifecycle.LaneID("lane-taken-back")]
+	ws.lifecycleMu.Unlock()
+	if !laneKnown || sid != session.ID("sid-axis") {
+		t.Fatal("the lane was not registered; every lifecycle fact for this pane is dropped as unroutable")
+	}
+	ws.integrationMu.Lock()
+	st, onAxis := ws.integrations[session.ID("sid-axis")]
+	ws.integrationMu.Unlock()
+	if !onAxis {
+		t.Fatal("the session is not on the integration axis, so the product says nothing about it at all")
+	}
+	if st.status != IntegrationStarting || st.shell != "/bin/bash" {
+		t.Fatalf("axis = %q/%q, want %q//bin/bash", st.status, st.shell, IntegrationStarting)
+	}
+}
+
+// The paired negative, and it is not symmetry for its own sake: absence on the
+// integration axis is how "conventional by design" is expressed, so a
+// re-attachment with nothing to say must leave the session OFF it. Registering
+// every re-adopted session would make the product nag about panes that never
+// offered shell integration in the first place.
+func TestATakenBackSessionWithNothingToSayStaysOffTheAxis(t *testing.T) {
+	rec := newFakeRecorder()
+	ws, reg := readoptServer(t, rec)
+	ch := newReadoptChannel(nil)
+	t.Cleanup(func() { _ = ch.Close() })
+
+	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-quiet"),
+		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
+			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+				session.ID("sid-quiet"), ch)
+			if adoptErr != nil {
+				return HostedSessionOpen{}, adoptErr
+			}
+			return HostedSessionOpen{Session: sess}, nil
+		})
+	if err != nil {
+		t.Fatalf("take the session back: %v", err)
+	}
+	ws.integrationMu.Lock()
+	_, onAxis := ws.integrations[session.ID("sid-quiet")]
+	ws.integrationMu.Unlock()
+	if onAxis {
+		t.Fatal("a session that asked for no integration was put on the axis; the product will nag about a pane that is correct")
+	}
+}
+
+// A re-attachment that already took a lifecycle domain over, refused by the
+// transport's own id guard: the domain must be disposed with the session. Left
+// behind it would sit in the kernel holding a lane, with a carrier nothing
+// reads and a pane that does not exist — and the next attempt on that session
+// would meet its own lane already busy.
+func TestARefusedReadoptDisposesTheLifecycleChannelItTookOver(t *testing.T) {
+	rec := newFakeRecorder()
+	ws, reg := readoptServer(t, rec)
+	ch := newReadoptChannel(nil)
+	t.Cleanup(func() { _ = ch.Close() })
+
+	aborted := false
+	err := ws.ReadoptHostedSession(context.Background(), session.ID("sid-wanted"),
+		func(_ context.Context, _ uint64) (HostedSessionOpen, error) {
+			sess, adoptErr := reg.Adopt(session.Config{Kind: session.KindRemote, Host: "h"},
+				session.ID("sid-answered"), ch)
+			if adoptErr != nil {
+				return HostedSessionOpen{}, adoptErr
+			}
+			return HostedSessionOpen{
+				Session:        sess,
+				LifecycleLane:  lifecycle.LaneID("lane-orphan"),
+				AbortLifecycle: func() { aborted = true },
+			}, nil
+		})
+	if err == nil {
+		t.Fatal("a re-attachment answering for another session was accepted")
+	}
+	if !aborted {
+		t.Fatal("the lifecycle domain the refused re-attachment took over was left in the kernel")
+	}
+	ws.lifecycleMu.Lock()
+	_, laneKnown := ws.lifecycleLanes[lifecycle.LaneID("lane-orphan")]
+	ws.lifecycleMu.Unlock()
+	if laneKnown {
+		t.Fatal("a lane was registered for a session the transport refused")
+	}
 }

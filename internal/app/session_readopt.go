@@ -283,6 +283,13 @@ func (rp *readoptPass) readopt(
 		if _, randErr := rand.Read(subscriberRaw[:]); randErr != nil {
 			return transport.HostedSessionOpen{}, randErr
 		}
+		// THE LIFECYCLE LEG IS RE-ESTABLISHED BEFORE THE ATTACH, because
+		// the attach has to carry the offset the adoption implies and
+		// because a refusal here must cost nothing: no attachment, no
+		// adapter, no half-adopted domain. What comes back is either the
+		// launch to adopt, "this session is conventional", or a reason the
+		// product will state (nocx-k6p18.31).
+		adoption := rp.adoptLifecycle(ctx, c, entry)
 		attached, err := c.Attach(ctx, proto.AttachParams{
 			Subscriber: proto.SubscriberID(hex.EncodeToString(subscriberRaw[:])),
 			Session: proto.HostSessionID{
@@ -297,15 +304,21 @@ func (rp *readoptPass) readopt(
 			// range it lost — when the host out-produced the window while
 			// nobody was listening, which is the case this epic is about.
 			Offset: proto.StreamOffset(from), Fresh: false,
-			// The lifecycle stream is attached FRESH and its facts do not
-			// survive: the capability the far shell holds was minted by the
-			// kernel of the coordinator that is gone, so nothing it sends can
-			// authenticate here. It is attached rather than left unread so the
-			// carrier is drained instead of stalling on its own credit window.
-			LifecycleOffset: 0, LifecycleFresh: true,
-			RequestWrite: true,
+			// THE LIFECYCLE STREAM RESUMES AT THE HELPER'S HEAD, NOT AT ITS
+			// BASE, and that is a security property rather than an
+			// optimisation. The adopted domain keeps the capability the shell
+			// has been stamping every frame with, so the helper's retained
+			// window is a stretch of already-authenticated events: replaying
+			// it into the new kernel would re-deliver commands that already
+			// ran. `Fresh` is true because this coordinator holds no lifecycle
+			// state at all — the offset is where the stream stands now, and
+			// what came before it belongs to the kernel that is gone.
+			LifecycleOffset: proto.StreamOffset(entry.LifecycleWindow.Written),
+			LifecycleFresh:  true,
+			RequestWrite:    true,
 		})
 		if err != nil {
+			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", p.Host, err)
 		}
 		// THE HOST'S OWN VERDICT ON A SHELL THAT ENDED WHILE WE WERE AWAY.
@@ -328,6 +341,7 @@ func (rp *readoptPass) readopt(
 			// the other coordinator owns it, and nothing here may delete its
 			// recording.
 			_ = attached.Close()
+			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf(
 				"another nocx already holds the keyboard of this session on %s", p.Host)
 		}
@@ -349,6 +363,7 @@ func (rp *readoptPass) readopt(
 		}, sid, attached)
 		if err != nil {
 			_ = attached.Close()
+			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
 		}
 		// The registry entry is what makes `sessions.inventory` answer for
@@ -359,12 +374,25 @@ func (rp *readoptPass) readopt(
 		rp.registry.hosts[sid] = h
 		rp.registry.mu.Unlock()
 		adopted = true
-		return transport.HostedSessionOpen{
+		open := transport.HostedSessionOpen{
 			Session: sess, Host: p.Host, Account: p.Account,
 			Generation: p.Generation, HelperCommand: p.HelperCommand,
 			Fingerprint:        p.Fingerprint,
 			ObserveOutputHoles: attached.OnOutputHole,
-		}, nil
+			// The integration axis is the product's own sentence about this
+			// pane, and it is filled in on BOTH arms: a lifecycle channel
+			// that was re-established says starting (the kernel's published
+			// fact turns it into integrated), and one that could not be says
+			// conventional with the reason. A re-adopted pane that said
+			// nothing at all is what this bead was filed for — absence on
+			// this axis means "conventional by design", and a shell that was
+			// integrated five minutes ago is not that.
+			IntegrationShell:  entry.Launch.Shell,
+			IntegrationStatus: adoption.status,
+			IntegrationReason: adoption.reason,
+		}
+		adoption.attachTo(&open, attached)
+		return open, nil
 	})
 	if err != nil && adopted {
 		// The transport refused a session the registry already holds. Closing

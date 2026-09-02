@@ -1040,6 +1040,7 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		proto.OpSpawn: true, proto.OpSessions: true, proto.OpAttach: true,
 		proto.OpAck: true, proto.OpDetach: true, proto.OpResize: true,
 		proto.OpCloseSession: true, proto.OpSignal: true,
+		proto.OpAdoptLifecycle: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

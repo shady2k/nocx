@@ -229,6 +229,12 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 	@echo "=== host-side gates green ==="
 	@echo "NOT covered by this target: backend-linux, e2e, and the frontend job"
 	@echo "on the runner's node — those are the other three of 'make ci-full'."
+	@# And, on a host with no bash 3.2, the package test-ci said it was not the
+	@# place for. Asked again here rather than remembered from test-ci, because
+	@# the summary of a gate is the line people read and a deferral that
+	@# scrolled past is a deferral nobody saw.
+	@./scripts/have-bash32.sh >/dev/null 2>&1 || \
+	  echo "Nor ./$(BASH32_PKG)/... — no GNU bash 3.2 here; 'make ci-backend' runs it."
 
 # Every CI job, each through the runner it actually runs on. The containerized
 # targets are byte-for-byte their CI counterparts; `ci` is the macOS-only part,

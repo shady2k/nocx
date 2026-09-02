@@ -8,6 +8,7 @@ import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { BufferLine } from './test-helpers'
 import { PetOverlay } from '../pets/overlay'
+import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -1270,6 +1271,7 @@ describe('ScrollbackController tells the pet how the command went', () => {
   })
   afterEach(() => {
     Element.prototype.scrollIntoView = protoScrollIntoView
+    unmountWindowPet()
     vi.restoreAllMocks()
   })
 
@@ -1287,12 +1289,12 @@ describe('ScrollbackController tells the pet how the command went', () => {
     // there is no instance to hand a double to — which is the point. A double
     // injected from the test would have passed against the dead method too.
     const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
+    mountWindowPet(document.createElement('div'))
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
       renderer,
       snapshotStore: new CommandSnapshotStore(),
-      pet: true,
     })
     controller.scrollbackArea.scrollTo = vi.fn()
     return { controller, sight: (ev) => fenceCb?.(ev), heard }
@@ -1343,7 +1345,8 @@ describe('ScrollbackController tells the pet how the command went', () => {
     expect(heard).toHaveBeenCalledWith('success', 'agent')
   })
 
-  it('says nothing at all when the pane has no pet', () => {
+  it('says nothing at all in a window with no pet', () => {
+    unmountWindowPet()
     const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
     const renderer = makeRenderer()
     let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
@@ -1373,6 +1376,7 @@ describe('ScrollbackController tells the pet a command has started', () => {
   })
   afterEach(() => {
     Element.prototype.scrollIntoView = protoScrollIntoView
+    unmountWindowPet()
     vi.restoreAllMocks()
   })
 
@@ -1381,11 +1385,11 @@ describe('ScrollbackController tells the pet a command has started', () => {
     heard: ReturnType<typeof vi.spyOn>
   } {
     const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
+    mountWindowPet(document.createElement('div'))
     const controller = new ScrollbackController({
       pane: document.createElement('div'),
       renderer: makeRenderer(),
       snapshotStore: new CommandSnapshotStore(),
-      pet: true,
     })
     controller.scrollbackArea.scrollTo = vi.fn()
     return { controller, heard }
@@ -1403,7 +1407,8 @@ describe('ScrollbackController tells the pet a command has started', () => {
     expect(heard).toHaveBeenCalledWith('agent')
   })
 
-  it('says nothing at all when the pane has no pet', () => {
+  it('says nothing at all in a window with no pet', () => {
+    unmountWindowPet()
     const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
     const controller = new ScrollbackController({
       pane: document.createElement('div'),

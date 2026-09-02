@@ -16,7 +16,7 @@
 // of pet in a millisecond and get the same answer every time.
 
 import type { Ledge } from './terrain'
-import { ledgeById, ledgeCrossed } from './terrain'
+import { ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
 
 export type Locomotion = 'idle' | 'walk' | 'run' | 'fall'
 type Mood = 'calm' | 'pleased' | 'worried' | 'tired'
@@ -80,6 +80,14 @@ export interface PetTuning {
   readonly reactionHold: number
   /** How long a mood lasts before it decays back to calm. */
   readonly moodHold: number
+  /** How far up the animal can reach, in pixels.
+   *
+   *  A DISTANCE rather than a launch speed, because the jump is aimed: the
+   *  speed is computed from the ledge it is jumping to, so a shelf just
+   *  overhead gets a hop and one two blocks up gets a leap. A single launch
+   *  speed makes every jump the same height, which is both uglier and
+   *  either too weak to leave the floor or too strong for a chip. */
+  readonly jumpReach: number
   /** How close the pointer may come before the animal moves away, in pixels.
    *
    *  A cat that lets you put the cursor through it is a sticker. This is the
@@ -104,6 +112,7 @@ export const DEFAULT_TUNING: PetTuning = {
   moodHold: 12,
   stepOff: 0.4,
   fleeRadius: 70,
+  jumpReach: 240,
 }
 
 export function newPet(x: number, y: number): Pet {
@@ -210,6 +219,8 @@ interface Choice {
   readonly activity: Activity
   readonly hold: number
   readonly weight: number
+  /** Jump to the ledge above, when there is one within reach. */
+  readonly ascend?: boolean
   /** Leave this ledge where it stands and drop to whatever is under it.
    *
    *  Stepping off the END is not enough on its own: a command block is the
@@ -227,6 +238,17 @@ interface Choice {
  *  Order matters to the tests and so it is stated: the moving choices come
  *  first and the still ones last, so "pin the rng high" means "keep still"
  *  in every mood rather than whichever entry happens to be at the bottom. */
+/** The one choice that is offered only when the terrain allows it. Weighted
+ *  above descending, because a pet that sinks faster than it climbs ends on
+ *  the floor whatever the numbers say. */
+const ASCEND: Choice = {
+  locomotion: 'walk',
+  activity: 'none',
+  hold: 1,
+  weight: 26,
+  ascend: true,
+}
+
 function menu(mood: Mood, attending: Author | null): readonly Choice[] {
   // Watching narrows the menu rather than replacing the mood. It keeps the
   // animal in place and near the work: no descending to another block, no
@@ -458,7 +480,29 @@ export function step(
   //    afresh every frame is what makes a pet twitch instead of live.
   hold -= dt
   if (hold <= 0) {
-    const c = pick(menu(mood, next.attending), rng())
+    const up = next.attending === null ? ledgeAbove(env.terrain, x, y, tuning.jumpReach) : null
+    const choices =
+      up === null ? menu(mood, next.attending) : [...menu(mood, next.attending), ASCEND]
+    const c = pick(choices, rng())
+    if (c.ascend === true && up !== null) {
+      return {
+        ...next,
+        x,
+        y,
+        dir,
+        ledgeId: null,
+        locomotion: 'fall',
+        activity: 'none',
+        hold: 0,
+        reacting: false,
+        // Aimed at the shelf, with a little to spare so it clears the edge
+        // and is caught on the way down rather than grazing it.
+        vy: -Math.sqrt(2 * tuning.gravity * (y - up.y + JUMP_MARGIN)),
+        mood,
+        moodHold,
+        boredom: 0,
+      }
+    }
     if (c.descend === true) {
       return {
         ...next,
@@ -519,7 +563,15 @@ function nearPointer(env: StepEnv, x: number, y: number, tuning: PetTuning): 0 |
   return dx >= 0 ? 1 : -1
 }
 
+/** Extra rise above the target, so the arc peaks over the shelf and the
+ *  animal is caught coming down instead of grazing the edge. */
+const JUMP_MARGIN = 16
+
 function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
+  // Negative vy is a jump on its way up. Nothing is caught while rising —
+  // `ledgeCrossed` only considers a descending segment — so the animal sails
+  // past the shelf it is aiming for and is caught by it coming back down,
+  // which is also what makes the arc read as a jump rather than a lift.
   const vy = Math.min(tuning.maxFall, pet.vy + tuning.gravity * dt)
   const from = pet.y
   const to = from + vy * dt

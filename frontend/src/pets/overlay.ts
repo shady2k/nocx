@@ -37,6 +37,14 @@ import {
 import { DEFAULT_TERRAIN, deriveTerrain, type Ledge, type LedgeCandidate } from './terrain'
 import { onPetsSettingsChanged, petHeight, petPack, petsEnabled } from './setting'
 
+/** One kind of ground: what to find, and which of its edges can be stood on. */
+export interface LedgeSource {
+  readonly selector: string
+  /** `top` for something you stand ON, `bottom` for something you stand
+   *  UNDER the near side of — the tab strip's underside is a shelf. */
+  readonly edge: 'top' | 'bottom'
+}
+
 /** What counts as ground, by default.
  *
  *  Not only the command block's own top edge. The chips a block wears — the
@@ -45,8 +53,19 @@ import { onPetsSettingsChanged, petHeight, petPack, petsEnabled } from './settin
  *  terrain: a Neko walked title bars and window edges, not the desktop. A cat
  *  standing on the `ok` badge of the command it just watched finish is the
  *  whole idea of the feature in one frame.
+ *
+ *  The tab strip is here because the animal belongs to the WINDOW: its
+ *  underside is the one shelf that does not move when you change tabs, which
+ *  is exactly where a screenmate should be able to sit and wait.
+ *
+ *  Blocks are taken from the ACTIVE pane only. A pet standing on a block in a
+ *  pane you cannot see would be a pet you cannot see.
  */
-const LEDGE_SELECTOR = '.cmd-block, .nocx-chip'
+const DEFAULT_LEDGES: readonly LedgeSource[] = [
+  { selector: '.tabbar', edge: 'bottom' },
+  { selector: '.pane.active .cmd-block', edge: 'top' },
+  { selector: '.pane.active .nocx-chip', edge: 'top' },
+]
 
 export interface PetOverlayOpts {
   /** The element the pet is drawn over. Must be a positioned ancestor of
@@ -64,10 +83,10 @@ export interface PetOverlayOpts {
   readonly rng?: () => number
   /** Injected in tests; defaults to the browser's decoder. */
   readonly imageSource?: ImageSource
-  /** What counts as ground. Defaults to LEDGE_SELECTOR; the settings preview
+  /** What counts as ground. Defaults to DEFAULT_LEDGES; the settings preview
    *  passes its own so the mock scrollback is walkable without borrowing the
    *  real scrollback's classes and its stylesheet with them. */
-  readonly ledgeSelector?: string
+  readonly ledges?: readonly LedgeSource[]
   /** Injected in tests. Defaults to the declared settings module. */
   readonly settings?: {
     enabled(): boolean
@@ -118,6 +137,11 @@ export class PetOverlay {
   private _width = 0
   private _hostLeft = 0
   private _hostTop = 0
+  /** The element the animal is standing on, so its rectangle can be refreshed
+   *  on its own each frame. One getBoundingClientRect is nothing; sweeping
+   *  every block and chip of a long scrollback sixty times a second is the
+   *  layout thrash this module is arranged to avoid. */
+  private _standingOn: { el: HTMLElement; source: LedgeSource } | null = null
   private _stale = true
   private _disposed = false
   private _running = false
@@ -286,6 +310,10 @@ export class PetOverlay {
     }
     if (typeof MutationObserver !== 'undefined') {
       const mo = new MutationObserver(mark)
+      // childList only, and no attributes: the editor rewrites its own
+      // attributes on every keystroke, and a pet that re-derived the whole
+      // terrain per character typed would be measuring the window rather than
+      // living in it.
       mo.observe(this._blocks, { childList: true, subtree: true })
       this._observers.push(mo)
     }
@@ -326,19 +354,23 @@ export class PetOverlay {
     this._hostTop = host.top
     const candidates: LedgeCandidate[] = []
     let n = 0
-    const selector = this._opts.ledgeSelector ?? LEDGE_SELECTOR
-    for (const el of this._blocks.querySelectorAll<HTMLElement>(selector)) {
-      const r = el.getBoundingClientRect()
-      if (r.width === 0 && r.height === 0) continue
-      candidates.push({
+    this._standingOn = null
+    for (const source of this._opts.ledges ?? DEFAULT_LEDGES) {
+      for (const el of this._blocks.querySelectorAll<HTMLElement>(source.selector)) {
+        const r = el.getBoundingClientRect()
+        if (r.width === 0 && r.height === 0) continue
         // Minted here rather than read off the element: the pet needs an
-        // identity that is stable across a re-measure and unique within one
-        // pane, and blocks carry neither.
-        id: `blk:${(el.dataset.petLedge ??= String(++n))}`,
-        left: r.left - host.left,
-        right: r.right - host.left,
-        top: r.top - host.top,
-      })
+        // identity that is stable across a re-measure and unique within the
+        // window, and neither blocks nor tabs carry one.
+        const id = `l:${(el.dataset.petLedge ??= String(++n))}`
+        if (id === this._pet.ledgeId) this._standingOn = { el, source }
+        candidates.push({
+          id,
+          left: r.left - host.left,
+          right: r.right - host.left,
+          top: (source.edge === 'top' ? r.top : r.bottom) - host.top,
+        })
+      }
     }
     const viewport = { width: host.width, height: host.height }
     this._terrain = deriveTerrain(candidates, {
@@ -405,6 +437,18 @@ export class PetOverlay {
     const scale = this._height / (y1 - y0)
     const width = (x1 - x0) * scale
     this._width = width
+    // What the animal is doing, on the element, in the app's own vocabulary.
+    //
+    // The alternative is a test reading which PNG the sprite happens to be
+    // showing, which pins the pack rather than the behaviour: rename a sheet
+    // or give a clip a second take and every assertion about the pet breaks
+    // without anything being wrong. This is the same idiom the rest of the
+    // app already offers a suite — `data-activity` on a tab, `data-view` on
+    // the activity bar — and it is the only window onto a module that
+    // deliberately takes no clicks and holds no text.
+    this._layer.dataset.doing = `${this._pet.locomotion}/${this._pet.activity}`
+    this._layer.dataset.mood = this._pet.mood
+    this._layer.dataset.watching = this._pet.attending ?? 'nothing'
     const s = this._sprite.style
     s.width = `${width}px`
     s.height = `${this._height}px`

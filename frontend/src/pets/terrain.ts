@@ -104,3 +104,31 @@ export function ledgeCrossed(
   }
   return best
 }
+
+/**
+ * The nearest ledge ABOVE this spot that a jump of `reach` could land on.
+ *
+ * Needed because the animal could only ever go down. Stepping off an edge and
+ * descending from the middle move it through the terrain beautifully and in
+ * one direction only, so over a few minutes every pet ended on the floor and
+ * stayed there — which is the state that looks most like a sticker.
+ *
+ * `clearance` keeps it from picking the shelf it is already standing under:
+ * a target must be far enough above to be worth jumping to.
+ */
+export function ledgeAbove(
+  terrain: readonly Ledge[],
+  x: number,
+  y: number,
+  reach: number,
+  clearance = 12,
+): Ledge | null {
+  let best: Ledge | null = null
+  for (const l of terrain) {
+    if (l.y > y - clearance) continue
+    if (y - l.y > reach) continue
+    if (x < l.x0 || x > l.x1) continue
+    if (best === null || l.y > best.y) best = l
+  }
+  return best
+}

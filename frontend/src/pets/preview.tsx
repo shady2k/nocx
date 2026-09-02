@@ -19,7 +19,10 @@ import { PetOverlay } from './overlay'
 
 // The chips are ground here for the same reason they are ground in the
 // terminal: they are what the animal is seen to climb onto.
-const LEDGE = '.pet-preview__ledge, .pet-preview__chip'
+const LEDGES = [
+  { selector: '.pet-preview__ledge', edge: 'top' },
+  { selector: '.pet-preview__chip', edge: 'top' },
+] as const
 
 export function PetPreview() {
   let stage!: HTMLDivElement
@@ -29,7 +32,7 @@ export function PetPreview() {
     const overlay = new PetOverlay({
       host: stage,
       blocks: ground,
-      ledgeSelector: LEDGE,
+      ledges: LEDGES,
     })
     // A pet that never reacted here would be a preview of half the feature —
     // the mood is the reason the animal is in a terminal rather than on a

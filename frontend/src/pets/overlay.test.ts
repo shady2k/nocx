@@ -74,6 +74,10 @@ interface Stand {
 function stand(blockTops: number[]): Stand {
   const host = document.createElement('div')
   const blocks = document.createElement('div')
+  // The real terrain is taken from the ACTIVE pane, so the stand wears the
+  // class the selector names rather than the test naming its own — otherwise
+  // the default ground would go untested and only a browser would notice.
+  blocks.className = 'pane active'
   host.appendChild(blocks)
   document.body.appendChild(host)
   host.getBoundingClientRect = () => rect(0, 0, 600, 400)

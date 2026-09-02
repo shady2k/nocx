@@ -454,3 +454,97 @@ describe('the answer stops being an answer once it is over', () => {
     expect(fled.reacting).toBe(false)
   })
 })
+
+describe('going back up', () => {
+  // Without this the animal could only ever go down. Stepping off an edge and
+  // descending from the middle move it through the terrain in one direction
+  // only, so over a few minutes every pet ended on the floor and stayed
+  // there — the state that looks most like a sticker.
+  const stack: Ledge[] = [
+    { id: 'blk:1', x0: 100, x1: 300, y: 200 },
+    { id: 'blk:2', x0: 100, x1: 300, y: 260 },
+  ]
+  const stacked: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34 }
+
+  it('jumps to the ledge above and is caught by it coming down', () => {
+    let p = standing(stack[1], { hold: 0.01, x: 200 })
+    // The ascend choice is appended last, so the top of the range picks it.
+    p = step(p, stacked, 0.02, seq(0.999))
+    expect(p.locomotion).toBe('fall')
+    expect(p.vy).toBeLessThan(0) // rising
+    for (let i = 0; i < 240 && p.locomotion === 'fall'; i++) p = step(p, stacked, 1 / 60, seq(0.5))
+    expect(p.ledgeId).toBe('blk:1')
+  })
+
+  it('rises past the target before it can be caught, so the arc reads as a jump', () => {
+    let p = step(standing(stack[1], { hold: 0.01, x: 200 }), stacked, 0.02, seq(0.999))
+    let highest = p.y
+    for (let i = 0; i < 240 && p.locomotion === 'fall'; i++) {
+      p = step(p, stacked, 1 / 60, seq(0.5))
+      highest = Math.min(highest, p.y)
+    }
+    expect(highest).toBeLessThan(stack[0].y)
+  })
+
+  it('is not offered when there is nothing overhead', () => {
+    // Only the ascend choice can put an idle pet into a rising fall.
+    let p = standing(A, { hold: 0.01, x: 200 })
+    p = step(p, env([A]), 0.02, seq(0.999))
+    expect(p.vy).toBeGreaterThanOrEqual(0)
+  })
+
+  it('is not offered while it is watching a command', () => {
+    // Watching keeps the animal where the work is.
+    const p = step(
+      attend(standing(stack[1], { hold: 0.01, x: 200 }), 'shell'),
+      stacked,
+      0.02,
+      seq(0.999),
+    )
+    expect(p.vy).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('the jump is aimed, not a fixed leap', () => {
+  it('reaches a shelf far above as readily as one just overhead', () => {
+    // A single launch speed is either too weak to leave the floor or too
+    // strong for a chip. Measured on the real gap: the pane floor to the
+    // lowest command block is well over a hundred pixels.
+    const far: Ledge[] = [
+      { id: 'blk:1', x0: 100, x1: 900, y: 620 },
+      { id: 'floor', x0: 8, x1: 900, y: 860 },
+    ]
+    const envFar: StepEnv = { terrain: far, floor: far[1], petHeight: 34 }
+    let p = standing(far[1], { hold: 0.01, x: 400 })
+    p = step(p, envFar, 0.02, seq(0.999))
+    expect(p.locomotion).toBe('fall')
+    for (let i = 0; i < 400 && p.locomotion === 'fall'; i++) p = step(p, envFar, 1 / 60, seq(0.5))
+    expect(p.ledgeId).toBe('blk:1')
+  })
+
+  it('does not launch harder than the shelf it is aiming at', () => {
+    const near: Ledge[] = [
+      { id: 'blk:1', x0: 100, x1: 900, y: 300 },
+      { id: 'blk:2', x0: 100, x1: 900, y: 340 },
+    ]
+    const envNear: StepEnv = { terrain: near, floor: FLOOR, petHeight: 34 }
+    const far: Ledge[] = [
+      { id: 'blk:1', x0: 100, x1: 900, y: 140 },
+      { id: 'blk:2', x0: 100, x1: 900, y: 340 },
+    ]
+    const envFar: StepEnv = { terrain: far, floor: FLOOR, petHeight: 34 }
+    const hop = step(standing(near[1], { hold: 0.01, x: 400 }), envNear, 0.02, seq(0.999))
+    const leap = step(standing(far[1], { hold: 0.01, x: 400 }), envFar, 0.02, seq(0.999))
+    expect(Math.abs(leap.vy)).toBeGreaterThan(Math.abs(hop.vy) * 1.5)
+  })
+
+  it('refuses a shelf beyond its reach rather than jumping short', () => {
+    const unreachable: Ledge[] = [
+      { id: 'blk:1', x0: 100, x1: 900, y: 100 },
+      { id: 'floor', x0: 8, x1: 900, y: 860 },
+    ]
+    const e: StepEnv = { terrain: unreachable, floor: unreachable[1], petHeight: 34 }
+    const p = step(standing(unreachable[1], { hold: 0.01, x: 400 }), e, 0.02, seq(0.999))
+    expect(p.vy).toBeGreaterThanOrEqual(0)
+  })
+})

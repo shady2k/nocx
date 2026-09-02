@@ -101,6 +101,7 @@ import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
+import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -159,6 +160,10 @@ function main(): void {
   // does not need one, and blocking first paint on an IPC round trip is not.
   void bootstrapPlatform()
   render(() => <App />, document.getElementById('app')!)
+  // The window's pet, over the whole shell so the tab strip's underside is
+  // terrain like any block edge. One animal per window: it is an ornament of
+  // the window, not of whichever pane happens to be in front.
+  mountWindowPet(document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
   const verticalStripHost = document.getElementById('vertical-tabstrip')!
   const panes = document.getElementById('panes')!

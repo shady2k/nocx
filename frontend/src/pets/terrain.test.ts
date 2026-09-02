@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   deriveTerrain,
+  ledgeAbove,
   ledgeById,
   ledgeCrossed,
   type Ledge,
@@ -90,5 +91,31 @@ describe('ledgeCrossed', () => {
   it('finds nothing when the step does not descend', () => {
     expect(ledgeCrossed(terrain, 400, 260, 260)).toBeNull()
     expect(ledgeCrossed(terrain, 400, 500, 100)).toBeNull()
+  })
+})
+
+describe('ledgeAbove', () => {
+  const terrain = deriveTerrain([block('high', 100), block('mid', 250), block('low', 400)], OPTS)
+
+  it('finds the nearest ledge overhead that is within reach', () => {
+    expect(ledgeAbove(terrain, 400, 400, 200)?.id).toBe('mid')
+  })
+
+  it('ignores one too far up to jump to', () => {
+    expect(ledgeAbove(terrain, 400, 400, 100)).toBeNull()
+  })
+
+  it('ignores one the animal is not under', () => {
+    expect(ledgeAbove(terrain, 50, 400, 400)).toBeNull()
+  })
+
+  it('ignores the ledge it is already standing on, and anything below', () => {
+    expect(ledgeAbove(terrain, 400, 250, 500)?.id).toBe('high')
+  })
+
+  it('will not pick a shelf that is barely overhead', () => {
+    // Under the clearance it is not a place to jump to, it is where you are.
+    const close = deriveTerrain([block('a', 300), block('b', 295)], OPTS)
+    expect(ledgeAbove(close, 400, 300, 500)).toBeNull()
   })
 })

@@ -1,4 +1,10 @@
-import { Terminal, type ITheme } from '@xterm/xterm'
+import {
+  Terminal,
+  type IDisposable,
+  type IEvent,
+  type ITerminalAddon,
+  type ITheme,
+} from '@xterm/xterm'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -220,9 +226,40 @@ export function parseRecoveryFence(payload: string): { hex: string } | null {
   return { hex }
 }
 
+/**
+ * The accelerated renderer addon, named by the two events this module needs
+ * from it rather than by its class.
+ *
+ * `WebglAddon` satisfies it structurally. It is an interface, and injectable
+ * below, because both events fire only on a machine with a GPU: the atlas
+ * wiring that nocx-4z5hv is about had no test at all while the addon was
+ * constructed inline, and the defect it repairs is in the SCHEDULING around
+ * the addon, not inside the GL.
+ */
+export interface AcceleratedAddon extends ITerminalAddon {
+  /** The GPU context went away and did not come back. */
+  readonly onContextLoss: IEvent<void>
+  /** The glyph atlas's page set changed — a page was added, or four were
+   *  merged into one. See _scheduleRepaintAfterFrame for why this matters. */
+  readonly onAddTextureAtlasCanvas: IEvent<HTMLCanvasElement>
+}
+
+/** Construction seam. The default is production; tests inject a double. */
+export interface XtermRendererOptions {
+  createWebglAddon?: () => AcceleratedAddon
+}
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
-  private webgl?: WebglAddon
+  private webgl?: AcceleratedAddon
+  private readonly _createWebglAddon: () => AcceleratedAddon
+  /** The live subscription to the accelerated addon's atlas-page event, held
+   *  so it dies with the addon it belongs to (context-loss recovery installs
+   *  a new addon, and with it a new atlas). */
+  private _atlasPageDisposable?: IDisposable
+  /** The single pending post-frame repaint, coalescing every invalidation
+   *  raised during one frame into one repaint. 0 when none is pending. */
+  private _repaintFrame = 0
   private canvas?: CanvasAddon
   private container: HTMLElement | null = null
   private recoveryAttempts = 0
@@ -310,6 +347,10 @@ export class XtermRenderer implements TerminalRenderer {
    *  order the composition root actually wires things in. */
   private _linkPolicy: LinkPolicy | null = null
   private _linkProvider: { dispose(): void } | null = null
+
+  constructor(options: XtermRendererOptions = {}) {
+    this._createWebglAddon = options.createWebglAddon ?? ((): AcceleratedAddon => new WebglAddon())
+  }
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -427,8 +468,7 @@ export class XtermRenderer implements TerminalRenderer {
     // always pending. No-op on macOS/browsers where the compositor is healthy.
     if (isLinuxWebKit()) {
       this.refreshTimer = setInterval(() => {
-        const t = this.term
-        if (t) t.refresh(0, (t.rows ?? 24) - 1)
+        this._repaintViewport()
       }, FORCED_REFRESH_MS)
     }
 
@@ -587,7 +627,7 @@ export class XtermRenderer implements TerminalRenderer {
       // frame. Nothing outside the renderer can be asked to remember this —
       // e0d0a490 moved the resize out to the presentation layer and the
       // repaint stayed behind (nocx-jfgb).
-      t.refresh(0, t.rows - 1)
+      this._repaintViewport()
     }
   }
 
@@ -639,11 +679,77 @@ export class XtermRenderer implements TerminalRenderer {
     for (const cb of this._cellDimsSubs) cb()
   }
 
+  /**
+   * Mark every row dirty so the next render redraws the whole viewport.
+   *
+   * The one place that knows what "repaint everything" means. Four call
+   * sites spelled this out independently before nocx-4z5hv; a fifth reason
+   * to repaint should not have to rediscover the expression.
+   */
+  private _repaintViewport(): void {
+    const t = this.term
+    if (!t) return
+    t.refresh(0, t.rows - 1)
+  }
+
+  /**
+   * Repaint the whole viewport on the NEXT frame, once, however many
+   * invalidations arrive during this one.
+   *
+   * This exists because of one hole in xterm.js 5.5.0 / addon-webgl 0.18.0.
+   * The WebGL renderer keeps a per-cell vertex model carrying texture
+   * coordinates into a glyph atlas that every terminal with the same font,
+   * theme and DPR SHARES (CharAtlasCache holds one module-global cache). When
+   * that atlas hits its page limit — min(32, MAX_TEXTURE_IMAGE_UNITS), which
+   * is 16 on macOS/Metal — TextureAtlas._createNewPage merges four pages and
+   * rewrites the coordinates of every glyph it moved, in place. Cells already
+   * in the model keep the coordinates they had, which now address a
+   * rearranged page: correct backgrounds, garbage glyph shapes.
+   *
+   * The library's repair is a flag (`_requestClearModel`) read at the TOP of
+   * a frame, and the merge happens LATER IN THAT SAME FRAME, inside
+   * _updateModel while rasterising a newly encountered glyph. So the flag
+   * cannot repair the frame that broke — it only says "rebuild fully IF
+   * another frame happens", and it schedules nothing: no refreshRows, no
+   * animation frame, nothing marked dirty. When the output that filled the
+   * atlas was the last output, no next frame comes, and the corruption sits
+   * on screen until something unrelated repaints. On Linux the
+   * FORCED_REFRESH_MS pump always supplies that frame, which is why this was
+   * only ever reported on macOS, where the user supplied it by resizing the
+   * window.
+   *
+   * So: the addon tells us the page set changed, and we supply the frame the
+   * library assumed. A frame, not a microtask — the event fires from inside
+   * the render that is drawing right now, and marking rows dirty during it
+   * repairs nothing. Coalesced, because a merge fires an add for the merged
+   * page while the same frame may add a fresh one too.
+   *
+   * The real owner of this is upstream: the merge should request its own
+   * redraw (nocx-a8r90 reports it). Until it does, the renderer module owns
+   * "the picture matches the buffer", so the renderer module closes it.
+   */
+  private _scheduleRepaintAfterFrame(): void {
+    if (this._disposed || this._repaintFrame !== 0) return
+    this._repaintFrame = requestAnimationFrame(() => {
+      this._repaintFrame = 0
+      if (this._disposed) return
+      this._repaintViewport()
+    })
+  }
+
   private attachWebGL(): void {
     if (!this.term) return
     try {
-      const addon = new WebglAddon()
+      const addon = this._createWebglAddon()
       addon.onContextLoss(() => this.onContextLoss())
+      // The atlas invalidation seam (nocx-4z5hv). Subscribed HERE, with the
+      // addon, so recovery re-arms it: a subscription taken once at mount
+      // would go on pointing at the dead addon's atlas after the first GPU
+      // hiccup and silently stop working.
+      this._atlasPageDisposable?.dispose()
+      this._atlasPageDisposable = addon.onAddTextureAtlasCanvas(() =>
+        this._scheduleRepaintAfterFrame(),
+      )
       this.term.loadAddon(addon)
       this.webgl = addon
     } catch {
@@ -653,6 +759,11 @@ export class XtermRenderer implements TerminalRenderer {
 
   private attachCanvas(): void {
     if (!this.term || this.canvas) return
+    // No atlas subscription here on purpose. The canvas renderer reads a
+    // glyph's atlas coordinates at DRAW time and blits into a retained
+    // canvas, so a page merge cannot leave it holding stale ones — only the
+    // WebGL renderer keeps a per-cell vertex model between frames, and that
+    // model is the thing a merge invalidates.
     try {
       const addon = new CanvasAddon()
       this.term.loadAddon(addon)
@@ -676,6 +787,8 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   private onContextLoss(): void {
+    this._atlasPageDisposable?.dispose()
+    this._atlasPageDisposable = undefined
     this.webgl?.dispose()
     this.webgl = undefined
     const recoverable =
@@ -901,9 +1014,7 @@ export class XtermRenderer implements TerminalRenderer {
     // char atlas via _refreshCharAtlas() which acquires a correctly-sized
     // atlas. The tab-activation path needs a viewport refresh because
     // terminal content may have changed while the tab was in the background.
-    if (this.term) {
-      this.term.refresh(0, this.term.rows - 1)
-    }
+    this._repaintViewport()
   }
 
   applyTheme(theme: ITheme): void {
@@ -914,7 +1025,7 @@ export class XtermRenderer implements TerminalRenderer {
     // loop.
     if (!this.term) return
     this.term.options.theme = theme
-    this.term.refresh(0, this.term.rows - 1)
+    this._repaintViewport()
   }
 
   setReadOnly(readOnly: boolean): void {
@@ -1035,6 +1146,12 @@ export class XtermRenderer implements TerminalRenderer {
     if (this._dprRefitFrame !== 0) {
       cancelAnimationFrame(this._dprRefitFrame)
       this._dprRefitFrame = 0
+    }
+    this._atlasPageDisposable?.dispose()
+    this._atlasPageDisposable = undefined
+    if (this._repaintFrame !== 0) {
+      cancelAnimationFrame(this._repaintFrame)
+      this._repaintFrame = 0
     }
     this._cellDimsSubs = []
     this.scrollDisposable?.dispose()

@@ -88,6 +88,8 @@ import {
 } from './ui'
 import { showToast } from './ui/toast'
 import { ResetIcon } from './ui/icons'
+import { Slider } from './ui/slider'
+import { PetPreview } from './pets/preview'
 import { systemPromptText } from './systemprompt'
 import {
   detachedOutputSentence,
@@ -106,6 +108,7 @@ const INSTRUCTIONS_SECTION = 'Instructions'
  *  at all, and inventing one so that one section can carry one notice would
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
+const PETS_SECTION = 'Pets'
 
 /** The clipboard an embedding without one hands the About page. It refuses
  *  rather than resolving: a Copy button that reports success while nothing was
@@ -1287,6 +1290,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // there: displayValue warns when it can find neither a usable value nor
     // a usable default, which is what a boolean looks like to it.
     const textValue = () => (decl.control === 'text' ? displayValue(eff(), decl) : '')
+    // The value a slider drag is passing through, before it is committed.
+    // Null whenever nothing is being dragged, which is every other control.
+    const [dragValue, setDragValue] = createSignal<number | null>(null)
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -1363,7 +1369,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
               />
             </Show>
 
-            <Show when={decl.control === 'number'}>
+            {/* The number control has two shapes, chosen by the declaration
+                (Declaration.slider) exactly as `text` chooses multiline: the
+                value, its bounds, its unit and its refusals are the same in
+                both, and only the affordance differs. A slider for a
+                magnitude judged by eye, a field for a bound somebody types
+                deliberately. */}
+            <Show when={decl.control === 'number' && decl.slider === true}>
+              {/* While the pointer is down the row shows the number the drag
+                  is on, and nothing is written; the save happens once, on
+                  release. A drag passes through every value between its ends
+                  and none of them was chosen — writing each one made the
+                  settings revision tick sixty times a second, and every
+                  client refetched the whole snapshot for each tick. */}
+              <Slider
+                value={dragValue() ?? numeric()}
+                min={decl.min ?? 0}
+                max={decl.max ?? 100}
+                unit={decl.unit}
+                ariaLabel={decl.label}
+                onInput={setDragValue}
+                onCommit={(n) => {
+                  setDragValue(null)
+                  void saveSetting(decl.key, n)
+                }}
+              />
+            </Show>
+
+            <Show when={decl.control === 'number' && decl.slider !== true}>
               <TextField
                 type="number"
                 value={displayValue(eff(), decl)}
@@ -1527,6 +1560,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         read-only text cannot push the person's field away. */}
                     <Show when={section === INSTRUCTIONS_SECTION}>
                       <CodeBlock ariaLabel="nocx system prompt">{systemPromptText}</CodeBlock>
+                    </Show>
+                    {/* The animal itself, above the controls that govern it.
+                        It runs the real overlay over a mock scrollback rather
+                        than showing a picture: size, colour, gait and the
+                        reaction to a command are the same code answering the
+                        same settings, so the preview cannot flatter what it
+                        previews. */}
+                    <Show when={section === PETS_SECTION}>
+                      <PetPreview />
                     </Show>
                     {/* The degrade notice, above the controls it
                         contradicts. A kit StatusCard, placed and never

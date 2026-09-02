@@ -1,0 +1,87 @@
+/* Slider — the track, the thumb and the readout beside them.
+
+   Two identities, different duties: `ui-slider` is the row and owns the
+   layout and the gap; `ui-slider__control` is the track and owns its
+   appearance, its thumb and its disabled state. The readout is a third,
+   because it is text rather than chrome and inherits the type scale.
+
+   `appearance: none` takes the platform look away and everything below puts
+   ours back — twice, because a range input's thumb is addressed by a
+   different pseudo-element in WebKit and in Gecko and neither browser
+   tolerates the other's selector in the same rule. */
+
+.ui-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.ui-slider__control {
+  appearance: none;
+  -webkit-appearance: none;
+  width: var(--control-width-number, 180px);
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ui-slider__control:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* The track. */
+.ui-slider__control::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-divider);
+}
+
+.ui-slider__control::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-divider);
+}
+
+/* The thumb. The negative top margin centres it on the 4px track in WebKit,
+   which positions the thumb from the track's top edge rather than its middle. */
+.ui-slider__control::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.ui-slider__control::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.ui-slider__control:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* Tabular figures so the row does not shuffle sideways as the number changes
+   width mid-drag — the one thing that makes a live readout feel broken. */
+.ui-slider__readout {
+  min-width: 4ch;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.ui-slider__unit {
+  margin-left: var(--space-1);
+  color: var(--color-text-dim);
+}

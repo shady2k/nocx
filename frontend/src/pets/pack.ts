@@ -35,8 +35,27 @@ export interface PetPack {
   readonly activity: Readonly<Record<Exclude<Activity, 'none'>, string>>
 }
 
+/** The six colours the pack ships. The id is the directory under
+ *  `public/pets/`; the label is what the settings page offers. */
+const CAT_COLOURS = [
+  { id: 'cat-1', label: 'Ginger' },
+  { id: 'cat-2', label: 'Black' },
+  { id: 'cat-3', label: 'Brown' },
+  { id: 'cat-4', label: 'Sphynx' },
+  { id: 'cat-5', label: 'White longhair' },
+  { id: 'cat-6', label: 'Grey' },
+] as const
+
+/** Where a colour's files live. Unknown ids fall back to the first colour
+ *  rather than to nothing: a setting written by a newer build must leave the
+ *  older one with a cat, not with an empty pane. */
+export function packBase(id: string): string {
+  const known = CAT_COLOURS.some((c) => c.id === id)
+  return `./pets/${known ? id : CAT_COLOURS[0].id}/`
+}
+
 /** The pack that ships in the box: luizmelo's Pet Cats, CC0.
- *  See `public/pets/cat/SOURCE.md` for provenance. */
+ *  See `public/pets/cat-1/SOURCE.md` for provenance. */
 export const CAT_PACK: PetPack = {
   id: 'cat',
   cell: 50,
@@ -140,7 +159,15 @@ export async function loadPack(
 
   for (const [name, clip] of Object.entries(pack.clips)) {
     const url = base + clip.file
-    const img = await (source ?? domImageSource).load(url)
+    // Not every colour draws every clip — Cat-3 has no scratch. A pack
+    // missing one sheet loses that ONE behaviour and keeps the rest; only a
+    // pack that yields nothing at all is an error.
+    let img
+    try {
+      img = await (source ?? domImageSource).load(url)
+    } catch {
+      continue
+    }
     clips[name] = {
       url,
       frames: clip.frames,
@@ -159,13 +186,31 @@ export async function loadPack(
     }
   }
 
+  if (Object.keys(clips).length === 0) {
+    throw new Error(`pet pack has no usable sprites: ${base}`)
+  }
   const trim: Trim =
     x1 > x0 && y1 > y0 ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: pack.cell, y1: pack.cell }
   return { pack, clips, trim }
 }
 
-/** Which clip a pet in this state should be playing. */
-export function clipFor(pack: PetPack, locomotion: Locomotion, activity: Activity): string {
-  if (locomotion === 'idle' && activity !== 'none') return pack.activity[activity]
-  return pack.locomotion[locomotion]
+/**
+ * Which clip a pet in this state should be playing.
+ *
+ * `have` is what the colour actually loaded. A behaviour the artist did not
+ * draw degrades to idle rather than to a blank frame — the animal simply does
+ * not do that thing, which is the honest reading of a missing sheet.
+ */
+export function clipFor(
+  pack: PetPack,
+  locomotion: Locomotion,
+  activity: Activity,
+  have?: Readonly<Record<string, unknown>>,
+): string {
+  const wanted =
+    locomotion === 'idle' && activity !== 'none'
+      ? pack.activity[activity]
+      : pack.locomotion[locomotion]
+  if (have === undefined || wanted in have) return wanted
+  return 'idle' in have ? 'idle' : Object.keys(have)[0]
 }

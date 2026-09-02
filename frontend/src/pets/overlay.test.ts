@@ -102,18 +102,20 @@ function stand(blockTops: number[]): Stand {
 }
 
 /** A settings stub the test can flip. */
-function settingsStub(enabled = true, height = 34) {
+function settingsStub(enabled = true, height = 34, base = '/p/') {
   const listeners = new Set<() => void>()
   return {
     enabled: () => enabled,
     height: () => height,
+    base: () => base,
     onChange: (cb: () => void) => {
       listeners.add(cb)
       return () => listeners.delete(cb)
     },
-    set(next: { enabled?: boolean; height?: number }) {
+    set(next: { enabled?: boolean; height?: number; base?: string }) {
       if (next.enabled !== undefined) enabled = next.enabled
       if (next.height !== undefined) height = next.height
+      if (next.base !== undefined) base = next.base
       for (const l of [...listeners]) l()
     },
   }
@@ -129,7 +131,6 @@ function overlayOn(
     host: s.host,
     blocks: s.blocks,
     pack: PACK,
-    base: '/p/',
     imageSource: IMAGES,
     rng,
     raf: (cb) => {
@@ -204,7 +205,7 @@ describe('a pet over a pane', () => {
       host: s.host,
       blocks: s.blocks,
       pack: PACK,
-      base: '/p/',
+      settings: settingsStub(),
       imageSource: { load: () => Promise.reject(new Error('gone')) },
       raf: (cb) => {
         s.frames.push(cb)
@@ -237,7 +238,6 @@ describe('the setting governs it', () => {
       host: s.host,
       blocks: s.blocks,
       pack: PACK,
-      base: '/p/',
       imageSource: { load },
       settings: settingsStub(false),
       raf: (cb) => {
@@ -284,5 +284,68 @@ describe('the setting governs it', () => {
     expect(sprite.style.height).toBe('60px')
     // The 40px ledge no longer clears a 60px cat, so it fell to the next one.
     expect(yOf() + 60).toBeCloseTo(300, 0)
+  })
+})
+
+describe('changing which animal', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('fetches the new pack from the new directory', async () => {
+    const s = stand([200])
+    const set = settingsStub(true, 34, '/ginger/')
+    const asked: string[] = []
+    new PetOverlay({
+      host: s.host,
+      blocks: s.blocks,
+      pack: PACK,
+      settings: set,
+      imageSource: {
+        load: (url) => {
+          asked.push(url)
+          return IMAGES.load(url)
+        },
+      },
+      raf: (cb) => {
+        s.frames.push(cb)
+        return s.frames.length
+      },
+      caf: () => {},
+    })
+    await vi.waitFor(() => expect(asked.some((u) => u.startsWith('/ginger/'))).toBe(true))
+    set.set({ base: '/black/' })
+    await vi.waitFor(() => expect(asked.some((u) => u.startsWith('/black/'))).toBe(true))
+  })
+
+  it('keeps the animal it has when the new one will not load', async () => {
+    // Losing the pet you had because a colour is missing is a worse outcome
+    // than staying on the old one.
+    const s = stand([200])
+    const set = settingsStub(true, 34, '/ginger/')
+    new PetOverlay({
+      host: s.host,
+      blocks: s.blocks,
+      pack: PACK,
+      settings: set,
+      imageSource: {
+        load: (url) =>
+          url.startsWith('/ginger/') ? IMAGES.load(url) : Promise.reject(new Error('missing')),
+      },
+      raf: (cb) => {
+        s.frames.push(cb)
+        return s.frames.length
+      },
+      caf: () => {},
+    })
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(2)
+    set.set({ base: '/nope/' })
+    await new Promise((r) => setTimeout(r, 0))
+    s.pump(1)
+    expect(s.host.querySelector('.pet-layer')).not.toBeNull()
+    expect(s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundImage).toContain(
+      '/ginger/',
+    )
   })
 })

@@ -7,6 +7,7 @@ import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { BufferLine } from './test-helpers'
+import { PetOverlay } from '../pets/overlay'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -1243,5 +1244,109 @@ describe('follow intent survives block geometry changes (nocx-n5q44)', () => {
     )
 
     expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+})
+
+// ── The pet hears about the command (nocx-q4qeh.1) ────────────────────────
+//
+// This exists because the first wiring was hung on `onCommandEnd`, which
+// reads like the obvious seam and has no caller at all — so the reaction
+// fired never, and both the unit tests of the pet and a look at the running
+// app agreed it worked. The check is therefore about the SEAM, not about the
+// animal: every freeze path settles through `_settleFrozen`, and the pet must
+// be told there.
+describe('ScrollbackController tells the pet how the command went', () => {
+  const FENCE = 'ab'.repeat(16)
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd-pet',
+    epoch: 1,
+  }) as IntegrationDomain
+
+  const protoScrollIntoView = Element.prototype.scrollIntoView?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollIntoView = protoScrollIntoView
+    vi.restoreAllMocks()
+  })
+
+  function petController(): {
+    controller: ScrollbackController
+    sight: (ev: RenderFenceEvent) => void
+    heard: ReturnType<typeof vi.spyOn>
+  } {
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    // Spied on the prototype: the overlay is built inside the controller, so
+    // there is no instance to hand a double to — which is the point. A double
+    // injected from the test would have passed against the dead method too.
+    const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+      pet: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    return { controller, sight: (ev) => fenceCb?.(ev), heard }
+  }
+
+  function finish(
+    controller: ScrollbackController,
+    sight: (ev: RenderFenceEvent) => void,
+    exitCode: number,
+  ): void {
+    controller.beginBlock('ls', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    sight({ hex: FENCE, line: 2, buffer: 'normal' })
+    controller.freezeFromAttempt(
+      { id: 'att-1', domain, state: 'completed', exitCode, fence: FENCE },
+      2,
+    )
+  }
+
+  it('says success when the command succeeded', () => {
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 0)
+    expect(heard).toHaveBeenCalledWith('success')
+  })
+
+  it('says failure when it did not', () => {
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 2)
+    expect(heard).toHaveBeenCalledWith('failure')
+  })
+
+  it('says unknown for a block that is neither — an environment entry', () => {
+    // 'entered' is not a verdict on the command, and a pet that read it as
+    // failure would sulk at every ssh.
+    const { controller, heard } = petController()
+    controller.beginBlock('ssh prod', '~', 0)
+    controller.enterBlock(1)
+    expect(heard).toHaveBeenCalledWith('unknown')
+  })
+
+  it('says nothing at all when the pane has no pet', () => {
+    const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    finish(controller, (ev) => fenceCb?.(ev), 0)
+    expect(heard).not.toHaveBeenCalled()
   })
 })

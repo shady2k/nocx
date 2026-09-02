@@ -19,12 +19,24 @@ import {
   CAT_PACK,
   clipFor,
   loadPack,
+  packBase,
   type ImageSource,
   type LoadedPack,
   type PetPack,
 } from './pack'
 import { DEFAULT_TERRAIN, deriveTerrain, type Ledge, type LedgeCandidate } from './terrain'
-import { onPetsSettingsChanged, petHeight, petsEnabled } from './setting'
+import { onPetsSettingsChanged, petHeight, petPack, petsEnabled } from './setting'
+
+/** What counts as ground, by default.
+ *
+ *  Not only the command block's own top edge. The chips a block wears — the
+ *  directory, the duration, the exit badge — are painted, raised and about
+ *  sixty pixels wide, which is what the old screenmates actually treated as
+ *  terrain: a Neko walked title bars and window edges, not the desktop. A cat
+ *  standing on the `ok` badge of the command it just watched finish is the
+ *  whole idea of the feature in one frame.
+ */
+const LEDGE_SELECTOR = '.cmd-block, .nocx-chip'
 
 export interface PetOverlayOpts {
   /** The element the pet is drawn over. Must be a positioned ancestor of
@@ -42,10 +54,16 @@ export interface PetOverlayOpts {
   readonly rng?: () => number
   /** Injected in tests; defaults to the browser's decoder. */
   readonly imageSource?: ImageSource
+  /** What counts as ground. Defaults to LEDGE_SELECTOR; the settings preview
+   *  passes its own so the mock scrollback is walkable without borrowing the
+   *  real scrollback's classes and its stylesheet with them. */
+  readonly ledgeSelector?: string
   /** Injected in tests. Defaults to the declared settings module. */
   readonly settings?: {
     enabled(): boolean
     height(): number
+    /** Which pack directory to load, as a base path with a trailing slash. */
+    base(): string
     onChange(cb: () => void): () => void
   }
 }
@@ -68,6 +86,10 @@ export class PetOverlay {
   private readonly _tuning: PetTuning
 
   private _loaded: LoadedPack | null = null
+  private _loadedBase = ''
+  /** Which load is the current one. Clicking through six colours starts six
+   *  fetches, and only the last one may land. */
+  private _loadToken = 0
   private _pet: Pet
   private _terrain: Ledge[] = []
   private _floor: Ledge = { id: 'floor', x0: 0, x1: 0, y: 0 }
@@ -75,9 +97,21 @@ export class PetOverlay {
   private _clipT = 0
   private _last = 0
   private _handle: number | null = null
+  /** Pointer position in host coordinates, or null while it is elsewhere.
+   *  Written from a passive listener and read once per frame — never
+   *  measured, so it costs no layout. */
+  private _pointer: { x: number; y: number } | null = null
+  /** The drawn width of the animal, from the pack's trim. Kept because the
+   *  flee test needs the box and only the painter knows it. */
+  private _width = 0
+  private _hostLeft = 0
+  private _hostTop = 0
   private _stale = true
   private _disposed = false
   private _running = false
+  /** Whether an animal is currently living in this layer. Distinct from
+   *  `_running`: the loop can be restarted around a pet that never left. */
+  private _alive = false
   private _height = 0
   private readonly _observers: { disconnect(): void }[] = []
   private readonly _settings: NonNullable<PetOverlayOpts['settings']>
@@ -102,6 +136,7 @@ export class PetOverlay {
     this._settings = opts.settings ?? {
       enabled: petsEnabled,
       height: petHeight,
+      base: () => packBase(petPack()),
       onChange: onPetsSettingsChanged,
     }
     this._height = this._settings.height()
@@ -121,46 +156,61 @@ export class PetOverlay {
       this._stop()
       return
     }
-    if (this._running) {
+    const base = this._opts.base ?? this._settings.base()
+    const sameArt = this._loaded !== null && this._loadedBase === base
+    if (this._running && sameArt) {
       // Only the size changed. The ledges were filtered against the old
       // height, so they have to be derived again before the next frame.
       this.invalidate()
       return
     }
     this._running = true
-    this._host.appendChild(this._layer)
-    if (this._loaded) {
+    if (this._layer.parentNode === null) this._host.appendChild(this._layer)
+    if (sameArt) {
       this._begin()
       return
     }
-    void loadPack(
-      this._opts.pack ?? CAT_PACK,
-      this._opts.base ?? './pets/cat/',
-      this._opts.imageSource,
-    )
+    // A different animal: fetch it, and swap only once it is in hand. A
+    // colour that fails to load must not cost the person the pet they had.
+    const token = ++this._loadToken
+    void loadPack(this._opts.pack ?? CAT_PACK, base, this._opts.imageSource)
       .then((loaded) => {
-        if (this._disposed || !this._running) return
+        if (this._disposed || !this._running || token !== this._loadToken) return
         this._loaded = loaded
+        this._loadedBase = base
+        this._clip = ''
         this._begin()
       })
       .catch(() => {
-        // A missing sprite is not worth a broken terminal.
-        this._stop()
+        if (token !== this._loadToken) return
+        // A missing sprite is not worth a broken terminal — but if an animal
+        // is already on screen, keep it rather than taking it away.
+        if (this._loaded === null) this._stop()
       })
   }
 
   private _begin(): void {
     this._watch()
     this._measure()
-    // Dropped in from above the first ledge, so the arrival is a fall rather
-    // than a pop: the pet is seen to take its place.
-    this._pet = newPet((this._floor.x0 + this._floor.x1) / 2, -this._height)
+    // A pet already living here KEEPS living. Minting one unconditionally is
+    // what made dragging the size slider rain cats: every value the drag
+    // passed through arrived as a settings change, and each one dropped a
+    // fresh animal in from above while the last was still walking. An
+    // arrival is for the first one and for a pet that was switched off and
+    // back on — not for a property of the one already on screen.
+    if (!this._alive) {
+      // Dropped in from above the first ledge, so the arrival is a fall
+      // rather than a pop: the pet is seen to take its place.
+      this._pet = newPet((this._floor.x0 + this._floor.x1) / 2, -this._height)
+      this._alive = true
+    }
     this._last = 0
     this._start()
   }
 
   private _stop(): void {
     this._running = false
+    this._alive = false
     if (this._handle !== null) this._caf(this._handle)
     this._handle = null
     this._layer.remove()
@@ -212,13 +262,42 @@ export class PetOverlay {
     const scroller = this._blocks.parentElement ?? this._host
     scroller.addEventListener('scroll', mark, { passive: true })
     this._observers.push({ disconnect: () => scroller.removeEventListener('scroll', mark) })
+
+    // The pointer, so the animal can get out of its way. Listened for on the
+    // HOST rather than the layer: the layer takes no pointer events at all
+    // (that is what makes the pet unclickable), so it would never hear one.
+    // The position is stored raw and converted per frame against the host
+    // rect the terrain snapshot already holds — no measuring on the event.
+    const onMove = (e: Event) => {
+      const ev = e as PointerEvent
+      // Against the rect the terrain snapshot already holds, NOT a fresh
+      // measurement: pointermove fires faster than frames do, and a
+      // getBoundingClientRect on each one is the layout thrash this whole
+      // module is arranged to avoid. Resize and scroll both invalidate the
+      // snapshot, so the rect is never stale for longer than a frame.
+      this._pointer = { x: ev.clientX - this._hostLeft, y: ev.clientY - this._hostTop }
+    }
+    const onLeave = () => {
+      this._pointer = null
+    }
+    this._host.addEventListener('pointermove', onMove, { passive: true })
+    this._host.addEventListener('pointerleave', onLeave, { passive: true })
+    this._observers.push({
+      disconnect: () => {
+        this._host.removeEventListener('pointermove', onMove)
+        this._host.removeEventListener('pointerleave', onLeave)
+      },
+    })
   }
 
   private _measure(): void {
     const host = this._host.getBoundingClientRect()
+    this._hostLeft = host.left
+    this._hostTop = host.top
     const candidates: LedgeCandidate[] = []
     let n = 0
-    for (const el of this._blocks.querySelectorAll<HTMLElement>('.cmd-block')) {
+    const selector = this._opts.ledgeSelector ?? LEDGE_SELECTOR
+    for (const el of this._blocks.querySelectorAll<HTMLElement>(selector)) {
       const r = el.getBoundingClientRect()
       if (r.width === 0 && r.height === 0) continue
       candidates.push({
@@ -244,6 +323,10 @@ export class PetOverlay {
   // ── the clock ────────────────────────────────────────────────────────────
 
   private _start(): void {
+    // Exactly one loop. Without this a second `_begin` — a pack that finished
+    // loading while another was in flight — leaves both running, and the pet
+    // moves at twice its speed for the rest of the session.
+    if (this._handle !== null) this._caf(this._handle)
     const frame = (t: number) => {
       if (this._disposed) return
       const dt = this._last === 0 ? 1 / 60 : Math.min(0.1, (t - this._last) / 1000)
@@ -251,7 +334,13 @@ export class PetOverlay {
       if (this._stale) this._measure()
       this._pet = step(
         this._pet,
-        { terrain: this._terrain, floor: this._floor, petHeight: this._height },
+        {
+          terrain: this._terrain,
+          floor: this._floor,
+          petHeight: this._height,
+          petWidth: this._width,
+          pointer: this._pointer,
+        },
         dt,
         this._rng,
         this._tuning,
@@ -267,7 +356,7 @@ export class PetOverlay {
   private _paint(dt: number): void {
     const loaded = this._loaded
     if (!loaded) return
-    const name = clipFor(loaded.pack, this._pet.locomotion, this._pet.activity)
+    const name = clipFor(loaded.pack, this._pet.locomotion, this._pet.activity, loaded.clips)
     const clip = loaded.clips[name]
     if (!clip) return
     if (name !== this._clip) {
@@ -280,6 +369,7 @@ export class PetOverlay {
     const { x0, y0, x1, y1 } = loaded.trim
     const scale = this._height / (y1 - y0)
     const width = (x1 - x0) * scale
+    this._width = width
     const s = this._sprite.style
     s.width = `${width}px`
     s.height = `${this._height}px`

@@ -22,10 +22,14 @@ export type Locomotion = 'idle' | 'walk' | 'run' | 'fall'
 type Mood = 'calm' | 'pleased' | 'worried' | 'tired'
 export type Activity = 'none' | 'sit' | 'groom' | 'stretch' | 'lie' | 'scratch' | 'meow' | 'sleep'
 
-/** How a finished command reaches the pet. Mirrors CommandStatus without
- *  importing it: the pet must not depend on the ledger's module (AD-8), and
- *  'running' has no meaning here — a pet reacts to outcomes, not to starts. */
-export type Outcome = 'success' | 'failure' | 'interrupted' | 'unknown'
+/** How a finished command reaches the pet.
+ *
+ *  The block's own three settled states, no more: 'entered' (an environment
+ *  opened) and an abandoned attempt both arrive as 'unknown', because neither
+ *  is a verdict on the command. A fourth value for "interrupted" was written
+ *  first and removed — no freeze path produces one, and a branch nothing can
+ *  reach is a claim the tests cannot check. */
+export type Outcome = 'success' | 'failure' | 'unknown'
 
 export interface Pet {
   /** The ledge underfoot, by identity. Null while falling. */
@@ -57,6 +61,18 @@ export interface PetTuning {
   readonly reactionHold: number
   /** How long a mood lasts before it decays back to calm. */
   readonly moodHold: number
+  /** How close the pointer may come before the animal moves away, in pixels.
+   *
+   *  A cat that lets you put the cursor through it is a sticker. This is the
+   *  one way a person touches the pet at all — the layer takes no clicks by
+   *  design — so it is also what makes it feel present rather than painted
+   *  on. */
+  readonly fleeRadius: number
+  /** Chance, at the end of a ledge, of stepping off it instead of turning
+   *  round. This is what makes the terminal a landscape rather than a set of
+   *  separate shelves: without it the animal walks one edge for ever, and a
+   *  pet that never explores reads as a decoration stuck to the screen. */
+  readonly stepOff: number
 }
 
 export const DEFAULT_TUNING: PetTuning = {
@@ -67,6 +83,8 @@ export const DEFAULT_TUNING: PetTuning = {
   sleepAfter: 45,
   reactionHold: 1.4,
   moodHold: 12,
+  stepOff: 0.4,
+  fleeRadius: 70,
 }
 
 export function newPet(x: number, y: number): Pet {
@@ -90,14 +108,12 @@ export function newPet(x: number, y: number): Pet {
 const MOOD_OF: Record<Outcome, Mood> = {
   success: 'pleased',
   failure: 'worried',
-  interrupted: 'worried',
   unknown: 'calm',
 }
 
 const REACTION_OF: Record<Outcome, Activity> = {
   success: 'meow',
   failure: 'scratch',
-  interrupted: 'sit',
   unknown: 'sit',
 }
 
@@ -130,10 +146,23 @@ interface Choice {
   readonly activity: Activity
   readonly hold: number
   readonly weight: number
+  /** Leave this ledge where it stands and drop to whatever is under it.
+   *
+   *  Stepping off the END is not enough on its own: a command block is the
+   *  full width of the pane, and at a walking pace an animal needs the better
+   *  part of a minute to reach an edge. Without a way to leave from the
+   *  middle it stays on the ledge it landed on for as long as anyone watches,
+   *  which is exactly the "decoration stuck to the screen" this feature is
+   *  trying not to be. */
+  readonly descend?: boolean
 }
 
 /** The menu, per mood. A pleased cat shows off; a worried one fidgets and
- *  keeps still; a tired one has already stopped caring. */
+ *  keeps still; a tired one has already stopped caring.
+ *
+ *  Order matters to the tests and so it is stated: the moving choices come
+ *  first and the still ones last, so "pin the rng high" means "keep still"
+ *  in every mood rather than whichever entry happens to be at the bottom. */
 function menu(mood: Mood): readonly Choice[] {
   const walk = (w: number): Choice => ({
     locomotion: 'walk',
@@ -145,6 +174,7 @@ function menu(mood: Mood): readonly Choice[] {
     case 'pleased':
       return [
         walk(34),
+        { locomotion: 'walk', activity: 'none', hold: 1, weight: 14, descend: true },
         { locomotion: 'run', activity: 'none', hold: 2, weight: 14 },
         { locomotion: 'idle', activity: 'stretch', hold: 2.4, weight: 20 },
         { locomotion: 'idle', activity: 'groom', hold: 3, weight: 16 },
@@ -153,6 +183,7 @@ function menu(mood: Mood): readonly Choice[] {
     case 'worried':
       return [
         walk(18),
+        { locomotion: 'walk', activity: 'none', hold: 1, weight: 6, descend: true },
         { locomotion: 'idle', activity: 'sit', hold: 4, weight: 34 },
         { locomotion: 'idle', activity: 'scratch', hold: 2, weight: 22 },
         { locomotion: 'idle', activity: 'lie', hold: 4, weight: 26 },
@@ -160,6 +191,7 @@ function menu(mood: Mood): readonly Choice[] {
     case 'tired':
       return [
         walk(8),
+        { locomotion: 'walk', activity: 'none', hold: 1, weight: 4, descend: true },
         { locomotion: 'idle', activity: 'lie', hold: 6, weight: 40 },
         { locomotion: 'idle', activity: 'sit', hold: 5, weight: 30 },
         { locomotion: 'idle', activity: 'groom', hold: 3, weight: 22 },
@@ -167,6 +199,7 @@ function menu(mood: Mood): readonly Choice[] {
     default:
       return [
         walk(30),
+        { locomotion: 'walk', activity: 'none', hold: 1, weight: 12, descend: true },
         { locomotion: 'idle', activity: 'sit', hold: 4, weight: 24 },
         { locomotion: 'idle', activity: 'groom', hold: 3, weight: 20 },
         { locomotion: 'idle', activity: 'lie', hold: 5, weight: 14 },
@@ -200,6 +233,14 @@ export interface StepEnv {
   /** The pane's own bottom edge, as ground. */
   readonly floor: Ledge
   readonly petHeight: number
+  /** How wide the animal is drawn. The flee test is against its BOX plus a
+   *  margin, not against a radius round its position: at 96px tall the cat is
+   *  180px wide, so a cursor visibly on top of it is ninety pixels from the
+   *  point a radius would measure — and it would sit there unbothered. */
+  readonly petWidth?: number
+  /** Where the pointer is, in the same coordinates as the terrain, or null
+   *  when it is not over this pane at all. */
+  readonly pointer?: { readonly x: number; readonly y: number } | null
 }
 
 /** Ground by identity, floor included. */
@@ -247,23 +288,60 @@ export function step(
   moodHold = Math.max(0, moodHold - dt)
   if (moodHold === 0 && mood !== 'tired') mood = 'calm'
 
-  // 3. Move, and turn round at the end of the world rather than falling off it.
+  // 3. The pointer. Close enough and the animal stops whatever it was doing
+  //    and moves away — the only interaction the pet has, since the layer
+  //    deliberately takes no clicks.
+  const threat = nearPointer(env, x, y, tuning)
+  if (threat !== 0) {
+    locomotion = 'run'
+    activity = 'none'
+    hold = Math.max(hold, 0.5)
+    dir = threat
+    boredom = 0
+  }
+
+  // 4. Move, and turn round at the end of the world rather than falling off it.
   if (locomotion === 'walk' || locomotion === 'run') {
     const speed = locomotion === 'run' ? tuning.runSpeed : tuning.walkSpeed
     x += dir * speed * dt
-    if (x <= ledge.x0) {
-      x = ledge.x0
-      dir = 1
-    } else if (x >= ledge.x1) {
-      x = ledge.x1
-      dir = -1
+    const past = x <= ledge.x0 ? -1 : x >= ledge.x1 ? 1 : 0
+    if (past !== 0) {
+      // Cornered by the pointer: leave, rather than turn round into it.
+      if (threat === past || rng() < tuning.stepOff) {
+        // Off the end, and whatever is below catches it. The landing is the
+        // ordinary swept one, so the animal may drop past several ledges or
+        // all the way to the floor — which is the point: this is how it gets
+        // from the chip it was on to the block two commands down.
+        //
+        // It leaves AT the edge, not one pixel past it. Command blocks are
+        // all the same width, so a step that overshot by a pixel would miss
+        // every block below by the same pixel and land on the floor every
+        // single time — the animal would live on the floor and visit the
+        // blocks only on the way down.
+        return {
+          ...next,
+          x: past > 0 ? ledge.x1 : ledge.x0,
+          y,
+          dir: past > 0 ? 1 : -1,
+          ledgeId: null,
+          locomotion: 'fall',
+          activity: 'none',
+          hold: 0,
+          vy: 0,
+          mood,
+          moodHold,
+          boredom: 0,
+        }
+      }
+      x = past > 0 ? ledge.x1 : ledge.x0
+      dir = past > 0 ? -1 : 1
     }
     boredom = 0
   } else {
     boredom += dt
   }
 
-  // 4. Long enough with nothing to do and the cat goes to sleep. This is the
+  // 5. Long enough with nothing to do and the cat goes to sleep. This is the
   //    one activity that is not chosen from the menu — it is arrived at.
   if (boredom >= tuning.sleepAfter && activity !== 'sleep') {
     return {
@@ -284,11 +362,27 @@ export function step(
     return { ...next, x, y, dir, mood: 'tired', moodHold: 0, boredom, ledgeId: ledge.id }
   }
 
-  // 5. Finish the current occupation before starting another one. Deciding
+  // 6. Finish the current occupation before starting another one. Deciding
   //    afresh every frame is what makes a pet twitch instead of live.
   hold -= dt
   if (hold <= 0) {
     const c = pick(menu(mood), rng())
+    if (c.descend === true) {
+      return {
+        ...next,
+        x,
+        y,
+        dir,
+        ledgeId: null,
+        locomotion: 'fall',
+        activity: 'none',
+        hold: 0,
+        vy: 0,
+        mood,
+        moodHold,
+        boredom: 0,
+      }
+    }
     locomotion = c.locomotion
     activity = c.activity
     hold = c.hold
@@ -308,6 +402,27 @@ export function step(
     boredom,
     ledgeId: ledge.id,
   }
+}
+
+/**
+ * Which way to run from the pointer, or 0 when it is not a threat.
+ *
+ * The animal's BOX plus a margin, not a radius round its position. Two
+ * reasons, both learned by watching a cat ignore a cursor sitting on it:
+ * `y` is where it STANDS, so its body is the `petHeight` above that; and a
+ * 96px cat is 180px wide, so its own edges are further from its centre than
+ * any sensible radius.
+ */
+function nearPointer(env: StepEnv, x: number, y: number, tuning: PetTuning): 0 | 1 | -1 {
+  const p = env.pointer
+  if (!p) return 0
+  const halfW = (env.petWidth ?? env.petHeight) / 2
+  const dx = x - p.x
+  const dy = y - env.petHeight / 2 - p.y
+  if (Math.abs(dx) > halfW + tuning.fleeRadius) return 0
+  if (Math.abs(dy) > env.petHeight / 2 + tuning.fleeRadius) return 0
+  // Directly on top of it: pick a side rather than freezing.
+  return dx >= 0 ? 1 : -1
 }
 
 function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {

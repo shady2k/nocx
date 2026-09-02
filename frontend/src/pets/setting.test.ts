@@ -6,7 +6,9 @@ import {
   petHeight,
   petsEnabled,
   PETS_ENABLED_DEFAULT,
+  PETS_PACK_DEFAULT,
   PETS_SIZE_DEFAULT,
+  petPack,
   resetPetsSettings,
 } from './setting'
 
@@ -14,13 +16,21 @@ afterEach(() => resetPetsSettings())
 
 describe('applyPetsSettings', () => {
   it('adopts the backend answers', () => {
-    applyPetsSettings(false, 64)
+    applyPetsSettings(false, 64, 'cat-2')
     expect(petsEnabled()).toBe(false)
     expect(petHeight()).toBe(64)
+    expect(petPack()).toBe('cat-2')
+  })
+
+  it('keeps the declared pack when the value is not a usable id', () => {
+    applyPetsSettings(true, 34, 42)
+    expect(petPack()).toBe(PETS_PACK_DEFAULT)
+    applyPetsSettings(true, 34, '')
+    expect(petPack()).toBe(PETS_PACK_DEFAULT)
   })
 
   it('keeps the declared default when a value is missing or the wrong type', () => {
-    applyPetsSettings(undefined, 'big')
+    applyPetsSettings(undefined, 'big', 42)
     expect(petsEnabled()).toBe(PETS_ENABLED_DEFAULT)
     expect(petHeight()).toBe(PETS_SIZE_DEFAULT)
   })
@@ -28,14 +38,14 @@ describe('applyPetsSettings', () => {
   it('clamps a size outside the declared bound', () => {
     // The terrain measures head clearance against this number; a value the
     // Go side would have refused must not reach the rules.
-    applyPetsSettings(true, 5000)
+    applyPetsSettings(true, 5000, 'cat-1')
     expect(petHeight()).toBe(96)
-    applyPetsSettings(true, -3)
+    applyPetsSettings(true, -3, 'cat-1')
     expect(petHeight()).toBe(16)
   })
 
   it('rounds a fractional size to whole pixels', () => {
-    applyPetsSettings(true, 40.6)
+    applyPetsSettings(true, 40.6, 'cat-1')
     expect(petHeight()).toBe(41)
   })
 })
@@ -44,7 +54,7 @@ describe('onPetsSettingsChanged', () => {
   it('tells a listener when an answer actually changed', () => {
     const seen = vi.fn()
     onPetsSettingsChanged(seen)
-    applyPetsSettings(false, PETS_SIZE_DEFAULT)
+    applyPetsSettings(false, PETS_SIZE_DEFAULT, PETS_PACK_DEFAULT)
     expect(seen).toHaveBeenCalledTimes(1)
   })
 
@@ -53,14 +63,14 @@ describe('onPetsSettingsChanged', () => {
     // this module is told about pets on every change to anything at all.
     const seen = vi.fn()
     onPetsSettingsChanged(seen)
-    applyPetsSettings(PETS_ENABLED_DEFAULT, PETS_SIZE_DEFAULT)
+    applyPetsSettings(PETS_ENABLED_DEFAULT, PETS_SIZE_DEFAULT, PETS_PACK_DEFAULT)
     expect(seen).not.toHaveBeenCalled()
   })
 
   it('stops telling an unsubscribed listener', () => {
     const seen = vi.fn()
     onPetsSettingsChanged(seen)()
-    applyPetsSettings(false, 64)
+    applyPetsSettings(false, 64, 'cat-2')
     expect(seen).not.toHaveBeenCalled()
   })
 })

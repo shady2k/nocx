@@ -63,6 +63,10 @@ export interface Declaration {
    * The text control's paragraph variant; present only for control: text. The screen renders the kit's multiline TextField, where Enter inserts a newline instead of committing. A variant rather than a sixth control kind, matching the kit: TextField takes a multiline prop and there is no second component.
    */
   multiline?: boolean
+  /**
+   * The number control's continuous variant; present only for control: number, and only where min and max are both declared — a slider without both ends has nothing to travel between. A variant rather than a sixth control kind, for the reason multiline gives: the value, its bounds, its unit and its refusals are the number control's in every respect, and only the control the screen reaches for differs.
+   */
+  slider?: boolean
 }
 export interface SettingsGroup {
   /**

@@ -100,7 +100,7 @@ import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expa
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
-import { applyPetsSettings, PETS_ENABLED_KEY, PETS_SIZE_KEY } from './pets/setting'
+import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -1044,6 +1044,16 @@ function main(): void {
         // The cap is live too: a block frozen after the change is captured
         // under the new number, and blocks already stored keep what they got.
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
+        // Live, and it has to be: switching the pet off, resizing it or
+        // choosing another animal is done by somebody looking at the pane
+        // while they do it. Reading these only at boot left every open pane
+        // with the pet it started with and the settings page insisting
+        // otherwise.
+        applyPetsSettings(
+          snap.values[PETS_ENABLED_KEY],
+          snap.values[PETS_SIZE_KEY],
+          snap.values[PETS_PACK_KEY],
+        )
         // The sidebar width is deliberately absent from this loop now. It
         // is not a setting, so no settings revision can carry it, and one
         // window is the only thing that changes it — re-reading it here
@@ -1771,7 +1781,11 @@ function main(): void {
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
         applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
         applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
-        applyPetsSettings(snap.values[PETS_ENABLED_KEY], snap.values[PETS_SIZE_KEY])
+        applyPetsSettings(
+          snap.values[PETS_ENABLED_KEY],
+          snap.values[PETS_SIZE_KEY],
+          snap.values[PETS_PACK_KEY],
+        )
       } catch {
         // The shell remains usable with declared defaults until the next
         // connection state transition supplies a fresh snapshot.

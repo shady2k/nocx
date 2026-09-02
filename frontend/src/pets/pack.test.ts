@@ -107,8 +107,20 @@ describe('loadPack', () => {
     expect(loaded.clips.idle).toMatchObject({ url: '/p/idle.png', frames: 2, sheetWidth: 20 })
   })
 
-  it('refuses to invent a clip that will not load', async () => {
-    await expect(loadPack(TINY, '/p/', sourceOf({}))).rejects.toThrow(/no fixture/)
+  it('keeps the rest of the pack when one sheet is missing', async () => {
+    // Not every colour draws every clip — Cat-3 has no scratch — and losing
+    // the whole animal over one absent behaviour is the wrong trade.
+    const loaded = await loadPack(
+      TINY,
+      '/p/',
+      sourceOf({ 'idle.png': strip(10, 2, [{ x: 3, y: 5, w: 4, h: 4 }]) }),
+    )
+    expect(Object.keys(loaded.clips)).toEqual(['idle'])
+    expect(loaded.trim).toEqual({ x0: 3, y0: 5, x1: 7, y1: 9 })
+  })
+
+  it('refuses a pack with no usable sprite at all', async () => {
+    await expect(loadPack(TINY, '/p/', sourceOf({}))).rejects.toThrow(/no usable sprites/)
   })
 })
 
@@ -121,6 +133,14 @@ describe('clipFor', () => {
   it('locomotion wins while the pet is moving', () => {
     expect(clipFor(CAT_PACK, 'walk', 'sleep')).toBe('walk')
     expect(clipFor(CAT_PACK, 'run', 'sit')).toBe('run')
+  })
+
+  it('degrades to idle for a behaviour this colour did not draw', () => {
+    // The honest reading of a missing sheet: the animal simply does not do
+    // that thing, rather than showing a blank frame while it tries.
+    const have = { idle: 1, walk: 1 }
+    expect(clipFor(CAT_PACK, 'idle', 'scratch', have)).toBe('idle')
+    expect(clipFor(CAT_PACK, 'walk', 'none', have)).toBe('walk')
   })
 
   it('every activity and locomotion names a clip the pack actually has', () => {

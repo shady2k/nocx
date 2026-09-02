@@ -127,6 +127,22 @@ type Declaration struct {
 	// multiline TextField for it. Max then bounds the text in characters
 	// and Unit names them.
 	Multiline bool `json:"multiline,omitempty"`
+	// Slider is the number control's continuous variant (nocx-q4qeh.1):
+	// present only on control "number", and only where Min and Max are both
+	// declared — a slider without both ends has nothing to travel between.
+	//
+	// A variant rather than a sixth ControlKind, for the reason Multiline
+	// gives above: the value, its bounds, its unit and its refusals are the
+	// number control's in every respect, and a kind of its own would have
+	// meant paired cases doing the same thing in validateValue, coerceValue
+	// and the settings.set handler. What differs is only which control the
+	// screen reaches for, and that is exactly what a declared variant says.
+	//
+	// Reach for it when the person is CHOOSING a magnitude by eye and every
+	// value between the ends is as good as its neighbours. Not for a bound
+	// somebody types deliberately: a retention age of 90 days is a decision,
+	// and dragging past it to 91 is an accident waiting to be saved.
+	Slider bool `json:"slider,omitempty"`
 }
 
 // ── Group catalogue ────────────────────────────────────────────────────
@@ -269,6 +285,10 @@ type NumberSpec struct {
 	// and the fourth sentence of the description had been explaining it.
 	// Empty means 0 is an ordinary number and needs no explanation.
 	ZeroLabel string
+	// Slider renders this number as a continuous control rather than a typed
+	// field. See Declaration.Slider for when that is the right choice.
+	// Requires both Min and Max; MustRegisterNumber panics otherwise.
+	Slider bool
 }
 
 // SelectSpec is the declaration site for a dropdown setting.
@@ -399,6 +419,7 @@ type Number struct {
 	max         *float64
 	unit        string
 	zeroLabel   string
+	slider      bool
 }
 
 func (n *Number) Key() string             { return n.key }
@@ -425,6 +446,7 @@ func (n *Number) toDeclaration() Declaration {
 		Max:         n.max,
 		Unit:        n.unit,
 		ZeroLabel:   n.zeroLabel,
+		Slider:      n.slider,
 	}
 }
 
@@ -554,6 +576,10 @@ func MustRegisterNumber(spec NumberSpec) *Number {
 		max:         spec.Max,
 		unit:        spec.Unit,
 		zeroLabel:   spec.ZeroLabel,
+		slider:      spec.Slider,
+	}
+	if spec.Slider && (spec.Min == nil || spec.Max == nil) {
+		panic("settings: slider " + spec.Key + " must declare both Min and Max")
 	}
 	assertValidKey(n.key)
 	allDecls = append(allDecls, n)
@@ -964,6 +990,30 @@ var PetsSize = MustRegisterNumber(NumberSpec{
 	Min:         fp(16),
 	Max:         fp(96),
 	Unit:        "px",
+	// A magnitude chosen by eye: every height between the ends is as good as
+	// its neighbours, and the only way to know which one you want is to look
+	// at the animal while you drag.
+	Slider: true,
+})
+
+// PetsPack is which animal. Six colours of one CC0 pack today, so the
+// vocabulary is deliberately "which pet" rather than "which colour" — the
+// question survives a second species arriving beside the cats.
+var PetsPack = MustRegisterSelect(SelectSpec{
+	Key:         "pets.pack",
+	Section:     "Pets",
+	Label:       "Pet",
+	Description: "Which animal lives in your terminal. All of them behave the same; a colour that is missing a drawing simply does not do that one thing.",
+	DataClass:   PublicConfig,
+	Default:     "cat-1",
+	Options: []SelectOption{
+		{Value: "cat-1", Label: "Ginger cat"},
+		{Value: "cat-2", Label: "Black cat"},
+		{Value: "cat-3", Label: "Brown cat"},
+		{Value: "cat-4", Label: "Sphynx cat"},
+		{Value: "cat-5", Label: "White longhair cat"},
+		{Value: "cat-6", Label: "Grey cat"},
+	},
 })
 
 func init() {

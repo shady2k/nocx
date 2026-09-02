@@ -688,10 +688,6 @@ export class ScrollbackController {
     if (rec) {
       this._settleFrozen(rec, followIntent)
     }
-    // The command's outcome is the pet's whole emotional life. An exit code
-    // nobody reported is 'unknown', not a failure — a pet that sulks at every
-    // command whose status was never published would sulk most of the time.
-    this._pet?.reactTo(exitCode === null ? 'unknown' : exitCode === 0 ? 'success' : 'failure')
   }
 
   /**
@@ -978,6 +974,18 @@ export class ScrollbackController {
    * the seventh path to arrive would have been written without it.
    */
   private _settleFrozen(rec: BlockRecord, followIntent = this._followIntent()): void {
+    // Every freeze path arrives here — the attempt-driven one, the abandoned
+    // one, the environment entry — so this is where the pet learns how the
+    // command went. `onCommandEnd` looks like the obvious place and is not:
+    // nothing calls it in the current wiring, and a reaction hung there fires
+    // never (AGENTS.md: a method on main is not a feature).
+    //
+    // 'entered' and 'unknown' are neither success nor failure and must not be
+    // read as one: a pet that sulked at every ssh and every abandoned attempt
+    // would sulk most of the time.
+    this._pet?.reactTo(
+      rec.status === 'success' || rec.status === 'failure' ? rec.status : 'unknown',
+    )
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()

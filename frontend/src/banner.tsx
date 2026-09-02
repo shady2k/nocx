@@ -16,8 +16,9 @@
  * reflows the grid down to the PTY.
  *
  * SolidJS implementation (nocx-njrx.6): renders via solid-js/web render()
- * into an isolated host appended beneath #panes. Never pass #panes directly
- * to the Solid disposer, because it owns the terminal pane children.
+ * into a host of its own, appended beneath #panes. Never pass #panes itself
+ * to render() — App.tsx states the invariant, and nocx-3hv2t is what
+ * breaking it costs.
  */
 import { render } from 'solid-js/web'
 import { IconButton } from './ui/icon-button'
@@ -105,6 +106,12 @@ export class ClipboardBannerImpl implements ClipboardBanner {
         resolve('dismiss')
         return
       }
+      // A host of our own, because Solid's disposer ends with
+      // `element.textContent = ''` — it empties whatever it was rendered
+      // into. Handed #panes, it removed every terminal pane on the way out
+      // (nocx-3hv2t). The class carries no styles and is not expected to:
+      // it is an identity hook, so a stray host is nameable in the DOM and
+      // in a test rather than being an anonymous div among the panes.
       const host = document.createElement('div')
       host.className = 'clipboard-banner-host'
       container.append(host)

@@ -34,6 +34,13 @@ async function disableWailsRuntime(page: import('@playwright/test').Page) {
   })
 }
 
+// RUNS ON BOTH BROWSERS, unlike everything below it. The Chromium-only note
+// above is about reading and writing the clipboard, which needs permissions
+// WebKit does not grant under Playwright. This test never touches a clipboard:
+// the banner is what a BLOCKED OSC 52 write raises, so the assertion is about
+// the panes surviving the answer. Do not "fix" a WebKit failure here by adding
+// a skip — a failure here means the panes are gone, on the browser closest to
+// the shipped WKWebView.
 test('answering the OSC 52 banner preserves every open terminal pane', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('.nocx-tab')).toHaveCount(1)

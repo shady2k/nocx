@@ -281,6 +281,7 @@ func (c *Client) sessionNotify(payload []byte) {
 	}
 	c.mu.Unlock()
 	for _, a := range matched {
+		a.recordExit(exit.Status)
 		a.finish()
 	}
 }

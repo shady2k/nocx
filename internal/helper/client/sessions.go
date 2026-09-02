@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 
@@ -47,6 +48,16 @@ type ExitStatus struct {
 	Signal int    `json:"signal,omitempty"`
 	At     string `json:"at"`
 }
+
+// Error lets the existing session.ExitOutcome mapping consume the helper's
+// process status through the same ExitCode vocabulary as os/exec.ExitError.
+// Signal remains diagnostic data on ExitStatus; the product's existing
+// outcome is still the reported Code, including -1 for signal termination.
+func (e *ExitStatus) Error() string {
+	return fmt.Sprintf("helper session exited with code %d", e.Code)
+}
+
+func (e *ExitStatus) ExitCode() int { return e.Code }
 
 type SessionEntry struct {
 	HostSessionID   HostSessionID `json:"hostSessionId"`
@@ -141,17 +152,22 @@ var ErrAttachmentClosed = errors.New("helper session attachment is closed")
 // AttachedSession is the coordinator-side data-plane view of one helper
 // session. Its identity is the helper-minted session and subscriber pair.
 type AttachedSession struct {
-	client          *Client
-	generation      proto.GenerationID
-	session         [16]byte
-	subscriber      [16]byte
-	attachment      proto.AttachmentID
-	epoch           proto.LeaseEpoch
-	data            chan []byte
-	lifecycleData   chan []byte
-	done            chan struct{}
-	once            sync.Once
-	mu              sync.Mutex
+	client        *Client
+	generation    proto.GenerationID
+	session       [16]byte
+	subscriber    [16]byte
+	attachment    proto.AttachmentID
+	epoch         proto.LeaseEpoch
+	data          chan []byte
+	lifecycleData chan []byte
+	done          chan struct{}
+	once          sync.Once
+	mu            sync.Mutex
+	// exitMu guards the immutable helper status. The notification records a
+	// snapshot before finish closes done, and WaitErr keeps returning it after
+	// close so the session layer can classify the complete interval.
+	exitMu          sync.Mutex
+	exit            *ExitStatus
 	offset          proto.StreamOffset
 	lifecycleOffset proto.StreamOffset
 }
@@ -225,6 +241,28 @@ func (a *AttachedSession) deliverLifecycle(payload []byte) {
 	case a.lifecycleData <- copyPayload:
 	case <-a.done:
 	}
+}
+
+func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
+	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At}
+	a.exitMu.Lock()
+	if a.exit == nil {
+		a.exit = snapshot
+	}
+	a.exitMu.Unlock()
+}
+
+// WaitErr exposes the helper's recorded process status through the optional
+// session.Channel seam. The returned snapshot is copied so callers cannot
+// mutate the status that remains valid until the attachment is closed.
+func (a *AttachedSession) WaitErr() (error, bool) {
+	a.exitMu.Lock()
+	defer a.exitMu.Unlock()
+	if a.exit == nil {
+		return nil, false
+	}
+	snapshot := *a.exit
+	return &snapshot, true
 }
 
 func (a *AttachedSession) finish() { a.once.Do(func() { close(a.done) }) }

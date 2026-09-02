@@ -1146,6 +1146,14 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 	if errors.As(waitErr, &se) {
 		return ExitExited, se.ExitStatus()
 	}
+	// The helper client carries the same process code in its existing
+	// ExitStatus DTO, which implements ExitCode. This extends the established
+	// exit-error mapping without adding a third outcome vocabulary; signal
+	// termination keeps the existing -1 status semantics.
+	var helperStatus interface{ ExitCode() int }
+	if errors.As(waitErr, &helperStatus) {
+		return ExitExited, helperStatus.ExitCode()
+	}
 	return ExitInterrupted, 0
 }
 

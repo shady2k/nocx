@@ -18,6 +18,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -583,6 +584,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			Account:     hosted.Account,
 			Generation:  hosted.Generation,
 		}); err != nil {
+			if hosted != nil && hosted.AbortLifecycle != nil {
+				hosted.AbortLifecycle()
+			}
 			_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
 				return svc.Close(sess.ID())
 			})
@@ -592,9 +596,19 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	state.add(sess)
+	if hosted != nil && hosted.LifecycleLane != "" {
+		if registrar, ok := h.sess.(interface {
+			RegisterLifecycleLane(lifecycle.LaneID, session.ID)
+		}); ok {
+			registrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
+		}
+	}
 
 	rx := h.sess.getOrCreateRx(sess.ID())
 	if rx == nil {
+		if hosted != nil && hosted.AbortLifecycle != nil {
+			hosted.AbortLifecycle()
+		}
 		state.remove(sess.ID())
 		_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
 			return svc.Close(sess.ID())
@@ -658,6 +672,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = respond(r, resp)
+	if hosted != nil && hosted.StartLifecycle != nil {
+		hosted.StartLifecycle()
+	}
 
 	// Every session-scoped notification must follow the open result (AD-7).
 	// Install the subscriber only now: lifecycle can authenticate during the

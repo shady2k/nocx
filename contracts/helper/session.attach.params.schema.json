@@ -5,7 +5,15 @@
   "description": "Params of the helper session service's attach op: make one subscriber a reader of one host session. A new attachment is a new READER of an existing stream and never a new stream, which is why the subscriber, the session and the offset are three separate fields and no two of them can stand in for each other.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["subscriber", "session", "offset", "fresh", "requestWrite"],
+  "required": [
+    "subscriber",
+    "session",
+    "offset",
+    "fresh",
+    "lifecycleOffset",
+    "lifecycleFresh",
+    "requestWrite"
+  ],
   "properties": {
     "subscriber": {
       "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/subscriberId"
@@ -19,6 +27,14 @@
     },
     "fresh": {
       "description": "The caller has no render state. It is a FLAG and never an inference, because only the caller knows: a fresh renderer can attach at a non-zero offset, and a renderer can hold an offset after losing its screen. It is required rather than optional so that false and absent are not the same bytes. The best-effort repaint request hangs off this flag, and it is best-effort: SIGWINCH is advisory, an application may repaint partially or not at all, and there is no observable signal saying a complete repaint has occurred.",
+      "type": "boolean"
+    },
+    "lifecycleOffset": {
+      "description": "Where the separate raw lifecycle-byte reader resumes.",
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/streamOffset"
+    },
+    "lifecycleFresh": {
+      "description": "Whether the caller has no lifecycle projection state.",
       "type": "boolean"
     },
     "requestWrite": {

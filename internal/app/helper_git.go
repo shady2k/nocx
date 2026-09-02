@@ -16,8 +16,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"path"
 	"strconv"
 	"sync"
@@ -31,6 +33,9 @@ import (
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -397,15 +402,16 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 // exposed, and sharing a helper across principals would be an
 // authorization error. Cross-session sharing waits for that seam.
 type helperRegistry struct {
-	lanes    helperLaneProvider
-	install  helperInstallProvider
-	source   deploy.ArtifactSource
-	log      *slog.Logger
-	consent  *consent.Store
-	registry *session.Reg
-	mu       sync.Mutex
-	hosts    map[session.ID]*hostHelper
-	closing  map[string]struct{}
+	lanes     helperLaneProvider
+	install   helperInstallProvider
+	source    deploy.ArtifactSource
+	log       *slog.Logger
+	consent   *consent.Store
+	registry  *session.Reg
+	lifecycle lifecyclechannel.Kernel
+	mu        sync.Mutex
+	hosts     map[session.ID]*hostHelper
+	closing   map[string]struct{}
 }
 
 // OpenHosted applies the same helper resolver used by git.open, then spawns
@@ -448,8 +454,35 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		return transport.HostedSessionOpen{}, true, randErr
 	}
 	subscriber := proto.SubscriberID(hex.EncodeToString(subscriberRaw[:]))
-	entry, err := c.Spawn(ctx, proto.SpawnParams{Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows})
+	var lifecycleAdapter *lifecyclechannel.Adapter
+	var lifecyclePeer net.Conn
+	var lifecycleLaunch *proto.LifecycleLaunch
+	if r.lifecycle != nil {
+		coordinatorConn, peerConn := net.Pipe()
+		var lifecycleErr error
+		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
+			log.NewSlogAdapter(r.log), r.lifecycle, coordinatorConn,
+		)
+		if lifecycleErr != nil {
+			_ = peerConn.Close()
+			_ = c.Close()
+			return transport.HostedSessionOpen{}, true, lifecycleErr
+		}
+		lifecyclePeer = peerConn
+		launch := lifecycleAdapter.Launch()
+		lifecycleLaunch = &proto.LifecycleLaunch{
+			Lane: string(launch.Lane), Domain: string(launch.Domain),
+			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+		}
+	}
+	entry, err := c.Spawn(ctx, proto.SpawnParams{
+		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
+	})
 	if err != nil {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
 	}
@@ -459,9 +492,14 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 			Generation: proto.GenerationID(entry.HostSessionID.Generation),
 			Session:    entry.HostSessionID.Session,
 		},
-		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true, RequestWrite: true,
+		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
+		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	})
 	if err != nil {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
@@ -471,6 +509,10 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	sess, err := r.registry.Adopt(cfg, sid, attached)
 	if err != nil {
 		_ = attached.Close()
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
 		_ = c.CloseSession(ctx, entry.HostSessionID)
 		_ = c.Close()
 		return transport.HostedSessionOpen{}, true, err
@@ -478,7 +520,48 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	r.mu.Lock()
 	r.hosts[sid] = h
 	r.mu.Unlock()
-	return transport.HostedSessionOpen{Session: sess, Host: cfg.Host, Account: f.account, Generation: generation}, true, nil
+	var lifecycleLane lifecycle.LaneID
+	var startLifecycle func()
+	var abortLifecycle func()
+	if lifecycleAdapter != nil {
+		lifecycleLane = lifecycleAdapter.Lane()
+		var startOnce sync.Once
+		startLifecycle = func() {
+			startOnce.Do(func() {
+				bridgeLifecycle(lifecyclePeer, attached.Lifecycle())
+			})
+		}
+		var abortOnce sync.Once
+		abortLifecycle = func() {
+			abortOnce.Do(func() {
+				_ = lifecycleAdapter.Close()
+				_ = lifecyclePeer.Close()
+			})
+		}
+	}
+	return transport.HostedSessionOpen{
+		Session: sess, Host: cfg.Host, Account: f.account, Generation: generation,
+		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
+		AbortLifecycle: abortLifecycle,
+	}, true, nil
+}
+
+func bridgeLifecycle(peer net.Conn, carrier io.ReadWriteCloser) {
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			_ = peer.Close()
+			_ = carrier.Close()
+		})
+	}
+	go func() {
+		_, _ = io.Copy(carrier, peer)
+		closeBoth()
+	}()
+	go func() {
+		_, _ = io.Copy(peer, carrier)
+		closeBoth()
+	}()
 }
 
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {

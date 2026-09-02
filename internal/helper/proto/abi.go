@@ -161,6 +161,10 @@ type AttachParams struct {
 	// losing its screen. It has no omitempty for the same reason — `false`
 	// and `absent` must not be the same bytes.
 	Fresh bool `json:"fresh"`
+	// LifecycleOffset and LifecycleFresh describe the separate raw lifecycle
+	// stream carried by this attachment.
+	LifecycleOffset StreamOffset `json:"lifecycleOffset"`
+	LifecycleFresh  bool         `json:"lifecycleFresh"`
 	// RequestWrite asks for the session's one write capability. A second
 	// request is refused and names the holder (see WriteGrant); it is never
 	// silently promoted, and it never displaces — displacement is a product
@@ -168,13 +172,14 @@ type AttachParams struct {
 	RequestWrite bool `json:"requestWrite"`
 }
 
-// AttachResult is the attachment, where the reader stands, and whether it may
-// write. Three fields for three concerns: conflating any two of them is the
-// defect this ABI exists to prevent.
+// AttachResult is the attachment, where both readers stand, and whether it
+// may write. The two Resume fields are intentionally the same vocabulary for
+// the two independent bounded streams.
 type AttachResult struct {
-	Attachment AttachmentID `json:"attachment"`
-	Resume     Resume       `json:"resume"`
-	Write      WriteGrant   `json:"write"`
+	Attachment      AttachmentID `json:"attachment"`
+	Resume          Resume       `json:"resume"`
+	LifecycleResume Resume       `json:"lifecycleResume"`
+	Write           WriteGrant   `json:"write"`
 }
 
 // Resume says where a reader stands in the stream. It is the coordinator's own
@@ -252,6 +257,10 @@ type AckParams struct {
 	Subscriber SubscriberID  `json:"subscriber"`
 	Session    HostSessionID `json:"session"`
 	Offset     StreamOffset  `json:"offset"`
+	// LifecycleOffset, when present, advances the separate lifecycle reader.
+	// A pointer keeps conventional clients' existing acknowledgement shape
+	// unchanged while allowing zero as a legitimate initial offset.
+	LifecycleOffset *StreamOffset `json:"lifecycleOffset,omitempty"`
 }
 
 // DetachParams drops one attachment (D9). The process survives; the session
@@ -281,4 +290,7 @@ type SessionReset struct {
 	Subscriber SubscriberID  `json:"subscriber"`
 	Session    HostSessionID `json:"session"`
 	Resume     Resume        `json:"resume"`
+	// Stream distinguishes the independent bounded carriers. Empty means the
+	// original PTY output stream for compatibility with older helpers.
+	Stream string `json:"stream,omitempty"`
 }

@@ -110,6 +110,7 @@
         "launch",
         "observed",
         "window",
+        "lifecycleWindow",
         "writer",
         "writerEpoch",
         "exit"
@@ -124,6 +125,10 @@
         },
         "launch": { "$ref": "#/$defs/launchRecord" },
         "observed": { "$ref": "#/$defs/observation" },
+        "lifecycleWindow": {
+          "description": "Bounded raw lifecycle bytes carried separately from PTY output.",
+          "$ref": "#/$defs/windowSpan"
+        },
         "window": { "$ref": "#/$defs/windowSpan" },
         "writer": {
           "description": "The subscriber holding the session's one write capability, or null when nobody holds it. Always present, like a write grant's own holder, so 'nobody is writing' and 'this helper does not say' are different bytes.",

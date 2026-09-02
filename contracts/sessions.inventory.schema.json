@@ -24,6 +24,7 @@
         "launch",
         "observed",
         "window",
+        "lifecycleWindow",
         "writer",
         "writerEpoch",
         "exit"
@@ -68,6 +69,15 @@
           }
         },
         "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base", "written"],
+          "properties": {
+            "base": { "type": "integer", "minimum": 0 },
+            "written": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "lifecycleWindow": {
           "type": "object",
           "additionalProperties": false,
           "required": ["base", "written"],

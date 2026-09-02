@@ -134,7 +134,7 @@ type Adapter struct {
 	epoch      uint64
 	capability lifecycle.Capability
 	recovery   lifecycle.FenceNonce // one-shot recovery fence
-	conn       *os.File             // parent end of the socketpair
+	conn       io.ReadWriteCloser   // parent end of the socketpair or a remote carrier
 	dec        *lifecyclecodec.Decoder
 
 	helloTimeout time.Duration
@@ -221,6 +221,64 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 	return a, child, nil
 }
 
+// NewStream constructs the same authenticated lifecycle adapter over an
+// already-owned byte carrier. The caller owns the carrier's attachment
+// lifecycle; this constructor only binds and mints the kernel state.
+//
+// A stream adapter is used by the helper-hosted path: the helper owns the
+// descriptor to the shell, while this adapter remains the sole interpreter on
+// the coordinator. The carrier may be attached after this call; the decoder
+// then simply waits for its first bytes.
+func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Option) (*Adapter, error) {
+	if conn == nil {
+		return nil, errors.New("lifecyclechannel: nil stream")
+	}
+	o := options{helloTimeout: lifecycle.HelloTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	tptHex, err := randHex(8)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	laneHex, err := randHex(8)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	a := &Adapter{
+		log: logger, kernel: k,
+		id:   lifecycle.TransportID("tpt-" + tptHex),
+		lane: lifecycle.LaneID("lane-" + laneHex),
+		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+	}
+	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
+	bindErr := k.BindTransport(a.id, a)
+	if bindErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("bind lifecycle transport: %w", bindErr)
+	}
+	h, err := k.RequestDomain(a.lane, nil, a.id)
+	if err != nil {
+		if unbinder, ok := k.(interface {
+			UnbindTransport(lifecycle.TransportID) error
+		}); ok {
+			_ = unbinder.UnbindTransport(a.id)
+		}
+		_ = conn.Close()
+		return nil, fmt.Errorf("request lifecycle domain: %w", err)
+	}
+	a.domain, a.epoch = h.Domain, h.Epoch
+	a.capability, a.recovery = h.Capability, h.Recovery
+	t := time.AfterFunc(a.helloTimeout, func() { a.lose(LossHelloTimeout) })
+	a.mu.Lock()
+	a.timer = t
+	a.mu.Unlock()
+	go a.pump()
+	return a, nil
+}
+
 // Lane returns the adapter's own lane — the addressing tuple it minted and
 // bound to the kernel. The session/app wiring uses it to register the lane
 // against a session id so published facts route to the right subscriber.
@@ -275,7 +333,9 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 		a.mu.Unlock()
 		return ErrClosed
 	}
-	_ = a.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if deadline, ok := a.conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = deadline.SetWriteDeadline(time.Now().Add(writeTimeout))
+	}
 	_, err := lifecyclecodec.Encode(a.conn, env)
 	a.mu.Unlock()
 	if err != nil {

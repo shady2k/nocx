@@ -243,6 +243,8 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.sessionNotify(payload)
 	case proto.TypeSessionData:
 		c.sessionData(payload)
+	case proto.TypeLifecycleData:
+		c.lifecycleData(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
@@ -302,6 +304,24 @@ func (c *Client) sessionData(payload []byte) {
 		return
 	}
 	a.deliver(f.Payload)
+}
+
+func (c *Client) lifecycleData(payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed lifecycle data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("lifecycle data frame dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"bytes", len(f.Payload))
+		return
+	}
+	a.deliverLifecycle(f.Payload)
 }
 
 // deliverResponse routes one response frame. A response whose result is a

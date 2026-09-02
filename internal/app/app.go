@@ -1325,6 +1325,9 @@ func New(opts ...Option) (*App, error) {
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
 	ptf.kernel = lifecyclePub
+	// Helper-hosted sessions use this same publisher; their byte carrier is
+	// remote, but lifecycle facts still follow the coordinator's session route.
+	helperReg.lifecycle = lifecyclePub
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
 	// bead nocx-u7uh.4): the composition root implements the ssh layer's
 	// RemoteLifecycle seam with the lifecycle kernel and the ssh client —

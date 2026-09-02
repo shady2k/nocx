@@ -143,6 +143,21 @@ type SpawnParams struct {
 	// int64 rather than int so the conversion on a 32-bit host cannot
 	// overflow, which D8 asks for by name. Zero means the helper's default.
 	WindowBytes int64 `json:"windowBytes"`
+	// Lifecycle is optional for conventional sessions. When present, the
+	// helper passes its descriptor-side channel and these values to the shell.
+	// The capability is never copied into argv or environment.
+	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+}
+
+// LifecycleLaunch carries the coordinator-minted authenticated channel
+// bootstrap to the helper. Addressing is public; Capability and Recovery are
+// bearer values and must be consumed only by the shell integration rcfile.
+type LifecycleLaunch struct {
+	Lane       string `json:"lane"`
+	Domain     string `json:"domain"`
+	Epoch      uint64 `json:"epoch"`
+	Capability string `json:"capability"`
+	Recovery   string `json:"recovery"`
 }
 
 // SpawnResult is the new session's inventory entry — the same shape `sessions`
@@ -193,6 +208,9 @@ type SessionEntry struct {
 	// oldest byte that still exists, exactly as sessions.live's replayFrom
 	// tells a fresh renderer today.
 	Window WindowSpan `json:"window"`
+	// LifecycleWindow is the bounded raw lifecycle-byte window. It is separate
+	// from PTY output but uses the same Window/Resume owner and offsets.
+	LifecycleWindow WindowSpan `json:"lifecycleWindow"`
 	// Writer names the subscriber holding the session's one write capability,
 	// and is null when nobody holds it — always present, like WriteGrant's own
 	// Holder, so "nobody is writing" and "this helper does not say" are

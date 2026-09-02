@@ -120,13 +120,16 @@ func TestHelperAttachDTOConformsToContract(t *testing.T) {
 		in   proto.AttachParams
 	}{
 		{"a reconnect at its own offset", proto.AttachParams{
-			Subscriber: "pane-a", Session: abiSession, Offset: 4096, Fresh: false, RequestWrite: true,
+			Subscriber: "pane-a", Session: abiSession, Offset: 4096, Fresh: false,
+			LifecycleOffset: 2048, LifecycleFresh: false, RequestWrite: true,
 		}},
 		{"a fresh reader at a non-zero offset", proto.AttachParams{
-			Subscriber: "pane-b", Session: abiSession, Offset: 4096, Fresh: true, RequestWrite: false,
+			Subscriber: "pane-b", Session: abiSession, Offset: 4096, Fresh: true,
+			LifecycleOffset: 2048, LifecycleFresh: true, RequestWrite: false,
 		}},
 		{"a fresh reader at the base", proto.AttachParams{
-			Subscriber: "pane-c", Session: abiSession, Offset: 0, Fresh: true, RequestWrite: false,
+			Subscriber: "pane-c", Session: abiSession, Offset: 0, Fresh: true,
+			LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: false,
 		}},
 	} {
 		if err := validateHelperJSON(params, mustMarshal(t, tc.in)); err != nil {
@@ -139,15 +142,15 @@ func TestHelperAttachDTOConformsToContract(t *testing.T) {
 		in   proto.AttachResult
 	}{
 		{"granted the write capability", proto.AttachResult{
-			Attachment: "att-1", Resume: abiResumed,
+			Attachment: "att-1", Resume: abiResumed, LifecycleResume: abiResumed,
 			Write: proto.WriteGrant{Granted: true, Epoch: 1, Holder: nil},
 		}},
 		{"refused, naming the holder", proto.AttachResult{
-			Attachment: "att-2", Resume: abiResumed,
+			Attachment: "att-2", Resume: abiResumed, LifecycleResume: abiResumed,
 			Write: proto.WriteGrant{Granted: false, Epoch: 0, Holder: sub("pane-a")},
 		}},
 		{"reset, with the hole it left", proto.AttachResult{
-			Attachment: "att-3", Resume: abiReset,
+			Attachment: "att-3", Resume: abiReset, LifecycleResume: abiReset,
 			Write: proto.WriteGrant{Granted: false, Epoch: 0, Holder: nil},
 		}},
 	} {
@@ -327,7 +330,17 @@ func (abiService) Call(_ context.Context, op string, params json.RawMessage) (an
 				Gap: &proto.Gap{Start: in.Offset, End: 9000, Reason: proto.GapReasonWindow},
 			}
 		}
-		return proto.AttachResult{Attachment: proto.AttachmentID("att-" + string(in.Subscriber)), Resume: resume, Write: write}, nil
+		lifecycleResume := proto.Resume{Resumed: true, Reset: false, From: in.LifecycleOffset}
+		if in.LifecycleOffset < 12 {
+			lifecycleResume = proto.Resume{
+				Resumed: false, Reset: true, From: 9000,
+				Gap: &proto.Gap{Start: in.LifecycleOffset, End: 9000, Reason: proto.GapReasonWindow},
+			}
+		}
+		return proto.AttachResult{
+			Attachment: proto.AttachmentID("att-" + string(in.Subscriber)),
+			Resume:     resume, LifecycleResume: lifecycleResume, Write: write,
+		}, nil
 	case proto.OpAck:
 		return struct{}{}, nil
 	case proto.OpDetach:

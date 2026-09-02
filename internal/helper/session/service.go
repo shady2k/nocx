@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"syscall"
@@ -34,6 +35,12 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
+
+// LifecycleDataPlane receives opaque lifecycle bytes from the coordinator.
+// The helper only routes them to the shell-owned carrier.
+type LifecycleDataPlane interface {
+	LifecycleData(context.Context, proto.SessionFrame)
+}
 
 // The refusals this service can answer with. Each is a fact the caller can act
 // on: ErrNoSuchSession is the ANSWER that a session does not exist — which is
@@ -371,6 +378,11 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
 			return nil, err
 		}
+		if p.LifecycleOffset != nil {
+			if err := hs.ackLifecycle(sink, p.Subscriber, *p.LifecycleOffset); err != nil {
+				return nil, err
+			}
+		}
 		return proto.AckResult{}, nil
 	case proto.OpDetach:
 		var p proto.DetachParams
@@ -443,13 +455,17 @@ func decode(raw json.RawMessage, into any) error {
 //     step 4 is still observed: the watcher sees an already-closed Done.
 func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	bound := s.clamp(p.WindowBytes)
+	reserved := bound
+	if p.Lifecycle != nil {
+		reserved += bound
+	}
 
 	s.mu.Lock()
-	if s.budget+bound > s.limits.BudgetBytes {
+	if s.budget+reserved > s.limits.BudgetBytes {
 		s.mu.Unlock()
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, s.budget, s.limits.BudgetBytes)
 	}
-	s.budget += bound
+	s.budget += reserved
 	s.mu.Unlock()
 
 	cols, rows := p.Cols, p.Rows
@@ -463,7 +479,7 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	raw, err := s.newID()
 	if err != nil {
 		s.mu.Lock()
-		s.budget -= bound
+		s.budget -= reserved
 		s.mu.Unlock()
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
@@ -474,24 +490,41 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		Env:       p.Env,
 		Cols:      cols,
 		Rows:      rows,
+		Lifecycle: p.Lifecycle,
 	})
 	if err != nil {
 		s.mu.Lock()
-		s.budget -= bound
+		s.budget -= reserved
 		s.mu.Unlock()
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
-
+	lifecycleWin := (*window)(nil)
+	lifecycleBudget := int64(0)
+	var lifecycleCarrier io.ReadWriteCloser
+	if lp, ok := proc.(LifecycleProcess); ok {
+		lifecycleCarrier = lp.Lifecycle()
+		if lifecycleCarrier != nil {
+			lifecycleWin = newWindow(bound)
+			lifecycleBudget = bound
+		}
+	}
+	if p.Lifecycle != nil && lifecycleWin == nil {
+		s.mu.Lock()
+		s.budget -= bound
+		s.mu.Unlock()
+	}
 	hs := &hostSession{
-		id:          proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
-		raw:         raw,
-		workspace:   p.Workspace,
-		startedAt:   s.now(),
-		proc:        proc,
-		win:         newWindow(bound),
-		log:         s.log,
-		subs:        make(map[proto.SubscriberID]*subscriber),
-		attachments: make(map[proto.AttachmentID]*attachment),
+		id:              proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
+		raw:             raw,
+		workspace:       p.Workspace,
+		startedAt:       s.now(),
+		proc:            proc,
+		win:             newWindow(bound),
+		lifecycleWin:    lifecycleWin,
+		lifecycleBudget: lifecycleBudget,
+		log:             s.log,
+		subs:            make(map[proto.SubscriberID]*subscriber),
+		attachments:     make(map[proto.AttachmentID]*attachment),
 	}
 	hs.launch = proto.LaunchRecord{
 		Shell:       proc.Shell(),
@@ -507,8 +540,10 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 
 	s.sessions[hs.id.Session] = hs
 	s.mu.Unlock()
-
 	go hs.pump()
+	if lifecycleCarrier != nil {
+		go hs.lifecyclePump(lifecycleCarrier)
+	}
 	go hs.watchExit(s.now, s.notifyExit)
 
 	s.log.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
@@ -529,7 +564,7 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	s.mu.Lock()
 	if current, ok := s.sessions[p.Session.Session]; ok && current == hs {
 		delete(s.sessions, p.Session.Session)
-		s.budget -= hs.launch.WindowBytes
+		s.budget -= hs.launch.WindowBytes + hs.lifecycleBudget
 	}
 	s.mu.Unlock()
 	return nil
@@ -698,6 +733,23 @@ func (s *Service) SessionData(ctx context.Context, f proto.SessionFrame) {
 	if err := hs.write(sink, f); err != nil {
 		s.log.Warn("session write refused", "session", hex, "subscriber", proto.SessionHex(f.Subscriber),
 			"epoch", uint64(f.Epoch), "bytes", len(f.Payload), "err", err)
+	}
+}
+
+// LifecycleData routes opaque lifecycle bytes to the shell-owned carrier.
+func (s *Service) LifecycleData(ctx context.Context, f proto.SessionFrame) {
+	hex := proto.SessionHex(f.Session)
+	s.mu.Lock()
+	hs, ok := s.sessions[hex]
+	s.mu.Unlock()
+	if !ok {
+		s.log.Warn("lifecycle data frame dropped: no such session", "session", hex, "bytes", len(f.Payload))
+		return
+	}
+	sink, _ := host.ConnectionFrom(ctx).(Sink)
+	if err := hs.writeLifecycle(sink, f); err != nil {
+		s.log.Warn("lifecycle write refused", "session", hex, "subscriber", proto.SessionHex(f.Subscriber),
+			"bytes", len(f.Payload), "err", err)
 	}
 }
 

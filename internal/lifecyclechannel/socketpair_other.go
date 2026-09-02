@@ -19,6 +19,7 @@ package lifecyclechannel
 // for why the two are separate files rather than one levelled-down path.
 
 import (
+	"os"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -40,4 +41,13 @@ func socketpairCloexec() ([2]int, error) {
 	unix.CloseOnExec(fds[0])
 	unix.CloseOnExec(fds[1])
 	return [2]int{fds[0], fds[1]}, nil
+}
+
+func NewSocketPair() (*os.File, *os.File, error) {
+	fds, err := socketpairCloexec()
+	if err != nil {
+		return nil, nil, err
+	}
+	return os.NewFile(uintptr(fds[0]), "lifecycle-parent"),
+		os.NewFile(uintptr(fds[1]), "lifecycle-child"), nil
 }

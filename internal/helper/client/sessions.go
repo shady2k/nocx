@@ -49,15 +49,16 @@ type ExitStatus struct {
 }
 
 type SessionEntry struct {
-	HostSessionID HostSessionID `json:"hostSessionId"`
-	Workspace     string        `json:"workspace"`
-	StartedAt     string        `json:"startedAt"`
-	Launch        LaunchRecord  `json:"launch"`
-	Observed      *Observation  `json:"observed"`
-	Window        WindowSpan    `json:"window"`
-	Writer        *string       `json:"writer"`
-	WriterEpoch   uint64        `json:"writerEpoch"`
-	Exit          *ExitStatus   `json:"exit"`
+	HostSessionID   HostSessionID `json:"hostSessionId"`
+	Workspace       string        `json:"workspace"`
+	StartedAt       string        `json:"startedAt"`
+	Launch          LaunchRecord  `json:"launch"`
+	Observed        *Observation  `json:"observed"`
+	Window          WindowSpan    `json:"window"`
+	LifecycleWindow WindowSpan    `json:"lifecycleWindow"`
+	Writer          *string       `json:"writer"`
+	WriterEpoch     uint64        `json:"writerEpoch"`
+	Exit            *ExitStatus   `json:"exit"`
 }
 
 // Sessions asks one helper generation for the sessions it currently holds.
@@ -107,8 +108,9 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 			Pgid: in.Launch.Pgid, Cols: in.Launch.Cols, Rows: in.Launch.Rows,
 			WindowBytes: in.Launch.WindowBytes,
 		},
-		Window:      WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
-		WriterEpoch: uint64(in.WriterEpoch),
+		Window:          WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
+		LifecycleWindow: WindowSpan{Base: uint64(in.LifecycleWindow.Base), Written: uint64(in.LifecycleWindow.Written)},
+		WriterEpoch:     uint64(in.WriterEpoch),
 	}
 	if in.Writer != nil {
 		writer := string(*in.Writer)
@@ -139,17 +141,19 @@ var ErrAttachmentClosed = errors.New("helper session attachment is closed")
 // AttachedSession is the coordinator-side data-plane view of one helper
 // session. Its identity is the helper-minted session and subscriber pair.
 type AttachedSession struct {
-	client     *Client
-	generation proto.GenerationID
-	session    [16]byte
-	subscriber [16]byte
-	attachment proto.AttachmentID
-	epoch      proto.LeaseEpoch
-	data       chan []byte
-	done       chan struct{}
-	once       sync.Once
-	mu         sync.Mutex
-	offset     proto.StreamOffset
+	client          *Client
+	generation      proto.GenerationID
+	session         [16]byte
+	subscriber      [16]byte
+	attachment      proto.AttachmentID
+	epoch           proto.LeaseEpoch
+	data            chan []byte
+	lifecycleData   chan []byte
+	done            chan struct{}
+	once            sync.Once
+	mu              sync.Mutex
+	offset          proto.StreamOffset
+	lifecycleOffset proto.StreamOffset
 }
 
 // Spawn creates a helper-owned shell and returns its inventory entry.
@@ -178,8 +182,9 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	a := &AttachedSession{
 		client: c, generation: params.Session.Generation,
 		session: session, subscriber: subscriber,
-		data: make(chan []byte, 64), done: make(chan struct{}),
-		offset: params.Offset,
+		data: make(chan []byte, 64), lifecycleData: make(chan []byte, 64),
+		done:   make(chan struct{}),
+		offset: params.Offset, lifecycleOffset: params.LifecycleOffset,
 	}
 	c.mu.Lock()
 	if _, exists := c.attachments[subscriber]; exists {
@@ -201,6 +206,7 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	a.attachment = result.Attachment
 	a.epoch = result.Write.Epoch
 	a.offset = result.Resume.From
+	a.lifecycleOffset = result.LifecycleResume.From
 	a.mu.Unlock()
 	return a, nil
 }
@@ -209,6 +215,14 @@ func (a *AttachedSession) deliver(payload []byte) {
 	copyPayload := append([]byte(nil), payload...)
 	select {
 	case a.data <- copyPayload:
+	case <-a.done:
+	}
+}
+
+func (a *AttachedSession) deliverLifecycle(payload []byte) {
+	copyPayload := append([]byte(nil), payload...)
+	select {
+	case a.lifecycleData <- copyPayload:
 	case <-a.done:
 	}
 }
@@ -223,8 +237,6 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	case data := <-a.data:
 		n := copy(p, data)
 		if n < len(data) {
-			// A PTY frame is normally smaller than the reader buffer. Preserve
-			// the uncommon split without adding a second queue abstraction.
 			go func() {
 				select {
 				case a.data <- data[n:]:
@@ -251,6 +263,79 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	case <-a.done:
 		return 0, io.EOF
 	}
+}
+
+type attachedLifecycle struct {
+	session *AttachedSession
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (l *attachedLifecycle) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	select {
+	case data := <-l.session.lifecycleData:
+		n := copy(p, data)
+		if n < len(data) {
+			go func() {
+				select {
+				case l.session.lifecycleData <- data[n:]:
+				case <-l.session.done:
+				}
+			}()
+		}
+		if n > 0 {
+			l.session.mu.Lock()
+			l.session.lifecycleOffset += proto.StreamOffset(n)
+			offset := l.session.lifecycleOffset
+			ptyOffset := l.session.offset
+			l.session.mu.Unlock()
+			if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
+				proto.AckParams{
+					Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
+					Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
+					Offset:     ptyOffset, LifecycleOffset: &offset,
+				}, nil); err != nil {
+				l.session.finish()
+				return n, err
+			}
+		}
+		return n, nil
+	case <-l.closed:
+		return 0, io.EOF
+	case <-l.session.done:
+		return 0, io.EOF
+	}
+}
+
+func (l *attachedLifecycle) Write(p []byte) (int, error) {
+	select {
+	case <-l.closed:
+		return 0, ErrAttachmentClosed
+	case <-l.session.done:
+		return 0, ErrAttachmentClosed
+	default:
+	}
+	frame := proto.EncodeSessionFrame(proto.SessionFrame{
+		Session: l.session.session, Subscriber: l.session.subscriber, Payload: p,
+	})
+	l.session.client.writeMu.Lock()
+	defer l.session.client.writeMu.Unlock()
+	if _, err := l.session.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeLifecycleData, 0, 0, frame)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (l *attachedLifecycle) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (a *AttachedSession) Lifecycle() io.ReadWriteCloser {
+	return &attachedLifecycle{session: a, closed: make(chan struct{})}
 }
 
 func (a *AttachedSession) Write(p []byte) (int, error) {

@@ -237,6 +237,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeSessionData:
 		h.sessionData(ctx, payload)
+	case proto.TypeLifecycleData:
+		h.lifecycleData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -274,6 +276,23 @@ func (h *Host) sessionData(ctx context.Context, payload []byte) {
 		"epoch", uint64(f.Epoch), "bytes", len(f.Payload))
 }
 
+func (h *Host) lifecycleData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed lifecycle data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	if svc := h.serviceByName(proto.ServiceSession); svc != nil {
+		if plane, ok := svc.(LifecycleDataPlane); ok {
+			plane.LifecycleData(WithConnection(ctx, h), f)
+			return
+		}
+	}
+	h.log.Warn("lifecycle data frame dropped: no session service in this generation",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"bytes", len(f.Payload))
+}
+
 // SendSessionData writes one data-plane frame to the wire: the helper's own
 // output, on its way to one subscriber. It is the outbound half of DataPlane
 // and the reason this method is on the host rather than in the service — the
@@ -285,6 +304,13 @@ func (h *Host) sessionData(ctx context.Context, payload []byte) {
 // session, the window and the process survive it.
 func (h *Host) SendSessionData(f proto.SessionFrame) error {
 	return h.write(proto.TypeSessionData, proto.EncodeSessionFrame(f))
+}
+
+// SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.
+// The helper never decodes the payload; the coordinator's lifecycle adapter
+// remains the sole semantic owner.
+func (h *Host) SendLifecycleData(f proto.SessionFrame) error {
+	return h.write(proto.TypeLifecycleData, proto.EncodeSessionFrame(f))
 }
 
 // SendNotification writes one unsolicited fact: a live reset, an exit. It

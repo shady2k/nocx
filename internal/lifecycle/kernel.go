@@ -97,6 +97,19 @@ func (k *Kernel) BindTransport(t TransportID, port Port) error {
 	return nil
 }
 
+// UnbindTransport removes a transport registration after a post-bind
+// construction failure. It is intentionally narrow: callers cannot unbind a
+// live transport through normal lifecycle operation.
+func (k *Kernel) UnbindTransport(t TransportID) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.ports[t]; !ok {
+		return ErrUnknownTransport
+	}
+	delete(k.ports, t)
+	return nil
+}
+
 // RequestDomain mints a Pending domain bound to the transport: a fresh id, a
 // fresh epoch and a fresh capability. The adapter substitutes the capability
 // into the integration script and waits for the shell's hello; nothing is

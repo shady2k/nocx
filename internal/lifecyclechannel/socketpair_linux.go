@@ -15,7 +15,11 @@ package lifecyclechannel
 // baseline: the update script sees one OS at a time and reads the half it
 // did not compile as a free shrink.
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // socketpairCloexec returns a connected SOCK_STREAM pair with close-on-exec
 // already set on both descriptors. The caller passes the child end to the
@@ -28,4 +32,16 @@ func socketpairCloexec() ([2]int, error) {
 		return [2]int{}, err
 	}
 	return [2]int{fds[0], fds[1]}, nil
+}
+
+// NewSocketPair returns the parent and child ends of an authenticated-channel
+// carrier. The child is intended for exec.Cmd.ExtraFiles; the parent remains
+// with the owner that forwards raw bytes to the coordinator.
+func NewSocketPair() (*os.File, *os.File, error) {
+	fds, err := socketpairCloexec()
+	if err != nil {
+		return nil, nil, err
+	}
+	return os.NewFile(uintptr(fds[0]), "lifecycle-parent"),
+		os.NewFile(uintptr(fds[1]), "lifecycle-child"), nil
 }

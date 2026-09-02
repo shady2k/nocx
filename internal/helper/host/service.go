@@ -30,22 +30,16 @@ type CancelPolicy interface {
 	RefusesCancel(op string) bool
 }
 
-// DataPlane is an optional capability a Service implements to receive
-// TypeSessionData frames — the raw PTY bytes of AD-1's binary plane, which
-// never cross as JSON. The host routes an inbound frame to the service named
-// proto.ServiceSession when that service implements this, and drops it
-// otherwise; the drop is what keeps a generation without a session service
-// from resyncing through a live PTY stream.
-//
-// It is an optional capability rather than a method on Service for the same
-// reason CancelPolicy and RefusalCoder are: the git service has no data plane
-// and must not be made to pretend it does.
+// DataPlane is an optional capability a Service implements to receive raw
+// TypeSessionData frames. The host never interprets those bytes.
 type DataPlane interface {
-	// SessionData is called on the host's read loop, once per frame, in wire
-	// order. An implementation must not block on the wire it was called from.
-	// The context carries this host's connection identity without changing the
-	// frozen frame ABI.
-	SessionData(ctx context.Context, f proto.SessionFrame)
+	SessionData(context.Context, proto.SessionFrame)
+}
+
+// LifecycleDataPlane is the optional raw lifecycle carrier. It is separate
+// from DataPlane so old services continue to receive PTY data unchanged.
+type LifecycleDataPlane interface {
+	LifecycleData(context.Context, proto.SessionFrame)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

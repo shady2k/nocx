@@ -204,10 +204,11 @@ func (s *fakeSpawner) last() *fakeProcess {
 // --- a sink that records the wire ------------------------------------------
 
 type recordingSink struct {
-	mu     sync.Mutex
-	frames []proto.SessionFrame
-	notes  []proto.Notification
-	err    error
+	mu              sync.Mutex
+	frames          []proto.SessionFrame
+	lifecycleFrames []proto.SessionFrame
+	notes           []proto.Notification
+	err             error
 	// arrived is a generation channel — closed and replaced on every
 	// delivery — rather than a buffered one, so a waiter can never miss a
 	// wakeup because the buffer was full. A dropped wakeup would make this
@@ -250,6 +251,17 @@ func (s *recordingSink) SendNotification(n proto.Notification) error {
 	s.notes = append(s.notes, n)
 	s.wake()
 	s.mu.Unlock()
+	return nil
+}
+
+func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.lifecycleFrames = append(s.lifecycleFrames, f)
+	s.wake()
 	return nil
 }
 
@@ -1143,4 +1155,108 @@ func (cwdSeeingInspector) Observe(int, int) *proto.Observation {
 		Argv:        []string{"-zsh"},
 		Unavailable: []proto.Diagnostic{},
 	}
+}
+
+type lifecycleCarrier struct {
+	stream *io.PipeReader
+	input  *io.PipeWriter
+}
+
+func (c *lifecycleCarrier) Read(b []byte) (int, error) { return c.stream.Read(b) }
+func (c *lifecycleCarrier) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (c *lifecycleCarrier) Close() error {
+	_ = c.stream.Close()
+	return c.input.Close()
+}
+
+type lifecycleProcess struct {
+	*fakeProcess
+	carrier *lifecycleCarrier
+}
+
+func (p *lifecycleProcess) Lifecycle() io.ReadWriteCloser { return p.carrier }
+
+func (p *lifecycleProcess) Close() error {
+	err := p.fakeProcess.Close()
+	_ = p.carrier.Close()
+	return err
+}
+
+type lifecycleSpawner struct {
+	proc *lifecycleProcess
+}
+
+func (s *lifecycleSpawner) Spawn(session.SpawnRequest) (session.Process, error) {
+	return s.proc, nil
+}
+
+func lifecycleBytes(s *recordingSink) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []byte
+	for _, frame := range s.lifecycleFrames {
+		out = append(out, frame.Payload...)
+	}
+	return out
+}
+
+func TestLifecycleWindowReplaysAfterConnectionReplacement(t *testing.T) {
+	stream, input := io.Pipe()
+	proc := &lifecycleProcess{
+		fakeProcess: newFakeProcess(),
+		carrier:     &lifecycleCarrier{stream: stream, input: input},
+	}
+	svc := session.New(session.Options{
+		Generation: "gen-under-test",
+		Spawner:    &lifecycleSpawner{proc: proc},
+		Log:        discardLog(),
+	})
+	first := newSink()
+	releaseFirst := bindTo(svc, first)
+	t.Cleanup(func() {
+		releaseFirst()
+		svc.Close()
+	})
+
+	entry := call[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{
+			Lane: "lane-1", Domain: "dom-1", Epoch: 7,
+			Capability: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}).Entry
+	sub := proto.SubscriberID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	call[proto.AttachResult](t, svc, proto.OpAttach, proto.AttachParams{
+		Subscriber: sub, Session: entry.Session, Fresh: true,
+	})
+
+	const payload = "fact produced while attached"
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := input.Write([]byte(payload))
+		writeDone <- err
+	}()
+	awaitSink(t, first, "the first lifecycle frame", func() bool {
+		return string(lifecycleBytes(first)) == payload
+	})
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write lifecycle bytes: %v", err)
+	}
+
+	releaseFirst()
+	second := newSink()
+	releaseSecond := bindTo(svc, second)
+	t.Cleanup(releaseSecond)
+	reattached := call[proto.AttachResult](t, svc, proto.OpAttach, proto.AttachParams{
+		Subscriber: sub, Session: entry.Session, Fresh: true, LifecycleOffset: 0,
+	})
+	if reattached.LifecycleResume.Reset {
+		t.Fatalf("lifecycle data reset despite fitting in the helper window: %+v", reattached.LifecycleResume)
+	}
+	awaitSink(t, second, "the lifecycle frame after connection replacement", func() bool {
+		return string(lifecycleBytes(second)) == payload
+	})
 }

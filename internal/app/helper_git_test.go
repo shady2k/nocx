@@ -19,6 +19,7 @@ import (
 	"io"
 	iofs "io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -46,6 +47,64 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 )
+
+func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
+	peer, peerRemote := net.Pipe()
+	carrier, carrierRemote := net.Pipe()
+	t.Cleanup(func() {
+		_ = peer.Close()
+		_ = peerRemote.Close()
+		_ = carrier.Close()
+		_ = carrierRemote.Close()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for _, conn := range []net.Conn{peer, peerRemote, carrier, carrierRemote} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bridgeLifecycle(peer, carrier)
+
+	const outbound = "opaque lifecycle bytes"
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := peerRemote.Write([]byte(outbound))
+		writeDone <- err
+	}()
+	got := make([]byte, len(outbound))
+	if _, err := io.ReadFull(carrierRemote, got); err != nil {
+		t.Fatalf("read toward carrier: %v", err)
+	}
+	if string(got) != outbound {
+		t.Fatalf("carrier got %q, want %q", got, outbound)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write toward carrier: %v", err)
+	}
+
+	const inbound = "opaque response bytes"
+	writeDone = make(chan error, 1)
+	go func() {
+		_, err := carrierRemote.Write([]byte(inbound))
+		writeDone <- err
+	}()
+	got = make([]byte, len(inbound))
+	if _, err := io.ReadFull(peerRemote, got); err != nil {
+		t.Fatalf("read toward peer: %v", err)
+	}
+	if string(got) != inbound {
+		t.Fatalf("peer got %q, want %q", got, inbound)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write toward peer: %v", err)
+	}
+
+	_ = carrierRemote.Close()
+	buf := make([]byte, 1)
+	if _, err := peerRemote.Read(buf); err == nil {
+		t.Fatal("peer remained open after carrier closed")
+	}
+}
 
 // fixtureRepo builds a real repository with a commit, a modified file and
 // an untracked file, so a successful open is non-trivial. The recipe is

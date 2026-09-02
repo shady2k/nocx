@@ -1,9 +1,12 @@
 package session
 
 import (
+	"io"
 	"log/slog"
+	"os"
 	"sort"
 
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/pty"
@@ -72,17 +75,43 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		Rows:    req.Rows,
 	}
 	var launch shellintegration.LocalLaunch
+	var lifecycleParent, lifecycleChild *os.File
 	var err error
 	if req.SessionID != "" && len(shellArgs) == 0 {
 		kind := shellintegration.LocalShellKind(shellPath)
 		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
-			launch, err = shellintegration.LocalEnhancedLaunchInMemory(
-				shellPath,
-				kind,
-				shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true},
-			)
+			if req.Lifecycle != nil {
+				lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
+				if err != nil {
+					return nil, err
+				}
+			}
+			opts := shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true}
+			if req.Lifecycle != nil {
+				opts.Lane = req.Lifecycle.Lane
+				opts.Domain = req.Lifecycle.Domain
+				opts.Epoch = req.Lifecycle.Epoch
+				opts.Capability = req.Lifecycle.Capability
+				opts.Recovery = req.Lifecycle.Recovery
+				opts.LifecycleFD = 4
+			}
+			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
 			if err != nil {
+				if lifecycleParent != nil {
+					_ = lifecycleParent.Close()
+				}
+				if lifecycleChild != nil {
+					_ = lifecycleChild.Close()
+				}
 				return nil, err
+			}
+			if lifecycleChild != nil {
+				launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
+				previousCleanup := launch.Cleanup
+				launch.Cleanup = func() {
+					previousCleanup()
+					_ = lifecycleChild.Close()
+				}
 			}
 			cfg.Command = launch.Command
 			cfg.Args = launch.Args
@@ -90,11 +119,16 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			cfg.ExtraFiles = launch.ExtraFiles
 		}
 	}
-
 	lp, err := pty.NewLocal(s.log, cfg)
 	if err != nil {
 		if launch.Abort != nil {
 			launch.Abort()
+		}
+		if lifecycleParent != nil {
+			_ = lifecycleParent.Close()
+		}
+		if lifecycleChild != nil {
+			_ = lifecycleChild.Close()
 		}
 		return nil, err
 	}
@@ -104,13 +138,16 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 				launch.Abort()
 			}
 			_ = lp.Close()
+			if lifecycleParent != nil {
+				_ = lifecycleParent.Close()
+			}
 			return nil, err
 		}
 	}
 	if launch.Cleanup != nil {
 		launch.Cleanup()
 	}
-	return &localProcess{LocalPty: lp}, nil
+	return &localProcess{LocalPty: lp, lifecycle: lifecycleParent}, nil
 }
 
 // envSlice turns the wire's map into exec's slice, in a STABLE order. The wire
@@ -139,6 +176,25 @@ func envSlice(env map[string]string) []string {
 // started, and which process group the helper owns for it.
 type localProcess struct {
 	*pty.LocalPty
+	lifecycle *os.File
+}
+
+func (p *localProcess) Lifecycle() io.ReadWriteCloser {
+	if p.lifecycle == nil {
+		return nil
+	}
+	return p.lifecycle
+}
+
+func (p *localProcess) Close() error {
+	err := p.LocalPty.Close()
+	if p.lifecycle != nil {
+		closeErr := p.lifecycle.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 // Cwd is the directory the shell was actually started in — the RESOLVED one.

@@ -43,6 +43,12 @@ type Process interface {
 	ForegroundProcessGroup() (int, error)
 }
 
+// LifecycleProcess is implemented by a spawner when a session requested the
+// authenticated descriptor channel. The helper moves this stream only.
+type LifecycleProcess interface {
+	Lifecycle() io.ReadWriteCloser
+}
+
 // ProcessGroupSignaller is the optional process-group control seam. The
 // helper's local PTY implements it; tests and platforms without POSIX process
 // groups can omit it and receive a named refusal.
@@ -63,6 +69,7 @@ type SpawnRequest struct {
 	Env       map[string]string
 	Cols      uint16
 	Rows      uint16
+	Lifecycle *proto.LifecycleLaunch
 }
 
 // Spawner starts a shell under a PTY. One implementation reaches internal/pty;
@@ -93,10 +100,10 @@ type Inspector interface {
 // connection, a host session does not (D2).
 type Sink interface {
 	SendSessionData(proto.SessionFrame) error
+	SendLifecycleData(proto.SessionFrame) error
 	SendNotification(proto.Notification) error
 }
 
-// creditLimit bounds how far ahead of a subscriber's acks the helper will
 // push. It is AD-10's own constant and the same value internal/transport uses,
 // restated here rather than imported because the helper may not depend on the
 // coordinator's transport — a survival component that must stay compatible
@@ -129,13 +136,20 @@ type subscriber struct {
 	sent  proto.StreamOffset
 	acked proto.StreamOffset
 
+	// lifecycleSent/lifecycleAcked are the cursor pair for the independent
+	// lifecycle window. They never share PTY offsets.
+	lifecycleSent  proto.StreamOffset
+	lifecycleAcked proto.StreamOffset
+
 	// cursorMu guards the reader cursor, which the serving pump advances while
 	// ack requests may advance the confirmed side concurrently.
 	cursorMu sync.Mutex
 	wake     *gate
 
-	stop context.CancelFunc
-	done chan struct{}
+	stop          context.CancelFunc
+	done          chan struct{}
+	lifecycleWake *gate
+	lifecycleDone chan struct{}
 	// sink is the connection this subscriber's pump writes to. It is captured
 	// at attach: a pump must not start writing to a connection that replaced
 	// the one it was attached on.
@@ -151,14 +165,16 @@ type attachment struct {
 
 // hostSession is one PTY and everything the helper knows about it.
 type hostSession struct {
-	id        proto.HostSessionID
-	raw       [16]byte
-	workspace proto.WorkspaceID
-	startedAt time.Time
-	launch    proto.LaunchRecord
-	proc      Process
-	win       *window
-	log       *slog.Logger
+	lifecycleWin    *window
+	id              proto.HostSessionID
+	raw             [16]byte
+	workspace       proto.WorkspaceID
+	startedAt       time.Time
+	launch          proto.LaunchRecord
+	proc            Process
+	win             *window
+	log             *slog.Logger
+	lifecycleBudget int64
 
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
@@ -184,13 +200,26 @@ func (s *hostSession) pump() {
 			s.win.write(buf[:n])
 		}
 		if err != nil {
-			// EOF is the shell exiting and is not a failure; anything else is
-			// stated, because a stream that stops for an unexplained reason
-			// is the silent degrade the product must never show.
 			if !errors.Is(err, io.EOF) {
 				s.log.Warn("session output ended", "session", s.id.Session, "err", err)
 			}
 			s.win.close()
+			return
+		}
+	}
+}
+
+// lifecyclePump moves raw lifecycle bytes from the helper-owned shell channel
+// into its bounded window. No decoder or policy exists on this host.
+func (s *hostSession) lifecyclePump(stream io.ReadWriteCloser) {
+	buf := make([]byte, pageSize)
+	for {
+		n, err := stream.Read(buf)
+		if n > 0 {
+			s.lifecycleWin.write(buf[:n])
+		}
+		if err != nil {
+			s.lifecycleWin.close()
 			return
 		}
 	}
@@ -255,15 +284,21 @@ func (s *hostSession) entry(inspector Inspector) proto.SessionEntry {
 	s.mu.Unlock()
 
 	base, written := s.win.span()
+	var lifecycleWindow proto.WindowSpan
+	if s.lifecycleWin != nil {
+		lbase, lwritten := s.lifecycleWin.span()
+		lifecycleWindow = proto.WindowSpan{Base: lbase, Written: lwritten}
+	}
 	e := proto.SessionEntry{
-		Session:     s.id,
-		Workspace:   s.workspace,
-		StartedAt:   proto.FormatTime(s.startedAt),
-		Launch:      s.launch,
-		Window:      proto.WindowSpan{Base: base, Written: written},
-		Writer:      writer,
-		WriterEpoch: 0,
-		Exit:        exit,
+		Session:         s.id,
+		Workspace:       s.workspace,
+		StartedAt:       proto.FormatTime(s.startedAt),
+		Launch:          s.launch,
+		Window:          proto.WindowSpan{Base: base, Written: written},
+		LifecycleWindow: lifecycleWindow,
+		Writer:          writer,
+		WriterEpoch:     0,
+		Exit:            exit,
 	}
 	if writer != nil {
 		e.WriterEpoch = epoch
@@ -284,6 +319,11 @@ func (s *hostSession) entry(inspector Inspector) proto.SessionEntry {
 // exists to prevent.
 func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment func() proto.AttachmentID, log *slog.Logger) (proto.AttachResult, error) {
 	raw, err := proto.SessionBytes(string(p.Subscriber))
+	lifecycleResume := proto.Resume{Resumed: true, From: p.LifecycleOffset}
+	if s.lifecycleWin != nil {
+		lbase, lwritten := s.lifecycleWin.span()
+		lifecycleResume = proto.ResumeAt(lbase, lwritten, p.LifecycleOffset)
+	}
 	if err != nil {
 		return proto.AttachResult{}, ErrBadSubscriber
 	}
@@ -321,7 +361,10 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	sub := &subscriber{
 		id: p.Subscriber, raw: raw,
 		sent: resume.From, acked: resume.From,
-		wake: newGate(), stop: stop, done: make(chan struct{}), sink: sink, attachment: att,
+		lifecycleSent: lifecycleResume.From, lifecycleAcked: lifecycleResume.From,
+		wake: newGate(), lifecycleWake: newGate(),
+		stop: stop, done: make(chan struct{}), lifecycleDone: make(chan struct{}),
+		sink: sink, attachment: att,
 	}
 	s.subs[p.Subscriber] = sub
 	s.attachments[att] = &attachment{id: att, subscriber: p.Subscriber, sink: sink}
@@ -344,10 +387,14 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		}
 	}
 	s.mu.Unlock()
-
 	s.stopSubscriber(old)
 	go s.serve(ctx, sub, log)
-	return proto.AttachResult{Attachment: att, Resume: resume, Write: grant}, nil
+	if s.lifecycleWin != nil {
+		go s.serveLifecycle(ctx, sub, log)
+	} else {
+		close(sub.lifecycleDone)
+	}
+	return proto.AttachResult{Attachment: att, Resume: resume, LifecycleResume: lifecycleResume, Write: grant}, nil
 }
 
 // serve is one subscriber's pump: it reads the window at the subscriber's own
@@ -439,6 +486,70 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 	}
 }
 
+func (s *hostSession) serveLifecycle(ctx context.Context, sub *subscriber, log *slog.Logger) {
+	defer close(sub.lifecycleDone)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		changed := s.lifecycleWin.changed()
+		acked := sub.lifecycleWake.wait()
+		sub.cursorMu.Lock()
+		sent, confirmed := sub.lifecycleSent, sub.lifecycleAcked
+		sub.cursorMu.Unlock()
+		data, resume := s.lifecycleWin.read(sent)
+		if resume.Reset {
+			_ = sub.sink.SendNotification(proto.Notification{
+				Service: proto.ServiceSession, Event: proto.EventSessionReset,
+				Params: proto.SessionReset{
+					Subscriber: sub.id, Session: s.id,
+					Resume: resume, Stream: "lifecycle",
+				},
+			})
+			sub.cursorMu.Lock()
+			sub.lifecycleSent, sub.lifecycleAcked = resume.From, resume.From
+			sub.cursorMu.Unlock()
+			continue
+		}
+		if len(data) > 0 {
+			if sent > confirmed && sent-confirmed >= creditLimit {
+				select {
+				case <-acked:
+				case <-changed:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			if err := sub.sink.SendLifecycleData(proto.SessionFrame{
+				Session: s.raw, Subscriber: sub.raw, Payload: data,
+			}); err != nil {
+				log.Warn("lifecycle data not delivered", "session", s.id.Session, "err", err)
+				return
+			}
+			sub.cursorMu.Lock()
+			sub.lifecycleSent += proto.StreamOffset(len(data))
+			sub.cursorMu.Unlock()
+			continue
+		}
+		if s.lifecycleWin.isClosed() {
+			_, written := s.lifecycleWin.span()
+			sub.cursorMu.Lock()
+			done := sub.lifecycleSent >= written
+			sub.cursorMu.Unlock()
+			if done {
+				return
+			}
+		}
+		select {
+		case <-changed:
+		case <-acked:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // ack advances one subscriber's confirmed offset. Validated exactly as the
 // coordinator's ring validates its own, and for the same two reasons: an
 // offset ahead of what was produced would free a reader to be sent bytes that
@@ -464,6 +575,36 @@ func (s *hostSession) ack(sink Sink, id proto.SubscriberID, offset proto.StreamO
 	sub.cursorMu.Unlock()
 	s.mu.Unlock()
 	sub.wake.signal()
+	return nil
+}
+
+func (s *hostSession) ackLifecycle(sink Sink, id proto.SubscriberID, offset proto.StreamOffset) error {
+	if s.lifecycleWin == nil {
+		if offset != 0 {
+			return ErrAckAhead
+		}
+		return ErrNotAttached
+	}
+	_, written := s.lifecycleWin.span()
+	if offset > written {
+		return ErrAckAhead
+	}
+	s.mu.Lock()
+	sub, ok := s.subs[id]
+	if !ok || sub.sink != sink {
+		s.mu.Unlock()
+		return ErrNotAttached
+	}
+	sub.cursorMu.Lock()
+	if offset < sub.lifecycleAcked {
+		sub.cursorMu.Unlock()
+		s.mu.Unlock()
+		return ErrAckBehind
+	}
+	sub.lifecycleAcked = offset
+	sub.cursorMu.Unlock()
+	s.mu.Unlock()
+	sub.lifecycleWake.signal()
 	return nil
 }
 
@@ -499,12 +640,11 @@ func (s *hostSession) stopSubscriber(sub *subscriber) {
 	}
 	sub.stop()
 	sub.wake.signal()
+	sub.lifecycleWake.signal()
 	<-sub.done
+	<-sub.lifecycleDone
 }
 
-// releaseConnection drops every attachment made on the connection that is
-// going away, AND ONLY THOSE. The sessions, their windows and their processes
-// all survive it: that is D1, and it is the whole point of the two identities.
 // So do the attachments of every other connection, which is what makes this
 // safe to call while other coordinators are still connected (D12).
 //
@@ -570,6 +710,25 @@ func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	}
 	_, werr := s.proc.Write(f.Payload)
 	return werr
+}
+
+func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, ok := s.subs[proto.SubscriberID(proto.SessionHex(f.Subscriber))]
+	if !ok || sub.sink != sink {
+		return ErrNotAttached
+	}
+	lp, ok := s.proc.(LifecycleProcess)
+	if !ok {
+		return ErrNotAttached
+	}
+	carrier := lp.Lifecycle()
+	if carrier == nil {
+		return ErrNotAttached
+	}
+	_, err := carrier.Write(f.Payload)
+	return err
 }
 
 // stop ends the session's own goroutines and closes the PTY. It is what the

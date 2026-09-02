@@ -1304,10 +1304,13 @@ type GitOpenSelection struct {
 // session. Host, Account and Generation are facts used by later projections;
 // Session carries the helper-minted authoritative id.
 type HostedSessionOpen struct {
-	Session    session.Session
-	Host       string
-	Account    string
-	Generation string
+	Session        session.Session
+	Host           string
+	Account        string
+	Generation     string
+	LifecycleLane  lifecycle.LaneID
+	StartLifecycle func()
+	AbortLifecycle func()
 }
 
 type HelperSessionOpener interface {

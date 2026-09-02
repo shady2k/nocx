@@ -51,6 +51,10 @@ const (
 	// would resync THROUGH a live PTY stream rather than dropping one
 	// frame. See SessionFrame.
 	TypeSessionData FrameType = 10
+	// TypeLifecycleData carries the raw lifecycle protocol on its own data
+	// plane tag. It shares SessionFrame's binary identity only as a carrier;
+	// the helper routes bytes and never decodes lifecycle envelopes.
+	TypeLifecycleData FrameType = 11
 )
 
 // valid reports whether the type belongs to the closed set above. A byte
@@ -58,7 +62,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData:
 		return true
 	}
 	return false

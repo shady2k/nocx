@@ -1193,8 +1193,31 @@ func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
 		t.Fatalf("the exec lane ran %q, want <path> %s <generation>: it must run the bridge, "+
 			"not a helper serving this channel", started, endpoint.BridgeCommand)
 	}
-	if _, err := endpoint.Path(t.TempDir(), proto.GenerationID(fields[2])); err != nil {
+	// The generation the bridge was handed is a content hash. Asserted
+	// against the ERROR CLASS, and with a short directory, because
+	// endpoint.Path answers two questions in one call: socketName validates
+	// the generation, and Path then measures the JOINED path against the
+	// platform's sun_path bound. This passed t.TempDir(), which on macOS is a
+	// ~120-character /var/folders path and under `make ci-mac` a disposable
+	// root — so the LENGTH answer arrived wearing the generation answer's
+	// message and the test reported "not a content hash" about a temporary
+	// directory it was never about (nocx-k6p18.4). The product cannot reach
+	// that state: endpoint.Dir derives from $HOME and the socket lives under
+	// ~/.nocx/run. Both halves of the fix are deliberate — the short
+	// directory means only the generation can fail this call today, and the
+	// error class means a third failure mode added to Path tomorrow still
+	// cannot be read as this one.
+	const genCheckDir = "/tmp"
+	if _, err := endpoint.Path(genCheckDir, proto.GenerationID(fields[2])); errors.Is(err, endpoint.ErrBadGeneration) {
 		t.Fatalf("the generation the bridge was given is not a content hash: %v", err)
+	}
+	// And the negative, in place, so the line above cannot pass by being
+	// unfalsifiable: the same call must REJECT a generation that is not one.
+	for _, notAHash := range []string{"", "short", "not-hex-at-all-not-hex-at-all"} {
+		if _, err := endpoint.Path(genCheckDir, proto.GenerationID(notAHash)); !errors.Is(err, endpoint.ErrBadGeneration) {
+			t.Fatalf("endpoint.Path(%q) = %v, want ErrBadGeneration — the assertion above "+
+				"means nothing unless this check has teeth", notAHash, err)
+		}
 	}
 	// And it is the generation that was INSTALLED, which is what the dial then
 	// verifies the hello-ok's content hash against (D21).

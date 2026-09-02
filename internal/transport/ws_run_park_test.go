@@ -68,13 +68,15 @@ func scriptQuietAnswer(h *runLeaseHarness, t *testing.T, decision string, seen c
 			t.Errorf("a still-running question names no run id:\n%s", body)
 			return "", "", false
 		}
+		answered++
 		// The FIRST question, kept for the assertion; later renewals ask the
-		// same thing and would only overwrite it.
+		// same thing and would only overwrite it. Sent LAST, after every
+		// piece of state this call changes, so nothing a reader of the
+		// channel might go on to check is still being written behind it.
 		select {
 		case seen <- body:
 		default:
 		}
-		answered++
 		return "session.wait", `{"runId":` + strconv.Quote(m[1]) + `,"decision":"` + decision + `"}`, true
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // newParkableLease is newUnitLease plus the park channel a real RequestRun
@@ -128,8 +129,22 @@ func TestRunLease_KeepWaitingForeverStillEndsAtThePersonsCeiling(t *testing.T) {
 	if renewals < 2 {
 		t.Fatalf("renewals = %d, want several: the test proves the ceiling holds ACROSS renewals", renewals)
 	}
-	if got := sess.got(); len(got) == 0 || got[0] != syscall.SIGINT {
-		t.Fatalf("signals = %v, want the escalation to have run against the execution", got)
+	// WAIT FOR THE LADDER, DO NOT ASSUME IT. The ceiling here can fire on
+	// either of two goroutines — the caller's, when superviseResume observes
+	// its own cancelled context and escalates inline, or a timer's, when the
+	// bound beats the continuation to the lease and the parked ending runs
+	// instead. In the second case superviseResume returns the verdict the
+	// moment takeBack refuses, which can be before that goroutine has
+	// finished escalating. "The escalation has run" is an observable state,
+	// so it is waited for as one rather than inferred from having been
+	// returned to.
+	var signals []syscall.Signal
+	waittest.WaitForTimeout(t, "the escalation to reach the execution", 10*time.Second, func() bool {
+		signals = sess.got()
+		return len(signals) > 0
+	})
+	if signals[0] != syscall.SIGINT {
+		t.Fatalf("signals = %v, want the escalation to have started at INT", signals)
 	}
 	if lease.renewalCount() != renewals {
 		t.Fatalf("lease renewals = %d, want %d — the count the model is shown must be the real one", lease.renewalCount(), renewals)
@@ -311,10 +326,17 @@ func TestParkedRun_TheCeilingStillEndsARunNobodyCameBackFor(t *testing.T) {
 		t.Fatalf("supervise returned %v, want the park", err)
 	}
 
+	// THE SIGNAL IS SENT AFTER THE LADDER, NOT BEFORE IT. Receiving from
+	// `ended` has to mean "the parked ending has finished", because that is
+	// the fact the assertion below reads. Sending first made the receive
+	// mean only "the callback started" — the checker then raced the very
+	// escalation it was checking for, and won on an idle machine and lost on
+	// a loaded CI runner. No timing here was ever wrong; the order was.
 	ended := make(chan content.TerminationReason, 1)
 	lease.setParkedEnd(func(reason content.TerminationReason) foregroundOutcome {
+		outcome := lease.escalate()
 		ended <- reason
-		return lease.escalate()
+		return outcome
 	})
 
 	select {
@@ -325,6 +347,8 @@ func TestParkedRun_TheCeilingStillEndsARunNobodyCameBackFor(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the wall clock never fired on a parked run: a parked command would run forever")
 	}
+	// Safe to read directly now: the send above is the escalation's own
+	// completion, so the ladder has run before this line can be reached.
 	if got := sess.got(); len(got) == 0 {
 		t.Fatal("the parked ending did not escalate; a run that outlived its ceiling must be killed, not abandoned")
 	}

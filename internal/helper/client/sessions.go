@@ -272,10 +272,56 @@ func (a *AttachedSession) deliverLifecycle(payload []byte) {
 	a.enqueue(a.lifecycleData, inbound{payload: append([]byte(nil), payload...)})
 }
 
+// enqueue hands one item to the reader. The room-first attempt is not an
+// optimisation: `done` closes on the PROCESS event, and the helper goes on
+// sending the window's remaining bytes after it — its window has one closer,
+// the pump, and the fd ending is the only event that means no more bytes will
+// arrive. A plain select against a closed done drops those bytes half the time
+// with the queue half empty.
 func (a *AttachedSession) enqueue(q chan inbound, item inbound) {
 	select {
 	case q <- item:
+		return
+	default:
+	}
+	select {
+	case q <- item:
 	case <-a.done:
+	}
+}
+
+// take is the reader's end of the same rule, and the one that names the
+// stream's closing event. The process ending and the OUTPUT ending are two
+// events and the second is later (internal/helper/session/session.go's
+// watchExit says so, and refuses to make the mistake again); a select over the
+// queue and a closed done picks uniformly, so with k chunks buffered the odds
+// of reading them all were 2^-k and what went missing was the last line the
+// shell ever printed.
+//
+// Draining first is the shape taken over "let EOF come from the stream
+// ending", because on this wire there is no end-of-stream marker to wait for:
+// the helper's per-subscriber pump simply returns when the window is closed
+// and drained, and a coordinator that waited for a frame that never comes
+// would hang the tab open forever instead of losing a line. So the closing
+// event is stated here rather than received: the queue is empty AND the
+// session has ended.
+func (a *AttachedSession) take(q chan inbound, closed <-chan struct{}) (inbound, bool) {
+	select {
+	case item := <-q:
+		return item, true
+	default:
+	}
+	select {
+	case item := <-q:
+		return item, true
+	case <-closed:
+	case <-a.done:
+	}
+	select {
+	case item := <-q:
+		return item, true
+	default:
+		return inbound{}, false
 	}
 }
 
@@ -357,62 +403,61 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	select {
-	case item := <-a.data:
-		if item.resetTo != nil {
-			a.mu.Lock()
-			a.offset = *item.resetTo
-			if a.pendingReset > 0 {
-				a.pendingReset--
-			}
-			a.mu.Unlock()
-		}
-		n := copy(p, item.payload)
-		if n < len(item.payload) {
-			rest := inbound{payload: item.payload[n:]}
-			go func() {
-				select {
-				case a.data <- rest:
-				case <-a.done:
-				}
-			}()
-		}
-		// A reset's own payload states the hole; it is not stream bytes, so
-		// it advances no cursor. Neither do bytes read while a reset is still
-		// queued behind them — see pendingReset.
-		if n > 0 && item.resetTo == nil {
-			advance := streamBytes(n)
-			a.mu.Lock()
-			frozen := a.pendingReset > 0
-			if !frozen {
-				a.offset += advance
-			}
-			offset := a.offset
-			a.mu.Unlock()
-			if !frozen {
-				if err := a.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
-					proto.AckParams{
-						Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
-						Session:    proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
-						Offset:     offset,
-					}, nil); err != nil {
-					// A refused ack is not the end of a session, and treating
-					// it as one is how a live shell was reported as ENDED. It
-					// is expected after a reset: the helper moves its own
-					// cursor the moment it sends the notification, so every
-					// ack for bytes already in flight is behind by the time it
-					// lands — a race the coordinator cannot win and does not
-					// need to. The session ends when the process exits or the
-					// transport dies, and both have their own owner.
-					a.client.log.Warn("session ack refused", "err", err,
-						"session", proto.SessionHex(a.session), "offset", uint64(offset))
-				}
-			}
-		}
-		return n, nil
-	case <-a.done:
+	item, ok := a.take(a.data, nil)
+	if !ok {
 		return 0, io.EOF
 	}
+	if item.resetTo != nil {
+		a.mu.Lock()
+		a.offset = *item.resetTo
+		if a.pendingReset > 0 {
+			a.pendingReset--
+		}
+		a.mu.Unlock()
+	}
+	n := copy(p, item.payload)
+	if n < len(item.payload) {
+		rest := inbound{payload: item.payload[n:]}
+		go func() {
+			select {
+			case a.data <- rest:
+			case <-a.done:
+			}
+		}()
+	}
+	// A reset's own payload states the hole; it is not stream bytes, so
+	// it advances no cursor. Neither do bytes read while a reset is still
+	// queued behind them — see pendingReset.
+	if n > 0 && item.resetTo == nil {
+		advance := streamBytes(n)
+		a.mu.Lock()
+		frozen := a.pendingReset > 0
+		if !frozen {
+			a.offset += advance
+		}
+		offset := a.offset
+		a.mu.Unlock()
+		if !frozen {
+			if err := a.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
+				proto.AckParams{
+					Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
+					Session:    proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
+					Offset:     offset,
+				}, nil); err != nil {
+				// A refused ack is not the end of a session, and treating
+				// it as one is how a live shell was reported as ENDED. It
+				// is expected after a reset: the helper moves its own
+				// cursor the moment it sends the notification, so every
+				// ack for bytes already in flight is behind by the time it
+				// lands — a race the coordinator cannot win and does not
+				// need to. The session ends when the process exits or the
+				// transport dies, and both have their own owner.
+				a.client.log.Warn("session ack refused", "err", err,
+					"session", proto.SessionHex(a.session), "offset", uint64(offset))
+			}
+		}
+	}
+	return n, nil
 }
 
 type attachedLifecycle struct {
@@ -425,56 +470,53 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	select {
-	case item := <-l.session.lifecycleData:
-		if item.resetTo != nil {
-			l.session.mu.Lock()
-			l.session.lifecycleOffset = *item.resetTo
-			if l.session.pendingLifecycleReset > 0 {
-				l.session.pendingLifecycleReset--
-			}
-			l.session.mu.Unlock()
-		}
-		n := copy(p, item.payload)
-		if n < len(item.payload) {
-			rest := inbound{payload: item.payload[n:]}
-			go func() {
-				select {
-				case l.session.lifecycleData <- rest:
-				case <-l.session.done:
-				}
-			}()
-		}
-		if n > 0 {
-			advance := streamBytes(n)
-			l.session.mu.Lock()
-			frozen := l.session.pendingLifecycleReset > 0
-			if !frozen {
-				l.session.lifecycleOffset += advance
-			}
-			offset := l.session.lifecycleOffset
-			ptyOffset := l.session.offset
-			l.session.mu.Unlock()
-			if frozen {
-				return n, nil
-			}
-			if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
-				proto.AckParams{
-					Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
-					Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
-					Offset:     ptyOffset, LifecycleOffset: &offset,
-				}, nil); err != nil {
-				// Not fatal, for the reason the PTY reader's ack is not.
-				l.session.client.log.Warn("lifecycle ack refused", "err", err,
-					"session", proto.SessionHex(l.session.session), "offset", uint64(offset))
-			}
-		}
-		return n, nil
-	case <-l.closed:
-		return 0, io.EOF
-	case <-l.session.done:
+	item, ok := l.session.take(l.session.lifecycleData, l.closed)
+	if !ok {
 		return 0, io.EOF
 	}
+	if item.resetTo != nil {
+		l.session.mu.Lock()
+		l.session.lifecycleOffset = *item.resetTo
+		if l.session.pendingLifecycleReset > 0 {
+			l.session.pendingLifecycleReset--
+		}
+		l.session.mu.Unlock()
+	}
+	n := copy(p, item.payload)
+	if n < len(item.payload) {
+		rest := inbound{payload: item.payload[n:]}
+		go func() {
+			select {
+			case l.session.lifecycleData <- rest:
+			case <-l.session.done:
+			}
+		}()
+	}
+	if n > 0 {
+		advance := streamBytes(n)
+		l.session.mu.Lock()
+		frozen := l.session.pendingLifecycleReset > 0
+		if !frozen {
+			l.session.lifecycleOffset += advance
+		}
+		offset := l.session.lifecycleOffset
+		ptyOffset := l.session.offset
+		l.session.mu.Unlock()
+		if frozen {
+			return n, nil
+		}
+		if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
+			proto.AckParams{
+				Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
+				Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
+				Offset:     ptyOffset, LifecycleOffset: &offset,
+			}, nil); err != nil {
+			// Not fatal, for the reason the PTY reader's ack is not.
+			l.session.client.log.Warn("lifecycle ack refused", "err", err,
+				"session", proto.SessionHex(l.session.session), "offset", uint64(offset))
+		}
+	}
+	return n, nil
 }
 
 func (l *attachedLifecycle) Write(p []byte) (int, error) {

@@ -167,15 +167,31 @@ describe('a pet over a pane', () => {
     expect(s.blocks.querySelectorAll('.cmd-block')).toHaveLength(1)
   })
 
+  it('separates world placement from expressive transform and reports phase', async () => {
+    const s = stand([200])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+
+    const layer = s.host.querySelector<HTMLElement>('.pet-layer')!
+    const world = s.host.querySelector<HTMLElement>('.pet-world')!
+    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
+    expect(layer.dataset.phase).toBe('none')
+    expect(world.parentElement).toBe(layer)
+    expect(sprite.parentElement).toBe(world)
+    expect(world.style.transform).toMatch(/^translate\(.*\) scaleX\([-\d]+\)$/)
+    expect(sprite.style.transform).toBe('scale(1, 1)')
+  })
+
   it('falls in and comes to rest ON a command block', async () => {
     const s = stand([200])
     overlayOn(s)
     await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
     s.pump(3)
-    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
+    const world = s.host.querySelector<HTMLElement>('.pet-world')!
     // 4 painted rows of a 10px cell scaled to 34px tall → the transform's y
     // puts the animal's feet on the block's top edge.
-    const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(sprite.style.transform)
+    const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(world.style.transform)
     expect(m).not.toBeNull()
     expect(Number(m![2]) + 34).toBeCloseTo(200, 0)
   })
@@ -185,8 +201,8 @@ describe('a pet over a pane', () => {
     overlayOn(s)
     await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
     s.pump(3)
-    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
-    const yOf = () => Number(/translate\([-\d.]+px, ([-\d.]+)px\)/.exec(sprite.style.transform)![1])
+    const world = s.host.querySelector<HTMLElement>('.pet-world')!
+    const yOf = () => Number(/translate\([-\d.]+px, ([-\d.]+)px\)/.exec(world.style.transform)![1])
     const landed = yOf()
     s.blocks.querySelector('.cmd-block')!.remove()
     // Let the mutation observer deliver — the overlay learns the layout moved
@@ -322,14 +338,14 @@ describe('the setting governs it', () => {
     overlayOn(s, () => 0.99, set)
     await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
     s.pump(3)
-    const sprite = s.host.querySelector<HTMLElement>('.pet-sprite')!
-    expect(sprite.style.height).toBe('34px')
-    const yOf = () => Number(/translate\([-\d.]+px, ([-\d.]+)px\)/.exec(sprite.style.transform)![1])
+    const world = s.host.querySelector<HTMLElement>('.pet-world')!
+    expect(world.style.height).toBe('34px')
+    const yOf = () => Number(/translate\([-\d.]+px, ([-\d.]+)px\)/.exec(world.style.transform)![1])
     expect(yOf() + 34).toBeCloseTo(40, 0)
 
     set.set({ height: 60 })
     s.pump(3)
-    expect(sprite.style.height).toBe('60px')
+    expect(world.style.height).toBe('60px')
     // The 40px ledge no longer clears a 60px cat, so it fell to the next one.
     expect(yOf() + 60).toBeCloseTo(300, 0)
   })

@@ -1,15 +1,18 @@
 // What the pet is doing, and why (nocx-q4qeh.1).
 //
-// Three axes, deliberately separate:
+// Four axes, deliberately separate:
 //
 //   locomotion — where the body is: idle, walking, running, falling.
 //   mood       — how the last command went. Decays back to calm.
 //   activity   — what it is busy with when not going anywhere.
+//   phase      — the short physical transition between settled behaviours:
+//                bracing, takeoff, landing or turning.
 //
 // Folding them into one enum is the obvious move and it is wrong: it
 // multiplies out into happy-walk, sad-walk, happy-climb and so on, and every
-// new mood doubles the machine. Here a mood only shifts the WEIGHTS of the
-// activities and the speed of the walk, so adding one costs a row in a table.
+// new mood doubles the machine. A phase is similarly orthogonal: it changes
+// how the body gets from one state to another without changing what the
+// animal is doing, so collapsing it would multiply every locomotion and mood.
 //
 // Everything below is pure. Time arrives as `dt`, chance arrives as `rng`;
 // there is no clock and no Math.random, so a test can run a thousand seconds
@@ -40,6 +43,7 @@ export interface PetTiming {
 }
 
 export type Locomotion = 'idle' | 'walk' | 'run' | 'fall'
+type MotionPhase = 'none' | 'anticipate' | 'takeoff' | 'land' | 'turn'
 type Mood = 'calm' | 'pleased' | 'worried' | 'tired'
 export type Activity = 'none' | 'sit' | 'groom' | 'stretch' | 'lie' | 'scratch' | 'meow' | 'sleep'
 
@@ -73,6 +77,14 @@ export interface Pet {
   readonly activity: Activity
   /** Seconds left of the current occupation. */
   readonly hold: number
+  /** The short transition layered over the ordinary behaviour axes. */
+  readonly phase: MotionPhase
+  /** Seconds left in the current motion phase. */
+  readonly phaseHold: number
+  /** Total duration of the current phase, for progress-based painting. */
+  readonly phaseDuration: number
+  /** Whether a turn has already crossed its midpoint. */
+  readonly phaseTurned: boolean
   /** Seconds left before the mood decays to calm. */
   readonly moodHold: number
   /** Seconds spent doing nothing in particular — the road to sleep. */
@@ -80,15 +92,15 @@ export interface Pet {
   /** Downward speed, px/s. Only meaningful while falling. */
   readonly vy: number
   /** Whether the current activity is an ANSWER to a finished command rather
-   *  than something the animal chose. Only these are protected from being cut
-   *  short: an ordinary occupation may be interrupted freely. */
+   * than something the animal chose. Only these are protected from being cut
+   * short: an ordinary occupation may be interrupted freely. */
   readonly reacting: boolean
   /** Whose command is running right now, or null when nothing is.
    *
-   *  Not a fourth axis and not a mood: it does not colour the animal, it
-   *  narrows what the animal is willing to do. A pet that wandered off mid
-   *  build is a pet that is not watching, and watching is the whole reason it
-   *  lives in a terminal rather than on a desktop. */
+   * Not a fourth axis and not a mood: it does not colour the animal, it
+   * narrows what the animal is willing to do. A pet that wandered off mid
+   * build is a pet that is not watching, and watching is the whole reason it
+   * lives in a terminal rather than on a desktop. */
   readonly attending: Author | null
 }
 
@@ -153,6 +165,10 @@ export function newPet(x: number, y: number): Pet {
     mood: 'calm',
     activity: 'none',
     hold: 0,
+    phase: 'none',
+    phaseHold: 0,
+    phaseDuration: 0,
+    phaseTurned: false,
     moodHold: 0,
     boredom: 0,
     vy: 0,
@@ -223,6 +239,45 @@ export function gaitSpeed(locomotion: Locomotion, timing: PetTiming, scale: numb
   if (locomotion === 'walk') return (timing.strides.walk / timing.locomotion.walk.duration) * scale
   if (locomotion === 'run') return (timing.strides.run / timing.locomotion.run.duration) * scale
   return 0
+}
+// These short transitions are state, not elapsed wall time: callers advance
+// their remaining durations with dt, while the painter derives expression
+// progress from the same values.
+const ANTICIPATE_DURATION = 0.15
+const TAKEOFF_DURATION = 0.085
+const TURN_DURATION = 0.11
+const LAND_MIN_DURATION = 0.15
+const LAND_MAX_DURATION = 0.22
+
+function advancePausedPhase(pet: Pet, dt: number): Pet {
+  const phaseHold = Math.max(0, pet.phaseHold - dt)
+  let phaseTurned = pet.phaseTurned
+  let dir = pet.dir
+  if (pet.phase === 'turn' && !phaseTurned && phaseHold <= pet.phaseDuration / 2) {
+    dir = -dir as 1 | -1
+    phaseTurned = true
+  }
+  if (phaseHold === 0) {
+    if (pet.phase === 'anticipate') {
+      return {
+        ...pet,
+        dir,
+        phase: 'takeoff',
+        phaseHold: TAKEOFF_DURATION,
+        phaseDuration: TAKEOFF_DURATION,
+        phaseTurned: false,
+        ledgeId: null,
+        locomotion: 'fall',
+      }
+    }
+    return { ...pet, dir, phase: 'none', phaseHold: 0, phaseDuration: 0, phaseTurned: false }
+  }
+  return { ...pet, dir, phaseHold, phaseTurned }
+}
+
+function landDuration(impactSpeed: number, maxFall: number): number {
+  const impact = Math.min(1, Math.max(0, impactSpeed / Math.max(1, maxFall)))
+  return LAND_MIN_DURATION + (LAND_MAX_DURATION - LAND_MIN_DURATION) * impact
 }
 
 /**
@@ -460,8 +515,8 @@ export function step(
 ): Pet {
   let next = pet
 
-  // 1. Is there still ground? A block removed under the pet drops it — it is
-  //    never quietly moved to another ledge, which would read as a teleport.
+  // 1. Resolve the world before phases. A block can move or disappear while
+  //    a visual transition is paused; the pet must ride it or fall at once.
   const standing = groundOf(env, next.ledgeId)
   if (next.locomotion !== 'fall' && standing === null) {
     next = {
@@ -472,15 +527,32 @@ export function step(
       vx: 0,
       activity: 'none',
       hold: 0,
+      phase: 'none',
+      phaseHold: 0,
+      phaseDuration: 0,
+      phaseTurned: false,
     }
   }
 
+  if (next.phase === 'takeoff') {
+    const phaseHold = next.phaseHold - dt
+    next =
+      phaseHold > 0
+        ? { ...next, phaseHold }
+        : { ...next, phase: 'none', phaseHold: 0, phaseDuration: 0, phaseTurned: false }
+    return fall(next, env, dt, tuning)
+  }
   if (next.locomotion === 'fall') return fall(next, env, dt, tuning)
 
   const ledge = standing as Ledge
   // A ledge that moved (the view scrolled) carries the pet with it.
   const y = ledge.y
   let x = Math.min(Math.max(next.x, ledge.x0), ledge.x1)
+  // A motion phase intentionally completes without checking the pointer or
+  // choosing a new behaviour; its world position still follows the ledge.
+  if (next.phase === 'anticipate' || next.phase === 'land' || next.phase === 'turn') {
+    return advancePausedPhase({ ...next, x, y, vx: 0 }, dt)
+  }
   let dir = next.dir
   let vx = next.vx
   let hold: number = next.hold
@@ -545,8 +617,25 @@ export function step(
         }
       }
       x = past > 0 ? ledge.x1 : ledge.x0
-      dir = past > 0 ? -1 : 1
       vx = 0
+      return {
+        ...next,
+        x,
+        y,
+        dir,
+        vx,
+        locomotion,
+        activity,
+        hold,
+        mood,
+        moodHold,
+        boredom,
+        phase: 'turn',
+        phaseHold: TURN_DURATION,
+        phaseDuration: TURN_DURATION,
+        phaseTurned: false,
+        ledgeId: ledge.id,
+      }
     }
     boredom = 0
   } else {
@@ -602,11 +691,15 @@ export function step(
         y,
         dir,
         vx: 0,
-        ledgeId: null,
-        locomotion: 'fall',
+        ledgeId: ledge.id,
+        locomotion: 'idle',
         activity: 'none',
         hold: 0,
         reacting: false,
+        phase: 'anticipate',
+        phaseHold: ANTICIPATE_DURATION,
+        phaseDuration: ANTICIPATE_DURATION,
+        phaseTurned: false,
         // Aimed at the shelf, with a little to spare so it clears the edge
         // and is caught on the way down rather than grazing it.
         vy: -Math.sqrt(2 * tuning.gravity * (y - up.y + JUMP_MARGIN)),
@@ -691,6 +784,7 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
   const to = from + vy * dt
   const landed = ledgeCrossed(env.terrain, pet.x, from, to)
   if (landed) {
+    const phaseDuration = landDuration(Math.abs(vy), tuning.maxFall)
     return {
       ...pet,
       ledgeId: landed.id,
@@ -700,10 +794,15 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
       locomotion: 'idle',
       activity: 'sit',
       hold: 1.2,
+      phase: 'land',
+      phaseHold: phaseDuration,
+      phaseDuration,
+      phaseTurned: false,
       boredom: 0,
     }
   }
   if (to >= env.floor.y) {
+    const phaseDuration = landDuration(Math.abs(vy), tuning.maxFall)
     return {
       ...pet,
       ledgeId: FLOOR_ID,
@@ -713,6 +812,10 @@ function fall(pet: Pet, env: StepEnv, dt: number, tuning: PetTuning): Pet {
       locomotion: 'idle',
       activity: 'sit',
       hold: 1.2,
+      phase: 'land',
+      phaseHold: phaseDuration,
+      phaseDuration,
+      phaseTurned: false,
       boredom: 0,
     }
   }

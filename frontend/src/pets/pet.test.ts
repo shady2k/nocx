@@ -126,11 +126,15 @@ describe('losing the ground', () => {
 })
 
 describe('walking', () => {
-  it('turns round at the end of the ledge instead of walking off it', () => {
+  it('pauses at the edge before turning round', () => {
     let p = standing(A, { locomotion: 'walk', dir: 1, x: A.x1 - 1, hold: 100 })
     p = step(p, env(), 0.5, seq(0.5))
     expect(p.x).toBe(A.x1)
+    expect(p.phase).toBe('turn')
+    p = step(p, env(), 0.06, seq(0.5))
     expect(p.dir).toBe(-1)
+    p = step(p, env(), 0.06, seq(0.5))
+    expect(p.phase).toBe('none')
     p = step(p, env(), 0.5, seq(0.5))
     expect(p.x).toBeLessThan(A.x1)
   })
@@ -584,14 +588,17 @@ describe('going back up', () => {
     let p = standing(stack[1], { hold: 0.01, x: 200 })
     // The ascend choice is appended last, so the top of the range picks it.
     p = step(p, stacked, 0.02, seq(0.999))
+    expect(p.phase).toBe('anticipate')
+    p = step(p, stacked, 0.15, seq(0.5))
     expect(p.locomotion).toBe('fall')
+    expect(p.phase).toBe('takeoff')
     expect(p.vy).toBeLessThan(0) // rising
     for (let i = 0; i < 240 && p.locomotion === 'fall'; i++) p = step(p, stacked, 1 / 60, seq(0.5))
     expect(p.ledgeId).toBe('blk:1')
   })
-
   it('rises past the target before it can be caught, so the arc reads as a jump', () => {
     let p = step(standing(stack[1], { hold: 0.01, x: 200 }), stacked, 0.02, seq(0.999))
+    p = step(p, stacked, 0.15, seq(0.5))
     let highest = p.y
     for (let i = 0; i < 240 && p.locomotion === 'fall'; i++) {
       p = step(p, stacked, 1 / 60, seq(0.5))
@@ -631,6 +638,8 @@ describe('the jump is aimed, not a fixed leap', () => {
     const envFar: StepEnv = { terrain: far, floor: far[1], petHeight: 34, ...ENV_DEFAULTS }
     let p = standing(far[1], { hold: 0.01, x: 400 })
     p = step(p, envFar, 0.02, seq(0.999))
+    expect(p.phase).toBe('anticipate')
+    p = step(p, envFar, 0.15, seq(0.5))
     expect(p.locomotion).toBe('fall')
     for (let i = 0; i < 400 && p.locomotion === 'fall'; i++) p = step(p, envFar, 1 / 60, seq(0.5))
     expect(p.ledgeId).toBe('blk:1')
@@ -665,5 +674,108 @@ describe('the jump is aimed, not a fixed leap', () => {
     }
     const p = step(standing(unreachable[1], { hold: 0.01, x: 400 }), e, 0.02, seq(0.999))
     expect(p.vy).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('motion phases', () => {
+  it('braces before a jump, then releases into takeoff', () => {
+    const stack: Ledge[] = [
+      { id: 'lower', x0: 100, x1: 300, y: 200 },
+      { id: 'upper', x0: 100, x1: 300, y: 260 },
+    ]
+    const e: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
+    let p = standing(stack[1], { x: 200, hold: 0.01 })
+
+    p = step(p, e, 0.02, seq(0.999))
+    expect(p.phase).toBe('anticipate')
+    expect(p.phaseHold).toBeGreaterThanOrEqual(0.12)
+    expect(p.phaseHold).toBeLessThanOrEqual(0.18)
+    expect(p.locomotion).toBe('idle')
+    expect(p.vx).toBe(0)
+    expect(p.x).toBe(200)
+
+    p = step(p, e, 0.15, seq(0.5))
+    expect(p.phase).toBe('takeoff')
+    expect(p.phaseHold).toBeGreaterThanOrEqual(0.07)
+    expect(p.phaseHold).toBeLessThanOrEqual(0.1)
+    expect(p.locomotion).toBe('fall')
+    expect(p.ledgeId).toBeNull()
+    expect(p.vy).toBeLessThan(0)
+  })
+
+  it('holds the pet in anticipation instead of moving it horizontally', () => {
+    const stack: Ledge[] = [
+      { id: 'lower', x0: 100, x1: 300, y: 200 },
+      { id: 'upper', x0: 100, x1: 300, y: 260 },
+    ]
+    const e: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
+    const p = step(
+      step(standing(stack[1], { x: 200, vx: 32, hold: 0.01 }), e, 0.02, seq(0.999)),
+      e,
+      0.05,
+      seq(0.5),
+    )
+    expect(p.phase).toBe('anticipate')
+    expect(p.x).toBe(200)
+    expect(p.vx).toBe(0)
+  })
+
+  it('pauses at an edge and turns halfway through the pause', () => {
+    let p = standing(A, { locomotion: 'walk', dir: 1, x: A.x1 - 1, hold: 100 })
+    p = step(p, env(), 0.5, seq(0.5))
+    expect(p.phase).toBe('turn')
+    expect(p.dir).toBe(1)
+    expect(p.phaseHold).toBeGreaterThan(0.05)
+
+    p = step(p, env(), 0.06, seq(0.5))
+    expect(p.phase).toBe('turn')
+    expect(p.dir).toBe(-1)
+
+    p = step(p, env(), 0.06, seq(0.5))
+    expect(p.phase).toBe('none')
+    expect(p.dir).toBe(-1)
+  })
+
+  it('lands through a scaled compression and bounce phase', () => {
+    const falling: Pet = {
+      ...newPet(200, 100),
+      locomotion: 'fall',
+      vy: 500,
+    }
+    const p = step(falling, env(), 0.2, seq(0.5))
+    expect(p.phase).toBe('land')
+    expect(p.phaseHold).toBeGreaterThanOrEqual(0.15)
+    expect(p.phaseHold).toBeLessThanOrEqual(0.22)
+    expect(p.locomotion).toBe('idle')
+    expect(p.ledgeId).toBe(A.id)
+  })
+
+  it('follows a ledge that moves during landing', () => {
+    const landed = step({ ...newPet(200, 100), locomotion: 'fall', vy: 500 }, env(), 0.2, seq(0.5))
+    const moved: Ledge = { ...A, y: A.y - 40 }
+    const after = step(landed, env([moved]), 1 / 60, seq(0.5))
+    expect(after.phase).toBe('land')
+    expect(after.y).toBe(moved.y)
+  })
+
+  it('falls immediately when the ledge vanishes during a turn', () => {
+    const turning = step(
+      standing(A, { locomotion: 'walk', x: A.x1 - 1, dir: 1, hold: 100 }),
+      env(),
+      0.5,
+      seq(0.5),
+    )
+    const after = step(turning, env([B]), 1 / 60, seq(0.5))
+    expect(after.phase).toBe('none')
+    expect(after.locomotion).toBe('fall')
+    expect(after.y).toBeGreaterThan(A.y)
+  })
+
+  it('never gives a motion phase more than 220 milliseconds', () => {
+    let p = standing(A, { locomotion: 'walk', dir: 1, x: A.x1 - 1, hold: 100 })
+    p = step(p, env(), 0.5, seq(0.5))
+    expect(p.phaseHold).toBeLessThanOrEqual(0.22)
+    const landed = step({ ...newPet(200, 100), locomotion: 'fall', vy: 900 }, env(), 0.2, seq(0.5))
+    expect(landed.phaseHold).toBeLessThanOrEqual(0.22)
   })
 })

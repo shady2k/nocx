@@ -11,8 +11,9 @@
 // each getBoundingClientRect forces the style and layout the scroll just
 // invalidated, sixty times a second, for as long as the pet exists.
 //
-// Painting is one element with a background-position, not one element per
-// frame — the sprite never enters the document as new nodes.
+// Painting is one sprite inside a world transform, not one element per
+// frame — the sprite never enters the document as new nodes. Keeping placement
+// outside expression is what lets compression leave the feet on the ledge.
 
 import {
   attend,
@@ -150,6 +151,7 @@ export class PetOverlay {
   private readonly _host: HTMLElement
   private readonly _blocks: HTMLElement
   private readonly _layer: HTMLElement
+  private readonly _world: HTMLElement
   private readonly _sprite: HTMLElement
   private readonly _raf: (cb: (t: number) => void) => number
   private readonly _caf: (h: number) => void
@@ -212,9 +214,12 @@ export class PetOverlay {
 
     this._layer = document.createElement('div')
     this._layer.className = 'pet-layer'
+    this._world = document.createElement('div')
+    this._world.className = 'pet-world'
     this._sprite = document.createElement('div')
     this._sprite.className = 'pet-sprite'
-    this._layer.appendChild(this._sprite)
+    this._world.appendChild(this._sprite)
+    this._layer.appendChild(this._world)
 
     this._pet = newPet(0, 0)
     this._opts = opts
@@ -575,16 +580,46 @@ export class PetOverlay {
     this._layer.dataset.doing = `${this._pet.locomotion}/${this._pet.activity}`
     this._layer.dataset.mood = this._pet.mood
     this._layer.dataset.watching = this._pet.attending ?? 'nothing'
+    this._layer.dataset.phase = this._pet.phase
+    let expressionScaleX = 1
+    let expressionScaleY = 1
+    const progress =
+      this._pet.phaseDuration > 0
+        ? Math.min(1, Math.max(0, 1 - this._pet.phaseHold / this._pet.phaseDuration))
+        : 1
+    if (this._pet.phase === 'anticipate') {
+      expressionScaleX = 1.04
+      expressionScaleY = 0.94
+    } else if (this._pet.phase === 'takeoff') {
+      expressionScaleX = 1.04 - 0.04 * progress
+      expressionScaleY = 0.94 + 0.06 * progress
+    } else if (this._pet.phase === 'land') {
+      if (progress <= 0.5) {
+        const compression = progress * 2
+        expressionScaleX = 1 + 0.04 * compression
+        expressionScaleY = 1 - 0.06 * compression
+      } else {
+        const rebound = (progress - 0.5) * 2
+        const bump = rebound <= 0.75 ? rebound / 0.75 : (1 - rebound) / 0.25
+        expressionScaleX = 1.04 - 0.04 * rebound
+        // The little bump settles to scaleY 1.0 exactly at phase end.
+        expressionScaleY = 0.94 + 0.06 * rebound + 0.04 * bump
+      }
+    }
+    const world = this._world.style
+    world.width = `${width}px`
+    world.height = `${this._height}px`
+    // World placement and facing are separate from the expressive transform:
+    // independent scaleY/rotation must not fight the pet's translated position.
+    world.transform =
+      `translate(${this._pet.x - width / 2}px, ${this._pet.y - this._height}px) ` +
+      `scaleX(${this._pet.dir > 0 ? 1 : -1})`
     const s = this._sprite.style
     s.width = `${width}px`
     s.height = `${this._height}px`
     s.backgroundImage = `url(${take.url})`
     s.backgroundSize = `${take.sheetWidth * this._scale}px ${take.sheetHeight * this._scale}px`
     s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * this._scale}px ${-y0 * this._scale}px`
-    // translate, not left/top: the pet moves on the compositor and never
-    // asks the pane for a new layout.
-    s.transform =
-      `translate(${this._pet.x - width / 2}px, ${this._pet.y - this._height}px) ` +
-      `scaleX(${this._pet.dir > 0 ? 1 : -1})`
+    s.transform = `scale(${expressionScaleX}, ${expressionScaleY})`
   }
 }

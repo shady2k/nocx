@@ -17,6 +17,15 @@
   z-index: 2;
 }
 
+.pet-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
 .pet-sprite {
   position: absolute;
   top: 0;

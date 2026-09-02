@@ -190,11 +190,9 @@ test.afterAll(async () => {
   await fake?.stop()
 })
 
-interface ResolvedCell {
-  char?: string
-}
 interface ResolvedRow {
-  cells?: ResolvedCell[]
+  kind?: string
+  text?: string
 }
 interface ResolvedFrame {
   requestId?: string
@@ -338,9 +336,7 @@ async function recorded(page: Page): Promise<SpecRecord> {
 }
 
 function frameText(frame: ResolvedFrame): string {
-  return (frame.rows ?? [])
-    .map((row) => (row.cells ?? []).map((cell) => cell.char ?? '').join(''))
-    .join('\n')
+  return (frame.rows ?? []).map((row) => row.text ?? '').join('\n')
 }
 
 async function openApp(page: Page): Promise<void> {
@@ -728,10 +724,16 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
         const command = children.find((el) => el.textContent?.includes(expected.command))
         const first = children.find((el) => el.textContent?.includes(expected.first))
         const secondAnswer = children.find((el) => el.textContent?.includes(expected.second))
+        const commandAt = command ? children.indexOf(command) : -1
+        const firstAt = first ? children.indexOf(first) : -1
         return {
-          command: command ? children.indexOf(command) : -1,
-          first: first ? children.indexOf(first) : -1,
+          command: commandAt,
+          first: firstAt,
           second: secondAnswer ? children.indexOf(secondAnswer) : -1,
+          between:
+            commandAt >= 0 && firstAt > commandAt
+              ? children.slice(commandAt + 1, firstAt).map((el) => el.className)
+              : ['unseated'],
           firstCount: children.filter((el) => el.textContent?.includes(expected.first)).length,
           secondCount: children.filter((el) => el.textContent?.includes(expected.second)).length,
         }
@@ -740,7 +742,13 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     )
     expect(seating).not.toBeNull()
     expect(seating).toMatchObject({ firstCount: 1, secondCount: 1 })
-    expect(seating!.first).toBe(seating!.command + 1)
+    // The answers follow the command, in ask order, with nothing of their own
+    // between them. The one thing that may sit between the command and the
+    // first answer is the live region: it is that command's output seat and
+    // rides with the block it belongs to, and the freeze empties it in place
+    // rather than moving it (nocx-hp8p2.8).
+    expect(seating!.first).toBeGreaterThan(seating!.command)
+    for (const cls of seating!.between) expect(cls).toContain('xterm-live-container')
     expect(seating!.second).toBe(seating!.first + 1)
 
     await expect

@@ -49,9 +49,29 @@ export function mintLiveFrame(
     }
     rows.push({ kind: 'cells', cells })
   }
+  // THE CURSOR IS PARKED INSIDE THE GEOMETRY IT IS REPORTED WITH.
+  // xterm reports cursorX === cols while the cursor hangs past the last
+  // written cell awaiting a wrap — the ordinary resting state of any row
+  // that fills the width, which for a full-screen TUI is most of them. That
+  // column is outside the frame's own identity, and the wire contract
+  // refuses it (validateLiveFrameBody: cursor.Col < identity.cols). The
+  // refusal is silent by construction — the resolution never reaches the
+  // broker, the pending request stays armed, and the run dies thirty
+  // seconds later on a timeout that names the renderer rather than the
+  // frame. Measured on `top`: 878 KB of screen discarded on the ingress,
+  // "cursor is out of bounds" (nocx-hp8p2.4).
+  //
+  // Parking rather than widening the contract: a pending wrap IS the last
+  // column with a flag, so the last column is the truthful answer inside
+  // the vocabulary a frame has, and every consumer keeps a cursor it can
+  // index with.
+  const cursor = {
+    line: seam.cursor.line,
+    col: Math.min(Math.max(seam.cursor.col, 0), Math.max(identity.cols - 1, 0)),
+  }
   return {
     rows,
-    cursor: seam.cursor,
+    cursor,
     provenance: {
       source: 'live',
       identity,

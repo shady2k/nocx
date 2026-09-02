@@ -18,12 +18,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 )
 
@@ -62,6 +64,18 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"snippets.update":  executeSnippetsUpdate,
 	"snippets.delete":  executeSnippetsDelete,
 	"snippets.reorder": executeSnippetsReorder,
+	"skills.read":      executeSkillsRead,
+	"skills.create":    executeSkillsCreate,
+	"skills.update":    executeSkillsUpdate,
+	"skills.delete":    executeSkillsDelete,
+}
+
+// SkillSource is the assistant's seam onto the skill library. The index is
+// what the prompt lists; Read is what the tool returns. The interface exists
+// so the assistant depends on the abstraction and not on internal/skill.
+type SkillSource interface {
+	Index() []skill.Skill
+	Read(name, relPath string) (skill.Content, error)
 }
 
 // toolSeams is the per-RUN infrastructure an executor may need and the
@@ -72,7 +86,12 @@ type toolSeams struct {
 	sessions         SessionSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
+	skills           SkillLibrary
+	skillDraft       *SkillDraftRequest
+	skillDraftHTTP   *http.Client
 	fetcher          apifetch.TextFetcher
+	snapshots        *runSnapshots
+	runID            string
 }
 
 type noteSearchRow struct {
@@ -122,9 +141,9 @@ func contentScope(cap agenttools.Capability, tool string) (*agenttools.ContentSc
 	return scope, nil
 }
 
-func requireContentRoot(scope *agenttools.ContentScope, tool string) error {
-	if !scope.Allows("content") {
-		return fmt.Errorf("%s: content library is outside the run's grant", tool)
+func requireContentFamily(scope *agenttools.ContentScope, tool, family string) error {
+	if !scope.Allows(family) {
+		return fmt.Errorf("%s: %s library is outside the run's grant", tool, family)
 	}
 	return nil
 }
@@ -142,7 +161,9 @@ func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.R
 		return "", fmt.Errorf("fetch.url: capability is %T, not *agenttools.URLScope", cap)
 	}
 	var p struct {
-		URL string `json:"url"`
+		URL      string `json:"url"`
+		Start    *int64 `json:"start"`
+		Revision string `json:"revision"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("fetch.url: args: %w", err)
@@ -150,14 +171,18 @@ func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.R
 	if !scope.Allows(p.URL) {
 		return "", errors.New("fetch.url: URL is outside the run's destination grant")
 	}
-	if seams.fetcher == nil {
-		return "", errors.New("fetch.url: URL fetcher is unavailable")
-	}
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
-	result, err := seams.fetcher.FetchText(ctx, p.URL, bound.MaxBytes)
+	start := int64(0)
+	if p.Start != nil {
+		start = *p.Start
+	}
+	if seams.snapshots == nil {
+		return "", errors.New("fetch.url: snapshot store is unavailable")
+	}
+	result, err := seams.snapshots.Fetch(ctx, seams.fetcher, seams.runID, p.URL, start, p.Revision, bound.MaxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +221,7 @@ func executeNotesSearch(ctx context.Context, cap agenttools.Capability, args jso
 			result.Notes = []noteSearchRow{{ID: n.ID, Title: n.Title, Body: n.Body, UpdatedAt: n.UpdatedAt}}
 			return nil
 		}
-		if rootErr := requireContentRoot(scope, "notes.search"); rootErr != nil {
+		if rootErr := requireContentFamily(scope, "notes.search", "note"); rootErr != nil {
 			return rootErr
 		}
 		rows, searchErr := svc.Search(callCtx, p.Query)
@@ -233,7 +258,7 @@ func executeNotesCreate(ctx context.Context, cap agenttools.Capability, args jso
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("notes.create: args: %w", unmarshalErr)
 	}
-	if rootErr := requireContentRoot(scope, "notes.create"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "notes.create", "note"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.noteOperation == nil {
@@ -312,7 +337,7 @@ func executeSnippetsList(ctx context.Context, cap agenttools.Capability, args js
 	if err != nil {
 		return "", err
 	}
-	if rootErr := requireContentRoot(scope, "snippets.list"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.list", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.snippetOperation == nil {
@@ -352,7 +377,7 @@ func executeSnippetsCreate(ctx context.Context, cap agenttools.Capability, args 
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("snippets.create: args: %w", unmarshalErr)
 	}
-	if rootErr := requireContentRoot(scope, "snippets.create"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.create", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.snippetOperation == nil {
@@ -432,7 +457,7 @@ func executeSnippetsReorder(ctx context.Context, cap agenttools.Capability, args
 	if err != nil {
 		return "", err
 	}
-	if rootErr := requireContentRoot(scope, "snippets.reorder"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.reorder", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	var p struct {
@@ -462,6 +487,149 @@ func marshalResult(v any) (string, error) {
 		return "", fmt.Errorf("agent tool: marshal result: %w", err)
 	}
 	return string(b), nil
+}
+
+type skillReadFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
+type skillReadResult struct {
+	Name    string            `json:"name"`
+	Path    string            `json:"path"`
+	Content string            `json:"content"`
+	Finding *skillReadFinding `json:"finding,omitempty"`
+}
+
+func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "skills.read")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("skills.read: args: %w", unmarshalErr)
+	}
+	if !scope.Allows("skill/" + p.Name) {
+		return "", fmt.Errorf("skills.read: %q is outside this run's grant", p.Name)
+	}
+	if seams.skills == nil {
+		return "", errors.New("skills.read: the skill library is unavailable")
+	}
+	got, err := seams.skills.Read(p.Name, p.Path)
+	if err != nil {
+		return "", fmt.Errorf("skills.read: %w", err)
+	}
+	result := skillReadResult{Name: p.Name, Path: got.Path, Content: string(got.Bytes)}
+	if got.Provenance != skill.ProvenanceBuiltin {
+		findings := skill.Scan(got.Bytes)
+		if len(findings) > 0 {
+			finding := findings[0]
+			result.Finding = &skillReadFinding{
+				PatternID:  finding.PatternID,
+				Line:       finding.Line,
+				LineNumber: finding.LineNumber,
+			}
+		}
+	}
+	if got.Changed {
+		result.Content = fmt.Sprintf("Skill %q changed since approval; the person approved different bytes.\n%s", p.Name, result.Content)
+	}
+	if got.Changed || result.Finding != nil {
+		result.Content = agenttools.FrameUntrusted(result.Content)
+	}
+	return marshalResult(result)
+}
+
+type skillWriteFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
+type skillWriteResult struct {
+	Status  string             `json:"status"`
+	Name    string             `json:"name"`
+	Finding *skillWriteFinding `json:"finding,omitempty"`
+}
+
+func executeSkillsCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	return executeSkillsWrite(ctx, "skills.create", "created", cap, args, seams, func(library SkillLibrary, name, description, body string) error {
+		return library.Create(name, description, body)
+	})
+}
+
+func executeSkillsUpdate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	return executeSkillsWrite(ctx, "skills.update", "updated", cap, args, seams, func(library SkillLibrary, name, description, body string) error {
+		return library.Update(name, description, body)
+	})
+}
+
+func executeSkillsDelete(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := skillWriteScope(cap, "skills.delete")
+	if err != nil {
+		return "", err
+	}
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("skills.delete: args: %w", err)
+	}
+	if !scope.Allows(params.Name) {
+		return "", fmt.Errorf("skills.delete: %q is outside this run's grant", params.Name)
+	}
+	library := seams.skills
+	if err := library.Delete(params.Name); err != nil {
+		return "", fmt.Errorf("skills.delete: %w", err)
+	}
+	return marshalResult(skillWriteResult{Status: "deleted", Name: params.Name})
+}
+
+func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.Capability, args json.RawMessage, seams toolSeams, write func(SkillLibrary, string, string, string) error) (string, error) {
+	scope, err := skillWriteScope(cap, tool)
+	if err != nil {
+		return "", err
+	}
+	var params struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("%s: args: %w", tool, err)
+	}
+	if !scope.Allows(params.Name) {
+		return "", fmt.Errorf("%s: %q is outside this run's grant", tool, params.Name)
+	}
+	library := seams.skills
+
+	result := skillWriteResult{Status: status, Name: params.Name}
+	findings := skill.Scan([]byte(params.Body))
+	if len(findings) > 0 {
+		finding := findings[0]
+		result.Finding = &skillWriteFinding{
+			PatternID:  finding.PatternID,
+			Line:       finding.Line,
+			LineNumber: finding.LineNumber,
+		}
+	}
+	if err := write(library, params.Name, params.Description, params.Body); err != nil {
+		return "", fmt.Errorf("%s: %w", tool, err)
+	}
+	return marshalResult(result)
+}
+
+func skillWriteScope(cap agenttools.Capability, tool string) (*agenttools.SkillWriteScope, error) {
+	scope, ok := cap.(*agenttools.SkillWriteScope)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, not *agenttools.SkillWriteScope", tool, cap)
+	}
+	return scope, nil
 }
 
 func marshalBoundedNotes(rows []noteSearchRow, max int64) (string, error) {
@@ -673,10 +841,7 @@ type readScreenIdent struct {
 // fields the window contract needs and never re-validates them.
 type frameBodyWire struct {
 	Rows []struct {
-		Kind  string `json:"kind"`
-		Cells []struct {
-			Char string `json:"char"`
-		} `json:"cells"`
+		Kind string `json:"kind"`
 		Text string `json:"text"`
 	} `json:"rows"`
 	Cursor *struct {

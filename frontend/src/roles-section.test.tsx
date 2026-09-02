@@ -50,11 +50,7 @@ function ep(id: string, name: string, models: string[]): Endpoint {
   }
 }
 
-function role(
-  role: 'answering' | 'classifier',
-  endpointId: string | null,
-  model: string | null,
-): Role {
+function role(role: Role['role'], endpointId: string | null, model: string | null): Role {
   return { role, endpointId, model }
 }
 
@@ -178,6 +174,18 @@ describe('the closed role set is visible', () => {
       expect(roleRows(container).length).toBe(2)
     })
     expect(text(roleRows(container)[0])).toMatch(/No model assigned/)
+  })
+  it('shows that an unassigned summarizing role uses the answering endpoint', async () => {
+    const { container } = mountRoles(
+      [ep('e1', 'OpenAI', ['gpt-4o'])],
+      [
+        role('answering', 'e1', 'gpt-4o'),
+        role('classifier', null, null),
+        role('summarizing', null, null),
+      ],
+    )
+    await vi.waitFor(() => expect(roleRows(container).length).toBe(3))
+    expect(text(roleRows(container)[2])).toMatch(/answering role.*OpenAI|OpenAI.*answering role/i)
   })
 })
 

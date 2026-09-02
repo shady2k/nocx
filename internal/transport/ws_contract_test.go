@@ -3837,7 +3837,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// No subscriber, then a change: the same shape a drop leaves, made
@@ -3881,6 +3881,48 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Rev == "" {
 		t.Error("rev is absent — the poll loop knew the new digest and must carry it")
+	}
+}
+
+func TestFilesRefreshStateChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.refreshStateChanged.schema.json")
+	for _, state := range []filesRefreshState{filesRefreshStateOK, filesRefreshStateDelayed} {
+		raw, err := json.Marshal(filesRefreshStateChangedParams{
+			BindingID: "binding-1",
+			State:     string(state),
+		})
+		if err != nil {
+			t.Fatalf("marshal %s: %v", state, err)
+		}
+		validateJSON(t, schema, raw, "files.refreshStateChanged DTO")
+	}
+}
+
+// The real notification is emitted by attach's state replay, then validated
+// from the params bytes read off the new WebSocket connection.
+func TestFilesRefreshStateChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.refreshStateChanged.schema.json")
+	e := newFilesTestEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+
+	w.mu.Lock()
+	w.refreshState = filesRefreshStateDelayed
+	w.mu.Unlock()
+	dropSubscriber(t, e, sid)
+	connB := reattach(t, e, sid, 4)
+
+	raw := readNotification(t, connB, "files.refreshStateChanged", wantWithin)
+	validateJSON(t, schema, raw, "files.refreshStateChanged params (real socket)")
+	var got filesRefreshStateChangedParams
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.BindingID != bid || got.State != string(filesRefreshStateDelayed) {
+		t.Fatalf("got %+v; want binding %q delayed", got, bid)
 	}
 }
 
@@ -5765,14 +5807,8 @@ func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
 	body, err := json.Marshal(readScreenResolvedParams{
 		Outcome: "frame",
-		Rows: []frameRowWire{{
-			Kind: "cells",
-			Cells: []frameCellWire{
-				{Char: "h", Attrs: frameAttrsWire{}},
-				{Char: "i", Attrs: frameAttrsWire{}},
-			},
-		}},
-		Cursor: &frameCursorWire{Line: 0, Col: 0},
+		Rows:    []frameRowWire{{Kind: "text", Text: "hi"}},
+		Cursor:  &frameCursorWire{Line: 0, Col: 0},
 		Identity: &frameIdentityWire{
 			Buffer: frameBufferWire{Kind: "normal"},
 			Cols:   2, Rows: 1, Generation: 1,

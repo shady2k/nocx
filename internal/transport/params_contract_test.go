@@ -320,6 +320,18 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"settings.set": {
 			[]byte(`{"key":"clipboard.osc52Suppressed","value":true}`),
 		},
+		"skills.list": {
+			[]byte(`{}`),
+		},
+		"skills.remove": {
+			[]byte(`{"name":"deploy"}`),
+		},
+		"skills.setEnabled": {
+			[]byte(`{"name":"deploy","enabled":true}`),
+		},
+		"skills.approve": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"shell.commandNames": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
@@ -423,6 +435,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"api.request.cancel": {
 			[]byte(`{"token":"token-1"}`),
 		},
+		"rpc.cancel": {
+			[]byte(`{"id":1}`),
+			[]byte(`{"id":"request-1"}`),
+		},
 		"api.request.delete": {
 			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json"}`),
 		},
@@ -470,6 +486,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"files.uploadCancel": {
 			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		// Both values, because the flag is the whole method: a probe set that
+		// only ever says "true" would accept a schema that had made the field
+		// a constant.
+		"files.visible": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","visible":true}`),
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","visible":false}`),
 		},
 		"files.watch": {
 			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","paths":[]}`),
@@ -712,6 +735,17 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			// tolerant decoder for optional input; malformed JSON values
 			// remain the shared shape rejection for them.
 			probes = [][]byte{[]byte(`[]`), []byte(`"scalar"`), []byte(`true`)}
+		case "rpc.cancel":
+			// JSON-RPC permits string and number ids, so the shared id-length
+			// and numeric probes are valid for this method.
+			probes = [][]byte{
+				[]byte(`[]`),
+				[]byte(`"scalar"`),
+				[]byte(`true`),
+				[]byte(`{"unknown":true}`),
+				[]byte(`{"id":null}`),
+				[]byte(`{"id":{}}`),
+			}
 		}
 		for _, raw := range probes {
 			raw := raw

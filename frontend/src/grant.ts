@@ -1,4 +1,4 @@
-import type { GrantBlock } from './ask-entry'
+import { grantRows, type GrantBlock } from './ask-entry'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 
 export type { GrantBlock }
@@ -83,9 +83,16 @@ export class GrantController {
     }
   }
 
-  /** The panel rows include the automatic attachment after person marks. */
+  /** The panel rows include the automatic attachment after person marks —
+   *  unless a person mark has NARROWED it. Marking rows inside the frozen
+   *  screen produces a mark on the screen's own item id plus a row span, and
+   *  that band is what the question carries; listing the whole screen beside
+   *  it would name two attachments where one travels (nocx-hp8p2.7). */
   private panelBlocks(): GrantBlock[] {
-    return this.automaticBlock === null ? [...this.blocks] : [...this.blocks, this.automaticBlock]
+    const automatic = this.automaticBlock
+    if (automatic === null) return [...this.blocks]
+    const narrowed = this.blocks.some((block) => block.itemId === automatic.itemId)
+    return narrowed ? [...this.blocks] : [...this.blocks, automatic]
   }
 
   /**
@@ -119,13 +126,24 @@ export class GrantController {
   private updateChip(): void {
     const count = this.blocks.length
     this.chip.dataset.state = count === 0 ? 'default' : 'chosen'
-    const automatic = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
+    // SHORT ON THE CHIP, WHOLE IN THE NAME (nocx-hp8p2.5). The chip is a
+    // count in a narrow box beside several others; the full sentence made it
+    // twice its width and it was painted over its neighbours. The attachment
+    // is already stated twice at full length beside it — the freeze badge on
+    // the same row, and its own row in this chip's popover — so what belongs
+    // here is the fact that something came with the question, not the
+    // sentence about it. The accessible name and the title keep the sentence.
+    const automatic = this.automaticBlock === null ? '' : ' + screen'
+    const spoken = this.automaticBlock === null ? '' : ' · frozen screen attached automatically'
     this.chip.textContent = `marked for the question · ${count}${automatic}`
+    // The chip ellipsises when the pane is narrow (style.css), so the title
+    // carries the whole line rather than a label about it — nothing may live
+    // only in the ellipsis.
     this.chip.title =
       count === 0 && this.automaticBlock === null
         ? 'Mark blocks to include them in a question'
-        : 'Open the marked blocks'
-    this.chip.setAttribute('aria-label', `marked for the question · ${count}${automatic}`)
+        : `Open the marked blocks — marked for the question · ${count}${spoken}`
+    this.chip.setAttribute('aria-label', `marked for the question · ${count}${spoken}`)
   }
 
   private renderPanel(): void {
@@ -183,10 +201,7 @@ export class GrantController {
     grant.blockEl.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
     const marked: HTMLElement[] =
       grant.start !== undefined && grant.count !== undefined
-        ? Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
-            grant.start,
-            grant.start + grant.count,
-          )
+        ? grantRows(grant.blockEl).slice(grant.start, grant.start + grant.count)
         : [grant.blockEl]
     for (const element of marked) {
       element.classList.remove('cmd-block-grant-flash')
@@ -203,7 +218,7 @@ export class GrantController {
     if (!this.visible) {
       for (const grant of this.blocks) {
         grant.blockEl.classList.remove('cmd-block-grant-flash')
-        for (const row of grant.blockEl.querySelectorAll<HTMLElement>('.term-line')) {
+        for (const row of grantRows(grant.blockEl)) {
           row.classList.remove('cmd-block-grant-flash')
         }
       }
@@ -211,10 +226,11 @@ export class GrantController {
     }
     for (const grant of this.blocks) {
       if (grant.start !== undefined && grant.count !== undefined) {
-        const rows = Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
-          grant.start,
-          grant.start + grant.count,
-        )
+        // The rows a mark covers are the markable surface's own — a block's
+        // `.term-line`, the frozen screen's `.nocx-freeze-frame__row`
+        // (nocx-hp8p2.7). Reading one selector here painted nothing at all
+        // for a mark made inside the frame.
+        const rows = grantRows(grant.blockEl).slice(grant.start, grant.start + grant.count)
         for (const row of rows) {
           row.dataset.granted = 'true'
           this.paintedRows.add(row)

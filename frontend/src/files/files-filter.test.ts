@@ -53,6 +53,18 @@ const more = (depth: number): FilesFlatRow => ({
   depth,
 })
 
+const loading = (depth: number): FilesFlatRow => ({
+  kind: 'loading',
+  dir: node('x'),
+  depth,
+})
+
+const state = (depth: number): FilesFlatRow => ({
+  kind: 'state',
+  dir: node('x'),
+  depth,
+})
+
 const names = (rows: FilesFlatRow[]): string[] =>
   rows.map((r) => (r.kind === 'entry' ? r.node.name : `<${r.kind}@${r.depth}>`))
 
@@ -138,14 +150,60 @@ describe('narrowing the tree', () => {
     expect(names(narrowFilesRows(rows, 'zzz'))).toEqual(['<more@0>'])
   })
 
-  it('keeps a folder`s structural row only while that folder is on screen', () => {
+  it('brings a structural row`s ancestors with it — it is where the filter could not look', () => {
+    // This replaces the opposite rule, which said a structural row must
+    // never put a folder on screen. The consequence was that "Show next
+    // 211" survived only under a folder that was already visible for some
+    // other reason — so the moment nothing matched, the one row that could
+    // explain the empty answer was removed BY the empty answer, and the
+    // panel said "No files match" over a blank tree (nocx-708q.7).
+    //
+    // A structural row is not an entry with a name; it is a statement that
+    // this directory holds entries the filter has NOT SEEN. That is as good
+    // a reason to put a folder on screen as a descendant that matched, so
+    // it earns its ancestors the same way.
     const rows = [entry('src', 0), entry('a.ts', 1), more(1), entry('docs', 0), more(1)]
-    // 'a.ts' matches, so src is on screen and its "show next" belongs there.
-    expect(names(narrowFilesRows(rows, 'a.ts'))).toEqual(['src', 'a.ts', '<more@1>'])
-    // Nothing under docs matched and docs did not either, so neither docs
-    // nor its "show next" appear — a structural row must not drag a folder
-    // into view.
-    expect(names(narrowFilesRows(rows, 'a.ts'))).not.toContain('docs')
+    expect(names(narrowFilesRows(rows, 'zzz'))).toEqual(['src', '<more@1>', 'docs', '<more@1>'])
+  })
+
+  it('says it for every structural kind, because each one means the same thing', () => {
+    // Unlisted pages, a listing in flight, and a directory that could not
+    // be listed at all are three ways of saying "not searched".
+    const rows = [entry('a', 0), more(1), entry('b', 0), loading(1), entry('c', 0), state(1)]
+    expect(names(narrowFilesRows(rows, 'zzz'))).toEqual([
+      'a',
+      '<more@1>',
+      'b',
+      '<loading@1>',
+      'c',
+      '<state@1>',
+    ])
+  })
+
+  it('leaves out a folder with neither a match nor anything unseen', () => {
+    // The rule stays single — a row is shown when it matches, when
+    // something below it matches, or when something below it is unseen —
+    // and this is the case that keeps it from collapsing into "show
+    // everything". docs is fully listed and holds nothing matching, so the
+    // filter HAS searched it and can honestly leave it out.
+    const rows = [entry('src', 0), entry('a.ts', 1), more(1), entry('docs', 0), entry('b.ts', 1)]
+    expect(names(narrowFilesRows(rows, 'zzz'))).toEqual(['src', '<more@1>'])
+  })
+
+  it('emits a folder once when it both matches and holds unseen entries', () => {
+    const rows = [entry('src', 0), entry('a.ts', 1), more(1)]
+    expect(names(narrowFilesRows(rows, 'src'))).toEqual(['src', '<more@1>'])
+  })
+
+  it('keeps depth-first order when a match and an unsearched folder interleave', () => {
+    const rows = [
+      entry('src', 0),
+      entry('deep.ts', 1),
+      entry('docs', 0),
+      more(1),
+      entry('tail.ts', 0),
+    ]
+    expect(names(narrowFilesRows(rows, 'deep'))).toEqual(['src', 'deep.ts', 'docs', '<more@1>'])
   })
 
   it('preserves depth-first order across siblings at several depths', () => {

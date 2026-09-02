@@ -20,10 +20,10 @@ import (
 )
 
 type transportFetchTextFetcher struct {
-	result apifetch.TextResult
+	result apifetch.TextDocument
 }
 
-func (f transportFetchTextFetcher) FetchText(context.Context, string, int64) (apifetch.TextResult, error) {
+func (f transportFetchTextFetcher) FetchText(context.Context, apifetch.TextRequest) (apifetch.TextDocument, error) {
 	return f.result, nil
 }
 
@@ -106,7 +106,7 @@ func TestFetchURLResult_OverTheWireConformsToContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(provider.serve))
 	defer server.Close()
 
-	fetcher := transportFetchTextFetcher{result: apifetch.TextResult{
+	fetcher := transportFetchTextFetcher{result: apifetch.TextDocument{
 		URL: "https://example.test/page", ContentType: "text/html", Text: "hello from the page",
 	}}
 	h := newAskHarnessWithOpts(t, mustClient(t),

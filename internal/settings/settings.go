@@ -646,6 +646,18 @@ var HistoryEnabled = MustRegisterBool(BoolSpec{
 	Default:     true,
 })
 
+// SkillsEnabled controls whether discovered skills participate in assistant
+// grants and prompt facts. It is deliberately a normal declaration so the
+// setting persists with the rest of the application settings.
+var SkillsEnabled = MustRegisterBool(BoolSpec{
+	Key:         "skills.enabled",
+	Section:     "Skills",
+	Label:       "Enable skills",
+	Description: "Allow the assistant to discover and use local skills.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
 // HistoryRetentionDays is the age-based retention limit. The label is honest
 // by design (internal/content's package doc): ordinary DELETE leaves rows in
 // WAL pages and free space, so the wording says "removed from nocx", never
@@ -1026,6 +1038,7 @@ func init() {
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
+	RegisterSectionGroup("Skills", "application")
 	RegisterSectionGroup("Pets", "application")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build

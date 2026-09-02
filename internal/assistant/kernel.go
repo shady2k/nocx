@@ -46,6 +46,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -54,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // PolicyRefusalReason is WHY a call was refused — the branches decide takes,
@@ -224,6 +226,31 @@ type ApprovalRequest struct {
 	// CommandInvocation preserves command-vs-non-command provenance for the
 	// approval surface, including malformed command parses.
 	CommandInvocation bool `json:"-"`
+	// Finding is the first static-scan finding in a skills.create or
+	// skills.update body, carried to the person with the exact proposal.
+	Finding *SkillScanFinding `json:"finding,omitempty"`
+	// Classifier is the classifier's verdict or bounded failure fact for a
+	// skills write. It is absent for ordinary policy approvals.
+	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
+}
+
+// SkillScanFinding is the first suspicious instruction pattern found in a
+// proposed skill body. It is evidence for the person approving the exact
+// bytes, never the body itself.
+type SkillScanFinding struct {
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
+}
+
+// ApprovalClassifier is the classifier gate's fact carried with an approval
+// question. A failed consultation has no verdict or model, but still carries
+// its bounded failure reason so the gate cannot disappear silently.
+type ApprovalClassifier struct {
+	Consulted bool              `json:"consulted"`
+	Verdict   ClassifierVerdict `json:"verdict,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	Reason    string            `json:"reason"`
 }
 
 func init() {
@@ -245,6 +272,13 @@ type AttemptLedger interface {
 	// turn's own entry (nocx-h1l4o, ADR-0040). The store assigns the seat;
 	// see content.LedgerRepository.AddCause for why the caller may not.
 	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// CaptureOutput records a BODY for an entry, through the one gate a
+	// durable body passes: output retention, the entry's sensitivity and
+	// the environment's criticality (design §7.4). The action entry of a
+	// tool call gets its result this way (nocx-hp8p2.13) — ADR-0040's tree
+	// gives every other block kind a body and left `action` with none, so
+	// "what came back" had nowhere to be asked from.
+	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
 }
 
 // maxArgsBytes bounds the model's argument JSON — the ingress size bound of
@@ -340,7 +374,7 @@ type effectKernel struct {
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, automaticItems []string, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
+func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, attached Attachments, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -363,7 +397,8 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		runCtx: agenttools.RunContext{
 			RunID:                 runID,
 			Session:               sessionID,
-			AutomaticSessionItems: append([]string(nil), automaticItems...),
+			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
+			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 		},
 		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
 		results:    make(map[string]*jsonschema.Schema, len(registry.All())),
@@ -521,10 +556,25 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	if !m.inScope(t, resources, resourceDeclaration) {
 		return policyRefuse, RefusedOutOfScope, ""
 	}
+	if decision == content.DecisionPermit && isSkillMutationTool(t) {
+		return policyAsk, "", ""
+	}
 	if decision == content.DecisionPermit {
 		return policyPermit, "", ""
 	}
 	return policyAsk, "", ""
+}
+
+func isSkillMutationTool(tool agenttools.Tool) bool {
+	if tool.ScopeFamily != "skill" {
+		return false
+	}
+	for _, effect := range tool.Declaration.Effect {
+		if effect != content.EffectObserve {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []agenttools.ResourceRef) (string, bool) {
@@ -708,6 +758,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.ArgHash = ap.ArgHash
 	ask.CommandInvocation = decl.CommandArg != ""
 	ask.Invocation = cloneInvocation(invocation)
+	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -722,7 +773,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 // with: one builder is what keeps a classifier ask from reaching the surface
 // without an effect, which the notification's schema requires.
 func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef) *ApprovalRequest {
-	return &ApprovalRequest{
+	req := &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
 		Tool:      decl.Name,
@@ -731,6 +782,32 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 		Effect:    decl.Effect,
 		Resources: append([]agenttools.ResourceRef(nil), resources...),
 		Resource:  matchedResource(resources),
+	}
+	if decl.Name == "skills.create" || decl.Name == "skills.update" {
+		var params struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(rawArgs), &params); err == nil {
+			if findings := skill.Scan([]byte(params.Body)); len(findings) > 0 {
+				finding := findings[0]
+				req.Finding = &SkillScanFinding{
+					PatternID: finding.PatternID, Line: finding.Line, LineNumber: finding.LineNumber,
+				}
+			}
+		}
+	}
+	return req
+}
+
+func approvalClassifier(fact *classifierFact) *ApprovalClassifier {
+	if fact == nil {
+		return nil
+	}
+	return &ApprovalClassifier{
+		Consulted: fact.Consulted,
+		Verdict:   fact.Verdict,
+		Model:     fact.Model,
+		Reason:    fact.Reason,
 	}
 }
 
@@ -1333,6 +1410,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	if !ok {
 		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
 	}
+	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
+		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
+		if err != nil {
+			k.warn("agent tool: skill draft could not be generated", "error", err)
+			return modelResult{
+				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
+				kind: modelNocxMessage,
+			}, nil
+		}
+		rawArgs = generated
+	}
 
 	// 2. Parameter validation against the tool's schema: the file the
 	// model was shown, byte for byte, plus the ingress size bound.
@@ -1397,6 +1485,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
+	skillMutation := isSkillMutationTool(decl)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1414,24 +1503,22 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// Approval binds to the exact proposal: an approved call skips
 		// the ask; a changed argument hashes differently and does NOT
 		// resume under the old approval (design §7.2).
-		ap := k.proposal(decl.Name, callID, rawArgs)
-		if k.approvals != nil && k.approvals.IsApproved(ap) {
-			break // the exact proposal was approved; verify before dispatch
+		if !skillMutation {
+			ap := k.proposal(decl.Name, callID, rawArgs)
+			if k.approvals != nil && k.approvals.IsApproved(ap) {
+				break // the exact proposal was approved; verify before dispatch
+			}
+			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 
 	}
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
-	// ask — never lower it. Consulted ONLY where the policy says permit
-	// (an ask or refuse cannot be changed by its verdict, and its
-	// latency must stay off a path where a person is already waiting),
-	// and skipped for the exact proposal a person already approved —
-	// the approval covers the proposal INCLUDING its classification,
-	// and consulting the classifier again on the approved resume could
-	// ask forever. Failure is escalation, always: unreachable, timed
-	// out, unparseable and role-unassigned each escalate, and the
-	// classifier is never silently skipped.
+	// ask — never lower it. Ordinary calls are consulted only where the
+	// policy says permit; skill mutations are deliberately consulted
+	// before their mandatory approval even when policy says ask. Refused
+	// calls are never changed by a verdict, and their latency stays off a
+	// path where a person is already waiting.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources)
@@ -1447,6 +1534,12 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
 		}
 		classifierFact = fact
+	}
+	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
+		if classifierFact != nil {
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources), classifierFact, resources, invocation)
+		}
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 	}
 
 	// An approved proposal may reach here through either policyAsk or the
@@ -1600,6 +1693,31 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 
+	// WHAT CAME BACK, RECORDED WHERE IT CAN BE ASKED FOR (nocx-hp8p2.13).
+	// A tool call announced itself and then said nothing about its outcome:
+	// agent.runToolCall carries the arguments and deliberately not the
+	// result, naming actionEntryId as "the handle a later 'show me what it
+	// returned' reaches through, rather than a second copy of the bytes".
+	// The handle reached nothing, because nothing was ever written there —
+	// ADR-0040 gives every block kind a body artifact and drew `action`
+	// with none. This is that body.
+	//
+	// AFTER THE EGRESS GATE, DELIBERATELY. The gate has already screened
+	// this result and either passed it or suspended the run; recording
+	// before it would put bytes in the store that the gate might still
+	// refuse to let leave. On an APPROVED resume the bytes do carry
+	// findings, which is why the record is masked as well as gated — the
+	// belt matters at exactly the one moment the gate has stood down.
+	//
+	// NOT FOR A CALL THAT OPENED A BLOCK. ADR-0040 is explicit that the
+	// block the command opened IS the account of that call, and the turn
+	// draws no child for it at all — so a body here would be a second copy
+	// of that command's own output, stored for a surface that will never
+	// ask for it.
+	if runErr == nil && !decl.OpensBlock {
+		k.recordToolResult(ctx, entryID, out)
+	}
+
 	// A person's Stop is a successful tool exchange carrying an explicit
 	// renderer fact, not a tool error. Preserve that fact in the action
 	// ledger: the command's own exit code may also be 130, so it cannot
@@ -1639,6 +1757,72 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// read is a statement addressed to a model, and the retained declared-call
 	// adapter applies that projection before returning it to the model.
 	return modelResult{text: out, kind: modelToolOutput}, nil
+}
+
+// maxToolResultRecordBytes bounds the body kept for one tool call. It is the
+// tools' own declared result bound (agenttools.ResultBound.MaxBytes), so in
+// practice nothing is cut here — a result the model received was already
+// bounded before it got this far. The check exists because a bound that
+// holds "in practice" is not a bound: masking rewrites the text, and one
+// chunk is what this write is.
+const maxToolResultRecordBytes = 64 << 10
+
+// recordToolResult writes the tool's result as the action entry's own body.
+//
+// MASKED BY THE ONE OWNER, AND FAIL CLOSED. internal/masking is the durable
+// path's masker (ADR-0021, nocx-a21v), and a body it could not read is not
+// written at all: the attempt row still says the call happened and carries
+// no body, which is exactly the state retention leaves behind and which
+// every reader already draws. Writing raw text because detection failed
+// would make this pane a second, unscreened path to bytes the ledger masks
+// everywhere else.
+//
+// NOTHING HERE FAILS THE CALL. The result has already been produced and is
+// on its way to the model; a body that could not be stored is a missing
+// body, not a failed tool. Said in the log, never in the run.
+func (k *effectKernel) recordToolResult(ctx context.Context, entryID, result string) {
+	if k.ledger == nil || entryID == "" || result == "" {
+		return
+	}
+	masked, _, _, err := masking.MaskWithSegments(result)
+	if err != nil {
+		k.warn("agent tool: the result could not be screened for the record — the call is recorded without its body",
+			"entry", entryID, "error", err)
+		return
+	}
+	var truncated *content.Truncation
+	if len(masked) > maxToolResultRecordBytes {
+		masked = truncateRunes(masked, maxToolResultRecordBytes)
+		cut := content.TruncCap
+		truncated = &cut
+	}
+	if _, err := k.ledger.CaptureOutput(ctx, content.CaptureOutput{
+		EntryID:    entryID,
+		ArtifactID: uuid.NewString(),
+		MediaType:  content.MediaText,
+		// The tool produced this text; nobody read it off a terminal grid.
+		CaptureMethod:  content.CaptureRawOutput,
+		CaptureVersion: 1,
+		Truncated:      truncated,
+		Seq:            1,
+		Body:           []byte(masked),
+	}); err != nil {
+		k.warn("agent tool: the result could not be recorded — the call is recorded without its body",
+			"entry", entryID, "error", err)
+	}
+}
+
+// truncateRunes cuts s to at most n bytes without splitting a rune. A body
+// cut mid-rune would reach a reader as a replacement character it cannot
+// tell from one the tool really printed.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // warn is the kernel's logger with the nil check the whole package needs. A
@@ -1730,4 +1914,20 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 		Verdict:   ClassifierClear,
 		Model:     classification.Model,
 	}, nil
+}
+
+// markedWindows converts the ask's marks into the tool layer's vocabulary.
+// A copy, so a later mutation of the caller's slice cannot change what this
+// run may read.
+func markedWindows(in []MarkedSessionWindow) []agenttools.MarkedSessionWindow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]agenttools.MarkedSessionWindow, 0, len(in))
+	for _, mark := range in {
+		out = append(out, agenttools.MarkedSessionWindow{
+			ItemID: mark.ItemID, Start: mark.Start, Count: mark.Count,
+		})
+	}
+	return out
 }

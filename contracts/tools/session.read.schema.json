@@ -15,13 +15,13 @@
     "start": {
       "type": "integer",
       "minimum": 0,
-      "description": "First output line for an exited item or screen region."
+      "description": "First output line, counting from 0. When the question came with a marked row span, this is the mark's own start — pass it with the count."
     },
     "count": {
       "type": "integer",
       "minimum": 1,
       "maximum": 2000,
-      "description": "Maximum number of output lines to return."
+      "description": "How many output lines to return. When the question came with a marked row span, pass the mark's count: a read that names the item and omits the window is answered inside the mark, not past it."
     }
   },
   "$defs": {

@@ -76,8 +76,8 @@ func askEveryTimeMatrixForTests() content.EffectPolicy {
 	}
 }
 
-// The product-minted grant includes the path, session and content roots, so
-// the registry can offer both filesystem and notes/snippets tools.
+// The product-minted grant includes the path, session and one root per
+// enabled content family, so the registry can offer each family's tools.
 func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(askEveryTimePolicyStore(t)))
@@ -93,14 +93,16 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	if !hasGrantScope(grant.Scopes, content.ResourceSession, sid) {
 		t.Fatalf("grant scopes = %+v, want the run's session scope", grant.Scopes)
 	}
-	if !hasGrantScope(grant.Scopes, content.ResourceContent, "content") {
-		t.Fatalf("grant scopes = %+v, want the content root for notes and snippets", grant.Scopes)
+	for _, family := range []string{"note", "snippet", "skill"} {
+		if !hasGrantScope(grant.Scopes, content.ResourceContent, family) {
+			t.Fatalf("grant scopes = %+v, want content family root %q", grant.Scopes, family)
+		}
 	}
 	if !hasGrantScope(grant.Scopes, content.ResourceDestination, "*") {
 		t.Fatalf("grant scopes = %+v, want the direct-destination scope", grant.Scopes)
 	}
-	if len(grant.Scopes) != 4 {
-		t.Fatalf("grant scopes = %+v, want path, session, content and destination scopes", grant.Scopes)
+	if len(grant.Scopes) != 6 {
+		t.Fatalf("grant scopes = %+v, want path, session, three content and destination scopes", grant.Scopes)
 	}
 
 	reg, err := agenttools.Assemble(tools.Schemas)
@@ -111,7 +113,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
+	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}
@@ -204,8 +206,8 @@ func streamOKChunks(w http.ResponseWriter) {
 }
 
 // readScreenFrameWire is the renderer's answer to a readScreen request: the
-// live frame shape — cells rows, cursor, identity, range — under the closed
-// "frame" outcome. The rows carry exactly identity.cols cells, the range
+// live frame shape — text rows, cursor, identity, range — under the closed
+// "frame" outcome. Each row is padded to identity.cols, the range
 // spans exactly the rows, and the cursor is inside the geometry: the wire
 // validation of the broker (validateReadScreenResolvedRaw) is what the test
 // is crossing.
@@ -219,15 +221,12 @@ func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]a
 	}
 	rows := make([]any, 0, len(texts))
 	for _, text := range texts {
-		cells := make([]any, 0, cols)
-		for i := 0; i < cols; i++ {
-			ch := " "
-			if i < len(text) {
-				ch = string(text[i])
-			}
-			cells = append(cells, map[string]any{"char": ch, "attrs": map[string]any{}})
-		}
-		rows = append(rows, map[string]any{"kind": "cells", "cells": cells})
+		// Padded to the width, the way a mint pads a short line with blank
+		// cells: the row's width IS the screen's.
+		rows = append(rows, map[string]any{
+			"kind": "text",
+			"text": text + strings.Repeat(" ", cols-len(text)),
+		})
 	}
 	return map[string]any{
 		"requestId": rid,
@@ -317,7 +316,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	defer srv.Close()
 
 	// The REAL engine: the embedded schemas include readScreen.
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -434,7 +433,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 // direction: a renderer that cannot produce the frame (a session it does
 // not know) answers "failed" and the run is not left hanging — the failure
 func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -521,7 +520,7 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 // leaking a pending request. The ledger is the record: the run reaches a
 // terminal state.
 func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

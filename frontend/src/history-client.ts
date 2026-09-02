@@ -150,6 +150,7 @@ export async function queryHistory(
   host: string,
   text?: string,
   paneId?: string,
+  signal?: AbortSignal,
 ): Promise<HistoryQuery> {
   // Empty-filter recall starts at the pane rung. A non-empty term is the
   // separate global-search door, never a hidden pane/directory filter.
@@ -166,5 +167,5 @@ export async function queryHistory(
   // The search filter (nocx-ms7v). Omitted when empty rather than sent as "",
   // so "no filter" is one state on the wire and not two.
   if (text !== undefined && text !== '') params.text = text
-  return client.call<HistoryQuery>('history.query', params)
+  return client.call<HistoryQuery>('history.query', params, signal)
 }

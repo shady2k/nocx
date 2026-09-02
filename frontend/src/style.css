@@ -47,7 +47,7 @@
 @import './styles/components/watch-badge.css';
 @import './styles/components/secret-chip.css';
 @import './styles/components/terminal-link.css';
-@import './styles/components/reasoning-note.css';
+@import './styles/components/disclosure.css';
 @import './styles/components/answer-markdown.css';
 @import './styles/components/mode-indicator.css';
 @import './styles/components/secret-value-field.css';
@@ -195,6 +195,13 @@
   /* The stack owns the rows it occupies. Its opaque ground stops the frozen
      frame underneath from painting through the answer. */
   background: var(--color-canvas);
+  /* THE VISIBLE SEAM. The kit's separator is transparent at rest by design —
+     "the pane border beside it is the visible seam" — so a surface that
+     places one owes it that border, or the person is handed a six-pixel
+     invisible strip and told it is draggable (nocx-hp8p2.6). This is the
+     assistant panel's own top edge; the handle sits just inside it and
+     accents on hover. */
+  border-top: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   max-height: 100%;
@@ -202,9 +209,26 @@
   box-sizing: border-box;
 }
 
+/* The seam between the frozen screen above and the assistant below. Placement
+   only: the kit's separator carries its own hit area, grab line, cursor and
+   accent (styles/components/resize-handle.css), and a surface may place a kit
+   component but never repaint one (ui/README). The cell exists because the
+   handle takes no class of its own — its identity belongs to the kit. */
+.nocx-summon-seam {
+  /* BLOCK, NOT FLEX. As a flex container this cell made the handle a flex
+     ITEM on the main axis, where `width: auto` is shrink-to-fit — the handle
+     collapsed to zero width and there was nothing to grab, while the border
+     above it made the edge look present (nocx-hp8p2.6). A block cell lets
+     the handle's own width mean the full line it is meant to be. */
+  display: block;
+  flex: none;
+}
+
 /* The cap is the feature: this is "ask ABOUT a full-screen program WITHOUT
    leaving it", so the answers may never grow into the whole pane and hide the
-   program the question is about. The stack's own `max-height: 100%` is only
+   program the question is about. The seam above may raise this box past the
+   cap — a person asking for more room has said what they want — but never
+   past the ceiling terminal-content keeps for the program itself. The stack's own `max-height: 100%` is only
    the outer bound — `.pane` is `position: absolute; inset: 0`, so 100% is
    the entire pane. Escape ends the summon and removes these nodes
    synchronously before the program owns the rows again. */
@@ -335,10 +359,39 @@
   color: var(--color-danger);
 }
 
+.nocx-freeze-dismiss {
+  /* Placement only: the kit's IconButton carries its own size, shape and
+     hover (ui/icon-button.css). This cell keeps it on the chrome row's
+     baseline beside the freeze badge it belongs to. */
+  display: inline-flex;
+  align-items: center;
+}
+
 /* The permanent grant chip (nocx-wcswn). One chip, two typed states: the
-   count is the only changing content and the list lives in its popover. */
+   count is the only changing content and the list lives in its popover.
+
+   THE WIDTH IS A FLOOR, NOT A SIZE (nocx-hp8p2.5). It was `width: 13rem`,
+   which held the count steady as it changed — the same twitch-avoidance the
+   tabular figures above are for — but a fixed width is only a size for
+   content that never grows. The automatic attachment appends a sentence to
+   this chip, and an over-long line in a fixed box with no `overflow` is
+   painted straight over its neighbours: the model chip and the freeze badge
+   ended up underneath the text, all three legible as one smear.
+
+   So: `min-width` keeps the count from twitching, `max-width` bounds the
+   longest sentence, and the chip may SHRINK (`flex: 0 1 auto` against
+   .nocx-chip's `flex: none`) with the ellipsis rather than escaping its box
+   when the pane is narrow. Nothing lives only in the ellipsis — the full
+   text is the title and the accessible name, and the attachment has its own
+   row in the popover. Same mechanism, same reasons, as .nocx-editor-model
+   below. */
 .nocx-editor-grant {
-  width: 13rem;
+  flex: 0 1 auto;
+  min-width: 13rem;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
   cursor: pointer;
   white-space: nowrap;
 }

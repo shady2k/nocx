@@ -156,6 +156,28 @@ async function artifactBody(
  * Null is rendered as "the output is not here", never as an empty block that
  * reads as a command which printed nothing.
  */
+/**
+ * WHAT ONE TOOL CALL RETURNED, from the action entry the call was recorded
+ * under (nocx-hp8p2.13).
+ *
+ * agent.runToolCall carries the arguments and deliberately not the result,
+ * naming actionEntryId as "the handle a later 'show me what it returned'
+ * reaches through, rather than a second copy of the bytes". This is that
+ * reach, and it is the SAME two round trips a block's own body takes — one
+ * fetch, one owner, whatever kind of entry is being read.
+ *
+ * The body is text/plain because an action's body is text the tool produced,
+ * never terminal cells. Null is "the record does not have it", which
+ * collapses retention, eviction and an unreachable store for the reason
+ * stated above artifactBody.
+ */
+export async function toolResultForEntry(
+  client: WSClient,
+  actionEntryId: string,
+): Promise<string | null> {
+  return artifactBody(client, actionEntryId, 'text/plain')
+}
+
 export async function bodyForBlock(client: WSClient, entryId: string): Promise<string | null> {
   return artifactBody(client, entryId, 'application/vt')
 }

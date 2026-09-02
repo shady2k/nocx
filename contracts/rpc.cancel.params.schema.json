@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/rpc.cancel.params.schema.json",
+  "title": "RPCCancelParams",
+  "description": "Parameters for rpc.cancel.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "description": "The JSON-RPC request id to cancel on this connection.",
+      "oneOf": [{ "type": "string" }, { "type": "number" }]
+    }
+  }
+}

@@ -28,6 +28,8 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
+import { SkillsSection } from './skills-section'
+import type { SkillsStore } from './skills-store'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
@@ -231,6 +233,8 @@ export interface SettingsComponentProps {
    *  a snippet saved here is in the next fire without a notification on the
    *  wire (design §6). Absent in an embedding with no snippets service. */
   snippetsStore?: SnippetsStore
+  /** The discovered skill library and person-controlled enablement state. */
+  skillsStore?: SkillsStore
   /** Whether durable command history is actually running (nocx-rtg0.15).
    *  The History section's five controls all describe a store, so when
    *  there is no store the section has to say so where the user is looking
@@ -601,6 +605,23 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    const skillsPage: SettingsPage = {
+      kind: 'component',
+      id: 'skills',
+      title: 'Skills',
+      groupId: 'application',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.skillsStore}
+          fallback={
+            <PageSection title="Skills">Skills are not available in this window.</PageSection>
+          }
+        >
+          <SkillsSection store={props.skillsStore!} />
+        </Show>
+      ),
+    }
 
     const rolesPage: SettingsPage = {
       kind: 'component',
@@ -676,6 +697,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      skillsPage,
       rolesPage,
       policyPage,
       aboutPage,

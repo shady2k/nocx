@@ -234,6 +234,29 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 	return string(b), nil
 }
 
+// applyMarkedWindow narrows a session.read to the row span a PERSON marked on
+// this item, when they marked one and the call did not name a window of its
+// own. It is the one owner of that rule, because the rule is the same
+// wherever the rows come from: a block read from the ledger (nocx-hp8p2.15)
+// and the frozen screen a summon attaches (nocx-hp8p2.7) are two surfaces
+// with one meaning — the person asked about THESE rows, and the span is
+// authority rather than a hint the model may improve on.
+//
+// A window the model asked for itself is honoured: it may legitimately want
+// context around the mark, and it can only ever reach rows the grant already
+// allows. A start with no count keeps the mark's count, so "read from here"
+// stays as long as the mark rather than becoming the whole item.
+func applyMarkedWindow(reader *agenttools.SessionReader, id string, start, count *int) {
+	mark, ok := reader.MarkedWindow(id)
+	if !ok || *count > 0 {
+		return
+	}
+	if *start == 0 {
+		*start = mark.Start
+	}
+	*count = mark.Count
+}
+
 func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
 	bound, err := toolBound(ctx)
 	if err != nil {
@@ -258,11 +281,28 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return executeSessionScreen(ctx, sessionID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if reader.IsAutomaticItem(p.ID) {
+		// A ROW MARK NARROWS THE FROZEN SCREEN, exactly as it narrows a block
+		// below (nocx-hp8p2.7): a person who selected rows inside the pinned
+		// screen marked THAT item, and the span travelled here with the ask.
+		applyMarkedWindow(reader, p.ID, &p.Start, &p.Count)
 		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
 	}
+	// A MARKED ITEM IS READ INSIDE ITS MARK (nocx-hp8p2.15). The person
+	// selected those rows and asked about them, and the span travelled here
+	// with the ask — so it is what the run knows, not a hint. A call that
+	// names the item and leaves the window out used to fall through to the
+	// default below and read to the end of the block: one marked line of
+	// `df -h` came back as the whole of `df -h`, and the answer was about
+	// the command. Two rounds of prompt wording did not stop it, because
+	// asking the model to be careful is not a bound.
+	//
+	// A window the model DID ask for is honoured — it may legitimately want
+	// context around the mark, and it can only ever reach rows the grant
+	// already allows.
+	applyMarkedWindow(reader, p.ID, &p.Start, &p.Count)
 	if p.Count <= 0 {
 		p.Count = defaultBlockLines
 	}
@@ -346,17 +386,12 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 	if frame.Range != nil {
 		returned = blockSpan{Start: frame.Range.Start, End: frame.Range.End}
 	}
-	var lines []string
+	// A frame row is its text: the renderer joins the cells' characters in
+	// column order before the row leaves it, blanks kept, so the row's width
+	// is the screen's (nocx-u3vxd).
+	lines := make([]string, 0, len(frame.Rows))
 	for _, row := range frame.Rows {
-		if row.Kind == "text" {
-			lines = append(lines, row.Text)
-			continue
-		}
-		var line strings.Builder
-		for _, cell := range row.Cells {
-			line.WriteString(cell.Char)
-		}
-		lines = append(lines, line.String())
+		lines = append(lines, row.Text)
 	}
 	fullText := strings.Join(lines, "\n")
 	text, returnedEnd := boundBlockText(fullText, returned.Start, returned.End, maxBytes)

@@ -26,6 +26,7 @@ import type { ClipboardAccess } from '../clipboard'
 import type { UrlOpener } from '../open-url'
 import { RpcError } from '../dispatcher'
 import { ToastHost, clearToasts } from '../ui/toast'
+import { setDocumentHidden } from '../test-support/document-visibility'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -144,6 +145,7 @@ interface Mounted {
 }
 
 const stores: GitStore[] = []
+const liveHandles: SidebarHandle[] = []
 
 /** The pieces a second mount must share with the first — the shape the real
  *  app has: ONE store and ONE origin accessor, with the panel mounting and
@@ -194,10 +196,13 @@ function mountApp(
   // ASSERTABLE as rendered toasts, the way a user sees them — the files
   // pattern.
   render(() => <ToastHost />)
+  liveHandles.push(handle)
   return { panel, open, setActiveOrigin, services, store, handle }
 }
 
 afterEach(() => {
+  for (const h of liveHandles) h.destroy()
+  liveHandles.length = 0
   clearToasts()
   for (const s of stores) s.dispose()
   stores.length = 0
@@ -411,6 +416,51 @@ describe('the panel renders what the store says', () => {
     panel.querySelector<HTMLElement>('[data-testid="git-refresh"]')?.click()
     await settle()
     expect(panel.querySelector('[data-testid="git-env-degraded"]')).toBeNull()
+  })
+})
+
+describe('the window visibility signal', () => {
+  it('hiding the window stops Git status work, then showing resumes it', async () => {
+    const restore = setDocumentHidden(false)
+    try {
+      const status = vi.fn().mockResolvedValue({ status: statusFixture(), envState: 'resolved' })
+      const services = fakeServices({ status })
+      const { setActiveOrigin } = mountApp(services)
+      setActiveOrigin(LOCAL_ORIGIN)
+      await settle()
+      status.mockClear()
+
+      const hide = setDocumentHidden(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await settle()
+      expect(status).not.toHaveBeenCalled()
+
+      hide()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await settle()
+      expect(status).toHaveBeenCalledTimes(1)
+    } finally {
+      restore()
+    }
+  })
+
+  it('a window already hidden at mount starts Git without background status work', async () => {
+    const restore = setDocumentHidden(true)
+    try {
+      const status = vi.fn().mockResolvedValue({ status: statusFixture(), envState: 'resolved' })
+      const services = fakeServices({ status })
+      const { setActiveOrigin } = mountApp(services)
+      setActiveOrigin(LOCAL_ORIGIN)
+      await settle()
+      expect(status).not.toHaveBeenCalled()
+
+      restore()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await settle()
+      expect(status).toHaveBeenCalledTimes(1)
+    } finally {
+      restore()
+    }
   })
 })
 

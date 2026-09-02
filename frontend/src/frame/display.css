@@ -4,14 +4,29 @@
   position: absolute;
   inset: 0;
   z-index: 1;
-  overflow: hidden;
+  /* THE FROZEN SCREEN IS SHORTER THAN THE SCREEN IT PHOTOGRAPHED, so it has
+     to be scrollable (nocx-hp8p2.6). The assistant's panel is an overlay —
+     the live grid may not be resized, or the program would be sent a
+     SIGWINCH and repaint the very screen being asked about — so the rows the
+     panel stands on are rows this box no longer has room for. Clipping them
+     is not an answer: a person who drags the seam up to read a long answer
+     must still be able to reach the bottom of what they froze.
+
+     Vertical only: the frame's width always matches the grid it came from,
+     and a horizontal bar there would be a scroller for nothing. */
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
   line-height: var(--term-cell-height, 1.2em);
   white-space: pre;
-  pointer-events: none;
+  /* The wheel has to land HERE. It was `none` while the frame was a pure
+     photograph with nothing to reach; now that it scrolls, events passing
+     through to a grid the summon has made read-only would be a scroller
+     nobody can drive. */
+  pointer-events: auto;
 }
 
 .nocx-freeze-frame__row {

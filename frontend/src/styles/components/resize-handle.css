@@ -39,7 +39,14 @@
    `[data-orientation]` is the component's own variant attribute; a caller
    never reaches in to turn it. */
 .ui-resize-handle[data-orientation='horizontal'] {
-  width: auto;
+  /* WIDTH IS DECLARED, NOT DELEGATED. `justify-self: stretch` only reaches
+     this element in a grid; in a flex row it is ignored and `width: auto`
+     becomes shrink-to-fit, so the separator arrives at zero width and no
+     pointer can find it — the first caller of this variant hit exactly that
+     (nocx-hp8p2.6). `justify-self` stays for the grid callers the vertical
+     variant already has; `width: 100%` is what makes the component whole on
+     its own, in whatever box a surface places it. */
+  width: 100%;
   height: 6px;
   align-self: auto;
   justify-self: stretch;

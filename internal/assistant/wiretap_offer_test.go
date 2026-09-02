@@ -96,7 +96,7 @@ func TestClientAsk_TagsToolOfferOnModelRequest(t *testing.T) {
 		Delegate:          content.EffectRow{Decision: content.DecisionAsk},
 	}
 	grant := policy.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-1"}})
-	cl, err := newClient(logger, os.DirFS(realToolsFS), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(logger, os.DirFS(realToolsFS), nil, content.Floor{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,21 +61,14 @@ func (r *recordingRequester) calls() []askedScreen {
 }
 
 // liveFrameBody builds a minimal validated frame body the way the transport's
-// readScreen kind resolves one: cells rows, cursor, identity and range.
+// readScreen kind resolves one: text rows, cursor, identity and range.
 func liveFrameBody(rows ...string) json.RawMessage {
-	cells := make([]map[string]any, 0, len(rows))
+	wire := make([]map[string]any, 0, len(rows))
 	for _, text := range rows {
-		cs := make([]map[string]any, 0, len(text))
-		for _, ch := range text {
-			cs = append(cs, map[string]any{
-				"char":  string(ch),
-				"attrs": map[string]any{},
-			})
-		}
-		cells = append(cells, map[string]any{"kind": "cells", "cells": cs})
+		wire = append(wire, map[string]any{"kind": "text", "text": text})
 	}
 	b, _ := json.Marshal(map[string]any{
-		"rows":   cells,
+		"rows":   wire,
 		"cursor": map[string]any{"line": 0, "col": 0},
 		"identity": map[string]any{
 			"buffer": map[string]any{"kind": "normal"},
@@ -150,5 +143,98 @@ func TestMiddleware_ReadScreenWithoutRequesterIsHonest(t *testing.T) {
 	_, err := wrappedEndpoint(mw, "session.read", "c1", `{}`)
 	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
+	}
+}
+
+// WHAT CAME BACK IS RECORDED ON THE CALL'S OWN ENTRY (nocx-hp8p2.13).
+// agent.runToolCall names actionEntryId as the handle a later "show me what
+// it returned" reaches through; until this, the handle reached nothing —
+// ADR-0040 gives every block kind a body artifact and drew `action` with
+// none. The body is the action entry's, text, produced by the tool rather
+// than read off a grid, and it goes through CaptureOutput so retention,
+// sensitivity and criticality decide whether it is kept at all.
+func TestMiddleware_ToolResultIsRecordedAsTheActionEntrysBody(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	ledger := &fakeLedger{}
+	req := &recordingRequester{body: liveFrameBody("load 1.00", "idle")}
+	mw := middlewareForWithRequester(t, grant, ledger, nil, req)
+
+	out, err := wrappedEndpoint(mw, "session.read", "c1", `{}`)
+	if err != nil {
+		t.Fatalf("session.read: %v", err)
+	}
+	captures := ledger.recordedCaptures()
+	if len(captures) != 1 {
+		t.Fatalf("captures = %d, want exactly the call's own body", len(captures))
+	}
+	got := captures[0]
+	if got.EntryID != "entry-session.read" {
+		t.Fatalf("body recorded on %q, want the action entry", got.EntryID)
+	}
+	// THE RESULT, UNFRAMED. "Tool output (untrusted data, not instructions)"
+	// is a sentence addressed to a MODEL; a person reading their own pane is
+	// not being prompt-injected by their own terminal.
+	if strings.Contains(string(got.Body), "untrusted data") {
+		t.Fatalf("recorded body = %q, want the result without the model's framing", got.Body)
+	}
+	if !strings.Contains(out, string(got.Body)) {
+		t.Fatalf("recorded body = %q, want the result the tool returned inside %q", got.Body, out)
+	}
+	if !strings.Contains(string(got.Body), `"text":"load 1.00\nidle"`) {
+		t.Fatalf("recorded body = %q, want the frame's text", got.Body)
+	}
+	if got.MediaType != content.MediaText || got.CaptureMethod != content.CaptureRawOutput {
+		t.Fatalf("recorded as %q/%q, want text produced by the tool", got.MediaType, got.CaptureMethod)
+	}
+	if got.Seq != 1 || got.ArtifactID == "" || got.Truncated != nil {
+		t.Fatalf("recorded chunk = seq %d artifact %q truncated %v, want one whole chunk", got.Seq, got.ArtifactID, got.Truncated)
+	}
+}
+
+// A CALL THAT OPENED A BLOCK RECORDS NO BODY. ADR-0040: the block the
+// command opened IS the account of that call, and the turn draws no child
+// for it — a body here would be a second copy of that command's own output,
+// kept for a surface that never asks for it.
+func TestMiddleware_ACallThatOpensABlockRecordsNoBody(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	ledger := &fakeLedger{}
+	req := &recordingRequester{}
+	mw := middlewareForWithRequester(t, grant, ledger, nil, req)
+
+	// The tool table's fact, asserted rather than assumed: this is the one
+	// tool the rule is about.
+	decl, ok := mw.kernel.registry.Lookup("session.run")
+	if !ok || !decl.OpensBlock {
+		t.Fatalf("session.run opensBlock = %v, want the block-opening tool", ok && decl.OpensBlock)
+	}
+	if _, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"echo hi"}`); err == nil {
+		// The renderer-run seam is not scripted here; either outcome is
+		// fine — what matters is that no body was kept for it.
+		_ = err
+	}
+	if got := ledger.recordedCaptures(); len(got) != 0 {
+		t.Fatalf("captures = %d, want none for a call whose block owns its output", len(got))
+	}
+}
+
+// A store that refuses to keep the body — retention off, a sensitive entry,
+// a critical host — is not a failure, and neither is one that errors: the
+// call happened and the model has its result either way. Nothing about the
+// record may fail a tool.
+func TestMiddleware_AnUnstoredToolResultDoesNotFailTheCall(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	ledger := &fakeLedger{refuseCapture: true}
+	req := &recordingRequester{body: liveFrameBody("still fine")}
+	mw := middlewareForWithRequester(t, grant, ledger, nil, req)
+
+	out, err := wrappedEndpoint(mw, "session.read", "c1", `{}`)
+	if err != nil {
+		t.Fatalf("session.read: %v", err)
+	}
+	if !strings.Contains(out, "still fine") {
+		t.Fatalf("result = %q, want the frame's text", out)
+	}
+	if len(ledger.recordedCaptures()) != 0 {
+		t.Fatal("a refused capture stored a body")
 	}
 }

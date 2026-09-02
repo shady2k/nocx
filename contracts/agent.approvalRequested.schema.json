@@ -84,9 +84,32 @@
         "kind": {
           "description": "The resource kind, from the ledger's closed set.",
           "type": "string",
-          "enum": ["path", "session", "environment", "credential", "destination"]
+          "enum": ["path", "session", "environment", "credential", "destination", "content"]
         },
         "id": { "description": "The resource's id.", "type": "string", "minLength": 1 }
+      }
+    },
+    "finding": {
+      "description": "Skill write only: the first static scan finding in the proposed body.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["patternId", "line", "lineNumber"],
+      "properties": {
+        "patternId": { "type": "string", "minLength": 1 },
+        "line": { "type": "string" },
+        "lineNumber": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "classifier": {
+      "description": "Skill write only: the classifier verdict or bounded failure fact.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["consulted", "reason"],
+      "properties": {
+        "consulted": { "type": "boolean" },
+        "verdict": { "type": "string", "enum": ["clear", "suspect"] },
+        "model": { "type": "string" },
+        "reason": { "type": "string" }
       }
     },
     "wasError": {

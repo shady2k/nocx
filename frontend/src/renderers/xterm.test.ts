@@ -1888,3 +1888,191 @@ describe('onBell through the real parser (nocx-n3nfg)', () => {
     r.dispose()
   })
 })
+
+// ── The atlas invalidation seam (nocx-4z5hv) ────────────────────────────
+//
+// xterm's WebGL renderer keeps a per-cell vertex model holding texture
+// coordinates into a shared glyph atlas. When the atlas reaches its page
+// limit, TextureAtlas._createNewPage() merges four pages and REWRITES the
+// coordinates of every glyph it moved, in place. The cells already in the
+// model keep the coordinates they had, which now address a different part of
+// a rearranged page — the corruption the owner photographed.
+//
+// The library's repair is a flag it reads at the TOP of a frame
+// (`beginFrame()`), while the merge happens LATER IN THAT SAME FRAME, inside
+// _updateModel. So the flag never repairs the frame that broke; it only says
+// "rebuild fully IF another frame happens". Setting it schedules nothing:
+// no refreshRows, no animation frame, nothing marked dirty. When the output
+// that filled the atlas was the last output, no next frame comes and the
+// garbage stays on screen until something else repaints — which on Linux is
+// the FORCED_REFRESH_MS pump and on macOS is the user resizing the window.
+//
+// The renderer module owns "the picture matches the buffer", so it is the
+// seam that must convert that library liveness assumption into a guarantee.
+// These tests drive the addon's own onAddTextureAtlasCanvas event — the
+// public signal for "the atlas page set changed" — because a GPU is not
+// available under jsdom and the defect is in the SCHEDULING, not in the GL.
+describe('XtermRenderer atlas invalidation', () => {
+  class FakeEvent<T> {
+    private subs: Array<(arg: T) => void> = []
+    readonly event = (cb: (arg: T) => void): { dispose(): void } => {
+      this.subs.push(cb)
+      return {
+        dispose: () => {
+          this.subs = this.subs.filter((s) => s !== cb)
+        },
+      }
+    }
+    fire(arg: T): void {
+      for (const s of [...this.subs]) s(arg)
+    }
+    get listenerCount(): number {
+      return this.subs.length
+    }
+  }
+
+  class FakeWebglAddon {
+    readonly atlasPageAdded = new FakeEvent<HTMLCanvasElement>()
+    readonly contextLost = new FakeEvent<void>()
+    disposed = false
+    readonly onAddTextureAtlasCanvas = this.atlasPageAdded.event
+    readonly onContextLoss = this.contextLost.event
+    activate(): void {}
+    dispose(): void {
+      this.disposed = true
+    }
+  }
+
+  /** Await two animation frames: one for the frame the renderer schedules
+   *  its repaint on, one to be sure it has run. A frame is an observable
+   *  state change, not a duration — nothing here waits on a clock. */
+  async function frames(n = 2): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    }
+  }
+
+  async function mountWith(addons: FakeWebglAddon[]): Promise<{
+    r: XtermRenderer
+    refreshes: () => Array<[number, number]>
+    rows: () => number
+  }> {
+    stubBrowser()
+    let next = 0
+    const r = new XtermRenderer({ createWebglAddon: () => addons[next++] })
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    // jsdom performs no layout, so offsetParent is null for every element and
+    // the renderer's "is this pane still on screen" recovery test would fail
+    // for the wrong reason. Give it the answer a mounted pane has.
+    Object.defineProperty(container, 'offsetParent', { value: document.body })
+    // Same reason: jsdom reports the document as unfocused, and the renderer
+    // only re-attaches WebGL after a context loss for a pane a user can
+    // actually see. Both stubs describe the state the reported defect
+    // happens in — a visible pane in a focused window.
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    await r.mount(container)
+    const term = (r as unknown as Record<string, unknown>).term as {
+      rows: number
+      refresh(start: number, end: number): void
+    }
+    const calls: Array<[number, number]> = []
+    const original = term.refresh.bind(term)
+    term.refresh = (start: number, end: number): void => {
+      calls.push([start, end])
+      original(start, end)
+    }
+    return { r, refreshes: () => calls, rows: () => term.rows }
+  }
+
+  it('repaints the whole viewport after the atlas page set changes', async () => {
+    const addon = new FakeWebglAddon()
+    const { r, refreshes, rows } = await mountWith([addon])
+
+    // The merge happens inside the render that is running right now, so the
+    // repair must NOT be synchronous: marking rows dirty during the frame
+    // that is already drawing repairs nothing.
+    addon.atlasPageAdded.fire(document.createElement('canvas'))
+    expect(refreshes()).toEqual([])
+
+    await frames()
+    expect(refreshes()).toEqual([[0, rows() - 1]])
+    r.dispose()
+  })
+
+  it('coalesces several page changes in one frame into a single repaint', async () => {
+    const addon = new FakeWebglAddon()
+    const { r, refreshes, rows } = await mountWith([addon])
+
+    // A merge fires an add for the merged page while the same frame may add
+    // a fresh page too. One repaint is the correct answer to both.
+    addon.atlasPageAdded.fire(document.createElement('canvas'))
+    addon.atlasPageAdded.fire(document.createElement('canvas'))
+    addon.atlasPageAdded.fire(document.createElement('canvas'))
+
+    await frames()
+    expect(refreshes()).toEqual([[0, rows() - 1]])
+    r.dispose()
+  })
+
+  it('re-arms the seam on the addon installed after a context loss', async () => {
+    const first = new FakeWebglAddon()
+    const second = new FakeWebglAddon()
+    const { r, refreshes, rows } = await mountWith([first, second])
+
+    // Recovery replaces the addon, and with it the atlas it draws from. A
+    // subscription bound to the dead addon is a seam that silently stops
+    // working after the first GPU hiccup — the shape this test exists for.
+    first.contextLost.fire()
+    expect(first.disposed).toBe(true)
+
+    refreshes().length = 0
+    second.atlasPageAdded.fire(document.createElement('canvas'))
+    await frames()
+    expect(refreshes()).toEqual([[0, rows() - 1]])
+
+    // And the dead addon's event is no longer wired to anything.
+    expect(first.atlasPageAdded.listenerCount).toBe(0)
+    r.dispose()
+  })
+
+  it('repaints every renderer, because the atlas the merge rearranged is shared', async () => {
+    // CharAtlasCache holds ONE module-global cache and hands the same
+    // TextureAtlas to every terminal whose font, cell size, DPR, options and
+    // colours match — which is every nocx tab. So a merge caused by tab B's
+    // rendering moves coordinates out from under tab A's model, and each
+    // renderer's addon forwards that atlas's event to it. The seam must
+    // therefore be per-renderer: a module-global one would repaint only
+    // whichever tab happened to mount last.
+    const first = new FakeWebglAddon()
+    const second = new FakeWebglAddon()
+    const a = await mountWith([first])
+    const b = await mountWith([second])
+
+    a.refreshes().length = 0
+    b.refreshes().length = 0
+    second.atlasPageAdded.fire(document.createElement('canvas'))
+    first.atlasPageAdded.fire(document.createElement('canvas'))
+    await frames()
+
+    expect(a.refreshes()).toEqual([[0, a.rows() - 1]])
+    expect(b.refreshes()).toEqual([[0, b.rows() - 1]])
+    a.r.dispose()
+    b.r.dispose()
+  })
+
+  it('drops a scheduled repaint when the renderer is disposed first', async () => {
+    const addon = new FakeWebglAddon()
+    const { r, refreshes } = await mountWith([addon])
+
+    addon.atlasPageAdded.fire(document.createElement('canvas'))
+    r.dispose()
+
+    await frames()
+    // A repaint that lands on a disposed terminal is a crash in the tab the
+    // user just closed.
+    expect(refreshes()).toEqual([])
+    expect(addon.atlasPageAdded.listenerCount).toBe(0)
+  })
+})

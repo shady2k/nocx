@@ -78,6 +78,9 @@ func validateLifecycleSubmitAttemptRaw(raw json.RawMessage) string {
 	if p.RequestID != "" && utf8.RuneCountInString(p.RequestID) > maxIDRunes {
 		return "requestId exceeds the id length bound"
 	}
+	if p.SubmitID != "" && utf8.RuneCountInString(p.SubmitID) > maxIDRunes {
+		return "submitId exceeds the id length bound"
+	}
 	// Refused HERE rather than at the store write: an attempt opened and
 	// then refused would hold the domain and poison the next attach, and a
 	// submit whose provenance is unknown must not open one at all.
@@ -434,6 +437,12 @@ func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 // send line (decision 5's privacy rule).
 type submitAttemptParams struct {
 	Domain string `json:"domain"`
+	// SubmitID is the renderer's correlation token for this submit: minted
+	// before the call, carried on the ledger record it opened, and echoed on
+	// the attempt so the renderer binds record to attempt by equality rather
+	// than searching for one by position (nocx-td6d4.10). Optional, because a
+	// caller with no ledger record to bind has nothing to correlate.
+	SubmitID string `json:"submitId,omitempty"`
 	// RequestID is the optional broker id of the assistant run that caused
 	// this submit. It is transport correlation only: user submits omit it.
 	RequestID string `json:"requestId,omitempty"`
@@ -470,6 +479,7 @@ type lifecycleSubmitAttemptResult struct {
 	Cwd       string    `json:"cwd"`
 	Host      string    `json:"host"`
 	Origin    string    `json:"origin"`
+	SubmitID  string    `json:"submitId,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
 }
 
@@ -515,7 +525,7 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
-	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
+	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host, params.SubmitID)
 	if err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
@@ -585,6 +595,7 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		Cwd:       att.Cwd,
 		Host:      att.Host,
 		Origin:    lifecyclepub.OriginApp,
+		SubmitID:  att.SubmitID,
 		StartedAt: att.StartedAt,
 	}))
 }

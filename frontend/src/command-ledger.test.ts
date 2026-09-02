@@ -119,26 +119,37 @@ describe('CommandLedger (severed)', () => {
     expect(ledger.records()).toHaveLength(1)
   })
 
-  it('bindAttempt ties the pending running record to the attempt — idempotent', () => {
+  it('bindAttempt ties the record to the attempt that echoes ITS token — idempotent', () => {
     const rec = ledger.open('make', '/', '', fakeLineOf(1), 'shell')
-    const bound = ledger.bindAttempt('att-1')
+    const bound = ledger.bindAttempt({ id: 'att-1', submitId: rec.submitId })
     expect(bound).toBe(rec)
     expect(ledger.recordForAttempt('att-1')).toBe(rec)
-    // A repeated binding returns the same record.
-    expect(ledger.bindAttempt('att-1')).toBe(rec)
-    // A second pending record stays unbound: the kernel allows one open
-    // attempt per domain, so the projection binds the oldest pending.
+    // A repeated binding returns the same record, and needs no token: the
+    // attempt id is already resolved.
+    expect(ledger.bindAttempt({ id: 'att-1' })).toBe(rec)
+    // A second submit is a second token, and the attempt carrying it binds
+    // that record — not whichever record happens to be oldest.
     const second = ledger.open('ls', '/', '', fakeLineOf(2), 'shell')
-    expect(ledger.bindAttempt('att-2')).toBe(second)
+    expect(second.submitId).not.toBe(rec.submitId)
+    expect(ledger.bindAttempt({ id: 'att-2', submitId: second.submitId })).toBe(second)
   })
 
-  it('bindAttempt with no pending record returns null — a shell-originated attempt', () => {
-    expect(ledger.bindAttempt('att-9')).toBeNull()
+  it('bindAttempt with no token returns null — a shell-originated attempt', () => {
+    // The shell's own line had no submit behind it, so there is no token and
+    // nothing to bind. Deliberately not "no record was found": a record left
+    // open by a refused submit is present and must NOT be claimed here.
+    ledger.open('deploy', '/', '', fakeLineOf(1), 'shell')
+    expect(ledger.bindAttempt({ id: 'att-9' })).toBeNull()
+  })
+
+  it('bindAttempt refuses a token no submit of this ledger minted', () => {
+    ledger.open('make', '/', '', fakeLineOf(1), 'shell')
+    expect(ledger.bindAttempt({ id: 'att-3', submitId: 'sub-elsewhere' })).toBeNull()
   })
 
   it('complete sets the exit status exactly once from the authenticated completion', () => {
     const rec = ledger.open('make', '/repo', '', fakeLineOf(1), 'shell')
-    ledger.bindAttempt('att-1')
+    ledger.bindAttempt({ id: 'att-1', submitId: ledger.records()[0].submitId })
     const done = ledger.complete(attempt({ exitCode: 0 }))
     expect(done).toBe(rec)
     expect(rec.status).toBe('success')
@@ -152,7 +163,7 @@ describe('CommandLedger (severed)', () => {
 
   it('complete paints failure from a non-zero authenticated exit code', () => {
     const rec = ledger.open('make', '/repo', '', fakeLineOf(1), 'shell')
-    ledger.bindAttempt('att-1')
+    ledger.bindAttempt({ id: 'att-1', submitId: ledger.records()[0].submitId })
     ledger.complete(attempt({ exitCode: 2 }))
     expect(rec.status).toBe('failure')
     expect(rec.exitCode).toBe(2)
@@ -160,7 +171,7 @@ describe('CommandLedger (severed)', () => {
 
   it('an abandoned attempt is unknown and never successful', () => {
     const rec = ledger.open('sleep 100', '/', '', fakeLineOf(1), 'shell')
-    ledger.bindAttempt('att-1')
+    ledger.bindAttempt({ id: 'att-1', submitId: ledger.records()[0].submitId })
     ledger.complete(attempt({ state: 'unknown' }))
     expect(rec.status).toBe('unknown')
     expect(rec.exitCode).toBeNull()
@@ -179,7 +190,7 @@ describe('CommandLedger (severed)', () => {
 
   it('the record keeps the app-owned command text — the attempt command never lands in the record', () => {
     const rec = ledger.open('make {{secret:ci}}', '/', '', fakeLineOf(1), 'shell')
-    ledger.bindAttempt('att-1')
+    ledger.bindAttempt({ id: 'att-1', submitId: ledger.records()[0].submitId })
     ledger.complete(attempt({ command: 'make sk-live-1234' }))
     expect(rec.command).toBe('make {{secret:ci}}')
   })

@@ -33,6 +33,12 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256
+    },
+    "submitId": {
+      "type": "string",
+      "description": "The submitting renderer's correlation token for THIS submit, minted before the call and carried on the ledger record it opened. It is echoed on the attempt the backend creates (result and lifecycle.changed) so the renderer binds record to attempt by equality instead of searching for one by position. It is NOT the attempt's identity \u2014 the backend mints that (ADR-0024 decision 5) \u2014 and it never names a shell-originated attempt, which has no submit behind it.",
+      "minLength": 1,
+      "maxLength": 256
     }
   }
 }

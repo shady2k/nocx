@@ -61,6 +61,11 @@ export interface ExecutionAttempt {
   readonly state: 'open' | 'completed' | 'unknown'
   readonly command?: string
   readonly origin?: 'app' | 'shell'
+  /** The correlation token the submit that created this attempt minted,
+   *  echoed by the backend. The ledger record opened by that submit carries
+   *  the same value, and binding the two is an equality on it. Absent on a
+   *  shell-originated attempt — there was no submit to mint one. */
+  readonly submitId?: string
   readonly startedAt?: string
   /** Present exactly when state is completed. */
   readonly exitCode?: number
@@ -472,6 +477,7 @@ export class LifecycleKernel {
         state: 'completed',
         command: a.command,
         origin: a.origin,
+        submitId: a.submitId,
         startedAt: a.startedAt,
         exitCode: a.exitCode,
         completedAt: a.completedAt,
@@ -485,6 +491,7 @@ export class LifecycleKernel {
       state: a.state,
       command: a.command,
       origin: a.origin,
+      submitId: a.submitId,
       startedAt: a.startedAt,
     }
   }

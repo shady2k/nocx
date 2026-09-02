@@ -352,7 +352,7 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 	})
 
 	// The live domain still works end to end: a start → complete round trip.
-	if _, err := k.SubmitAttempt(cfg.Domain, "echo hi", "/home/dev", "local"); err != nil {
+	if _, err := k.SubmitAttempt(cfg.Domain, "echo hi", "/home/dev", "local", ""); err != nil {
 		t.Fatalf("submit after hostile candidates: %v", err)
 	}
 	att, ok := k.OpenAttempt(cfg.Domain)
@@ -435,7 +435,7 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 	// cannot leave a spare one behind.
 	var att lifecycle.ExecutionAttempt
 	waittest.WaitFor(t, "domain past accept", func() bool {
-		a, err := k.SubmitAttempt(cfg.Domain, "sleep 100", "/home/dev", "local")
+		a, err := k.SubmitAttempt(cfg.Domain, "sleep 100", "/home/dev", "local", "")
 		if err != nil {
 			return false
 		}

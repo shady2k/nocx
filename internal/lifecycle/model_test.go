@@ -25,7 +25,7 @@ func TestModelScenario(t *testing.T) {
 	assertState(t, st, LifecyclePromptReady, hA.Domain, "", []DomainID{hA.Domain})
 
 	// 3. Start and complete attempt A1.
-	a1, err := k.SubmitAttempt(hA.Domain, "echo hi", "/home/dev", "local")
+	a1, err := k.SubmitAttempt(hA.Domain, "echo hi", "/home/dev", "local", "")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
@@ -176,11 +176,11 @@ func TestModelScenario(t *testing.T) {
 	if _, ingestErr := k2.Ingest("R", env("L1", hY, 2, startEvt(nil, "ls"))); !errors.Is(ingestErr, ErrWrongLane) {
 		t.Fatalf("cross-lane event must be rejected, got %v", ingestErr)
 	}
-	x1, err := k2.SubmitAttempt(hX.Domain, "make", "/work/nocx", "local")
+	x1, err := k2.SubmitAttempt(hX.Domain, "make", "/work/nocx", "local", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	y1, err := k2.SubmitAttempt(hY.Domain, "ls", "/tmp", "remote")
+	y1, err := k2.SubmitAttempt(hY.Domain, "ls", "/tmp", "remote", "")
 	if err != nil {
 		t.Fatal(err)
 	}

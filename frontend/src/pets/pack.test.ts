@@ -197,10 +197,10 @@ describe('clipFor', () => {
     // trim width, so the run/walk ratio remains three.
     expect(CAT_PACK.strideBodies).toEqual({ walk: 1, run: 3 })
   })
-  it('declares reasoned air poses from the run strip', () => {
-    expect(CAT_PACK.airFrames).toEqual({ rise: 1, apex: 3, fall: 6 })
+  it('declares air poses read off the run strip', () => {
+    expect(CAT_PACK.airFrames).toEqual({ rise: 1, apex: 2, fall: 4 })
     expect(airFrame(CAT_PACK, -500, 900)).toBe(1)
-    expect(airFrame(CAT_PACK, -10, 900)).toBe(3)
-    expect(airFrame(CAT_PACK, 500, 900)).toBe(6)
+    expect(airFrame(CAT_PACK, -10, 900)).toBe(2)
+    expect(airFrame(CAT_PACK, 500, 900)).toBe(4)
   })
 })

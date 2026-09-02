@@ -141,10 +141,16 @@ export const CAT_PACK: PetPack = {
   // lengths per cycle, versus one for walk, making the ratio explicit.
   strideBodies: { walk: 1, run: 3 },
 
-  // The air poses reuse run.png without advancing its gait cycle. The
-  // indices are chosen by reasoning about push-off, apex and landing phases;
-  // this headless worktree cannot confirm the artwork visually.
-  airFrames: { rise: 1, apex: 3, fall: 6 },
+  // The air poses reuse run.png without advancing its gait cycle. The indices
+  // were first chosen by reasoning and two of the three were wrong; these are
+  // read off the strip. Frame 1 is the push-off, still low with the front legs
+  // coming up. Frame 2 is the fullest extension, body horizontal — that is
+  // what the top of an arc looks like, where frame 3 has already dropped its
+  // nose. Frame 4 reaches the front legs down for the ground, which is a cat
+  // descending; frame 6 is the gathered crouch of one that has just landed,
+  // and using it here drew the compression twice, once in the air and again
+  // in the `land` phase underneath it.
+  airFrames: { rise: 1, apex: 2, fall: 4 },
 }
 
 /** Select the fixed airborne pose from signed vertical speed. A narrow band

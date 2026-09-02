@@ -75,6 +75,9 @@ export type EmptyReason =
    *  rebuilt: hosts cannot be offered, and naming WHY beats the generic
    *  "no matches" (an empty list would read as "you have no hosts"). */
   | { kind: 'hosts-unavailable'; reason: string; detail: string }
+  /** The remote shell completion adapter could not answer. Its reason is
+   *  not an SSH-config failure: completion may fail for any remote shell. */
+  | { kind: 'completion-unavailable'; reason: string }
 
 /** What one provider answers to one query: candidates plus — when it
  *  answered nothing — the specific reason, so "no matches" is never
@@ -188,13 +191,13 @@ function checkableTrailingToken(line: string, position: TokenPosition): string {
 }
 
 export function historyProvider(opts: {
-  query: (cwd: string, host: string) => Promise<HistoryQuery>
+  query: (cwd: string, host: string, signal: AbortSignal) => Promise<HistoryQuery>
   /** The fs.complete seam — the same backend call the path provider makes.
    *  Checks whether a history row's trailing token still exists, so a row
    *  whose file is gone is DEMOTED — never hidden (re-running a command to
    *  see it fail is legitimate). Absent on a remote session: the backend's
    *  filesystem is not the session's, and no call may be made. */
-  completeFs?: (text: string, cwd: string) => Promise<FsComplete>
+  completeFs?: (text: string, cwd: string, signal: AbortSignal) => Promise<FsComplete>
 }): SuggestionProvider {
   // The existence cache: one fs.complete call per (cwd, trailing token),
   // for the life of the open list. A query whose document extends the
@@ -224,7 +227,7 @@ export function historyProvider(opts: {
         ctx.position === 'argument' && ctx.isLocal && !NO_FS_CANDIDATES[commandWord(ctx)]
           ? MAX_HISTORY_IN_ARGUMENT_POSITION
           : MAX_PROVIDER_CANDIDATES
-      const result = await opts.query(ctx.cwd, ctx.host)
+      const result = await opts.query(ctx.cwd, ctx.host, signal)
       if (signal.aborted) return { candidates: [] }
       const seen = new Set<string>()
       const out: Candidate[] = []
@@ -268,7 +271,8 @@ export function historyProvider(opts: {
           const key = `${ctx.cwd}\u0000${token}`
           let missing = exists.get(key)
           if (missing === undefined) {
-            const result = await opts.completeFs(token, ctx.cwd)
+            const result = await opts.completeFs(token, ctx.cwd, signal)
+            if (signal.aborted) return { candidates: [] }
             missing = !result.entries.some((e) => e.name === token)
             exists.set(key, missing)
           }
@@ -330,7 +334,7 @@ function listedDirName(ctx: SuggestContext): string {
 }
 
 export function fsProvider(opts: {
-  complete: (text: string, cwd: string) => Promise<FsComplete>
+  complete: (text: string, cwd: string, signal: AbortSignal) => Promise<FsComplete>
 }): SuggestionProvider {
   return {
     id: 'fs',
@@ -348,7 +352,7 @@ export function fsProvider(opts: {
       // `./` lists it, and the display below keys off the REAL token, so
       // rows show bare names — never a `./` the user did not type.
       const q = ctx.token.text === '' ? './' : ctx.token.text
-      const result = await opts.complete(q, ctx.cwd)
+      const result = await opts.complete(q, ctx.cwd, signal)
       if (signal.aborted) return { candidates: [] }
       // The part of the token the user has already typed up to the last
       // slash — display and insert both carry it, so accepting a candidate
@@ -441,12 +445,15 @@ export function fsProvider(opts: {
 // answer the right kind, so the table is not consulted and must not be
 // re-added.
 export function shellCompleteProvider(opts: {
-  complete: (params: {
-    sessionId: string
-    cwd: string
-    line: string
-    pos: number
-  }) => Promise<ShellComplete>
+  complete: (
+    params: {
+      sessionId: string
+      cwd: string
+      line: string
+      pos: number
+    },
+    signal: AbortSignal,
+  ) => Promise<ShellComplete>
   /** The session ID of the tab this provider answers for. */
   sessionId: () => string
 }): SuggestionProvider {
@@ -470,27 +477,31 @@ export function shellCompleteProvider(opts: {
 
       const pos = ctx.token.to // caret position
 
-      const result = await opts.complete({
-        sessionId: sid,
-        cwd: ctx.cwd,
-        line: ctx.doc,
-        pos,
-      })
+      const result = await opts.complete(
+        {
+          sessionId: sid,
+          cwd: ctx.cwd,
+          line: ctx.doc,
+          pos,
+        },
+        signal,
+      )
       if (signal.aborted) return { candidates: [] }
 
       if (result.entries.length === 0) {
         // The adapter named a specific reason — surface it rather than
         // the generic "no matches".
         if (result.reason) {
-          // Map specific adapter reasons to the EmptyReason vocabulary.
+          // A withdrawn query is not a failure to report: the backend stops
+          // a completion the renderer superseded (rpc.cancel, nocx-7jujk),
+          // and "cancelled" is the answer to a question nobody is still
+          // asking. Anything else is named honestly.
           if (result.reason === 'cancelled') return { candidates: [] }
-          // Surface the adapter's reason as the honest empty message.
           return {
             candidates: [],
             emptyReason: {
-              kind: 'hosts-unavailable',
-              reason: 'shell completion',
-              detail: result.reason,
+              kind: 'completion-unavailable',
+              reason: result.reason,
             },
           }
         }
@@ -516,7 +527,7 @@ export function shellCompleteProvider(opts: {
             insertText: e.source === 'path' ? tokenPrefix + display : display,
             replacement: { from: ctx.token.from, to: ctx.token.to },
             matchRanges: matchTo > 0 ? [{ from: 0, to: matchTo }] : [],
-            source: e.source === 'command' ? 'command' : 'path',
+            source: e.source,
             kind: e.isDir ? 'directory' : undefined,
             environment: { cwd: ctx.cwd, host: ctx.host, confidence: 'asserted' },
             eligibleForGhostText: true,
@@ -538,16 +549,19 @@ export function shellCompleteProvider(opts: {
  */
 export function createShellProviders(opts: {
   store: CommandSnapshotStore
-  queryHistory: (cwd: string, host: string) => Promise<HistoryQuery>
-  completeFs: (text: string, cwd: string) => Promise<FsComplete>
+  queryHistory: (cwd: string, host: string, signal: AbortSignal) => Promise<HistoryQuery>
+  completeFs: (text: string, cwd: string, signal: AbortSignal) => Promise<FsComplete>
   /** The shell.complete seam — the remote completion adapter (nocx-w7h.15).
    *  Absent when no adapter is wired (tests, raw contexts). */
-  completeShell?: (params: {
-    sessionId: string
-    cwd: string
-    line: string
-    pos: number
-  }) => Promise<ShellComplete>
+  completeShell?: (
+    params: {
+      sessionId: string
+      cwd: string
+      line: string
+      pos: number
+    },
+    signal: AbortSignal,
+  ) => Promise<ShellComplete>
   /** The session ID of the tab — only needed when completeShell is present. */
   sessionId?: () => string
   /** Present when a ProfileClient is wired (the app); absent in tests and

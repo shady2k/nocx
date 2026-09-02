@@ -65,6 +65,7 @@ var ingressCriticalMethods = map[string]struct{}{
 	// queue behind the lane either. Handler: a mutex update, microseconds.
 	"agent.laneInteractivity": {},
 	"transport.ping":          {},
+	"rpc.cancel":              {},
 }
 
 // methodSpec declares one control method at server construction: the

@@ -57,6 +57,9 @@ func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcReq
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	op, err := h.ops.ForSessionTarget(session.ID(params.SessionID))
 	if err != nil {
@@ -84,24 +87,28 @@ func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcReq
 				compResp, compErr = h.remote.Complete(ctx, compReq, target.SSHOptions...)
 			}
 		}
-		if compResp == nil && compErr == nil {
-			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
-				Entries: []shellCompleteEntry{},
-				Reason:  "completion unavailable for this session kind",
-			}))
-			return nil
-		}
-		if compErr != nil {
-			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
-				Entries: []shellCompleteEntry{},
-				Reason:  "completion unavailable",
-			}))
-			return nil
+		// Withdrawn while the adapter was answering (rpc.cancel, or the
+		// socket dropped): the renderer is not waiting for this any more, so
+		// no result is sent and the operation reports why it stopped.
+		if cancelled := ctx.Err(); cancelled != nil {
+			return cancelled
 		}
 
-		_ = h.r.TryResult(req.ID, mustMarshal(toWireResponse(compResp)))
+		result := shellCompleteResponse{Entries: []shellCompleteEntry{}}
+		switch {
+		case compResp == nil && compErr == nil:
+			result.Reason = "completion unavailable for this session kind"
+		case compErr != nil:
+			result.Reason = "completion unavailable"
+		default:
+			result = toWireResponse(compResp)
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(result))
 		return nil
 	})
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		if capability.IsRefused(err) {
 			answerOperationRefusal(h.r, req, err)

@@ -95,7 +95,7 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		}),
 		regResponder(s.lane, "fs.complete", params(validateFsCompleteRaw), func(r Responder) handlerFunc {
 			h := fsCompleteHandlers{r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(req) }
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(ctx, req) }
 		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler

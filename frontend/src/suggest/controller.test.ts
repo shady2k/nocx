@@ -10,8 +10,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EditorView } from '@codemirror/view'
 import {
   CompletionController,
+  docMoveDismissesSurface,
   ghostAcceptable,
   ghostTail,
+  QUERY_DEBOUNCE_MS,
   LATENCY_BUDGET_MS,
   type CompletionEditor,
 } from './controller'
@@ -137,6 +139,7 @@ interface Rig {
 const rig = (opts: {
   providers: SuggestionProvider[]
   latencyBudgetMs?: number
+  queryDebounceMs?: number
   recallIsOpen?: () => boolean
   editorDoc?: string
   acceptSnippet?: (snippetId: string) => void
@@ -151,6 +154,7 @@ const rig = (opts: {
     env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
     recallIsOpen: opts.recallIsOpen,
     latencyBudgetMs: opts.latencyBudgetMs,
+    queryDebounceMs: opts.queryDebounceMs ?? 0,
     acceptSnippet: opts.acceptSnippet,
     now: () => 1_750_000_000_000,
   })
@@ -220,6 +224,21 @@ describe('opening', () => {
     controller.open()
     await flush()
     expect(emptyRow(dropdown)?.textContent).toContain('No subdirectories in Downloads')
+  })
+
+  it('names remote completion failures without inventing SSH config trouble', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        emptyProvider('shell', {
+          kind: 'completion-unavailable',
+          reason: 'remote failed',
+        }),
+      ],
+    })
+    controller.open()
+    await flush()
+    expect(emptyRow(dropdown)?.textContent).toContain('Shell completion unavailable: remote failed')
+    expect(emptyRow(dropdown)?.textContent).not.toContain('SSH config')
   })
 
   it('a pending command snapshot is named, not hidden', async () => {
@@ -437,20 +456,98 @@ describe('streaming and selection', () => {
 
   it('a keystroke aborts: batches from the old query are dropped', async () => {
     const slow = manualProvider('slow', true)
-    const { editor, dropdown, controller } = rig({ providers: [slow.provider] })
+    const { editor, dropdown, controller } = rig({
+      providers: [slow.provider],
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+    })
     controller.open()
     await flush()
 
     // The user types before the slow provider answers.
     editor.type('x')
     controller.onDocChanged()
-    await flush()
 
-    // The old query's delivery arrives late — dropped, never rendered.
+    // The old query's delivery arrives during the debounce window — dropped,
+    // never rendered before the replacement query is even issued.
     slow.next().resolve([cand({ id: 'stale' })])
     await flush()
     expect(dropdown.isOpen).toBe(false)
     expect(dropdown.root.textContent).not.toContain('stale')
+  })
+
+  it('keeps an open dropdown live through the debounce rather than flashing it shut', async () => {
+    const { editor, dropdown, controller } = rig({
+      providers: [instantProvider('fast', () => [cand({ id: 'one' })])],
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+    })
+    controller.open()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+
+    // The keystroke withdraws the request, not the surface: the panel a
+    // person is reading must not blink out from under their fingers while
+    // the replacement query waits for the burst to end.
+    editor.type('x')
+    controller.onDocChanged()
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+    expect(dropdown.root.textContent).toContain('one')
+
+    await vi.advanceTimersByTimeAsync(QUERY_DEBOUNCE_MS)
+    await flush()
+    expect(dropdown.isOpen).toBe(true)
+  })
+
+  it('coalesces a burst of keystrokes into one completion query', async () => {
+    const suggest = vi.fn(() => Promise.resolve({ candidates: [] }))
+    const { editor, controller } = rig({
+      providers: [
+        {
+          id: 'counted',
+          targetId: 'shell',
+          applicable: () => true,
+          suggest,
+        },
+      ],
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+    })
+
+    for (const ch of 'a long hand-typed command') {
+      editor.type(ch)
+      controller.onDocChanged()
+    }
+    await flush()
+    expect(suggest).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(QUERY_DEBOUNCE_MS)
+    await flush()
+    expect(suggest).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts an in-flight completion before scheduling the replacement query', async () => {
+    let firstSignal: AbortSignal | undefined
+    const first = deferred()
+    const provider: SuggestionProvider = {
+      id: 'cancellable',
+      targetId: 'shell',
+      applicable: () => true,
+      suggest: (_ctx, signal) => {
+        firstSignal = signal
+        return first.promise.then((candidates) => ({ candidates }))
+      },
+    }
+    const { editor, controller } = rig({
+      providers: [provider],
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+    })
+
+    controller.open()
+    await flush()
+    expect(firstSignal?.aborted).toBe(false)
+
+    editor.type('x')
+    controller.onDocChanged()
+    expect(firstSignal?.aborted).toBe(true)
   })
 
   it('a keystroke while the dropdown is open re-queries and resets the selection', async () => {
@@ -969,6 +1066,32 @@ describe('ghost tail', () => {
   })
 })
 
+describe('a document that moved out from under the surface', () => {
+  // The seam the e2e caught and no unit test covered: extensions()' update
+  // listener. With the query issued on every keystroke the document and
+  // queryDoc were never apart, so this guard never fired; with the typing
+  // debounce they are apart for the whole window BY DESIGN, and dismissing
+  // there cancelled the scheduled query — typing produced no completion at
+  // all and the ghost never appeared (nocx-7jujk).
+  it('takes the surface down when the document moved and nothing will refresh it', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git st', queryDoc: 'git s', refreshScheduled: false }),
+    ).toBe(true)
+  })
+
+  it('leaves it alone while a refresh is already scheduled', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git st', queryDoc: 'git s', refreshScheduled: true }),
+    ).toBe(false)
+  })
+
+  it('has nothing to do when the document is the one the surface answers', () => {
+    expect(
+      docMoveDismissesSurface({ doc: 'git s', queryDoc: 'git s', refreshScheduled: false }),
+    ).toBe(false)
+  })
+})
+
 describe('ghost text', () => {
   const ghostEditor = (doc: string) => {
     const e = new FakeEditor(doc)
@@ -992,6 +1115,7 @@ describe('ghost text', () => {
       ],
       dropdown,
       env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      queryDebounceMs: 0,
       now: () => 1_750_000_000_000,
     })
     controller.attach(editor, container)
@@ -1002,6 +1126,43 @@ describe('ghost text', () => {
     expect(controller.handleKey(e)).toBe(true)
     expect(editor.doc).toBe('git status')
     expect(dropdown.isOpen).toBe(false)
+  })
+
+  // The e2e that caught this: typing at the PRODUCTION debounce must still
+  // put a ghost at the caret. Every other ghost test here runs with the
+  // debounce switched off, so the whole deferred path — the one the product
+  // uses — had no unit coverage at all, and shipped red.
+  it('a ghost still lands when the query is deferred by the production debounce', async () => {
+    const editor = ghostEditor('cd Down')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const controller = new CompletionController({
+      providers: [
+        instantProvider('p', () => [
+          cand({
+            id: 'path:Downloads/',
+            insertText: 'Downloads/',
+            kind: 'directory',
+            replacement: { from: 3, to: 7 },
+          }),
+        ]),
+      ],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      queryDebounceMs: QUERY_DEBOUNCE_MS,
+      now: () => 1_750_000_000_000,
+    })
+    controller.attach(editor, container)
+    controller.onDocChanged()
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(QUERY_DEBOUNCE_MS)
+    await flush()
+
+    expect(controller.handleKey(key('ArrowRight'))).toBe(true)
+    await flush()
+    expect(editor.doc).toBe('cd Downloads/')
   })
 
   // The owner's report: with `cd Downloads/` ghosted, Right inserted it and
@@ -1021,6 +1182,7 @@ describe('ghost text', () => {
         ],
         dropdown,
         env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+        queryDebounceMs: 0,
         now: () => 1_750_000_000_000,
       })
       controller.attach(editor, container)
@@ -1071,6 +1233,7 @@ describe('ghost text', () => {
           ]),
         ],
         dropdown,
+        queryDebounceMs: 0,
         env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
         now: () => 1_750_000_000_000,
       })
@@ -1142,6 +1305,7 @@ describe('ghost text', () => {
       providers: [slow.provider],
       dropdown,
       env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      queryDebounceMs: 0,
       now: () => 1_750_000_000_000,
     })
     controller.attach(editor, container)
@@ -1302,6 +1466,7 @@ describe('ghost draw and accept are one rule (nocx-mlm7)', () => {
           }),
         ]),
       ],
+      queryDebounceMs: 0,
       dropdown,
       env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
       latencyBudgetMs: 0,
@@ -1364,6 +1529,7 @@ describe('ghost refusal tracing (nocx-mlm7)', () => {
       ],
       dropdown,
       env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      queryDebounceMs: 0,
       now: () => 1_750_000_000_000,
     })
     controller.attach(editor, container)

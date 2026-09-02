@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,14 @@ import (
 // Unit tests for completeLocalPath — the resolution rules, in isolation from
 // the socket. The wire shape is pinned in ws_contract_test.go; these pin the
 // semantics (what a partial path means, what a directory listing answers).
+
+// completeLocalPath is the synchronous shape these tests assert against: the
+// production caller passes the request's context so a withdrawn keystroke
+// stops the walk, and no test here exercises that lifetime.
+func completeLocalPath(text, cwd string, limit int) []fsCompleteEntry {
+	entries, _ := completeLocalPathContext(context.Background(), text, cwd, limit)
+	return entries
+}
 
 func writeFixture(t *testing.T, dir string, files []string, dirs []string) {
 	t.Helper()

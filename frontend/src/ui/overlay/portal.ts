@@ -8,11 +8,22 @@
  *
  * ADR-0014: "Portal root — a single document.body-level element owned by the kit."
  *
+ * NEVER PASS THE ROOT ITSELF TO `render()`. Solid's disposer ends with
+ * `element.textContent = ''`, so it empties whatever it was rendered into: the
+ * first overlay to close would take every other overlay in the root with it.
+ * The root is shared; give each overlay a host of its own and remove that host
+ * after disposing. Ignoring this is what removed every terminal pane when the
+ * clipboard banner rendered straight into `#panes` (nocx-3hv2t).
+ *
  * @example
  * ```ts
  * import { getPortalRoot } from './overlay/portal'
- * const root = getPortalRoot()
- * render(() => <MyOverlay />, root)
+ * const host = document.createElement('div')
+ * getPortalRoot().append(host)
+ * const dispose = render(() => <MyOverlay />, host)
+ * // teardown:
+ * dispose()
+ * host.remove()
  * ```
  */
 

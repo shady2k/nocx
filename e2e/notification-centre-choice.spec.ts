@@ -39,6 +39,37 @@ const NOTIFICATIONS_NAV = '.ui-grouped-nav__item[data-item="Notifications"]'
 const rowsOfKind = (page: Page, kind: string) =>
   page.locator(ROW).filter({ has: page.getByText(kind, { exact: true }) })
 
+/**
+ * The command block a parked command left behind, found by the title it
+ * printed — every command here names its own tab, so the text is unique and
+ * the lookup needs no pane scoping (a background pane's block is in the DOM;
+ * tabs are hidden, not unmounted).
+ */
+const blockOf = (page: Page, title: string) => page.locator('.cmd-block').filter({ hasText: title })
+
+/**
+ * Wait until the ledger has CLOSED this command, before asking the centre
+ * about it.
+ *
+ * The exit chip is written by the authenticated completion, so it is the
+ * nearest observable to "the product knows this command ended" — and it sits
+ * on the near side of the seam the notification travels: the row is raised
+ * from the record the renderer sends afterwards. Waiting here first is what
+ * makes a red run diagnostic. A missing row with a frozen block says the
+ * notification half failed; a block that never froze says the completion
+ * never arrived. Without it the only evidence is a number on the bell, which
+ * is what a webkit CI run left behind and why nocx-td6d4.10 took an artefact
+ * dig to attribute.
+ *
+ * Every parked command exits non-zero on purpose (see parkBellAndFinish), so
+ * the chip is the failure one.
+ */
+async function commandFinished(page: Page, title: string): Promise<void> {
+  await expect(blockOf(page, title).locator('.cmd-header-exit-fail').first()).toHaveText('exit 1', {
+    timeout: 30_000,
+  })
+}
+
 const filterFor = (page: Page, label: string) =>
   page
     .locator('.notifications-panel__filters .ui-field')
@@ -133,6 +164,7 @@ test('a person can choose visible notification kinds without losing rows or read
     await tabNamed(page, titleB).click()
     await expect(tabNamed(page, titleA)).toHaveAttribute('aria-selected', 'false')
     fs.writeFileSync(gateA, '')
+    await commandFinished(page, titleA)
     await showSidebarView(page, 'notifications')
     const badge = page.locator(BELL).locator(BADGE)
     // One wait on all three facts, and it carries the numbers.
@@ -175,9 +207,26 @@ test('a person can choose visible notification kinds without losing rows or read
     await tabNamed(page, titleC).click()
     await expect(tabNamed(page, titleB)).toHaveAttribute('aria-selected', 'false')
     fs.writeFileSync(gateB, '')
-    await expect(badge).toHaveText('2', { timeout: 30_000 })
-    await expect(rowsOfKind(page, TERMINAL_BELL)).toHaveCount(bellRowsBefore + 2)
-    await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 2)
+    await commandFinished(page, titleB)
+    // The same wait the gateA moment uses, and for the same reason: the badge
+    // passes through "1" on its way to "2" because the BEL and the ledger's
+    // completion travel different paths, so a wait that closes on the badge
+    // alone can close on the state the next assertion rejects — and when it
+    // times out it names which half never arrived.
+    await expect
+      .poll(
+        async () => ({
+          badge: await badge.textContent(),
+          bells: await rowsOfKind(page, TERMINAL_BELL).count(),
+          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+        }),
+        { timeout: 30_000 },
+      )
+      .toEqual({
+        badge: '2',
+        bells: bellRowsBefore + 2,
+        finished: finishedRowsBefore + 2,
+      })
 
     const countBeforeOff = Number(await badge.textContent())
     expect(countBeforeOff).toBe(2)
@@ -220,6 +269,7 @@ test('a person can choose visible notification kinds without losing rows or read
     await tabNamed(page, titleA).click()
     await expect(tabNamed(page, titleC)).toHaveAttribute('aria-selected', 'false')
     fs.writeFileSync(gateC, '')
+    await commandFinished(page, titleC)
     await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 3, {
       timeout: 30_000,
     })

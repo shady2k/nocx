@@ -45,6 +45,7 @@ function completedRecord(overrides: Partial<CommandRecord> = {}): CommandRecord 
     cwd: '/repo',
     author: 'shell',
     host: '',
+    submitId: 'sub-test',
     status: 'success',
     exitCode: 0,
     startedAt: 1000.4,

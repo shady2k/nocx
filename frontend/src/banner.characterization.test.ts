@@ -121,6 +121,42 @@ describe('ClipboardBanner', () => {
     clickText("Don't show again")
     expect(await first).toBe('suppress')
   })
+  it.each([
+    ['Allow clipboard writes', 'allow'],
+    ["Don't show again", 'suppress'],
+    ['[aria-label="Dismiss"]', 'dismiss'],
+  ] as const)(
+    'each banner choice removes only the banner host and preserves existing panes',
+    async (trigger, expected) => {
+      const pane = document.createElement('div')
+      pane.className = 'pane'
+      const marker = document.createElement('span')
+      marker.textContent = 'existing pane marker'
+      pane.append(marker)
+      panes.append(pane)
+      const originalMarkup = pane.innerHTML
+
+      const banner = makeBanner()
+      const choice = banner.show()
+
+      expect(pane.isConnected).toBe(true)
+      expect(panes.querySelector('.pane')).toBe(pane)
+      expect(pane.querySelector('span')?.textContent).toBe('existing pane marker')
+
+      if (trigger.startsWith('[')) {
+        click(trigger)
+      } else {
+        clickText(trigger)
+      }
+      expect(await choice).toBe(expected)
+
+      expect(panes.querySelector('.clipboard-banner')).toBeNull()
+      expect(panes.querySelector('.clipboard-banner-host')).toBeNull()
+      expect(pane.isConnected).toBe(true)
+      expect(pane.parentElement).toBe(panes)
+      expect(pane.innerHTML).toBe(originalMarkup)
+    },
+  )
 
   // ── DOM footprint ─────────────────────────────────────────────
 

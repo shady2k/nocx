@@ -56,45 +56,43 @@
  * a marker count, a byte count, a DOM node. The detached window is exactly as
  * long as it needs to be.
  *
- * ── THIS SPEC IS RED, AND WHAT IT IS RED ABOUT IS THE POINT ────────────────
+ * ── GREEN, AND WHAT IT HAD TO BE RED ABOUT FIRST ──────────────────────────
  *
- * THE RECLAIM ITSELF HOLDS (nocx-k6p18.30, nocx-xhm9e, measured 2026-09-02).
- * The helper installs through the product's consent path; the session is
- * helper-hosted with a hostSessionId; a block appears while it runs; the
- * detach is observed server-side; the build overruns the host's 4 MiB window
- * with no coordinator alive; a FRESH coordinator lists the session, a fresh
- * context finds its pane, the host reports the SAME pid and window and no
- * exit, the detached span is proved by the build's own marker file, the hole
- * is named `hostWindow`, the build goes on advancing THROUGH the reclaim, and
- * when it ends the notification centre carries `exit status 7`. Every one of
- * those was watched passing.
+ * It passes end to end as of 2026-09-02 — four consecutive runs, the last of
+ * them on the tree left behind after every mutation below had been applied and
+ * reverted. It was red for a real defect every time the product had one, and
+ * each of those was found by RUNNING this file rather than by reading code:
+ * nocx-k6p18.24 (a helper-hosted tab rendered output and accepted no input),
+ * nocx-k6p18.30 (no coordinator path re-adopted a live helper-hosted session,
+ * so `sessions.live` answered `[]` for two minutes while the build was
+ * provably still advancing), and nocx-k6p18.31 (a re-adopted session had no
+ * lifecycle domain, so the pane read its shell as markerless, hid every
+ * restored block behind `inner-fullscreen-mode` and offered no editor).
  *
- * ONE ASSERTION IS RED, and it is the last thing between this file and the
- * epic's sentence: the restored command block is in the DOM and is invisible.
- * A re-adopted session gets no lifecycle channel — the capability was minted
- * by the dead coordinator's kernel — so the pane sees a markerless shell,
- * enters `unstructured` mode, and every block in `.scrollback-inner` is
- * `display: none` (style.css `inner-fullscreen-mode`, controller.ts
- * `setUnstructured`). The same cause takes the command editor away, so the
- * returned tab cannot start a new command either, and the Git panel says the
- * session has no shell integration. That is nocx-k6p18.31. It is not fixable
- * from this file and it may not be assumed away here: a tab that comes back
- * with its history invisible and its editor gone has not come back.
+ * A GREEN CHECK NOBODY HAS FALSIFIED IS A CHECK NOBODY HAS MEASURED. Four
+ * mutations, each applied to the product, run, and reverted on 2026-09-02, and
+ * the last three were run against this file EXACTLY as it stands:
  *
- * WHAT THE MUTATIONS SAY — each applied to the product, run, and reverted on
- * 2026-09-02, because a check nobody has falsified is a check nobody has
- * measured. Removing the lifecycle socketpair from
- * internal/helper/session/spawn_local.go: red in 18.6 s at `promptReady`
- * (harness.ts:39, from the `promptReady` on the build's own tab below). Deleting the
- * `interface{ ExitCode() int }` branch from internal/session/session.go's
- * `ExitOutcome`: red at `expect(returnedPane).toHaveCount(0)` — a status that
- * classifies as a LOSS never closes the tab, so the mutation is caught one
- * assertion EARLIER than the bell row it was aimed at. Recording the
- * host-window hole as `unrecorded` in internal/transport/ws_session_record.go:
- * red at the recovery card's reason clause. The last two were reached by
- * neutralising the nocx-k6p18.31 assertion locally; with it in place they sit
- * behind it, and that neutralised run is also where "every one of those was
- * watched passing" above comes from.
+ *  - internal/helper/session/spawn_local.go, the lifecycle socketpair not
+ *    built: red in 18.6 s at `promptReady` (harness.ts:39) — not at the block
+ *    assertion. With no lifecycle channel the pane never shows a command
+ *    editor, so the run dies one step before it can ask about a block. The
+ *    mutation IS caught; the assertion that names it is the harness's.
+ *  - internal/session/session.go, the `interface{ ExitCode() int }` branch
+ *    deleted from `ExitOutcome`: red at `expect(returnedPane).toHaveCount(0)`.
+ *    A status that classifies as a LOSS never closes the tab, so this is
+ *    caught one assertion before the bell row it was aimed at.
+ *  - internal/transport/ws_session_record.go, the execution host's window hole
+ *    recorded as `unrecorded`: red at the recovery card's reason clause, which
+ *    then reads "that was never recorded" and sends a person to a retention
+ *    knob that governs nothing about the host's window.
+ *  - internal/app/session_readopt.go, `LifecycleOffset` resumed at the
+ *    helper's window BASE rather than at its head: red at the restored-block
+ *    assertion, twice. Replaying an already-authenticated stretch of the
+ *    lifecycle stream into the new kernel does not merely re-deliver frames
+ *    that already ran — the pane never reaches `prompt_ready` at all, so it
+ *    collapses into exactly the markerless layout nocx-k6p18.31 used to
+ *    produce, editor and all.
  */
 import { test as base, expect, type Browser, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -674,16 +672,18 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // The block criterion again, and this is the half that matters: blocks
     // survive a coordinator replacement (nocx-k6p18.22, moved here).
     //
-    // THIS IS THE ONE ASSERTION THIS SPEC IS STILL RED ON, and `toBeVisible`
-    // rather than `toBeAttached` is deliberate. The block IS built and IS in
+    // `toBeVisible` RATHER THAN `toBeAttached`, and that word is the whole
+    // assertion. This line was red for nocx-k6p18.31 and it is the line the
+    // fourth mutation lands on, and in BOTH cases the block is built and is in
     // the DOM — `<div class="cmd-block" data-restored="true"
-    // data-output-evicted="true">`, resolved 123 times in 60 s — and it is
-    // `display: none`, because a re-adopted session has no lifecycle channel
-    // (nocx-k6p18.31), so the pane classifies the shell as markerless, enters
-    // `unstructured` mode, and `.scrollback-inner.inner-fullscreen-mode >
-    // *:not(.xterm-live-container)` hides every block in the stack. A history
-    // a person cannot see has not survived anything, so the weaker assertion
-    // would be this test agreeing with the defect.
+    // data-output-evicted="true">`, resolving 120-odd times across 60 s — and
+    // is `display: none`. A pane with no lifecycle domain reads its shell as
+    // markerless, enters `unstructured` mode, and
+    // `.scrollback-inner.inner-fullscreen-mode > *:not(.xterm-live-container)`
+    // takes every block in the stack with it (style.css; controller.ts
+    // `setUnstructured`). A history a person cannot see has not survived
+    // anything, so `toBeAttached` here would be this test agreeing with the
+    // defect — it passes in both of the states above.
     const returnedBlock = returnedPane
       .locator('.cmd-block')
       .filter({ hasText: MARKER_PREFIX })
@@ -710,7 +710,7 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     //
     // MEASURED (2026-09-02): recording the hole as `unrecorded` in
     // ws_session_record.go's sessionOutputHoleReason turns this clause into
-    // "96.5 kB that was never recorded" and this line goes red.
+    // "…that was never recorded" and this line goes red.
     //
     // A BARE `not.toContainText('size limit')` STOOD HERE AND WAS WRONG, and
     // the run that would have failed on it is the run where everything works.

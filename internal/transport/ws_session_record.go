@@ -31,6 +31,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -86,6 +87,76 @@ func WithSessionOutputRecorder(r SessionOutputRecorder) WSServerOption {
 	return func(s *WSServer) { s.sessionRecorder = r }
 }
 
+// holeResult is what one attempt to write a hole to the store came to. Three
+// answers and not two, because "the store declined" and "the store failed"
+// are different facts with different next moves: the first is retention being
+// off, which a person can turn back on and the loop must survive; the second
+// is a write failure the product has to hear about.
+type holeResult int
+
+const (
+	// holeRecorded — the store took it; the recorder resumes past the hole.
+	holeRecorded holeResult = iota
+	// holeDeferred — retention is off, so there is no recording for a hole
+	// to be a hole in. The cursor stays where it is and the whole skip is
+	// retried when the setting comes back.
+	holeDeferred
+	// holeUnrecordable — the store failed. A store that cannot record the
+	// hole cannot be trusted with the resume either, because the alternative
+	// is a recording that silently joins two stretches that are not
+	// adjacent.
+	holeUnrecordable
+)
+
+// recordHole writes one hole into the recording and moves the ring's
+// persistence cursor across it.
+//
+// ONE FUNCTION FOR TWO CAUSES, deliberately. A recorder meets a hole two
+// ways — its own cursor falls behind the ring's oldest byte (nobody was
+// there), or the ring is told a stretch never arrived at all (the execution
+// host's window took it, nocx-k6p18.25) — and they are one operation with two
+// reasons: the store call, the refusal, the failure, the status episode and
+// the cursor move are identical, and only the word for the cause and the
+// sentence in the log differ. Writing them twice is how the two would drift.
+func (s *WSServer) recordHole(
+	ctx context.Context, rec SessionOutputRecorder, sid session.ID, ring *outputRing,
+	pos, resumeAt uint64, reason, resumed string,
+) holeResult {
+	res, err := rec.Skip(ctx, string(sid), resumeAt, reason)
+	if err != nil {
+		// Said where every other history write failure is said.
+		if s.historyStatus != nil {
+			s.historyStatus.Raise(HistoryDegradeWriteFailed, err.Error())
+		}
+		s.log.Warn("session recording could not record the hole it fell into; the ring falls back to client acks",
+			"session_id", string(sid), "at", pos, "resume_at", resumeAt, "reason", reason, "error", err)
+		return holeUnrecordable
+	}
+	if !res.Kept {
+		return holeDeferred
+	}
+	// A kept skip is a store write that succeeded, so it closes an open
+	// write-failure episode and puts the loop back on the ring as its
+	// consumer — both of which the append path does for the same reason, and
+	// neither of which may wait for the first byte after the hole, since a
+	// session that produces nothing more would leave the product asserting a
+	// failure that ended.
+	ring.setRecording(true)
+	if s.historyStatus != nil {
+		s.historyStatus.ClearReason(HistoryDegradeWriteFailed)
+	}
+	s.log.Warn(resumed, "session_id", string(sid), "at", pos, "resume_at", resumeAt, "reason", reason)
+	// The store owes nothing before the resume point, so the ring may free up
+	// to it. Without this the persistence cursor would sit at an offset the
+	// ring has already discarded until the next successful append moved it.
+	if err := ring.recordTo(resumeAt); err != nil {
+		s.log.Warn("session recording could not advance its cursor across the hole",
+			"session_id", string(sid), "at", resumeAt, "error", err)
+		return holeUnrecordable
+	}
+	return holeRecorded
+}
+
 // recordSessionOutput is the recorder's loop: one goroutine per session,
 // started by pumpToRing and ending when the ring closes.
 //
@@ -108,7 +179,33 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 
 	var pos uint64
 	for {
-		data, _, needsReset := ring.snapshot(pos)
+		data, _, needsReset, hole := ring.snapshot(pos)
+		if hole != nil {
+			// A stretch of this session's output never reached this machine
+			// at all: the execution host reclaimed its own bounded window
+			// past the coordinator before the bytes could be carried across
+			// (nocx-k6p18.25). The ring carries it as a hole rather than
+			// renumbering what came after, so the resume point is the hole's
+			// far end and the range recorded is exactly what was lost.
+			//
+			// The reason is the RING's, carried from the wire, and not this
+			// loop's: `unrecorded` below would say nobody was listening,
+			// which is false and points a person at a recorder that was
+			// running the whole time.
+			resumeAt := hole.at + hole.n
+			switch outcome := s.recordHole(ctx, rec, sid, ring, pos, resumeAt, hole.reason,
+				"session recording crossed a hole the execution host's window left; the hole is recorded and recording resumes"); outcome {
+			case holeRecorded:
+				pos = resumeAt
+			case holeDeferred:
+				if s.recorderIdle(ctx, ring) {
+					return
+				}
+			case holeUnrecordable:
+				return
+			}
+			continue
+		}
 		if needsReset {
 			// The recorder's cursor is behind the ring's oldest retained
 			// byte, so the bytes between them are gone from both sides:
@@ -138,48 +235,15 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 					"session_id", string(sid), "at", pos, "resume_at", resumeAt)
 				return
 			}
-			res, err := rec.Skip(ctx, string(sid), resumeAt, content.GapReasonUnrecorded)
-			if err != nil {
-				// A store that cannot record the hole cannot be trusted with
-				// the resume either — the alternative is a recording that
-				// silently joins two stretches that are not adjacent. Said
-				// where every other history write failure is said.
-				if s.historyStatus != nil {
-					s.historyStatus.Raise(HistoryDegradeWriteFailed, err.Error())
-				}
-				s.log.Warn("session recording could not record the hole it fell into; the ring falls back to client acks",
-					"session_id", string(sid), "at", pos, "resume_at", resumeAt, "error", err)
-				return
-			}
-			if !res.Kept {
-				// Retention is off, so there is no recording for a hole to
-				// be a hole in. The cursor stays put and the whole skip is
-				// retried when the setting comes back.
+			switch outcome := s.recordHole(ctx, rec, sid, ring, pos, resumeAt, content.GapReasonUnrecorded,
+				"session recording lost its place in the ring; the hole is recorded and recording resumes"); outcome {
+			case holeRecorded:
+				pos = resumeAt
+			case holeDeferred:
 				if s.recorderIdle(ctx, ring) {
 					return
 				}
-				continue
-			}
-			// A kept skip is a store write that succeeded, so it closes an
-			// open write-failure episode and puts the loop back on the ring
-			// as its consumer — both of which the append path below does for
-			// the same reason, and neither of which may wait for the first
-			// byte after the hole, since a session that produces nothing
-			// more would leave the product asserting a failure that ended.
-			ring.setRecording(true)
-			if s.historyStatus != nil {
-				s.historyStatus.ClearReason(HistoryDegradeWriteFailed)
-			}
-			s.log.Warn("session recording lost its place in the ring; the hole is recorded and recording resumes",
-				"session_id", string(sid), "at", pos, "resume_at", resumeAt)
-			pos = resumeAt
-			// The store owes nothing before the resume point, so the ring
-			// may free up to it. Without this the persistence cursor would
-			// sit at an offset the ring has already discarded until the next
-			// successful append moved it.
-			if err := ring.recordTo(pos); err != nil {
-				s.log.Warn("session recording could not advance its cursor across the hole",
-					"session_id", string(sid), "at", pos, "error", err)
+			case holeUnrecordable:
 				return
 			}
 			continue
@@ -568,6 +632,23 @@ func sessionOutputGapReason(start, end uint64, gaps []content.Gap) string {
 		if gs < end && ge > start && g.Reason != "" {
 			return g.Reason
 		}
+	}
+	return content.GapReasonUnknown
+}
+
+// sessionOutputHoleReason translates the execution host's word for a hole
+// into the store's, and it is the ONE place the two vocabularies meet.
+//
+// They are two vocabularies because they are two protocols: the helper's is
+// frozen per generation and read by one coordinator (internal/helper/proto),
+// the store's is read by a person through session.output's gaps. Its own doc
+// (proto.GapReasonWindow) says a coordinator meeting a reason it does not
+// recognise must treat it as an unqualified loss, and that is exactly what
+// the fallback does — `unknown`, which is what is actually known, rather than
+// this generation's word for a cause a later one has renamed.
+func sessionOutputHoleReason(protoReason string) string {
+	if protoReason == proto.GapReasonWindow {
+		return content.GapReasonHostWindow
 	}
 	return content.GapReasonUnknown
 }

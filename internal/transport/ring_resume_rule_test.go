@@ -41,7 +41,7 @@ func TestSnapshotAndTheHelperWindowShareOneDecisionRule(t *testing.T) {
 	}
 
 	for _, offset := range []uint64{0, 3, 4, 5, 10, 11} {
-		_, from, needsReset := ring.snapshot(offset)
+		_, from, needsReset, _ := ring.snapshot(offset)
 		want := proto.ResumeAt(proto.StreamOffset(base), proto.StreamOffset(written), proto.StreamOffset(offset))
 		if needsReset != want.Reset {
 			t.Errorf("snapshot(%d) reset=%v, proto.ResumeAt says %v", offset, needsReset, want.Reset)

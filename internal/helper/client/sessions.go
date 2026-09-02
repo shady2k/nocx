@@ -162,6 +162,16 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 
 var ErrAttachmentClosed = errors.New("helper session attachment is closed")
 
+// streamBytes widens a byte count to a stream offset. Every caller's count
+// comes from copy, which never returns a negative value, and the check makes
+// that readable rather than merely true.
+func streamBytes(n int) proto.StreamOffset {
+	if n < 0 {
+		return 0
+	}
+	return proto.StreamOffset(n)
+}
+
 // AttachedSession is the coordinator-side data-plane view of one helper
 // session. Its identity is the helper-minted session and subscriber pair.
 type AttachedSession struct {
@@ -171,8 +181,8 @@ type AttachedSession struct {
 	subscriber    [16]byte
 	attachment    proto.AttachmentID
 	epoch         proto.LeaseEpoch
-	data          chan []byte
-	lifecycleData chan []byte
+	data          *stream
+	lifecycleData *stream
 	done          chan struct{}
 	once          sync.Once
 	mu            sync.Mutex
@@ -183,6 +193,42 @@ type AttachedSession struct {
 	exit            *ExitStatus
 	offset          proto.StreamOffset
 	lifecycleOffset proto.StreamOffset
+	// pendingReset and pendingLifecycleReset count the live resets that have
+	// been RECEIVED but not yet REACHED by the reader, and they exist because
+	// the helper moves its own cursor the moment it sends one. The interval
+	// they mark has both ends: it opens when the notification arrives on the
+	// connection's read loop and closes when the reader consumes the reset in
+	// stream order. Inside it the cursor is frozen — the bytes still queued
+	// ahead of the hole are handed over, because they are output the user has
+	// not seen, but nothing is acked for them: their position is one the
+	// helper has already abandoned, so an ack carrying it could only be
+	// refused as behind.
+	pendingReset          int
+	pendingLifecycleReset int
+	// holeObs is the coordinator's observer for a hole in this session's
+	// output — see OnOutputHole. Guarded by mu; fired outside it.
+	holeObs func(lost uint64, reason string)
+}
+
+// inbound is one item in an attachment's delivery order: bytes the wire
+// carried, or the live reset that sits between them. It is one queue and not
+// two because AD-9's reset is ordered WITH RESPECT TO the data — proto's own
+// SessionReset says the reader "sees exactly which bytes the hole sits
+// between" — and a reset applied out of band would move the cursor out from
+// under bytes still waiting to be read.
+type inbound struct {
+	// payload is what Read hands to its caller.
+	payload []byte
+	// resetTo, when non-nil, is where the stream resumes. The cursor takes
+	// this value as the item is consumed, and the item carries no stream
+	// bytes of its own — so nothing is acked for it.
+	resetTo *proto.StreamOffset
+	// hole is what the helper says was lost, in its own Gap shape: the range
+	// of this session's output that the host's window reclaimed before this
+	// reader could receive it. Carried on the item rather than reported when
+	// the notification arrives, because WHERE the hole sits is the whole of
+	// what a reader needs from it, and that is only known in stream order.
+	hole *proto.Gap
 }
 
 // Spawn creates a helper-owned shell and returns its inventory entry.
@@ -211,7 +257,7 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	a := &AttachedSession{
 		client: c, generation: params.Session.Generation,
 		session: session, subscriber: subscriber,
-		data: make(chan []byte, 64), lifecycleData: make(chan []byte, 64),
+		data: newStream(), lifecycleData: newStream(),
 		done:   make(chan struct{}),
 		offset: params.Offset, lifecycleOffset: params.LifecycleOffset,
 	}
@@ -241,19 +287,196 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 }
 
 func (a *AttachedSession) deliver(payload []byte) {
-	copyPayload := append([]byte(nil), payload...)
-	select {
-	case a.data <- copyPayload:
-	case <-a.done:
-	}
+	a.data.push(inbound{payload: append([]byte(nil), payload...)})
 }
 
 func (a *AttachedSession) deliverLifecycle(payload []byte) {
-	copyPayload := append([]byte(nil), payload...)
-	select {
-	case a.lifecycleData <- copyPayload:
-	case <-a.done:
+	a.lifecycleData.push(inbound{payload: append([]byte(nil), payload...)})
+}
+
+// stream is one attachment's inbound queue for one carrier, and its whole
+// purpose is that PUSHING NEVER BLOCKS. The connection has a single read loop:
+// it delivers the response every Call is waiting for, and it also hands PTY
+// and lifecycle payloads to their attachment. While that hand-off could block,
+// the read loop's progress depended on a consumer — and a consumer that acked
+// synchronously was waiting on the read loop, so neither could move and the
+// whole client wedged: every session on that helper, plus resize, detach and
+// inventory. A bigger buffer only moves that deadlock.
+//
+// What bounds the queue is not this side but the helper's credit limit: it
+// sends at most creditLimit unacked bytes, and only bytes that have been READ
+// are ever acked, so an undrained carrier stalls the producer after one credit
+// window rather than growing here without end. That is AD-10's backpressure
+// applied where it belongs — at the source — instead of at a channel in the
+// middle of the connection's only reader.
+type stream struct {
+	mu      sync.Mutex
+	items   []inbound
+	changed chan struct{}
+}
+
+func newStream() *stream { return &stream{changed: make(chan struct{})} }
+
+// wait is taken BEFORE a pop, so an item pushed between the pop and the park
+// is not slept through. Same generation-channel shape as the coordinator's own
+// output ring.
+func (s *stream) wait() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.changed
+}
+
+func (s *stream) push(item inbound) {
+	s.mu.Lock()
+	s.items = append(s.items, item)
+	s.signalLocked()
+	s.mu.Unlock()
+}
+
+// unpop returns the unread remainder of a partially copied item to the FRONT
+// of the queue. It replaces a goroutine that pushed the remainder back onto a
+// channel, which could — and on a busy stream would — put it behind a payload
+// that arrived later: bytes delivered out of order to a terminal.
+func (s *stream) unpop(item inbound) {
+	s.mu.Lock()
+	s.items = append([]inbound{item}, s.items...)
+	s.signalLocked()
+	s.mu.Unlock()
+}
+
+func (s *stream) pop() (inbound, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.items) == 0 {
+		return inbound{}, false
 	}
+	item := s.items[0]
+	s.items = s.items[1:]
+	return item, true
+}
+
+func (s *stream) signalLocked() {
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+// take is the reader's end of the same rule, and the one that names the
+// stream's closing event. The process ending and the OUTPUT ending are two
+// events and the second is later (internal/helper/session/session.go's
+// watchExit says so, and refuses to make the mistake again); a select over the
+// queue and a closed done picks uniformly, so with k chunks buffered the odds
+// of reading them all were 2^-k and what went missing was the last line the
+// shell ever printed.
+//
+// Draining first is the shape taken over "let EOF come from the stream
+// ending", because on this wire there is no end-of-stream marker to wait for:
+// the helper's per-subscriber pump simply returns when the window is closed
+// and drained, and a coordinator that waited for a frame that never comes
+// would hang the tab open forever instead of losing a line. So the closing
+// event is stated here rather than received: the queue is empty AND the
+// session has ended.
+func (a *AttachedSession) take(q *stream, closed <-chan struct{}) (inbound, bool) {
+	for {
+		wake := q.wait()
+		if item, ok := q.pop(); ok {
+			return item, true
+		}
+		select {
+		case <-wake:
+		case <-closed:
+			item, ok := q.pop()
+			return item, ok
+		case <-a.done:
+			item, ok := q.pop()
+			return item, ok
+		}
+	}
+}
+
+// applyReset takes AD-9's live reset, in stream order. The helper reclaimed
+// its bounded window past this reader's cursor, told it so, and moved that
+// subscriber's sent and acked cursors to the base; this is the coordinator
+// growing the ear for it. Two things are applied and both are required: the
+// cursor moves to the base, which is what makes the next ack acceptable
+// instead of behind, and the hole is STATED between the bytes it sits
+// between, which is what keeps a reader from splicing two non-adjacent
+// stretches of output together and calling it a screen.
+//
+// The statement is NOT in the byte stream, and an earlier version of this fix
+// put it there — a line of nocx's own text between the two stretches. It read
+// well and it was wrong twice over: session.output's contract says in its own
+// words that "the backend hands back what the session printed and never
+// interprets it (AD-6)", and a recording replays those bytes for ever, so a
+// person scrolling back a week later would read a sentence the shell never
+// printed and have no way to tell. The hole already has an owner in this
+// codebase — internal/content's Gap, with its start, its end and its reason —
+// and the coordinator reaches it through OnOutputHole.
+func (a *AttachedSession) applyReset(r proto.SessionReset) {
+	from := r.Resume.From
+	if r.Stream == streamLifecycle {
+		// No hole is reported on this carrier: the lifecycle stream is a
+		// framed protocol, not a terminal, and there is no recording of it
+		// for a gap to be a gap in. Its own resynchronisation belongs to the
+		// channel that frames it.
+		a.mu.Lock()
+		a.pendingLifecycleReset++
+		a.mu.Unlock()
+		a.lifecycleData.push(inbound{resetTo: &from})
+		return
+	}
+	a.mu.Lock()
+	a.pendingReset++
+	a.mu.Unlock()
+	a.data.push(inbound{resetTo: &from, hole: r.Resume.Gap})
+}
+
+// streamLifecycle is the SessionReset.Stream value naming the lifecycle
+// carrier; empty names the PTY output stream.
+const streamLifecycle = "lifecycle"
+
+// OnOutputHole installs the observer for a stretch of this session's output
+// that never reached this coordinator, and it is the seam the durable record
+// of that hole is written from (internal/transport's recorder, which owns the
+// content store this package must not depend on).
+//
+// IT FIRES IN STREAM ORDER, from the reader's own goroutine, as the reset is
+// consumed: after the last byte before the hole has been handed over and
+// before the first byte after it. That is the whole reason it is a callback
+// on the read path rather than a channel — the coordinator's ring is written
+// by the same goroutine that reads here, so a hole reported from anywhere
+// else would land at an offset that is not the hole's.
+//
+// `lost` is the helper's own count and never a second derivation of it: the
+// helper computed it from this subscriber's cursor when it reclaimed the
+// window, and two derivations of one number agree everywhere anybody looks.
+// `reason` is the helper's word for the cause (proto.GapReasonWindow today),
+// carried through untranslated so a generation naming a cause this one has
+// never heard of is still reported as itself.
+func (a *AttachedSession) OnOutputHole(f func(lost uint64, reason string)) {
+	a.mu.Lock()
+	a.holeObs = f
+	a.mu.Unlock()
+}
+
+// reportHole tells the observer what the reset said was lost. A reset whose
+// gap the helper did not name states no bounds, and inventing them here —
+// from the distance between the cursor and the resume point — would be the
+// second derivation OnOutputHole exists to avoid, so it is logged and not
+// guessed. proto.Resume's contract is that the gap is present exactly when
+// the reset is, so this is a defensive branch rather than a live one.
+func (a *AttachedSession) reportHole(gap *proto.Gap) {
+	a.mu.Lock()
+	obs := a.holeObs
+	a.mu.Unlock()
+	if obs == nil {
+		return
+	}
+	if gap == nil || gap.End <= gap.Start {
+		a.client.log.Warn("session reset named no gap; the hole cannot be recorded",
+			"session", proto.SessionHex(a.session))
+		return
+	}
+	obs(uint64(gap.End-gap.Start), gap.Reason)
 }
 
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
@@ -284,36 +507,59 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	select {
-	case data := <-a.data:
-		n := copy(p, data)
-		if n < len(data) {
-			go func() {
-				select {
-				case a.data <- data[n:]:
-				case <-a.done:
-				}
-			}()
+	item, ok := a.take(a.data, nil)
+	if !ok {
+		return 0, io.EOF
+	}
+	if item.resetTo != nil {
+		a.mu.Lock()
+		a.offset = *item.resetTo
+		if a.pendingReset > 0 {
+			a.pendingReset--
 		}
-		if n > 0 {
-			a.mu.Lock()
-			a.offset += proto.StreamOffset(n)
-			offset := a.offset
-			a.mu.Unlock()
+		a.mu.Unlock()
+		// Here, and not when the notification arrived: this is the point in
+		// the byte stream the hole sits at, and the observer's whole job is
+		// to say where.
+		a.reportHole(item.hole)
+	}
+	n := copy(p, item.payload)
+	if n < len(item.payload) {
+		a.data.unpop(inbound{payload: item.payload[n:]})
+	}
+	// A reset carries no stream bytes of its own, so it advances no cursor.
+	// Neither do bytes read while a reset is still queued behind them — see
+	// pendingReset.
+	if n > 0 && item.resetTo == nil {
+		advance := streamBytes(n)
+		a.mu.Lock()
+		frozen := a.pendingReset > 0
+		if !frozen {
+			a.offset += advance
+		}
+		offset := a.offset
+		a.mu.Unlock()
+		if !frozen {
 			if err := a.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
 				proto.AckParams{
 					Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
 					Session:    proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
 					Offset:     offset,
 				}, nil); err != nil {
-				a.finish()
-				return n, err
+				// A refused ack is not the end of a session, and treating
+				// it as one is how a live shell was reported as ENDED. It
+				// is expected after a reset: the helper moves its own
+				// cursor the moment it sends the notification, so every
+				// ack for bytes already in flight is behind by the time it
+				// lands — a race the coordinator cannot win and does not
+				// need to. The session ends when the process exits or the
+				// transport dies, and both have their own owner.
+				a.client.log.Warn("session ack refused", "err", err,
+					"session", proto.SessionHex(a.session), "offset", uint64(offset))
 			}
 		}
-		return n, nil
-	case <-a.done:
-		return 0, io.EOF
 	}
+	return n, nil
 }
 
 type attachedLifecycle struct {
@@ -326,39 +572,47 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	select {
-	case data := <-l.session.lifecycleData:
-		n := copy(p, data)
-		if n < len(data) {
-			go func() {
-				select {
-				case l.session.lifecycleData <- data[n:]:
-				case <-l.session.done:
-				}
-			}()
-		}
-		if n > 0 {
-			l.session.mu.Lock()
-			l.session.lifecycleOffset += proto.StreamOffset(n)
-			offset := l.session.lifecycleOffset
-			ptyOffset := l.session.offset
-			l.session.mu.Unlock()
-			if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
-				proto.AckParams{
-					Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
-					Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
-					Offset:     ptyOffset, LifecycleOffset: &offset,
-				}, nil); err != nil {
-				l.session.finish()
-				return n, err
-			}
-		}
-		return n, nil
-	case <-l.closed:
-		return 0, io.EOF
-	case <-l.session.done:
+	item, ok := l.session.take(l.session.lifecycleData, l.closed)
+	if !ok {
 		return 0, io.EOF
 	}
+	if item.resetTo != nil {
+		l.session.mu.Lock()
+		l.session.lifecycleOffset = *item.resetTo
+		if l.session.pendingLifecycleReset > 0 {
+			l.session.pendingLifecycleReset--
+		}
+		l.session.mu.Unlock()
+	}
+	n := copy(p, item.payload)
+	if n < len(item.payload) {
+		l.session.lifecycleData.unpop(inbound{payload: item.payload[n:]})
+	}
+	if n > 0 {
+		advance := streamBytes(n)
+		l.session.mu.Lock()
+		frozen := l.session.pendingLifecycleReset > 0
+		if !frozen {
+			l.session.lifecycleOffset += advance
+		}
+		offset := l.session.lifecycleOffset
+		ptyOffset := l.session.offset
+		l.session.mu.Unlock()
+		if frozen {
+			return n, nil
+		}
+		if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
+			proto.AckParams{
+				Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
+				Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
+				Offset:     ptyOffset, LifecycleOffset: &offset,
+			}, nil); err != nil {
+			// Not fatal, for the reason the PTY reader's ack is not.
+			l.session.client.log.Warn("lifecycle ack refused", "err", err,
+				"session", proto.SessionHex(l.session.session), "offset", uint64(offset))
+		}
+	}
+	return n, nil
 }
 
 func (l *attachedLifecycle) Write(p []byte) (int, error) {
@@ -406,7 +660,12 @@ func (a *AttachedSession) Write(p []byte) (int, error) {
 	})
 	a.client.writeMu.Lock()
 	defer a.client.writeMu.Unlock()
-	if _, err := a.client.conn.Stdin().Write(frame); err != nil {
+	// The inner session frame is the ENVELOPE'S payload, never the lane's:
+	// from the first write until this attachment is closed, every byte this
+	// method puts on the lane is inside exactly one TypeSessionData frame —
+	// the way attachedLifecycle.Write wraps its own in TypeLifecycleData, and
+	// the way every other producer on this wire wraps its own.
+	if _, err := a.client.conn.Stdin().Write(proto.EncodeFrame(proto.TypeSessionData, 0, 0, frame)); err != nil {
 		return 0, err
 	}
 	return len(p), nil

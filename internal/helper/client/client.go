@@ -8,6 +8,7 @@ package client
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -256,34 +257,78 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.log.Warn("malformed notify frame", "err", err)
 		return
 	}
-	if n.Service != proto.ServiceSession || n.Event != proto.EventSessionExit {
+	if n.Service != proto.ServiceSession {
 		return
 	}
 	raw, err := json.Marshal(n.Params)
 	if err != nil {
 		return
 	}
+	switch n.Event {
+	case proto.EventSessionExit:
+		c.sessionExited(raw)
+	case proto.EventSessionReset:
+		c.sessionReset(raw)
+	}
+}
+
+func (c *Client) sessionExited(raw json.RawMessage) {
 	var exit proto.SessionExit
-	if unmarshalErr := json.Unmarshal(raw, &exit); unmarshalErr != nil {
-		c.log.Warn("malformed session exit notification", "err", unmarshalErr)
+	if err := json.Unmarshal(raw, &exit); err != nil {
+		c.log.Warn("malformed session exit notification", "err", err)
 		return
 	}
-	sessionRaw, err := proto.SessionBytes(exit.Session.Session)
-	if err != nil {
-		return
-	}
-	c.mu.Lock()
-	matched := make([]*AttachedSession, 0)
-	for _, a := range c.attachments {
-		if a.session == sessionRaw {
-			matched = append(matched, a)
-		}
-	}
-	c.mu.Unlock()
-	for _, a := range matched {
+	for _, a := range c.attachedTo(exit.Session.Session, "") {
 		a.recordExit(exit.Status)
 		a.finish()
 	}
+}
+
+// sessionReset is AD-9's live reset arriving mid-stream: this reader's cursor
+// fell behind the helper's bounded window, the helper has already moved that
+// subscriber's own cursors to the base, and the attachment must move with it
+// or the very next ack is refused as behind and the tab reports a session that
+// is still running as over.
+func (c *Client) sessionReset(raw json.RawMessage) {
+	var reset proto.SessionReset
+	if err := json.Unmarshal(raw, &reset); err != nil {
+		c.log.Warn("malformed session reset notification", "err", err)
+		return
+	}
+	matched := c.attachedTo(reset.Session.Session, reset.Subscriber)
+	if len(matched) == 0 {
+		c.log.Warn("session reset dropped: no matching attachment",
+			"session", reset.Session.Session, "subscriber", string(reset.Subscriber))
+		return
+	}
+	for _, a := range matched {
+		a.applyReset(reset)
+	}
+}
+
+// attachedTo is the one match rule for a session notification: by session, so
+// several attachments on one session all hear it, and additionally by
+// subscriber when the event names one. A reset names one — it is a fact about
+// ONE reader's cursor — and applying it to another reader's would move a
+// cursor that never fell behind.
+func (c *Client) attachedTo(session string, subscriber proto.SubscriberID) []*AttachedSession {
+	sessionRaw, err := proto.SessionBytes(session)
+	if err != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	matched := make([]*AttachedSession, 0)
+	for raw, a := range c.attachments {
+		if a.session != sessionRaw {
+			continue
+		}
+		if subscriber != "" && proto.SubscriberID(hex.EncodeToString(raw[:])) != subscriber {
+			continue
+		}
+		matched = append(matched, a)
+	}
+	return matched
 }
 
 // sessionData routes raw PTY bytes to the attached subscriber. The subscriber

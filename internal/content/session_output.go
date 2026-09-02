@@ -153,9 +153,11 @@ type SessionOutputRecording struct {
 	// order and never overlapping, in the ledger's own Gap shape — so "what
 	// is missing" is said the same way here as on an artifact. Each carries
 	// its own reason: GapReasonCap for a range the bound evicted,
-	// GapReasonUnrecorded for one nobody was there to offer. A range cannot
-	// be both, and the two are never merged into one span, because they are
-	// two different answers to "who had these bytes".
+	// GapReasonUnrecorded for one nobody was there to offer, and
+	// GapReasonHostWindow for one the execution host's own window reclaimed
+	// before it ever crossed the wire. A range cannot be more than one of
+	// them, and they are never merged into one span, because they are
+	// different answers to "who had these bytes".
 	Gaps []Gap
 	// Truncated is the PRIMARY reason the recording is not whole, and nil
 	// while it is. `cap` whenever the bound has evicted anything — that is

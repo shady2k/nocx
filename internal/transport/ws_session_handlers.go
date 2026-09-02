@@ -706,6 +706,17 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		go h.sess.replayStoredForwards(cfg.ProfileID, cfg.Host, cfg.Remote)
 	}
 
+	// The helper's holes reach the ring from here, BEFORE the pump starts:
+	// the observer fires on the pump's own goroutine as it reads, so it
+	// cannot fire before there is a pump, and registering it after one would
+	// be a window in which a hole is dropped instead of recorded.
+	if hosted != nil && hosted.ObserveOutputHoles != nil {
+		ring := rx.ring
+		hosted.ObserveOutputHoles(func(lost uint64, reason string) {
+			ring.hole(lost, sessionOutputHoleReason(reason))
+		})
+	}
+
 	// Start the PTY → ring output pump only after the ack is sent.
 	// AD-7: the ack must precede the session's own traffic in both
 	// directions, otherwise the first prompt races the open result and
@@ -1022,7 +1033,12 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			return nil
 		}
 
-		_, from, needsReset := rx.ring.snapshot(params.Offset)
+		// A hole is not a case of its own here: snapshot answers `from` with
+		// the offset the stream continues at, which is past the hole, and an
+		// attach is exactly a client being told where to continue. The hole
+		// itself is the recording's to state (session.output's gaps), not
+		// this answer's.
+		_, from, needsReset, _ := rx.ring.snapshot(params.Offset)
 
 		state.add(sess)
 		prev, prevState := rx.setSubscriber(wconn, state)

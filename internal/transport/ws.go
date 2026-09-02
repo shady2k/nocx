@@ -1311,6 +1311,18 @@ type HostedSessionOpen struct {
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
+	// ObserveOutputHoles installs the coordinator's handler for stretches of
+	// this session's output that never crossed the wire — the execution
+	// host's bounded window reclaimed them before this machine could receive
+	// them (AD-9 on the helper's side, nocx-k6p18.25). Nil for an opener
+	// with nothing to report.
+	//
+	// It is a REGISTRATION and not a value because the hole has a position
+	// and the position is only known later, in stream order: the handler is
+	// called from the goroutine that reads the session, between the last
+	// byte before the hole and the first byte after it, which is what lets
+	// the ring place it at an offset that is actually the hole's.
+	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
 type HelperSessionOpener interface {
@@ -3124,7 +3136,29 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		if len(pending) == 0 {
-			data, from, needsReset := ring.snapshot(pos)
+			data, from, needsReset, hole := ring.snapshot(pos)
+			if hole != nil {
+				// A stretch that never reached this machine: the execution
+				// host's window took it before the coordinator could carry
+				// it across (nocx-k6p18.25). There is nothing to send, so
+				// the pump steps over it and goes on — the bytes on the far
+				// side are real and withholding them would cost the tab its
+				// live output as well as the hole.
+				//
+				// THE STATEMENT OF THE HOLE IS NOT MADE HERE, and that is a
+				// stated limit rather than an oversight: this carrier has no
+				// mid-stream reset shape (the renderer's only reset is
+				// answered at attach), so what a live tab sees is a splice.
+				// What the person gets instead is the recording — the hole
+				// is durable, with its bounds and its reason, and
+				// session.output reports it to any client that reads it
+				// back. Giving this path its own notification is
+				// nocx-k6p18.29.
+				s.log.Warn("session output pump stepped over a hole the execution host's window left",
+					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
+				pos = from
+				continue
+			}
 			if needsReset {
 				// The ring no longer holds the byte this pump is asking for,
 				// so it can never be served and asking again is the one thing

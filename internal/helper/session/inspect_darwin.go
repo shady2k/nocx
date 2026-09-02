@@ -36,10 +36,20 @@ func NewInspector() Inspector {
 // process's cwd — KERN_PROC's subtypes are pid/pgrp/tty/uid/all and none of
 // them carry it, and kern.proc.cwd is FreeBSD's, not Darwin's. The only route
 // is proc_pidinfo(PROC_PIDVNODEPATHINFO) in libproc, and that is a libSystem
-// symbol: reaching it needs cgo, which D3's size argument refuses (~2.8 MiB
-// against ~40 MiB), or hand-written per-architecture assembly trampolines
-// duplicating what x/sys/unix generates — unverifiable on any machine that is
-// not a Mac. Shelling out to lsof was the third option and is not taken: it
+// symbol: reaching it needs cgo, or hand-written per-architecture assembly
+// trampolines duplicating what x/sys/unix generates — unverifiable on any
+// machine that is not a Mac.
+//
+// Nothing forbids cgo, and an earlier version of this comment claimed D3's
+// size argument did. It does not: D3 argues for a THIN PRODUCT, never for a
+// toolchain. What cgo actually costs here is the BUILD, and it is a real cost
+// rather than a preference: darwin/* would have to be built on a Mac, which
+// splits nocx-6de7c's one-origin decision into one origin per platform, and
+// the deployment floor stops being Go's and becomes whatever
+// -mmacosx-version-min the CI runner happens to pick, so it has to be pinned
+// and asserted. nocx-k6p18.14 is where that is decided, not here.
+//
+// Shelling out to lsof was the third option and is not taken: it
 // forks a process per inventory row on a host we do not own, and makes a
 // diagnostic depend on a tool being present.
 //

@@ -40,7 +40,7 @@ func newHelperExitConn(code int) *helperExitConn {
 	}
 	go func() {
 		defer close(c.peer)
-		defer fromPeerW.Close()
+		defer func() { _ = fromPeerW.Close() }()
 		answered := false
 		decoder := proto.NewDecoder(func(ty proto.FrameType, _, _ uint32, payload []byte) {
 			switch {
@@ -125,7 +125,7 @@ func (c *helperExitConn) Close() error {
 // delivery-only side effect.
 func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	conn := newHelperExitConn(7)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	attached, err := client.Dial(context.Background(), client.Config{
 		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash",
 		SentinelTTL: time.Second, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -133,7 +133,7 @@ func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer attached.Close()
+	defer func() { _ = attached.Close() }()
 
 	channel, err := attached.Attach(context.Background(), proto.AttachParams{
 		Subscriber: helperExitSubscriber,
@@ -143,7 +143,7 @@ func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 
 	select {
 	case <-channel.Done():

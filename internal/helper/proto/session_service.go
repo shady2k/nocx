@@ -291,8 +291,9 @@ type Observation struct {
 	//
 	// macOS is where it bites and why this exists. There is no /proc, and the
 	// only route to another process's working directory is
-	// proc_pidinfo(PROC_PIDVNODEPATHINFO), which needs cgo — refused by the
-	// helper's size argument (~2.8 MiB against ~40 MiB, D3). sysctl answers
+	// proc_pidinfo(PROC_PIDVNODEPATHINFO), which needs cgo. Nothing forbids
+	// cgo; what it costs is the build, and the cost is named in
+	// nocx-k6p18.14. sysctl answers
 	// argv and the foreground command cgo-free and cannot answer cwd at all,
 	// so the shipped platform reports `["cwd"]` here and a reader can say "we
 	// do not know where this shell is" instead of showing where it started.

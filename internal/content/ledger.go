@@ -326,6 +326,34 @@ type Session struct {
 	// deliberately unowned: rows written before helper generation tracking
 	// remain unknown rather than being attributed heuristically.
 	Generation string
+	// PaneID, ProfileID and HelperCommand are the rest of the route BACK to
+	// a session that outlived the coordinator that opened it
+	// (nocx-k6p18.30). Generation, Host and Account say WHICH helper owns
+	// the id space, which is all a verdict needs; re-adopting the session
+	// needs the three facts a verdict never asks for — which pane it was the
+	// pipe of, which saved connection reaches its host, and where on that
+	// host the helper binary the bridge execs lives.
+	//
+	// They live in this binding rather than being derived later for the
+	// reason nocx-k6p18.15's ordering exists: deriving a route from a
+	// session id would let a truthful "I do not hold that" from the wrong
+	// host become a deletion. All three are empty for a session no route
+	// was recorded for — a direct-host open has no profile — and an empty
+	// one is never guessed at, it simply means this session cannot be taken
+	// back and its verdict stays whatever it would have been.
+	PaneID        string
+	ProfileID     string
+	HelperCommand string
+	// Fingerprint is the execution machine's host public-key fingerprint —
+	// the CONSENT key (remote-helper design D8). It is part of the route back
+	// because re-adopting a session OPENS A HELPER CHANNEL to that machine,
+	// and a person who withdrew consent between two runs must not have one
+	// opened on their behalf by a startup pass they never triggered. That is
+	// the whole of what it is read for today; the uninstall path's own
+	// fingerprint (sessionFactory.fp) is a separate, still-unset field, and
+	// a helper-hosted session's channel is not closed by an uninstall
+	// whether it was opened or taken back.
+	Fingerprint string
 }
 
 // Environment is the durable identity of where work happens (design §3.1,

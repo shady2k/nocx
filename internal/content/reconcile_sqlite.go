@@ -27,6 +27,13 @@ type pendingSession struct {
 	host          string
 	account       string
 	generation    string
+	// The route back, read off the same payload the binding wrote
+	// (nocx-k6p18.30). Empty means no route was recorded and the session
+	// cannot be taken back — never that it may be reached some other way.
+	paneID        string
+	profileID     string
+	helperCommand string
+	fingerprint   string
 	sinceMs       int64
 	bytes         uint64
 	openRows      int
@@ -62,9 +69,13 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 			return nil, fmt.Errorf("content: carry-over sessions: %w", scanErr)
 		}
 		var metadata struct {
-			Generation string `json:"generation"`
-			Host       string `json:"host"`
-			Account    string `json:"account"`
+			Generation    string `json:"generation"`
+			Host          string `json:"host"`
+			Account       string `json:"account"`
+			Pane          string `json:"pane"`
+			Profile       string `json:"profile"`
+			HelperCommand string `json:"helperCommand"`
+			Fingerprint   string `json:"fingerprint"`
 		}
 		if decodeErr := json.Unmarshal([]byte(payload), &metadata); decodeErr != nil {
 			_ = rows.Close()
@@ -72,7 +83,10 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 		}
 		out[id] = &pendingSession{
 			id: id, host: metadata.Host, account: metadata.Account,
-			generation: metadata.Generation, sinceMs: sinceMs, cause: CauseNotYetAsked,
+			generation: metadata.Generation, paneID: metadata.Pane,
+			profileID: metadata.Profile, helperCommand: metadata.HelperCommand,
+			fingerprint: metadata.Fingerprint,
+			sinceMs:     sinceMs, cause: CauseNotYetAsked,
 		}
 	}
 	if closeErr := errors.Join(rows.Err(), rows.Close()); closeErr != nil {
@@ -146,6 +160,10 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 			Host:          p.host,
 			Account:       p.account,
 			Generation:    p.generation,
+			PaneID:        p.paneID,
+			ProfileID:     p.profileID,
+			HelperCommand: p.helperCommand,
+			Fingerprint:   p.fingerprint,
 			Since:         time.UnixMilli(p.sinceMs),
 			Cause:         p.cause,
 			Detail:        p.detail,

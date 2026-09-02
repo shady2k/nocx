@@ -177,7 +177,21 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 	ring.setRecording(true)
 	defer ring.setRecording(false)
 
-	var pos uint64
+	// THE RECORDER RESUMES AT THE RING'S PERSISTENCE CURSOR, which is the one
+	// place that already holds "how far this session has been written down".
+	// For every session this coordinator opened it is zero and always was; for
+	// one it took BACK from a helper the ring was created at the offset the
+	// previous coordinator's recording ends at, so the two stretches of one
+	// stream share a coordinate (nocx-k6p18.30). One rule and no branch.
+	//
+	// It is NOT the ring's oldest byte, and the difference is a hole nobody
+	// would ever hear about. A session that ran with no recorder — history
+	// switched off, then on — leaves a ring whose BASE the acks moved and whose
+	// persistence cursor is still at zero, and starting at the base would step
+	// over those bytes silently instead of recording the `unrecorded` gap that
+	// says nobody was listening (nocx-k6p18.2). The two cursors are two facts
+	// and this loop needs the second one.
+	pos := ring.recordedLocked()
 	for {
 		data, _, needsReset, hole := ring.snapshot(pos)
 		if hole != nil {

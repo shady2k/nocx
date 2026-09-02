@@ -29,6 +29,10 @@ func (c *helperOpenTestChannel) Resize(context.Context, uint16, uint16, uint16, 
 }
 func (c *helperOpenTestChannel) Done() <-chan struct{} { return c.done }
 
+// helperOpenPane is the pane the helper-hosted tab is the pipe of. A real
+// UUIDv7, because the transport validates the shape before anything is spawned.
+const helperOpenPane = "0198f2b0-0000-7000-8000-0000000000b7"
+
 type helperOpenTestOpener struct {
 	reg    *session.Reg
 	id     session.ID
@@ -42,7 +46,13 @@ func (o *helperOpenTestOpener) OpenHosted(_ context.Context, cfg session.Config)
 		return HostedSessionOpen{}, false, err
 	}
 
-	return HostedSessionOpen{Session: sess, Host: cfg.Host, Account: "alice", Generation: "gen-test"}, true, nil
+	return HostedSessionOpen{
+		Session: sess, Host: cfg.Host, Account: "alice", Generation: "gen-test",
+		// The rest of the route back, as the install learned it
+		// (nocx-k6p18.30).
+		HelperCommand: "/home/alice/.nocx/helper/gen-test/nocx-helper",
+		Fingerprint:   "SHA256:remote-example",
+	}, true, nil
 }
 
 type helperOpenTestInventory struct {
@@ -80,7 +90,9 @@ func TestShippedOpenUsesHelperMintedSessionID(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	resp := jsonrpcCall(t, conn, "open", map[string]any{"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24})
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24, "paneId": helperOpenPane,
+	})
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -112,7 +124,7 @@ func TestShippedHelperOpenPersistsBindingForReconciliation(t *testing.T) {
 	if _, err = db.Layout().CreateWorkspace(ctx,
 		content.Workspace{ID: "workspace:default", Name: "default"},
 		content.Tab{ID: "tab-default", WorkspaceID: "workspace:default", Layout: content.LayoutRow},
-		content.Pane{ID: "pane-default", TabID: "tab-default", Cwd: "/", Kind: content.PaneLocal, SizeShare: 1},
+		content.Pane{ID: helperOpenPane, TabID: "tab-default", Cwd: "/", Kind: content.PaneSSH, SizeShare: 1},
 	); err != nil {
 		_ = db.Close()
 		t.Fatalf("CreateWorkspace: %v", err)
@@ -135,7 +147,9 @@ func TestShippedHelperOpenPersistsBindingForReconciliation(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	conn := connectWS(t, ws)
-	resp := jsonrpcCall(t, conn, "open", map[string]any{"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24})
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24, "paneId": helperOpenPane,
+	})
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -174,6 +188,24 @@ func TestShippedHelperOpenPersistsBindingForReconciliation(t *testing.T) {
 	if got.SessionID != string(helperID) || got.Host != "remote.example" ||
 		got.Account != "alice" || got.Generation != "gen-test" {
 		t.Fatalf("pending binding = %+v, want %s at alice@remote.example generation gen-test", got, helperID)
+	}
+	// AND THE ROUTE BACK (nocx-k6p18.30). The three facts above say which
+	// helper may JUDGE this session; these say how a later coordinator reaches
+	// it and which pane it belongs to. Asserted over the reopened store on the
+	// shipped open path, because that is the only place they can be shown to be
+	// written — the shape nocx-1u0am was filed for was a writer nothing read.
+	if got.PaneID != helperOpenPane {
+		t.Fatalf("pane = %q, want the pane the tab opened in — read off the config the registry accepted, not "+
+			"echoed from the params", got.PaneID)
+	}
+	if got.ProfileID != "p" {
+		t.Fatalf("profile = %q, want p — without it a later coordinator has no route to the host", got.ProfileID)
+	}
+	if got.HelperCommand != "/home/alice/.nocx/helper/gen-test/nocx-helper" {
+		t.Fatalf("helper command = %q, want the path the install recorded", got.HelperCommand)
+	}
+	if got.Fingerprint != "SHA256:remote-example" {
+		t.Fatalf("fingerprint = %q, want the consent key of the machine this session runs on", got.Fingerprint)
 	}
 	inventory := helperOpenTestInventory{
 		sessionID: string(helperID), host: got.Host, account: got.Account, generation: got.Generation,
@@ -252,7 +284,9 @@ func TestShippedHelperOpenRefusesUnpersistedBinding(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	conn := connectWS(t, ws)
-	resp := jsonrpcCall(t, conn, "open", map[string]any{"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24})
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24, "paneId": helperOpenPane,
+	})
 	_ = conn.Close()
 	var envelope struct {
 		Error *jsonrpcErrorObj `json:"error"`

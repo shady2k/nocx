@@ -42,10 +42,22 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 			Generation string `json:"generation,omitempty"`
 			Host       string `json:"host,omitempty"`
 			Account    string `json:"account,omitempty"`
+			// The route back (nocx-k6p18.30). omitempty on all three: a
+			// session with no route recorded writes the same payload it
+			// always did, so "no route" and "an older row" are one state
+			// rather than two that have to be told apart.
+			Pane          string `json:"pane,omitempty"`
+			Profile       string `json:"profile,omitempty"`
+			HelperCommand string `json:"helperCommand,omitempty"`
+			Fingerprint   string `json:"fingerprint,omitempty"`
 		}{
-			Generation: sess.Generation,
-			Host:       sess.Host,
-			Account:    sess.Account,
+			Generation:    sess.Generation,
+			Host:          sess.Host,
+			Account:       sess.Account,
+			Pane:          sess.PaneID,
+			Profile:       sess.ProfileID,
+			HelperCommand: sess.HelperCommand,
+			Fingerprint:   sess.Fingerprint,
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {

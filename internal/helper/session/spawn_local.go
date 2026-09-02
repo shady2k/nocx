@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"syscall"
 
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
@@ -32,6 +33,28 @@ import (
 type LocalSpawner struct {
 	log   log.Logger
 	shell Shell
+	// openPTY is internal/pty's constructor, held as a value so the failure
+	// arms of Spawn can be driven without a real shell. Production wires
+	// pty.NewLocal in NewLocalSpawner; nothing else may replace it, which is
+	// why it is unexported and has no option or setter — a spawner that could
+	// be told what to start over an API would be a second answer to the
+	// question the doc comment above says only the composition root may ask.
+	openPTY func(log.Logger, pty.Config) (localPTY, error)
+}
+
+// localPTY is everything Spawn and localProcess need from internal/pty, named
+// as an interface so a test can supply a PTY whose Write fails — the one
+// failure this function must survive and cannot provoke with a real terminal.
+//
+// It is deliberately larger than session.Process: Dir and SignalProcessGroup
+// are what localProcess re-exports as Cwd and the ProcessGroupSignaller seam,
+// and service.go reaches both by TYPE ASSERTION. An interface that omitted
+// them would still compile and would silently stop the helper signalling a job
+// on the host, so they are stated here where the compiler checks them.
+type localPTY interface {
+	Process
+	Dir() string
+	SignalProcessGroup(pgid int, sig syscall.Signal) error
 }
 
 // Shell pins what a LocalSpawner starts. Its ZERO VALUE means "ask
@@ -52,7 +75,20 @@ type Shell struct {
 
 // NewLocalSpawner builds the spawner. Production passes a zero Shell.
 func NewLocalSpawner(logger *slog.Logger, shell Shell) *LocalSpawner {
-	return &LocalSpawner{log: log.NewSlogAdapter(logger), shell: shell}
+	return &LocalSpawner{
+		log:   log.NewSlogAdapter(logger),
+		shell: shell,
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			// Returned through the named nil rather than as one expression:
+			// a (*pty.LocalPty)(nil) handed back as an interface is not nil,
+			// and every failure arm below is keyed on the error, not on lp.
+			lp, err := pty.NewLocal(l, cfg)
+			if err != nil {
+				return nil, err
+			}
+			return lp, nil
+		},
+	}
 }
 
 // Spawn starts one shell under one PTY. The PTY is created with setsid, so the
@@ -77,12 +113,44 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	var launch shellintegration.LocalLaunch
 	var lifecycleParent, lifecycleChild *os.File
 	var err error
+
+	// release is the ONE unwind every failure arm below runs, and it is one
+	// function rather than four copies because the copies drifted: the
+	// bootstrap-write arm closed the parent end of the lifecycle socketpair
+	// and returned with the child end still open, leaking a descriptor per
+	// occurrence in a daemon that lives as long as the host session
+	// (nocx-k6p18.28). Closing over the three variables rather than taking
+	// them as parameters is what makes that impossible to repeat: an arm
+	// cannot pass the wrong set, and a fifth arm gets the whole unwind by
+	// writing one call.
+	//
+	// It is deliberately NOT launch.Cleanup, which the lines below compose to
+	// close lifecycleChild after a SUCCESSFUL exec has duplicated it into the
+	// shell. Cleanup closes the in-memory script's reader and leaves its
+	// writer goroutine to finish; Abort closes the writer, waits for that
+	// goroutine and then the reader. A spawn that failed has no shell to
+	// deliver a script to, so Abort is the correct half of that pair, and the
+	// socketpair is closed here explicitly the way the surviving arms already
+	// closed it.
+	release := func() {
+		if launch.Abort != nil {
+			launch.Abort()
+		}
+		if lifecycleParent != nil {
+			_ = lifecycleParent.Close()
+		}
+		if lifecycleChild != nil {
+			_ = lifecycleChild.Close()
+		}
+	}
+
 	if req.SessionID != "" && len(shellArgs) == 0 {
 		kind := shellintegration.LocalShellKind(shellPath)
 		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
 			if req.Lifecycle != nil {
 				lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
 				if err != nil {
+					release()
 					return nil, err
 				}
 			}
@@ -97,12 +165,7 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			}
 			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
 			if err != nil {
-				if lifecycleParent != nil {
-					_ = lifecycleParent.Close()
-				}
-				if lifecycleChild != nil {
-					_ = lifecycleChild.Close()
-				}
+				release()
 				return nil, err
 			}
 			if lifecycleChild != nil {
@@ -119,35 +182,22 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			cfg.ExtraFiles = launch.ExtraFiles
 		}
 	}
-	lp, err := pty.NewLocal(s.log, cfg)
+	lp, err := s.openPTY(s.log, cfg)
 	if err != nil {
-		if launch.Abort != nil {
-			launch.Abort()
-		}
-		if lifecycleParent != nil {
-			_ = lifecycleParent.Close()
-		}
-		if lifecycleChild != nil {
-			_ = lifecycleChild.Close()
-		}
+		release()
 		return nil, err
 	}
 	if len(launch.Bootstrap) > 0 {
 		if _, err := lp.Write(launch.Bootstrap); err != nil {
-			if launch.Abort != nil {
-				launch.Abort()
-			}
 			_ = lp.Close()
-			if lifecycleParent != nil {
-				_ = lifecycleParent.Close()
-			}
+			release()
 			return nil, err
 		}
 	}
 	if launch.Cleanup != nil {
 		launch.Cleanup()
 	}
-	return &localProcess{LocalPty: lp, lifecycle: lifecycleParent}, nil
+	return &localProcess{localPTY: lp, lifecycle: lifecycleParent}, nil
 }
 
 // envSlice turns the wire's map into exec's slice, in a STABLE order. The wire
@@ -175,7 +225,7 @@ func envSlice(env map[string]string) []string {
 // needs and the Pty interface does not carry: where the shell actually
 // started, and which process group the helper owns for it.
 type localProcess struct {
-	*pty.LocalPty
+	localPTY
 	lifecycle *os.File
 }
 
@@ -187,7 +237,7 @@ func (p *localProcess) Lifecycle() io.ReadWriteCloser {
 }
 
 func (p *localProcess) Close() error {
-	err := p.LocalPty.Close()
+	err := p.localPTY.Close()
 	if p.lifecycle != nil {
 		closeErr := p.lifecycle.Close()
 		if err == nil {

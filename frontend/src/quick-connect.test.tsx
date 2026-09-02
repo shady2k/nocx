@@ -134,14 +134,19 @@ describe('SSHQuickConnectProvider', () => {
     expect(items[1].detail).toBe('Dev box')
   })
 
-  it('calls newSSHPane with correct args on run()', async () => {
+  // The PORT is part of "correct args" (nocx-xhm9e). The pane stores the
+  // endpoint it applies at, so a run that dropped the port stored `:22` for
+  // every profile and the restore could never match the pane back to the
+  // profile it was opened from. 47311 is neither 22 nor any default in the
+  // chain, so a defaulted port cannot look like a pass.
+  it('calls newSSHPane with the whole destination, port included, on run()', async () => {
     const profileClient = {
       listProfiles: vi.fn().mockResolvedValue([
         {
           id: 'ssh:custom:x:uuid',
           type: 'ssh' as const,
           name: 'X',
-          options: { host: 'x.example.com', port: 22, user: 'me' },
+          options: { host: 'x.example.com', port: 47311, user: 'me' },
         },
       ]),
     }
@@ -151,7 +156,30 @@ describe('SSHQuickConnectProvider', () => {
     const items = await Promise.resolve(provider.getItems())
     items[0].run()
 
-    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me')
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me', 47311)
+  })
+
+  // A profile that names no port contributes none: the default belongs to
+  // whoever writes the endpoint, not to the row, and passing 0 through would
+  // store `:0`.
+  it('passes no port for a profile that names none', async () => {
+    const profileClient = {
+      listProfiles: vi.fn().mockResolvedValue([
+        {
+          id: 'ssh:custom:y:uuid',
+          type: 'ssh' as const,
+          name: 'Y',
+          options: { host: 'y.example.com', user: 'me' },
+        },
+      ]),
+    }
+    const newSSHPane = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHPane)
+
+    const items = await Promise.resolve(provider.getItems())
+    items[0].run()
+
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:y:uuid', 'y.example.com', 'me', undefined)
   })
 
   it('handles empty profile list', async () => {
@@ -1379,7 +1407,10 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
               id: 'ssh:custom:prod:uuid',
               type: 'ssh' as const,
               name: 'Production DB',
-              options: { host: 'example.com', port: 22, user: 'deploy' },
+              // NOT 22: the palette's Enter must carry the profile's real
+              // port to the pane, or the pane it opens cannot be matched
+              // back to this profile after a restart (nocx-xhm9e).
+              options: { host: 'example.com', port: 2202, user: 'deploy' },
             },
           ]),
         } as never,
@@ -1440,7 +1471,7 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
     expect(input).toBeTruthy()
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy')
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy', 2202)
     expect(newConnection).not.toHaveBeenCalled()
   })
 

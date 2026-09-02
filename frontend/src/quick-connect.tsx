@@ -300,7 +300,14 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
 
   constructor(
     private profileClient: ProfileClient,
-    private newSSHPane: (profileId: string, host: string, user?: string) => Pane,
+    /** The pane opener, taking the whole destination the row names. The
+     *  PORT is not optional decoration: the pane stores the endpoint it
+     *  applies at, and a call that left the port off stored `:22` for every
+     *  profile, so the restore could not match the pane back to its profile
+     *  (nocx-xhm9e). The composition root passes the manager's method itself
+     *  rather than a lambda re-listing these arguments, so there is no
+     *  second parameter list to forget one in. */
+    private newSSHPane: (profileId: string, host: string, user?: string, port?: number) => Pane,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -314,7 +321,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
       kind: 'host' as const,
       label: p.label,
       detail: p.detail,
-      run: () => void this.newSSHPane(p.id, p.host, p.user),
+      run: () => void this.newSSHPane(p.id, p.host, p.user, p.port),
     }))
   }
 }

@@ -29,6 +29,14 @@ export interface HostProfileRow {
   /** The address opening the row acts on. */
   readonly host: string
   readonly user?: string
+  /** The profile's port, when it names one. Carried because the pane a row
+   *  opens STORES where it applies, and a row that dropped the port stored
+   *  `:22` for every profile — after which the restore could never match the
+   *  pane back to the profile it came from and reopened it as an
+   *  unauthenticated direct-host dial (nocx-xhm9e). A profile with no port
+   *  contributes none: the default belongs to whoever writes the endpoint,
+   *  not to this row. */
+  readonly port?: number
 }
 
 /** A live ~/.ssh/config alias after the saved-profile dedup, as both
@@ -67,12 +75,17 @@ export function profileRows(profiles: SSHProfile[]): HostProfileRow[] {
     .map((p) => {
       const user = p.options.user
       const host = p.options.host
+      // A port of 0 is "not set" the same way `undefined` is — the same
+      // reading profileIdentity makes, and the two must agree or the restore
+      // match below cannot hold.
+      const port = p.options.port !== undefined && p.options.port > 0 ? p.options.port : undefined
       return {
         id: p.id,
         label: user ? `${user}@${host}` : host,
         detail: p.name,
         host,
         user,
+        port,
       }
     })
 }

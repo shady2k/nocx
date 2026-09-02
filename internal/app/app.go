@@ -43,6 +43,7 @@ import (
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -784,7 +785,7 @@ func New(opts ...Option) (*App, error) {
 	// both the factory's per-session helpers and the uninstall surface's
 	// close-before-remove, so a machine's channels are closed by the same
 	// bookkeeping that started them.
-	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
+	helperFactory, helperReg := helperGitFactory(sshClient, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS

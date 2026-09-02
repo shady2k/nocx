@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/profile"
@@ -84,9 +85,9 @@ func accountFromOptions(opts []ssh.ConnectOption) string {
 // (D7), so both consultations converge on the same install. The dial
 // happens inside the returned factory's Open, never here.
 
-func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
+func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
 	reg := &helperRegistry{
-		lanes: lanes, install: lanes, log: log, consent: store,
+		lanes: lanes, install: lanes, source: source, log: log, consent: store,
 		hosts:   make(map[session.ID]*hostHelper),
 		closing: make(map[string]struct{}),
 	}
@@ -97,7 +98,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 		// only when the machine resolves to relay (D8: consent is asked
 		// when the user reaches for the feature, not when a connection is
 		// made; nothing is written before the ask is answered).
-		platform, available, perr := probeHelperPlatform(sess, lanes)
+		platform, available, perr := probeHelperPlatform(sess, lanes, source)
 		r := newResolver(
 			withStore(store),
 			withHelperArtifactAvailable(available),
@@ -114,7 +115,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 					"host", sess.Host(), "error", perr)
 				return helperProbeRefusal(platform, perr)
 			}
-			command, hash, err := installHelperFor(sess, lanes, platform)
+			command, hash, err := installHelperFor(sess, lanes, source, platform)
 			if err != nil {
 				// The upload or install failed (D7). The failure is a
 				// fact about the host or the build, carried by the
@@ -197,7 +198,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 // seen. The error is the probe's own, never re-derived.
 func helperProbeRefusal(platform deploy.Platform, err error) transport.GitOpenSelection {
 	switch {
-	case errors.Is(err, deploy.ErrUnsupportedPlatform), errors.Is(err, deploy.ErrArtifactsNotBuilt):
+	case errors.Is(err, deploy.ErrUnsupportedPlatform), errors.Is(err, helperartifacts.ErrArtifactsNotBuilt):
 		return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
 			State:   git.OpenUnsupportedPlatform,
 			Message: unsupportedPlatformMessage(platform, err),
@@ -215,7 +216,7 @@ func helperProbeRefusal(platform deploy.Platform, err error) transport.GitOpenSe
 // built. artifactErr is the Artifact error the probe already saw (or nil
 // when the probe did not reach the artifact decision).
 func unsupportedPlatformMessage(p deploy.Platform, artifactErr error) string {
-	if errors.Is(artifactErr, deploy.ErrArtifactsNotBuilt) {
+	if errors.Is(artifactErr, helperartifacts.ErrArtifactsNotBuilt) {
 		return "the helper artifact for " + p.GOOS + "/" + p.GOARCH + " was not built — run `make helpers` to build it"
 	}
 	return "we build no helper for " + p.GOOS + "/" + p.GOARCH
@@ -251,12 +252,12 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 // resolver's "a suitable binary exists for that platform" arm. The probe
 // is one bounded exec and writes nothing; it is the only remote command
 // the consent decision runs before the user has accepted.
-func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (deploy.Platform, bool, error) {
-	_, platform, available, err := probeHelperPlatformAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes)
+func probeHelperPlatform(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource) (deploy.Platform, bool, error) {
+	_, platform, available, err := probeHelperPlatformAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source)
 	return platform, available, err
 }
 
-func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider) (string, deploy.Platform, bool, error) {
+func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource) (string, deploy.Platform, bool, error) {
 	probe, err := lanes.DiscoveryConn(ctx, host, opts...)
 	if err != nil {
 		return "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
@@ -270,7 +271,7 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 	if err != nil {
 		return fingerprint, deploy.Platform{}, false, err
 	}
-	if _, _, aerr := deploy.DefaultSource.Artifact(platform); aerr != nil {
+	if _, _, aerr := source.Artifact(platform); aerr != nil {
 		return fingerprint, platform, false, aerr
 	}
 	return fingerprint, platform, true, nil
@@ -283,11 +284,11 @@ func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectO
 // background — the selection has no caller context — and the install
 // lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
-func installHelperFor(sess session.Session, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
-	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, platform)
+func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
+	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source, platform)
 }
 
-func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
+func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
 	conn, err := lanes.HelperInstallConn(ctx, host, opts...)
 	if err != nil {
 		return "", "", fmt.Errorf("install lease for %s: %w", host, err)
@@ -298,7 +299,7 @@ func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption,
 		return "", "", fmt.Errorf("remote home for %s: %w", host, err)
 	}
 	fsys := installFS{conn}
-	command, hash, err = deploy.Ensure(ctx, fsys, deploy.DefaultSource, home, platform)
+	command, hash, err = deploy.Ensure(ctx, fsys, source, home, platform)
 	if err != nil {
 		return "", "", err
 	}
@@ -398,6 +399,7 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 type helperRegistry struct {
 	lanes    helperLaneProvider
 	install  helperInstallProvider
+	source   deploy.ArtifactSource
 	log      *slog.Logger
 	consent  *consent.Store
 	registry *session.Reg
@@ -414,7 +416,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		return transport.HostedSessionOpen{}, false, nil
 	}
 	opts := session.SSHOptionsFromConfig(cfg.Remote)
-	fingerprint, platform, available, err := probeHelperPlatformAt(ctx, cfg.Host, opts, r.install)
+	fingerprint, platform, available, err := probeHelperPlatformAt(ctx, cfg.Host, opts, r.install, r.source)
 	if err != nil && !available {
 		return transport.HostedSessionOpen{}, false, nil
 	}
@@ -426,7 +428,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredRelay {
 		return transport.HostedSessionOpen{}, false, nil
 	}
-	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, platform)
+	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}

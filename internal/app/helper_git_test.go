@@ -35,6 +35,7 @@ import (
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -593,11 +594,8 @@ func makeSyntheticArtifact() (compressed []byte, contentHash string) {
 }
 
 // syntheticSource is the app tests' ArtifactSource: it serves the synthetic
-// bytes built above. The selection under test is the composition root, so
-// it installs from deploy.DefaultSource; these tests substitute the
-// synthetic source for the duration (DefaultSource is a variable precisely
-// so the composition root can substitute a source — the readFileFn shape)
-// and restore it via t.Cleanup.
+// bytes built above. The selection under test is the composition root, which
+// receives this source explicitly rather than mutating deploy package state.
 type syntheticSource struct{}
 
 func (syntheticSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
@@ -605,20 +603,16 @@ func (syntheticSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
 }
 
 // refusingSource is an ArtifactSource that answers ErrArtifactsNotBuilt —
-// the state of a fresh checkout before `make helpers` — for workspaces
-// where the embedded binaries ARE present and the real source would not
-// produce the refusal.
+// the state of a fresh checkout before `make helpers`.
 type refusingSource struct{}
 
 func (refusingSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
-	return nil, "", deploy.ErrArtifactsNotBuilt
+	return nil, "", helperartifacts.ErrArtifactsNotBuilt
 }
 
-func stubArtifacts(t *testing.T) {
+func stubArtifacts(t *testing.T) deploy.ArtifactSource {
 	t.Helper()
-	orig := deploy.DefaultSource
-	deploy.DefaultSource = syntheticSource{}
-	t.Cleanup(func() { deploy.DefaultSource = orig })
+	return syntheticSource{}
 }
 
 // testConsentStores builds the consent store (pre-granted for the default
@@ -635,9 +629,9 @@ func testConsentStores(t *testing.T) (*consent.Store, *consent.InstallStore) {
 
 func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitFactoryFor {
 	t.Helper()
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 	return factory
 }
 
@@ -683,14 +677,13 @@ func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
 // is exercised through the stub, so the test asserts identically in both
 // worlds and never depends on which one it is in.
 func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
-	orig := deploy.DefaultSource
-	if _, _, err := orig.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, deploy.ErrArtifactsNotBuilt) {
-		deploy.DefaultSource = refusingSource{}
+	source := helperartifacts.DefaultSource
+	if _, _, err := source.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
+		source = refusingSource{}
 	}
-	t.Cleanup(func() { deploy.DefaultSource = orig })
 
 	var buf bytes.Buffer
-	sel, _ := helperGitFactory(&fakeLaneProvider{}, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	sel, _ := helperGitFactory(&fakeLaneProvider{}, source, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection with no artifacts = %+v, want the empty refusal", got)
 	}
@@ -708,7 +701,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel, _ := helperGitFactory(provider, nil, nil, discardLogger())
+	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger())
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
@@ -816,7 +809,7 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 // channels by the host-key fingerprint that keys consent.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	if err := store.Grant("SHA256:machine-a"); err != nil {
 		t.Fatalf("grant a: %v", err)
@@ -825,7 +818,7 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 		t.Fatalf("grant b: %v", err)
 	}
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factory, reg := helperGitFactory(provider, store, installs, discardLogger())
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
 	dir := fixtureRepo(t)
 
 	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
@@ -884,9 +877,9 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
 	const fingerprint = "SHA256:test-host"
 	provider := &fakeLaneProvider{peer: helperPeerWithoutSession()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, reg := helperGitFactory(provider, store, installs, discardLogger())
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
 	dir := fixtureRepo(t)
 
 	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
@@ -990,10 +983,10 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 // acquired, no platform probe is even needed to decide that.
 func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
 	if !selection.ConsentRequired {
@@ -1016,10 +1009,10 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 // git.open's not-available error carries it.
 func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
 	if selection.Factory != nil || selection.ConsentRequired {
@@ -1038,10 +1031,10 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 // the selection installs and the observation store lists the machine.
 func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -1068,10 +1061,10 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 // have refused every user who never opened a connection's settings.
 func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
 	if selection.ConsentRequired {

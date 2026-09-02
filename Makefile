@@ -52,9 +52,10 @@ ifneq ($(VERSION),)
 LDFLAGS += -X $(VERSION_PKG).Version=$(VERSION)
 endif
 
-# The remote helper's build matrix (D20): three targets, gzip-compressed
-# into the deploy package's artifacts directory and embedded by
-# //go:embed all:artifacts. darwin/amd64 is deliberately NOT built.
+# The remote helper's build matrix (D20): four targets, gzip-compressed
+# into the artifact package's bin/ directory and embedded by
+# //go:embed all:bin. The 2x2 matrix was adopted in nocx-v1ltv,
+# which added the Intel macOS target.
 # CGO_ENABLED=0 is load-bearing: a static binary is what a helper on an
 # unknown remote host must be — no remote glibc, no dynamic-loader
 # surprises. The artifacts are gitignored; a fresh checkout compiles with
@@ -71,7 +72,7 @@ endif
 # bought the make target artifacts CI would not have had, and two SSH git
 # specs that could only ever pass locally (nocx-eoijp).
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
-HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts
+HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 
 .PHONY: helpers
 helpers:

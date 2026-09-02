@@ -106,6 +106,56 @@ import type { AgentApprove } from './generated/agent.approve'
 /** How far an answer reaches — the wire's own vocabulary, not a second one. */
 type ApprovalScope = AgentApprove['scope']
 
+/** What the command's variables read as, as the backend derived it. */
+type ExpansionFacts = NonNullable<NonNullable<AgentApprovalRequested['expansion']>>
+type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
+
+/**
+ * What a live shell said a program word IS (nocx-4h0m7.5). nocx does not read
+ * anybody's rc files, so `ls` on the command line and `ls` on the PATH are
+ * not the same claim — an alias or a function can make them differ, and this
+ * is the one place a person is told which they are looking at.
+ */
+const PROGRAM_KIND_WORDS: Record<NonNullable<ExpansionFacts['programs']>[number]['kind'], string> =
+  {
+    alias: 'an alias in this shell, not the program of that name',
+    function: 'a shell function, not the program of that name',
+    builtin: "the shell's own builtin",
+    file: 'the program of that name on the PATH',
+    'not-found': 'not a command this shell knows',
+  }
+
+/**
+ * One expansion, in the words a person reads. The three states are three
+ * different facts and the surface keeps them apart deliberately: a value we
+ * READ, a value we REFUSE to read because reading it would have an effect,
+ * and a value we COULD NOT read at all. Merging the last two would tell
+ * somebody their shell had been consulted when it had not.
+ */
+const expansionRowValue = (part: ExpansionPart): string => {
+  switch (part.state) {
+    case 'expanded':
+      // A glob can match an enormous number of paths, so the count is the
+      // fact and the paths are a sample beside it — never 143 paths inline.
+      return part.count ? `${part.count} paths — ${part.value}` : (part.value ?? '')
+    case 'unsafe':
+      return 'left exactly as written'
+    case 'unasked':
+      return 'not read'
+  }
+}
+
+const expansionRowNote = (part: ExpansionPart, facts: ExpansionFacts): string | undefined => {
+  switch (part.state) {
+    case 'expanded':
+      return 'as the shell reads it now'
+    case 'unsafe':
+      return part.reason
+    case 'unasked':
+      return facts.reason || 'no shell could be asked for this value'
+  }
+}
+
 export interface AgentApprovalPromptProps {
   open: boolean
   /** The question as the backend sent it — the full binding plus the ask. */
@@ -254,6 +304,27 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
+   * What the command's variables read as — present only for a command
+   * proposal the backend derived it for. It sits BESIDE the verbatim
+   * command and never replaces it: the string in `arguments` is what runs
+   * (nocx-y47mi SETTLED 1), and this window is the one place a person can
+   * see what `$HOME` currently is before staking an `rm -rf` on it.
+   */
+  const expansion = (): ExpansionFacts | null => ask().expansion ?? null
+
+  /**
+   * The expanded form, shown only when it says something the verbatim line
+   * does not. A command whose variables were all refused or unreadable
+   * expands to itself, and a second identical code block would read as a
+   * claim that something was resolved when nothing was.
+   */
+  const expandedCommand = (): string | null => {
+    const facts = expansion()
+    if (!facts || facts.command === '' || facts.command === proposedCommand()) return null
+    return facts.command
+  }
+
+  /**
    * The arguments the window has ALREADY stated, which are therefore not
    * repeated as rows. Derived from what is actually rendered rather than
    * from the tool name: `run`'s block states `command`, and the machine and
@@ -340,6 +411,34 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       for (const [key, value] of Object.entries(args)) {
         if (stated.has(key)) continue
         rows.push({ name: key, value: argumentValue(key, value) })
+      }
+    }
+    // What the command's variables read as (nocx-4h0m7.5), as rows of the
+    // ONE fact list — the assignments the command makes to itself first,
+    // because they change what every expansion below them means, then each
+    // expansion, then what each program word actually is.
+    const exp = expansion()
+    if (exp !== null) {
+      for (const assignment of exp.assignments ?? []) {
+        rows.push({
+          name: assignment.name,
+          value: assignment.value,
+          note: 'the command sets this itself for this command, so the shell’s value is not what it reads',
+        })
+      }
+      for (const part of exp.parts ?? []) {
+        rows.push({
+          name: part.text,
+          value: expansionRowValue(part),
+          note: expansionRowNote(part, exp),
+        })
+      }
+      for (const program of exp.programs ?? []) {
+        rows.push({
+          name: program.word,
+          value: PROGRAM_KIND_WORDS[program.kind],
+          note: program.target || undefined,
+        })
       }
     }
     if (ask().reason === 'policy' && ask().tool === 'fetch.url') {
@@ -481,6 +580,35 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 <CodeBlock copy={props.copy} ariaLabel="The command this question is about">
                   {command()}
                 </CodeBlock>
+                {/*
+                  The expanded form sits BESIDE the verbatim one and is
+                  labelled as a reading, never as the thing that runs
+                  (nocx-4h0m7.5). Substituting it into the submission was
+                  considered and refused: a rewritten command can behave
+                  differently through our own fault — re-quoting a value
+                  that contains quotes or newlines, or a command that meant
+                  to be re-evaluated later — so what is sent is byte-for-byte
+                  the block above.
+                */}
+                <Show when={expandedCommand()}>
+                  {(expanded) => (
+                    <>
+                      <p>
+                        With its variables as the shell reads them now. This is what the command
+                        means, not what is sent — the line above is what runs, exactly as written:
+                      </p>
+                      <CodeBlock
+                        copy={props.copy}
+                        ariaLabel="The same command with its variables read as the shell reads them now"
+                      >
+                        {expanded()}
+                      </CodeBlock>
+                    </>
+                  )}
+                </Show>
+                <Show when={expansion()?.asked === false && (expansion()?.reason ?? '') !== ''}>
+                  <p>{expansion()?.reason}</p>
+                </Show>
               </>
             )}
           </Show>

@@ -95,6 +95,81 @@ export interface AgentApprovalRequested {
    */
   wasError?: boolean
   /**
+   * Command proposals only (nocx-4h0m7.5): what the verbatim command's variables currently read as, carried BESIDE the verbatim string and never instead of it (nocx-y47mi SETTLED 1 — the verbatim string is what runs). Absent for a non-command proposal. Every part carries one of three states, and the last two are different facts the surface must never merge: 'unsafe' means reading it would have an effect ($(cmd), backticks, <(cmd), ${VAR:=x}, ${VAR:?msg}, $((x++))) so it is left exactly as written; 'unasked' means it is a pure read and no shell could be asked — a remote host without our integration, or a shell that did not answer.
+   */
+  expansion?: {
+    /**
+     * Whether a live shell was consulted at all. False is the remote host, the un-integrated session and the shell that did not answer; reason says which.
+     */
+    asked: boolean
+    /**
+     * Why no shell was consulted, in the words the person reads. Present only when asked is false.
+     */
+    reason?: string
+    /**
+     * The expanded DISPLAY form: the verbatim command with every answered span substituted and every other span left exactly as written. It is never submitted, never re-quoted and never handed to a shell — the verbatim command in arguments is what runs.
+     */
+    command: string
+    /**
+     * Every expansion site in the verbatim command, in the order it appears.
+     */
+    parts?: {
+      /**
+       * The verbatim source text of this expansion site.
+       */
+      text: string
+      /**
+       * The parameter's name when it has one — what a refusal sentence names.
+       */
+      name?: string
+      /**
+       * Which shell construct this is.
+       */
+      kind:
+        | 'parameter'
+        | 'tilde'
+        | 'glob'
+        | 'brace'
+        | 'arithmetic'
+        | 'command-substitution'
+        | 'process-substitution'
+      /**
+       * expanded: a live shell answered. unsafe: reading it would have an effect, so it is left as written and reason says why. unasked: a pure read no shell could be asked for.
+       */
+      state: 'expanded' | 'unsafe' | 'unasked'
+      /**
+       * What the shell said this reads as. Present only for state 'expanded'.
+       */
+      value?: string
+      /**
+       * How many paths a glob matched. A pattern can match an enormous number of them, so the count is the fact and the list is available rather than inline.
+       */
+      count?: number
+      /**
+       * Why an unsafe expansion is left exactly as written.
+       */
+      reason?: string
+    }[]
+    /**
+     * The NAME=value prefixes the command applies to a command of its own — `HOME=/tmp rm -rf $HOME/x`. The PARSE's business and never the shell's: the live shell knows nothing about them, so every expansion of an assigned name is reported unsafe rather than expanded.
+     */
+    assignments?: {
+      name: string
+      value: string
+    }[]
+    /**
+     * What a live shell says each program word actually IS. It closes, partly, the hole the command parser names in its own header: nocx does not read rc files, so an alias or a function can make `ls` mean something else.
+     */
+    programs?: {
+      word: string
+      kind: 'alias' | 'function' | 'builtin' | 'file' | 'not-found'
+      /**
+       * What the alias expands to, or the path of the file.
+       */
+      target?: string
+    }[]
+  } | null
+  /**
    * Egress only: what was found and where. Facts, never the material.
    */
   findings?: {

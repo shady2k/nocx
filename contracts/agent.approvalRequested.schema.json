@@ -116,6 +116,109 @@
       "description": "Egress only: the findings are in an ERROR string the tool returned rather than in its result — the surface reads the two differently.",
       "type": "boolean"
     },
+    "expansion": {
+      "description": "Command proposals only (nocx-4h0m7.5): what the verbatim command's variables currently read as, carried BESIDE the verbatim string and never instead of it (nocx-y47mi SETTLED 1 — the verbatim string is what runs). Absent for a non-command proposal. Every part carries one of three states, and the last two are different facts the surface must never merge: 'unsafe' means reading it would have an effect ($(cmd), backticks, <(cmd), ${VAR:=x}, ${VAR:?msg}, $((x++))) so it is left exactly as written; 'unasked' means it is a pure read and no shell could be asked — a remote host without our integration, or a shell that did not answer.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["asked", "command"],
+      "properties": {
+        "asked": {
+          "description": "Whether a live shell was consulted at all. False is the remote host, the un-integrated session and the shell that did not answer; reason says which.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why no shell was consulted, in the words the person reads. Present only when asked is false.",
+          "type": "string"
+        },
+        "command": {
+          "description": "The expanded DISPLAY form: the verbatim command with every answered span substituted and every other span left exactly as written. It is never submitted, never re-quoted and never handed to a shell — the verbatim command in arguments is what runs.",
+          "type": "string"
+        },
+        "parts": {
+          "description": "Every expansion site in the verbatim command, in the order it appears.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "kind", "state"],
+            "properties": {
+              "text": {
+                "description": "The verbatim source text of this expansion site.",
+                "type": "string"
+              },
+              "name": {
+                "description": "The parameter's name when it has one — what a refusal sentence names.",
+                "type": "string"
+              },
+              "kind": {
+                "description": "Which shell construct this is.",
+                "type": "string",
+                "enum": [
+                  "parameter",
+                  "tilde",
+                  "glob",
+                  "brace",
+                  "arithmetic",
+                  "command-substitution",
+                  "process-substitution"
+                ]
+              },
+              "state": {
+                "description": "expanded: a live shell answered. unsafe: reading it would have an effect, so it is left as written and reason says why. unasked: a pure read no shell could be asked for.",
+                "type": "string",
+                "enum": ["expanded", "unsafe", "unasked"]
+              },
+              "value": {
+                "description": "What the shell said this reads as. Present only for state 'expanded'.",
+                "type": "string"
+              },
+              "count": {
+                "description": "How many paths a glob matched. A pattern can match an enormous number of them, so the count is the fact and the list is available rather than inline.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "description": "Why an unsafe expansion is left exactly as written.",
+                "type": "string"
+              }
+            }
+          }
+        },
+        "assignments": {
+          "description": "The NAME=value prefixes the command applies to a command of its own — `HOME=/tmp rm -rf $HOME/x`. The PARSE's business and never the shell's: the live shell knows nothing about them, so every expansion of an assigned name is reported unsafe rather than expanded.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "programs": {
+          "description": "What a live shell says each program word actually IS. It closes, partly, the hole the command parser names in its own header: nocx does not read rc files, so an alias or a function can make `ls` mean something else.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["word", "kind"],
+            "properties": {
+              "word": { "type": "string", "minLength": 1 },
+              "kind": {
+                "type": "string",
+                "enum": ["alias", "function", "builtin", "file", "not-found"]
+              },
+              "target": {
+                "description": "What the alias expands to, or the path of the file.",
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "findings": {
       "description": "Egress only: what was found and where. Facts, never the material.",
       "type": "array",

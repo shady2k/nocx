@@ -92,6 +92,12 @@ type toolSeams struct {
 	fetcher          apifetch.TextFetcher
 	snapshots        *runSnapshots
 	runID            string
+	// expansions asks ONE live shell what the safe expansions in a proposed
+	// command currently read as (nocx-4h0m7.5). Nil is the ordinary shape
+	// for every caller that is not the transport, and it is also the
+	// product's honest answer wherever our integration is not deployed:
+	// expand nothing, mark every variable unresolved, say so.
+	expansions ExpansionSource
 }
 
 type noteSearchRow struct {

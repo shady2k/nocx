@@ -89,6 +89,13 @@ const (
 	// RefusedFileChanged: the approved path no longer has the version the
 	// person agreed to, so the old approval does not cover this execution.
 	RefusedFileChanged PolicyRefusalReason = "refused-file-changed"
+	// RefusedExpansionChanged: a value the person was shown beside the
+	// verbatim command moved between the question and this call, or could
+	// not be read again to check (nocx-4h0m7.5). Without substitution there
+	// is a window between reading a value and running the command; this is
+	// the DETECTOR that turns "silently did something else" into "loudly
+	// refused", which is the trade this repo makes everywhere else.
+	RefusedExpansionChanged PolicyRefusalReason = "refused-expansion-changed"
 )
 
 // ToolFailedError is the FOURTH cause a run can end on, and the one the
@@ -232,6 +239,13 @@ type ApprovalRequest struct {
 	// Classifier is the classifier's verdict or bounded failure fact for a
 	// skills write. It is absent for ordinary policy approvals.
 	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
+	// Expansion sits BESIDE the verbatim command, never instead of it
+	// (nocx-4h0m7.5, nocx-y47mi SETTLED 1): what a live shell said each safe
+	// expansion currently reads as, which expansions were left exactly as
+	// written because reading them would have an effect, and — when no
+	// shell could be asked at all — that fact and its reason. Absent for
+	// every non-command proposal.
+	Expansion *ExpansionFacts `json:"expansion,omitempty"`
 }
 
 // SkillScanFinding is the first suspicious instruction pattern found in a
@@ -633,6 +647,12 @@ func (m *effectKernel) resolveResources(decl agenttools.Tool, args map[string]an
 // The resolver's nil/non-nil distinction is preserved: nil means the
 // declaration names no resource, while an empty resolved list is a
 // resource-bearing declaration whose current call touches none.
+//
+// This is the DECLARED half only. The resources a COMMAND names have no
+// resolver — they are the parser's report — and they meet the same row
+// inside content.EffectPolicy.DecisionForInvocation, which states the
+// composition order for both. Do not grow a second command-resource check
+// here.
 func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool) bool {
 	if !resourceDeclaration {
 		return true
@@ -698,6 +718,43 @@ func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []ag
 	ap.FileVersions = versions
 }
 
+// commandOf returns the verbatim command a command-carrying declaration
+// names, exactly as the model produced it. It is the ONE place the raw
+// string is read out of the proposal for expansion purposes, and it copies
+// nothing: what comes back is what would run.
+func commandOf(decl agenttools.Tool, rawArgs string) (string, bool) {
+	if decl.CommandArg == "" {
+		return "", false
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		return "", false
+	}
+	command, ok := args[decl.CommandArg].(string)
+	return command, ok && command != ""
+}
+
+// bindApprovalExpansions puts the expansion facts on BOTH halves of an
+// escalation: the request the person is shown, and the approval record the
+// submission is later checked against (nocx-4h0m7.5).
+//
+// It asks ONE query per approval, never one per variable, and only ever for
+// expansions expansionsIn classified as pure reads — a `$(…)` is never
+// evaluated to build a question. Where no shell can be asked, the facts say
+// so and the run is unaffected: failing to expand is a thinner window, never
+// a refusal.
+func (m *effectKernel) bindApprovalExpansions(ctx context.Context, ap *Approval, req *ApprovalRequest, decl agenttools.Tool, rawArgs string) {
+	command, ok := commandOf(decl, rawArgs)
+	if !ok {
+		return
+	}
+	facts := ExpansionFactsFor(ctx, m.runSeams.expansions, m.runCtx.Session, command)
+	ap.ExpansionValues = facts.Values
+	if req != nil {
+		req.Expansion = &facts
+	}
+}
+
 // ── the ask and the latch ─────────────────────────────────────────────────
 
 // escalate suspends the run BEFORE next — the call that is asking has not
@@ -727,6 +784,9 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
+	// After the ledger record and before the latch: the person is shown the
+	// values, and the SAME values are what the record binds.
+	m.bindApprovalExpansions(ctx, &ap, req, decl, rawArgs)
 	tripLatch(ctx, &ApprovalRequestedError{Request: req})
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -760,6 +820,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.Invocation = cloneInvocation(invocation)
 	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
+	m.bindApprovalExpansions(ctx, &ap, ask, decl, rawArgs)
 	if m.approvals != nil {
 		ap.EntryID = entryID
 		m.approvals.Request(ap)
@@ -958,6 +1019,15 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 			reason = detail[0]
 		}
 		return "REFUSED: nocx did not run your call to " + tool + ": " + reason
+	case RefusedExpansionChanged:
+		// The sentence NAMES the variable and states nothing about its
+		// value: the person saw both values in the window they answered,
+		// and the model needs the fact, not the contents of the machine.
+		reason := "a value the command depends on changed between the approval and the call"
+		if len(detail) > 0 && detail[0] != "" {
+			reason = detail[0]
+		}
+		return "REFUSED: nocx did not run your call to " + tool + ": " + reason + ". Propose the call again if you still want it; do not work around the check."
 	default: // RefusedByDecision — the matrix row, standing by nature
 		return "REFUSED: nocx did not run your call to " + tool + ": this kind of action is refused by the policy this question runs under, and that refusal stands. Do not propose it again, or try a different spelling of the same call."
 	}
@@ -1549,6 +1619,20 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if k.approvals.IsApproved(ap) {
 			if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
 				return modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}, nil
+			}
+			// AND THE VALUES, IMMEDIATELY BEFORE SUBMITTING (nocx-4h0m7.5).
+			// The verbatim command is what runs, so between reading a
+			// variable for the question and running the command there is a
+			// window. This closes it the only way that is not a rewrite:
+			// read the values AGAIN and compare with what the person was
+			// shown. It is a detector, not a fix — but it turns "silently
+			// did something else" into "loudly refused", which is the trade
+			// this repo makes everywhere else. Nothing expanded means
+			// nothing to compare, and the call proceeds.
+			if shown, ok := k.approvals.ApprovedExpansions(ap); ok && len(shown) > 0 {
+				if verifyErr := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); verifyErr != nil {
+					return modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}, nil
+				}
 			}
 		}
 	}

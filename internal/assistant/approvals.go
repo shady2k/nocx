@@ -64,6 +64,15 @@ type Approval struct {
 	// FileVersions are the exact path versions the proposal is allowed to
 	// read or execute. They are carriers, not part of the proposal key.
 	FileVersions []FileVersion
+	// ExpansionValues are the expression→value pairs the person was SHOWN
+	// beside the verbatim command (nocx-4h0m7.5). They are a carrier, never
+	// part of the key, and they are what the re-read immediately before
+	// submission compares against: a value that moved between the question
+	// and the call refuses the run naming the variable. Empty means nothing
+	// was expanded — a remote host, or a session whose shell could not be
+	// asked — and then there is nothing to compare and the call proceeds,
+	// because the window the person answered said exactly that.
+	ExpansionValues []ExpansionValue
 }
 
 type approvalKey struct {
@@ -81,6 +90,7 @@ type approvalEntry struct {
 	commandInvocation bool
 	fileVersionState  FileVersionBindingState
 	fileVersions      []FileVersion
+	expansionValues   []ExpansionValue
 }
 
 // DeclineKind is what a person's no means, recorded with the declined
@@ -151,6 +161,7 @@ func (s *ApprovalStore) Request(ap Approval) {
 		commandInvocation: ap.CommandInvocation || (ap.Invocation.Parsed && ap.Invocation.Commands != nil),
 		fileVersionState:  ap.FileVersionState,
 		fileVersions:      cloneFileVersions(ap.FileVersions),
+		expansionValues:   cloneExpansionValues(ap.ExpansionValues),
 	}
 }
 
@@ -187,8 +198,33 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 		commandInvocation: cur.commandInvocation,
 		fileVersionState:  cur.fileVersionState,
 		fileVersions:      cloneFileVersions(cur.fileVersions),
+		// The values the PERSON was shown, from the pending record. The
+		// wire's approve carries none of them, and taking them from the
+		// answer would let a changed question re-authorise itself.
+		expansionValues: cloneExpansionValues(cur.expansionValues),
 	}
 	return true
+}
+
+// ApprovedExpansions returns the expression→value pairs the person was shown
+// when they approved this exact proposal. ok is false when the proposal is
+// not approved; an approved proposal with no expansions returns an empty
+// slice, which is the "nothing was expanded, nothing to re-check" case.
+func (s *ApprovalStore) ApprovedExpansions(ap Approval) ([]ExpansionValue, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.approved[keyOf(ap)]
+	if !ok {
+		return nil, false
+	}
+	return cloneExpansionValues(entry.expansionValues), true
+}
+
+func cloneExpansionValues(values []ExpansionValue) []ExpansionValue {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]ExpansionValue(nil), values...)
 }
 
 // IsApproved reports whether this exact proposal was approved.

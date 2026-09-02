@@ -461,6 +461,14 @@ type agentApprovalRequested struct {
 	// Classifier is the model gate's verdict or bounded failure fact.
 	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
 	Standing   agentApprovalStanding         `json:"standing"`
+	// Expansion is what the verbatim command's variables currently read as,
+	// carried BESIDE the verbatim string and never instead of it
+	// (nocx-4h0m7.5, nocx-y47mi SETTLED 1). Every unsafe expansion is left
+	// exactly as written and labelled with the reason reading it would have
+	// an effect, and a shell that could not be asked at all is its own
+	// state — the surface must never present "we refuse to ask" and "we
+	// could not ask" as the same fact. Absent for non-command proposals.
+	Expansion *assistant.ExpansionFacts `json:"expansion,omitempty"`
 }
 
 type agentApprovalStanding struct {
@@ -575,6 +583,13 @@ type agentHandlers struct {
 	// through (assistant.RendererRequester); nil when the broker is not
 	// wired, which disables InRenderer tools.
 	requester assistant.RendererRequester
+	// expansions is the authenticated-channel seam that answers "what does
+	// $HOME read as, in the shell that would run this" for an approval
+	// question (nocx-4h0m7.5, assistant.ExpansionSource). The server
+	// implements it; see ws_expansion.go for what it can and cannot answer
+	// today, and why the honest refusal is the product's own outcome rather
+	// than a stub.
+	expansions assistant.ExpansionSource
 	// knownMaterial is the egress gate's vault comparison (design §7.1,
 	// assistant.KnownMaterial) — the seam that answers "does this tool
 	// result contain a value the vault holds", in the backend, nothing
@@ -1380,6 +1395,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Grant:            rc.grant,
 		AttemptLedger:    h.attemptLedger,
 		Requester:        h.requester,
+		Expansions:       h.expansions,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
@@ -1657,6 +1673,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
+		n.Expansion = ap.Expansion
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -2573,7 +2590,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
-			requester: s, knownMaterial: s.agentKnownMaterial,
+			requester: s, expansions: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,

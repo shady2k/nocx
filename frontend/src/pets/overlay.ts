@@ -19,7 +19,6 @@ import {
   attend,
   DEFAULT_TUNING,
   humanActivity,
-  gaitSpeed,
   newPet,
   react,
   FLOOR_ID,
@@ -180,10 +179,9 @@ export class PetOverlay {
   private _doing = ''
   private _behaviorGeneration = 0
   private _paintedGeneration = -1
-  private _clipT = 0
-  private _clipPause = 0
   /** Which drawing of the current behaviour is playing. */
   private _take = 0
+  private _paintedCycle = -1
   private _last = 0
   private _handle: number | null = null
   /** Pointer position and buttons in host coordinates, or null while it is
@@ -543,11 +541,12 @@ export class PetOverlay {
         this._rng,
         this._tuning,
       )
-      this._paint(dt)
+      this._paint()
       this._handle = this._raf(frame)
     }
     this._handle = this._raf(frame)
   }
+
   private _updateMetrics(): void {
     const loaded = this._loaded
     if (!loaded) return
@@ -558,7 +557,7 @@ export class PetOverlay {
 
   // ── paint ────────────────────────────────────────────────────────────────
 
-  private _paint(dt: number): void {
+  private _paint(): void {
     const loaded = this._loaded
     if (!loaded) return
     const preContact =
@@ -578,65 +577,65 @@ export class PetOverlay {
     const definition = loaded.pack.clips[name]
     if (!clip || !definition) return
     const doing = `${this._pet.locomotion}/${this._pet.activity}`
-    if (
+    const changing =
       this._behaviorGeneration !== this._paintedGeneration ||
       doing !== this._doing ||
       name !== this._clip
-    ) {
-      this._paintedGeneration = this._behaviorGeneration
-      this._doing = doing
-      this._clip = name
-      this._clipT = 0
-      // A fresh take and pause are chosen only when the behaviour starts.
-      // Resolving a range here, rather than per frame, keeps the final pose
-      // stable for the whole pause while still giving repeated cycles variety.
-      this._take = Math.floor(this._rng() * clip.takes.length) % clip.takes.length
-      const pause = definition.pause ?? 0
-      this._clipPause =
-        definition.mode === 'loop'
-          ? typeof pause === 'number'
-            ? pause
-            : pause[0] + this._rng() * (pause[1] - pause[0])
-          : 0
-    }
-    const take = clip.takes[Math.min(this._take, clip.takes.length - 1)]
-    // The clip plays at the ratio of actual speed to the gait's own speed, so
-    // a cat still accelerating draws its walk correspondingly slower and the
-    // contact foot stays put. Airborne poses are discrete, so their clip time
-    // does not advance at all.
-    const moving = this._pet.locomotion === 'walk' || this._pet.locomotion === 'run'
-    const baseSpeed = gaitSpeed(this._pet.locomotion, this._timing, this._scale)
-    const rate = moving && baseSpeed > 0 ? Math.abs(this._pet.vx) / baseSpeed : 1
-    if (this._pet.locomotion !== 'fall') this._clipT += dt * rate
-    const cycle = take.frames / loaded.pack.fps
-    if (definition.mode === 'loop') {
-      while (this._clipT >= cycle + this._clipPause) {
-        this._clipT -= cycle + this._clipPause
-        const pause = definition.pause ?? 0
-        this._clipPause =
-          typeof pause === 'number' ? pause : pause[0] + this._rng() * (pause[1] - pause[0])
+    const cycleChanged = this._pet.clip.cycle !== this._paintedCycle
+    let displayTake = clip.takes[Math.min(this._take, clip.takes.length - 1)]
+    if (changing || (definition.mode === 'loop' && cycleChanged)) {
+      if (changing) {
+        this._paintedGeneration = this._behaviorGeneration
+        this._doing = doing
+        this._clip = name
       }
+      this._paintedCycle = this._pet.clip.cycle
+      // The state machine owns elapsed time and cycle boundaries. The painter
+      // only chooses artwork when that observable cycle counter advances.
+      this._take = Math.floor(this._rng() * clip.takes.length) % clip.takes.length
+      displayTake = clip.takes[Math.min(this._take, clip.takes.length - 1)]
     }
-    const phase = this._clipT
-    const airborne = this._pet.locomotion === 'fall'
-    const fixedAirFrame = airborne
-      ? airFrame(loaded.pack, this._pet.vy, this._tuning.maxFall)
-      : null
-    const frame =
-      fixedAirFrame !== null
-        ? Math.min(take.frames - 1, Math.max(0, fixedAirFrame))
-        : airborne
-          ? 0
-          : definition.mode === 'loop'
-            ? Math.min(
-                take.frames - 1,
-                Math.floor(Math.min(phase, cycle - Number.EPSILON) * loaded.pack.fps),
-              )
-            : Math.min(take.frames - 1, Math.floor(phase * loaded.pack.fps))
 
+    // Get-up is a state-machine phase: the animal remains on this ledge and
+    // the transition sheet is simply read backwards from its final frame.
+    const reversing = this._pet.phase === 'getup' && definition.mode === 'transition'
+    const cycle =
+      clip.takes.reduce((longest, take) => Math.max(longest, take.frames), 0) / loaded.pack.fps
+    const frame = reversing
+      ? Math.min(
+          displayTake.frames - 1,
+          Math.floor(
+            (this._pet.phaseDuration > 0
+              ? Math.min(1, Math.max(0, this._pet.phaseHold / this._pet.phaseDuration))
+              : 0) *
+              displayTake.frames +
+              1e-9,
+          ),
+        )
+      : this._pet.locomotion === 'fall'
+        ? (() => {
+            const fixedAirFrame = airFrame(loaded.pack, this._pet.vy, this._tuning.maxFall)
+            return fixedAirFrame === null
+              ? 0
+              : Math.min(displayTake.frames - 1, Math.max(0, fixedAirFrame))
+          })()
+        : definition.mode === 'loop'
+          ? Math.min(
+              displayTake.frames - 1,
+              Math.floor(
+                Math.min(this._pet.clip.elapsed, cycle - Number.EPSILON) * loaded.pack.fps + 1e-9,
+              ),
+            )
+          : Math.min(
+              displayTake.frames - 1,
+              Math.floor(this._pet.clip.elapsed * loaded.pack.fps + 1e-9),
+            )
+
+    const take = displayTake
     const { x0, y0 } = loaded.trim
     const width = this._width
     // What the animal is doing, on the element, in the app's own vocabulary.
+    // This is the stable window onto pure state; it does not identify a PNG.
     //
     // The alternative is a test reading which PNG the sprite happens to be
     // showing, which pins the pack rather than the behaviour: rename a sheet
@@ -645,7 +644,7 @@ export class PetOverlay {
     // app already offers a suite — `data-activity` on a tab, `data-view` on
     // the activity bar — and it is the only window onto a module that
     // deliberately takes no clicks and holds no text.
-    this._layer.dataset.doing = `${this._pet.locomotion}/${this._pet.activity}`
+    this._layer.dataset.doing = doing
     this._layer.dataset.mood = this._pet.mood
     this._layer.dataset.watching = this._pet.attending ?? 'nothing'
     this._layer.dataset.phase = this._pet.phase
@@ -686,12 +685,12 @@ export class PetOverlay {
     world.transform =
       `translate(${this._pet.x - width / 2}px, ${this._pet.y - this._height}px) ` +
       `scaleX(${this._pet.dir > 0 ? 1 : -1})`
-    const s = this._sprite.style
-    s.width = `${width}px`
-    s.height = `${this._height}px`
-    s.backgroundImage = `url(${take.url})`
-    s.backgroundSize = `${take.sheetWidth * this._scale}px ${take.sheetHeight * this._scale}px`
-    s.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * this._scale}px ${-y0 * this._scale}px`
-    s.transform = `rotate(${tilt}deg) scale(${expressionScaleX}, ${expressionScaleY})`
+    const sprite = this._sprite.style
+    sprite.width = `${width}px`
+    sprite.height = `${this._height}px`
+    sprite.backgroundImage = `url(${take.url})`
+    sprite.backgroundSize = `${take.sheetWidth * this._scale}px ${take.sheetHeight * this._scale}px`
+    sprite.backgroundPosition = `${-(frame * loaded.pack.cell + x0) * this._scale}px ${-y0 * this._scale}px`
+    sprite.transform = `rotate(${tilt}deg) scale(${expressionScaleX}, ${expressionScaleY})`
   }
 }

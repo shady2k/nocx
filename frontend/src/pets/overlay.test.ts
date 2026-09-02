@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PetOverlay, timingFrom } from './overlay'
 import { loadPack, type ImageSource, type PetPack } from './pack'
+import { DEFAULT_TUNING, type PetTuning } from './pet'
 
 const CELL = 10
 
@@ -22,14 +23,16 @@ const PACK: PetPack = {
     run: { mode: 'loop', takes: [{ file: 'run.png', frames: 2 }] },
     meow: { mode: 'once', takes: [{ file: 'meow.png', frames: 2 }] },
     itch: { mode: 'once', takes: [{ file: 'itch.png', frames: 2 }] },
-    sitting: { mode: 'hold', takes: [{ file: 'sitting.png', frames: 1 }] },
+    licking: { mode: 'loop', takes: [{ file: 'licking.png', frames: 2 }] },
+    laying: { mode: 'transition', takes: [{ file: 'laying.png', frames: 4 }] },
+    sitting: { mode: 'once', takes: [{ file: 'sitting.png', frames: 1 }] },
   },
   locomotion: { idle: 'idle', walk: 'walk', run: 'run', fall: 'run' },
   activity: {
     sit: 'sitting',
     groom: 'idle',
     stretch: 'idle',
-    lie: 'idle',
+    lie: 'laying',
     scratch: 'itch',
     meow: 'meow',
     sleep: 'idle',
@@ -54,11 +57,25 @@ const RETURN_PACK: PetPack = {
   ...PACK,
   activity: { ...PACK.activity, stretch: 'meow' },
 }
+const GROOM_PACK: PetPack = {
+  ...PACK,
+  clips: {
+    ...PACK.clips,
+    licking: {
+      mode: 'loop',
+      takes: [
+        { file: 'licking1.png', frames: 2 },
+        { file: 'licking2.png', frames: 2 },
+      ],
+    },
+  },
+  activity: { ...PACK.activity, stretch: 'licking' },
+}
 
 /** Every clip paints a 4×4 animal at (3,5) of a 10×10 cell. */
 const IMAGES: ImageSource = {
   load(url) {
-    const frames = url.endsWith('sitting.png') ? 1 : 2
+    const frames = url.endsWith('sitting.png') ? 1 : url.endsWith('laying.png') ? 4 : 2
     const width = CELL * frames
     const alpha = new Uint8ClampedArray(width * CELL)
     for (let f = 0; f < frames; f++) {
@@ -166,6 +183,7 @@ function overlayOn(
   rng = () => 0.99,
   settings: ReturnType<typeof settingsStub> = settingsStub(),
   pack: PetPack = PACK,
+  tuning?: PetTuning,
 ): PetOverlay {
   return new PetOverlay({
     settings,
@@ -173,6 +191,7 @@ function overlayOn(
     blocks: s.blocks,
     pack,
     imageSource: IMAGES,
+    tuning,
     rng,
     raf: (cb) => {
       s.frames.push(cb)
@@ -397,6 +416,66 @@ describe('a pet over a pane', () => {
     expect(pet.playing).toBe('meow')
     s.pump(0.1)
     expect(pet.playing).not.toBe('meow')
+  })
+
+  it('repeats a loop occupation after its drawing cycle closes', async () => {
+    const s = stand([200])
+    const pet = overlayOn(s, () => 0.5, settingsStub(), GROOM_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(5 * 60 + 1)
+    pet.onUserActivity()
+    s.pump(1 / 60)
+    const firstCycleFrame =
+      s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition
+    expect(pet.playing).toBe('licking')
+    s.pump(0.21)
+    expect(pet.playing).toBe('licking')
+    expect(s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition).toBe(
+      firstCycleFrame,
+    )
+  })
+
+  it('plays transition frames forward, rests, then backward', async () => {
+    const s = stand([200])
+    const tuning = { ...DEFAULT_TUNING, reactionHold: 0.05 }
+    const pet = overlayOn(s, () => 0.5, settingsStub(), PACK, tuning)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    pet.reactTo('failure', 'agent')
+    s.pump(1 / 60)
+    const frameOf = () =>
+      -Number(
+        /^(-[\d.]+)px/.exec(
+          s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundPosition,
+        )![1],
+      ) / 8.5
+    s.pump(0.3)
+    expect(pet.playing).toBe('laying')
+    expect(frameOf()).toBe(33)
+    s.pump(0.1)
+    expect(pet.playing).toBe('laying')
+    expect(frameOf()).toBe(33)
+    s.pump(0.2)
+    expect(pet.playing).toBe('laying')
+    expect(frameOf()).toBe(23)
+    s.pump(0.5)
+    expect(pet.playing).not.toBe('laying')
+  })
+  it('chooses a fresh loop take at every drawing boundary', async () => {
+    const s = stand([200])
+    const rng = vi.fn(() => 0)
+    const pet = overlayOn(s, rng, settingsStub(), GROOM_PACK)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    s.pump(3)
+    pet.reactTo('success', 'agent')
+    s.pump(1 / 60)
+    const firstTake = s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundImage
+    rng.mockReturnValue(0.99)
+    s.pump(0.2)
+    expect(pet.playing).toBe('licking')
+    expect(s.host.querySelector<HTMLElement>('.pet-sprite')!.style.backgroundImage).not.toBe(
+      firstTake,
+    )
   })
 
   it('restarts a repeated reaction even when it uses the same clip', async () => {

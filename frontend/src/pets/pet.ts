@@ -6,7 +6,7 @@
 //   mood       — how the last command went. Decays back to calm.
 //   activity   — what it is busy with when not going anywhere.
 //   phase      — the short physical transition between settled behaviours:
-//                bracing, takeoff, landing or turning.
+//                bracing, takeoff, landing, turning or getting up.
 //
 // Folding them into one enum is the obvious move and it is wrong: it
 // multiplies out into happy-walk, sad-walk, happy-climb and so on, and every
@@ -22,7 +22,7 @@ import type { Ledge } from './terrain'
 import { ledgeAbove, ledgeById, ledgeCrossed } from './terrain'
 
 type ClipPause = number | readonly [number, number]
-export type ClipMode = 'loop' | 'once' | 'hold'
+export type ClipMode = 'loop' | 'once' | 'transition'
 
 /** Timing data copied from the loaded drawing, not a pack dependency. */
 interface ClipTiming {
@@ -30,6 +30,18 @@ interface ClipTiming {
   readonly duration: number
   readonly pause: ClipPause
 }
+
+interface ClipState {
+  /** Elapsed time within the current drawing cycle. */
+  readonly elapsed: number
+  /** Pause selected for the current loop cycle. */
+  readonly pause: number
+  /** Number of completed drawing cycles for this behaviour. */
+  readonly cycle: number
+}
+
+const EMPTY_CLIP: ClipState = { elapsed: 0, pause: 0, cycle: 0 }
+
 /**
  * The pure state machine receives this as data. Passing the logical state
  * maps keeps `pet.ts` independent of pack loading; passing a pack or a
@@ -43,7 +55,7 @@ export interface PetTiming {
 }
 
 export type Locomotion = 'idle' | 'walk' | 'run' | 'fall'
-type MotionPhase = 'none' | 'anticipate' | 'takeoff' | 'land' | 'turn'
+type MotionPhase = 'none' | 'anticipate' | 'takeoff' | 'land' | 'turn' | 'getup'
 type Mood = 'calm' | 'pleased' | 'worried' | 'tired'
 export type Activity = 'none' | 'sit' | 'groom' | 'stretch' | 'lie' | 'scratch' | 'meow' | 'sleep'
 
@@ -78,6 +90,8 @@ export interface Pet {
   readonly recentBehaviors: readonly string[]
   /** Ages of noticeable autonomous events inside the rolling minute. */
   readonly noticeableAges: readonly number[]
+  /** The state-machine-owned clock consumed by the painter. */
+  readonly clip: ClipState
   readonly activity: Activity
   /** Seconds left of the current occupation. */
   readonly hold: number
@@ -212,6 +226,7 @@ export function newPet(x: number, y: number): Pet {
     vigilStage: 0,
     recentBehaviors: [],
     noticeableAges: [],
+    clip: EMPTY_CLIP,
     activity: 'none',
     hold: 0,
     phase: 'none',
@@ -257,13 +272,18 @@ function timingFor(timing: PetTiming, locomotion: Locomotion, activity: Activity
     : timing.locomotion[locomotion]
 }
 
-/** The drawing sets a lifetime only for a once clip; other modes keep caller hold. */
+/** Resolve a behaviour lifetime at its one owner.
+ *
+ * Reactions let a once drawing finish before they can be replaced. An
+ * occupation is the animal's own decision, so its menu hold wins regardless
+ * of the drawing mode; the step keeps it until the current cycle closes. */
 function chosenHold(
   choice: Pick<Choice, 'locomotion' | 'activity' | 'hold'>,
   timing: PetTiming,
+  kind: 'reaction' | 'occupation' = 'occupation',
 ): number {
   const clip = timingFor(timing, choice.locomotion, choice.activity)
-  return clip.mode === 'once' ? clip.duration : choice.hold
+  return kind === 'reaction' && clip.mode === 'once' ? clip.duration : choice.hold
 }
 
 function approach(
@@ -280,19 +300,113 @@ function approach(
   return current + Math.sign(target - current) * change
 }
 
-/** How fast this gait travels, in display pixels per second.
- *
- *  Exported because the PAINTER needs the same number: the clip's playback
- *  rate is the ratio of actual speed to this one, so that a cat still
- *  getting up to speed draws its walk cycle correspondingly slower. Written
- *  out a second time in overlay.ts it was the same expression twice, which
- *  is how the two drift and the feet start sliding again in exactly the
- *  state — accelerating — this task existed to fix. */
-export function gaitSpeed(locomotion: Locomotion, timing: PetTiming, scale: number): number {
+/** How fast this gait travels, in display pixels per second. */
+function gaitSpeed(locomotion: Locomotion, timing: PetTiming, scale: number): number {
   if (locomotion === 'walk') return (timing.strides.walk / timing.locomotion.walk.duration) * scale
   if (locomotion === 'run') return (timing.strides.run / timing.locomotion.run.duration) * scale
   return 0
 }
+
+function clipPlaybackRate(
+  locomotion: Locomotion,
+  timing: PetTiming,
+  scale: number,
+  vx: number,
+): number {
+  const moving = locomotion === 'walk' || locomotion === 'run'
+  const baseSpeed = gaitSpeed(locomotion, timing, scale)
+  return moving && baseSpeed > 0 ? Math.abs(vx) / baseSpeed : 1
+}
+
+function chooseClipPause(clip: ClipTiming, rng: () => number): number {
+  if (clip.mode !== 'loop') return 0
+  return typeof clip.pause === 'number'
+    ? clip.pause
+    : clip.pause[0] + rng() * (clip.pause[1] - clip.pause[0])
+}
+
+interface ClipClock {
+  readonly elapsed: number
+  readonly pause: number
+  readonly cycle: number
+  readonly completeAfterHold: boolean
+}
+
+function resetClipClock(
+  locomotion: Locomotion,
+  activity: Activity,
+  timing: PetTiming,
+  rng: () => number,
+): ClipClock {
+  const clip = timingFor(timing, locomotion, activity)
+  return {
+    elapsed: 0,
+    pause: chooseClipPause(clip, rng),
+    cycle: 0,
+    completeAfterHold: false,
+  }
+}
+
+function advanceClipClock(
+  pet: Pet,
+  locomotion: Locomotion,
+  activity: Activity,
+  timing: PetTiming,
+  scale: number,
+  vx: number,
+  dt: number,
+  hold: number,
+  rng: () => number,
+): ClipClock {
+  const clip = timingFor(timing, locomotion, activity)
+  const rate = clipPlaybackRate(locomotion, timing, scale, vx)
+  if (locomotion === 'fall' || dt <= 0 || rate <= 0) {
+    return {
+      elapsed: pet.clip.elapsed,
+      pause: pet.clip.pause,
+      cycle: pet.clip.cycle,
+      completeAfterHold: clip.mode !== 'loop' && pet.clip.elapsed >= clip.duration,
+    }
+  }
+  const advance = dt * rate
+  if (clip.mode !== 'loop') {
+    const elapsed = Math.min(clip.duration, pet.clip.elapsed + advance)
+    return {
+      elapsed,
+      pause: 0,
+      cycle: elapsed >= clip.duration ? 1 : 0,
+      completeAfterHold: elapsed >= clip.duration && hold <= dt,
+    }
+  }
+
+  let elapsed = Math.min(pet.clip.elapsed, clip.duration + pet.clip.pause)
+  let pause = pet.clip.pause
+  let cycle = pet.clip.cycle
+  let remaining = advance
+  let consumed = 0
+  let completeAfterHold = false
+  while (remaining > 0) {
+    const cycleLength = clip.duration + pause
+    const toBoundary = elapsed <= 0 ? cycleLength : cycleLength - elapsed
+    if (toBoundary > remaining) {
+      elapsed += remaining
+      break
+    }
+    consumed += toBoundary
+    remaining -= toBoundary
+    elapsed = 0
+    cycle++
+    pause = chooseClipPause(clip, rng)
+    if (consumed / rate + Number.EPSILON >= Math.max(0, hold)) completeAfterHold = true
+  }
+  return {
+    elapsed,
+    pause,
+    cycle,
+    completeAfterHold,
+  }
+}
+
 // These short transitions are state, not elapsed wall time: callers advance
 // their remaining durations with dt, while the painter derives expression
 // progress from the same values.
@@ -309,6 +423,21 @@ function advancePausedPhase(pet: Pet, dt: number): Pet {
   if (pet.phase === 'turn' && !phaseTurned && phaseHold <= pet.phaseDuration / 2) {
     dir = -dir as 1 | -1
     phaseTurned = true
+  }
+  if (phaseHold === 0 && pet.phase === 'getup') {
+    // Ending get-up hands control back to the ordinary behaviour chooser;
+    // the next behaviour change resets the clip clock in one place.
+    return {
+      ...pet,
+      dir,
+      phase: 'none',
+      phaseHold: 0,
+      phaseDuration: 0,
+      phaseTurned: false,
+      activity: 'none',
+      hold: 0,
+      reacting: false,
+    }
   }
   if (phaseHold === 0) {
     if (pet.phase === 'anticipate') {
@@ -359,10 +488,17 @@ export function react(
     mood,
     moodHold: tuning.moodHold,
     activity,
-    // Once reactions finish when their drawing finishes. Loop and hold
+    // Once reactions finish when their drawing finishes; loop and transition
     // reactions keep the caller's reaction cadence instead.
-    hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, timing),
+    hold: chosenHold(
+      { locomotion: 'idle', activity, hold: tuning.reactionHold },
+      timing,
+      'reaction',
+    ),
     reacting: true,
+    // This event has already replaced the activity before `step` runs, so
+    // `step` cannot infer the external restart from locomotion/activity.
+    clip: EMPTY_CLIP,
     boredom: 0,
   }
 }
@@ -399,8 +535,8 @@ export function attend(
     attendingFor: 0,
     vigilStage: 0,
     locomotion: 'idle',
-    // reactionHold is an attention cadence, not a clip length. Once drawings
-    // may override it; loop and hold drawings leave it unchanged.
+    // reactionHold is an attention cadence, not a clip length.
+    // Occupations keep this caller-selected hold and end at a cycle boundary.
     activity,
     hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, timing),
     reacting: false,
@@ -431,6 +567,14 @@ interface Choice {
    */
   readonly descend?: boolean
 }
+// These are behaviour decisions, not drawing lengths: a cat washes for a
+// sustained session and rests for much longer than either sheet takes to play.
+// The sheet frame count remains in PetTiming; the menu holds are what the
+// owner can retune to make the animal feel occupied rather than twitchy.
+const GROOM_HOLD = 15
+const LIE_HOLD = 60
+const SIT_HOLD = 20
+const STRETCH_HOLD = 1.5
 
 /** The menu, per mood. A pleased cat shows off; a worried one fidgets and
  *  keeps still; a tired one has already stopped caring.
@@ -458,15 +602,15 @@ function menu(mood: Mood, attending: Author | null): readonly Choice[] {
   if (attending !== null) {
     return attending === 'agent'
       ? [
-          { locomotion: 'idle', activity: 'sit', hold: 4, weight: 50 },
-          { locomotion: 'idle', activity: 'groom', hold: 3, weight: 18 },
+          { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 50 },
+          { locomotion: 'idle', activity: 'groom', hold: GROOM_HOLD, weight: 18 },
           { locomotion: 'walk', activity: 'none', hold: 1.6, weight: 18 },
-          { locomotion: 'idle', activity: 'lie', hold: 4, weight: 14 },
+          { locomotion: 'idle', activity: 'lie', hold: LIE_HOLD, weight: 14 },
         ]
       : [
-          { locomotion: 'idle', activity: 'lie', hold: 5, weight: 46 },
-          { locomotion: 'idle', activity: 'sit', hold: 4, weight: 22 },
-          { locomotion: 'idle', activity: 'groom', hold: 3, weight: 18 },
+          { locomotion: 'idle', activity: 'lie', hold: LIE_HOLD, weight: 46 },
+          { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 22 },
+          { locomotion: 'idle', activity: 'groom', hold: GROOM_HOLD, weight: 18 },
           { locomotion: 'walk', activity: 'none', hold: 1.6, weight: 14 },
         ]
   }
@@ -486,34 +630,34 @@ function moodMenu(mood: Mood): readonly Choice[] {
         walk(34),
         { locomotion: 'walk', activity: 'none', hold: 1, weight: 14, descend: true },
         { locomotion: 'run', activity: 'none', hold: 2, weight: 14 },
-        { locomotion: 'idle', activity: 'stretch', hold: 2.4, weight: 20 },
-        { locomotion: 'idle', activity: 'groom', hold: 3, weight: 16 },
-        { locomotion: 'idle', activity: 'sit', hold: 3, weight: 16 },
+        { locomotion: 'idle', activity: 'stretch', hold: STRETCH_HOLD, weight: 20 },
+        { locomotion: 'idle', activity: 'groom', hold: GROOM_HOLD, weight: 16 },
+        { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 16 },
       ]
     case 'worried':
       return [
         walk(18),
         { locomotion: 'walk', activity: 'none', hold: 1, weight: 6, descend: true },
-        { locomotion: 'idle', activity: 'sit', hold: 4, weight: 34 },
+        { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 34 },
         { locomotion: 'idle', activity: 'scratch', hold: 2, weight: 22 },
-        { locomotion: 'idle', activity: 'lie', hold: 4, weight: 26 },
+        { locomotion: 'idle', activity: 'lie', hold: LIE_HOLD, weight: 26 },
       ]
     case 'tired':
       return [
         walk(8),
         { locomotion: 'walk', activity: 'none', hold: 1, weight: 4, descend: true },
-        { locomotion: 'idle', activity: 'lie', hold: 6, weight: 40 },
-        { locomotion: 'idle', activity: 'sit', hold: 5, weight: 30 },
-        { locomotion: 'idle', activity: 'groom', hold: 3, weight: 22 },
+        { locomotion: 'idle', activity: 'lie', hold: LIE_HOLD, weight: 40 },
+        { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 30 },
+        { locomotion: 'idle', activity: 'groom', hold: GROOM_HOLD, weight: 22 },
       ]
     default:
       return [
         walk(30),
         { locomotion: 'walk', activity: 'none', hold: 1, weight: 12, descend: true },
-        { locomotion: 'idle', activity: 'sit', hold: 4, weight: 24 },
-        { locomotion: 'idle', activity: 'groom', hold: 3, weight: 20 },
-        { locomotion: 'idle', activity: 'lie', hold: 5, weight: 14 },
-        { locomotion: 'idle', activity: 'stretch', hold: 2.4, weight: 12 },
+        { locomotion: 'idle', activity: 'sit', hold: SIT_HOLD, weight: 24 },
+        { locomotion: 'idle', activity: 'groom', hold: GROOM_HOLD, weight: 20 },
+        { locomotion: 'idle', activity: 'lie', hold: LIE_HOLD, weight: 14 },
+        { locomotion: 'idle', activity: 'stretch', hold: STRETCH_HOLD, weight: 12 },
       ]
   }
 }
@@ -844,8 +988,16 @@ export function step(
   let x = Math.min(Math.max(next.x, ledge.x0), ledge.x1)
   // A motion phase intentionally completes without checking the pointer or
   // choosing a new behaviour; its world position still follows the ledge.
-  if (next.phase === 'anticipate' || next.phase === 'land' || next.phase === 'turn') {
-    return advancePausedPhase({ ...next, x, y, vx: 0 }, dt)
+  if (
+    next.phase === 'anticipate' ||
+    next.phase === 'land' ||
+    next.phase === 'turn' ||
+    next.phase === 'getup'
+  ) {
+    const phased = advancePausedPhase({ ...next, x, y, vx: 0 }, dt)
+    if (phased.locomotion === 'fall') return fall(phased, env, dt, tuning)
+    if (phased.phase !== 'none') return phased
+    next = phased
   }
   let dir = next.dir
   let vx = next.vx
@@ -864,59 +1016,60 @@ export function step(
   // only chooses the response to it.
   const threat = pointer.near ? pointer.direction : 0
   const onBody = pointer.onBody && pointer.still > 0
+  let petting = false
   if (env.pointer != null && pettingReady(env.pointer, pointer, next.pettingAges)) {
-    const activity =
+    const pettingActivity =
       PETTING_ACTIVITIES[
         Math.min(PETTING_ACTIVITIES.length - 1, Math.floor(rng() * PETTING_ACTIVITIES.length))
       ]
-    return {
+    locomotion = 'idle'
+    activity = pettingActivity
+    reacting = false
+    hold = chosenHold(
+      { locomotion: 'idle', activity: pettingActivity, hold: tuning.reactionHold },
+      env.timing,
+    )
+    vx = 0
+    boredom = 0
+    petting = true
+    next = {
       ...next,
-      x,
-      y,
-      dir,
-      vx: 0,
-      locomotion: 'idle',
-      activity,
-      reacting: false,
-      hold: chosenHold({ locomotion: 'idle', activity, hold: tuning.reactionHold }, env.timing),
       pettingAges: [0],
       pettingWindow: PETTING_WINDOW_MIN + rng() * (PETTING_WINDOW_MAX - PETTING_WINDOW_MIN),
-      mood,
-      moodHold,
-      boredom: 0,
-      ledgeId: ledge.id,
     }
-  }
-  const slowApproach = pointer.near && pointer.approach > POINTER_SLOW_APPROACH && !pointer.alarmed
-  if (threat !== 0 && !(next.reacting && next.hold > 0)) {
-    if (pointer.alarmed) {
-      locomotion = 'run'
-      activity = 'none'
-      reacting = false
-      hold = Math.max(hold, 0.5)
-      dir = threat
-      boredom = 0
-    } else if (onBody) {
-      locomotion = 'walk'
-      activity = 'none'
-      reacting = false
-      hold = Math.max(hold, 0.5)
-      dir = threat
-      boredom = 0
-    } else if (pointer.still >= POINTER_STILL_DELAY || slowApproach) {
-      locomotion = 'idle'
-      activity = 'sit'
-      reacting = false
-      hold = Math.max(hold, POINTER_STILL_DELAY)
-      dir = -threat as 1 | -1
-      boredom = 0
+  } else {
+    const slowApproach =
+      pointer.near && pointer.approach > POINTER_SLOW_APPROACH && !pointer.alarmed
+    if (threat !== 0 && !(next.reacting && next.hold > 0)) {
+      if (pointer.alarmed) {
+        locomotion = 'run'
+        activity = 'none'
+        reacting = false
+        hold = Math.max(hold, 0.5)
+        dir = threat
+        boredom = 0
+      } else if (onBody) {
+        locomotion = 'walk'
+        activity = 'none'
+        reacting = false
+        hold = Math.max(hold, 0.5)
+        dir = threat
+        boredom = 0
+      } else if (pointer.still >= POINTER_STILL_DELAY || slowApproach) {
+        locomotion = 'idle'
+        activity = 'sit'
+        reacting = false
+        hold = Math.max(hold, POINTER_STILL_DELAY)
+        dir = -threat as 1 | -1
+        boredom = 0
+      }
     }
   }
 
   // 4. Move with a signed velocity. The displayed scale and pack stride are
   //    the sole source of the gait target; braking is explicit so a reversal
   //    cannot snap the feet to the other side of the body.
-  if (locomotion === 'walk' || locomotion === 'run') {
+  if (!petting && (locomotion === 'walk' || locomotion === 'run')) {
     const target = dir * gaitSpeed(locomotion, env.timing, env.petScale)
     vx = approach(vx, target, dt, tuning.gaitRamp)
     x += vx * dt
@@ -978,7 +1131,7 @@ export function step(
       }
     }
     boredom = 0
-  } else {
+  } else if (!petting) {
     vx = approach(
       vx,
       0,
@@ -1009,82 +1162,123 @@ export function step(
       vigilActivity = next.attending === 'shell' ? 'stretch' : 'groom'
     }
     if (vigilActivity !== null) {
-      const vigilHold = chosenHold(
+      locomotion = 'idle'
+      activity = vigilActivity
+      hold = chosenHold(
         { locomotion: 'idle', activity: vigilActivity, hold: tuning.reactionHold },
         env.timing,
       )
-      return {
-        ...next,
-        x,
-        y,
-        dir,
-        vx,
-        locomotion: 'idle',
-        activity: vigilActivity,
-        hold: vigilHold,
-        reacting: false,
-        mood,
-        moodHold,
-        boredom,
-        ledgeId: ledge.id,
-        vigilStage: stage,
-      }
+      reacting = false
+      next = { ...next, vigilStage: stage }
+    } else if (stage !== next.vigilStage) {
+      next = { ...next, vigilStage: stage }
     }
-    if (stage !== next.vigilStage) next = { ...next, vigilStage: stage }
   }
 
   // 5. Long enough with nothing to do and the cat goes to sleep. This is the
   //    one activity that is not chosen from the menu — it is arrived at.
   // Watching keeps it awake: a pet that dozed off during your build would be
   // reporting the opposite of what is happening.
+  let sleepStarted = false
   if (next.attending === null && boredom >= tuning.sleepAfter && activity !== 'sleep') {
-    return {
-      ...next,
-      x,
-      y,
-      dir,
-      vx,
-      mood: 'tired',
-      moodHold: 0,
-      locomotion: 'idle',
-      activity: 'sleep',
-      hold: 0,
-      boredom,
-      ledgeId: ledge.id,
-    }
+    mood = 'tired'
+    moodHold = 0
+    locomotion = 'idle'
+    activity = 'sleep'
+    hold = 0
+    reacting = false
+    sleepStarted = true
   }
-  if (activity === 'sleep') {
+  if (activity === 'sleep' && !sleepStarted) {
     return { ...next, x, y, dir, vx, mood: 'tired', moodHold: 0, boredom, ledgeId: ledge.id }
   }
-  // 6. Finish the current occupation before starting another one. Deciding
-  //    afresh every frame is what makes a pet twitch instead of live.
+  const behaviorChanged = locomotion !== next.locomotion || activity !== next.activity
+  let clipNeedsReset = behaviorChanged
+  let clock: ClipClock = { elapsed: 0, pause: 0, cycle: 0, completeAfterHold: false }
+  if (!behaviorChanged) {
+    clock = advanceClipClock(
+      next,
+      locomotion,
+      activity,
+      env.timing,
+      env.petScale,
+      vx,
+      dt,
+      hold,
+      rng,
+    )
+  }
+  // An occupation exists from the frame its choice starts until its requested
+  // hold has elapsed and the drawing cycle in progress has closed. The pure
+  // state owns this interval because it receives dt and timing directly; the
+  // painter only reads `clip.elapsed` and never decides when behaviour ends.
   hold -= dt
-  if (hold <= 0 && next.attending !== null && next.vigilStage >= 3 && locomotion === 'idle') {
-    // After the final gesture, observation intentionally freezes in a quiet
-    // pose until the command ends. A pointer alarm has already changed
-    // locomotion to run above, so it is never swallowed by this guard.
-    const quiet = next.attending === 'shell' ? 'lie' : 'sit'
+  // A zero-hold, zero-elapsed state is the menu boundary used by a newly
+  // standing pet. Any positive hold or completed cycle means the behaviour
+  // already started and must be allowed to close before another is chosen.
+  const behaviorAlreadyStarted = next.hold > 0 || next.clip.elapsed > 0 || next.clip.cycle > 0
+  if (hold <= 0 && !clock.completeAfterHold && !clipNeedsReset && behaviorAlreadyStarted) {
     return {
       ...next,
       x,
       y,
       dir,
       vx,
-      locomotion: 'idle',
-      activity: quiet,
-      hold: 0,
-      reacting: false,
+      locomotion,
+      activity,
+      hold,
+      reacting,
+      clip: { elapsed: clock.elapsed, pause: clock.pause, cycle: clock.cycle },
       mood,
       moodHold,
       boredom,
       ledgeId: ledge.id,
     }
   }
-  if (hold <= 0) {
-    const up =
-      next.attending === null && !next.humanAway
-        ? ledgeAbove(env.terrain, x, y, tuning.jumpReach)
-        : null
+  if (
+    hold <= 0 &&
+    clock.completeAfterHold &&
+    timingFor(env.timing, locomotion, activity).mode === 'transition'
+  ) {
+    const phaseDuration = timingFor(env.timing, locomotion, activity).duration
+    return {
+      ...next,
+      x,
+      y,
+      dir,
+      vx: 0,
+      locomotion: 'idle',
+      activity,
+      hold: 0,
+      reacting: false,
+      phase: 'getup',
+      phaseHold: phaseDuration,
+      phaseDuration,
+      phaseTurned: false,
+      clip: { elapsed: clock.elapsed, pause: clock.pause, cycle: clock.cycle },
+      mood,
+      moodHold,
+      boredom,
+      ledgeId: ledge.id,
+    }
+  }
+  let quieting = false
+  if (hold <= 0 && next.attending !== null && next.vigilStage >= 3 && locomotion === 'idle') {
+    // After the final gesture, observation intentionally freezes in a quiet
+    // pose until the command ends. A pointer alarm has already changed
+    // locomotion to run above, so it is never swallowed by this guard.
+    const quiet = next.attending === 'shell' ? 'lie' : 'sit'
+    activity = quiet
+    hold = 0
+    reacting = false
+    quieting = true
+  }
+  if (quieting) clipNeedsReset = true
+  const up =
+    next.attending === null && !next.humanAway
+      ? ledgeAbove(env.terrain, x, y, tuning.jumpReach)
+      : null
+  if (!quieting && !sleepStarted && hold <= 0) {
     const offered =
       up === null ? menu(mood, next.attending) : [...menu(mood, next.attending), ASCEND]
     const choices = weightedChoices(
@@ -1147,8 +1341,12 @@ export function step(
       next = { ...next, noticeableAges: [...next.noticeableAges, 0] }
     }
     if (c.locomotion !== 'idle' && rng() < 0.5) dir = (dir * -1) as 1 | -1
+    clipNeedsReset = true
   }
 
+  if (clipNeedsReset) {
+    clock = resetClipClock(locomotion, activity, env.timing, rng)
+  }
   return {
     ...next,
     x,
@@ -1163,6 +1361,7 @@ export function step(
     moodHold,
     boredom,
     ledgeId: ledge.id,
+    clip: { elapsed: clock.elapsed, pause: clock.pause, cycle: clock.cycle },
   }
 }
 

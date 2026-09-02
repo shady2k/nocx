@@ -28,14 +28,14 @@ interface Take {
  *
  * A cat washes itself more than once an hour, and playing the identical five
  * frames every time is what turns a living animal back into a loop. The pack
- * ships second takes of exactly the two behaviours that repeat most — the
- * wash and the sleep — and a take is chosen afresh each time the clip starts.
+ * ships second takes of the two behaviours that repeat most — the wash and
+ * sleep — and a take is chosen afresh whenever a clip begins or loops.
  */
 interface Clip {
   readonly mode: ClipMode
   /** Seconds to hold the final frame of a looping clip. A range is resolved
-   *  once when a cycle starts, by the injected random source in the painter,
-   *  so a pause never changes halfway through a frame interval. */
+   * once when a cycle starts by the pure pet state machine, so the painter
+   * only reads the resulting elapsed time. */
   readonly pause?: number | readonly [number, number]
   readonly takes: readonly Take[]
 }
@@ -47,10 +47,6 @@ function once(file: string, frames: number): Clip {
 
 function loop(file: string, frames: number, pause?: number | readonly [number, number]): Clip {
   return { mode: 'loop', pause, takes: [{ file, frames }] }
-}
-
-function hold(file: string, frames: number): Clip {
-  return { mode: 'hold', takes: [{ file, frames }] }
 }
 
 export interface PetPack {
@@ -103,18 +99,18 @@ export const CAT_PACK: PetPack = {
     walk: loop('walk.png', 8),
     run: loop('run.png', 8),
     meow: once('meow.png', 4),
-    laying: loop('laying.png', 8),
+    laying: { mode: 'transition', takes: [{ file: 'laying.png', frames: 8 }] },
     itch: once('itch.png', 2),
     licking: {
-      mode: 'once',
+      mode: 'loop',
       takes: [
         { file: 'licking1.png', frames: 5 },
         { file: 'licking2.png', frames: 5 },
       ],
     },
-    sitting: hold('sitting.png', 1),
+    sitting: once('sitting.png', 1),
     sleeping: {
-      mode: 'hold',
+      mode: 'once',
       takes: [
         { file: 'sleeping1.png', frames: 1 },
         { file: 'sleeping2.png', frames: 1 },

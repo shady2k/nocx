@@ -185,15 +185,13 @@ describe('clipFor', () => {
     for (const c of Object.values(CAT_PACK.activity)) expect(names).toContain(c)
   })
   it('declares clip playback modes, idle pause, and measured gait strides', () => {
-    for (const name of ['idle', 'walk', 'run', 'laying']) {
+    for (const name of ['idle', 'walk', 'run', 'licking']) {
       expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'loop' })
     }
-    for (const name of ['meow', 'stretching', 'itch', 'licking']) {
+    for (const name of ['meow', 'stretching', 'itch', 'sitting', 'sleeping']) {
       expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'once' })
     }
-    for (const name of ['sitting', 'sleeping']) {
-      expect(CAT_PACK.clips[name]).toMatchObject({ mode: 'hold' })
-    }
+    expect(CAT_PACK.clips.laying).toMatchObject({ mode: 'transition' })
     expect(CAT_PACK.clips.idle).toMatchObject({ pause: [0.4, 2.0] })
     // Strides are body-length coefficients; timingFrom applies the loaded
     // trim width, so the run/walk ratio remains three.

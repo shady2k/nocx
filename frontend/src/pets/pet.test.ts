@@ -21,7 +21,7 @@ const FLOOR: Ledge = { id: FLOOR_ID, x0: 0, x1: 900, y: 580 }
 const A: Ledge = { id: 'blk:1', x0: 100, x1: 300, y: 200 }
 const B: Ledge = { id: 'blk:2', x0: 100, x1: 300, y: 400 }
 
-const timing = (mode: 'loop' | 'once' | 'hold', duration: number) => ({
+const timing = (mode: 'loop' | 'once' | 'transition', duration: number) => ({
   mode,
   duration,
   pause: mode === 'loop' ? 0 : 0,
@@ -36,13 +36,13 @@ const TIMING: PetTiming = {
     fall: timing('loop', 0.8),
   },
   activity: {
-    sit: timing('hold', 0.1),
-    groom: timing('once', 0.5),
+    sit: timing('once', 0.1),
+    groom: timing('loop', 0.5),
     stretch: timing('once', 1.3),
-    lie: timing('loop', 0.8),
+    lie: timing('transition', 0.8),
     scratch: timing('once', 0.2),
     meow: timing('once', 0.4),
-    sleep: timing('hold', 0.1),
+    sleep: timing('once', 0.1),
   },
   strides: { walk: 32, run: 48 },
 }
@@ -259,13 +259,13 @@ describe('reacting to a command', () => {
     expect(r.hold).not.toBe(DEFAULT_TUNING.reactionHold)
   })
 
-  it('keeps the caller hold for a hold-mode reaction', () => {
+  it('uses the once clip length for a once-mode reaction', () => {
     const r = react(standing(A), 'unknown')
     expect(r.activity).toBe('sit')
-    expect(r.hold).toBe(DEFAULT_TUNING.reactionHold)
+    expect(r.hold).toBe(TIMING.activity.sit.duration)
   })
 
-  it('keeps the caller hold for a loop-mode reaction', () => {
+  it('keeps the caller hold for a transition-mode reaction', () => {
     const r = react(standing(A), 'failure', 'agent')
     expect(r.activity).toBe('lie')
     expect(r.hold).toBe(DEFAULT_TUNING.reactionHold)
@@ -335,7 +335,7 @@ describe('human absence', () => {
     p = humanActivity(p, TIMING)
     expect(p.humanAway).toBe(false)
     expect(p.activity).toBe('stretch')
-    expect(p.hold).toBeCloseTo(1.3, 5)
+    expect(p.hold).toBeCloseTo(1, 5)
 
     p = step(p, env([A]), 0.6, seq(0), quietTuning)
     expect(p.activity).toBe('stretch')
@@ -360,12 +360,53 @@ describe('choosing what to do', () => {
     expect(after.activity).toBe('groom')
     expect(after.hold).toBeCloseTo(1, 5)
   })
+  it('keeps grooming for its occupation hold, not one wash cycle', () => {
+    let p = step(standing(A, { hold: 0 }), env(), 0.01, seq(0.7))
+    expect(p.activity).toBe('groom')
+    expect(p.hold).toBeGreaterThan(10)
+    p = step(p, env(), 1, seq(0))
+    expect(p.activity).toBe('groom')
+  })
+  it('waits for a lying occupation to enter its get-up phase at its own boundary', () => {
+    let p = standing(A, { activity: 'lie', hold: 0.5 })
+    p = step(p, env(), 0.6, seq(0))
+    expect(p.activity).toBe('lie')
+    p = step(p, env(), 0.2, seq(0))
+    expect(p.phase).toBe('getup')
+  })
+  it('keeps a non-multiple occupation until its own clip boundary', () => {
+    let p = standing(A, { activity: 'groom', hold: 1.1 })
+    p = step(p, env(), 1.1, seq(0))
+    expect(p.activity).toBe('groom')
+    p = step(p, env(), 0.4, seq(0))
+    expect(p.locomotion).toBe('walk')
+  })
 
-  it('picks from the menu once the hold runs out', () => {
-    const p = standing(A, { activity: 'groom', hold: 0.01 })
-    // First entry of every menu is the walk.
-    const after = step(p, env(), 0.02, seq(0))
-    expect(after.locomotion).toBe('walk')
+  it('carries elapsed time across every boundary in one step', () => {
+    const p = step(standing(A, { activity: 'groom', hold: 3 }), env(), 1.7, seq(0))
+    expect(p.clip.cycle).toBe(3)
+    expect(p.clip.elapsed).toBeCloseTo(0.2, 5)
+  })
+
+  it('keeps the pet still during the get-up phase', () => {
+    let p = standing(A, { activity: 'lie', hold: 0.5 })
+    p = step(p, env(), 0.8, seq(0))
+    expect(p.phase).toBe('getup')
+    expect(p.activity).toBe('lie')
+    expect(p.locomotion).toBe('idle')
+    const x = p.x
+    p = step(p, env(), 0.1, seq(0))
+    expect(p.phase).toBe('getup')
+    expect(p.x).toBe(x)
+    expect(p.activity).toBe('lie')
+    expect(p.locomotion).toBe('idle')
+  })
+  it('picks from the menu after the hold and current cycle finish', () => {
+    let p = standing(A, { activity: 'groom', hold: 0.01 })
+    p = step(p, env(), 0.02, seq(0))
+    expect(p.activity).toBe('groom')
+    p = step(p, env(), 0.48, seq(0))
+    expect(p.locomotion).toBe('walk')
   })
 })
 
@@ -374,7 +415,7 @@ describe('leaving a ledge from the middle', () => {
     // A command block is the full width of the pane; at a walking pace the
     // animal needs the better part of a minute to reach an edge. Without
     // this it lives on whichever ledge it first landed on.
-    const p = standing(A, { hold: 0.01, x: 200 })
+    const p = standing(A, { hold: 0, x: 200 })
     // The calm menu weighs walk 30, descend 12, then the still ones — total
     // 112, so the descend band is [30,42)/112. 0.3 is inside it.
     const after = step(p, env(), 0.02, seq(0.3))
@@ -813,7 +854,7 @@ describe('going back up', () => {
   const stacked: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
 
   it('jumps to the ledge above and is caught by it coming down', () => {
-    let p = standing(stack[1], { hold: 0.01, x: 200 })
+    let p = standing(stack[1], { hold: 0, x: 200 })
     // The ascend choice is appended last, so the top of the range picks it.
     p = step(p, stacked, 0.02, seq(0.999))
     expect(p.phase).toBe('anticipate')
@@ -825,7 +866,7 @@ describe('going back up', () => {
     expect(p.ledgeId).toBe('blk:1')
   })
   it('rises past the target before it can be caught, so the arc reads as a jump', () => {
-    let p = step(standing(stack[1], { hold: 0.01, x: 200 }), stacked, 0.02, seq(0.999))
+    let p = step(standing(stack[1], { hold: 0, x: 200 }), stacked, 0.02, seq(0.999))
     p = step(p, stacked, 0.15, seq(0.5))
     let highest = p.y
     for (let i = 0; i < 240 && p.locomotion === 'fall'; i++) {
@@ -837,7 +878,7 @@ describe('going back up', () => {
 
   it('is not offered when there is nothing overhead', () => {
     // Only the ascend choice can put an idle pet into a rising fall.
-    let p = standing(A, { hold: 0.01, x: 200 })
+    let p = standing(A, { hold: 0, x: 200 })
     p = step(p, env([A]), 0.02, seq(0.999))
     expect(p.vy).toBeGreaterThanOrEqual(0)
   })
@@ -864,7 +905,7 @@ describe('the jump is aimed, not a fixed leap', () => {
       { id: 'floor', x0: 8, x1: 900, y: 860 },
     ]
     const envFar: StepEnv = { terrain: far, floor: far[1], petHeight: 34, ...ENV_DEFAULTS }
-    let p = standing(far[1], { hold: 0.01, x: 400 })
+    let p = standing(far[1], { hold: 0, x: 400 })
     p = step(p, envFar, 0.02, seq(0.999))
     expect(p.phase).toBe('anticipate')
     p = step(p, envFar, 0.15, seq(0.5))
@@ -884,8 +925,8 @@ describe('the jump is aimed, not a fixed leap', () => {
       { id: 'blk:2', x0: 100, x1: 900, y: 340 },
     ]
     const envFar: StepEnv = { terrain: far, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
-    const hop = step(standing(near[1], { hold: 0.01, x: 400 }), envNear, 0.02, seq(0.999))
-    const leap = step(standing(far[1], { hold: 0.01, x: 400 }), envFar, 0.02, seq(0.999))
+    const hop = step(standing(near[1], { hold: 0, x: 400 }), envNear, 0.02, seq(0.999))
+    const leap = step(standing(far[1], { hold: 0, x: 400 }), envFar, 0.02, seq(0.999))
     expect(Math.abs(leap.vy)).toBeGreaterThan(Math.abs(hop.vy) * 1.5)
   })
 
@@ -900,7 +941,7 @@ describe('the jump is aimed, not a fixed leap', () => {
       petHeight: 34,
       ...ENV_DEFAULTS,
     }
-    const p = step(standing(unreachable[1], { hold: 0.01, x: 400 }), e, 0.02, seq(0.999))
+    const p = step(standing(unreachable[1], { hold: 0, x: 400 }), e, 0.02, seq(0.999))
     expect(p.vy).toBeGreaterThanOrEqual(0)
   })
 })
@@ -912,7 +953,7 @@ describe('motion phases', () => {
       { id: 'upper', x0: 100, x1: 300, y: 260 },
     ]
     const e: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
-    let p = standing(stack[1], { x: 200, hold: 0.01 })
+    let p = standing(stack[1], { x: 200, hold: 0 })
 
     p = step(p, e, 0.02, seq(0.999))
     expect(p.phase).toBe('anticipate')
@@ -938,7 +979,7 @@ describe('motion phases', () => {
     ]
     const e: StepEnv = { terrain: stack, floor: FLOOR, petHeight: 34, ...ENV_DEFAULTS }
     const p = step(
-      step(standing(stack[1], { x: 200, vx: 32, hold: 0.01 }), e, 0.02, seq(0.999)),
+      step(standing(stack[1], { x: 200, vx: 32, hold: 0 }), e, 0.02, seq(0.999)),
       e,
       0.05,
       seq(0.5),
@@ -1013,7 +1054,7 @@ describe('airborne and ordinary-choice policy', () => {
   const wideEnv = env([wide])
 
   it('descends without the jump anticipation phase', () => {
-    const after = step(standing(A, { x: 200, hold: 0.01 }), env(), 0.02, seq(0.3))
+    const after = step(standing(A, { x: 200, hold: 0 }), env(), 0.02, seq(0.3))
     expect(after.locomotion).toBe('fall')
     expect(after.phase).toBe('none')
   })

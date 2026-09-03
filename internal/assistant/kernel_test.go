@@ -159,7 +159,7 @@ func TestDeclaredResourceOutsideARowScopeIsAQuestionAndOutsideTheFenceIsARefusal
 
 	// Inside the selector: nothing fell outside, so the row's own permit stands.
 	inside := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: filepath.Join(selector, "a.txt")}}
-	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, inside, true, parsed); outcome != policyPermit || reason != "" {
+	if outcome, reason, _, _ := kernel.decideInvocationWithReason(tool, inside, true, parsed); outcome != policyPermit || reason != "" {
 		t.Errorf("a declared resource inside the selector gave outcome=%v reason=%q, want permit", outcome, reason)
 	}
 
@@ -167,7 +167,7 @@ func TestDeclaredResourceOutsideARowScopeIsAQuestionAndOutsideTheFenceIsARefusal
 	// person can widen the selector, so refusing would withhold the only
 	// answer that helps.
 	editable := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: filepath.Join(root, "lib", "b.txt")}}
-	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, editable, true, parsed); outcome != policyAsk || reason != "" {
+	if outcome, reason, _, _ := kernel.decideInvocationWithReason(tool, editable, true, parsed); outcome != policyAsk || reason != "" {
 		t.Errorf("a declared resource outside the editable row scope gave outcome=%v reason=%q, want ask with no refusal reason",
 			outcome, reason)
 	}
@@ -175,7 +175,7 @@ func TestDeclaredResourceOutsideARowScopeIsAQuestionAndOutsideTheFenceIsARefusal
 	// Outside the fence: a refusal, and RefusedOutOfScope is its sentence.
 	// No answer a person could give makes this call executable.
 	fenced := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: "/etc/hosts"}}
-	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, fenced, true, parsed); outcome != policyRefuse || reason != RefusedOutOfScope {
+	if outcome, reason, _, _ := kernel.decideInvocationWithReason(tool, fenced, true, parsed); outcome != policyRefuse || reason != RefusedOutOfScope {
 		t.Errorf("a declared resource outside the run fence gave outcome=%v reason=%q, want refuse/%s",
 			outcome, reason, RefusedOutOfScope)
 	}
@@ -261,7 +261,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	// run fence, so the selector is the only thing excluding it and a person
 	// could widen it.
 	refs := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: target}}
-	outcome, reason, _ := kernel.decideInvocationWithReason(decl, refs, true, content.Invocation{Parsed: true})
+	outcome, reason, _, _ := kernel.decideInvocationWithReason(decl, refs, true, content.Invocation{Parsed: true})
 	if outcome != policyAsk || reason != "" {
 		t.Fatalf("policy on %q gave outcome=%v reason=%q, want ask", target, outcome, reason)
 	}
@@ -282,7 +282,7 @@ func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
 	// The symlink escape: spelled inside the scope, canonically outside it.
 	// The policy predicate lets it through, and the capability does not.
 	escapeRefs := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: escape}}
-	if outcome, _, _ := kernel.decideInvocationWithReason(decl, escapeRefs, true, content.Invocation{Parsed: true}); outcome != policyPermit {
+	if outcome, _, _, _ := kernel.decideInvocationWithReason(decl, escapeRefs, true, content.Invocation{Parsed: true}); outcome != policyPermit {
 		t.Fatalf("policy on the symlink %q gave outcome=%v; the lexical predicate cannot see the escape and must permit it here", escape, outcome)
 	}
 	escapeCapability, err := decl.Narrow(grant, escapeRefs, agenttools.RunContext{})

@@ -28,7 +28,7 @@ func decideOutcome(t *testing.T, grant content.Grant, tool agenttools.Tool, args
 	if err != nil {
 		t.Fatalf("ResolveResources: %v", err)
 	}
-	outcome, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, tool.ResolveResources != nil, content.Invocation{Parsed: true})
+	outcome, _, _, _ := mw.kernel.decideInvocationWithReason(tool, resources, tool.ResolveResources != nil, content.Invocation{Parsed: true})
 	return outcome
 }
 

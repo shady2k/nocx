@@ -15,6 +15,7 @@ package assistant
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -85,4 +86,61 @@ func (s *GlobalPolicyStore) SetPolicy(p content.EffectPolicy) error {
 	}
 	s.current = p
 	return nil
+}
+
+// WidenRowScope returns p with one more scope on ONE effect's row — the whole
+// of what the widening answer changes (design §5.3: the answer "atomically
+// widens the row's scopes and approves this call").
+//
+// It goes through the policy's own WIRE FORM rather than reaching into the
+// matrix struct, and that is deliberate. content.EffectPolicy states in as
+// many words that SetRowDecision is its only exported mutator, "a caller
+// reaching into the struct fields would be a second place that knows the
+// lattice's shape" — and a second place is exactly what this would become.
+// The JSON document already owns the effect→row mapping (the row keys ARE the
+// effect names), and content.ParseEffectPolicy is the ONE strict gate every
+// operator-supplied policy crosses, so a widening written this way is
+// validated by the same code that would reject a hand-edited document naming
+// a tool, a bad path scope or a tool-kind scope.
+//
+// Widening is idempotent: a scope the row already states is not appended
+// twice, so answering the same question twice cannot grow the document.
+// An effect outside the lattice is an error rather than a silent no-op — a
+// widening that quietly widened nothing would resume a call whose next
+// identical proposal asks again, which is the defect this exists to remove.
+func WidenRowScope(p content.EffectPolicy, e content.Effect, scope content.GrantScope) (content.EffectPolicy, error) {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	var doc map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &doc); err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	rowRaw, ok := doc[string(e)]
+	if !ok {
+		return p, fmt.Errorf("agent policy: widening %s: no such effect row", e)
+	}
+	var row content.EffectRow
+	if err = json.Unmarshal(rowRaw, &row); err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	for _, existing := range row.Scopes {
+		if existing == scope {
+			return p, nil
+		}
+	}
+	row.Scopes = append(row.Scopes, scope)
+	if doc[string(e)], err = json.Marshal(row); err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	next, err := json.Marshal(doc)
+	if err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	widened, err := content.ParseEffectPolicy(next)
+	if err != nil {
+		return p, fmt.Errorf("agent policy: widening %s: %w", e, err)
+	}
+	return widened, nil
 }

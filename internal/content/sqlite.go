@@ -473,7 +473,7 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
 // by folding the `api_run*` tables in and retiring the private counter they
 // used to carry (nocx-lmb6v.5).
-const schemaVersion = 16
+const schemaVersion = 17
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -834,6 +834,87 @@ CREATE TABLE IF NOT EXISTS grant_effects (
             ('observe','mutate-reversible','mutate-destructive','privilege-change',
              'disclose','cross-boundary','delegate')),
   PRIMARY KEY (grant_id, effect)
+) STRICT;
+
+-- THE WAVE RECORD (nocx-dkawo.2). The backend holds it because the backend
+-- is a process without turns: an agent exists only while it takes a turn, so
+-- anything that depends on an act the coordinator must remember is not an
+-- invariant. These rows are what it cannot forget.
+--
+-- MEMBERSHIP IS NOT DELEGATION, and that is why there are two tables rather
+-- than one row with an authority column. A participant row makes the
+-- participant ADDRESSABLE — it is in this wave and other participants may
+-- reach it. A wave_delegations row makes it CONTROLLABLE. Neither implies
+-- the other, which is what lets a human take over a worker's pane, suspend
+-- the coordinator's send-input, and leave the worker in the wave and still
+-- reachable. Conflating them severs coordination the moment a person helps
+-- their own worker past a prompt.
+CREATE TABLE IF NOT EXISTS waves (
+  id                  TEXT PRIMARY KEY,
+  -- The SESSION that coordinates, never the run. A coordinator run ends
+  -- while its workers live, and D3's whole question — "a restarted
+  -- coordinator asks what it holds" — is asked after that run has gone.
+  coordinator_session TEXT NOT NULL,
+  created_at          INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS wave_participants (
+  id            TEXT PRIMARY KEY,
+  wave_id       TEXT NOT NULL REFERENCES waves(id) ON DELETE CASCADE,
+  role          TEXT NOT NULL CHECK (role IN ('coordinator','worker')),
+  -- prepared is deliberately reachable and deliberately not live: it is a
+  -- committed record with nothing behind it yet, which is the state that
+  -- makes an orphaned fork discoverable instead of invisible. abandoned is
+  -- an exit with no declaration and is named so it can never be misread as
+  -- a completion; interrupted is what a restart or a failed compensation
+  -- leaves, never an adoption.
+  state         TEXT NOT NULL CHECK (state IN
+                ('prepared','live','completed','failed','abandoned','interrupted')),
+  task          TEXT NOT NULL DEFAULT '',
+  registered_at INTEGER NOT NULL,
+  -- THE FULL IDENTITY a fact is bound to. A bare attempt number attaches old
+  -- evidence to a new incarnation: output offsets are per-session replay
+  -- coordinates (AD-9), attempts restart, and a domain can be re-established
+  -- under one session. All of it is compared, or a late observation from a
+  -- replaced attempt overwrites a current fact.
+  backend_instance TEXT NOT NULL DEFAULT '',
+  session_id       TEXT NOT NULL DEFAULT '',
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  domain           TEXT NOT NULL DEFAULT '',
+  attempt          INTEGER NOT NULL DEFAULT 0,
+  output_offset    INTEGER NOT NULL DEFAULT 0,
+  -- THE TWO TERMINAL FACTS, each independently nullable, because they are
+  -- independent facts and neither alone reaches completed: what the
+  -- participant DECLARED it produced, and its PROCESS EXIT.
+  declared_ok      INTEGER CHECK (declared_ok IN (0,1)),
+  declared_summary TEXT,
+  declared_at      INTEGER,
+  exit_cause       TEXT,
+  exit_code        INTEGER,
+  exited_at        INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS wave_participants_open ON wave_participants(wave_id, state);
+
+CREATE TABLE IF NOT EXISTS wave_delegations (
+  participant_id     TEXT PRIMARY KEY REFERENCES wave_participants(id) ON DELETE CASCADE,
+  controller_session TEXT NOT NULL,
+  epoch              INTEGER NOT NULL,
+  -- Provenance only, exactly as a lineage edge is. It records which run
+  -- asked; nothing reads it to decide whether an operation is allowed.
+  created_by_run_id  TEXT NOT NULL DEFAULT '',
+  state              TEXT NOT NULL CHECK (state IN
+                     ('active','input-suspended','scope-suspended','revoked','expired'))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS wave_delegation_effects (
+  participant_id TEXT NOT NULL REFERENCES wave_delegations(participant_id) ON DELETE CASCADE,
+  -- delegate-further is a legal value and is never in the default bundle:
+  -- transitive revocation arrives with the act axis, and granting it by
+  -- default would adopt that by the back door.
+  effect         TEXT NOT NULL CHECK (effect IN
+                 ('observe','receive-events','send-input','close','delegate-further')),
+  PRIMARY KEY (participant_id, effect)
 ) STRICT;
 
 -- AN ARTIFACT BELONGS TO ITS BLOCK (ADR-0040). entry_id is the OWNER: it is

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+
+	"github.com/shady2k/nocx/internal/wave"
 )
 
 // Stub is the no-op implementation of ContentDB. Every repository method logs
@@ -70,6 +72,15 @@ func (s *Stub) APIRuns() APIRunRepository {
 func (s *Stub) SessionOutput() SessionOutputRepository {
 	s.log.Info("content stub: SessionOutput called (no-op)")
 	return &sessionOutputStub{log: s.log}
+}
+
+// Waves returns a wave record that refuses rather than a no-op one. The
+// distinction is the whole of D4: a wave the backend cannot record is a wave
+// nothing supervises, and accepting a registration into nowhere would create
+// exactly the unaccounted agent the record exists to prevent.
+func (s *Stub) Waves() wave.Store {
+	s.log.Info("content stub: Waves called (refusing)")
+	return &waveStub{log: s.log}
 }
 
 // Reconcile returns a reconciler with nothing to reconcile. It is not a

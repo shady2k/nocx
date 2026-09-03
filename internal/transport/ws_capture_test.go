@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/wave"
 )
 
 // captureFakeDB is a real-behaving in-memory ContentDB for the capture round
@@ -41,11 +42,16 @@ type captureFakeDB struct {
 
 func newCaptureFakeDB() *captureFakeDB { return &captureFakeDB{} }
 
-func (f *captureFakeDB) Conversations() content.ConversationRepository  { return nil }
-func (f *captureFakeDB) Backup(_ context.Context, _ string) error       { return content.ErrNotImplemented }
-func (f *captureFakeDB) Close() error                                   { return nil }
-func (f *captureFakeDB) Ledger() content.LedgerRepository               { return f }
-func (f *captureFakeDB) Layout() content.LayoutRepository               { return nil }
+func (f *captureFakeDB) Conversations() content.ConversationRepository { return nil }
+func (f *captureFakeDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
+func (f *captureFakeDB) Close() error                                  { return nil }
+func (f *captureFakeDB) Ledger() content.LedgerRepository              { return f }
+func (f *captureFakeDB) Layout() content.LayoutRepository              { return nil }
+
+// Waves: these fakes never register a participant. A wave store that
+// refuses is the honest stand-in — a nil one would panic at the first
+// call and a no-op one would pretend a registration succeeded.
+func (f *captureFakeDB) Waves() wave.Store                              { return content.NewStub(log.NewSlogAdapter(nil)).Waves() }
 func (f *captureFakeDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *captureFakeDB) SessionOutput() content.SessionOutputRepository { return nil }
 

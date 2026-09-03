@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -22,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/wave"
 	"github.com/shady2k/nocx/internal/workspace"
 )
 
@@ -567,7 +569,12 @@ func (f *fakeContentDB) Ledger() content.LedgerRepository              { return 
 
 // Layout is unused by these tests: the fake predates the layout chain and no
 // capability reaches it (nocx-isoph.1).
-func (f *fakeContentDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeContentDB) Layout() content.LayoutRepository { return nil }
+
+// Waves: these fakes never register a participant. A wave store that
+// refuses is the honest stand-in — a nil one would panic at the first
+// call and a no-op one would pretend a registration succeeded.
+func (f *fakeContentDB) Waves() wave.Store                              { return content.NewStub(log.NewSlogAdapter(nil)).Waves() }
 func (f *fakeContentDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return nil }
 

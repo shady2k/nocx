@@ -25,6 +25,8 @@ package content
 import (
 	"context"
 	"errors"
+
+	"github.com/shady2k/nocx/internal/wave"
 )
 
 // ErrNotImplemented is the sentinel error returned by every Stub method.
@@ -81,6 +83,12 @@ type ContentDB interface {
 	// id and a stream offset — neither an entry nor a request — which is why
 	// it owns its own two tables rather than widening the ledger's.
 	SessionOutput() SessionOutputRepository
+	// Waves returns the durable half of the wave record (nocx-dkawo.2):
+	// which participants exist, what is known about each, and which
+	// controller session may act on them. internal/wave owns the semantics
+	// and owns no rows; these rows are here because one encrypted store has
+	// one connection and one owner.
+	Waves() wave.Store
 	// Reconcile returns the restart-reconciliation seam (reconcile.go,
 	// nocx-k6p18.5). `Open` no longer judges the sessions it inherits — it
 	// cannot, because asking needs a carrier and the carrier may need the

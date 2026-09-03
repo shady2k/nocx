@@ -8,6 +8,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/wave"
 )
 
 // ── fakeHistoryDB ─────────────────────────────────────────────────────────
@@ -32,11 +33,16 @@ type fakeHistoryDB struct {
 	calls    int
 }
 
-func (f *fakeHistoryDB) Conversations() content.ConversationRepository  { return nil }
-func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error       { return content.ErrNotImplemented }
-func (f *fakeHistoryDB) Close() error                                   { return nil }
-func (f *fakeHistoryDB) Ledger() content.LedgerRepository               { return f }
-func (f *fakeHistoryDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeHistoryDB) Conversations() content.ConversationRepository { return nil }
+func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
+func (f *fakeHistoryDB) Close() error                                  { return nil }
+func (f *fakeHistoryDB) Ledger() content.LedgerRepository              { return f }
+func (f *fakeHistoryDB) Layout() content.LayoutRepository              { return nil }
+
+// Waves: these fakes never register a participant. A wave store that
+// refuses is the honest stand-in — a nil one would panic at the first
+// call and a no-op one would pretend a registration succeeded.
+func (f *fakeHistoryDB) Waves() wave.Store                              { return content.NewStub(log.NewSlogAdapter(nil)).Waves() }
 func (f *fakeHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 

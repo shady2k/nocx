@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isDriverState, paneIndicator } from './pane-observation'
+import { isDriverState, paneIndicator, readPaneChildren, sameChildren } from './pane-observation'
 
 describe('the boundary guard', () => {
   it('lets every member of the closed set through', () => {
@@ -116,5 +116,59 @@ describe("the TUI's own error", () => {
 
   it('is a state the boundary guard lets through', () => {
     expect(isDriverState('error')).toBe(true)
+  })
+})
+
+// ── The child rows at the boundary (nocx-o1v0h) ───────────────────────────
+
+describe('readPaneChildren', () => {
+  it('reads the rows the notification carried, name and task', () => {
+    expect(
+      readPaneChildren([{ name: 'Explore', task: 'List files in directory' }, { name: 'Plan' }]),
+    ).toEqual([{ name: 'Explore', task: 'List files in directory' }, { name: 'Plan' }])
+  })
+
+  // Absent and empty are different claims and only one of them is ever true:
+  // the backend cannot say "the panel is on screen and names nobody". A
+  // renderer that accepted an empty list would draw an expanded parent with
+  // nothing under it, which reads as children that vanished.
+  it('answers null for absent, for a non-array, and for an empty list', () => {
+    expect(readPaneChildren(undefined)).toBeNull()
+    expect(readPaneChildren(null)).toBeNull()
+    expect(readPaneChildren('Explore')).toBeNull()
+    expect(readPaneChildren([])).toBeNull()
+  })
+
+  // The guard is the point: this is an unsolicited notification, nothing
+  // correlates it, and what survives it reaches a surface that draws it.
+  it('drops a row with no usable name rather than drawing a blank one', () => {
+    expect(
+      readPaneChildren([{ name: '' }, { task: 'orphan' }, 7, null, { name: 'Explore' }]),
+    ).toEqual([{ name: 'Explore' }])
+    // And if that empties the list, the whole list is absent — the same claim
+    // an empty array would have made wrongly.
+    expect(readPaneChildren([{ name: '' }, { task: 'orphan' }])).toBeNull()
+  })
+
+  // A task the screen did not carry is ABSENT, never an empty string: the two
+  // are different claims and only the first is true, and a row rendering `''`
+  // draws a separator with nothing after it.
+  it('omits a task the notification did not carry', () => {
+    const rows = readPaneChildren([{ name: 'Explore', task: '' }])
+    expect(rows).toEqual([{ name: 'Explore' }])
+    expect(rows?.[0]).not.toHaveProperty('task')
+  })
+})
+
+describe('sameChildren', () => {
+  it('is true only for the same rows in the same order', () => {
+    const a = [{ name: 'Explore', task: 'List files' }, { name: 'Plan' }]
+    expect(sameChildren(a, [{ name: 'Explore', task: 'List files' }, { name: 'Plan' }])).toBe(true)
+    // The panel's order is the lineage's order, so a reordering is a
+    // different screen and has to repaint.
+    expect(sameChildren(a, [{ name: 'Plan' }, { name: 'Explore', task: 'List files' }])).toBe(false)
+    expect(sameChildren(a, [{ name: 'Explore' }, { name: 'Plan' }])).toBe(false)
+    expect(sameChildren(a, [{ name: 'Explore', task: 'List files' }])).toBe(false)
+    expect(sameChildren([], [])).toBe(true)
   })
 })

@@ -854,3 +854,64 @@
 .nocx-tab.dragging {
   opacity: 0.4;
 }
+
+/* ── The children a pane's agent spawned (nocx-o1v0h) ─────────────────────
+
+   A pane whose agent has spawned child agents draws them as rows of its own
+   under it (subagent-row.css). This row carries two things about them and
+   nothing else: the control that folds them away, and — only while they are
+   folded — the count of what was folded.
+
+   The disclosure's shape is the kit's, to the declaration: TreeRow, RecordRow
+   and Section all draw a chevron that turns when `data-disclosure` says
+   collapsed, and the rotation lives on the icon wrapper rather than on the
+   button so the hit area and the hover stay square. One gesture across the
+   product, not one per component. A row with no children is `leaf` and draws
+   no control at all, so a strip of ordinary panes is unchanged. */
+
+/* The control itself is the kit's IconButton and this row only PLACES it:
+   where it sits in the line and how tight it is against the title. Nothing
+   here touches its ground, its border or its text — a surface may place a kit
+   component and may never repaint one. */
+
+.nocx-tab-line > .ui-icon-button {
+  flex: none;
+  margin-left: -4px;
+}
+
+.nocx-tab-disclosure-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.85em;
+  height: 0.85em;
+  transition: transform 0.12s ease;
+}
+
+.nocx-tab-disclosure-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nocx-tab[data-disclosure='collapsed'] .nocx-tab-disclosure-icon {
+  transform: rotate(-90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nocx-tab-disclosure-icon {
+    transition: none;
+  }
+}
+
+/* WHAT WAS FOLDED AWAY, and it is deliberately quiet. It is not a Badge: a
+   badge is a status about the row, and this is a count of rows that would be
+   on screen if the person had not just folded them — the same register as the
+   workspace pill's own count, which is why it is drawn like it. */
+
+.nocx-tab-childcount {
+  flex: none;
+  margin-left: var(--space-1);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}

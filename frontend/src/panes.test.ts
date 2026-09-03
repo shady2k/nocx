@@ -2905,6 +2905,141 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
     }
   })
 
+  // THE WHOLE OF nocx-o1v0h, at the seam a person looks at, off a real socket.
+  //
+  // A pane whose agent spawned children shows a row per child with its name
+  // and what it is doing — and the child rows come from the pane's OWN SCREEN.
+  // The backend reads the agent's task panel off a live VT grid; there is no
+  // vendor hook anywhere in this chain, which is the point: the two other
+  // tools that model subagents carry them over a hook, and with no hook they
+  // have no rows at all.
+  //
+  // It is deliberately the real client on a real frame rather than the
+  // fixture's fireObservation: the boundary guard that reads the rows is part
+  // of what has to work, and a fixture that hands typed objects straight to
+  // the callback would never exercise it.
+  it('draws a row per child agent, and clicking one goes to the parent pane', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9877)))
+    const sessionId = '3123456789abcdef0011223344556677'
+    const identity = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
+
+    realClient.start()
+    await Promise.resolve()
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const realSocket: MockWebSocket = constructed
+    realSocket.serverAccepts()
+
+    try {
+      const mounted = mountPaneManager(realClient as unknown as ClientFake)
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'sessions.live')).toHaveLength(1)
+      })
+      const live = realSocket.requests().find((r) => r.method === 'sessions.live')
+      if (live?.id === undefined) throw new Error('missing sessions.live request')
+      realSocket.deliverText({ jsonrpc: '2.0', id: live.id, result: { sessions: [] } })
+
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(1)
+      })
+      const open = realSocket.requests().find((r) => r.method === 'open')
+      if (open?.id === undefined) throw new Error('missing open request')
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: open.id,
+        result: {
+          sessionId,
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      const { manager, bar } = await mounted
+      // THE VERTICAL PLACEMENT, and the switch is load-bearing rather than
+      // incidental. Only the column draws a tree — a horizontal row of tabs
+      // has no under — so the strip emits no child rows at all in the other
+      // placement. Written against the default first, this test passed while
+      // a person would have seen nothing.
+      manager.replaceStrip(new (await import('./tab-strip')).VerticalTabStrip())
+
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: {
+          sessionId,
+          ...identity,
+          agent: 'claude',
+          state: 'working',
+          children: [{ name: 'Explore', task: 'List files in directory' }],
+        },
+      })
+
+      // The row, with both facts on it.
+      await vi.waitFor(() => {
+        const rows = bar.querySelectorAll('.nocx-subagent')
+        expect(rows).toHaveLength(1)
+        expect(rows[0].textContent).toContain('Explore')
+        expect(rows[0].textContent).toContain('List files in directory')
+      })
+
+      // A CHILD HAS NO PANE OF ITS OWN, so its row goes to the pane its
+      // parent runs in. Asserted by what a person would see — the parent's tab
+      // becomes the selected one — rather than by spying on the call: a second
+      // pane is opened and activated first, so the click has somewhere to
+      // come FROM and the assertion cannot pass by accident.
+      manager.newPane()
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(2)
+      })
+      const second = realSocket.requests().filter((r) => r.method === 'open')[1]
+      if (second?.id === undefined) throw new Error('missing second open request')
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: second.id,
+        result: {
+          sessionId: '4123456789abcdef0011223344556677',
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      const selected = (): (string | null)[] =>
+        [...bar.querySelectorAll('[role="tab"]')].map((t) => t.getAttribute('aria-selected'))
+      await vi.waitFor(() => expect(selected()).toEqual(['false', 'true']))
+
+      const childRow = bar.querySelector<HTMLElement>('.nocx-subagent')
+      if (childRow === null) throw new Error('the child row is not on screen')
+      childRow.click()
+      await vi.waitFor(() => expect(selected()).toEqual(['true', 'false']))
+
+      // And the pane's own indicator is decided by the pane's chrome, not by
+      // the row: the child arriving did not move it, and the child going away
+      // does not move it either.
+      const status = (): string | null =>
+        bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')
+      expect(status()).toBe('working')
+
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: { sessionId, ...identity, agent: 'claude', state: 'working' },
+      })
+      await vi.waitFor(() => {
+        expect(bar.querySelectorAll('.nocx-subagent')).toHaveLength(0)
+      })
+      expect(status()).toBe('working')
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
+  })
+
   // And the state moves with the pane, rather than latching on the first thing
   // it was told.
   it('follows the pane back to waiting for input when the dialog is answered', async () => {

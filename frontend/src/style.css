@@ -82,6 +82,7 @@
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
 @import './styles/components/workspace-chip.css';
+@import './styles/components/subagent-row.css';
 @import './styles/components/row-list.css';
 @import './styles/components/key-material-input.css';
 @import './styles/components/tree-row.css';

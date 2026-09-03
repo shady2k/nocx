@@ -375,27 +375,54 @@ func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {
 	}
 }
 
-func TestPolicyNarrowRowRefusesOutsideRunFence(t *testing.T) {
+// TestPolicyNarrowRowAsksOutsideItsSelectorAndRefusesOutsideTheFence covers
+// both bounds of a narrowed row, because they are two different answers
+// (design §5.3, nocx-t6h2u): the operator's own selector is editable, so a
+// path outside it is a question, while the run fence is not, so a path
+// outside THAT is a refusal.
+//
+// Tool.Effect is set explicitly here, and that is load-bearing. The kernel
+// selects the row by t.Effect, not by t.Declaration.Effect; this test used to
+// set only the declaration, so t.Effect was "", every path missed the empty
+// row of an effect outside the lattice, and the narrowed row it names was
+// never consulted at all.
+func TestPolicyNarrowRowAsksOutsideItsSelectorAndRefusesOutsideTheFence(t *testing.T) {
 	policy := autonomousMatrix()
-	rowRoot := t.TempDir()
+	fenceRoot := t.TempDir()
+	rowRoot := filepath.Join(fenceRoot, "row")
 	policy.Observe.Scopes = []content.GrantScope{{
 		Kind: content.ResourcePath,
 		ID:   rowRoot,
 	}}
 	grant := policy.AsGrant([]content.GrantScope{
 		{Kind: content.ResourceSession, ID: "session-a"},
-		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourcePath, ID: fenceRoot},
 	})
 	kernel := &effectKernel{grant: grant}
 	tool := agenttools.Tool{
 		Declaration: agenttools.Declaration{Effect: []content.Effect{content.EffectObserve}},
+		Effect:      content.EffectObserve,
 	}
-	outside := filepath.Join(filepath.Dir(rowRoot), "outside.txt")
-	if kernel.inScope(tool, []agenttools.ResourceRef{{
-		Kind: content.ResourcePath,
-		ID:   outside,
-	}}, true) {
-		t.Fatalf("outside-row path %q passed the narrowed policy row", outside)
+	decide := func(path string) (policyOutcome, PolicyRefusalReason) {
+		outcome, reason, _ := kernel.decideInvocationWithReason(tool, []agenttools.ResourceRef{{
+			Kind: content.ResourcePath,
+			ID:   path,
+		}}, true, content.Invocation{Parsed: true})
+		return outcome, reason
+	}
+
+	if outcome, reason := decide(filepath.Join(rowRoot, "in.txt")); outcome != policyPermit || reason != "" {
+		t.Fatalf("in-row path gave outcome=%v reason=%q, want permit", outcome, reason)
+	}
+	outsideRow := filepath.Join(fenceRoot, "outside.txt")
+	if outcome, reason := decide(outsideRow); outcome != policyAsk || reason != "" {
+		t.Fatalf("path %q outside the row selector gave outcome=%v reason=%q, want ask — the selector is editable",
+			outsideRow, outcome, reason)
+	}
+	outsideFence := filepath.Join(filepath.Dir(fenceRoot), "beyond.txt")
+	if outcome, reason := decide(outsideFence); outcome != policyRefuse || reason != RefusedOutOfScope {
+		t.Fatalf("path %q outside the run fence gave outcome=%v reason=%q, want refuse/%s — the fence cannot be widened by an answer",
+			outsideFence, outcome, reason, RefusedOutOfScope)
 	}
 }
 

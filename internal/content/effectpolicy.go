@@ -363,7 +363,18 @@ func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fe
 			return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: outside}
 		}
 	}
-	if outside, ok := firstOutside(resources, p.rowFor(e).Scopes, bound); ok {
+	scopes := p.rowFor(e).Scopes
+	if bound == boundOutright && len(scopes) == 0 && len(resources) > 0 {
+		// NO scope at all is not a narrow selector somebody could widen: it
+		// is authority nobody minted. A grant whose matrix field was never
+		// set arrives here, and the only honest answer is the immutable one
+		// — there is no bound to expand, so the question would have no
+		// answer. Under boundKindWise the same emptiness means the opposite
+		// (see the constant's doc), which is why this is asked here and not
+		// inside firstOutside.
+		return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: resources[0]}
+	}
+	if outside, ok := firstOutside(resources, scopes, bound); ok {
 		return Verdict{Decision: DecisionAsk, Cause: OutOfScopeRowScope, Resource: outside}
 	}
 	return Verdict{Decision: decision}
@@ -433,8 +444,8 @@ func namedScopes(report ResourceReport) []GrantScope {
 // ResourceUnknown is decided explicitly and deliberately has NO scope kind.
 // It is the verb of an UnresolvedResource and never of a resolved Resource
 // (internal/assistant/cmdeffect.go emits it on the Unresolved slice alone),
-// so it cannot reach namedResourcesWithinRow, which walks Resources. Giving
-// it a kind would be worse than useless: the parser is saying it could not
+// so it cannot reach namedScopes, which walks Resources. Giving it a kind
+// would be worse than useless: the parser is saying it could not
 // determine what the operand is, and comparing that undetermined string
 // against a real scope could only ever declare it INSIDE one. Uncertainty is
 // answered a row earlier instead — ResourceReport.Effect sends any report

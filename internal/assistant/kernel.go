@@ -563,20 +563,56 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
 		return policyRefuse, RefusedByFloor, reason
 	}
-	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
-	if decision == content.DecisionRefuse {
+	verdict := m.verdict(t, resources, resourceDeclaration, invocation)
+	switch verdict.Decision {
+	case content.DecisionRefuse:
+		// The two refusals have two sentences, and the CAUSE picks which:
+		// a resource outside an immutable bound is RefusedOutOfScope, and
+		// a row that simply refuses this effect is RefusedByDecision. A
+		// resource outside an EDITABLE row scope is no longer either — it
+		// is the ask below (design §5.3).
+		if verdict.Cause == content.OutOfScopeFence {
+			return policyRefuse, RefusedOutOfScope, ""
+		}
 		return policyRefuse, RefusedByDecision, ""
-	}
-	if !m.inScope(t, resources, resourceDeclaration) {
-		return policyRefuse, RefusedOutOfScope, ""
-	}
-	if decision == content.DecisionPermit && isSkillMutationTool(t) {
+	case content.DecisionPermit:
+		if isSkillMutationTool(t) {
+			return policyAsk, "", ""
+		}
+		return policyPermit, "", ""
+	default:
 		return policyAsk, "", ""
 	}
-	if decision == content.DecisionPermit {
-		return policyPermit, "", ""
+}
+
+// verdict is the kernel's whole policy answer for one call, and it computes
+// none of it: the command half is content.EffectPolicy.EvaluateInvocation and
+// the DECLARED half is EvaluateResources, which is the same evaluator over
+// resources a declaration resolved rather than a parser inferred. The kernel
+// used to own a second containment predicate here (inScope), and owning two
+// is how the two paths came to answer one question differently.
+//
+// The declared half receives the command half's decision, so it can only make
+// the answer more restrictive; it replaces the verdict exactly when it found
+// something outside, because that is when it has a cause the command half
+// does not.
+func (m *effectKernel) verdict(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) content.Verdict {
+	fence := m.grant.Policy.RunFence()
+	v := m.grant.Policy.EvaluateInvocation(t.Effect, invocation, fence)
+	// The resolver's nil/non-nil distinction is preserved: nil means the
+	// declaration names no resource, while an empty resolved list is a
+	// resource-bearing declaration whose current call touches none.
+	if !resourceDeclaration {
+		return v
 	}
-	return policyAsk, "", ""
+	declared := make([]content.GrantScope, 0, len(resources))
+	for _, resource := range resources {
+		declared = append(declared, content.GrantScope{Kind: resource.Kind, ID: resource.ID})
+	}
+	if d := m.grant.Policy.EvaluateResources(t.Effect, v.Decision, declared, fence); d.Cause != "" {
+		return d
+	}
+	return v
 }
 
 func isSkillMutationTool(tool agenttools.Tool) bool {
@@ -599,19 +635,6 @@ func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []a
 	return m.grant.Policy.FloorRefusal(invocation, scopes)
 }
 
-// inScope is the policy's scope check: the resource the call names must be
-// inside the SELECTED EFFECT's row scopes. The run bound was folded into
-// every row at mint (EffectPolicy.WithRunScopes), so the row is the whole
-// resource authority here; Grant.Scopes is deliberately NOT consulted — it
-// is the derived all-rows union that exists for the declaration filter's
-// resource-kind coverage, and a decision that consulted it would let one
-// effect's scopes leak into another effect's call (an observe row scoped to
-// /home refusing /etc nowhere it matters). This is NOT the enforcement — the
-// capability is the enforcement (ADR-0028 decision 4) — and it is
-// deliberately the advisory lexical approximation of it: the capability
-// resolves canonical identity, the policy compares the spelled path. A call
-// this check lets through can still be refused by the capability; a call it
-// refuses never reaches the capability.
 // resolveResources is the one call-resource derivation. A nil resolver means
 // the declaration names no resource at all; a non-nil resolver may validly
 // return zero refs for this call. Resolver failures are malformed model
@@ -641,41 +664,6 @@ func (m *effectKernel) resolveResources(decl agenttools.Tool, args map[string]an
 		}
 	}
 	return resources, true, nil
-}
-
-// inScope checks EVERY resolved resource against the selected effect row.
-// The resolver's nil/non-nil distinction is preserved: nil means the
-// declaration names no resource, while an empty resolved list is a
-// resource-bearing declaration whose current call touches none.
-//
-// This is the DECLARED half only. The resources a COMMAND names have no
-// resolver — they are the parser's report — and they meet the same row
-// inside content.EffectPolicy.DecisionForInvocation, which states the
-// composition order for both. Do not grow a second command-resource check
-// here.
-func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool) bool {
-	if !resourceDeclaration {
-		return true
-	}
-	for _, resource := range resources {
-		inside := false
-		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
-			// The row's scope is asked WHOLE: rebuilding it from kind and id
-			// drops a destination's subdomain marker (design §5.4), and a
-			// row that grants a host with its subdomains would then refuse
-			// one of them.
-			inside = scope.Contains(
-				content.GrantScope{Kind: resource.Kind, ID: resource.ID},
-			)
-			if inside {
-				break
-			}
-		}
-		if !inside {
-			return false
-		}
-	}
-	return true
 }
 
 // matchedResource is the singular wire projection of the first resolved

@@ -9,22 +9,81 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
+	"time"
 
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
 const DocumentName = "skills.json"
 
+// skillsSchemaVersion is this module's current document version. It is a
+// named constant rather than a literal in Module because the migration rung
+// below has to stamp the same number, and a func referencing Module inside
+// Module's own initializer is an initialization cycle.
+const skillsSchemaVersion storage.SchemaVersion = 2
+
 // Module declares the skill settings document's schema version. The document
-// owns only dynamic per-skill enablement; the global feature switch remains a
-// normal settings declaration.
-var Module = storage.Module{Name: "skills", Current: 1}
+// owns dynamic per-skill enablement, the digest recorded when the person
+// approved a skill's bytes, and — since version 2 — where an installed skill
+// came from; the global feature switch remains a normal settings declaration.
+var Module = storage.Module{
+	Name:    "skills",
+	Current: skillsSchemaVersion,
+	Migrations: []storage.Migration{
+		{From: 1, To: 2, Up: migrateToSources},
+	},
+}
+
+// migrateToSources carries a version 1 document forward. Version 2 IS version
+// 1, plus an optional `sources` map, so there is nothing to convert: a
+// document written before a skill could be installed simply has no sources,
+// and an absent map reads as an empty one.
+//
+// The rung still has to exist, and this is the whole reason it does.
+// storage.Module.Migrate refuses a stored version it has no migration FROM, so
+// without a rung every skills.json already on disk would fail the entire list
+// closed the moment Current moved — it is the version bump that needs
+// carrying, not the shape. Restamping keeps the in-memory document honest
+// about which shape the reader just applied.
+//
+// A version 0 document — one with no schemaVersion at all — is deliberately
+// still refused, exactly as it was at version 1: there is no rung from 0, and
+// inventing one would mean guessing at a shape nothing ever wrote.
+func migrateToSources(data []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("document is not a JSON object")
+	}
+	fields["schemaVersion"] = json.RawMessage(strconv.Itoa(int(skillsSchemaVersion)))
+	return json.Marshal(fields)
+}
 
 type document struct {
-	SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
-	Disabled      []string              `json:"disabled"`
-	Digests       map[string]string     `json:"digests,omitempty"`
+	SchemaVersion storage.SchemaVersion  `json:"schemaVersion"`
+	Disabled      []string               `json:"disabled"`
+	Digests       map[string]string      `json:"digests,omitempty"`
+	Sources       map[string]skillSource `json:"sources,omitempty"`
+}
+
+// skillSource records where an installed skill came from, keyed by skill name
+// like Digests. It exists so an update can re-run the install against the URL
+// the person actually installed from; without it an update could only search
+// for the name somewhere else, and skill names are not namespaced across
+// sources, so a same-named skill elsewhere would silently reassign provenance.
+//
+// It is NEVER read as provenance. Provenance is the root (skill.go) and this
+// row is content in a file anything able to write skills.json could write — so
+// a source entry for a name the authored root holds changes nothing at all
+// about that skill, and there is a test for exactly that direction.
+type skillSource struct {
+	URL         string `json:"url"`
+	InstalledAt string `json:"installedAt"`
 }
 
 // ListedSkill is the settings page's complete view of a discovered skill.
@@ -100,7 +159,7 @@ func (s *Store) loadApprovedDigests() (map[string]string, error) {
 }
 
 func (s *Store) loadDocumentLocked() (document, error) {
-	d := document{Disabled: []string{}, Digests: map[string]string{}}
+	d := document{Disabled: []string{}, Digests: map[string]string{}, Sources: map[string]skillSource{}}
 	if s.docStore == nil {
 		s.docFailure = nil
 		return d, nil
@@ -134,6 +193,9 @@ func (s *Store) loadDocumentLocked() (document, error) {
 	if d.Digests == nil {
 		d.Digests = map[string]string{}
 	}
+	if d.Sources == nil {
+		d.Sources = map[string]skillSource{}
+	}
 	for _, name := range d.Disabled {
 		canonical, err := normalizeName(name)
 		if err != nil {
@@ -153,6 +215,31 @@ func (s *Store) loadDocumentLocked() (document, error) {
 		}
 		if len(digest) != sha256HexSize || !isHexDigest(digest) {
 			s.docFailure = fmt.Errorf("parse %s: digest for %q is invalid", DocumentName, name)
+			return document{}, s.docFailure
+		}
+	}
+	// Read exactly as strictly as the digests above, and for the same reason:
+	// a row nobody can act on is a defect in the file, not a row to skip. A
+	// source that silently vanished would leave a skill listed as installed
+	// with no way to update it, which is the state this map exists to prevent.
+	for name, source := range d.Sources {
+		canonical, err := normalizeName(name)
+		if err != nil || canonical != name {
+			s.docFailure = fmt.Errorf("parse %s: source name %q is not canonical", DocumentName, name)
+			return document{}, s.docFailure
+		}
+		// profile.ValidateBaseURL is the repo's one owner of "is this string
+		// a fetchable http(s) address at all" — shape, not policy, with the
+		// address rules enforced at dial time. internal/transport already
+		// crosses a module boundary to reuse it rather than derive the answer
+		// a second time. Its rejection of userinfo matters here too:
+		// credentials must never come to rest in a plaintext document.
+		if err := profile.ValidateBaseURL(source.URL); err != nil {
+			s.docFailure = fmt.Errorf("parse %s: source url for %q is invalid: %w", DocumentName, name, err)
+			return document{}, s.docFailure
+		}
+		if _, err := time.Parse(time.RFC3339, source.InstalledAt); err != nil {
+			s.docFailure = fmt.Errorf("parse %s: source installedAt for %q is not an RFC3339 time", DocumentName, name)
 			return document{}, s.docFailure
 		}
 	}
@@ -251,10 +338,16 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	} else {
 		disabled[name] = struct{}{}
 	}
-	return s.writeDocumentLocked(disabled, d.Digests)
+	return s.writeDocumentLocked(d, disabled)
 }
 
-func (s *Store) writeDocumentLocked(disabled map[string]struct{}, digests map[string]string) error {
+// writeDocumentLocked persists the document that was loaded, with disabled
+// replacing its Disabled list. It takes the whole loaded value rather than a
+// parameter per map ON PURPOSE: every mutation rebuilds the file from what it
+// read, so a field a writer forgets to carry is a field the next toggle
+// silently deletes. Passing the document through means a new field is carried
+// by construction instead of by three call sites remembering it.
+func (s *Store) writeDocumentLocked(d document, disabled map[string]struct{}) error {
 	if s.docStore == nil {
 		return errors.New("skill settings document is unavailable")
 	}
@@ -263,7 +356,9 @@ func (s *Store) writeDocumentLocked(disabled map[string]struct{}, digests map[st
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if err := s.docStore.Write(DocumentName, document{SchemaVersion: Module.Current, Disabled: names, Digests: digests}); err != nil {
+	d.SchemaVersion = Module.Current
+	d.Disabled = names
+	if err := s.docStore.Write(DocumentName, d); err != nil {
 		return fmt.Errorf("write %s: %w", DocumentName, err)
 	}
 	s.docFailure = nil
@@ -289,9 +384,14 @@ func (s *Store) recordApprovalDigest(name, dir string) error {
 	for _, item := range d.Disabled {
 		disabled[item] = struct{}{}
 	}
-	return s.writeDocumentLocked(disabled, d.Digests)
+	return s.writeDocumentLocked(d, disabled)
 }
 
+// clearApprovalDigest forgets everything the document records about one skill:
+// the digest AND the source, together, because they are one record of a skill
+// the person did not write. A source outliving its skill is a row for a name
+// that is not on disk, which the next install of that name would read as its
+// own history.
 func (s *Store) clearApprovalDigest(name string) error {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
@@ -300,11 +400,12 @@ func (s *Store) clearApprovalDigest(name string) error {
 		return err
 	}
 	delete(d.Digests, name)
+	delete(d.Sources, name)
 	disabled := make(map[string]struct{}, len(d.Disabled))
 	for _, item := range d.Disabled {
 		disabled[item] = struct{}{}
 	}
-	return s.writeDocumentLocked(disabled, d.Digests)
+	return s.writeDocumentLocked(d, disabled)
 }
 
 // Approve records the current bytes of a changed managed or installed skill.

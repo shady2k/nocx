@@ -1634,7 +1634,12 @@ func New(opts ...Option) (*App, error) {
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.
-	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid), transport.WithPaneObserver(paneWatch))
+	// And the rules those panes are read through, for the emitting view
+	// (nocx-02uci): the SAME registry the watcher classifies with, so the
+	// reading a person is shown is the reading the product acted on. A
+	// second registry here would be a second answer to one question.
+	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
+		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries

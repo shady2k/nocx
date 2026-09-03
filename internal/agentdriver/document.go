@@ -240,30 +240,43 @@ func (d documentDriver) Observe(f panegrid.Frame) Observation {
 		return Observation{State: StateUnknown}
 	}
 	anchors := d.bindAnchors(f)
-	return Observation{State: d.decide(f, anchors), Extras: d.extract(f, anchors)}
+	return Observation{State: d.decide(f, anchors, nil), Extras: d.extract(f, anchors)}
 }
 
 // decide is the ordered branch walk. It reads predicates and anchors, and
 // nothing an extractor produced.
-func (d documentDriver) decide(f panegrid.Frame, anchors bound) State {
-	for _, b := range d.doc.Branches {
+//
+// tr is the RECORDER, and it is nil on every path in the product. It exists so
+// that the emitting view (nocx-02uci) reports the walk the product actually
+// took rather than a second walk written beside it — two evaluations of one
+// question is how the two come to disagree on the frame nobody tried. Nothing
+// it records is read back here: recording cannot change an answer, because
+// every branch below is decided before the recorder is told about it.
+func (d documentDriver) decide(f panegrid.Frame, anchors bound, tr *trace) State {
+	for i, b := range d.doc.Branches {
 		if b.Below != nil {
-			switch belowAnchorOpensOnlyWith(f, anchors[b.Below.Anchor], b.Below.Glyphs) {
-			case belowAllMatched:
-				if _, ok := anchors[b.Below.Anchor]; ok {
-					return b.Below.AllMatched
+			_, bound := anchors[b.Below.Anchor]
+			verdict := belowAnchorOpensOnlyWith(f, anchors[b.Below.Anchor], b.Below.Glyphs)
+			state := State("")
+			if bound {
+				switch verdict {
+				case belowAllMatched:
+					state = b.Below.AllMatched
+				case belowCounterexample:
+					state = b.Below.Counterexample
 				}
-			case belowCounterexample:
-				if _, ok := anchors[b.Below.Anchor]; ok {
-					return b.Below.Counterexample
-				}
+			}
+			tr.below(i, b, bound, verdict, state)
+			if state != "" {
+				return state
 			}
 			continue
 		}
-		if allHold(f, anchors, b.When) {
+		if tr.conjunction(i, b, f, anchors) {
 			return b.State
 		}
 	}
+	tr.fellThrough()
 	return d.doc.Default
 }
 

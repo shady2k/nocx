@@ -304,6 +304,11 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// agentRules is what a pane's rule READS on its frame, for the emitting
+	// view (nocx-02uci). Nil when unwired, and agent.emitting then answers
+	// that it is not available rather than a screen with no reading beside
+	// it — the half of that view the design says may not be missing.
+	agentRules agentRules
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
 	// can be sure nothing is still sweeping. Same shape as panegrid's own
@@ -1603,6 +1608,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
+	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {

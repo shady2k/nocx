@@ -39,6 +39,13 @@ type paneObserver interface {
 	Unwatch(paneID string)
 	Sweep()
 	Snapshot(paneID string) (paneobserve.Observation, bool)
+	// Watching lists the panes under observation and the agent each was
+	// enrolled as. It is what the emitting view (nocx-02uci) asks first, and
+	// it is a read of the ENROLMENT rather than of a classification —
+	// Snapshot above is silent until a first sweep has produced one, and a
+	// view that waited for that would show its operator nothing on a settled
+	// screen.
+	Watching() []paneobserve.Enrolled
 }
 
 // WithPaneObserver attaches the backend's pane-observation watcher.

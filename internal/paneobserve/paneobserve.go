@@ -49,6 +49,7 @@
 package paneobserve
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
@@ -302,4 +303,38 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 		return Observation{}, false
 	}
 	return Observation{PaneID: paneID, Agent: p.agent, State: p.seen, Children: p.seenChildren}, true
+}
+
+// Enrolled is one pane under observation: which pane, and which agent's rule
+// governs it. Both halves come from the enrolment act and neither is inferred.
+type Enrolled struct {
+	PaneID string
+	Agent  string
+}
+
+// Watching lists the panes under observation, in pane order.
+//
+// It answers from the enrolment act itself rather than from what a sweep has
+// classified, so it is true from the instant Watch returns — which is what the
+// emitting view (nocx-02uci) needs, because a settled screen may go a long
+// time without a sweep having anything to say and a view that waited for one
+// would show its operator nothing at all. Snapshot is the other question and
+// stays the other question: that one answers what a pane WAS, and is silent
+// until a first classification exists.
+//
+// A pane whose agent has EXITED is still listed. The observation is retained
+// for exactly that reason, and dropping the pane here would take the last
+// screen away from the person trying to work out what happened on it.
+//
+// Sorted, because this feeds a list a person reads and a map's order would
+// reshuffle it under them on every poll.
+func (w *Watcher) Watching() []Enrolled {
+	w.mu.Lock()
+	out := make([]Enrolled, 0, len(w.panes))
+	for id, p := range w.panes {
+		out = append(out, Enrolled{PaneID: id, Agent: p.agent})
+	}
+	w.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].PaneID < out[j].PaneID })
+	return out
 }

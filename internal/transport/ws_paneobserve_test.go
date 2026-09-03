@@ -305,6 +305,8 @@ func (c *countingObserver) Snapshot(string) (paneobserve.Observation, bool) {
 	return paneobserve.Observation{}, false
 }
 
+func (c *countingObserver) Watching() []paneobserve.Enrolled { return nil }
+
 func (c *countingObserver) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

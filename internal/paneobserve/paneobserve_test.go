@@ -603,3 +603,73 @@ func TestAnExitedPaneNamesNoChildren(t *testing.T) {
 		t.Errorf("the retained snapshot still names children: %+v", o.Children)
 	}
 }
+
+// WHICH PANES NOCX IS WATCHING, AND AS WHAT (nocx-02uci).
+//
+// The emitting view has to read a pane's frame through the rule that actually
+// governs it, and the only place that fact exists is the enrolment act. It is
+// read here rather than taken from the caller because a caller that names the
+// agent is a second owner of which rule a pane is under, and the two would
+// disagree the first time a pane was re-enrolled.
+func TestWatchingListsEnrolledPanesBeforeAnySweep(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	for _, id := range []string{"p2", "p1"} {
+		if err := grid.Enrol(id, 40, 14); err != nil {
+			t.Fatalf("enrol %s: %v", id, err)
+		}
+		defer grid.Withdraw(id)
+		w.Watch(id, "claude")
+	}
+
+	// Before any sweep, deliberately: Snapshot answers nothing until a pane
+	// has been classified once, and a view that had to wait for that would
+	// show a person nothing on a settled screen.
+	got := w.Watching()
+	if len(got) != 2 {
+		t.Fatalf("Watching() = %+v, want two panes", got)
+	}
+	// Sorted, because a person reads this list and a map's order would
+	// reshuffle it under them on every poll.
+	if got[0].PaneID != "p1" || got[1].PaneID != "p2" {
+		t.Fatalf("Watching() = %+v, want p1 before p2", got)
+	}
+	if got[0].Agent != "claude" || got[1].Agent != "claude" {
+		t.Fatalf("Watching() = %+v, want each pane named as claude", got)
+	}
+}
+
+// And the interval has the other end. A pane nobody watches is not listed, so
+// the view cannot be pointed at one nocx is not observing.
+func TestAnUnwatchedPaneIsNotListed(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Enrol("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	if got := w.Watching(); len(got) != 0 {
+		t.Fatalf("Watching() = %+v before Watch; want nothing", got)
+	}
+	w.Watch("p1", "claude")
+	w.Unwatch("p1")
+	if got := w.Watching(); len(got) != 0 {
+		t.Fatalf("Watching() = %+v after Unwatch; want nothing", got)
+	}
+}
+
+// An exited agent is still the agent this pane was enrolled as, and the pane
+// stays listed. The observation is retained for a client that attaches
+// afterwards, and taking the last screen away from the person working out what
+// happened on it is the opposite of what this view is for.
+func TestAnExitedPaneIsStillListed(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Enrol("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	w.Exited("p1")
+	got := w.Watching()
+	if len(got) != 1 || got[0].Agent != "claude" {
+		t.Fatalf("Watching() = %+v after Exited; want p1/claude", got)
+	}
+}

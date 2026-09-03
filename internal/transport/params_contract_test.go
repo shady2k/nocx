@@ -716,6 +716,12 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"detach": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		// The emitting view asks twice over: once before a person has picked
+		// a pane, and once for the pane they picked (nocx-02uci).
+		"agent.emitting": {
+			[]byte(`{}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

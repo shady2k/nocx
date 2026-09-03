@@ -264,6 +264,16 @@ returned — is one request cheaper and makes the person's approval refer to byt
 the server never verified. If the second fetch returns something different, the
 install refuses and says the document changed.
 
+**Each contract lands in the same commit as its handler and its client method**, and
+this is a constraint rather than a preference. A generated type with no consumer is
+a new entry in `check-dead-exports`' baseline, and that baseline may only SHRINK —
+its updater refuses to write one that grows — so "declare the contracts, wire them
+next" has no committable state at all. The rule is general and was bought twice in
+one wave (`nocx-0c7qz`): a contract lands with its consumer, a package with its
+caller, an API change with its call sites. A task whose output has no consumer
+inside the task has the wrong boundary, and the gate is the hook rather than the
+brief, so a worker cannot be briefed out of it.
+
 Registration follows `ws_skill_handlers.go`: a method on `skillSettingsSource`, a
 `case`, a `validate…Raw`, a `regResponder` in `configSpecs`, and a regenerated
 `openrpc.json`. The transport registration test is the authority for the method

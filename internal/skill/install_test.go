@@ -135,10 +135,10 @@ func (s *installStand) installed(t *testing.T, name string) (string, bool) {
 // recordedFor is what skills.json says about one skill — both halves, read
 // through the file rather than through the store, because the assertion is
 // about what was persisted.
-func (s *installStand) recordedFor(t *testing.T, name string) (digest string, source skillSource, hasSource bool) {
+func (s *installStand) recordedFor(t *testing.T, name string) (digest string, source Source, hasSource bool) {
 	t.Helper()
 	if _, err := os.Stat(filepath.Join(s.configDir, DocumentName)); os.IsNotExist(err) {
-		return "", skillSource{}, false
+		return "", Source{}, false
 	}
 	doc := readDocument(t, s.configDir)
 	if raw, ok := doc.Sources[name]; ok {

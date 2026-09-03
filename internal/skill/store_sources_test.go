@@ -289,3 +289,87 @@ func TestBackupCarriesAVersionTwoDocumentUnchanged(t *testing.T) {
 		t.Fatalf("DocumentError after restore = %q, want a restored document to load", result.DocumentError)
 	}
 }
+
+// TestListCarriesTheRecordedSourceOfAnInstalledSkill is the wire half of the
+// bead: the fact has been on disk since the install wrote it, and the one
+// question a person asks of a downloaded skill — where did this come from —
+// was answerable only by opening skills.json by hand.
+func TestListCarriesTheRecordedSourceOfAnInstalledSkill(t *testing.T) {
+	configDir := t.TempDir()
+	writeExistingSkill(t, filepath.Join(configDir, "installed-skills"), "downloaded", "name: downloaded\ndescription: theirs", "body")
+	writeDocument(t, configDir, `{"schemaVersion":2,"disabled":[],"digests":{},"sources":{"downloaded":`+aSourceRow+`}}`)
+
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+	result, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want none", result.DocumentError)
+	}
+	downloaded := listed(t, result, "downloaded")
+	if downloaded.Source == nil {
+		t.Fatal("Source is absent: the recorded source never left the backend, which is the whole defect")
+	}
+	if downloaded.Source.URL != "https://example.com/skills/downloaded/SKILL.md" {
+		t.Errorf("Source.URL = %q, want the recorded address", downloaded.Source.URL)
+	}
+	if downloaded.Source.InstalledAt != "2026-09-03T12:00:00Z" {
+		t.Errorf("Source.InstalledAt = %q, want the recorded time", downloaded.Source.InstalledAt)
+	}
+}
+
+// TestAnInstalledSkillWithNoRecordedSourceIsListedWithoutOne is the case a
+// person creates with `mv`: a directory put into the installed root by hand
+// has no source row, and the row has to render without the field rather than
+// with an empty one. The provenance is still installed — the root decides
+// that — so the absence of a source is not the absence of a skill.
+func TestAnInstalledSkillWithNoRecordedSourceIsListedWithoutOne(t *testing.T) {
+	configDir := t.TempDir()
+	writeExistingSkill(t, filepath.Join(configDir, "installed-skills"), "byhand", "name: byhand\ndescription: theirs", "body")
+	writeDocument(t, configDir, `{"schemaVersion":2,"disabled":[],"digests":{},"sources":{}}`)
+
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+	result, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want none", result.DocumentError)
+	}
+	byHand := listed(t, result, "byhand")
+	if byHand.Provenance != ProvenanceInstalled {
+		t.Fatalf("provenance = %q, want installed: the root decides that, not the document", byHand.Provenance)
+	}
+	if byHand.Source != nil {
+		t.Fatalf("Source = %+v, want none: nothing recorded where these bytes came from", *byHand.Source)
+	}
+}
+
+// TestAManagedSkillNeverCarriesASource pins the other half of "only a
+// provenance that HAS a source gets the field". The assistant writes managed
+// skills, so there is no address behind them, and a row in a file anything can
+// write must not put one on a managed skill's wire entry — that would make the
+// field a second way to ask what a skill's provenance is, when provenance is
+// the root and stays the root.
+func TestAManagedSkillNeverCarriesASource(t *testing.T) {
+	configDir := t.TempDir()
+	writeExistingSkill(t, filepath.Join(configDir, "managed-skills"), "remembered", "name: remembered\ndescription: assistant", "body")
+	writeDocument(t, configDir, `{"schemaVersion":2,"disabled":[],"digests":{},"sources":{"remembered":`+aSourceRow+`}}`)
+
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+	result, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want none", result.DocumentError)
+	}
+	remembered := listed(t, result, "remembered")
+	if remembered.Provenance != ProvenanceManaged {
+		t.Fatalf("provenance = %q, want managed", remembered.Provenance)
+	}
+	if remembered.Source != nil {
+		t.Fatalf("Source = %+v, want none on a managed skill", *remembered.Source)
+	}
+}

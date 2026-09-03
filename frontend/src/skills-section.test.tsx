@@ -218,6 +218,55 @@ describe('SkillsSection', () => {
     await waitFor(() => expect(container.textContent).not.toContain('Changed since approval'))
   })
 
+  /** The evidence lines under a row's meta, in the order the row draws them. */
+  const evidenceIn = (row: HTMLElement): string[] =>
+    Array.from(row.querySelectorAll('.ui-record-row__detail > div')).map(
+      (line) => line.textContent ?? '',
+    )
+
+  it('says where an installed skill came from, beside the file it is in', async () => {
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(INSTALLED) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(rowFor(container, 'weather')).toBeTruthy())
+    // BOTH, in that order: the file Delete acts on, and the address the bytes
+    // came from. Either alone leaves a question the page is the only place to
+    // ask — see the judgement in skills-section.tsx.
+    expect(evidenceIn(rowFor(container, 'weather')!)).toEqual([
+      '/tmp/nocx/installed-skills/weather/SKILL.md',
+      'https://example.com/weather/SKILL.md',
+    ])
+    // And nothing borrows it: a skill the person wrote has no source, and a
+    // row that showed one would be claiming a stranger wrote their bytes.
+    expect(evidenceIn(rowFor(container, 'deploy')!)).toEqual(['/tmp/nocx/skills/deploy/SKILL.md'])
+  })
+
+  it('draws no source line for a skill moved into the installed root by hand', async () => {
+    const byHand: SkillsList = {
+      ...SKILLS,
+      skills: [
+        {
+          name: 'byhand',
+          description: 'Put here with mv',
+          provenance: 'installed',
+          path: '/tmp/nocx/installed-skills/byhand/SKILL.md',
+          enabled: true,
+          status: 'approved',
+        },
+      ],
+    }
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(byHand) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(rowFor(container, 'byhand')).toBeTruthy())
+    const row = rowFor(container, 'byhand')!
+    // Installed, and nothing recorded: the row renders WITHOUT the line
+    // rather than with an empty one. The provenance badge still says
+    // installed, because the root decides that and not the document.
+    expect(row.textContent).toContain('installed')
+    expect(evidenceIn(row)).toEqual(['/tmp/nocx/installed-skills/byhand/SKILL.md'])
+  })
+
   it('shows a corrupt document as an actionable failure with its path', async () => {
     const result: SkillsList = {
       skills: [],
@@ -267,6 +316,10 @@ const INSTALLED: SkillsList = {
       path: '/tmp/nocx/installed-skills/weather/SKILL.md',
       enabled: true,
       status: 'approved',
+      source: {
+        url: 'https://example.com/weather/SKILL.md',
+        installedAt: '2026-09-03T12:00:00Z',
+      },
     },
   ],
 }
@@ -376,6 +429,12 @@ describe('SkillsSection — installing a skill by its URL (nocx-qja4m.6)', () =>
     expect(rowFor(container, 'weather')!.textContent).toContain('installed')
     expect(rowFor(container, 'weather')!.textContent).toContain(
       '/tmp/nocx/installed-skills/weather/SKILL.md',
+    )
+    // …and with where it came from, which is the whole point of recording it
+    // (nocx-qja4m.9): the address is on the row the moment the install lands,
+    // not only in skills.json.
+    expect(rowFor(container, 'weather')!.textContent).toContain(
+      'https://example.com/weather/SKILL.md',
     )
     // The ask is done and gets out of the way.
     await waitFor(() => expect(ask(container).open).toBe(false))

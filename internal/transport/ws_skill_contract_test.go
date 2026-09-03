@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/apifetch"
@@ -21,7 +22,17 @@ import (
 
 func TestSkillsList_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "skills.list.schema.json")
-	raw, err := json.Marshal(skill.ListResult{Skills: []skill.ListedSkill{{Name: "deploy", Description: "d", Provenance: skill.ProvenanceAuthored, Path: "/skills/deploy/SKILL.md", Enabled: true, Status: skill.StatusApproved}}, DocumentPath: "/skills.json"})
+	// Both shapes of a row, because the source is optional: a skill with no
+	// recorded source omits the key entirely, and one with a source has to
+	// satisfy the same `additionalProperties: false` object as everything else.
+	raw, err := json.Marshal(skill.ListResult{Skills: []skill.ListedSkill{
+		{Name: "deploy", Description: "d", Provenance: skill.ProvenanceAuthored, Path: "/skills/deploy/SKILL.md", Enabled: true, Status: skill.StatusApproved},
+		{
+			Name: "downloaded", Description: "d", Provenance: skill.ProvenanceInstalled,
+			Path: "/installed-skills/downloaded/SKILL.md", Enabled: true, Status: skill.StatusApproved,
+			Source: &skill.Source{URL: "https://example.com/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z"},
+		},
+	}, DocumentPath: "/skills.json"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,9 +270,35 @@ func callSkills(t *testing.T, conn *websocket.Conn, method, url string) rpcEnvel
 	return env
 }
 
+// The real list, off the real socket, over the three rows that make the
+// source field mean something (nocx-qja4m.9). The skill it asserts about was
+// installed BY THE SHIPPED HANDLER earlier in this test rather than written
+// into a fixture: a payload the test built itself would prove the struct is
+// well-formed, not that the server sends the field.
 func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
-	conn, cleanup := skillsContractConnection(t)
+	document := "---\nname: weather\ndescription: Answer questions about the weather\n---\nbody\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(document))
+	}))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	// One the person wrote, and one somebody dropped into the installed root
+	// by hand — the case with no source row at all, which is the one most
+	// likely to be missed and the one that must not render an empty field.
+	writeSkillFile(t, filepath.Join(configDir, "skills", "deploy"), "deploy", "Deploy the service")
+	writeSkillFile(t, filepath.Join(configDir, "installed-skills", "byhand"), "byhand", "Put here with mv")
+
+	conn, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
+	url := srv.URL + "/anything/SKILL.md"
+	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
+		t.Fatalf("preview: %+v", env.Error)
+	}
+	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
+		t.Fatalf("install: %+v", env.Error)
+	}
+
 	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
 	var env rpcEnvelope
 	if err := json.Unmarshal(resp, &env); err != nil {
@@ -271,6 +308,77 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("unexpected error: %+v", env.Error)
 	}
 	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "skills.list wire")
+
+	var got skill.ListResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want none", got.DocumentError)
+	}
+	weather := wireSkill(t, got, "weather")
+	if weather.Source == nil {
+		t.Fatal("weather has no source on the wire: the fact the install recorded never left the backend")
+	}
+	if weather.Source.URL != url {
+		t.Errorf("source url = %q, want the address it was installed from (%q)", weather.Source.URL, url)
+	}
+	if _, err := time.Parse(time.RFC3339, weather.Source.InstalledAt); err != nil {
+		t.Errorf("source installedAt = %q, want an RFC3339 time: %v", weather.Source.InstalledAt, err)
+	}
+	// The field says where the bytes came from and never what provenance a
+	// skill has: installed with nothing recorded is still installed.
+	byHand := wireSkill(t, got, "byhand")
+	if byHand.Provenance != skill.ProvenanceInstalled {
+		t.Errorf("byhand provenance = %q, want installed", byHand.Provenance)
+	}
+	if byHand.Source != nil {
+		t.Errorf("byhand source = %+v, want none", *byHand.Source)
+	}
+	if deploy := wireSkill(t, got, "deploy"); deploy.Source != nil {
+		t.Errorf("deploy source = %+v, want none on an authored skill", *deploy.Source)
+	}
+	// The key is ABSENT rather than null: the renderer's type makes it
+	// optional, and a null would satisfy neither it nor the schema's object.
+	var rows struct {
+		Skills []map[string]json.RawMessage `json:"skills"`
+	}
+	if err := json.Unmarshal(env.Result, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows.Skills {
+		var name string
+		if err := json.Unmarshal(row["name"], &name); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := row["source"]; present != (name == "weather") {
+			t.Errorf("skill %q source key present = %v, want %v", name, present, name == "weather")
+		}
+	}
+}
+
+// writeSkillFile puts one SKILL.md on disk the way a person would, so a test
+// can name a state the shipped handlers never create for themselves.
+func writeSkillFile(t *testing.T, dir, name, description string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\nbody\n", name, description)
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func wireSkill(t *testing.T, result skill.ListResult, name string) skill.ListedSkill {
+	t.Helper()
+	for _, listed := range result.Skills {
+		if listed.Name == name {
+			return listed
+		}
+	}
+	t.Fatalf("skill %q is not in the listed result %+v", name, result.Skills)
+	return skill.ListedSkill{}
 }
 
 func TestSkillsSetEnabled_OverTheWireConformsToContract(t *testing.T) {

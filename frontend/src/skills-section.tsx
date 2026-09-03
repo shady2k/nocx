@@ -18,7 +18,8 @@
  *   meta    the skill's own description line, from its front matter.
  *   detail  the path, in the detail slot's monospace: verbatim evidence, and
  *           the answer to "which file am I looking at" that the Settings page
- *           is the only place to get.
+ *           is the only place to get — JOINED, for a skill that records one,
+ *           by the address it was installed from (see `evidence` below).
  *   status  shown ONLY when the bytes changed since approval. Enabled state
  *           is not a status here — the switch beside it already says so, and
  *           a row that reports one fact twice is how the two come to disagree.
@@ -67,6 +68,37 @@ function provenanceTone(provenance: Skill['provenance']): BadgeTone {
       return 'warning'
   }
 }
+
+/**
+ * The row's verbatim evidence: the file, and where its bytes came from.
+ *
+ * THE JUDGEMENT (nocx-qja4m.9), because a record's parts are its argument.
+ * The URL JOINS the path on the detail slot rather than replacing it, and is
+ * not a new slot of its own:
+ *
+ * - They answer two different questions, and both are load-bearing for an
+ *   installed skill. The path answers "which file am I looking at" — the file
+ *   Delete removes and Re-approve adopts, and true of every row in the list.
+ *   The URL answers "where did these bytes come from", which is the question
+ *   this whole epic exists for. Replacing the path would make installed rows
+ *   the only rows that cannot answer the first, and would give one list two
+ *   row grammars — the exact defect RecordRow was built to prevent.
+ * - The slot already takes several lines ("one line, or a few of them as an
+ *   array"), so two is a supported shape, not a widening of the composite.
+ *   Adding a slot for one surface is what the kit README forbids while an
+ *   existing one fits, and this one fits for the reason the slot names: both
+ *   strings are the RECORD's own words, not the composite's prose about it.
+ * - Nothing is emitted when there is nothing recorded. A skill moved into the
+ *   installed root by hand has no source, and a blank second line reads as a
+ *   row that lost something.
+ *
+ * `source.installedAt` travels on the wire because the recorded source is one
+ * fact and half of it would be a wire that has to be asked twice; it is not
+ * drawn here, because when a skill was fetched is not evidence about the
+ * bytes, and a third string would compete with the two that are.
+ */
+const evidence = (skill: Skill): readonly string[] =>
+  skill.source ? [skill.path, skill.source.url] : [skill.path]
 
 export function SkillsSection(props: SkillsSectionProps) {
   const [state, setState] = createSignal<SkillsState>({ kind: 'loading' })
@@ -292,7 +324,7 @@ export function SkillsSection(props: SkillsSectionProps) {
                   title={skill.name}
                   kind={{ label: skill.provenance, tone: provenanceTone(skill.provenance) }}
                   meta={skill.description}
-                  detail={skill.path}
+                  detail={evidence(skill)}
                   status={
                     skill.status === 'changed'
                       ? { tone: 'error', text: 'Changed since approval' }

@@ -65,23 +65,28 @@ func migrateToSources(data []byte) ([]byte, error) {
 }
 
 type document struct {
-	SchemaVersion storage.SchemaVersion  `json:"schemaVersion"`
-	Disabled      []string               `json:"disabled"`
-	Digests       map[string]string      `json:"digests,omitempty"`
-	Sources       map[string]skillSource `json:"sources,omitempty"`
+	SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
+	Disabled      []string              `json:"disabled"`
+	Digests       map[string]string     `json:"digests,omitempty"`
+	Sources       map[string]Source     `json:"sources,omitempty"`
 }
 
-// skillSource records where an installed skill came from, keyed by skill name
-// like Digests. It exists so an update can re-run the install against the URL
-// the person actually installed from; without it an update could only search
-// for the name somewhere else, and skill names are not namespaced across
-// sources, so a same-named skill elsewhere would silently reassign provenance.
+// Source records where an installed skill came from, keyed by skill name like
+// Digests. It exists so an update can re-run the install against the URL the
+// person actually installed from; without it an update could only search for
+// the name somewhere else, and skill names are not namespaced across sources,
+// so a same-named skill elsewhere would silently reassign provenance.
+//
+// It is also what ListedSkill carries out to the settings page (nocx-qja4m.9),
+// as ONE type rather than two: the document's copy and the wire's copy are the
+// same fact, and a second declaration of the shape would be free to drift from
+// the one the strict reader above validates.
 //
 // It is NEVER read as provenance. Provenance is the root (skill.go) and this
 // row is content in a file anything able to write skills.json could write — so
 // a source entry for a name the authored root holds changes nothing at all
 // about that skill, and there is a test for exactly that direction.
-type skillSource struct {
+type Source struct {
 	URL         string `json:"url"`
 	InstalledAt string `json:"installedAt"`
 }
@@ -94,6 +99,18 @@ type ListedSkill struct {
 	Path        string     `json:"path"`
 	Enabled     bool       `json:"enabled"`
 	Status      Status     `json:"status"`
+	// Source is where these bytes came from, and it is a POINTER because the
+	// answer "nothing recorded" has to be tellable apart from the answer "an
+	// empty address": a skill somebody moved into the installed root by hand
+	// has no source row, and a row of two empty strings would put an empty
+	// line on the page claiming to say where it came from.
+	//
+	// Present only when the document records one, which — since install is
+	// the only writer — means only for an installed skill. It is not a second
+	// way to ask what a skill's provenance is, and cannot become one: the
+	// implication runs one way only, because installed WITHOUT a source is a
+	// state a person can create with `mv`.
+	Source *Source `json:"source,omitempty"`
 }
 
 // ListResult is returned by the settings-page RPC. A document failure is a
@@ -164,7 +181,7 @@ func (s *Store) loadApprovedDigests() (map[string]string, error) {
 }
 
 func (s *Store) loadDocumentLocked() (document, error) {
-	d := document{Disabled: []string{}, Digests: map[string]string{}, Sources: map[string]skillSource{}}
+	d := document{Disabled: []string{}, Digests: map[string]string{}, Sources: map[string]Source{}}
 	if s.docStore == nil {
 		s.docFailure = nil
 		return d, nil
@@ -199,7 +216,7 @@ func (s *Store) loadDocumentLocked() (document, error) {
 		d.Digests = map[string]string{}
 	}
 	if d.Sources == nil {
-		d.Sources = map[string]skillSource{}
+		d.Sources = map[string]Source{}
 	}
 	for _, name := range d.Disabled {
 		canonical, err := normalizeName(name)
@@ -281,17 +298,52 @@ func (s *Store) List() (ListResult, error) {
 		result.DocumentError = err.Error()
 		return result, nil
 	}
+	// Read AFTER discovery and outside it, because discovery is the roots'
+	// answer and this is the document's: recordedSources takes docMu, which
+	// discoverDetailed's own disabled/digests callbacks take for themselves.
+	sources, err := s.recordedSources()
+	if err != nil {
+		result.DocumentError = err.Error()
+		return result, nil
+	}
 	for _, found := range detailed {
-		result.Skills = append(result.Skills, ListedSkill{
+		listed := ListedSkill{
 			Name:        found.Name,
 			Description: found.Description,
 			Provenance:  found.Provenance,
 			Path:        filepath.Join(found.BaseDir, "SKILL.md"),
 			Enabled:     found.Enabled,
 			Status:      found.Status,
-		})
+		}
+		// The provenance gate is the shadowing defence restated on the wire:
+		// a source row is content in a file anything able to write skills.json
+		// could write, so a row naming a skill the AUTHORED root holds must
+		// not travel as that skill's origin — it would say a stranger wrote
+		// bytes the person wrote themselves. Install is the only writer of
+		// sources and writes only into the installed root, so gating here
+		// drops nothing that was honestly recorded.
+		if found.Provenance == ProvenanceInstalled {
+			if source, recorded := sources[found.Name]; recorded {
+				row := source
+				listed.Source = &row
+			}
+		}
+		result.Skills = append(result.Skills, listed)
 	}
 	return result, nil
+}
+
+// recordedSources is every source the document holds, for the one caller that
+// needs them all at once. recordedSource answers for a single name; asking it
+// per skill would re-read and re-validate the whole document once per row.
+func (s *Store) recordedSources() (map[string]Source, error) {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return nil, err
+	}
+	return d.Sources, nil
 }
 
 // DocumentPath is the actual skills.json path used by the store.
@@ -409,9 +461,9 @@ func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
 	d.Digests[name] = digest
 	if sourceURL != "" {
 		if d.Sources == nil {
-			d.Sources = make(map[string]skillSource)
+			d.Sources = make(map[string]Source)
 		}
-		d.Sources[name] = skillSource{URL: sourceURL, InstalledAt: time.Now().UTC().Format(time.RFC3339)}
+		d.Sources[name] = Source{URL: sourceURL, InstalledAt: time.Now().UTC().Format(time.RFC3339)}
 	}
 	disabled := make(map[string]struct{}, len(d.Disabled))
 	for _, item := range d.Disabled {
@@ -423,12 +475,12 @@ func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
 // recordedSource answers where an installed skill was installed from. It is
 // the document's copy and never provenance: provenance is the root, and a row
 // here for a name the authored root holds means nothing at all.
-func (s *Store) recordedSource(name string) (skillSource, bool, error) {
+func (s *Store) recordedSource(name string) (Source, bool, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
 	d, err := s.loadDocumentLocked()
 	if err != nil {
-		return skillSource{}, false, err
+		return Source{}, false, err
 	}
 	source, found := d.Sources[name]
 	return source, found, nil

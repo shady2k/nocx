@@ -161,7 +161,22 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 		if len(sys) != 1 {
 			t.Fatalf("engine received %d system messages, want exactly one", len(sys))
 		}
-		grant, err := json.Marshal(client.receivedParams.Grant)
+		// The AUTHORITY is compared, and the mint INSTANT is not part of it
+		// (nocx-1z1r1). A grant is issued to one turn and expires with it
+		// (ADR-0020 §5), so two asks are two mints and two deadlines by
+		// construction — a difference that says nothing about what was
+		// granted. Everything the comparison is actually about — the policy
+		// matrix, the effects, the scopes — is left in the bytes.
+		authority := client.receivedParams.Grant
+		if authority != nil {
+			if authority.ExpiresAt == 0 {
+				t.Fatal("the run's grant states no deadline: the mint stopped stamping one")
+			}
+			normalized := *authority
+			normalized.ExpiresAt = 0
+			authority = &normalized
+		}
+		grant, err := json.Marshal(authority)
 		if err != nil {
 			t.Fatalf("marshal grant: %v", err)
 		}

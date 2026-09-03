@@ -763,9 +763,49 @@ func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
 			problems = append(problems, fmt.Sprintf("%s: params schema in %q: %v", d.Name, d.Params, paramsErr))
 			continue
 		}
+		d.Narrow = withinGrantLifetime(d.Narrow)
 		tools = append(tools, Tool{Declaration: d, Effect: content.WorstEffect(d.Effect), ParamsSchema: params, ResultSchema: result})
 	}
 	return Registry{tools: tools}, joinProblems(problems)
+}
+
+// withinGrantLifetime is where ADR-0020 §5's "EXPIRING capability" is
+// enforced (nocx-1z1r1). The grant's deadline is stated at the mint
+// (content.EffectPolicy.AsGrant); this is the consumer that refuses one past
+// it.
+//
+// IT IS THE CONSTRUCTOR, NOT A CHECK BEFORE THE CALL. ADR-0028 decision 4
+// rejects the second shape — "a check before the call is advisory, because
+// the tool still holds a full session manager" — and expiry is the one bound
+// narrowing cannot express as a smaller object: there is no capability that
+// means "none". So the deadline is enforced by the constructor declining to
+// construct, which is the same guarantee by the same mechanism: the tool
+// cannot exceed the grant because it never has more than it, and past the
+// deadline it has nothing at all.
+//
+// IT WRAPS AT ASSEMBLY, ONCE, rather than inside each Narrow. The registry is
+// the only handle any consumer has on a constructor (Lookup and ForGrant
+// both return these tools), so a declaration added later inherits the bound
+// without its author remembering it, and there is no per-tool copy to drift.
+// The unwrapped functions stay reachable inside the package for their own
+// unit tests, which is what they are: a constructor, not authority.
+//
+// A CALL ALREADY RUNNING IS UNTOUCHED. This decides whether a NEW capability
+// exists; a capability handed to a tool while the grant was live goes on
+// working until that call ends. The grant is immutable once execution starts
+// (ADR-0020 §5), and a deadline that killed a running tool call mid-flight
+// would be a different and worse thing than one that refuses the next
+// attempt.
+func withinGrantLifetime(narrow Narrow) Narrow {
+	if narrow == nil {
+		return nil
+	}
+	return func(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error) {
+		if grant.Expired(time.Now()) {
+			return nil, content.ErrGrantExpired
+		}
+		return narrow(grant, resources, runCtx)
+	}
 }
 
 // validateDeclaration checks a row's classification: every enum value must be

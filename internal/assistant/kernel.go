@@ -89,6 +89,17 @@ const (
 	// RefusedFileChanged: the approved path no longer has the version the
 	// person agreed to, so the old approval does not cover this execution.
 	RefusedFileChanged PolicyRefusalReason = "refused-file-changed"
+	// RefusedExpired: the run's authority grant has passed its deadline
+	// (ADR-0020 §5 — the grant is a versioned, EXPIRING capability). Unlike
+	// every other reason here it is not about this call: nothing the model
+	// could propose has authority any more, because the interval the grant
+	// was issued for has closed. The capability constructor enforces it
+	// (agenttools wraps every Narrow, so an expired grant yields no
+	// capability at all); this reason is what turns that into an answer the
+	// model can explain instead of a terminal error about a constructor,
+	// and it is why the refusal comes BEFORE the attempt is opened rather
+	// than after.
+	RefusedExpired PolicyRefusalReason = "refused-expired"
 	// RefusedExpansionChanged: a value the person was shown beside the
 	// verbatim command moved between the question and this call, or could
 	// not be read again to check (nocx-4h0m7.5). Without substitution there
@@ -560,6 +571,15 @@ const (
 )
 
 func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
+	// The grant's own interval, before any row is consulted: past the
+	// deadline there is no authority for the matrix to read a decision out
+	// of. Deciding it here is what keeps the attempt out of the ledger — a
+	// call that never had authority is not an attempt — and what makes the
+	// refusal an ANSWER; the enforcement is the capability constructor,
+	// which cannot be reasoned around (agenttools.withinGrantLifetime).
+	if m.grant.Expired(time.Now()) {
+		return policyRefuse, RefusedExpired, ""
+	}
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
 		return policyRefuse, RefusedByFloor, reason
 	}
@@ -1013,6 +1033,13 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		default:
 			return "REFUSED: the person declined your call to " + tool + " — it did not run. Say what you needed in words instead."
 		}
+	case RefusedExpired:
+		// The sentence says the authority ended, not that the call was
+		// wrong: nothing the model proposes next will run either, and
+		// telling it to propose something else would be an invitation to
+		// keep trying. Only the person can start a turn, so the answer is
+		// to say so in words.
+		return "REFUSED: nocx did not run your call to " + tool + ": the authority this question was given has expired. Nothing further will run under it. Say what you were about to do, in words, so the person can ask again."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {

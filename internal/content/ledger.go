@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -597,11 +598,72 @@ func ShellExitCodeOf(payload string) (*int, error) {
 // one source of what a run may do, and a grant built any other way is a
 // hand-rolled authority the consumer cannot have reasoned about.
 type Grant struct {
-	Version   int
+	Version int
+	// ExpiresAt is the closing end of the authority's interval, in
+	// milliseconds of the backend wall clock. The interval is stated with
+	// BOTH ends, because only one of them was here before: authority exists
+	// from the mint (EffectPolicy.AsGrant, which stamps this) UNTIL this
+	// instant, and a capability is constructed only inside it. Past it, a
+	// NEW capability cannot be constructed; one already held by a call in
+	// flight is untouched, because ADR-0020 §5 makes the grant immutable
+	// once execution starts and a deadline that killed a running tool call
+	// would be a different and worse thing than one that refuses a new
+	// attempt.
+	//
+	// Zero means NO DEADLINE WAS STATED — a grant nobody minted (a test
+	// literal, or a row written before the mint stamped one), not authority
+	// forever by design. Production has one mint and it always stamps;
+	// that is what the invariant rests on, and it is pinned by
+	// TestAsGrantStampsTheDeadline and by the transport's runGrantFor test
+	// rather than left to this comment.
 	ExpiresAt int64
 	Policy    EffectPolicy
 	Effects   []Effect
 	Scopes    []GrantScope
+}
+
+// GrantLifetime is how long one run's authority is usable: the interval
+// between EffectPolicy.AsGrant and Grant.ExpiresAt.
+//
+// It bounds ONE agent turn, not one command. Both ends of a turn re-mint —
+// the question mints (ws_readscreen.go's runGrantFor) and an approval resume
+// mints again (ws_agent.go's resumeRun) — so a person taking an hour over an
+// approval never resumes on stale authority; what is left to bound is a
+// single streaming turn, which nothing else bounds at all. What that bound
+// is FOR is the case where authority outlives the reasoning that produced
+// it: the policy matrix a person edits mid-run does not reach a grant minted
+// before the edit, deliberately, and an unbounded grant would make that
+// staleness permanent for as long as the turn ran.
+//
+// An hour is that turn's outer edge with room to spare — six back-to-back
+// commands at the default "Stop an assistant's command after" of ten minutes
+// (settings.AgentRunWallClockMinutes) — and a turn still going after it has
+// stopped being a turn. The consequence is stated rather than hidden: a
+// person who raises that setting toward its 240-minute ceiling can have one
+// command outlive the turn's authority, and the call after it is refused
+// with the sentence saying so. That is visible and re-askable, never silent;
+// nocx-ddqi4 is where that interaction is decided rather than tolerated.
+//
+// It is a CONSTANT and not yet a setting, deliberately, in the house style of
+// DefaultUnreconciledRetention: what this bead owes is that the bound exists
+// and fires at all, and choosing the number on a screen is ordinary product
+// work with its own surface (nocx-1z1r1).
+const GrantLifetime = time.Hour
+
+// ErrGrantExpired is what a capability constructor returns instead of a
+// capability when the run's authority has closed. It is an error rather than
+// a narrower object because expiry is the one bound narrowing cannot
+// express: there is no smaller capability that means "none".
+var ErrGrantExpired = errors.New("content: the run's authority grant has expired")
+
+// Expired reports whether now is at or past the grant's deadline. The
+// interval is closed at the mint and OPEN at the deadline: a grant is live
+// strictly before ExpiresAt and expired from that millisecond on.
+func (g Grant) Expired(now time.Time) bool {
+	if g.ExpiresAt == 0 {
+		return false
+	}
+	return now.UnixMilli() >= g.ExpiresAt
 }
 
 // FinishAgentRun is the terminal close of an assistant run (the state

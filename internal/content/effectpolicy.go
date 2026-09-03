@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Decision is one entry of the matrix: what a run may do for an effect class,
@@ -400,9 +401,23 @@ func (p EffectPolicy) RunFence() []GrantScope {
 // declaration coverage intentionally includes its resource kinds even when a
 // row selector does not, so an offered call can still be refused by the row;
 // nocx-tyhel is where offer-time explanation learns to say so.
+//
+// THE MINT IS ALSO WHERE THE DEADLINE COMES FROM (nocx-1z1r1). ADR-0020 §5
+// calls the grant "a versioned, EXPIRING capability issued to one agent turn
+// or one execution"; the version was stamped here and the expiry was not, so
+// every recorded grant carried expires_at = 0 and nothing could compare it
+// to a clock. There is exactly one place a run's authority begins, and it is
+// this function, so this is where its end is stated: now + GrantLifetime.
+// Enforcement is elsewhere and deliberately not a predicate before dispatch
+// — agenttools wraps every capability constructor, so an expired grant
+// yields no capability at all (ADR-0028 decision 4).
 func (p EffectPolicy) AsGrant(runScopes []GrantScope) Grant {
 	effective := p.WithRunScopes(runScopes)
-	g := Grant{Version: 1, Policy: effective}
+	g := Grant{
+		Version:   1,
+		ExpiresAt: time.Now().Add(GrantLifetime).UnixMilli(),
+		Policy:    effective,
+	}
 	g.Effects = effective.PermittedEffects()
 	if len(effective.runFence) > 0 {
 		// Grant scopes are the run fence's declaration coverage. Row

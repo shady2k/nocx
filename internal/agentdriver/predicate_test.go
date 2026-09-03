@@ -97,6 +97,36 @@ func TestCellAtColRefusesAnIndentedGlyphThatRowOpensWithWouldAccept(t *testing.T
 	}
 }
 
+// And a predicate no branch of holds() could reach is not in the closed set at
+// all — it is Go somebody wrote and no document can name. rowOpensWith was
+// exactly that when the rule became a document: implemented, tested directly,
+// and absent from the evaluator's switch, so the "closed set a rule composes"
+// was one smaller than the file claimed. This asserts the composition, which is
+// the only thing that makes a predicate part of the grammar.
+func TestADocumentCanComposeRowOpensWith(t *testing.T) {
+	doc := Document{
+		Agent:   "test",
+		Default: StateUnknown,
+		// The frame's own bottom row, which is where the two grids below
+		// put the row under test.
+		Anchors: []AnchorSpec{{Name: "row", Kind: "offset", Offset: 0}},
+		Branches: []Branch{{
+			State: StateWorking,
+			When:  []Pred{{Kind: "rowOpensWith", Glyph: "●", RegionSpec: RegionSpec{Anchor: "row"}}},
+		}},
+	}
+	d, err := newDocumentDriver(doc)
+	if err != nil {
+		t.Fatalf("newDocumentDriver: %v", err)
+	}
+	if got := d.Classify(grid(20, 2, []string{"", "   ● main"}, 0, 0)); got != StateWorking {
+		t.Errorf("an indented marker opening its row = %q, want %q", got, StateWorking)
+	}
+	if got := d.Classify(grid(20, 2, []string{"", "   text then ● here"}, 0, 0)); got != StateUnknown {
+		t.Errorf("a mid-row glyph = %q, want %q", got, StateUnknown)
+	}
+}
+
 func TestFullWidthRuleMatchesARowThatIsNothingElse(t *testing.T) {
 	f := grid(6, 2, []string{"──────"}, 0, 0)
 	if !fullWidthRule(f, 0, "─") {

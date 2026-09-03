@@ -321,6 +321,12 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 	case "nearestNonBlankAboveCursorContains":
 		text, ok := nearestNonBlankAbove(f, f.CursorY)
 		return ok && strings.Contains(text, p.Text)
+	case "rowOpensWith":
+		row, ok := anchors[p.Anchor]
+		if !ok {
+			return false
+		}
+		return rowOpensWith(f, row, p.Glyph)
 	case "rowContains":
 		row, ok := anchors[p.Anchor]
 		if !ok {

@@ -17,19 +17,75 @@ type Invocation struct {
 	Resources    ResourceReport `json:"-"`
 }
 
-// InvocationRule is an exception to the effect matrix for one exact command
-// shape. Patterns match a fixed number of subcommands and a fixed number of
-// tokens in each subcommand; they never name a tool. A '*' matches only within
-// one token, never "and whatever follows". This deliberately narrow bound is
-// safe because over-matching is the failure mode these rules remove.
+// FeatureWritesOptionNamedPath names the one semantic feature a rule may
+// match today: the command writes a file to a path named by one of its own
+// options rather than by an operand or a shell redirection.
+//
+// The vocabulary is CLOSED — knownInvocationFeatures below is the whole of
+// it, and a rule naming anything else is an unparseable policy. This package
+// owns the vocabulary because it owns the rules that match it; the classifier
+// in internal/assistant records these constants rather than its own spelling
+// of them, so there is one name per fact and not two.
+const FeatureWritesOptionNamedPath = "writes-option-named-path"
+
+var knownInvocationFeatures = map[string]struct{}{
+	FeatureWritesOptionNamedPath: {},
+}
+
+// InvocationSelector is a closed sum with exactly one field set: it says
+// WHICH invocations a rule speaks about, and nothing about what it decides.
+//
+// The three variants are not interchangeable, and the difference is a safety
+// property rather than a convenience (design §5.5):
+//
+//   - Exact matches a fixed number of subcommands and a fixed number of
+//     tokens in each, positionally; a '*' matches any one token's contents and
+//     never spans a token boundary or a shell separator. This is the only form
+//     a person's answer to a prompt can save, because it is the only one that
+//     covers exactly the command line they were shown.
+//   - Program matches a command word carrying ANY arguments. It may permit
+//     only while bound to the effect it was granted under (InvocationRule's
+//     GrantedUnder), because "any find" without that binding is a permit for
+//     `find . -delete`.
+//   - HasFeature matches a command word carrying a semantic feature the
+//     CLASSIFIER recorded — never the spelling of a token. `-o`, `--output`,
+//     `--output=file`, an attached short option and `-- -o` are one fact
+//     written five ways, and a rule over token text is evaded by the first of
+//     them the parser normalizes differently. It may never permit.
+type InvocationSelector struct {
+	Exact      [][]string  `json:"exact,omitempty"`
+	Program    string      `json:"program,omitempty"`
+	HasFeature *FeatureRef `json:"hasFeature,omitempty"`
+}
+
+// FeatureRef names one command word and one feature of the closed vocabulary
+// above. Both halves are required: a feature alone would speak for every
+// program that can carry it.
+type FeatureRef struct {
+	Program string `json:"program"`
+	Feature string `json:"feature"`
+}
+
+// InvocationRule is an exception to the effect matrix for the invocations its
+// selector covers. A rule never names a tool (ADR-0028 decision 4): it names a
+// command word in a parsed invocation, which is a different thing.
+//
+// GrantedUnder is the effect the widening permit was granted for, and it is
+// checked against the effect the CALL classified as — not against the effect
+// the rule was written beside. It is what stops a permit written while a
+// program was reading from reaching the same program deleting. The guard
+// itself cannot live in Matches, which is not told what the call classified
+// as; it lives in the rule loop in EvaluateInvocation.
 type InvocationRule struct {
-	Pattern  [][]string `json:"pattern"`
-	Decision Decision   `json:"decision"`
+	ID           string             `json:"id"`
+	Selector     InvocationSelector `json:"selector"`
+	Decision     Decision           `json:"decision"`
+	GrantedUnder Effect             `json:"grantedUnder,omitempty"`
 }
 
 // LiteralInvocationRule builds a standing rule from a person's exact command
-// line. Pattern characters are refused so only operator-authored rules can use
-// token matching operators.
+// line. It produces only an Exact selector, and pattern characters are refused
+// so only operator-authored rules can use token matching operators.
 func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, error) {
 	if !inv.Parsed {
 		return InvocationRule{}, fmt.Errorf("invocation is not parsed")
@@ -50,7 +106,10 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 			unresolved.Path,
 		)
 	}
-	rule := InvocationRule{Pattern: inv.Commands, Decision: decision}
+	rule := InvocationRule{
+		Selector: InvocationSelector{Exact: inv.Commands},
+		Decision: decision,
+	}
 	if err := validateInvocationRules([]InvocationRule{rule}); err != nil {
 		return InvocationRule{}, err
 	}
@@ -94,11 +153,20 @@ func StandingRule(inv Invocation) (InvocationRule, string) {
 	return rule, ""
 }
 
-// Label returns the canonical, shell-safe spelling of the invocation pattern.
-// It is presentation of Pattern, not a second parse of the original command.
+// Label returns the canonical, shell-safe spelling of what the rule covers.
+// It is presentation of the SELECTOR, not a second parse of any command line:
+// an exact selector reads back as the command it names, a program selector as
+// that word followed by an ellipsis, and a feature selector as the word and
+// the feature it must carry.
 func (r InvocationRule) Label() string {
-	commands := make([]string, 0, len(r.Pattern))
-	for _, command := range r.Pattern {
+	switch {
+	case r.Selector.HasFeature != nil:
+		return ruleTokenLabel(r.Selector.HasFeature.Program) + " \u2026 (" + r.Selector.HasFeature.Feature + ")"
+	case r.Selector.Program != "":
+		return ruleTokenLabel(r.Selector.Program) + " \u2026"
+	}
+	commands := make([]string, 0, len(r.Selector.Exact))
+	for _, command := range r.Selector.Exact {
 		tokens := make([]string, 0, len(command))
 		for _, token := range command {
 			tokens = append(tokens, ruleTokenLabel(token))
@@ -125,15 +193,54 @@ func ruleTokenLabel(token string) string {
 	return "'" + strings.ReplaceAll(token, "'", "'\\''") + "'"
 }
 
-// Matches reports whether this rule covers the complete canonical invocation.
-// Every subcommand and every token must match. A token '*' matches any one
-// token's contents; it never spans token boundaries or shell separators.
+// Matches reports whether this rule's selector covers the complete canonical
+// invocation. It answers SHAPE alone: whether a matching permit actually
+// reaches the call is the GrantedUnder guard in EvaluateInvocation, which is
+// the only place the effect the call classified as is known.
+//
+// The soundness bar is the same for all three variants, and it is the one the
+// exact form has always applied: an unparsed, disqualified or unresolved
+// invocation matches no rule, because its meaning can differ between the
+// reading and the next execution. A refusal that therefore does not fire
+// falls back to the row, which is the fail-toward-asking default.
 func (r InvocationRule) Matches(inv Invocation) bool {
 	if !inv.Parsed || inv.Disqualified || len(inv.Resources.Unresolved) != 0 ||
-		len(r.Pattern) != len(inv.Commands) {
+		len(inv.Commands) == 0 {
 		return false
 	}
-	for i, patternCommand := range r.Pattern {
+	return r.Selector.matches(inv)
+}
+
+func (s InvocationSelector) matches(inv Invocation) bool {
+	switch {
+	case s.HasFeature != nil:
+		// A refusal may over-match and may not under-match, so ANY
+		// subcommand carrying the word is enough. The feature is a fact
+		// about the whole report, which cannot attribute it to one
+		// subcommand of a compound line.
+		if !hasFeature(inv.Resources.Features, s.HasFeature.Feature) {
+			return false
+		}
+		for _, command := range inv.Commands {
+			if len(command) > 0 && command[0] == s.HasFeature.Program {
+				return true
+			}
+		}
+		return false
+	case s.Program != "":
+		// A permit may not over-match, so EVERY subcommand must be that
+		// word: "df -h ; rm -rf /" is not an invocation of df.
+		for _, command := range inv.Commands {
+			if len(command) == 0 || command[0] != s.Program {
+				return false
+			}
+		}
+		return true
+	}
+	if len(s.Exact) != len(inv.Commands) {
+		return false
+	}
+	for i, patternCommand := range s.Exact {
 		command := inv.Commands[i]
 		if len(patternCommand) != len(command) {
 			return false
@@ -145,6 +252,15 @@ func (r InvocationRule) Matches(inv Invocation) bool {
 		}
 	}
 	return true
+}
+
+func hasFeature(features []string, want string) bool {
+	for _, f := range features {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }
 
 func tokenPatternMatches(pattern, token string) bool {
@@ -177,24 +293,77 @@ func tokenPatternMatches(pattern, token string) bool {
 	return pi == len(pattern)
 }
 
+// validateInvocationRules is the gate the asymmetry is enforced at, so that
+// the unsafe form is not a rule an operator may write and be careful with —
+// it is a document that does not parse (ParseEffectPolicy, and WithRule,
+// which drops what this rejects).
 func validateInvocationRules(rules []InvocationRule) error {
 	for i, rule := range rules {
 		if !rule.Decision.valid() {
 			return fmt.Errorf("rule %d: decision %q is not permit, ask or refuse", i, rule.Decision)
 		}
-		if len(rule.Pattern) == 0 {
-			return fmt.Errorf("rule %d: pattern must contain a subcommand", i)
+		if rule.GrantedUnder != "" && !latticeEffect(rule.GrantedUnder) {
+			return fmt.Errorf("rule %d: grantedUnder %q is not an effect class", i, rule.GrantedUnder)
 		}
-		for j, command := range rule.Pattern {
-			if len(command) == 0 {
-				return fmt.Errorf("rule %d: pattern subcommand %d is empty", i, j)
+		set := 0
+		if len(rule.Selector.Exact) > 0 {
+			set++
+		}
+		if rule.Selector.Program != "" {
+			set++
+		}
+		if rule.Selector.HasFeature != nil {
+			set++
+		}
+		if set != 1 {
+			return fmt.Errorf(
+				"rule %d: selector must set exactly one of exact, program or hasFeature, not %d",
+				i, set)
+		}
+		switch {
+		case rule.Selector.HasFeature != nil:
+			// A feature selector matches a whole class of command lines
+			// nobody was shown, so it may narrow and never widen.
+			if rule.Decision == DecisionPermit {
+				return fmt.Errorf(
+					"rule %d: a hasFeature selector may not permit; a loose matcher may only narrow", i)
 			}
-			for k, token := range command {
-				if token == "" {
-					return fmt.Errorf("rule %d: pattern token %d.%d is empty", i, j, k)
+			if rule.Selector.HasFeature.Program == "" {
+				return fmt.Errorf("rule %d: hasFeature names no program", i)
+			}
+			if _, ok := knownInvocationFeatures[rule.Selector.HasFeature.Feature]; !ok {
+				return fmt.Errorf(
+					"rule %d: %q is not a feature the classifier records; the vocabulary is closed",
+					i, rule.Selector.HasFeature.Feature)
+			}
+		case rule.Selector.Program != "":
+			// A program selector covers every argument list, so a permit
+			// is only as narrow as the effect it is bound to.
+			if rule.Decision == DecisionPermit && rule.GrantedUnder == "" {
+				return fmt.Errorf(
+					"rule %d: a program selector may not permit without the effect it was granted under", i)
+			}
+		default:
+			for j, command := range rule.Selector.Exact {
+				if len(command) == 0 {
+					return fmt.Errorf("rule %d: exact subcommand %d is empty", i, j)
+				}
+				for k, token := range command {
+					if token == "" {
+						return fmt.Errorf("rule %d: exact token %d.%d is empty", i, j, k)
+					}
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func latticeEffect(e Effect) bool {
+	switch e {
+	case EffectObserve, EffectMutateReversible, EffectMutateDestructive,
+		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate:
+		return true
+	}
+	return false
 }

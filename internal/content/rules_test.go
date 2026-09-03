@@ -13,7 +13,7 @@ func TestInvocationRuleMatchesWholeCanonicalInvocation(t *testing.T) {
 		Parsed:   true,
 	}
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"ls", "*", "/tmp"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"ls", "*", "/tmp"}}},
 		Decision: content.DecisionPermit,
 	}
 	if !rule.Matches(invocation) {
@@ -32,7 +32,7 @@ func TestInvocationRuleMatchesWholeCanonicalInvocation(t *testing.T) {
 
 func TestInvocationRuleTrailingWildcardDoesNotSpanExtraArguments(t *testing.T) {
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"ls", "*"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"ls", "*"}}},
 		Decision: content.DecisionPermit,
 	}
 	invocation := content.Invocation{
@@ -46,7 +46,7 @@ func TestInvocationRuleTrailingWildcardDoesNotSpanExtraArguments(t *testing.T) {
 
 func TestInvocationRuleNeverMatchesUnsoundCanonicalInvocations(t *testing.T) {
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"rm", "-rf", "/tmp/scratch"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"rm", "-rf", "/tmp/scratch"}}},
 		Decision: content.DecisionPermit,
 	}
 	for _, invocation := range []content.Invocation{
@@ -65,8 +65,8 @@ func TestEffectPolicyInvocationRulesMostRestrictiveWins(t *testing.T) {
 	p := content.EffectPolicy{
 		MutateDestructive: content.EffectRow{Decision: content.DecisionAsk},
 		Rules: []content.InvocationRule{
-			{Pattern: invocation.Commands, Decision: content.DecisionPermit},
-			{Pattern: invocation.Commands, Decision: content.DecisionRefuse},
+			{Selector: content.InvocationSelector{Exact: invocation.Commands}, Decision: content.DecisionPermit},
+			{Selector: content.InvocationSelector{Exact: invocation.Commands}, Decision: content.DecisionRefuse},
 		},
 	}
 	if got := p.DecisionForInvocation(content.EffectMutateDestructive, invocation); got != content.DecisionRefuse {
@@ -78,7 +78,7 @@ func TestEffectPolicyUnparseableInvocationAsks(t *testing.T) {
 	p := content.EffectPolicy{
 		MutateDestructive: content.EffectRow{Decision: content.DecisionPermit},
 		Rules: []content.InvocationRule{{
-			Pattern:  [][]string{{"rm", "-rf", "/tmp/scratch"}},
+			Selector: content.InvocationSelector{Exact: [][]string{{"rm", "-rf", "/tmp/scratch"}}},
 			Decision: content.DecisionPermit,
 		}},
 	}
@@ -116,7 +116,7 @@ func TestStandingRuleRejectsUnresolvedInvocationAndNeverMatchesItLater(t *testin
 	}
 
 	saved := content.InvocationRule{
-		Pattern:  invocation.Commands,
+		Selector: content.InvocationSelector{Exact: invocation.Commands},
 		Decision: content.DecisionPermit,
 	}
 	if saved.Matches(invocation) {
@@ -135,9 +135,9 @@ func TestStandingRuleUsesCanonicalSingleInvocationLabel(t *testing.T) {
 	if got := rule.Label(); got != "df -h" {
 		t.Fatalf("standing rule label = %q, want canonical invocation %q", got, "df -h")
 	}
-	if len(rule.Pattern) != 1 || len(rule.Pattern[0]) != 2 ||
-		rule.Pattern[0][0] != "df" || rule.Pattern[0][1] != "-h" {
-		t.Fatalf("standing rule pattern = %#v, want the canonical invocation tokens", rule.Pattern)
+	exact := rule.Selector.Exact
+	if len(exact) != 1 || len(exact[0]) != 2 || exact[0][0] != "df" || exact[0][1] != "-h" {
+		t.Fatalf("standing rule selector = %#v, want the canonical invocation tokens", rule.Selector)
 	}
 }
 
@@ -182,7 +182,7 @@ func TestStandingRuleRefusesInvocationsItCannotShowCompletely(t *testing.T) {
 
 func TestPermittingRuleDoesNotCoverAResourceOutsideTheRowScopes(t *testing.T) {
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"cat", "*"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"cat", "*"}}},
 		Decision: content.DecisionPermit,
 	}
 	p := content.EffectPolicy{
@@ -212,7 +212,7 @@ func TestPermittingRuleDoesNotCoverAResourceOutsideTheRowScopes(t *testing.T) {
 
 func TestPermittingRuleDoesNotCoverAResourceOutsideTheRunFence(t *testing.T) {
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"cat", "*"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"cat", "*"}}},
 		Decision: content.DecisionPermit,
 	}
 	// Every row permits and states no selector of its own, so the run fence
@@ -272,7 +272,7 @@ func TestResourceLayerRefusalIsPerEffectRowNotTheWholeMatrix(t *testing.T) {
 			Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/repo/scratch"}},
 		},
 		Rules: []content.InvocationRule{{
-			Pattern:  [][]string{{"rm", "-rf", "*"}},
+			Selector: content.InvocationSelector{Exact: [][]string{{"rm", "-rf", "*"}}},
 			Decision: content.DecisionPermit,
 		}},
 	}
@@ -309,7 +309,7 @@ func TestResourceLayerNeverWidensARefusingRowOrAResourceOfAnUnboundKind(t *testi
 			Decision: content.DecisionRefuse,
 			Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/etc"}},
 		},
-		Rules: []content.InvocationRule{{Pattern: [][]string{{"cat", "*"}}, Decision: content.DecisionPermit}},
+		Rules: []content.InvocationRule{{Selector: content.InvocationSelector{Exact: [][]string{{"cat", "*"}}}, Decision: content.DecisionPermit}},
 	}
 	if got := refusing.DecisionForInvocation(content.EffectObserve, inv); got != content.DecisionRefuse {
 		t.Fatalf("refusing row = %q, want refuse — refusal stays final", got)
@@ -322,5 +322,227 @@ func TestResourceLayerNeverWidensARefusingRowOrAResourceOfAnUnboundKind(t *testi
 	}
 	if got := sessionOnly.DecisionForInvocation(content.EffectObserve, inv); got != content.DecisionPermit {
 		t.Fatalf("session-scoped row = %q, want permit — a row that bounds no path bounds no path", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The selector axis (design §5.5). A loose matcher is safe for NARROWING and
+// unsafe for WIDENING, and the three groups below are the three ends of that:
+// what the document refuses to express at all, what a widening permit reaches,
+// and what a narrowing refusal beats.
+
+func TestAWidenedPermitIsUnparseableWithoutTheEffectItWasGrantedFor(t *testing.T) {
+	// The gate is the document, not the operator's care: neither spelling of
+	// a loose permit survives ParseEffectPolicy, so no store can hold one.
+	unparseable := map[string]string{
+		"a program-wide permit with no effect binding": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"program": "df"}, "decision": "permit"}]
+		}`,
+		"a feature permit": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"hasFeature": {"program": "curl", "feature": "writes-option-named-path"}}, "decision": "permit"}]
+		}`,
+		"a feature permit bound to an effect, which does not rescue it": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"hasFeature": {"program": "curl", "feature": "writes-option-named-path"}}, "decision": "permit", "grantedUnder": "observe"}]
+		}`,
+		"two selector fields at once": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"program": "df", "exact": [["df", "-h"]]}, "decision": "refuse"}]
+		}`,
+		"no selector field at all": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {}, "decision": "refuse"}]
+		}`,
+		"a feature the classifier does not record": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"hasFeature": {"program": "curl", "feature": "phones-home"}}, "decision": "refuse"}]
+		}`,
+		"a grantedUnder outside the lattice": `{
+			"observe": {"decision": "ask", "scopes": []},
+			"rules": [{"id": "r1", "selector": {"program": "df"}, "decision": "permit", "grantedUnder": "readScreen"}]
+		}`,
+	}
+	for name, doc := range unparseable {
+		t.Run(name, func(t *testing.T) {
+			if _, err := content.ParseEffectPolicy([]byte(doc)); err == nil {
+				t.Fatal("the document parsed; the unsafe form must not be expressible")
+			}
+			// WithRule is the other way in, and it drops what the document
+			// refuses rather than admitting it behind the parser's back.
+			bad := content.InvocationRule{
+				Selector: content.InvocationSelector{Program: "df"},
+				Decision: content.DecisionPermit,
+			}
+			if got := len(content.EffectPolicy{}.WithRule(bad).Rules); got != 0 {
+				t.Fatalf("WithRule kept %d rules, want 0 — an invalid rule is not stored", got)
+			}
+		})
+	}
+
+	// And both safe forms DO parse, so the refusals above are the asymmetry
+	// and not a validator that rejects everything.
+	good := `{
+		"observe": {"decision": "ask", "scopes": []},
+		"rules": [
+			{"id": "r1", "selector": {"program": "df"}, "decision": "permit", "grantedUnder": "observe"},
+			{"id": "r2", "selector": {"hasFeature": {"program": "curl", "feature": "writes-option-named-path"}}, "decision": "refuse"},
+			{"id": "r3", "selector": {"exact": [["df", "-h"]]}, "decision": "permit"}
+		]
+	}`
+	p, err := content.ParseEffectPolicy([]byte(good))
+	if err != nil {
+		t.Fatalf("the safe forms did not parse: %v", err)
+	}
+	if len(p.Rules) != 3 {
+		t.Fatalf("parsed %d rules, want 3", len(p.Rules))
+	}
+}
+
+func TestAProgramPermitCoversEveryArgumentUnderOneEffectAndNoOther(t *testing.T) {
+	// "All df commands" is one rule now, where df, df -h and df -h / used to
+	// be three — and the same looseness is bounded by the effect the permit
+	// was granted for, so it never becomes "all find commands, including the
+	// one that deletes".
+	askEverything := content.EffectPolicy{
+		Observe:           content.EffectRow{Decision: content.DecisionAsk},
+		MutateReversible:  content.EffectRow{Decision: content.DecisionAsk},
+		MutateDestructive: content.EffectRow{Decision: content.DecisionAsk},
+	}
+	df := askEverything.WithRule(content.InvocationRule{
+		ID:           "df-observe",
+		Selector:     content.InvocationSelector{Program: "df"},
+		Decision:     content.DecisionPermit,
+		GrantedUnder: content.EffectObserve,
+	})
+	for _, command := range [][]string{
+		{"df"},
+		{"df", "-h"},
+		{"df", "-h", "/"},
+		{"df", "--output=source"},
+	} {
+		inv := content.Invocation{Commands: [][]string{command}, Parsed: true}
+		if got := df.DecisionForInvocation(content.EffectObserve, inv); got != content.DecisionPermit {
+			t.Errorf("%v = %q, want permit — one rule covers every argument list", command, got)
+		}
+	}
+
+	find := askEverything.WithRule(content.InvocationRule{
+		ID:           "find-observe",
+		Selector:     content.InvocationSelector{Program: "find"},
+		Decision:     content.DecisionPermit,
+		GrantedUnder: content.EffectObserve,
+	})
+	deleting := content.Invocation{Commands: [][]string{{"find", ".", "-delete"}}, Parsed: true}
+	if got := find.DecisionForInvocation(content.EffectMutateDestructive, deleting); got != content.DecisionAsk {
+		t.Errorf("find . -delete = %q, want the row's ask — a permit granted while find was reading does not reach a destructive call", got)
+	}
+	// The same command classified as what the permit was granted for is
+	// permitted, so the guard is the effect and not the argument list.
+	reading := content.Invocation{Commands: [][]string{{"find", ".", "-name", "*.go"}}, Parsed: true}
+	if got := find.DecisionForInvocation(content.EffectObserve, reading); got != content.DecisionPermit {
+		t.Errorf("find . -name = %q, want permit — the permit reaches the effect it was granted for", got)
+	}
+	// A compound line is not an invocation of the program: every subcommand
+	// must be that word, or a permit for df would carry rm with it.
+	compound := content.Invocation{
+		Commands: [][]string{{"df", "-h"}, {"rm", "-rf", "/"}},
+		Parsed:   true,
+	}
+	if got := df.DecisionForInvocation(content.EffectObserve, compound); got != content.DecisionAsk {
+		t.Errorf("df -h ; rm -rf / = %q, want ask — a program permit covers that program alone", got)
+	}
+}
+
+func TestAFeatureRefusalBeatsAProgramPermitForTheSameCall(t *testing.T) {
+	// "Permit curl, but never when it writes a file." The refusal matches the
+	// FEATURE the classifier recorded, not the spelling -o, so the five ways
+	// of writing the same option are one rule.
+	p := content.EffectPolicy{
+		Observe:       content.EffectRow{Decision: content.DecisionAsk},
+		CrossBoundary: content.EffectRow{Decision: content.DecisionAsk},
+	}.WithRule(content.InvocationRule{
+		ID:           "curl-observe",
+		Selector:     content.InvocationSelector{Program: "curl"},
+		Decision:     content.DecisionPermit,
+		GrantedUnder: content.EffectCrossBoundary,
+	}).WithRule(content.InvocationRule{
+		ID: "curl-writes",
+		Selector: content.InvocationSelector{
+			HasFeature: &content.FeatureRef{Program: "curl", Feature: content.FeatureWritesOptionNamedPath},
+		},
+		Decision: content.DecisionRefuse,
+	})
+
+	writing := content.Invocation{
+		Commands: [][]string{{"curl", "-o", "/tmp/x", "https://y"}},
+		Parsed:   true,
+		Resources: content.ResourceReport{
+			Features: []string{content.FeatureWritesOptionNamedPath},
+		},
+	}
+	if got := p.EvaluateInvocation(content.EffectCrossBoundary, writing, nil); got.Decision != content.DecisionRefuse {
+		t.Fatalf("curl -o = %+v, want refuse — the most restrictive matching rule wins", got)
+	}
+	// Without the feature the permit is the only matching rule, so the
+	// refusal above is the feature and not the program word.
+	plain := content.Invocation{
+		Commands: [][]string{{"curl", "https://y"}},
+		Parsed:   true,
+	}
+	if got := p.EvaluateInvocation(content.EffectCrossBoundary, plain, nil); got.Decision != content.DecisionPermit {
+		t.Fatalf("curl https://y = %+v, want permit — only the writing call is refused", got)
+	}
+}
+
+func TestADisqualifiedInvocationBypassesEveryRuleIncludingARefusal(t *testing.T) {
+	// A disqualified command receives the MATRIX answer and can never receive
+	// a rule exception — in either direction. The refusal end is the one that
+	// is easy to get wrong, because it looks safe to let it through.
+	refusing := content.EffectPolicy{
+		Observe: content.EffectRow{Decision: content.DecisionPermit},
+	}.WithRule(content.InvocationRule{
+		ID: "curl-writes",
+		Selector: content.InvocationSelector{
+			HasFeature: &content.FeatureRef{Program: "curl", Feature: content.FeatureWritesOptionNamedPath},
+		},
+		Decision: content.DecisionRefuse,
+	})
+	disqualified := content.Invocation{
+		Commands:     [][]string{{"curl", "-o", "/tmp/x", "https://y"}},
+		Parsed:       true,
+		Disqualified: true,
+		Resources: content.ResourceReport{
+			Features: []string{content.FeatureWritesOptionNamedPath},
+		},
+	}
+	if got := refusing.DecisionForInvocation(content.EffectObserve, disqualified); got != content.DecisionPermit {
+		t.Errorf("disqualified invocation = %q, want the row's own permit — rules are bypassed entirely", got)
+	}
+	// And the same rule DOES reach the qualified form, so the bypass above is
+	// the disqualification and not a rule that never matches.
+	qualified := disqualified
+	qualified.Disqualified = false
+	if got := refusing.DecisionForInvocation(content.EffectObserve, qualified); got != content.DecisionRefuse {
+		t.Errorf("qualified invocation = %q, want refuse", got)
+	}
+}
+
+func TestOnlyAnExactSelectorCanBeSavedFromAPrompt(t *testing.T) {
+	// The prompt's answer is saved over the command line a person was shown,
+	// and no widening form is reachable from it.
+	rule, reason := content.StandingRule(content.Invocation{
+		Commands: [][]string{{"df", "-h"}},
+		Parsed:   true,
+	})
+	if reason != "" {
+		t.Fatalf("standing rule reason = %q, want none", reason)
+	}
+	if rule.Selector.Program != "" || rule.Selector.HasFeature != nil {
+		t.Fatalf("standing rule selector = %#v, want an exact selector alone", rule.Selector)
+	}
+	if len(rule.Selector.Exact) != 1 {
+		t.Fatalf("standing rule exact = %#v, want the one command shown", rule.Selector.Exact)
 	}
 }

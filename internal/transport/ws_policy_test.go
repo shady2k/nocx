@@ -121,7 +121,7 @@ func TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem(t *testing.T
 	const name = "agent-policy.json"
 	store := assistant.NewGlobalPolicyStore(doc, name)
 	rule := content.InvocationRule{
-		Pattern:  [][]string{{"df", "-h"}},
+		Selector: content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
 		Decision: content.DecisionPermit,
 	}
 	initial := content.EffectPolicy{

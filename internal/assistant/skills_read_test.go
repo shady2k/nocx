@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 type skillsReadSource struct {
@@ -254,5 +256,54 @@ func TestSkillsRead_OverTheWireConformsToContract(t *testing.T) {
 	validateSkillsReadContract(t, schema, []byte(content), "skills.read result on provider socket")
 	if got := providerRequests.Load(); got != 2 {
 		t.Fatalf("provider requests = %d, want tool call and result", got)
+	}
+}
+
+// TestExecuteSkillsReadServesAnInstalledSkillLikeAManagedOne drives the real
+// filesystem store rather than the fake source above, because the question is
+// whether a skill under the fourth root reaches the same two seams a managed
+// one does: the prompt index, and skills.read. A fake that returns whatever it
+// was handed cannot answer either (AGENTS.md testing rule 1).
+func TestExecuteSkillsReadServesAnInstalledSkillLikeAManagedOne(t *testing.T) {
+	configDir := t.TempDir()
+	installed := filepath.Join(configDir, "installed-skills", "downloaded")
+	if err := os.MkdirAll(installed, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const body = "Run the downloaded procedure.\n"
+	doc := "---\nname: downloaded\ndescription: someone else wrote this\n---\n" + body
+	if err := os.WriteFile(filepath.Join(installed, "SKILL.md"), []byte(doc), 0o600); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	library := skill.NewStore(skill.OSFileSystem{}, []skill.Root{
+		{Dir: filepath.Join(configDir, "skills"), Provenance: skill.ProvenanceAuthored},
+		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
+		{Dir: filepath.Join(configDir, "installed-skills"), Provenance: skill.ProvenanceInstalled},
+	}, storage.NewDocumentStore(configDir))
+
+	if len(library.Index()) != 0 {
+		t.Fatal("an unapproved installed skill reached the prompt index; it must fail closed")
+	}
+	if err := library.Approve("downloaded"); err != nil {
+		t.Fatalf("Approve the installed skill: %v", err)
+	}
+	index := library.Index()
+	if len(index) != 1 || index[0].Name != "downloaded" || index[0].Provenance != skill.ProvenanceInstalled {
+		t.Fatalf("Index() = %+v, want the approved installed skill", index)
+	}
+
+	got, err := executeSkillsRead(context.Background(), skillsReadTestCapability(), json.RawMessage(`{"name":"downloaded"}`), toolSeams{skills: library})
+	if err != nil {
+		t.Fatalf("executeSkillsRead: %v", err)
+	}
+	var result skillReadResult
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Content != body {
+		t.Fatalf("content = %q, want the approved bytes unframed, like a managed skill", result.Content)
+	}
+	if result.Finding != nil {
+		t.Fatalf("finding = %+v, want none for a benign body", result.Finding)
 	}
 }

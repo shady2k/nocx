@@ -69,7 +69,7 @@ func (OSFileSystem) Remove(path string) error {
 }
 
 // Store owns the managed skill root and retains the other roots so writes can
-// refuse names already claimed by an authored or builtin skill.
+// refuse names already claimed by an authored, builtin or installed skill.
 type Store struct {
 	fs         FileSystem
 	roots      []Root
@@ -299,7 +299,7 @@ func (s *Store) refuseForeignCollision(name string) error {
 		if found.Provenance == ProvenanceManaged {
 			continue
 		}
-		return fmt.Errorf("skill %q belongs to a skill you wrote and cannot be changed by the assistant", name)
+		return fmt.Errorf("skill %q belongs to %s and cannot be changed by the assistant", name, holderPhrase(found.Provenance))
 	}
 	return nil
 }

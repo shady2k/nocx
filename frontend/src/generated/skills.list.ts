@@ -20,7 +20,7 @@ export interface SkillsList {
 export interface Skill {
   name: string
   description: string
-  provenance: 'authored' | 'builtin' | 'managed'
+  provenance: 'authored' | 'builtin' | 'installed' | 'managed'
   path: string
   enabled: boolean
   status: 'approved' | 'changed'

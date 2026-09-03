@@ -14,7 +14,7 @@ package skill
 import "io/fs"
 
 // Provenance is where a skill came from, which is what its trust is built
-// on. The set is closed and the values are the three roots.
+// on. The set is closed and the values are the four roots.
 type Provenance string
 
 const (
@@ -25,7 +25,43 @@ const (
 	// ProvenanceManaged is what the assistant drafted and the person
 	// approved. It is the ONLY root any tool writes to.
 	ProvenanceManaged Provenance = "managed"
+	// ProvenanceInstalled is what the person downloaded from a URL and
+	// approved. Its root is searched LAST, so nothing downloaded can shadow
+	// what the person wrote or what we ship.
+	ProvenanceInstalled Provenance = "installed"
 )
+
+// digested answers whether a provenance's bytes are recorded when the person
+// approves them and compared against that record at discovery. Managed and
+// installed both are, because they share the property every branch asking
+// this question actually cares about: the person did not write the bytes, and
+// what they approved was one specific version of them. Authored bytes are the
+// person's own and builtin bytes are ours, so neither has an approval to
+// diverge from.
+//
+// One owner for the question, rather than the same disjunction repeated in
+// statusFor, discovery, Approve and removeDiscovered — four copies that agree
+// until one of them does not.
+func (p Provenance) digested() bool {
+	return p == ProvenanceManaged || p == ProvenanceInstalled
+}
+
+// holderPhrase names, in the person's terms, whose skill already holds a name,
+// and includes the provenance verbatim so a refusal says which root to look
+// in rather than only that something is in the way.
+func holderPhrase(p Provenance) string {
+	switch p {
+	case ProvenanceAuthored:
+		return "a skill you wrote (authored)"
+	case ProvenanceBuiltin:
+		return "a skill nocx ships (builtin)"
+	case ProvenanceInstalled:
+		return "a skill you installed (installed)"
+	case ProvenanceManaged:
+		return "a skill the assistant wrote (managed)"
+	}
+	return "a skill with provenance " + string(p)
+}
 
 // Status describes whether the bytes still match the person's approval.
 type Status string
@@ -38,7 +74,7 @@ const (
 )
 
 func statusFor(provenance Provenance, changed bool) Status {
-	if provenance == ProvenanceManaged && changed {
+	if provenance.digested() && changed {
 		return StatusChanged
 	}
 	return StatusApproved

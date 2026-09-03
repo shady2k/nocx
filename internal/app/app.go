@@ -560,6 +560,11 @@ func New(opts ...Option) (*App, error) {
 		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
+		// LAST, and the order is the whole of the precedence decision:
+		// discovery's seen map is the entire collision rule, so a skill
+		// downloaded from a URL can never shadow one the person wrote or
+		// one we ship.
+		{Dir: filepath.Join(paths.ConfigDir(), "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")

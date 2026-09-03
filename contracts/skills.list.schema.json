@@ -19,7 +19,7 @@
       "properties": {
         "name": { "type": "string" },
         "description": { "type": "string" },
-        "provenance": { "type": "string", "enum": ["authored", "builtin", "managed"] },
+        "provenance": { "type": "string", "enum": ["authored", "builtin", "installed", "managed"] },
         "path": { "type": "string" },
         "enabled": { "type": "boolean" },
         "status": { "type": "string", "enum": ["approved", "changed"] }

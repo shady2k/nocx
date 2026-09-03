@@ -142,11 +142,11 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				}
 			}
 			changed := false
-			if root.Provenance == ProvenanceManaged {
+			if root.Provenance.digested() {
 				expected, approved := digests[skName]
 				actual, hashErr := hashSkillDirectory(base)
 				if hashErr != nil {
-					slog.Warn("skill: cannot hash managed skill", "skill", skName, "error", hashErr)
+					slog.Warn("skill: cannot hash skill", "skill", skName, "provenance", root.Provenance, "error", hashErr)
 					changed = true
 				} else {
 					changed = !approved || actual != expected

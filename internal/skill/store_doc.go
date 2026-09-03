@@ -307,8 +307,9 @@ func (s *Store) clearApprovalDigest(name string) error {
 	return s.writeDocumentLocked(disabled, d.Digests)
 }
 
-// Approve records the current bytes of a changed managed skill. Authored and
-// builtin skills have no assistant approval digest and cannot use this path.
+// Approve records the current bytes of a changed managed or installed skill.
+// Authored and builtin skills have no approval digest to diverge from and
+// cannot use this path.
 func (s *Store) Approve(name string) error {
 	name, err := normalizeName(name)
 	if err != nil {
@@ -330,8 +331,8 @@ func (s *Store) Approve(name string) error {
 			break
 		}
 	}
-	if target == nil || target.Provenance != ProvenanceManaged {
-		return fmt.Errorf("skill %q is not a changed managed skill", name)
+	if target == nil || !target.Provenance.digested() {
+		return fmt.Errorf("skill %q is not a changed managed or installed skill", name)
 	}
 	if target.Status != StatusChanged {
 		return fmt.Errorf("skill %q is not changed", name)
@@ -339,9 +340,9 @@ func (s *Store) Approve(name string) error {
 	return s.recordApprovalDigest(name, target.BaseDir)
 }
 
-// Remove deletes the person-facing authored or managed skill. Builtins are
-// embedded and therefore refuse explicitly so the page never offers a click
-// that can only fail.
+// Remove deletes the person-facing authored, managed or installed skill.
+// Builtins are embedded and therefore refuse explicitly so the page never
+// offers a click that can only fail.
 func (s *Store) Remove(name string) error {
 	name, err := normalizeName(name)
 	if err != nil {
@@ -410,7 +411,7 @@ func (s *Store) removeDiscovered(found discovered) error {
 	if err := s.fs.Sync(dir); err != nil {
 		return fmt.Errorf("skill %q: sync directory after delete: %w", found.Name, err)
 	}
-	if found.Provenance == ProvenanceManaged {
+	if found.Provenance.digested() {
 		if err := s.clearApprovalDigest(found.Name); err != nil {
 			return fmt.Errorf("skill %q: clear approval: %w", found.Name, err)
 		}

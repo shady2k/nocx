@@ -45,7 +45,13 @@ export interface SkillsSectionProps {
 
 /** Provenance as a badge tone: `builtin` is neutral because it is the state
  *  nobody chose, `authored` is what the person wrote, `managed` what the
- *  assistant wrote after they approved it. */
+ *  assistant wrote after they approved it, and `installed` warning because it
+ *  is the one provenance whose bytes a stranger wrote — the row should say so
+ *  before the person reads the description as though it were their own.
+ *
+ *  The switch has no default ON PURPOSE: `Skill['provenance']` is a closed
+ *  union generated from the contract, so a fifth value fails the return-type
+ *  check here rather than rendering as an untoned badge nobody notices. */
 function provenanceTone(provenance: Skill['provenance']): BadgeTone {
   switch (provenance) {
     case 'builtin':
@@ -54,6 +60,8 @@ function provenanceTone(provenance: Skill['provenance']): BadgeTone {
       return 'info'
     case 'managed':
       return 'success'
+    case 'installed':
+      return 'warning'
   }
 }
 

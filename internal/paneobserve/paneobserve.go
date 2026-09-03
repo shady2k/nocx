@@ -16,6 +16,25 @@
 // alone moves on every response chunk. So the sweep classifies and compares,
 // and says nothing when the answer is the one already sent.
 //
+// # The child rows are inside that rule, not an exception to it
+//
+// A pane's agent can spawn children, and its own chrome names them (nocx-o1v0h).
+// Those rows carry an elapsed time and a token count that move on EVERY frame,
+// so they were the first thing this rule could not have absorbed: keying the
+// comparison on them emits eight times a second per pane, and keying on
+// everything else while carrying them ships a clock that freezes at whatever
+// it read when the set last moved — a stopped clock that looks live, which is
+// worse than none.
+//
+// The resolution is upstream of the comparison rather than inside it. What
+// crosses is only what is STABLE for the life of a row — which children exist,
+// their names, and what each was given to do (agentdriver.Subagent) — so
+// "emit when the answer changed" needs no exception, and the interval it
+// produces is exact: a child row is on the wire from the first sweep in which
+// the pane's chrome names it until the first sweep in which it does not. The
+// measurement is still read, and still available to a caller looking at one
+// frame; it simply does not cross a seam that only carries changes.
+//
 // Snapshot is the other half of that, and it exists for the same reason
 // replayIntegration does in the transport: a state is not an event. A client
 // that attaches after the last change must be able to ask what the pane is,
@@ -44,6 +63,31 @@ type Observation struct {
 	PaneID string
 	Agent  string
 	State  agentdriver.State
+	// Children are the child agents this pane's agent has spawned, as its
+	// own screen names them, in the order the screen drew them. Empty for
+	// almost every pane, and empty is the ordinary answer rather than a
+	// degraded one.
+	//
+	// They ride BESIDE the state and never through it. Their content cannot
+	// reach the state at all — the driver decides the verdict from branches
+	// no extractor is visible to — and the interval below is what keeps them
+	// from deciding it here either.
+	Children []agentdriver.Subagent
+}
+
+// sameChildren reports whether two child lists are the same reading. Ordered,
+// because the panel's order is the lineage's order and a reordering is a
+// different screen.
+func sameChildren(a, b []agentdriver.Subagent) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Emit hands an observation on. It is called from the sweep, never from Touch.
@@ -73,6 +117,12 @@ type watched struct {
 	// seen is the last state EMITTED, and empty before the first sweep so
 	// that a pane's first reading is always news.
 	seen agentdriver.State
+	// seenChildren is the last child list emitted, compared alongside seen.
+	// It is a second field rather than part of a digest so that what is
+	// compared is exactly what was sent — a digest is a third representation
+	// of the answer, and a third representation is where the two come to
+	// disagree.
+	seenChildren []agentdriver.Subagent
 }
 
 // New returns a Watcher. It watches nothing until told, and reports nowhere
@@ -154,6 +204,10 @@ func (w *Watcher) Exited(paneID string) {
 	p.gone = true
 	p.dirty = false
 	p.seen = agentdriver.StateExited
+	// An agent that exited has no screen, so it names no children. Clearing
+	// them is what keeps the retained observation from leaving the last rows
+	// standing under a pane whose process is gone.
+	p.seenChildren = nil
 	agent := p.agent
 	w.mu.Unlock()
 
@@ -196,17 +250,23 @@ func (w *Watcher) Sweep() {
 			w.clean(j.paneID)
 			continue
 		}
-		state := w.drivers.Classify(j.agent, f)
-		if !w.commit(j.paneID, state) {
+		o := w.drivers.Observe(j.agent, f)
+		children := o.Subagents()
+		if !w.commit(j.paneID, o.State, children) {
 			continue
 		}
-		emit(Observation{PaneID: j.paneID, Agent: j.agent, State: state})
+		emit(Observation{PaneID: j.paneID, Agent: j.agent, State: o.State, Children: children})
 	}
 }
 
-// commit clears the dirty flag and reports whether the state is news. Both
-// under one lock, so a Touch that lands mid-sweep is not lost.
-func (w *Watcher) commit(paneID string, state agentdriver.State) bool {
+// commit clears the dirty flag and reports whether the observation is news.
+// Both under one lock, so a Touch that lands mid-sweep is not lost.
+//
+// The state and the children are compared TOGETHER and stored together,
+// because they are one answer about one screen: a pane whose verdict held
+// while its children changed is news, and a pane whose children held while its
+// verdict changed carries the same rows forward rather than dropping them.
+func (w *Watcher) commit(paneID string, state agentdriver.State, children []agentdriver.Subagent) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	p, ok := w.panes[paneID]
@@ -215,10 +275,11 @@ func (w *Watcher) commit(paneID string, state agentdriver.State) bool {
 		return false
 	}
 	p.dirty = false
-	if p.seen == state {
+	if p.seen == state && sameChildren(p.seenChildren, children) {
 		return false
 	}
 	p.seen = state
+	p.seenChildren = children
 	return true
 }
 
@@ -240,5 +301,5 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 	if !ok || p.seen == "" {
 		return Observation{}, false
 	}
-	return Observation{PaneID: paneID, Agent: p.agent, State: p.seen}, true
+	return Observation{PaneID: paneID, Agent: p.agent, State: p.seen, Children: p.seenChildren}, true
 }

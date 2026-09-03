@@ -235,3 +235,69 @@ func (r *Registry) Observe(agent string, f panegrid.Frame) Observation {
 func (r *Registry) Classify(agent string, f panegrid.Frame) State {
 	return r.Observe(agent, f).State
 }
+
+// SubagentsExtra is the name a rule document gives the extractor that reads an
+// agent's CHILD rows off its own chrome. It is a constant here rather than a
+// string at each reader because the document's vocabulary is this package's
+// contract: a caller that misspells it silently observes a pane with no
+// children, which is indistinguishable from a pane that has none.
+const SubagentsExtra = "subagents"
+
+// Subagent is one child agent the pane's agent has spawned, as the screen
+// names it.
+//
+// # Two fields, and the omissions are the decision
+//
+// The claude panel draws four things per row — a name, the task, an elapsed
+// time and a token flow — and only the first two survive this projection. The
+// reason is the emit seam downstream (internal/paneobserve): observations are
+// pushed on CHANGE, the elapsed time and the token count move on every single
+// frame, and there is no third answer. Carrying them and keying on them emits
+// per repaint, which is what "only changes travel" exists to prevent; carrying
+// them and NOT keying on them ships a clock that stops at whatever it read
+// when the row set last moved, which is worse than no clock because it looks
+// live. So what crosses is what is STABLE for the life of a row, and the
+// measurement stays in Extras for a caller that is looking at one frame.
+//
+// There is no running/finished flag for the same kind of reason, measured
+// rather than chosen: over claude-subagent's whole window no glyph on a child
+// row ever changes. A child that finishes LEAVES the panel, and its presence
+// is the whole of what the screen says about it.
+type Subagent struct {
+	// Name is the child's name — "Explore", not the pane's agent. Never
+	// empty: a row the screen did not name is not a child anybody could be
+	// shown, and it is dropped rather than rendered blank.
+	Name string
+	// Task is what it was given to do, and it is OPTIONAL. A panel row
+	// carries one only once the task has been drawn; absent means the screen
+	// did not say, which is a different claim from an empty task.
+	Task string
+}
+
+// Subagents projects the observation's extras onto the children the screen
+// named, in the order the panel drew them.
+//
+// It is here rather than at each reader because Extras is a generic map keyed
+// by a document's own vocabulary, and turning that vocabulary into meaning is
+// this package's job (AD-8). A watcher that reached into Extras itself would
+// be a second owner of what "subagents" means, and the two would disagree the
+// first time a rule was repaired.
+//
+// Nil when the rule extracted nothing — which is every agent with no such
+// extractor, and every frame of an agent that has spawned nothing.
+func (o Observation) Subagents() []Subagent {
+	var out []Subagent
+	for _, e := range o.Extras {
+		if e.Name != SubagentsExtra {
+			continue
+		}
+		for _, row := range e.Rows {
+			name := row["name"]
+			if name == "" {
+				continue
+			}
+			out = append(out, Subagent{Name: name, Task: row["task"]})
+		}
+	}
+	return out
+}

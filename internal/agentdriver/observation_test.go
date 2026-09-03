@@ -59,28 +59,80 @@ func TestARuleThatExtractsNothingObservesTheScalarAndNoExtras(t *testing.T) {
 	}
 }
 
-// The motivating case, and the proof that the shape can carry it. Between 25s
-// and 38s of claude-subagent the task panel is drawn below the mode line, one
+// The motivating case, and the proof that the shape can carry it. Between 23s
+// and 39s of claude-subagent the task panel is drawn below the mode line, one
 // row per agent, and the scalar for the whole panel is the single word
-// "working". Here the rows come out whole.
-func TestTheSubagentPanelIsReadRowByRow(t *testing.T) {
+// "working". Here the CHILDREN come out whole.
+//
+// The panel's first row is the pane's OWN agent — "● main" — and it is not a
+// child. That fact lives in the document, as an anchor that starts the
+// extractor's region one row below the panel's head, because "the first row of
+// claude's task panel is the conversation you are looking at" is agent-specific
+// knowledge and the document is the agent-specific, person-repairable place.
+func TestTheSubagentPanelNamesTheChildrenAndNotThePaneItself(t *testing.T) {
 	o := observe(t, replay(t, "claude-subagent", 30000))
 	if o.State != agentdriver.StateWorking {
 		t.Fatalf("task panel drawn = %q, want %q", o.State, agentdriver.StateWorking)
 	}
 	rows := extraRows(t, o, "subagents")
-	if len(rows) != 2 {
-		t.Fatalf("task panel yielded %d rows, want 2: %+v", len(rows), rows)
+	if len(rows) != 1 {
+		t.Fatalf("task panel yielded %d rows, want 1 (the one child): %+v", len(rows), rows)
 	}
-	want := []map[string]string{
-		{"glyph": "●", "name": "main"},
-		{"glyph": "◯", "name": "Explore", "task": "List files in directory", "elapsed": "7s", "flow": "↓", "tokens": "11.6k"},
+	want := map[string]string{
+		"glyph": "◯", "name": "Explore", "task": "List files in directory",
+		"elapsed": "7s", "flow": "↓", "tokens": "11.6k",
 	}
-	for i, w := range want {
-		for field, value := range w {
-			if got := rows[i][field]; got != value {
-				t.Errorf("row %d field %q = %q, want %q (whole row: %+v)", i, field, got, value, rows[i])
+	for field, value := range want {
+		if got := rows[0][field]; got != value {
+			t.Errorf("field %q = %q, want %q (whole row: %+v)", field, got, value, rows[0])
+		}
+	}
+}
+
+// And the other end of the same fact, stated so it cannot rot into an
+// off-by-one nobody notices: the pane's own row is never among the children.
+func TestThePanesOwnRowIsNeverAChild(t *testing.T) {
+	for at := int64(20000); at <= 45000; at += 1000 {
+		o := observe(t, replay(t, "claude-subagent", at))
+		for _, e := range o.Extras {
+			if e.Name != "subagents" {
+				continue
 			}
+			for _, row := range e.Rows {
+				if row["name"] == "main" {
+					t.Errorf("at %dms the pane's own row was reported as a child: %+v", at, row)
+				}
+			}
+		}
+	}
+}
+
+// The typed projection, which is what every caller downstream reads instead of
+// reaching into a generic map keyed by a document's own vocabulary.
+//
+// Two fields cross and four are read: the elapsed time and the token flow stay
+// in Extras deliberately, because the seam that carries this pushes on CHANGE
+// and both of them move on every frame. See Subagent's own comment for the
+// interval that decision is stated with.
+func TestSubagentsProjectsTheChildrenTheScreenNamed(t *testing.T) {
+	got := observe(t, replay(t, "claude-subagent", 30000)).Subagents()
+	want := []agentdriver.Subagent{{Name: "Explore", Task: "List files in directory"}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("Subagents() = %+v, want %+v", got, want)
+	}
+}
+
+// And the absence is a claim of its own. A pane whose agent has spawned
+// nothing answers NIL — not one child with an empty name, which is what a
+// projection that trusted the map's keys would produce.
+func TestAPaneThatSpawnedNothingHasNoSubagents(t *testing.T) {
+	for _, at := range []int64{11000, 20000, 50000} {
+		name := "claude-idle"
+		if at != 11000 {
+			name = "claude-subagent"
+		}
+		if got := observe(t, replay(t, name, at)).Subagents(); got != nil {
+			t.Errorf("%s@%d Subagents() = %+v, want nil", name, at, got)
 		}
 	}
 }
@@ -91,11 +143,11 @@ func TestTheSubagentPanelIsReadRowByRow(t *testing.T) {
 func TestTheExtractedRowsFollowTheScreen(t *testing.T) {
 	at30 := extraRows(t, observe(t, replay(t, "claude-subagent", 30000)), "subagents")
 	at38 := extraRows(t, observe(t, replay(t, "claude-subagent", 38000)), "subagents")
-	if at30[1]["elapsed"] == at38[1]["elapsed"] {
-		t.Fatalf("the child's elapsed time did not move between 30s and 38s: %q", at30[1]["elapsed"])
+	if at30[0]["elapsed"] == at38[0]["elapsed"] {
+		t.Fatalf("the child's elapsed time did not move between 30s and 38s: %q", at30[0]["elapsed"])
 	}
-	if at38[1]["elapsed"] != "15s" {
-		t.Errorf("elapsed at 38s = %q, want %q", at38[1]["elapsed"], "15s")
+	if at38[0]["elapsed"] != "15s" {
+		t.Errorf("elapsed at 38s = %q, want %q", at38[0]["elapsed"], "15s")
 	}
 }
 
@@ -105,10 +157,10 @@ func TestTheExtractedRowsFollowTheScreen(t *testing.T) {
 // exactly that, rather than claiming a flow of zero in a direction nobody chose.
 func TestAFieldTheRowDoesNotCarryIsAbsentRatherThanEmpty(t *testing.T) {
 	rows := extraRows(t, observe(t, replay(t, "claude-subagent", 23000)), "subagents")
-	if len(rows) != 2 {
-		t.Fatalf("captured %d rows, want 2: %+v", len(rows), rows)
+	if len(rows) != 1 {
+		t.Fatalf("captured %d rows, want 1: %+v", len(rows), rows)
 	}
-	child := rows[1]
+	child := rows[0]
 	if child["name"] != "Explore" || child["task"] != "List files in directory" || child["elapsed"] != "0s" {
 		t.Errorf("child row = %+v", child)
 	}
@@ -116,10 +168,6 @@ func TestAFieldTheRowDoesNotCarryIsAbsentRatherThanEmpty(t *testing.T) {
 		if v, ok := child[field]; ok {
 			t.Errorf("field %q is not on the screen yet and was reported as %q", field, v)
 		}
-	}
-	// And the parent row carries a name and nothing else at all.
-	if len(rows[0]) != 2 {
-		t.Errorf("the parent row invented fields: %+v", rows[0])
 	}
 }
 

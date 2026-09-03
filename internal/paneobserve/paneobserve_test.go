@@ -1,6 +1,7 @@
 package paneobserve_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,37 @@ func idleScreen(cols int) string {
 func workingScreen(cols int) string {
 	// One row above the token meter, which is where the status stack starts.
 	return idleScreen(cols) + "\x1b[6;1H* Ruminating… (3s)\x1b[9;3H"
+}
+
+// The task panel, drawn where claude draws it: below the mode line, the pane's
+// OWN row first and one row per child under it. Painted onto the same idle
+// chrome, because that is the trap — a backgrounded agent keeps the input box
+// live and shows no spinner at all.
+func panelScreen(cols int, children ...string) string {
+	out := idleScreen(cols) + "\x1b[14;1H  ● main"
+	for i, row := range children {
+		out += fmt.Sprintf("\x1b[%d;1H  ◯ %s", 15+i, row)
+	}
+	return out + "\x1b[9;3H"
+}
+
+// The panel's other end, and the one herdr regressed on twice: the panel has
+// collapsed and the children are gone from it, but the mode line says they are
+// still alive. The pane is still working and the rows are simply no longer
+// nameable.
+func collapsedPanelScreen(cols int) string {
+	return "\x1b[2J\x1b[7;1H              0 tokens" +
+		"\x1b[8;1H" + strings.Repeat("─", cols) + "\x1b[9;1H❯ \x1b[10;1H" + strings.Repeat("─", cols) +
+		"\x1b[12;1H  ⏵⏵ auto mode on · /tasks to see subagents\x1b[9;3H"
+}
+
+// childNames is what a reader of the wire would see, in order.
+func childNames(o paneobserve.Observation) []string {
+	out := make([]string, 0, len(o.Children))
+	for _, c := range o.Children {
+		out = append(out, c.Name)
+	}
+	return out
 }
 
 func newFixture(t *testing.T) (*paneobserve.Watcher, *panegrid.Store, *recorder) {
@@ -341,5 +373,233 @@ func TestAnUnwatchedPaneCannotExit(t *testing.T) {
 	w.Exited("never-watched")
 	if got := rec.drain(); len(got) != 0 {
 		t.Fatalf("an unwatched pane reported %+v", got)
+	}
+}
+
+// ── The child rows, and the seam that carries them (nocx-o1v0h) ───────────
+
+// The whole point: the panel's child rows travel with the observation, so a
+// person watching a pane whose agent spawned children can be shown a row per
+// child with its name and what it is doing. Read off the grid, with no vendor
+// hook anywhere in the picture.
+func TestTheChildRowsTravelWithTheObservation(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	if err := grid.Enrol("p1", 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files in directory")))
+	w.Touch("p1")
+	w.Sweep()
+
+	got := rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("observations = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].State != agentdriver.StateWorking {
+		t.Errorf("state = %q, want %q", got[0].State, agentdriver.StateWorking)
+	}
+	want := []agentdriver.Subagent{{Name: "Explore", Task: "List files in directory"}}
+	if len(got[0].Children) != 1 || got[0].Children[0] != want[0] {
+		t.Fatalf("children = %+v, want %+v", got[0].Children, want)
+	}
+}
+
+// THE EMIT SEAM, stated with both ends.
+//
+// A child row is on the wire from the first sweep in which the panel names it
+// until the first sweep in which the panel does not — and nothing about a row
+// that is still there is ever news again. That holds because what crosses is
+// only what is stable for the life of a row: the elapsed time and the token
+// flow move on every frame and are deliberately not carried (agentdriver.
+// Subagent). So "emit when the answer changed" needs no exception for them,
+// and a pane repainting its clock eight times a second says nothing at all.
+func TestARepaintThatOnlyMovesAChildsClockIsNotNews(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	if err := grid.Enrol("p1", 80, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(panelScreen(80, "Explore  List files in directory                  7s · ↓ 11.6k tokens")))
+	w.Touch("p1")
+	w.Sweep()
+	if got := rec.drain(); len(got) != 1 || len(got[0].Children) != 1 {
+		t.Fatalf("first sweep = %+v, want one observation carrying one child", got)
+	}
+
+	// The same panel, four frames later. Everything the screen changed is a
+	// measurement, and the driver reads all of it — the extractor's own test
+	// asserts the elapsed time follows the screen.
+	for _, elapsed := range []string{"8s", "9s", "10s", "11s"} {
+		grid.Feed("p1", []byte(panelScreen(80, "Explore  List files in directory                 "+elapsed+" · ↓ 11.9k tokens")))
+		w.Touch("p1")
+		w.Sweep()
+	}
+	if got := rec.drain(); len(got) != 0 {
+		t.Fatalf("a moving clock was reported %d times: %+v", len(got), got)
+	}
+}
+
+// The other half of the same interval: the SET moving is news, in both
+// directions. Without this the rows would be drawn once and then lie.
+func TestAChildAppearingAndVanishingAreBothNews(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	if err := grid.Enrol("p1", 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
+	w.Touch("p1")
+	w.Sweep()
+	rec.drain()
+
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files", "Plan  Draft the change")))
+	w.Touch("p1")
+	w.Sweep()
+	got := rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("a second child appearing was reported %d times: %+v", len(got), got)
+	}
+	if names := childNames(got[0]); len(names) != 2 || names[0] != "Explore" || names[1] != "Plan" {
+		t.Fatalf("children = %v, want [Explore Plan] in panel order", names)
+	}
+
+	grid.Feed("p1", []byte(panelScreen(60, "Plan  Draft the change")))
+	w.Touch("p1")
+	w.Sweep()
+	got = rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("a child vanishing was reported %d times: %+v", len(got), got)
+	}
+	if names := childNames(got[0]); len(names) != 1 || names[0] != "Plan" {
+		t.Fatalf("children after one finished = %v, want [Plan]", names)
+	}
+}
+
+// A CHILD FACT MAY NEVER DECIDE THE PARENT'S STATE.
+//
+// Bought twice elsewhere and carried over deliberately: herdr's claude hook
+// discards subagent events by name because SubagentStop can arrive after the
+// main turn already stopped and would never let an idle pane revive; orca's
+// parent flips to done while its children still run.
+//
+// Two things are asserted, and neither is the same claim. First, that the
+// state the watcher emits is byte-for-byte what the registry answers for the
+// same frame — the children reach the wire beside the verdict and never
+// through it. Second, the sharp middle cases: the panel gaining a second
+// child, and its child being replaced by a differently-named one, are news for
+// the rows and silence for the state.
+//
+// The panel's PRESENCE deciding "working" is a different thing and is correct:
+// that is a branch reading the pane's own chrome, which is the only evidence
+// on screen that a backgrounded agent is running at all. What may not happen
+// is a row's CONTENT moving the answer.
+func TestAChildAppearingOrVanishingDoesNotChangeTheParentsState(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	if err := grid.Enrol("p1", 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
+	w.Touch("p1")
+	w.Sweep()
+	first := rec.drain()
+	if len(first) != 1 || first[0].State != agentdriver.StateWorking {
+		t.Fatalf("panel drawn = %+v, want one working observation", first)
+	}
+
+	for _, step := range []struct {
+		what   string
+		screen string
+	}{
+		{"a second child appears", panelScreen(60, "Explore  List files", "Plan  Draft the change")},
+		{"the first child finishes", panelScreen(60, "Plan  Draft the change")},
+		{"the child is replaced", panelScreen(60, "Review  Read the diff")},
+	} {
+		grid.Feed("p1", []byte(step.screen))
+		w.Touch("p1")
+		w.Sweep()
+		got := rec.drain()
+		if len(got) != 1 {
+			t.Fatalf("%s: reported %d times, want 1: %+v", step.what, len(got), got)
+		}
+		if got[0].State != agentdriver.StateWorking {
+			t.Errorf("%s: state moved to %q; a child fact decided the parent", step.what, got[0].State)
+		}
+	}
+
+	// And the end herdr regressed on: the panel collapses, so no row can be
+	// named — and the pane does NOT go back to inviting input, because the
+	// mode line still says a background agent is alive.
+	grid.Feed("p1", []byte(collapsedPanelScreen(60)))
+	w.Touch("p1")
+	w.Sweep()
+	got := rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("the panel collapsing was reported %d times: %+v", len(got), got)
+	}
+	if got[0].State != agentdriver.StateWorking {
+		t.Errorf("every child row vanished and the pane became %q", got[0].State)
+	}
+	if len(got[0].Children) != 0 {
+		t.Errorf("a collapsed panel still named children: %+v", got[0].Children)
+	}
+}
+
+// The snapshot carries them too, for the same reason it carries the state: a
+// client that attaches after the change that produced it would otherwise see a
+// pane with an agent working and no rows under it, and wait forever for a
+// transition that already happened.
+func TestSnapshotCarriesTheChildRows(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Enrol("p1", 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files in directory")))
+	w.Touch("p1")
+	w.Sweep()
+
+	o, ok := w.Snapshot("p1")
+	if !ok {
+		t.Fatal("a watched pane has no snapshot")
+	}
+	if names := childNames(o); len(names) != 1 || names[0] != "Explore" {
+		t.Fatalf("snapshot children = %v, want [Explore]", names)
+	}
+}
+
+// An agent that exited has no children on screen, because it has no screen.
+// The terminal observation says so rather than leaving the last rows standing
+// under a pane whose process is gone.
+func TestAnExitedPaneNamesNoChildren(t *testing.T) {
+	w, grid, rec := newFixture(t)
+	if err := grid.Enrol("p1", 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
+	w.Touch("p1")
+	w.Sweep()
+	rec.drain()
+
+	w.Exited("p1")
+	got := rec.drain()
+	if len(got) != 1 || got[0].State != agentdriver.StateExited {
+		t.Fatalf("after exit = %+v, want one exited observation", got)
+	}
+	if len(got[0].Children) != 0 {
+		t.Errorf("an exited pane still named children: %+v", got[0].Children)
+	}
+	o, _ := w.Snapshot("p1")
+	if len(o.Children) != 0 {
+		t.Errorf("the retained snapshot still names children: %+v", o.Children)
 	}
 }

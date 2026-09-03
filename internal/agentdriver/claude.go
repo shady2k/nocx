@@ -77,16 +77,36 @@ package agentdriver
 // task it was given, how long it has been running and how many tokens have
 // flowed which way — and the verdict is the single word "working". The
 // "subagents" extractor reads those rows out of the SAME chrome the verdict is
-// decided from, and its yield reaches nothing that decides: it is anchored on
-// the mode line, capped by the engine, and evaluated after the branches. So the
-// panel can be reported row by row without any of it being able to move the
+// decided from, and its yield reaches nothing that decides: it is anchored in
+// the panel itself, capped by the engine, and evaluated after the branches. So
+// the panel can be reported row by row without any of it being able to move the
 // answer.
 //
 // The fields are what the rows actually carry, not what a subagent feature will
-// want. "● main" is the parent and carries a name only; a child carries a task
-// and, once it has run a second, an elapsed time and a token flow. A capture
-// group that did not participate contributes no field at all, so a child with
-// no timing yet is SILENT about timing rather than claiming zero.
+// want. A child carries a name, a task and, once it has run a second, an
+// elapsed time and a token flow. A capture group that did not participate
+// contributes no field at all, so a child with no timing yet is SILENT about
+// timing rather than claiming zero.
+//
+// # The panel's FIRST row is the pane itself, and it is not a child
+//
+// Measured over claude-subagent from 23s to 39s, the panel is exactly "● main"
+// over "◯ Explore  List files in directory  …". The first row is the conversation
+// you are looking at; the rest are what it spawned. So the extractor is
+// anchored on taskPanelHead — the first non-blank row below the mode line —
+// and a region begins one row BELOW its anchor, which is what makes the pane's
+// own row structurally unreadable as a child rather than filtered out
+// afterwards by somebody who remembered to.
+//
+// The GLYPH was the other candidate and it is rejected on evidence. Over the
+// whole window main never stops being "●" and the child never stops being "◯",
+// including for the second the child has run for 0s and after its tokens have
+// flowed both ways — so the corpus cannot tell whether the glyph marks lineage
+// or marks which row has focus, and "← for agents" in the mode line says focus
+// is a thing that moves. Position holds under both readings; the glyph holds
+// under only one. For the same reason no per-child running/finished flag
+// crosses this seam: the screen never draws one. A child that finishes leaves
+// the panel, and that is the whole of what it says.
 
 import (
 	_ "embed"

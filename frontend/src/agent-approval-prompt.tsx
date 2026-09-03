@@ -215,26 +215,43 @@ type ClassifierNotice = { tone: StatusCardTone; title: string; description?: str
 const classifierNotice = (
   classifier: NonNullable<AgentApprovalRequested['classifier']>,
 ): ClassifierNotice => {
-  const parts: string[] = []
-  if (classifier.reason) parts.push(endSentence(classifier.reason))
-  if (classifier.model) parts.push(`Verdict from ${classifier.model}.`)
-  const description = parts.length > 0 ? parts.join(' ') : undefined
+  // The model clause is BRANCH-AWARE, because "verdict from X" is itself a
+  // claim that a verdict exists. Two of these four shapes have none — the
+  // gate that did not run, and the consultation that came back empty — so on
+  // those the same field can only say which model was asked. Naming a verdict
+  // where there is none is the defect this bead is about, one field over
+  // again. Today's kernel sends no model on either of those paths
+  // (kernel.go:2016-2027 fills Reason alone), so this is unreachable from our
+  // own backend; the schema permits it, and a surface may not state a
+  // falsehood merely because the current producer never provokes it.
+  const say = (modelClause: (model: string) => string): string | undefined => {
+    const parts: string[] = []
+    if (classifier.reason) parts.push(endSentence(classifier.reason))
+    if (classifier.model) parts.push(modelClause(classifier.model))
+    return parts.length > 0 ? parts.join(' ') : undefined
+  }
+  const verdictFrom = (model: string): string => `Verdict from ${model}.`
+  const askedOf = (model: string): string => `Asked of ${model}.`
 
   if (!classifier.consulted) {
-    return { tone: 'warning', title: 'The classifier gate did not run.', description }
+    return {
+      tone: 'warning',
+      title: 'The classifier gate did not run.',
+      description: say(askedOf),
+    }
   }
   switch (classifier.verdict) {
     case 'clear':
       return {
         tone: 'neutral',
         title: 'A second model read this proposal and raised no suspicion.',
-        description,
+        description: say(verdictFrom),
       }
     case 'suspect':
       return {
         tone: 'warning',
         title: 'A second model read this proposal and judged it suspect.',
-        description,
+        description: say(verdictFrom),
       }
     default:
       // Consulted, and no verdict came back. The wire permits it and
@@ -242,7 +259,7 @@ const classifierNotice = (
       return {
         tone: 'warning',
         title: 'A second model was consulted and returned no verdict.',
-        description,
+        description: say(askedOf),
       }
   }
 }

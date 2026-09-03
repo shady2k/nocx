@@ -1183,6 +1183,24 @@ describe('AgentApprovalPrompt — the classifier verdict is evidence beside the 
     expect(card(container)?.getAttribute('data-tone')).toBe('warning')
   })
 
+  // "Verdict from X" asserts that a verdict exists. Two of the four shapes
+  // have none, so on those the model field can only say who was ASKED — a
+  // window that names a verdict where there is none is the same defect this
+  // bead is about, one field further over. Our own kernel sends no model on
+  // either path today (kernel.go:2016-2027 fills Reason alone); the schema
+  // permits it, and the surface must be true for what the schema allows and
+  // not merely for what today's producer happens to send.
+  it.each([
+    ['a gate that did not run', { consulted: false, model: MODEL, reason: 'the role refused' }],
+    ['a consultation with no verdict', { consulted: true, model: MODEL, reason: '' }],
+  ] as const)('names the model as asked, never as the source of a verdict — %s', (_label, c) => {
+    const { container } = renderPrompt({ ask: { ...SKILL_ASK, classifier: { ...c } } })
+    const text = container.textContent ?? ''
+
+    expect(text).toContain(`Asked of ${MODEL}.`)
+    expect(text).not.toContain('Verdict from')
+  })
+
   it('renders no empty slot when the wire carried no classifier', () => {
     const { container } = renderPrompt({ ask: { ...SKILL_ASK, classifier: null } })
     expect(card(container)).toBeNull()

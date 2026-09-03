@@ -332,11 +332,21 @@ not prose.
 
 - An agent-callable install (§2), a hub or index (§2), archives, clones and
   support files (§2), signature verification (§2).
-- Sharing installed skills between machines beyond what backup already carries.
-  Backup snapshots `authored` and `managed` today (`backup.go:15-33`); whether
-  `installed` joins them is a real question — a restore that reinstates a
-  stranger's skill on a new machine is a different act from restoring the
-  person's own — and it is decided in its own bead, not smuggled in here.
+- ~~Whether an installed skill travels in a backup.~~ **Decided by the owner,
+  2026-09-03: it travels**, beside `authored` and `managed`. `builtin` stays
+  absent for the reason `backup.go:15-33` already gives — it comes from the
+  binary and is restored by the destination build.
+
+  What that accepts, written down because it is the part that is easy to miss:
+  the digest lives in `skills.json`, which the snapshot carries as `Settings`,
+  and it is computed over relative content — so a restored installed skill
+  arrives `approved`. An adoption the person made once, on one machine, for one
+  set of bytes, is replayed on the next machine without being asked again. It is
+  the same trade-off already taken for `managed`, which is drafted by a model and
+  travels approved today, so this is a consistency rather than a new exposure.
+  `nocx-qja4m.8` implements it, and fixes the defect that the installed root is
+  already walked by `Snapshot` and its result discarded.
+
 - Notifying the person that an installed skill has an update upstream. The
   recorded URL makes it possible; nothing in this spec does it.
 - Project-level and ecosystem roots, still, from §14.

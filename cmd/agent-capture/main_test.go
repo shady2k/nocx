@@ -2,59 +2,14 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-)
 
-func TestCaptureJSONLRoundTrip(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "capture.jsonl")
-	header := captureHeader{
-		Agent:   "bash",
-		Argv:    []string{"bash", "-i"},
-		Cols:    80,
-		Rows:    24,
-		Started: "2026-08-25T12:00:00Z",
-		Script:  []string{"+0ms \"\\r\""},
-	}
-	chunks := []captureChunk{
-		{AtMs: 3, Offset: 0, Data: "hello\r\n"},
-		{AtMs: 8, Offset: 7, Data: "\x1b[2J"},
-	}
-	if err := writeCapture(path, header, chunks); err != nil {
-		t.Fatalf("writeCapture: %v", err)
-	}
-	gotHeader, gotChunks, err := readCapture(path)
-	if err != nil {
-		t.Fatalf("readCapture: %v", err)
-	}
-	gotHeaderJSON, err := json.Marshal(gotHeader)
-	if err != nil {
-		t.Fatalf("marshal header: %v", err)
-	}
-	expectedHeaderJSON, err := json.Marshal(header)
-	if err != nil {
-		t.Fatalf("marshal expected header: %v", err)
-	}
-	if !bytes.Equal(gotHeaderJSON, expectedHeaderJSON) {
-		t.Fatalf("header mismatch: got %s, want %s", gotHeaderJSON, expectedHeaderJSON)
-	}
-	gotChunksJSON, err := json.Marshal(gotChunks)
-	if err != nil {
-		t.Fatalf("marshal chunks: %v", err)
-	}
-	expectedChunksJSON, err := json.Marshal(chunks)
-	if err != nil {
-		t.Fatalf("marshal expected chunks: %v", err)
-	}
-	if !bytes.Equal(gotChunksJSON, expectedChunksJSON) {
-		t.Fatalf("chunks mismatch: got %s, want %s", gotChunksJSON, expectedChunksJSON)
-	}
-}
+	"github.com/shady2k/nocx/internal/agentcapture"
+)
 
 func TestParseScriptCommittedForms(t *testing.T) {
 	t.Parallel()
@@ -121,26 +76,6 @@ func TestParseScriptRejectsMalformedLines(t *testing.T) {
 	}
 }
 
-func TestChunksThroughMarkIncludesExactBoundary(t *testing.T) {
-	t.Parallel()
-	chunks := []captureChunk{
-		{AtMs: 10, Offset: 0, Data: "a"},
-		{AtMs: 20, Offset: 1, Data: "b"},
-		{AtMs: 20, Offset: 2, Data: "c"},
-		{AtMs: 21, Offset: 3, Data: "d"},
-	}
-	if consumed := chunksThroughMark(chunks, 9, 0); consumed != 0 {
-		t.Fatalf("chunksThroughMark(..., 9) = %d, want 0", consumed)
-	}
-	consumed := chunksThroughMark(chunks, 20, 0)
-	if consumed != 3 {
-		t.Fatalf("chunksThroughMark(..., 20) = %d, want 3", consumed)
-	}
-	if consumed = chunksThroughMark(chunks, 21, consumed); consumed != 4 {
-		t.Fatalf("chunksThroughMark(..., 21, 3) = %d, want 4", consumed)
-	}
-}
-
 func TestParseMarksRejectsDescendingMarks(t *testing.T) {
 	t.Parallel()
 	_, err := parseMarks("20,10")
@@ -177,9 +112,9 @@ func TestCaptureProgramEndsWhenScriptExhausted(t *testing.T) {
 	if !strings.Contains(stderr.String(), "capture ended because script ended") {
 		t.Fatalf("stderr = %q, want script-ended completion", stderr.String())
 	}
-	header, chunks, err := readCapture(outPath)
+	header, chunks, err := agentcapture.Read(outPath)
 	if err != nil {
-		t.Fatalf("readCapture: %v", err)
+		t.Fatalf("agentcapture.Read: %v", err)
 	}
 	if header.Agent != "bash" || len(chunks) == 0 {
 		t.Fatalf("capture = agent %q, %d chunks; want bash and output", header.Agent, len(chunks))

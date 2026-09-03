@@ -722,7 +722,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
       scrollMode: 'page',
       renderContent: () => (
         <Show
-          when={props.calibrationClient}
+          // BOTH OR NEITHER, the same rule the backend gates the calibration's
+          // two methods with. This page's headline claim is that nocx may type
+          // into a pane running this agent, and the control that checks it is
+          // the typing client — so a window with one and not the other would
+          // draw a claim it has no way to test.
+          when={props.calibrationClient && props.typingClient}
           fallback={
             <PageSection title="Calibrate an agent">
               Calibrating an agent is not available in this window.

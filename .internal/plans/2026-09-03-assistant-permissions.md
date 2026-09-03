@@ -44,7 +44,7 @@
 **Acceptance Criteria:**
 
 - `curl -o /tmp/proof https://example.com` records `/tmp/proof` as a resource with verb `ResourceWrite`, and the invocation carries the feature `writes-option-named-path`.
-- Because the report then mixes `ResourceNetwork` and `ResourceWrite`, `ResourceReport.Effect` returns `WorstEffect(declared)` — for `session.run` that is `mutate-destructive`, not `cross-boundary`.
+- Because the report then mixes `ResourceNetwork` and `ResourceWrite`, `ResourceReport.Effect` returns `WorstEffect(declared)` — which for `session.run` is `delegate`, since `effectOrder` ranks delegate highest. It is no longer `cross-boundary` alone. Whether `delegate` is the right row for a mixed call is `nocx-jxq97`, not this task.
 - `curl -o "$OUT" https://example.com` — a dynamic target — is unresolved, so the invocation is disqualified rather than classified as harmless.
 - `curl https://example.com` is unchanged: one network resource, `cross-boundary`.
 - Every entry of `optionTakesNextValue` whose value is a written path is covered by a test naming that program and option. Options whose value is **not** a path are covered by a test that they are still not resources: `ssh -o` (a config keyword), `bash -o` (a shell option name), `install -o` (an owner), `grep -f` (a pattern file, read not written).
@@ -72,7 +72,7 @@ func TestCurlOutputOptionIsAWrittenResource(t *testing.T) {
 		content.EffectMutateDestructive, content.EffectDelegate,
 		content.EffectCrossBoundary,
 	}
-	if got := inv.Resources.Effect(declared); got != content.EffectMutateDestructive {
+	if got := inv.Resources.Effect(declared); got != content.EffectDelegate {
 		t.Errorf("a curl that writes a file classified as %q; a mixed report takes the worst declared effect", got)
 	}
 }

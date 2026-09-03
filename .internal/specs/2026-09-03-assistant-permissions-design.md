@@ -123,6 +123,17 @@ It blocks §5.4 because the narrowing rule form there matches a **semantic
 feature** — "writes a file to a path named by an option" — and until the
 classifier records that feature there is nothing to match.
 
+**And it exposes a second problem, found by the Task 1 worker on 2026-09-03 and
+filed as `nocx-jxq97`.** Once the write is recorded, the report mixes
+`ResourceNetwork` and `ResourceWrite`, and a mixed report takes
+`WorstEffect(DECLARED)` (`resources.go:75-77`). `effectOrder` ranks `delegate`
+highest (:113-131), and `session.run` declares it — so `curl -o file url` lands
+in **"hand work to another agent"**, which is not what it did. The ordering is a
+lattice for which row governs, not a risk ranking, so today's conservative
+answer is also an arbitrary one. A row a person answers must be a row the call
+belongs in, so `nocx-jxq97` blocks the honesty of §8 and is not deferred with
+the rest of the polish.
+
 ### 5.2 One evaluator, one typed cause (`nocx-okdsm`, `nocx-yso3z`)
 
 Two containment paths disagree, in two ways, and the model's own documentation

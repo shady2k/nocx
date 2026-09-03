@@ -1068,9 +1068,27 @@ func seedRepo(dir string) (string, string, error) {
 	marker = filepath.Join(markerDir, "pre-commit-ran")
 
 	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	// THE PAUSE IS THE INTERVAL, MADE OBSERVABLE — not a wait, and not a
+	// tuning constant. Git moves the branch only once a pre-commit hook has
+	// EXITED, so between this marker appearing and HEAD moving there is a
+	// whole hook's worth of work during which the repository still says
+	// `initial`. The acceptance used to latch on the marker and read HEAD
+	// immediately after, which is a read inside that interval: it passed
+	// whenever the hook happened to finish first and went red when it did
+	// not, one CI run in several, in whichever browser lost the toss
+	// (nocx-02fyv).
+	//
+	// Widening the interval here makes the wrong latch fail EVERY time
+	// instead of occasionally, which is the difference between a test that
+	// catches that mistake and one that merely might. It is a duration in
+	// the fixture rather than in a test — a faster machine only makes the
+	// window it opens more generous, never smaller — so nothing here
+	// depends on timing in the sense AGENTS.md forbids.
 	script := "#!/bin/sh\n" +
-		"# nocx acceptance fixture: write the marker and be chatty.\n" +
+		"# nocx acceptance fixture: write the marker, hold the interval open,\n" +
+		"# and be chatty.\n" +
 		"touch '" + marker + "'\n" +
+		"sleep 2\n" +
 		"i=0\n" +
 		"while [ $i -lt 500 ]; do printf 'pre-commit packet %04d %064d\\n' \"$i\" \"$i\"; i=$((i+1)); done\n" +
 		"i=0\n" +

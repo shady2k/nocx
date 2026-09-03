@@ -1,0 +1,486 @@
+package transport
+
+// One session-open path, two callers (nocx-dkawo.6).
+//
+// Opening a session used to exist only inside `open`'s JSON-RPC handler, and
+// it was written for the only caller it had: a renderer that already created
+// the pane row, that is waiting on a response frame, and that will be
+// attached to the session's ring the moment it exists. None of those hold for
+// the second caller. A wave participant is spawned by the BACKEND — there is
+// no request id to answer, no connection to attach, and the pane is one the
+// backend is creating rather than one it was handed.
+//
+// The wrong fix is a second open beside the first. The two would agree on the
+// day they were written and disagree the first time either moved: the parent
+// claim's admission, the workspace chain, the Enhanced default, the rule that
+// a profile id is recorded only after the resolver accepted it, the helper's
+// binding written before the ack, the compensation when that write fails.
+// Every one of those is a decision with an argument behind it, and a copy
+// carries the code without the argument.
+//
+// So the handler is split where its two jobs already meet. sessionOpener does
+// what makes a SESSION — resolve the workspace, build the config, resolve ssh,
+// dial, persist the helper binding — and knows nothing about a connection. The
+// handler does what makes an ANSWER — the ring, the subscriber, the ack, the
+// pumps — and is the only half that names a wsConn.
+//
+// The seam is not invented for this: `attach` already does the second half
+// alone, for a session that exists with no client on it. A session outliving
+// every WebSocket is AD-9, and a session that never had one is the same fact
+// one step further.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/workspace"
+)
+
+// OpenSpec is what to open, with no caller in it.
+//
+// It is deliberately not openParams. openParams is a WIRE shape — it carries
+// what a renderer may say, validated by validateOpenRaw before anything here
+// runs — and a backend caller that had to fill one in would be pretending to
+// be a renderer. What survives the translation is only what makes a session.
+type OpenSpec struct {
+	// PaneID is the pane this session becomes the pipe of. Empty means the
+	// default workspace, which is the ordinary case until every caller mints
+	// panes.
+	PaneID string
+	// Kind is "", "local" or "ssh". The wire's closed set, unchanged: an
+	// unrecognised kind is refused by validateOpenRaw before this, and a
+	// backend caller that invents one gets a local session, which is what
+	// the zero value has always meant.
+	Kind string
+	// Cols, Rows, XPixel and YPixel are the caller's REPORT of geometry. The
+	// registry decides the size the channel opens at; nothing here may treat
+	// these as the answer.
+	Cols, Rows, XPixel, YPixel uint16
+	// ProfileID or Host names an ssh destination. Exactly one, and the wire
+	// validator has already refused neither.
+	ProfileID string
+	Host      string
+	User      string
+	// Shell pins the far shell the launcher targets. Anything unrecognised
+	// is ignored with a warn, never honoured.
+	Shell string
+	// Parent is the claimed edge, carried as a CLAIM: the registry is the
+	// single owner of whether it may be recorded, and it refuses before
+	// anything is spawned.
+	Parent *session.Ref
+}
+
+// OpenedSession is a session that exists, together with the facts a caller
+// needs to finish its own half.
+//
+// Config is returned rather than re-derived because it holds what the open
+// CONCLUDED — the resolved host, the profile id the resolver accepted, the
+// remote config the discovery and forward replays key on — and a caller that
+// rebuilt it from the spec would be rebuilding the renderer's claim instead of
+// the backend's conclusion.
+type OpenedSession struct {
+	Session     session.Session
+	Config      session.Config
+	Hosted      *HostedSessionOpen
+	WorkspaceID string
+}
+
+// openRefusal is an answer the open path produced ITSELF, as distinct from a
+// failure a phase returned. The difference matters on the wire: a refusal
+// carries a sentence a person can act on — "SSH sessions not available (no
+// profile resolver wired)" — and routing it through the ssh error taxonomy
+// would turn it into "Internal error", which is the shape a person cannot act
+// on at all.
+type openRefusal struct {
+	code    int
+	message string
+	// cause, when set, is what the caller maps through rpcErrorFor instead of
+	// message. It exists for the sealed vault: the renderer's unlock prompt
+	// is raised off the REASON carried in the error data, so flattening it to
+	// a sentence would replace an unlock dialog with an error.
+	cause error
+}
+
+func (e *openRefusal) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
+	return e.message
+}
+
+func (e *openRefusal) Unwrap() error { return e.cause }
+
+// refuse builds a refusal carrying a sentence.
+func refuse(code int, message string) error {
+	return &openRefusal{code: code, message: message}
+}
+
+// refuseWithCause builds a refusal whose wire shape comes from the error.
+func refuseWithCause(code int, cause error) error {
+	return &openRefusal{code: code, cause: cause}
+}
+
+// sessionOpener owns "a session comes into existence". Its fields are the
+// seams the two phases need and nothing else: there is no Responder here, no
+// connection and no request id, which is what makes the second caller
+// possible rather than merely intended.
+type sessionOpener struct {
+	op       capability.OpenOperation
+	resolver *resolverHolder
+	sshCfg   ssh.ConfigResolver
+	launcher ssh.RemoteLauncher
+	// installer publishes the bundle over SFTP on the direct-host path,
+	// which is the only thing that installs it now that the command carries
+	// no payload.
+	installer ssh.RemoteInstaller
+	// lifecycle is the authenticated-channel seam (ADR-0024): the dial hands
+	// it to the far side so the shell can hand its lifecycle back over a
+	// channel that is not the terminal.
+	lifecycle ssh.RemoteLifecycle
+	// panes resolves pane → tab → workspace. nil when the content store is
+	// not wired, which is a visible unavailable state and not a degrade.
+	panes paneWorkspaces
+	// ledger is the durable writer for the helper binding — the existing
+	// content ledger seam, never a second session store.
+	ledger content.LedgerRepository
+	helper HelperSessionOpener
+	// laneRegistrar records the lifecycle lane a helper-hosted open returned.
+	// It is a seam and not the whole machine because what this needs is one
+	// statement: this lane belongs to this session.
+	laneRegistrar lifecycleLaneRegistrar
+	log           log.Logger
+}
+
+// lifecycleLaneRegistrar is the narrow view of "remember which session this
+// lane speaks for" (AD-8).
+type lifecycleLaneRegistrar interface {
+	RegisterLifecycleLane(lifecycle.LaneID, session.ID)
+}
+
+// workspaceForOpen derives the workspace this session belongs to.
+//
+// THE CHAIN IS THE ANSWER, never a value the caller sent: a caller names a
+// PANE — the durable identity it already owns — and the backend walks pane →
+// tab → workspace itself. A paneId naming no pane is refused rather than
+// defaulted, because "the pane you named does not exist" and "you named no
+// pane" are different facts and answering both with the default would hide the
+// first.
+//
+// No paneId is the second fact, and it is the ordinary one until every caller
+// mints panes (nocx-isoph.4): the session is in the default workspace,
+// resolved through internal/workspace.Default, which is the single owner of
+// that decision (AD-7).
+func (o *sessionOpener) workspaceForOpen(ctx context.Context, paneID string) (string, error) {
+	if paneID == "" || o.panes == nil {
+		return string(workspace.Default), nil
+	}
+	return o.panes.WorkspaceForPane(ctx, paneID)
+}
+
+// Open runs both phases and returns a live session.
+//
+// THE ORDER IS THE ROLLBACK, and each step names what is true if the next one
+// fails. The workspace is resolved BEFORE anything is spawned or dialed,
+// because a request that cannot be satisfied must not cost the caller a shell
+// or an ssh handshake, and a refused open must leave nothing behind. The
+// resolve runs under the [config, session] gates and touches stores only; both
+// gates are released before anything is dialed, because a gate held across a
+// network wait — and sometimes across a person, at a password prompt — is what
+// refused every other pane's open with "the terminal is busy" while one tab
+// was still connecting. The helper's binding is written before the session is
+// returned, so reconciliation can never observe a live helper session without
+// the generation that qualifies its id space; a failed write closes the
+// session rather than exposing one no inventory may safely judge.
+func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession, error) {
+	workspaceID, wsErr := o.workspaceForOpen(ctx, spec.PaneID)
+	if wsErr != nil {
+		return OpenedSession{}, refuse(-32602, "Invalid params: "+wsErr.Error())
+	}
+
+	cfg := session.Config{
+		Kind: session.KindLocal,
+		// The caller's REPORT of its own geometry, carried through as a
+		// measurement (nocx-eidfb.1). The registry decides the size the
+		// channel is created at and the ack reports what it decided, so
+		// nothing here may treat these four as the answer.
+		Cols:   spec.Cols,
+		Rows:   spec.Rows,
+		XPixel: spec.XPixel,
+		YPixel: spec.YPixel,
+		// Every session asks to be integrated, and the ones that cannot be
+		// fall back to an ordinary terminal (nocx-tr2n). This is not a policy
+		// a caller may express: it arrived as an `enhanced` open parameter,
+		// both ssh openers omitted it, and the result was a second — silent,
+		// always-negative — answer to the question `desiredMode` already
+		// answers per connection (AD-8).
+		Enhanced: true,
+		// The pane this session is the pipe of, recorded so the ledger can
+		// anchor every block it records without the caller restating it per
+		// event (nocx-rtg0.28).
+		PaneID: spec.PaneID,
+	}
+	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
+	// claim; the registry is the single owner of whether it may be recorded,
+	// and it refuses before anything is spawned. Absent means a root session.
+	if spec.Parent != nil {
+		cfg.Parent = *spec.Parent
+	}
+	// ProfileID is deliberately NOT set here. It is recorded below, only once
+	// the resolver has accepted it, because a local PTY has no profile and
+	// setting it up front lets a caller attach any profile id to a local
+	// session it opens. sessions.status would then report that profile live
+	// and the connection list would draw a row as connected with nothing
+	// behind it (nocx-uxs5.4).
+
+	// PHASE ONE — resolve, under [config, session]. Store and vault reads
+	// only.
+	if err := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		if spec.Kind != "ssh" {
+			return nil
+		}
+		return o.resolveRemote(ctx, svc, spec, &cfg)
+	}); err != nil {
+		return OpenedSession{}, err
+	}
+
+	// PHASE TWO — dial, on the execution lane and no domain gate.
+	var (
+		sess   session.Session
+		hosted *HostedSessionOpen
+	)
+	if err := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		if cfg.Kind == session.KindRemote && o.helper != nil {
+			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg)
+			if selected {
+				if oerr != nil {
+					return oerr
+				}
+				if openedHosted.Session == nil {
+					return errors.New("helper session opener returned no session")
+				}
+				sess = openedHosted.Session
+				hosted = &openedHosted
+				return nil
+			}
+			if oerr != nil {
+				return oerr
+			}
+		}
+		var oerr error
+		sess, oerr = svc.Open(ctx, cfg)
+		return oerr
+	}); err != nil {
+		return OpenedSession{}, err
+	}
+
+	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID); err != nil {
+		return OpenedSession{}, err
+	}
+
+	if hosted != nil && hosted.LifecycleLane != "" && o.laneRegistrar != nil {
+		o.laneRegistrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
+	}
+
+	return OpenedSession{Session: sess, Config: cfg, Hosted: hosted, WorkspaceID: workspaceID}, nil
+}
+
+// resolveRemote fills cfg's remote half. It is phase one's whole ssh body and
+// it writes nothing outside cfg, so a refusal here has dialed nothing.
+func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenService, spec OpenSpec, cfg *session.Config) error {
+	var remote *ssh.ConnectConfig
+
+	switch {
+	case spec.ProfileID != "":
+		// Profile-based resolution: look up the stored profile, resolve
+		// credentials and jump hosts through the profile resolver.
+		if _, ok := o.resolver.get(); !ok {
+			return refuse(-32603, "SSH sessions not available (no profile resolver wired)")
+		}
+		host, resolved, err := svc.Resolve(spec.ProfileID)
+		if err != nil {
+			o.log.Error("profile resolve failed", "profileId", spec.ProfileID, "error", err)
+			// Resolving reads the stored password, so a sealed vault
+			// surfaces here — the caller needs the reason to offer an
+			// unlock.
+			return refuseWithCause(-32603, err)
+		}
+		remote = resolved
+		// The size is deliberately NOT set here (nocx-eidfb.1): the spec
+		// carries what the caller MEASURED, and the session registry is what
+		// decides the size the channel opens at. Writing it onto the
+		// ConnectConfig as well would put the caller's number back on the
+		// path the registry's conclusion travels.
+		remote.RemoteLauncher = o.launcher
+		remote.RemoteLifecycle = o.lifecycle
+
+		o.log.Info("SSH open via profile", "profileId", spec.ProfileID, "host", host, "user", remote.User)
+
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = remote
+		// Recorded here and nowhere else: the resolver has just accepted this
+		// id, so the association is the backend's own conclusion rather than
+		// the caller's claim.
+		cfg.ProfileID = spec.ProfileID
+		// CredentialID from the resolver: scoped revocation matches sessions
+		// by credential. Empty for sessions with no linked credential.
+		cfg.CredentialID = remote.CredentialID
+
+	case spec.Host != "":
+		// Direct host resolution: resolve through ~/.ssh/config (ssh -G) and
+		// build a minimal ConnectConfig. Used for SSH aliases from the config
+		// file — no stored profile involved.
+		if o.sshCfg == nil {
+			return refuse(-32603, "SSH config resolver not available")
+		}
+		resolved, err := o.sshCfg.ResolveConfig(ctx, spec.Host)
+		if err != nil {
+			o.log.Warn("SSH config resolution degraded for direct host", "host", spec.Host, "error", err)
+		}
+
+		user := spec.User
+		if user == "" && resolved != nil && resolved.User != "" {
+			user = resolved.User
+		}
+		port := 0
+		if resolved != nil && resolved.Port > 0 {
+			port = resolved.Port
+		}
+		remoteHost := spec.Host
+		if resolved != nil && resolved.HostName != "" {
+			remoteHost = resolved.HostName
+		}
+		var keyFile string
+		if resolved != nil {
+			keyFile = resolved.IdentityFile
+		}
+		remote = &ssh.ConnectConfig{
+			User:    user,
+			Port:    port,
+			KeyFile: keyFile,
+			// No size: see the profile branch above — the registry decides
+			// it, and this struct carries what the caller supplied.
+			RemoteLauncher:  o.launcher,
+			RemoteInstaller: o.installer,
+			RemoteLifecycle: o.lifecycle,
+		}
+
+		o.log.Info("SSH open via direct host", "host", spec.Host, "resolvedHost", remoteHost, "user", user)
+
+		cfg.Kind = session.KindRemote
+		cfg.Host = remoteHost
+		cfg.Remote = remote
+		// No ProfileID — this is not a saved profile. The usage tracker does
+		// not record it.
+
+	default:
+		// Unreachable from the wire: validateOpenRaw refuses an ssh open that
+		// names neither, with "profileId or host is required for an ssh
+		// session", and that is the sentence a person actually sees
+		// (ws_open_refusal_test.go). A second answer here would be a second
+		// owner of one question — so this one names the first rather than
+		// restating it, and exists only because a backend caller does not
+		// pass through the wire validator.
+		return refuse(-32602, "Invalid params: profileId or host is required for an ssh session")
+	}
+
+	// Shell pin (nocx-pu4.1): the open may name the far shell the launcher
+	// must target. A pin beats auto-detection — a user who knows their host
+	// runs zsh can say so, and where detection is wrong they have an
+	// override. Anything else is ignored with a warn, never honoured:
+	// detection is the safe degrade for a meaningless pin, and the launcher
+	// refuses unmapped kinds rather than guessing if one slips past.
+	if spec.Shell != "" {
+		switch ssh.ShellKind(spec.Shell) {
+		case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
+			remote.Shell = ssh.ShellKind(spec.Shell)
+		default:
+			o.log.Warn("ignoring unknown shell pin", "profileId", spec.ProfileID, "shell", spec.Shell)
+		}
+	}
+	return nil
+}
+
+// recordHostedBinding persists the helper's authoritative id and binding facts
+// before the session is handed back.
+//
+// The write comes first for a reason with both ends named: reconciliation may
+// never observe a live helper session without the generation that qualifies
+// its id space, so the interval in which that is possible must be empty. A
+// failed write therefore REFUSES the open and closes the helper session,
+// rather than returning a session no inventory may safely judge.
+func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Session, cfg session.Config, hosted *HostedSessionOpen, workspaceID string) error {
+	if hosted == nil || o.ledger == nil {
+		return nil
+	}
+	err := o.ledger.CreateSession(ctx, content.Session{
+		ID:          string(sess.ID()),
+		WorkspaceID: workspaceID,
+		Host:        hosted.Host,
+		Account:     hosted.Account,
+		Generation:  hosted.Generation,
+		// The route back, written in the same statement as the binding it
+		// completes (nocx-k6p18.30). The pane and the profile come off the
+		// config the registry has just accepted, never off the caller's
+		// spec: a caller may name any pane it likes, and the session is what
+		// records which one it actually became the pipe of. A direct-host
+		// open carries no profile, writes none, and is therefore a session a
+		// later coordinator cannot take back — which is stated by the empty
+		// field rather than by a guess.
+		PaneID:        cfg.PaneID,
+		ProfileID:     cfg.ProfileID,
+		HelperCommand: hosted.HelperCommand,
+		Fingerprint:   hosted.Fingerprint,
+	})
+	if err == nil {
+		return nil
+	}
+	if hosted.AbortLifecycle != nil {
+		hosted.AbortLifecycle()
+	}
+	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
+		return svc.Close(sess.ID())
+	})
+	return fmt.Errorf("recording the helper binding: %w", err)
+}
+
+// close ends a session the opener produced, through the same operation the
+// open ran under. It exists so a caller that could not finish its own half —
+// a ring that could not be created because the server is shutting down — ends
+// the session rather than leaking it, without holding the capability seam
+// itself.
+func (o *sessionOpener) close(ctx context.Context, id session.ID) {
+	_ = o.op.Run(ctx, func(_ context.Context, svc capability.OpenService) error {
+		return svc.Close(id)
+	})
+}
+
+// OpenSession is the backend's own way in (nocx-dkawo.6).
+//
+// It is the SAME path `open` takes and not a parallel one: the identical
+// opener instance, the identical two-phase capability operation, the identical
+// refusals. What a backend caller does not get is the second half — no ring,
+// no subscriber, no ack — because it has no connection to attach and no
+// request to answer. A client that later attaches picks the session up through
+// `attach`, exactly as it does for a session whose client went away.
+//
+// The opener exists from construction, not from Start: the control plane —
+// and with it the admission gates the two phases run under — is built by
+// NewWSServer. That is what lets a composition root hand this to the wave
+// record while it is still wiring, rather than having to wait for a server
+// that is already serving. The nil guard is for a zero-value server, which is
+// reachable only in-package and would otherwise panic inside the operation
+// rather than say what is wrong.
+func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSession, error) {
+	if s.opener == nil {
+		return OpenedSession{}, errors.New("transport: the session opener is not running")
+	}
+	return s.opener.Open(ctx, spec)
+}

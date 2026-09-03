@@ -633,6 +633,12 @@ type WSServer struct {
 	// helperSessionOpener selects the execution-host-owned PTY for remote
 	// opens when the existing helper resolver permits it.
 	helperSessionOpener HelperSessionOpener
+	// opener is the one path a session comes into existence by, shared
+	// between the `open` handler and the backend's own callers
+	// (nocx-dkawo.6). It is built where the method set is assembled, because
+	// that is where the admission gates it runs under exist — which is
+	// NewWSServer, so it is ready before the server serves anything.
+	opener *sessionOpener
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a

@@ -24,7 +24,6 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
-	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // sessionMachine is the transport-owned session lifecycle surface the
@@ -112,30 +111,10 @@ type openMachine interface {
 // the connection as the session's subscriber, so the handler receives the
 // *wsConn per call.
 type openHandlers struct {
-	op       capability.OpenOperation
-	sess     openMachine
-	resolver *resolverHolder // profile resolver, readable post-construction
-	sshCfg   ssh.ConfigResolver
-	launcher ssh.RemoteLauncher
-	// installer publishes the bundle over SFTP on the direct-host path,
-	// which is the only thing that installs it now that the command
-	// carries no payload.
-	installer ssh.RemoteInstaller
-	// lifecycle is the authenticated-channel seam (ADR-0024): the dial
-	// hands it to the far side so the shell can hand its lifecycle back
-	// over a channel that is not the terminal. An explicit seam, not the
-	// whole server.
-	lifecycle ssh.RemoteLifecycle
-	// panes resolves pane → tab → workspace for the open ack's workspaceId
-	// (nocx-isoph.2). nil when the content store is not wired, which is a
-	// visible unavailable state and not a degrade to hide.
-	panes paneWorkspaces
-	// ledger is the durable writer for the helper binding. It is deliberately
-	// the existing content ledger seam, not a second session store: the
-	// helper returns host, account and generation together with the
-	// authoritative id, and this handler records those facts before ack.
-	ledger content.LedgerRepository
-	helper HelperSessionOpener
+	// opener is the half that makes a SESSION, and it is shared with the
+	// backend's own callers rather than owned here (nocx-dkawo.6).
+	opener *sessionOpener
+	sess   openMachine
 	log    log.Logger
 }
 
@@ -146,26 +125,6 @@ type openHandlers struct {
 // workspace and may not write a layout row.
 type paneWorkspaces interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
-}
-
-// workspaceForOpen derives the workspace this session's ack will carry.
-//
-// THE CHAIN IS THE ANSWER, never a value the renderer sent: the renderer
-// names a PANE — the durable identity it already owns — and the backend walks
-// pane → tab → workspace itself. A paneId naming no pane is refused rather
-// than defaulted, because "the pane you named does not exist" and "you named
-// no pane" are different facts and answering both with the default would hide
-// the first.
-//
-// No paneId is the second fact, and it is the ordinary one until the renderer
-// starts minting panes (nocx-isoph.4): the session is in the default
-// workspace, resolved through internal/workspace.Default, which is the single
-// owner of that decision (AD-7).
-func (h openHandlers) workspaceForOpen(ctx context.Context, paneID string) (string, error) {
-	if paneID == "" || h.panes == nil {
-		return string(workspace.Default), nil
-	}
-	return h.panes.WorkspaceForPane(ctx, paneID)
 }
 
 // openResult is the open ack payload, declared once (contracts/open.schema
@@ -260,6 +219,24 @@ func isLineageRefusal(err error) bool {
 // get one — so the mapping lives in one place rather than being written
 // twice and drifting once.
 func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err error) {
+	// A refusal the open path produced itself carries the sentence a person
+	// reads, and it is answered FIRST so nothing below can flatten it. The
+	// ssh taxonomy two paragraphs down would turn "SSH sessions not
+	// available (no profile resolver wired)" into "Internal error", which is
+	// a sentence nobody can act on.
+	var refusal *openRefusal
+	if errors.As(err, &refusal) {
+		if refusal.cause != nil {
+			// The sealed vault, and anything else whose wire DATA is what
+			// the renderer acts on: rpcErrorFor carries the reason the
+			// unlock prompt is raised from, so flattening it to a message
+			// would replace a dialog with an error.
+			_ = r.TryError(req.ID, rpcErrorFor(refusal.code, "", refusal.cause))
+			return
+		}
+		_ = respond(r, newJSONRPCError(req.ID, refusal.code, refusal.message))
+		return
+	}
 	// A gate refusal: another operation holds the config or session
 	// domain — the request is refused, never queued.
 	if capability.IsRefused(err) {
@@ -323,52 +300,21 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return
 	}
 
-	// The workspace is resolved BEFORE anything is spawned or dialed, for
-	// the reason the parent claim is: a request that cannot be satisfied must
-	// not cost the user a shell or an ssh handshake, and a refused open must
-	// leave nothing behind.
-	workspaceID, wsErr := h.workspaceForOpen(ctx, params.PaneID)
-	if wsErr != nil {
-		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+wsErr.Error()))
-		return
-	}
-
-	cfg := session.Config{
-		Kind: session.KindLocal,
-		// The client's REPORT of its own geometry, carried through as a
-		// measurement (nocx-eidfb.1). The registry decides the size the
-		// channel is created at and the ack reports what it decided, so
-		// nothing here may treat these four as the answer — including this
-		// handler, which reads the size back off the session below rather
-		// than echoing what it just sent.
+	spec := OpenSpec{
+		PaneID: params.PaneID,
+		Kind:   params.Kind,
 		Cols:   params.Cols,
 		Rows:   params.Rows,
 		XPixel: params.XPixel,
 		YPixel: params.YPixel,
-		// Every session asks to be integrated, and the ones that cannot be
-		// fall back to an ordinary terminal (nocx-tr2n). This is not a
-		// policy the renderer may express: it arrived as an `enhanced` open
-		// parameter, both ssh openers omitted it, and the result was a
-		// second — silent, always-negative — answer to the question
-		// `desiredMode` (raw|script|relay) already answers per connection
-		// (AD-8). Nothing below fails closed on the request: a launcher
-		// that declines, a channel the far sshd refuses, a raw destination
-		// all end at a visible native prompt, so asking always is the safe
-		// direction and forgetting to ask is the one that shipped a tab
-		// with no blocks and no diagnostic.
-		Enhanced: true,
-		// The pane this session is the pipe of, recorded so the ledger can
-		// anchor every block it records without the renderer restating it
-		// per event (nocx-rtg0.28, design §6.1). It is the id the chain walk
-		// above has already resolved, so a session never carries one that
-		// names nothing.
-		PaneID: params.PaneID,
+
+		ProfileID: params.ProfileID,
+		Host:      params.Host,
+		User:      params.User,
+		Shell:     params.Shell,
 	}
-	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
-	// claim; the registry is the single owner of whether it may be recorded,
-	// and it refuses before anything is spawned. Absent means a root session.
 	if params.Parent != nil {
-		cfg.Parent = session.Ref{
+		spec.Parent = &session.Ref{
 			ID: session.ID(params.Parent.SessionID),
 			Identity: session.Identity{
 				InstanceID: session.InstanceID(params.Parent.InstanceID),
@@ -376,236 +322,13 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			},
 		}
 	}
-	// ProfileID is deliberately NOT set here. It is recorded below, only once
-	// the resolver has accepted it, because a local PTY has no profile and
-	// setting it up front lets a renderer attach any profile id to a local
-	// session it opens. sessions.status would then report that profile live and
-	// the connection list would draw a row as connected with nothing behind it
-	// (nocx-uxs5.4).
 
-	var sess session.Session
-	opened := false
-	// answered: a resolve step already wrote the response (no resolver
-	// wired, no target named, a sealed vault). Nothing is dialed after one.
-	answered := false
-	// PHASE ONE — resolve, under [config, session]. Store and vault reads
-	// only; both gates are released before anything is dialed (open.go).
-	err := h.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
-		// SSH session — when kind="ssh", open a remote channel instead of
-		// local PTY. Only the RESOLVE runs here.
-		if params.Kind == "ssh" {
-			var host string
-			var remote *ssh.ConnectConfig
-
-			if params.ProfileID != "" {
-				// Profile-based resolution: look up the stored profile, resolve
-				// credentials and jump hosts through the profile resolver.
-				if _, ok := h.resolver.get(); !ok {
-					resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
-					_ = respond(r, resp)
-					answered = true
-					return nil
-				}
-
-				var err error
-				host, remote, err = svc.Resolve(params.ProfileID)
-				if err != nil {
-					h.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
-					// Resolving reads the stored password, so a sealed vault surfaces
-					// here — the renderer needs the reason to offer an unlock.
-					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
-					answered = true
-					return nil
-				}
-
-				// The size is deliberately NOT set here (nocx-eidfb.1): the
-				// params carry what the client MEASURED, and the session
-				// registry is what decides the size the channel opens at.
-				// Writing it onto the ConnectConfig as well would put the
-				// renderer's number back on the path the registry's
-				// conclusion travels.
-				remote.RemoteLauncher = h.launcher
-				remote.RemoteLifecycle = h.lifecycle
-
-				h.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
-
-				cfg.Kind = session.KindRemote
-				cfg.Host = host
-				cfg.Remote = remote
-				// Recorded here and nowhere else: the resolver has just accepted this
-				// id, so the association is the backend's own conclusion rather than
-				// the renderer's claim.
-				cfg.ProfileID = params.ProfileID
-				// CredentialID from the resolver: scoped revocation matches
-				// sessions by credential. Empty for sessions with no linked
-				// credential (inline auth).
-				cfg.CredentialID = remote.CredentialID
-
-			} else if params.Host != "" {
-				// Direct host resolution: resolve through ~/.ssh/config (ssh -G)
-				// and build a minimal ConnectConfig. Used for SSH aliases from
-				// the config file — no stored profile involved.
-				if h.sshCfg == nil {
-					resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
-					_ = respond(r, resp)
-					answered = true
-					return nil
-				}
-
-				resolved, err := h.sshCfg.ResolveConfig(ctx, params.Host)
-				if err != nil {
-					h.log.Warn("SSH config resolution degraded for direct host", "host", params.Host, "error", err)
-				}
-
-				user := params.User
-				if user == "" && resolved != nil && resolved.User != "" {
-					user = resolved.User
-				}
-				port := 0
-				if resolved != nil && resolved.Port > 0 {
-					port = resolved.Port
-				}
-				remoteHost := params.Host
-				if resolved != nil && resolved.HostName != "" {
-					remoteHost = resolved.HostName
-				}
-
-				var keyFile string
-				if resolved != nil {
-					keyFile = resolved.IdentityFile
-				}
-				remote = &ssh.ConnectConfig{
-					User:    user,
-					Port:    port,
-					KeyFile: keyFile,
-					// No size: see the profile branch above — the registry
-					// decides it, and this struct carries what the caller
-					// supplied (nocx-eidfb.1).
-					RemoteLauncher:  h.launcher,
-					RemoteInstaller: h.installer,
-					RemoteLifecycle: h.lifecycle,
-				}
-
-				h.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
-
-				cfg.Kind = session.KindRemote
-				cfg.Host = remoteHost
-				cfg.Remote = remote
-				// No ProfileID — this is not a saved profile. The usage tracker
-				// does not record it.
-			} else {
-				resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
-				_ = respond(r, resp)
-				answered = true
-				return nil
-			}
-			// Shell pin (nocx-pu4.1): the open may name the far shell the
-			// launcher must target. A pin beats auto-detection — a user who
-			// knows their host runs zsh can say so, and where detection is
-			// wrong they have an override. Anything else is ignored with a
-			// warn, never honoured: detection is the safe degrade for a
-			// meaningless pin, and the launcher refuses unmapped kinds rather
-			// than guessing if one slips past.
-			if params.Shell != "" {
-				switch ssh.ShellKind(params.Shell) {
-				case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
-					remote.Shell = ssh.ShellKind(params.Shell)
-				default:
-					h.log.Warn("ignoring unknown shell pin", "profileId", params.ProfileID, "shell", params.Shell)
-				}
-			}
-		}
-		return nil
-	})
+	opened, err := h.opener.Open(ctx, spec)
 	if err != nil {
 		h.answerOpenFailure(r, req, err)
 		return
 	}
-	if answered {
-		return
-	}
-
-	// PHASE TWO — dial, on the execution lane and no domain gate. The
-	// handshake waits on the network and sometimes on a person (the password prompt),
-	// and a gate held across that wait is what refused
-	// every other pane's open with "the terminal is busy" while one tab was
-	// still connecting.
-	var hosted *HostedSessionOpen
-	err = h.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
-		var oerr error
-		if cfg.Kind == session.KindRemote && h.helper != nil {
-			var selected bool
-			var openedHosted HostedSessionOpen
-			openedHosted, selected, oerr = h.helper.OpenHosted(ctx, cfg)
-			if selected {
-				if oerr != nil {
-					return oerr
-				}
-				if openedHosted.Session == nil {
-					return errors.New("helper session opener returned no session")
-				}
-				sess = openedHosted.Session
-				hosted = &openedHosted
-				opened = true
-				return nil
-			}
-			if oerr != nil {
-				return oerr
-			}
-		}
-		sess, oerr = svc.Open(ctx, cfg)
-		if oerr != nil {
-			return oerr
-		}
-		opened = true
-		return nil
-	})
-	if err != nil {
-		h.answerOpenFailure(r, req, err)
-		return
-	}
-	if !opened {
-		// The callback answered a refusal already (missing resolver,
-		// missing target); nothing further to do.
-		return
-	}
-
-	// The helper's authoritative id and binding facts are one synchronous
-	// result. Persist them before the session enters connState or sends its
-	// open ack, so reconciliation can never observe a live helper session
-	// without the generation that qualifies its id space. A failed write
-	// refuses the open and closes the helper session rather than exposing an
-	// unbound session that no inventory may safely judge.
-	if hosted != nil && h.ledger != nil {
-		if err := h.ledger.CreateSession(ctx, content.Session{
-			ID:          string(sess.ID()),
-			WorkspaceID: workspaceID,
-			Host:        hosted.Host,
-			Account:     hosted.Account,
-			Generation:  hosted.Generation,
-			// The route back, written in the same statement as the binding
-			// it completes (nocx-k6p18.30). The pane and the profile come
-			// off the config the registry has just accepted, never off the
-			// params: a renderer may name any pane it likes, and the
-			// session is what records which one it actually became the pipe
-			// of. A direct-host open carries no profile, writes none, and
-			// is therefore a session a later coordinator cannot take back —
-			// which is stated by the empty field rather than by a guess.
-			PaneID:        cfg.PaneID,
-			ProfileID:     cfg.ProfileID,
-			HelperCommand: hosted.HelperCommand,
-			Fingerprint:   hosted.Fingerprint,
-		}); err != nil {
-			if hosted != nil && hosted.AbortLifecycle != nil {
-				hosted.AbortLifecycle()
-			}
-			_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
-				return svc.Close(sess.ID())
-			})
-			h.answerOpenFailure(r, req, err)
-			return
-		}
-	}
+	sess, cfg, hosted, workspaceID := opened.Session, opened.Config, opened.Hosted, opened.WorkspaceID
 
 	state.add(sess)
 	if hosted != nil && hosted.LifecycleLane != "" {
@@ -622,9 +345,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			hosted.AbortLifecycle()
 		}
 		state.remove(sess.ID())
-		_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
-			return svc.Close(sess.ID())
-		})
+		h.opener.close(ctx, sess.ID())
 		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
 		_ = respond(r, resp)
 		return
@@ -1208,6 +929,20 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	if s.contentDB != nil {
 		sessionLedger = s.contentDB.Ledger()
 	}
+	// The lane registrar is taken by assertion because not every machine
+	// handed to these handlers has one — the test doubles do not — and a
+	// helper-hosted open is the only path that produces a lane at all.
+	laneRegistrar, _ := any(s).(lifecycleLaneRegistrar)
+	// One opener per server, not one per request: it holds no per-connection
+	// state, and the backend's own callers reach the same instance
+	// (nocx-dkawo.6).
+	s.opener = &sessionOpener{
+		op: openOp, resolver: s.resolver, sshCfg: s.sshConfigResolver,
+		launcher: s.remoteLauncher, installer: s.remoteInstaller,
+		lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
+		ledger: sessionLedger, helper: s.helperSessionOpener,
+		laneRegistrar: laneRegistrar, log: s.log,
+	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside
 	// the per-session factory the other methods use: the list is about every
@@ -1229,12 +964,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{
-				op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver,
-				launcher: s.remoteLauncher, installer: s.remoteInstaller,
-				lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
-				ledger: sessionLedger, helper: s.helperSessionOpener, log: s.log,
-			}
+			h := openHandlers{opener: s.opener, sess: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

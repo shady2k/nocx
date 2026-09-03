@@ -735,3 +735,53 @@ func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) 
 		})
 	}
 }
+
+// ── one evaluator, one typed cause (nocx-t6h2u) ──
+//
+// The defect these tests exist for: two containment paths answered "the call
+// named a resource outside the row scopes" differently — the command path
+// asked (DecisionForInvocation), the declared path refused
+// (internal/assistant/kernel.go, RefusedOutOfScope) — and EffectRow's own doc
+// comment stated refusal for both. The split is not between the two paths; it
+// is between two CAUSES, and one evaluator now reports which.
+
+// catInvocation is what internal/assistant's parser produces for
+// `cat <path>`: one resolved resource, the path, under ResourceRead. Built
+// here for the same reason curlInvocation is — parseCanonicalInvocation is
+// unexported and internal/content may not reach into the assistant.
+func catInvocation(path string) content.Invocation {
+	return content.Invocation{
+		Commands: [][]string{{"cat", path}},
+		Parsed:   true,
+		Resources: content.ResourceReport{
+			Resources: []content.Resource{{Path: path, Verb: content.ResourceRead}},
+		},
+	}
+}
+
+func observePermitting(scopes ...content.GrantScope) content.EffectPolicy {
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{Decision: content.DecisionPermit, Scopes: scopes}
+	return p
+}
+
+func TestOutOfScopeCauseSeparatesAQuestionFromARefusal(t *testing.T) {
+	policy := observePermitting(content.GrantScope{Kind: content.ResourcePath, ID: "/workspace"})
+
+	editable := policy.EvaluateInvocation(content.EffectObserve, catInvocation("/etc/hosts"), nil)
+	if editable.Decision != content.DecisionAsk || editable.Cause != content.OutOfScopeRowScope {
+		t.Errorf("a path outside an editable row scope gave %+v; it must be a question", editable)
+	}
+	if editable.Resource.ID != "/etc/hosts" || editable.Resource.Kind != content.ResourcePath {
+		t.Errorf("the verdict does not name what fell outside: %+v", editable.Resource)
+	}
+
+	fenced := policy.EvaluateInvocation(content.EffectObserve, catInvocation("/etc/hosts"),
+		[]content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}})
+	if fenced.Decision != content.DecisionRefuse || fenced.Cause != content.OutOfScopeFence {
+		t.Errorf("a path outside the fence gave %+v; approval cannot make it executable", fenced)
+	}
+	if fenced.Resource.ID != "/etc/hosts" {
+		t.Errorf("the fence refusal does not name what fell outside: %+v", fenced.Resource)
+	}
+}

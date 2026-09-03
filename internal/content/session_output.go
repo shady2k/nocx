@@ -49,6 +49,11 @@ package content
 //	          recordSessionOutput → Append. It is the seam the whole bead is
 //	          about, and the transport test that watches a detached session
 //	          outlive the ring is its end-to-end proof.
+//	Skip    — WIRED as of nocx-k6p18.2. main → App.Run → … → handleOpen →
+//	          pumpToRing → recordSessionOutput → Skip, confirmed with
+//	          `deadcode -tags gtk3 -whylive`. The call site is the one branch
+//	          that used to end the recording: the recorder finding its cursor
+//	          behind the ring's oldest byte.
 //	Stance  — WIRED. history.status reads it on every render of the History
 //	          settings section, which is where the degrade is stated.
 //	Read    — WIRED as of nocx-22k1c.2. main → App.Run → … → sessionSpecs →
@@ -68,10 +73,21 @@ import (
 )
 
 // ErrSessionOutputDiscontinuous is returned when an Append does not begin
-// exactly where the last one ended. The recorder advances its cursor by what
-// it wrote, so a gap here is a caller defect and not a fact about the
-// stream — accepting it would put a hole in a recording whose whole value is
-// that its offsets line up with what the client received.
+// exactly where the last one ended, or when a Skip resumes BEHIND the
+// cursor. The recorder advances its cursor by what it wrote, so accepting
+// either would put a hole in a recording whose whole value is that its
+// offsets line up with what the client received.
+//
+// AMENDED, not contradicted (nocx-k6p18.2). This used to say that a gap is
+// "a caller defect and not a fact about the stream", full stop, and that was
+// right while a recorder could not be absent: the only way to arrive at an
+// offset past the cursor was to have had the bytes in between and to have
+// failed to hand them over. Once a coordinator can be REPLACED under a live
+// session, a range can exist that nobody was there to offer. So: a gap is a
+// caller defect WHEN THE CALLER HAD THE BYTES — which is what an Append
+// arriving past the cursor claims, and what this error still refuses — and a
+// fact about the stream when nobody did, which is what Skip is for and says
+// out loud, with a reason.
 var ErrSessionOutputDiscontinuous = errors.New("content: session output: append does not continue the recording")
 
 // SessionOutputStance is the closed vocabulary for whether output produced
@@ -133,12 +149,21 @@ type SessionOutputRecording struct {
 	SessionID string
 	// Runs are in stream order and never overlap.
 	Runs []SessionOutputRun
-	// Gaps are the byte ranges the cap dropped, in the ledger's own Gap
-	// shape — so "what is missing" is said the same way here as on an
-	// artifact.
+	// Gaps are the byte ranges this recording does not hold, in stream
+	// order and never overlapping, in the ledger's own Gap shape — so "what
+	// is missing" is said the same way here as on an artifact. Each carries
+	// its own reason: GapReasonCap for a range the bound evicted,
+	// GapReasonUnrecorded for one nobody was there to offer, and
+	// GapReasonHostWindow for one the execution host's own window reclaimed
+	// before it ever crossed the wire. A range cannot be more than one of
+	// them, and they are never merged into one span, because they are
+	// different answers to "who had these bytes".
 	Gaps []Gap
-	// Truncated is `cap` once anything has been dropped, and nil while the
-	// recording is whole.
+	// Truncated is the PRIMARY reason the recording is not whole, and nil
+	// while it is. `cap` whenever the bound has evicted anything — that is
+	// the one a user can act on, since the knob that dropped those bytes is
+	// the knob that would have kept them — and `gap` for a recording holed
+	// only by ranges nobody recorded, where no bound acted at all.
 	Truncated *Truncation
 	// Bytes is how much is currently kept across every run.
 	Bytes uint64
@@ -151,21 +176,50 @@ type SessionOutputRecording struct {
 // SessionOutputRepository owns session_output and session_output_chunks. It
 // is the ONE writer of both.
 //
-// Lifetime: a recording lives as long as the pipe it records. A session is
-// server-authoritative, lives inside one backend process and cannot outlive
-// it (AD-7, D5), so at store-open no recording names anything live and the
-// startup sweep drops them all — the same sentence dropDeadSessions already
-// makes about `sessions`, and the same one owner making it. That is why
-// these rows are NOT in the budget sweep: its unit is `artifacts.byte_len`
-// ordered by `ingest_seq`, and a session recording has neither. Giving it
-// one would mean a second meaning for that column or a second ordering
-// inside one sweep.
+// Lifetime, and it is longer than it was (nocx-k6p18.5). It used to end at
+// the next store-open: a session lived inside one backend process and could
+// not outlive it (AD-7, D5), so at store-open no recording named anything live
+// and the startup sweep dropped them all. The helper owns the host now, so a
+// recording found at open may be of a session that is still producing bytes,
+// and deleting it because the READER went away would throw out exactly what
+// the promise exists to keep. A recording therefore lives from its first
+// append until its session is reconciled ABSENT — a reachable generation was
+// asked and does not hold it — or until the age bound takes one nobody could
+// ever ask about (reconcile.go).
+//
+// These rows are still NOT in the budget sweep: its unit is
+// `artifacts.byte_len` ordered by `ingest_seq`, and a session recording has
+// neither. Giving it one would mean a second meaning for that column or a
+// second ordering inside one sweep. What changed is that "the bound on a dead
+// one" is no longer a line inside `Open` — it is the absent verdict and the
+// retention age, which is why removing the first without adding the second
+// would have been unshippable.
 type SessionOutputRepository interface {
 	// Append records bytes at their stream offset, evicting the oldest
 	// non-head bytes if the recording would exceed the per-command cap. It
 	// never fails for being over the cap — exceeding a bound is what the
 	// bound is for.
 	Append(ctx context.Context, in SessionOutputAppend) (SessionOutputResult, error)
+	// Skip advances the recording's produced cursor to resumeAt across a
+	// range that was NEVER OFFERED — nobody was recording it — and records
+	// that range as a Gap carrying `reason`. It is the operation that makes
+	// an absent recorder a fact about the stream rather than the end of the
+	// recording (nocx-k6p18.2, level-1 D6).
+	//
+	// THE CLAUSE THAT MATTERS: the recording is APPENDABLE afterwards. The
+	// interval, both ends named — from the Skip that returns Kept until the
+	// recording is deleted, every Append at or after resumeAt is accepted
+	// exactly as one before the hole would have been. Without it one missed
+	// second costs the whole session, because the recorder in
+	// internal/transport stops for good once it loses its place.
+	//
+	// resumeAt at the cursor is a no-op and not a zero-width gap, so a
+	// caller may retry a Skip whose error it could not classify. resumeAt
+	// BEHIND the cursor is ErrSessionOutputDiscontinuous: the caller is
+	// claiming a hole over bytes the recording holds. An empty reason is
+	// refused — an unexplained hole is what makes a reader guess, and the
+	// guess it used to make was the cap.
+	Skip(ctx context.Context, sessionID string, resumeAt uint64, reason string) (SessionOutputResult, error)
 	// Read returns everything kept for a session, in stream order. An
 	// unknown session is an empty recording and not an error: nothing was
 	// produced, or all of it was dropped, and neither is a fault.

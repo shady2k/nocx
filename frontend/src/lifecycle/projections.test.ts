@@ -374,6 +374,25 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
       'bind:att-reused',
     ])
   })
+  it('does not abandon pending work in a fresh session after a previous domain ended', () => {
+    const { kernel, ledger, blocks, projections } = makeEnv()
+    ledger.open('first session', '/', '', () => undefined, 'shell')
+    kernel.applyFact(promptReady('first-domain'))
+    kernel.applyFact(lostF())
+    kernel.applyFact(nativeFact())
+    projections.reset()
+
+    // A replacement session uses a fresh domain id. The old session's ended
+    // count must not be mistaken for an ending in this session.
+    kernel.reset()
+    ledger.open('second session', '/', '', () => undefined, 'shell')
+    kernel.applyFact(promptReady('second-domain'))
+
+    expect(
+      blocks.events,
+      'a fresh session must not abandon its pending command because an old domain ended',
+    ).toEqual(['abandon-pending'])
+  })
 })
 
 function nativeFact(): LifecycleFact {

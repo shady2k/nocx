@@ -19,6 +19,7 @@ import (
 	"io"
 	iofs "io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -35,13 +36,75 @@ import (
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
+	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 )
+
+func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
+	peer, peerRemote := net.Pipe()
+	carrier, carrierRemote := net.Pipe()
+	t.Cleanup(func() {
+		_ = peer.Close()
+		_ = peerRemote.Close()
+		_ = carrier.Close()
+		_ = carrierRemote.Close()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for _, conn := range []net.Conn{peer, peerRemote, carrier, carrierRemote} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bridgeLifecycle(peer, carrier)
+
+	const outbound = "opaque lifecycle bytes"
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := peerRemote.Write([]byte(outbound))
+		writeDone <- err
+	}()
+	got := make([]byte, len(outbound))
+	if _, err := io.ReadFull(carrierRemote, got); err != nil {
+		t.Fatalf("read toward carrier: %v", err)
+	}
+	if string(got) != outbound {
+		t.Fatalf("carrier got %q, want %q", got, outbound)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write toward carrier: %v", err)
+	}
+
+	const inbound = "opaque response bytes"
+	writeDone = make(chan error, 1)
+	go func() {
+		_, err := carrierRemote.Write([]byte(inbound))
+		writeDone <- err
+	}()
+	got = make([]byte, len(inbound))
+	if _, err := io.ReadFull(peerRemote, got); err != nil {
+		t.Fatalf("read toward peer: %v", err)
+	}
+	if string(got) != inbound {
+		t.Fatalf("peer got %q, want %q", got, inbound)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write toward peer: %v", err)
+	}
+
+	_ = carrierRemote.Close()
+	buf := make([]byte, 1)
+	if _, err := peerRemote.Read(buf); err == nil {
+		t.Fatal("peer remained open after carrier closed")
+	}
+}
 
 // fixtureRepo builds a real repository with a commit, a modified file and
 // an untracked file, so a successful open is non-trivial. The recipe is
@@ -106,8 +169,9 @@ type fakeLaneConn struct {
 
 	startErr error
 
-	mu     sync.Mutex
-	closed int
+	mu      sync.Mutex
+	closed  int
+	started string
 }
 
 func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
@@ -131,7 +195,12 @@ func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLane
 func (f *fakeLaneConn) Stdin() io.WriteCloser { return f.stdin }
 func (f *fakeLaneConn) Stdout() io.Reader     { return f.stdout }
 func (f *fakeLaneConn) Stderr() io.Reader     { return f.stderr }
-func (f *fakeLaneConn) Start(string) error    { return f.startErr }
+func (f *fakeLaneConn) Start(command string) error {
+	f.mu.Lock()
+	f.started = command
+	f.mu.Unlock()
+	return f.startErr
+}
 func (f *fakeLaneConn) Wait() (int, error)    { <-f.exited; return f.exitCode, nil }
 func (f *fakeLaneConn) Done() <-chan struct{} { return make(chan struct{}) }
 func (f *fakeLaneConn) LostErr() error        { return nil }
@@ -141,6 +210,15 @@ func (f *fakeLaneConn) Close() error {
 	f.closed++
 	f.mu.Unlock()
 	return f.stdin.Close()
+}
+
+// startedCommand is what the exec lane was asked to run: the whole point of
+// the remote half of D11 is that it is the BRIDGE and not the helper serving
+// over this channel.
+func (f *fakeLaneConn) startedCommand() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
 }
 
 func (f *fakeLaneConn) closeCount() int {
@@ -159,6 +237,11 @@ type fakeLaneProvider struct {
 	peer     func(in io.Reader, out io.Writer) int
 	startErr error
 
+	laneErr error // when set, every HelperConn fails: an unreachable host
+	// laneBlock, when set, parks every HelperConn on it (or on the caller's
+	// context): a host that accepts nothing and refuses nothing, which is what
+	// a machine behind a black-holing firewall looks like.
+	laneBlock   chan struct{}
 	uname       string // the probe's canned answer; default "Linux x86_64"
 	home        string // the install lease's home; default "/home/u"
 	probeFail   error  // when set, DiscoveryConn fails
@@ -170,7 +253,17 @@ type fakeLaneProvider struct {
 	install *fakeInstallConn
 }
 
-func (p *fakeLaneProvider) HelperConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
+func (p *fakeLaneProvider) HelperConn(ctx context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
+	if p.laneErr != nil {
+		return nil, p.laneErr
+	}
+	if p.laneBlock != nil {
+		select {
+		case <-p.laneBlock:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	c := newFakeLaneConn(p.peer)
 	c.startErr = p.startErr
 	p.mu.Lock()
@@ -428,6 +521,25 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger())
 		h.Register(hostsvc.New(localgit.NewFactory()))
+		h.Register(helpersession.New(helpersession.Options{
+			Generation: proto.GenerationID(contentHash),
+		}))
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	}
+}
+
+// helperPeerWithoutSession serves the git surface but omits the session
+// service. Uninstall must refuse when this daemon cannot enumerate its live
+// sessions; treating the unknown service as an empty inventory would remove a
+// live helper executable without first closing its process.
+func helperPeerWithoutSession() func(in io.Reader, out io.Writer) int {
+	contentHash := syntheticArtifactHash
+	return func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, contentHash, "instance-1", discardLogger())
+		h.Register(hostsvc.New(localgit.NewFactory()))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}
@@ -556,11 +668,8 @@ func makeSyntheticArtifact() (compressed []byte, contentHash string) {
 }
 
 // syntheticSource is the app tests' ArtifactSource: it serves the synthetic
-// bytes built above. The selection under test is the composition root, so
-// it installs from deploy.DefaultSource; these tests substitute the
-// synthetic source for the duration (DefaultSource is a variable precisely
-// so the composition root can substitute a source — the readFileFn shape)
-// and restore it via t.Cleanup.
+// bytes built above. The selection under test is the composition root, which
+// receives this source explicitly rather than mutating deploy package state.
 type syntheticSource struct{}
 
 func (syntheticSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
@@ -568,20 +677,16 @@ func (syntheticSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
 }
 
 // refusingSource is an ArtifactSource that answers ErrArtifactsNotBuilt —
-// the state of a fresh checkout before `make helpers` — for workspaces
-// where the embedded binaries ARE present and the real source would not
-// produce the refusal.
+// the state of a fresh checkout before `make helpers`.
 type refusingSource struct{}
 
 func (refusingSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
-	return nil, "", deploy.ErrArtifactsNotBuilt
+	return nil, "", helperartifacts.ErrArtifactsNotBuilt
 }
 
-func stubArtifacts(t *testing.T) {
+func stubArtifacts(t *testing.T) deploy.ArtifactSource {
 	t.Helper()
-	orig := deploy.DefaultSource
-	deploy.DefaultSource = syntheticSource{}
-	t.Cleanup(func() { deploy.DefaultSource = orig })
+	return syntheticSource{}
 }
 
 // testConsentStores builds the consent store (pre-granted for the default
@@ -598,9 +703,9 @@ func testConsentStores(t *testing.T) (*consent.Store, *consent.InstallStore) {
 
 func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitFactoryFor {
 	t.Helper()
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 	return factory
 }
 
@@ -646,14 +751,13 @@ func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
 // is exercised through the stub, so the test asserts identically in both
 // worlds and never depends on which one it is in.
 func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
-	orig := deploy.DefaultSource
-	if _, _, err := orig.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, deploy.ErrArtifactsNotBuilt) {
-		deploy.DefaultSource = refusingSource{}
+	source := helperartifacts.DefaultSource
+	if _, _, err := source.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
+		source = refusingSource{}
 	}
-	t.Cleanup(func() { deploy.DefaultSource = orig })
 
 	var buf bytes.Buffer
-	sel, _ := helperGitFactory(&fakeLaneProvider{}, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	sel, _ := helperGitFactory(&fakeLaneProvider{}, source, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection with no artifacts = %+v, want the empty refusal", got)
 	}
@@ -671,7 +775,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel, _ := helperGitFactory(provider, nil, nil, discardLogger())
+	sel, _ := helperGitFactory(provider, helperartifacts.DefaultSource, nil, nil, discardLogger())
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
@@ -779,7 +883,7 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 // channels by the host-key fingerprint that keys consent.
 func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	if err := store.Grant("SHA256:machine-a"); err != nil {
 		t.Fatalf("grant a: %v", err)
@@ -788,7 +892,7 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 		t.Fatalf("grant b: %v", err)
 	}
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	factory, reg := helperGitFactory(provider, store, installs, discardLogger())
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
 	dir := fixtureRepo(t)
 
 	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
@@ -805,7 +909,9 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 		t.Fatalf("two machines brought up %d helpers, want 2", got)
 	}
 
-	reg.CloseHelpersFor("SHA256:machine-a")
+	if closeErr := reg.CloseHelpersFor(context.Background(), "SHA256:machine-a"); closeErr != nil {
+		t.Fatalf("close machine-a helper: %v", closeErr)
+	}
 
 	// The machine named by the fingerprint lost its helper channel; the
 	// other machine's helper is untouched.
@@ -820,11 +926,75 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	if _, ok := reg.hosts["s1"]; ok {
 		t.Fatal("the closed helper is still registered")
 	}
+	if _, _, openErr := selA.Factory.Open(context.Background(), dir); openErr == nil || openErr.Error() != "helper is closing for uninstall" {
+		t.Fatalf("open during uninstall gate: got %v, want helper is closing for uninstall", openErr)
+	}
+	reg.FinishHelpersFor("SHA256:machine-a")
+	retryRepo, retryOutcome, err := selA.Factory.Open(context.Background(), dir)
+	if err != nil || retryOutcome.State != git.OpenOK {
+		t.Fatalf("open after uninstall gate: %v %+v", err, retryOutcome)
+	}
+	_ = retryRepo.Close()
 	_ = repoB.Close()
 	_ = repoA.Close()
 
 	// An unknown fingerprint closes nothing and is not an error.
-	reg.CloseHelpersFor("SHA256:nobody")
+	if err := reg.CloseHelpersFor(context.Background(), "SHA256:nobody"); err != nil {
+		t.Fatalf("close unknown helper: %v", err)
+	}
+}
+
+// TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated protects
+// uninstall's safety boundary: an unknown session service is not an empty
+// inventory. Every affected helper must be unfrozen and remain registered so
+// the operation can be retried after the daemon is repaired.
+func TestHelperCloseHelpersForRefusesWhenSessionsCannotBeEnumerated(t *testing.T) {
+	const fingerprint = "SHA256:test-host"
+	provider := &fakeLaneProvider{peer: helperPeerWithoutSession()}
+	source := stubArtifacts(t)
+	store, installs := testConsentStores(t)
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger())
+	dir := fixtureRepo(t)
+
+	selectionA := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selectionB := factory(&fakeRemoteSession{id: "s2", host: "host.example"})
+	repoA, outcome, err := selectionA.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open A: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repoA.Close() })
+	repoB, outcome, err := selectionB.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open B: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repoB.Close() })
+
+	if got := len(reg.hosts); got != 2 {
+		t.Fatalf("helper registry before uninstall = %d entries, want 2", got)
+	}
+	if err := reg.CloseHelpersFor(context.Background(), fingerprint); err == nil {
+		t.Fatal("uninstall continued after the daemon could not list its sessions, so a live session's executable was about to be deleted")
+	}
+	if reg.isClosing(fingerprint) {
+		t.Fatal("failed uninstall left the machine in the closing state")
+	}
+	for _, id := range []session.ID{"s1", "s2"} {
+		h, ok := reg.hosts[id]
+		if !ok {
+			t.Fatalf("failed uninstall forgot helper %q, so retry could not reach it", id)
+		}
+		h.mu.Lock()
+		closing := h.closing
+		h.mu.Unlock()
+		if closing {
+			t.Fatalf("failed uninstall left helper %q frozen against retry", id)
+		}
+	}
+	for i := range 2 {
+		if got := provider.lane(i).closeCount(); got != 0 {
+			t.Fatalf("failed uninstall closed helper lane %d %d times, want 0", i, got)
+		}
+	}
 }
 
 // TestHelperDialFactory_RefusingOpenClosesTheLane: an open that answers
@@ -887,10 +1057,10 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 // acquired, no platform probe is even needed to decide that.
 func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
 	if !selection.ConsentRequired {
@@ -913,10 +1083,10 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 // git.open's not-available error carries it.
 func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
 	if selection.Factory != nil || selection.ConsentRequired {
@@ -935,10 +1105,10 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 // the selection installs and the observation store lists the machine.
 func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -965,10 +1135,10 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 // have refused every user who never opened a connection's settings.
 func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
-	stubArtifacts(t)
+	source := stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, source, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
 	if selection.ConsentRequired {
@@ -987,5 +1157,150 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
 		t.Fatalf("explicit script wrote %d uploads, want 0", provider.install.uploadCount())
+	}
+}
+
+// TestTheExecLaneRunsTheBridgeForTheGenerationInstalled is the remote half of
+// the level-1 design's D11, asserted where the coordinator actually decides
+// it: what goes down the pty-less exec lane is `nocx-helper bridge
+// <generation>`, not the helper serving over that channel's stdin and stdout.
+//
+// The distinction is the whole bead. With the helper serving the channel, its
+// sessions died with the channel; with the bridge, the channel reaches an
+// endpoint on the host that outlives it — which is what lets a session survive
+// a coordinator being replaced (D1). The generation is the content hash the
+// installer wrote, so the bridge can never reach a different generation's
+// sessions while two coexist on one host (D4).
+func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	sel := configuredSelector(t, provider)
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory")
+	}
+	repo, outcome, err := selection.Factory.Open(context.Background(), fixtureRepo(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("open outcome = %s, want ok", outcome.State)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	started := provider.lane(0).startedCommand()
+	fields := strings.Fields(started)
+	if len(fields) != 3 || fields[1] != endpoint.BridgeCommand {
+		t.Fatalf("the exec lane ran %q, want <path> %s <generation>: it must run the bridge, "+
+			"not a helper serving this channel", started, endpoint.BridgeCommand)
+	}
+	// The generation the bridge was handed is a content hash. Asserted
+	// against the ERROR CLASS, and with a short directory, because
+	// endpoint.Path answers two questions in one call: socketName validates
+	// the generation, and Path then measures the JOINED path against the
+	// platform's sun_path bound. This passed t.TempDir(), which on macOS is a
+	// ~120-character /var/folders path and under `make ci-mac` a disposable
+	// root — so the LENGTH answer arrived wearing the generation answer's
+	// message and the test reported "not a content hash" about a temporary
+	// directory it was never about (nocx-k6p18.4). The product cannot reach
+	// that state: endpoint.Dir derives from $HOME and the socket lives under
+	// ~/.nocx/run. Both halves of the fix are deliberate — the short
+	// directory means only the generation can fail this call today, and the
+	// error class means a third failure mode added to Path tomorrow still
+	// cannot be read as this one.
+	const genCheckDir = "/tmp"
+	if _, err := endpoint.Path(genCheckDir, proto.GenerationID(fields[2])); errors.Is(err, endpoint.ErrBadGeneration) {
+		t.Fatalf("the generation the bridge was given is not a content hash: %v", err)
+	}
+	// And the negative, in place, so the line above cannot pass by being
+	// unfalsifiable: the same call must REJECT a generation that is not one.
+	for _, notAHash := range []string{"", "short", "not-hex-at-all-not-hex-at-all"} {
+		if _, err := endpoint.Path(genCheckDir, proto.GenerationID(notAHash)); !errors.Is(err, endpoint.ErrBadGeneration) {
+			t.Fatalf("endpoint.Path(%q) = %v, want ErrBadGeneration — the assertion above "+
+				"means nothing unless this check has teeth", notAHash, err)
+		}
+	}
+	// And it is the generation that was INSTALLED, which is what the dial then
+	// verifies the hello-ok's content hash against (D21).
+	if !strings.HasSuffix(path.Dir(fields[0]), "-"+fields[2]) {
+		t.Fatalf("the bridge names generation %q but the binary was installed at %q", fields[2], fields[0])
+	}
+}
+
+// TestHelperSessionsRedialsAfterCarrierLoss proves that inventory remains
+// available when the SSH carrier dies but the helper daemon still exists.
+// The binding keeps the hostHelper registered; only its client is lost.
+func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	daemon := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(syntheticArtifactHash),
+		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}),
+		Log:        logger,
+	})
+	t.Cleanup(daemon.Close)
+	peer := func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger())
+		h.Register(hostsvc.New(localgit.NewFactory()))
+		h.Register(daemon)
+		release := daemon.Bind(h)
+		defer release()
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	}
+	provider := &fakeLaneProvider{peer: peer}
+	factory := configuredSelector(t, provider)
+	sel := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
+	dir := fixtureRepo(t)
+	repo, outcome, err := sel.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	selectedFactory, ok := sel.Factory.(*sessionFactory)
+	if !ok {
+		t.Fatal("selection factory has unexpected type")
+	}
+	reg := selectedFactory.reg
+	h := reg.hosts["s1"]
+	h.mu.Lock()
+	carrier := h.client
+	h.mu.Unlock()
+	if carrier == nil {
+		t.Fatal("open did not retain a helper client")
+	}
+	var spawned proto.SpawnResult
+	callErr := carrier.Call(context.Background(), proto.ServiceSession, proto.OpSpawn,
+		proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24}, &spawned)
+	if callErr != nil {
+		t.Fatalf("spawn daemon session: %v", callErr)
+	}
+	closeErr := carrier.Close()
+	if closeErr != nil {
+		t.Fatalf("close carrier: %v", closeErr)
+	}
+	select {
+	case <-carrier.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("closed carrier did not report loss")
+	}
+
+	entries, err := reg.sessions(context.Background())
+	if err != nil {
+		t.Fatalf("inventory after carrier loss: %v", err)
+	}
+	if len(entries) != 1 || entries[0].HostSessionID.Session != spawned.Entry.Session.Session {
+		t.Fatalf("inventory after carrier loss = %+v, want daemon session %q",
+			entries, spawned.Entry.Session.Session)
+	}
+	if got := provider.laneCount(); got != 2 {
+		t.Fatalf("inventory used %d helper lanes, want 2 after redial", got)
+	}
+	if err := reg.CloseHelpersFor(context.Background(), "SHA256:test-host"); err != nil {
+		t.Fatalf("uninstall after carrier loss: %v", err)
+	}
+	if _, ok := reg.hosts["s1"]; ok {
+		t.Fatal("uninstall left the carrier-loss helper registered")
 	}
 }

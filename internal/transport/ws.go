@@ -568,6 +568,10 @@ type WSServer struct {
 	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+	// hostSessionInventory answers what active helper generations hold. It is
+	// nil when the helper plane is not wired, which is a visible unavailable
+	// method rather than a fabricated empty answer.
+	hostSessionInventory HostSessionInventory
 
 	// historyStatus is the raise/clear state of durable command history:
 	// whether it is running and, when it is not, why. It answers
@@ -606,6 +610,9 @@ type WSServer struct {
 	// and Refusal, git.open answers the not-available error for that
 	// session.
 	gitHelperFor GitFactoryFor
+	// helperSessionOpener selects the execution-host-owned PTY for remote
+	// opens when the existing helper resolver permits it.
+	helperSessionOpener HelperSessionOpener
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -1292,6 +1299,73 @@ type GitOpenSelection struct {
 // available for this host, and may it be used" (the remote-helper design).
 // ConsentRequired and Refusal answer their states instead of opening; a
 // selection with none of the three answers the not-available error.
+
+// HostedSessionOpen is the synchronous result of selecting a helper-owned
+// session. Host, Account and Generation are facts used by later projections;
+// Session carries the helper-minted authoritative id.
+type HostedSessionOpen struct {
+	Session    session.Session
+	Host       string
+	Account    string
+	Generation string
+	// HelperCommand is the path of the helper binary on the execution host
+	// that the bridge execs. It rides here because it is learned by the
+	// install, at open, and it is the one part of the route back that no
+	// later reader can re-derive without writing to the host again
+	// (nocx-k6p18.30): re-deriving it means an install pass at startup, and
+	// a startup pass that writes to somebody's machine to answer a question
+	// about a session it may not even still have is the wrong trade.
+	HelperCommand string
+	// Fingerprint is the execution machine's host public-key fingerprint —
+	// the consent key the helper selection already decided on (D8). It rides
+	// here so the durable binding can record which machine's consent this
+	// session stands on, and so a later re-adoption re-asks that decision
+	// instead of assuming it.
+	Fingerprint    string
+	LifecycleLane  lifecycle.LaneID
+	StartLifecycle func()
+	AbortLifecycle func()
+	// IntegrationShell, IntegrationStatus and IntegrationReason are what the
+	// opener already knows about this session's shell integration, for the
+	// axis session.integrationChanged renders (nocx-k6p18.31).
+	//
+	// They are carried only by an opener that has no other way to say it. The
+	// ORDINARY open does not fill them in and must not: a remote session's
+	// launch-time refusal is the ssh channel's own answer and
+	// registerRemoteIntegration reads it there, which is the one owner of
+	// that question. A RE-ADOPTION has no ssh channel and no launch — it
+	// attached to a shell that was started by a process that no longer
+	// exists — so the only thing that knows whether its lifecycle channel
+	// came back is the pass that tried to bring it back.
+	//
+	// An empty status is not "unknown", it is "do not register": absence on
+	// this axis is how "conventional by design" is expressed, and a session
+	// with nothing to say must go on saying nothing.
+	IntegrationShell  string
+	IntegrationStatus string
+	IntegrationReason ssh.RefusalReason
+	// ObserveOutputHoles installs the coordinator's handler for stretches of
+	// this session's output that never crossed the wire — the execution
+	// host's bounded window reclaimed them before this machine could receive
+	// them (AD-9 on the helper's side, nocx-k6p18.25). Nil for an opener
+	// with nothing to report.
+	//
+	// It is a REGISTRATION and not a value because the hole has a position
+	// and the position is only known later, in stream order: the handler is
+	// called from the goroutine that reads the session, between the last
+	// byte before the hole and the first byte after it, which is what lets
+	// the ring place it at an offset that is actually the hole's.
+	ObserveOutputHoles func(func(lost uint64, reason string))
+}
+
+type HelperSessionOpener interface {
+	OpenHosted(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+}
+
+func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {
+	return func(s *WSServer) { s.helperSessionOpener = opener }
+}
+
 // It must be side-effect-free: git.open consults it twice (the handler's
 // refusal decision, then the open), and the two calls must agree.
 type GitFactoryFor func(sess session.Session) GitOpenSelection
@@ -1489,9 +1563,14 @@ func (s *WSServer) buildControlPlane() {
 	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
+	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, whenAvailable(
+		s.hostSessionInventorySpecs(inventorySub)[0],
+		func() bool { return s.hostSessionInventory != nil },
+		"method not found: helper session inventory not wired"))
 	specs = append(specs, s.signalSpecs(lane, gates.session)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
@@ -1808,6 +1887,15 @@ func (s *WSServer) getRx(id session.ID) *sessionRx {
 }
 
 func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
+	return s.getOrCreateRxAt(id, 0)
+}
+
+// getOrCreateRxAt is getOrCreateRx for a session whose stream does not start
+// at zero — one taken back from a helper that outlived the previous
+// coordinator (nocx-k6p18.30). `base` is ignored for a receiver that already
+// exists: the ring is the session's, not the caller's, and a second caller
+// naming a different origin for one stream is a bug rather than a rebase.
+func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
 
@@ -1818,7 +1906,7 @@ func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
 	if rx, ok := s.rx[id]; ok {
 		return rx
 	}
-	rx := &sessionRx{ring: newOutputRing()}
+	rx := &sessionRx{ring: newOutputRingAt(base)}
 	s.rx[id] = rx
 	return rx
 }
@@ -2644,6 +2732,21 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// detachSession drops only the named connection's attachment. It does not
+// close the registry session, ring, resize lane, or durable bindings.
+func (s *WSServer) detachSession(sid session.ID, sess session.Session, wconn *wsConn, state *connState) {
+	rx := s.getRx(sid)
+	if rx == nil {
+		state.remove(sid)
+		return
+	}
+	if rx.clearSubscriber(wconn) {
+		s.takeSize(sid, sess, session.NoClient())
+	}
+	rx.ring.wake()
+	state.remove(sid)
+}
+
 func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState, readErr chan<- error) {
 	defer func() { readErr <- nil }()
 
@@ -3075,7 +3178,29 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		if len(pending) == 0 {
-			data, from, needsReset := ring.snapshot(pos)
+			data, from, needsReset, hole := ring.snapshot(pos)
+			if hole != nil {
+				// A stretch that never reached this machine: the execution
+				// host's window took it before the coordinator could carry
+				// it across (nocx-k6p18.25). There is nothing to send, so
+				// the pump steps over it and goes on — the bytes on the far
+				// side are real and withholding them would cost the tab its
+				// live output as well as the hole.
+				//
+				// THE STATEMENT OF THE HOLE IS NOT MADE HERE, and that is a
+				// stated limit rather than an oversight: this carrier has no
+				// mid-stream reset shape (the renderer's only reset is
+				// answered at attach), so what a live tab sees is a splice.
+				// What the person gets instead is the recording — the hole
+				// is durable, with its bounds and its reason, and
+				// session.output reports it to any client that reads it
+				// back. Giving this path its own notification is
+				// nocx-k6p18.29.
+				s.log.Warn("session output pump stepped over a hole the execution host's window left",
+					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
+				pos = from
+				continue
+			}
 			if needsReset {
 				// The ring no longer holds the byte this pump is asking for,
 				// so it can never be served and asking again is the one thing

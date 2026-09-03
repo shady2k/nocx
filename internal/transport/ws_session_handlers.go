@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -43,33 +45,35 @@ type sessionMachine interface {
 	takeSize(sid session.ID, sess session.Session, reported session.Size)
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
+	// detachSession drops only this connection's subscriber. It never closes
+	// the helper-owned session or its ring, and it must preserve a newer
+	// subscriber that displaced this connection.
+	detachSession(sid session.ID, sess session.Session, wconn *wsConn, state *connState)
 	// markCloseRequested records that this session's end was asked for, so
 	// the exit it produces is not filed as news the user has to read.
 	markCloseRequested(sid session.ID)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	// flushUploadDone re-emits the upload outcomes that settled while
-	// nothing was attached (upload design §5.3). Separate from the files
-	// flush because it is a terminal fact rather than an invalidation: a
-	// missed files.changed costs a stale listing the next poll corrects,
+	// nothing was attached (upload design §5.3). Separate from the
+	// files flush because it is a terminal fact rather than an invalidation:
+	// a missed files.changed costs a stale listing the next poll corrects,
 	// and a missed uploadDone leaves the UI saying "uploading" forever.
 	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
-	// announceDisplacement tells the client that has just lost a session that
-	// it lost it, and takes the session out of its connection state (D8). One
-	// narrow method rather than the notification machinery itself: the handler
-	// may report the displacement it caused, and nothing more.
+	// announceDisplacement tells the client that has just lost a session
+	// that it lost it, and takes the session out of its connection state (D8).
 	announceDisplacement(sid session.ID, ident session.Identity, prev *wsConn, prevState *connState)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
 	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
 	// method rather than the publisher itself: the handler may resynchronise
 	// a session it already owns, and nothing more.
 	replayLifecycleFacts(sid session.ID)
-	// replayIntegration re-sends the session's integration status on
-	// reattach (nocx-dvql). Separate from the lifecycle replay because it
-	// is a state rather than a transition: a frontend that reconnects after
-	// the handshake expired must learn it is in a conventional terminal,
-	// and no further transition is ever coming to tell it.
+	// replayIntegration re-sends the session's integration status on reattach
+	// (nocx-dvql). Separate from the lifecycle replay because it is a state
+	// rather than a transition: a frontend that reconnects after the
+	// handshake expired must learn it is in a conventional terminal, and no
+	// further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
 	// replayPaneObservation re-sends an enrolled pane's current
 	// classification on reattach (nocx-szb40.3). Beside replayIntegration
@@ -123,20 +127,16 @@ type openHandlers struct {
 	// whole server.
 	lifecycle ssh.RemoteLifecycle
 	// panes resolves pane → tab → workspace for the open ack's workspaceId
-	// (nocx-isoph.2). nil when the content store is not wired, which is the
-	// honest state and not a degrade to hide: with no layout store there is
-	// no chain to walk and every session is in the default workspace.
-	//
-	// It is the store's READ seam and not the gated LayoutOperation, and the
-	// reason is a deadlock rather than a convenience. This handler already
-	// runs inside the open operation, which holds [config, session] and then
-	// the execution lane; acquiring the content operation inside it would
-	// take a second lane permit while holding one, and with every lane permit
-	// held by an open the whole control plane would stop. The read itself
-	// needs no gate: layout reads go straight to the pool and never through
-	// the single writer goroutine.
+	// (nocx-isoph.2). nil when the content store is not wired, which is a
+	// visible unavailable state and not a degrade to hide.
 	panes paneWorkspaces
-	log   log.Logger
+	// ledger is the durable writer for the helper binding. It is deliberately
+	// the existing content ledger seam, not a second session store: the
+	// helper returns host, account and generation together with the
+	// authoritative id, and this handler records those facts before ack.
+	ledger content.LedgerRepository
+	helper HelperSessionOpener
+	log    log.Logger
 }
 
 // paneWorkspaces answers "which workspace is this pane in" — the one
@@ -526,12 +526,33 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	// PHASE TWO — dial, on the execution lane and no domain gate. The
-	// handshake waits on the network and sometimes on a person (the
-	// password prompt), and a gate held across that wait is what refused
-	// every other pane's open with "the terminal is busy" while one tab
-	// was still connecting.
+	// handshake waits on the network and sometimes on a person (the password prompt),
+	// and a gate held across that wait is what refused
+	// every other pane's open with "the terminal is busy" while one tab was
+	// still connecting.
+	var hosted *HostedSessionOpen
 	err = h.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		var oerr error
+		if cfg.Kind == session.KindRemote && h.helper != nil {
+			var selected bool
+			var openedHosted HostedSessionOpen
+			openedHosted, selected, oerr = h.helper.OpenHosted(ctx, cfg)
+			if selected {
+				if oerr != nil {
+					return oerr
+				}
+				if openedHosted.Session == nil {
+					return errors.New("helper session opener returned no session")
+				}
+				sess = openedHosted.Session
+				hosted = &openedHosted
+				opened = true
+				return nil
+			}
+			if oerr != nil {
+				return oerr
+			}
+		}
 		sess, oerr = svc.Open(ctx, cfg)
 		if oerr != nil {
 			return oerr
@@ -549,10 +570,57 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return
 	}
 
+	// The helper's authoritative id and binding facts are one synchronous
+	// result. Persist them before the session enters connState or sends its
+	// open ack, so reconciliation can never observe a live helper session
+	// without the generation that qualifies its id space. A failed write
+	// refuses the open and closes the helper session rather than exposing an
+	// unbound session that no inventory may safely judge.
+	if hosted != nil && h.ledger != nil {
+		if err := h.ledger.CreateSession(ctx, content.Session{
+			ID:          string(sess.ID()),
+			WorkspaceID: workspaceID,
+			Host:        hosted.Host,
+			Account:     hosted.Account,
+			Generation:  hosted.Generation,
+			// The route back, written in the same statement as the binding
+			// it completes (nocx-k6p18.30). The pane and the profile come
+			// off the config the registry has just accepted, never off the
+			// params: a renderer may name any pane it likes, and the
+			// session is what records which one it actually became the pipe
+			// of. A direct-host open carries no profile, writes none, and
+			// is therefore a session a later coordinator cannot take back —
+			// which is stated by the empty field rather than by a guess.
+			PaneID:        cfg.PaneID,
+			ProfileID:     cfg.ProfileID,
+			HelperCommand: hosted.HelperCommand,
+			Fingerprint:   hosted.Fingerprint,
+		}); err != nil {
+			if hosted != nil && hosted.AbortLifecycle != nil {
+				hosted.AbortLifecycle()
+			}
+			_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
+				return svc.Close(sess.ID())
+			})
+			h.answerOpenFailure(r, req, err)
+			return
+		}
+	}
+
 	state.add(sess)
+	if hosted != nil && hosted.LifecycleLane != "" {
+		if registrar, ok := h.sess.(interface {
+			RegisterLifecycleLane(lifecycle.LaneID, session.ID)
+		}); ok {
+			registrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
+		}
+	}
 
 	rx := h.sess.getOrCreateRx(sess.ID())
 	if rx == nil {
+		if hosted != nil && hosted.AbortLifecycle != nil {
+			hosted.AbortLifecycle()
+		}
 		state.remove(sess.ID())
 		_ = h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
 			return svc.Close(sess.ID())
@@ -616,6 +684,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = respond(r, resp)
+	if hosted != nil && hosted.StartLifecycle != nil {
+		hosted.StartLifecycle()
+	}
 
 	// Every session-scoped notification must follow the open result (AD-7).
 	// Install the subscriber only now: lifecycle can authenticate during the
@@ -645,6 +716,17 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// this tab leaves them running.
 	if cfg.ProfileID != "" {
 		go h.sess.replayStoredForwards(cfg.ProfileID, cfg.Host, cfg.Remote)
+	}
+
+	// The helper's holes reach the ring from here, BEFORE the pump starts:
+	// the observer fires on the pump's own goroutine as it reads, so it
+	// cannot fire before there is a pump, and registering it after one would
+	// be a window in which a hole is dropped instead of recorded.
+	if hosted != nil && hosted.ObserveOutputHoles != nil {
+		ring := rx.ring
+		hosted.ObserveOutputHoles(func(lost uint64, reason string) {
+			ring.hole(lost, sessionOutputHoleReason(reason))
+		})
 	}
 
 	// Start the PTY → ring output pump only after the ack is sent.
@@ -684,6 +766,7 @@ type sessionOpsHandlers struct {
 	// registry could do more than judge (migration map: handlers hold seams,
 	// never stores).
 	instance session.InstanceID
+	conn     *wsConn
 	machine  sessionMachine
 }
 
@@ -826,6 +909,48 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 	}
 }
 
+// handleDetach drops this connection's attachment without ending the
+// helper-owned session. The session remains in the registry and can be
+// claimed by a later attach.
+func (h sessionOpsHandlers) handleDetach(ctx context.Context, state *connState, req jsonrpcRequest) {
+	var params closeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required")
+		_ = respond(h.r, resp)
+		return
+	}
+
+	sid := session.ID(params.SessionID)
+	if !state.has(sid) {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = respond(h.r, resp)
+		return
+	}
+
+	op, err := h.ops.ForSession(sid)
+	if err != nil {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = respond(h.r, resp)
+		return
+	}
+	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
+		sess, gerr := svc.Get(sid)
+		if gerr != nil {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+			_ = respond(h.r, resp)
+			return nil
+		}
+		h.machine.detachSession(sid, sess, h.conn, state)
+		result, _ := json.Marshal(map[string]any{})
+		resp := newJSONRPCResult(req.ID, result)
+		_ = respond(h.r, resp)
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+	}
+}
+
 // handleAttach gives a connection a session's output stream from a byte
 // offset: the AD-9 reconnect, and the CLAIM by which a fresh client takes back
 // a pane it has never seen (nocx-oevq4, the nocx-server design D5).
@@ -920,7 +1045,12 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			return nil
 		}
 
-		_, from, needsReset := rx.ring.snapshot(params.Offset)
+		// A hole is not a case of its own here: snapshot answers `from` with
+		// the offset the stream continues at, which is past the hole, and an
+		// attach is exactly a client being told where to continue. The hole
+		// itself is the recording's to state (session.output's gaps), not
+		// this answer's.
+		_, from, needsReset, _ := rx.ring.snapshot(params.Offset)
 
 		state.add(sess)
 		prev, prevState := rx.setSubscriber(wconn, state)
@@ -1074,6 +1204,10 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 // submission.
 func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate control.Admission) []methodSpec {
 	openOp := capability.NewOpenOperation(configGate, sessionGate, lane, s.resolver, s.registry)
+	var sessionLedger content.LedgerRepository
+	if s.contentDB != nil {
+		sessionLedger = s.contentDB.Ledger()
+	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside
 	// the per-session factory the other methods use: the list is about every
@@ -1095,8 +1229,17 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{
+				op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver,
+				launcher: s.remoteLauncher, installer: s.remoteInstaller,
+				lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
+				ledger: sessionLedger, helper: s.helperSessionOpener, log: s.log,
+			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
+		}),
+		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}

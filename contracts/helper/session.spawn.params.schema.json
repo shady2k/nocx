@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.spawn.params.schema.json",
+  "title": "HelperSessionSpawnParams",
+  "description": "Params of the helper session service's spawn op: start a shell under a new PTY on the host. There is NO command and NO argv here, and that is the shape being frozen rather than an omission — the host's registration path refuses any op whose params carry a free-form string list, because an input reaches a command line. Which shell runs is the helper's composition-root decision (its login-shell resolution), so a remote caller names the environment a session starts in and never the program it starts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace", "cwd", "cols", "rows", "windowBytes"],
+  "properties": {
+    "workspace": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/workspaceId"
+    },
+    "cwd": {
+      "description": "Where the shell starts. Empty means the helper's own default, which is the user's home — the same resolution internal/pty already makes, rather than a second answer to one question. The RESOLVED directory comes back in the launch record.",
+      "type": "string"
+    },
+    "env": {
+      "description": "Additional environment entries, as a MAP rather than the string slice exec wants. Not only because the registration rule refuses the slice: a map cannot express a positional argument, so no caller can smuggle argv through it, and a duplicate key is impossible rather than last-wins.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "windowBytes": {
+      "description": "The requested bound on this session's output window. The coordinator decides and the helper applies, clamped to the helper's own floor, ceiling and aggregate budget — the cost is spent on somebody else's machine, so the helper keeps the last word. 0 means the helper's default. What the session actually got is reported back in the launch record, because a silently ignored setting is the degrade the product must never hide.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "lifecycle": {
+      "description": "Optional authenticated lifecycle carrier configuration. Capability and recovery are consumed only by the shell bootstrap and never become argv or environment entries.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lane", "domain", "epoch", "capability", "recovery"],
+      "properties": {
+        "lane": { "type": "string", "minLength": 1 },
+        "domain": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "capability": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "recovery": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

@@ -129,6 +129,34 @@ func (s *InstallStore) Remove(fingerprint, path string) error {
 	return nil
 }
 
+// RemoveMachine forgets every observed helper location for one machine. It
+// writes one replacement document, so a failed write leaves all rows intact.
+func (s *InstallStore) RemoveMachine(fingerprint string) error {
+	if fingerprint == "" {
+		return fmt.Errorf("helper-install store: refusing to remove installs for an empty host-key fingerprint")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	next := make(map[string]Install, len(s.installs))
+	changed := false
+	for key, in := range s.installs {
+		if in.Fingerprint == fingerprint {
+			changed = true
+			continue
+		}
+		next[key] = in
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.writeDoc(next); err != nil {
+		return err
+	}
+	s.installs = next
+	return nil
+}
+
 // All returns every recorded install, ordered by identity so the footprint
 // surface never depends on Go map iteration order. Same fail-closed reading
 // as the rest of the store: a missing or corrupt document is an empty list.

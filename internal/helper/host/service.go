@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // Service is one named surface. Registering a second one is the whole
@@ -26,6 +28,18 @@ type Service interface {
 // service declares its five mutations; reads stay cancellable.
 type CancelPolicy interface {
 	RefusesCancel(op string) bool
+}
+
+// DataPlane is an optional capability a Service implements to receive raw
+// TypeSessionData frames. The host never interprets those bytes.
+type DataPlane interface {
+	SessionData(context.Context, proto.SessionFrame)
+}
+
+// LifecycleDataPlane is the optional raw lifecycle carrier. It is separate
+// from DataPlane so old services continue to receive PTY data unchanged.
+type LifecycleDataPlane interface {
+	LifecycleData(context.Context, proto.SessionFrame)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

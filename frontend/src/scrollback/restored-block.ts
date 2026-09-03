@@ -40,8 +40,13 @@ export interface RestoredBlockFacts {
   durationMs: number | null
   exitCode: number | null
   /** Where the block ended — or `settled`, which is finished with no outcome
-   *  of its own (nocx-hoeq3). */
-  status: FrozenStatus | 'settled'
+   *  of its own (nocx-hoeq3), or `unreconciled`, which is NOT an ending at all
+   *  (nocx-k6p18.5): the block's session was carried over from a previous
+   *  coordinator and nobody could be asked whether it still exists, so the
+   *  block is neither running nor finished and the pane's notice says why.
+   *  Only a RESTORE can produce that one — the live path has a process to
+   *  watch and never needs to wonder. */
+  status: FrozenStatus | 'settled' | 'unreconciled'
   /**
    * The stored SGR body, or NULL when there is none to show.
    *

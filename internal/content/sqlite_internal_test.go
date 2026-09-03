@@ -483,10 +483,15 @@ func TestStartupSweepUsesThePartialIndex(t *testing.T) {
 	}
 
 	conn := openKeyedConn(t, path)
+	// The statement is the one closeUnanchoredEntries runs, WHERE CLAUSE AND
+	// ALL: it grew two terms with nocx-k6p18.5 (an entry naming a session is
+	// no longer judged at open, and neither is a question's), and a plan test
+	// asserting a statement the code does not run is a plan test about
+	// nothing.
 	rows, err := conn.Query(`EXPLAIN QUERY PLAN
 		UPDATE entries SET phase = 'closed', status =
-		  CASE WHEN kind = 'agent' THEN 'interrupted' ELSE 'unknown' END
-		WHERE phase != 'closed'`)
+		  CASE WHEN kind = 'ask' THEN 'interrupted' ELSE 'unknown' END
+		WHERE phase != 'closed' AND (session_id IS NULL OR kind = 'ask')`)
 	if err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 	}

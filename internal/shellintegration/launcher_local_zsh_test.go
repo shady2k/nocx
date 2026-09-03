@@ -1062,10 +1062,23 @@ func TestLocalZshSession_HonoursAZdotdirChosenInTheUsersZshenv(t *testing.T) {
 // behaviour in place.
 func TestLocalZshSession_AZprofileThatExecsStillRuns(t *testing.T) {
 	zsh := requireShell(t, "zsh")
+	// The program the fixture's ~/.zprofile execs is RESOLVED on this host,
+	// not written down. /bin/echo is the FHS answer and is not NixOS's or
+	// Guix's, where coreutils lives under /run/current-system/sw/bin: a
+	// hard-coded path made this test report the machine's layout ("no such
+	// file or directory: /bin/echo") for twenty seconds instead of reporting
+	// whether an exec'ing ~/.zprofile still runs (nocx-9jomd). Nothing about
+	// the assertion changes — the marker still has to come out of the PTY,
+	// which it cannot unless the tier's own startup files got out of the way.
+	echoBin, lookErr := exec.LookPath("echo")
+	if lookErr != nil {
+		t.Fatalf("echo is not installed: %v — this test needs a real program for "+
+			"the user's ~/.zprofile to exec", lookErr)
+	}
 
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, ".zprofile"),
-		[]byte("exec /bin/echo NOCX_EXEC_PROBE\n"), 0o600); err != nil {
+		[]byte("exec "+ShellQuote(echoBin)+" NOCX_EXEC_PROBE\n"), 0o600); err != nil {
 		t.Fatalf("write user .zprofile: %v", err)
 	}
 	unsetZDOTDIR(t)

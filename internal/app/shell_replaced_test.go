@@ -81,6 +81,7 @@ func (w *fakeWatcher) stops() int {
 // as, so "something else is running there" is a comparison and not a guess.
 func TestLocalEnhancedSessionIsWatchedForReplacement(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
+	bash := requireShellBinary(t, "bash")
 	w := &fakeWatcher{}
 	var (
 		mu     sync.Mutex
@@ -91,7 +92,7 @@ func TestLocalEnhancedSessionIsWatchedForReplacement(t *testing.T) {
 		log:    logger,
 		shint:  shellintegration.New(logger),
 		kernel: newIntegrationKernel(),
-		shells: fixedShell{path: "/bin/bash"},
+		shells: fixedShell{path: bash},
 		procs:  w,
 		reportShellReplaced: func(sid, observed string) {
 			mu.Lock()
@@ -110,8 +111,11 @@ func TestLocalEnhancedSessionIsWatchedForReplacement(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	got := w.only(t)
-	if got.expected != "/bin/bash" {
-		t.Errorf("expected executable = %q, want the binary the factory exec'd", got.expected)
+	// Against the INJECTED path, which is what makes this an assertion rather
+	// than a tautology: the factory is told to start this bash and must
+	// register that same absolute path as the executable it expects.
+	if got.expected != bash {
+		t.Errorf("expected executable = %q, want %q — the binary the factory exec'd", got.expected, bash)
 	}
 	// The pid must be a live process, not a zero the observer would silently
 	// refuse: signal 0 is the portable "does this process exist".
@@ -137,12 +141,13 @@ func TestLocalEnhancedSessionIsWatchedForReplacement(t *testing.T) {
 // registration behind for a pid the OS is free to reuse.
 func TestClosingAnEnhancedSessionEndsItsWatch(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
+	bash := requireShellBinary(t, "bash")
 	w := &fakeWatcher{}
 	ptf := &localPTYFactory{
 		log:                 logger,
 		shint:               shellintegration.New(logger),
 		kernel:              newIntegrationKernel(),
-		shells:              fixedShell{path: "/bin/bash"},
+		shells:              fixedShell{path: bash},
 		procs:               w,
 		reportShellReplaced: func(string, string) {},
 	}
@@ -167,12 +172,13 @@ func TestClosingAnEnhancedSessionEndsItsWatch(t *testing.T) {
 // what this session is — and a watch that can only produce noise is noise.
 func TestASessionWithoutAHandshakeIsNotWatched(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
+	bash := requireShellBinary(t, "bash")
 	w := &fakeWatcher{}
 	ptf := &localPTYFactory{
 		log:                 logger,
 		shint:               shellintegration.New(logger),
 		kernel:              newIntegrationKernel(),
-		shells:              fixedShell{path: "/bin/bash"},
+		shells:              fixedShell{path: bash},
 		procs:               w,
 		reportShellReplaced: func(string, string) {},
 	}
@@ -193,12 +199,13 @@ func TestASessionWithoutAHandshakeIsNotWatched(t *testing.T) {
 // the detector it always was, so the tab opens exactly as before.
 func TestAPlatformThatCannotObserveStillOpensTheSession(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
+	bash := requireShellBinary(t, "bash")
 	w := &fakeWatcher{err: procwatch.ErrUnsupported}
 	ptf := &localPTYFactory{
 		log:                 logger,
 		shint:               shellintegration.New(logger),
 		kernel:              newIntegrationKernel(),
-		shells:              fixedShell{path: "/bin/bash"},
+		shells:              fixedShell{path: bash},
 		procs:               w,
 		reportShellReplaced: func(string, string) {},
 	}

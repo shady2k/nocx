@@ -126,6 +126,27 @@ func (s *Store) Grant(fingerprint string) error {
 	return nil
 }
 
+// Revoke removes the answer for one machine. It is idempotent, and the
+// in-memory map changes only after the atomic document write succeeds.
+func (s *Store) Revoke(fingerprint string) error {
+	if fingerprint == "" {
+		return ErrEmptyFingerprint
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	prev, existed := s.answers[fingerprint]
+	if !existed {
+		return nil
+	}
+	delete(s.answers, fingerprint)
+	if err := s.writeDocLocked(); err != nil {
+		s.answers[fingerprint] = prev
+		return err
+	}
+	return nil
+}
+
 // writeDocLocked persists the answers document atomically (the
 // DocumentStore's temp-file+fsync discipline): a torn write never leaves a
 // half-grant, and the next start reads either the whole document or none

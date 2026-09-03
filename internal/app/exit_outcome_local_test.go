@@ -20,7 +20,6 @@ package app
 
 import (
 	"context"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -35,10 +34,7 @@ import (
 // rather than about which login shell this machine happens to have.
 func openLocalEnhanced(t *testing.T) session.Session {
 	t.Helper()
-	shell, err := exec.LookPath("bash")
-	if err != nil {
-		t.Fatalf("bash is not installed: %v — the integrated tier this test classifies must be present", err)
-	}
+	shell := requireShellBinary(t, "bash")
 	storagetest.IsolateWithHome(t)
 	f := localFactory(t)
 	f.shells = fixedShell{path: shell}

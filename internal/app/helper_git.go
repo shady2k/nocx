@@ -12,10 +12,14 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"path"
 	"strconv"
 	"sync"
@@ -26,6 +30,12 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
+	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -54,7 +64,18 @@ type helperInstallProvider interface {
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
 
+func accountFromOptions(opts []ssh.ConnectOption) string {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.User
+}
+
 // helperGitFactory is the composition root's answer to
+
 // transport.GitFactoryFor: for an SSH session it decides whether the
 // helper may be used for that machine at all (D8) — the consent decision
 // comes before any remote write — and when it may, installs the helper
@@ -68,8 +89,13 @@ type helperInstallProvider interface {
 // installs idempotently, and an already-complete directory uploads nothing
 // (D7), so both consultations converge on the same install. The dial
 // happens inside the returned factory's Open, never here.
-func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
-	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
+
+func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
+	reg := &helperRegistry{
+		lanes: lanes, install: lanes, source: source, log: log, consent: store,
+		hosts:   make(map[session.ID]*hostHelper),
+		closing: make(map[string]struct{}),
+	}
 	return func(sess session.Session) transport.GitOpenSelection {
 		// The platform probe is the one bounded remote exec the decision
 		// runs before the user has accepted anything — it writes nothing.
@@ -77,7 +103,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 		// only when the machine resolves to relay (D8: consent is asked
 		// when the user reaches for the feature, not when a connection is
 		// made; nothing is written before the ask is answered).
-		platform, available, perr := probeHelperPlatform(sess, lanes)
+		platform, available, perr := probeHelperPlatform(sess, lanes, source)
 		r := newResolver(
 			withStore(store),
 			withHelperArtifactAvailable(available),
@@ -94,7 +120,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 					"host", sess.Host(), "error", perr)
 				return helperProbeRefusal(platform, perr)
 			}
-			command, hash, err := installHelperFor(sess, lanes, platform)
+			command, hash, err := installHelperFor(sess, lanes, source, platform)
 			if err != nil {
 				// The upload or install failed (D7). The failure is a
 				// fact about the host or the build, carried by the
@@ -131,6 +157,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 				reg:        reg,
 				sid:        sess.ID(),
 				host:       sess.Host(),
+				account:    accountFromOptions(sess.SSHOptions()),
 				fp:         sess.HostKeyFingerprint(),
 				opts:       sess.SSHOptions(),
 				command:    command,
@@ -176,7 +203,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 // seen. The error is the probe's own, never re-derived.
 func helperProbeRefusal(platform deploy.Platform, err error) transport.GitOpenSelection {
 	switch {
-	case errors.Is(err, deploy.ErrUnsupportedPlatform), errors.Is(err, deploy.ErrArtifactsNotBuilt):
+	case errors.Is(err, deploy.ErrUnsupportedPlatform), errors.Is(err, helperartifacts.ErrArtifactsNotBuilt):
 		return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
 			State:   git.OpenUnsupportedPlatform,
 			Message: unsupportedPlatformMessage(platform, err),
@@ -194,7 +221,7 @@ func helperProbeRefusal(platform deploy.Platform, err error) transport.GitOpenSe
 // built. artifactErr is the Artifact error the probe already saw (or nil
 // when the probe did not reach the artifact decision).
 func unsupportedPlatformMessage(p deploy.Platform, artifactErr error) string {
-	if errors.Is(artifactErr, deploy.ErrArtifactsNotBuilt) {
+	if errors.Is(artifactErr, helperartifacts.ErrArtifactsNotBuilt) {
 		return "the helper artifact for " + p.GOOS + "/" + p.GOARCH + " was not built — run `make helpers` to build it"
 	}
 	return "we build no helper for " + p.GOOS + "/" + p.GOARCH
@@ -230,21 +257,56 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 // resolver's "a suitable binary exists for that platform" arm. The probe
 // is one bounded exec and writes nothing; it is the only remote command
 // the consent decision runs before the user has accepted.
-func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (deploy.Platform, bool, error) {
-	ctx := context.Background()
-	probe, err := lanes.DiscoveryConn(ctx, sess.Host(), sess.SSHOptions()...)
+func probeHelperPlatform(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource) (deploy.Platform, bool, error) {
+	_, platform, available, err := probeHelperPlatformAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source)
+	return platform, available, err
+}
+
+func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource) (string, deploy.Platform, bool, error) {
+	// The probe dials with the interactive rung removed, and the reason is
+	// the open path rather than the git one. Selection now runs BEFORE the
+	// session exists (OpenHosted), so the probe's lease is the only reference
+	// on the pooled connection: it dials, and when the decision is made it
+	// releases, which closes the connection. On a destination whose only
+	// credential is a password the user types, that dial raised the ask, and
+	// the session's own dial a moment later raised a SECOND one — in front of
+	// a user who had already answered, on an open that was blocked behind it.
+	// The password reached an authentication that was then thrown away, and
+	// the session never opened (nocx-bzac4).
+	//
+	// Suppressing the ask rather than sharing the connection is the choice
+	// because it is a rule this codebase already has: a probe answers a
+	// question the product asked itself and may not stop a person to do it
+	// (internal/ssh, TestPromptRung_ProbeNeverFiresTheAsk). Every silent
+	// credential still applies, so a key, an agent or a remembered password
+	// probes exactly as before; only the destination that would have to
+	// interrupt someone declines — and declining degrades to the plain
+	// terminal, which is the direction §4.2 requires.
+	//
+	// The option list is COPIED before the suppression is appended: the
+	// caller's slice is the destination's own options and is used again for
+	// the install lease and the helper channel, both of which are the user's
+	// chosen action rather than a probe.
+	probeOpts := make([]ssh.ConnectOption, 0, len(opts)+1)
+	probeOpts = append(probeOpts, opts...)
+	probeOpts = append(probeOpts, ssh.WithoutPasswordPrompt())
+	probe, err := lanes.DiscoveryConn(ctx, host, probeOpts...)
 	if err != nil {
-		return deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", sess.Host(), err)
+		return "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
 	}
 	defer func() { _ = probe.Close() }()
+	fingerprint := ""
+	if fp, ok := probe.(interface{ HostKeyFingerprint() string }); ok {
+		fingerprint = fp.HostKeyFingerprint()
+	}
 	platform, err := deploy.Probe(ctx, probeExec{probe})
 	if err != nil {
-		return deploy.Platform{}, false, err
+		return fingerprint, deploy.Platform{}, false, err
 	}
-	if _, _, aerr := deploy.DefaultSource.Artifact(platform); aerr != nil {
-		return platform, false, aerr
+	if _, _, aerr := source.Artifact(platform); aerr != nil {
+		return fingerprint, platform, false, aerr
 	}
-	return platform, true, nil
+	return fingerprint, platform, true, nil
 }
 
 // installHelperFor installs the helper artifact on sess's host for the
@@ -254,27 +316,27 @@ func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (dep
 // background — the selection has no caller context — and the install
 // lease's own hard timeout is what bounds the acquisition (the
 // filesystemProviderFactory precedent).
-func installHelperFor(sess session.Session, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
-	ctx := context.Background()
+func installHelperFor(sess session.Session, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
+	return installHelperAt(context.Background(), sess.Host(), sess.SSHOptions(), lanes, source, platform)
+}
 
-	conn, err := lanes.HelperInstallConn(ctx, sess.Host(), sess.SSHOptions()...)
+func installHelperAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource, platform deploy.Platform) (command, hash string, err error) {
+	conn, err := lanes.HelperInstallConn(ctx, host, opts...)
 	if err != nil {
-		return "", "", fmt.Errorf("install lease for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("install lease for %s: %w", host, err)
 	}
 	defer func() { _ = conn.Close() }()
 	home, err := conn.Home()
 	if err != nil {
-		return "", "", fmt.Errorf("remote home for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("remote home for %s: %w", host, err)
 	}
 	fsys := installFS{conn}
-	command, hash, err = deploy.Ensure(ctx, fsys, deploy.DefaultSource, home, platform)
+	command, hash, err = deploy.Ensure(ctx, fsys, source, home, platform)
 	if err != nil {
 		return "", "", err
 	}
-	// Bound the footprint: every superseded install on the host goes, the
-	// one just installed never (D25).
 	if err := deploy.Prune(ctx, fsys, home, path.Base(path.Dir(command))); err != nil {
-		return "", "", fmt.Errorf("prune for %s: %w", sess.Host(), err)
+		return "", "", fmt.Errorf("prune for %s: %w", host, err)
 	}
 	return command, hash, nil
 }
@@ -367,11 +429,182 @@ func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.Read
 // exposed, and sharing a helper across principals would be an
 // authorization error. Cross-session sharing waits for that seam.
 type helperRegistry struct {
-	lanes helperLaneProvider
-	log   *slog.Logger
+	lanes     helperLaneProvider
+	install   helperInstallProvider
+	source    deploy.ArtifactSource
+	log       *slog.Logger
+	consent   *consent.Store
+	registry  *session.Reg
+	lifecycle lifecyclechannel.Kernel
+	// lifecycleLoss carries a helper-hosted adapter's loss cause to the
+	// session integration axis, the same seam the local pty factory uses.
+	// It is a separate seam from the published facts for the same reason it
+	// is there: a channel that ends establishes nothing new, so no fact
+	// moves and the product would otherwise learn nothing (nocx-dvql).
+	// Nil (tests, or a server without the wiring) reports nowhere and the
+	// loss is still logged by the adapter.
+	lifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
+	mu            sync.Mutex
+	hosts         map[session.ID]*hostHelper
+	closing       map[string]struct{}
+}
 
-	mu    sync.Mutex
-	hosts map[session.ID]*hostHelper
+// OpenHosted applies the same helper resolver used by git.open, then spawns
+// and attaches through the helper ABI. The returned session id is the helper's
+// id; the coordinator never mints a replacement.
+func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (transport.HostedSessionOpen, bool, error) {
+	if cfg.Kind != session.KindRemote || cfg.Remote == nil || r.install == nil || r.registry == nil {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	opts := session.SSHOptionsFromConfig(cfg.Remote)
+	fingerprint, platform, available, err := probeHelperPlatformAt(ctx, cfg.Host, opts, r.install, r.source)
+	if err != nil && !available {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	resolver := newResolver(
+		withStore(r.consent),
+		withHelperArtifactAvailable(available),
+		withHelperRequested(true),
+	)
+	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredRelay {
+		return transport.HostedSessionOpen{}, false, nil
+	}
+	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)
+	if err != nil {
+		return transport.HostedSessionOpen{}, true, err
+	}
+	f := &sessionFactory{reg: r, sid: session.NewID(), host: cfg.Host, account: accountFromOptions(opts), opts: opts, command: command, expectHash: generation}
+	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
+	h.mu.Lock()
+	c, outcome, err := h.connectLocked(ctx)
+	h.mu.Unlock()
+	if err != nil {
+		return transport.HostedSessionOpen{}, true, err
+	}
+	if outcome.State != "" {
+		return transport.HostedSessionOpen{}, true, errors.New(outcome.Message)
+	}
+	var subscriberRaw [16]byte
+	if _, randErr := rand.Read(subscriberRaw[:]); randErr != nil {
+		return transport.HostedSessionOpen{}, true, randErr
+	}
+	subscriber := proto.SubscriberID(hex.EncodeToString(subscriberRaw[:]))
+	var lifecycleAdapter *lifecyclechannel.Adapter
+	var lifecyclePeer net.Conn
+	var lifecycleLaunch *proto.LifecycleLaunch
+	if r.lifecycle != nil {
+		coordinatorConn, peerConn := net.Pipe()
+		var lifecycleErr error
+		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
+			log.NewSlogAdapter(r.log), r.lifecycle, coordinatorConn,
+			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
+		)
+		if lifecycleErr != nil {
+			_ = peerConn.Close()
+			_ = c.Close()
+			return transport.HostedSessionOpen{}, true, lifecycleErr
+		}
+		lifecyclePeer = peerConn
+		launch := lifecycleAdapter.Launch()
+		lifecycleLaunch = &proto.LifecycleLaunch{
+			Lane: string(launch.Lane), Domain: string(launch.Domain),
+			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+		}
+	}
+	entry, err := c.Spawn(ctx, proto.SpawnParams{
+		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows, Lifecycle: lifecycleLaunch,
+	})
+	if err != nil {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	attached, err := c.Attach(ctx, proto.AttachParams{
+		Subscriber: subscriber,
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(entry.HostSessionID.Generation),
+			Session:    entry.HostSessionID.Session,
+		},
+		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
+		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
+	})
+	if err != nil {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
+		_ = c.CloseSession(ctx, entry.HostSessionID)
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	sid := session.ID(entry.HostSessionID.Session)
+	f.sid = sid
+	sess, err := r.registry.Adopt(cfg, sid, attached)
+	if err != nil {
+		_ = attached.Close()
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Close()
+			_ = lifecyclePeer.Close()
+		}
+		_ = c.CloseSession(ctx, entry.HostSessionID)
+		_ = c.Close()
+		return transport.HostedSessionOpen{}, true, err
+	}
+	r.mu.Lock()
+	r.hosts[sid] = h
+	r.mu.Unlock()
+	var lifecycleLane lifecycle.LaneID
+	var startLifecycle func()
+	var abortLifecycle func()
+	if lifecycleAdapter != nil {
+		lifecycleLane = lifecycleAdapter.Lane()
+		var startOnce sync.Once
+		startLifecycle = func() {
+			startOnce.Do(func() {
+				bridgeLifecycle(lifecyclePeer, attached.Lifecycle())
+			})
+		}
+		var abortOnce sync.Once
+		abortLifecycle = func() {
+			abortOnce.Do(func() {
+				_ = lifecycleAdapter.Close()
+				_ = lifecyclePeer.Close()
+			})
+		}
+	}
+	return transport.HostedSessionOpen{
+		Session: sess, Host: cfg.Host, Account: f.account, Generation: generation,
+		HelperCommand: command, Fingerprint: fingerprint,
+		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
+		AbortLifecycle: abortLifecycle,
+		// The two ends of one fact meet here and nowhere else: the
+		// attachment knows a stretch of output never crossed the wire, and
+		// the transport's ring is the only thing that can place it at an
+		// offset. Neither package learns the other's job — this passes a
+		// function, and the content store stays where it is (nocx-k6p18.25).
+		ObserveOutputHoles: attached.OnOutputHole,
+	}, true, nil
+}
+
+func bridgeLifecycle(peer net.Conn, carrier io.ReadWriteCloser) {
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			_ = peer.Close()
+			_ = carrier.Close()
+		})
+	}
+	go func() {
+		_, _ = io.Copy(carrier, peer)
+		closeBoth()
+	}()
+	go func() {
+		_, _ = io.Copy(peer, carrier)
+		closeBoth()
+	}()
 }
 
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
@@ -381,6 +614,9 @@ func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
 		return h
 	}
 	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
+	if _, ok := r.closing[f.fp]; ok {
+		h.closing = true
+	}
 	r.hosts[f.sid] = h
 	return h
 }
@@ -391,21 +627,90 @@ func (r *helperRegistry) forget(f *sessionFactory) {
 	r.mu.Unlock()
 }
 
-// CloseHelpersFor closes every live helper channel on the machine whose
-// host public-key fingerprint is fp — the D25 order an uninstall is bound
-// by: no helper may be running out of a directory being deleted, so the
-// channels the backend KNOWS about (its own, per session) are closed
-// before the install directory is removed. The registry's channels are
-// the backend's whole knowledge: a helper running from a DIFFERENT nocx
-// instance sharing the same $HOME is out of reach, which the design
-// accepts because the backend can only account for its own channels.
-// A closed helper is forgotten; the next open redials it, and a machine
-// whose install directory is gone answers the honest dial refusal (D6).
-func (r *helperRegistry) CloseHelpersFor(fp string) {
+func (r *helperRegistry) isClosing(fp string) bool {
+	r.mu.Lock()
+	_, ok := r.closing[fp]
+	r.mu.Unlock()
+	return ok
+}
+
+// inventories returns one reconciliation inventory per helper generation
+// currently held by this coordinator. A helper channel that was never opened
+// has no client and therefore cannot claim any stored id space.
+func (r *helperRegistry) inventories() []sessionInventory {
+	r.mu.Lock()
+	helpers := make([]*hostHelper, 0, len(r.hosts))
+	for _, h := range r.hosts {
+		helpers = append(helpers, h)
+	}
+	r.mu.Unlock()
+
+	out := make([]sessionInventory, 0, len(helpers))
+	for _, h := range helpers {
+		h.mu.Lock()
+		c, generation := h.client, h.f.expectHash
+		host, account := h.f.host, h.f.account
+		h.mu.Unlock()
+		if c != nil && generation != "" {
+			out = append(out, &helperSessionInventory{
+				client: c, generation: generation, host: host, account: account,
+			})
+		}
+	}
+	return out
+}
+
+// sessions asks each active helper once and combines the coordinator DTOs for
+// the read-only inventory RPC. A failed helper fails the aggregate answer;
+// callers must not interpret a partial list as a complete inventory.
+func (r *helperRegistry) sessions(ctx context.Context) ([]client.SessionEntry, error) {
+	r.mu.Lock()
+	helpers := make([]*hostHelper, 0, len(r.hosts))
+	for _, h := range r.hosts {
+		helpers = append(helpers, h)
+	}
+	r.mu.Unlock()
+	if len(helpers) == 0 {
+		return nil, errors.New("helper session inventory unavailable: no active helper")
+	}
+	out := make([]client.SessionEntry, 0)
+	for _, h := range helpers {
+		for attempt := range 2 {
+			c, err := h.inventoryClient(ctx)
+			if err != nil {
+				return nil, err
+			}
+			entries, err := c.Sessions(ctx)
+			if err == nil {
+				out = append(out, entries...)
+				break
+			}
+			if attempt == 0 && errors.Is(err, client.ErrLost) {
+				h.invalidate(c)
+				continue
+			}
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// CloseHelpersFor first asks every helper daemon this coordinator knows about
+// for its sessions and closes each one through the daemon's close-session
+// operation. Only after all those acknowledgements does it close the bridge
+// channels and forget the registry entries. A daemon that cannot enumerate
+// sessions refuses the operation rather than allowing uninstall to delete a
+// live session's executable.
+func (r *helperRegistry) CloseHelpersFor(ctx context.Context, fp string) error {
 	if fp == "" {
-		return
+		return nil
 	}
 	r.mu.Lock()
+	if _, alreadyClosing := r.closing[fp]; alreadyClosing {
+		r.mu.Unlock()
+		return errors.New("helper uninstall already in progress")
+	}
+	r.closing[fp] = struct{}{}
 	var victims []*hostHelper
 	for _, h := range r.hosts {
 		if h.f.fp == fp {
@@ -413,21 +718,94 @@ func (r *helperRegistry) CloseHelpersFor(fp string) {
 		}
 	}
 	r.mu.Unlock()
-	// closeLocked takes h.mu (an open in flight finishes first, so the
-	// close is exact) and calls reg.forget, which re-takes r.mu — the
-	// iteration therefore releases r.mu before closing.
 	for _, h := range victims {
-		h.closeLocked()
+		if err := h.closeSessions(ctx); err != nil {
+			for _, victim := range victims {
+				victim.cancelClosing()
+			}
+			r.FinishHelpersFor(fp)
+			return err
+		}
 	}
+
+	// closeLocked takes h.mu and calls reg.forget, which re-takes r.mu; the
+	// registry lock is therefore released before closing each helper.
+	for _, h := range victims {
+		h.mu.Lock()
+		h.closeLocked()
+		h.mu.Unlock()
+	}
+	return nil
+}
+
+func (r *helperRegistry) FinishHelpersFor(fp string) {
+	r.mu.Lock()
+	delete(r.closing, fp)
+	r.mu.Unlock()
+}
+
+func (h *hostHelper) cancelClosing() {
+	h.mu.Lock()
+	h.closing = false
+	h.mu.Unlock()
+}
+
+func (h *hostHelper) closeSessions(ctx context.Context) error {
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return errors.New("helper is already closing")
+	}
+	h.closing = true
+	if h.client == nil && h.factory == nil && !h.dead {
+		h.closing = false
+		h.mu.Unlock()
+		return nil
+	}
+	c, outcome, err := h.connectLocked(ctx)
+	generation := h.f.expectHash
+	h.mu.Unlock()
+	ok := false
+	defer func() {
+		if !ok {
+			h.cancelClosing()
+		}
+	}()
+	if err != nil {
+		return fmt.Errorf("connect helper for session close: %w", err)
+	}
+	if outcome.State != "" {
+		return fmt.Errorf("connect helper for session close: %s", outcome.Message)
+	}
+	entries, err := c.Sessions(ctx)
+	if err != nil {
+		var refusal *client.RefusalError
+		if errors.As(err, &refusal) &&
+			(refusal.Code == proto.ErrCodeUnknownService || refusal.Code == proto.ErrCodeUnknownOp) {
+			return fmt.Errorf("helper session service unavailable: %w", err)
+		}
+		return fmt.Errorf("list helper sessions: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.HostSessionID.Generation != generation {
+			continue
+		}
+		if err := c.CloseSession(ctx, entry.HostSessionID); err != nil {
+			return fmt.Errorf("close helper session %s: %w", entry.HostSessionID.Session, err)
+		}
+	}
+	ok = true
+	return nil
 }
 
 // sessionFactory is a git.RepoFactory for one session: stateless (the state
 // lives in the registry), so the two times git.open consults the selection
 // both resolve to the same shared helper.
 type sessionFactory struct {
-	reg  *helperRegistry
-	sid  session.ID
-	host string
+	reg     *helperRegistry
+	sid     session.ID
+	host    string
+	account string
 	// fp is the machine's host public-key fingerprint — the consent key —
 	// captured at selection time so the registry can close every live
 	// helper channel on a machine without holding a session (D25).
@@ -438,15 +816,21 @@ type sessionFactory struct {
 }
 
 func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
+	if f.reg.isClosing(f.fp) {
+		return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+	}
 	h := f.reg.helper(f)
 	repo, outcome, err := h.open(ctx, cwd)
 	if err != nil && errors.Is(err, client.ErrLost) {
 		// The shared client died under us: real transport loss, not the
 		// last-binding-close (that path sets dead and never reuses the
 		// client). A fresh dial can heal the session, and open is
-		// idempotent — exactly one retry; a mutation would never be
-		// retried (D12).
+		// idempotent — exactly one retry; a mutation would never be retried
+		// (D12).
 		h.evict()
+		if f.reg.isClosing(f.fp) {
+			return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+		}
 		repo, outcome, err = h.open(ctx, cwd)
 	}
 	return repo, outcome, err
@@ -467,11 +851,88 @@ type hostHelper struct {
 	factory git.RepoFactory
 	refs    int
 	dead    bool // the shared client is closed; the next open must redial
+	closing bool // uninstall has frozen this helper against new opens
+}
+
+// connectLocked returns the existing carrier or establishes a new bridge to
+// the helper daemon. A lost carrier is disposable; the daemon's endpoint and
+// session state live on the host and are reached again through a fresh lane.
+func (h *hostHelper) connectLocked(ctx context.Context) (*client.Client, git.OpenOutcome, error) {
+	if h.client != nil && !h.dead {
+		select {
+		case <-h.client.Done():
+			h.client = nil
+			h.factory = nil
+			h.dead = true
+		default:
+			return h.client, git.OpenOutcome{}, nil
+		}
+	}
+	lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
+	if err != nil {
+		return nil, git.OpenOutcome{}, fmt.Errorf("helper lane for %s: %w", h.f.host, err)
+	}
+	c, err := client.Dial(ctx, client.Config{
+		Exec:       lane,
+		Command:    bridgeCommand(h.f.command, h.f.expectHash),
+		ExpectHash: h.f.expectHash,
+		Log:        h.log,
+	})
+	if err != nil {
+		// Dial's contract: on failure the lane is left for the caller to
+		// close. Refusals are returned as an open outcome; other failures
+		// remain errors so callers can apply their retry policy.
+		_ = lane.Close()
+		if outcome, ok := dialFailure(err, h.f.host); ok {
+			return nil, outcome, nil
+		}
+		return nil, git.OpenOutcome{}, err
+	}
+	h.client = c
+	h.dead = false
+	h.factory = helpergit.NewFactory(c)
+	return c, git.OpenOutcome{}, nil
+}
+
+// inventoryClient preserves the hostHelper registry entry across carrier loss.
+// It only redials an entry that had already opened a helper; an unstarted
+// entry must not make inventory claim a helper exists.
+func (h *hostHelper) inventoryClient(ctx context.Context) (*client.Client, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.client == nil && h.factory == nil && !h.dead {
+		return nil, errors.New("helper session inventory unavailable: no active helper")
+	}
+	c, outcome, err := h.connectLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.State != "" {
+		return nil, errors.New(outcome.Message)
+	}
+	return c, nil
+}
+
+// invalidate drops only the carrier used by a failed operation. Comparing
+// pointers prevents an old loss from evicting a replacement installed by a
+// concurrent retry.
+func (h *hostHelper) invalidate(c *client.Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.client != c {
+		return
+	}
+	h.client = nil
+	h.factory = nil
+	h.dead = true
 }
 
 func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closing {
+		return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+	}
 	if h.dead || h.factory == nil {
 		lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
 		if err != nil {
@@ -479,7 +940,7 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 		}
 		c, err := client.Dial(ctx, client.Config{
 			Exec:       lane,
-			Command:    h.f.command,
+			Command:    bridgeCommand(h.f.command, h.f.expectHash),
 			ExpectHash: h.f.expectHash,
 			Log:        h.log,
 		})
@@ -519,6 +980,29 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 	return &refRepo{Repo: repo, released: h.released}, outcome, nil
 }
 
+// bridgeCommand is what the exec lane runs on the remote host: the installed
+// helper, asked to BRIDGE to the endpoint of the generation we installed
+// (level-1 design §5, D11).
+//
+// It is not the helper serving over this channel's stdin and stdout any more,
+// and that is the point. The authoritative endpoint is a private Unix socket
+// on the host; the bridge connects to it and copies bytes, holding no session,
+// no window and no lock. So the sessions live in a process that outlives this
+// channel, this coordinator and this nocx — which is what makes a session
+// survive a coordinator being replaced (D1) — while what rides the ssh channel
+// is exactly what rode it before: the frame protocol, unchanged.
+//
+// The generation is the content hash the installer wrote (D7, D21), because a
+// helper install is content-addressed and the generation IS the build: naming
+// it here is what stops a bridge from reaching a DIFFERENT generation's
+// sessions, and what lets two generations coexist on one host while an old one
+// still holds somebody's shell (D4).
+//
+// No port forwarding is configured and none is required: nothing is forwarded.
+func bridgeCommand(command, generation string) string {
+	return command + " " + endpoint.BridgeCommand + " " + generation
+}
+
 // dialFailure maps a helper dial error onto the §6 open outcome it is,
 // and reports whether the error is a refusal at all. A protocol version
 // or content-hash mismatch is helperVersionMismatch — the file at the
@@ -535,6 +1019,13 @@ func dialFailure(err error, host string) (git.OpenOutcome, bool) {
 	case errors.Is(err, client.ErrVersionMismatch), errors.Is(err, client.ErrHashMismatch):
 		outcome.State = git.OpenHelperVersionMismatch
 		outcome.Message = "the helper installed on " + host + " answered with a different protocol version or content than nocx installed — reinstall it to recover (" + err.Error() + ")"
+	case errors.Is(err, client.ErrHelperNotServing):
+		// The bridge reached the host and found no helper serving that
+		// generation, and could not start one. It is its own sentence: "no
+		// helper is running there" is not "the host refused the exec", and the
+		// recovery is different.
+		outcome.State = git.OpenExecForbidden
+		outcome.Message = "no nocx helper is running on " + host + " for the generation nocx installed, and it could not be started: " + err.Error()
 	case errors.Is(err, client.ErrExecForbidden), errors.Is(err, client.ErrNotOurHelper), errors.Is(err, client.ErrSentinelTimeout):
 		outcome.State = git.OpenExecForbidden
 		outcome.Message = "the host did not answer with the nocx helper: " + err.Error()
@@ -593,4 +1084,15 @@ func (r *refRepo) Close() error {
 	err := r.Repo.Close()
 	r.once.Do(r.released)
 	return err
+}
+
+// reportLifecycleLoss is the adapter's loss sink for every helper-hosted
+// session, opened or taken back. A method rather than the field itself so a
+// registry without the wiring is one nil check here instead of one at each
+// construction site.
+func (r *helperRegistry) reportLifecycleLoss(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	if r == nil || r.lifecycleLoss == nil {
+		return
+	}
+	r.lifecycleLoss(lane, cause)
 }

@@ -155,15 +155,17 @@ jobs:
 
       - name: Build the remote helpers
         run: make helpers
+      - name: Verify helper build output is stable and bounded
+        run: go test -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestMakeHelpersIsIdempotent|TestHelperArtifactsStayBelowSizeCeiling' -count=1
 
       # The COMPRESSED artefacts, exactly as `make helpers` leaves them:
-      # //go:embed all:artifacts takes the .gz files, so these are what the
+      # //go:embed all:bin takes the .gz files, so these are what the
       # build jobs download back into place before the Go build that embeds
       # them.
       - uses: actions/upload-artifact@v7
         with:
           name: helper-artifacts
-          path: internal/helper/deploy/artifacts/*.gz
+          path: internal/helper/deploy/artifacts/bin/*.gz
           retention-days: 7
 
       - name: Stage the helper binaries for publication
@@ -188,7 +190,7 @@ jobs:
           # than the shorter one.
           mkdir -p dist
           : > helper-hashes.txt
-          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
             name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
             plat="${name#nocx-helper-}"
             out="dist/nocx-helper-${VERSION}-${plat}"
@@ -353,7 +355,7 @@ jobs:
           echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
           security find-identity -v -p codesigning build.keychain
 
-      # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
+      # The helpers are EMBEDDED in the app (//go:embed all:bin), so
       # they must exist before the Go build that embeds them. Until
       # nocx-mchgh no step put them there at all and every published
       # release answered ErrArtifactsNotBuilt for every platform: remote
@@ -368,7 +370,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: helper-artifacts
-          path: internal/helper/deploy/artifacts
+          path: internal/helper/deploy/artifacts/bin
 
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
@@ -495,7 +497,7 @@ jobs:
           stage="$RUNNER_TEMP/helper-stage"
           mkdir -p "$stage"
           : > embedded-hashes.txt
-          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
             name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
             plat="${name#nocx-helper-}"
             out="$stage/nocx-helper-${VERSION}-${plat}"
@@ -700,7 +702,7 @@ jobs:
         run: npm ci && npm run build
         working-directory: frontend
 
-      # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
+      # The helpers are EMBEDDED in the app (//go:embed all:bin), so
       # they must exist before the Go build that embeds them. Until
       # nocx-mchgh no step put them there at all and every published
       # release answered ErrArtifactsNotBuilt for every platform: remote
@@ -715,7 +717,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: helper-artifacts
-          path: internal/helper/deploy/artifacts
+          path: internal/helper/deploy/artifacts/bin
 
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
@@ -794,7 +796,7 @@ jobs:
           stage="$RUNNER_TEMP/helper-stage"
           mkdir -p "$stage"
           : > embedded-hashes.txt
-          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
             name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
             plat="${name#nocx-helper-}"
             out="$stage/nocx-helper-${VERSION}-${plat}"

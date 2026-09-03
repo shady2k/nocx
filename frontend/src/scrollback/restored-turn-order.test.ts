@@ -536,5 +536,6 @@ function block(entryId: string, command: string, author: 'shell' | 'agent'): Res
     durationMs: 0,
     exitCode: 0,
     author,
+    unreconciled: null,
   }
 }

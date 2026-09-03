@@ -32,7 +32,7 @@ Every event travels in an envelope. **Every** envelope carries the full addressi
 tuple — protocol version, lane id, domain id, epoch, monotonic sequence, and the
 bearer capability. No API anywhere obtains lane, domain or epoch from a singleton;
 they are addressed explicitly in every message. This is the property that keeps
-the future relay a third adapter instead of a protocol rewrite.
+the remote helper a third adapter instead of a protocol rewrite.
 
 ```
 +--------+--------+--------+--------+------------------+
@@ -329,7 +329,7 @@ payload. Where the local platform cannot preserve the descriptor (sudo
 policy, su that closes fds), the honest fallback is the conventional
 terminal, visible in the product. `docker exec` is conventional-only by
 owner decision: neither an inherited descriptor nor a loopback port crosses
-the container boundary — that is a container relay, a Tier-B transport.
+the container boundary — that is a container transport of its own.
 Events from a suspended, closed or lost domain are rejected against the active
 lane — stale events can never touch the live domain.
 
@@ -461,6 +461,48 @@ permits only `Lost → Native` (it can never revive a `DomainLost`, never
 grant ownership, never open or complete an attempt); it is idempotent; and
 it is invalidated by session exit — a late acknowledgement after the session
 died is rejected.
+
+### 12.2 Adoption: the coordinator dies, the domain does not
+
+§12 above and §12.1 both describe a channel that BROKE. This one did not.
+
+A helper-hosted session's lifecycle channel is a socketpair whose child end the
+shell inherited at spawn and whose parent end the HELPER holds; the coordinator
+reads the shell's frames as a relayed byte window. When the coordinator process
+is replaced, nothing on the far side changes: the shell has its `accept`, its
+descriptor is open, and it goes on emitting frames stamped with the domain,
+epoch and capability it was given. What is gone is the registry that could place
+them.
+
+So the replacement **adopts** the domain (`Kernel.AdoptDomain`): it installs it
+`Established` on the re-attached carrier with the identity the helper hands back
+(`session.adopt-lifecycle`), and the lane goes to `PromptReady`. No `hello`, no
+`accept`, no new epoch — there is no shell-side act to trigger one, and an epoch
+exists to invalidate stale authority, which this is not.
+
+This does not weaken §12's rule that a `Lost` domain stays `Lost`. That rule
+binds a kernel that observed the loss and revoked authority; the adopting kernel
+observed nothing, because it did not exist. **A domain may be adopted only by a
+kernel that has never held it, and never after any kernel has marked it Lost** —
+`AdoptDomain` refuses a domain id already in the registry, in any state.
+
+Three properties keep adoption an authentication rather than a bypass:
+
+- **The bearer is unchanged and still mandatory.** Every adopted frame is
+  validated exactly as a minted domain's is. A descendant holding the descriptor
+  gains nothing.
+- **The stream resumes at the helper's lifecycle window HEAD.** The retained
+  bytes below it are frames the previous coordinator already consumed, and they
+  carry a capability the adopted domain still honours; replaying them would be
+  replaying authenticated events.
+- **The epoch counter is lifted past the adopted epoch**, so "never reused"
+  holds across the two processes rather than only within one.
+
+An attempt that was open when the coordinator was replaced is NOT adopted with
+the domain: it belonged to the dead kernel, and its outcome comes back from the
+replayed OSC 133 bytes, frontend-side (`nocx-k6p18.6`). The shell's `complete`
+for it is rejected, the shell is never told, and its next `prompt_ready` is
+accepted normally.
 
 ## 13. Security boundary
 

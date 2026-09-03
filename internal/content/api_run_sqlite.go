@@ -9,93 +9,21 @@ import (
 	"strings"
 )
 
+// The `api_run*` tables themselves are declared in `schemaV1` (sqlite.go) and
+// versioned by the file's own `user_version`, like every other table here.
+// They used to be created and versioned by a `migrateAPIRuns` step of their
+// own, running after `schemaV1` with a private `api_run_schema` counter beside
+// `user_version` — two numbers answering "what shape is this file in", and the
+// api-run half sat outside every refusal the ladder makes. nocx-lmb6v.5 folded
+// them in; schema_migrate.go's 15→16 rung retires the counter.
+
 const (
-	apiRunSchemaVersion = 1
-	apiRunChunkBytes    = 64 * 1024
+	apiRunChunkBytes = 64 * 1024
 
 	apiRunArtifactRequest      = "request"
 	apiRunArtifactResponseText = "response-text"
 	apiRunArtifactResponseRaw  = "response-raw"
 )
-
-// migrateAPIRuns is a feature-owned migration inside ContentDB's open path.
-// The ledger's schema version deliberately does not advance for an API feature:
-// each typed repository owns a monotonic version, so adding runs cannot force
-// an unrelated ledger reset. The tables are still listed in rebuildDropOrder,
-// so a base-schema rebuild remains all-or-nothing and foreign-key complete.
-func migrateAPIRuns(ctx context.Context, conn *sql.Conn) error {
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("content: api runs: begin migration: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS api_run_schema (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			version INTEGER NOT NULL
-		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS api_runs (
-			id              INTEGER PRIMARY KEY,
-			collection_path  TEXT NOT NULL,
-			request_rel_path TEXT NOT NULL,
-			repeated_from    INTEGER REFERENCES api_runs(id) ON DELETE SET NULL,
-			method           TEXT NOT NULL,
-			url              TEXT NOT NULL,
-			outcome          TEXT NOT NULL CHECK (outcome IN ('pending','answered','failed','stopped')),
-			request_spans    TEXT NOT NULL DEFAULT '[]',
-			metadata         TEXT NOT NULL DEFAULT '{}',
-			started_at       INTEGER NOT NULL,
-			ended_at         INTEGER,
-			logical_bytes    INTEGER NOT NULL DEFAULT 0 CHECK (logical_bytes >= 0)
-		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS api_run_artifacts (
-			id          INTEGER PRIMARY KEY,
-			run_id      INTEGER NOT NULL REFERENCES api_runs(id) ON DELETE CASCADE,
-			kind        TEXT NOT NULL CHECK (kind IN ('request','response-text','response-raw')),
-			byte_len    INTEGER NOT NULL DEFAULT 0 CHECK (byte_len >= 0),
-			chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
-			UNIQUE (run_id, kind)
-		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS api_run_artifact_chunks (
-			artifact_id INTEGER NOT NULL REFERENCES api_run_artifacts(id) ON DELETE CASCADE,
-			seq         INTEGER NOT NULL CHECK (seq >= 1),
-			body        BLOB NOT NULL,
-			PRIMARY KEY (artifact_id, seq)
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS api_runs_by_request
-			ON api_runs(collection_path, request_rel_path, started_at DESC, id DESC)`,
-		`CREATE INDEX IF NOT EXISTS api_run_artifacts_by_run
-			ON api_run_artifacts(run_id, kind)`,
-	}
-	for i, statement := range statements {
-		if _, execErr := tx.ExecContext(ctx, statement); execErr != nil {
-			return fmt.Errorf("content: api runs: migration statement %d: %w", i+1, execErr)
-		}
-	}
-	var version int
-	err = tx.QueryRowContext(ctx, `SELECT version FROM api_run_schema WHERE id = 1`).Scan(&version)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if _, execErr := tx.ExecContext(ctx, `INSERT INTO api_run_schema(id, version) VALUES (1, ?)`, apiRunSchemaVersion); execErr != nil {
-			return fmt.Errorf("content: api runs: seed migration version: %w", execErr)
-		}
-	case err != nil:
-		return fmt.Errorf("content: api runs: read migration version: %w", err)
-	case version > apiRunSchemaVersion:
-		return fmt.Errorf("content: api runs: version %d is newer than supported version %d", version, apiRunSchemaVersion)
-	case version < apiRunSchemaVersion:
-		// Version 1 is the first release. Future versions add their own
-		// transactional step here instead of resetting the ledger.
-		if _, err := tx.ExecContext(ctx, `UPDATE api_run_schema SET version = ? WHERE id = 1`, apiRunSchemaVersion); err != nil {
-			return fmt.Errorf("content: api runs: advance migration version: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("content: api runs: commit migration: %w", err)
-	}
-	return nil
-}
 
 var _ APIRunRepository = (*sqliteContent)(nil)
 

@@ -58,14 +58,15 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:    cfg.Exec,
-		cfg:     cfg,
-		log:     cfg.Log,
-		nonce:   nonce,
-		pending: make(map[uint64]chan proto.Response),
-		streams: make(map[uint64]*chunkStream),
-		done:    make(chan struct{}),
-		hsCh:    make(chan error, 1),
+		conn:        cfg.Exec,
+		cfg:         cfg,
+		log:         cfg.Log,
+		nonce:       nonce,
+		pending:     make(map[uint64]chan proto.Response),
+		streams:     make(map[uint64]*chunkStream),
+		attachments: make(map[[16]byte]*AttachedSession),
+		done:        make(chan struct{}),
+		hsCh:        make(chan error, 1),
 	}
 
 	hello := proto.Hello{Version: proto.Version, Nonce: nonce, Corr: randomCorr()}
@@ -199,6 +200,15 @@ func (c *Client) pump() {
 				r := <-c.waitCh
 				if r.code == exitVersionMismatch {
 					c.handshakeDone(ErrVersionMismatch)
+					return
+				}
+				if r.code == exitNoEndpoint {
+					// The bridge ran, reached the host and found no helper
+					// serving that generation. It is a fact about the HOST,
+					// not about the binary or the protocol, so it must not be
+					// reported as "not our helper": the recovery is a helper
+					// starting, and nothing about the install is wrong.
+					c.handshakeDone(ErrHelperNotServing)
 					return
 				}
 				msg := ""

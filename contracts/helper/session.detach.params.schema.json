@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.detach.params.schema.json",
+  "title": "HelperSessionDetachParams",
+  "description": "Params of the helper session service's detach op: drop this attachment. The process survives it, and the session stays in the inventory and reattachable. Detach is NOT close-session and neither is closing a tab: in level 1 closing a tab is this verb plus losing the local tab, and the tab's rows are kept, so the blocks stay in recall. It names the attachment and nothing else — the subscriber's cursor and the host session both outlive it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attachment"],
+  "properties": {
+    "attachment": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/attachmentId"
+    }
+  }
+}

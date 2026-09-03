@@ -104,6 +104,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0052 | [A code identity without a publisher identity](0052-a-code-identity-without-a-publisher-identity.md)                              | Accepted 2026-08-30                   |
 | 0053 | [A tool declares the classes it can reach](0053-a-tool-declares-the-classes-it-can-reach.md)                                      | Accepted 2026-08-31                   |
 | 0054 | [A table is a stack of rows that carries a grid](0054-a-table-is-a-stack-of-rows-that-carries-a-grid.md)                          | Accepted 2026-08-31                   |
+| 0055 | [ContentDB schema changes migrate or refuse](0055-contentdb-schema-changes-migrate-or-refuse.md)                                  | Accepted 2026-09-01                   |
 
 ## Adding one
 

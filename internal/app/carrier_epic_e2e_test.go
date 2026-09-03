@@ -421,7 +421,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 	fx.launcher = rec
 
 	kernel := newCanaryKernel()
-	installer := shellintegration.New(logger)
+	installer := &remoteInstallerAdapter{inner: shellintegration.New(logger)}
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -757,7 +757,7 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		// remove now that it does. Nothing here arranges the order; the
 		// installer only RECORDS what happened to the auxiliary call, so the
 		// clause is asserted rather than staged.
-		installer := &recordingInstaller{inner: shellintegration.New(logger)}
+		installer := &recordingInstaller{inner: &remoteInstallerAdapter{inner: shellintegration.New(logger)}}
 
 		// The named reason on THIS path is not on the terminal and must not
 		// be looked for there: the bootstrap conversation happens on the SSH

@@ -11,7 +11,12 @@ import type { WorkspaceColour } from '../layout/workspace-colours'
 
 import type { CommandStatus } from '../command-ledger'
 import type { PaneActivity } from '../pane-observation'
-import type { OverviewBlockFacts, OverviewPaneFacts, OverviewSnapshot } from './overview-port'
+import type {
+  OverviewBlockFacts,
+  OverviewPaneFacts,
+  OverviewSnapshot,
+  ProcessState,
+} from './overview-port'
 
 /**
  * What a pane is doing, in the vocabulary a person uses when they are looking
@@ -126,18 +131,81 @@ export function stateText(f: OverviewPaneFacts, now: number): string {
 }
 
 /**
+ * Return the cwd text that is safe to show as a current location.
+ *
+ * The helper's launch cwd is not an observation. In particular, the
+ * unavailable state must never turn that historical value into a plausible
+ * current path.
+ */
+function cwdText(f: OverviewPaneFacts): string {
+  switch (f.cwd.state) {
+    case 'known':
+      return present(f.cwd.cwd) ?? 'Directory not known'
+    case 'unavailable':
+      return 'Directory unavailable'
+    case 'unobserved':
+      return 'Directory not observed'
+  }
+}
+
+/**
+ * The kernel's word for what the shell's process is doing.
+ *
+ * IT IS NOT PaneState, and the two must never be folded together. `paneState`
+ * is the product's judgement about what the PERSON has to do — an agent that
+ * has stopped on a question is `waiting`, whatever the kernel thinks of the
+ * process holding it. This is the OS's answer about one process, and the whole
+ * reason nocx-k6p18.12 put it on the wire is that a shell suspended by ^Z and
+ * a shell sitting at a prompt look identical everywhere else in this product.
+ */
+const PROCESS_STATE_LABEL: Record<ProcessState, string> = {
+  running: 'Running',
+  sleeping: 'Sleeping',
+  uninterruptible: 'Uninterruptible',
+  stopped: 'Stopped',
+  zombie: 'Zombie',
+}
+
+/**
+ * What the OS says about the session's process: its state, how long it has
+ * been up, and who its parent is — or, for each of those independently, that
+ * the helper asked and could not answer.
+ *
+ * EVERY PART IS PRINTED, including the ones that are ordinary. A line that
+ * appeared only when something was wrong would make "we do not know" and "it
+ * is fine" the same silence, which is the defect the whole `unavailable`
+ * vocabulary exists to prevent — and it is the one this surface already
+ * learned once, about a directory.
+ *
+ * Null only when nobody could be asked at all: a pane with no helper-owned
+ * session has no process for the OS to describe, and inventing a line for it
+ * would be the launch-record fallback wearing different clothes.
+ */
+export function cardProcess(f: OverviewPaneFacts, now: number): string | null {
+  if (!f.process.observed) return null
+  const { processState, startTimeMs, ppid } = f.process
+  const age = ageLabel(startTimeMs, now)
+  return [
+    processState === null ? 'State unavailable' : PROCESS_STATE_LABEL[processState],
+    age === null ? 'start time unavailable' : `started ${age} ago`,
+    ppid === null ? 'parent unavailable' : `parent ${ppid}`,
+  ].join(' · ')
+}
+
+/**
  * What the card calls the pane: the title it composed for itself, and — when
  * it has composed none yet — the same chain one rung at a time.
  *
  * The last resort is a name rather than an empty string. A blank card is
  * indistinguishable from a rendering bug, and a pane one round trip old is an
- * ordinary state, not a broken one.
+ * ordinary state, not a broken one. Only an observed cwd is eligible for this
+ * fallback; the other two states are rendered by `cardLocation`.
  */
 export function cardTitle(f: OverviewPaneFacts): string {
   return (
     present(f.title) ??
     present(f.runningCommand) ??
-    present(f.cwd) ??
+    (f.cwd.state === 'known' ? present(f.cwd.cwd) : null) ??
     present(f.host) ??
     'Untitled pane'
   )
@@ -147,19 +215,16 @@ export function cardTitle(f: OverviewPaneFacts): string {
  * Where the pane is: the machine, the directory and the branch, in that order,
  * and only the parts that are known.
  *
- * A part equal to the title is dropped. A pane sitting at a prompt is titled
- * by its cwd (`pushTitle`: program title, else running command, else cwd), so
- * printing that cwd underneath would be one fact twice — the same reason
- * `terminal-content.ts` suppresses its own location line.
+ * A part equal to the title is dropped. An unknown cwd remains an explicit
+ * status rather than disappearing or falling back to the launch value.
  */
 export function cardLocation(f: OverviewPaneFacts): string | null {
   const title = present(f.title)
-  const parts = [present(f.host), present(f.cwd), present(f.branch)].filter(
+  const parts = [present(f.host), cwdText(f), present(f.branch)].filter(
     (p): p is string => p !== null && p !== title,
   )
   return parts.length === 0 ? null : parts.join(' · ')
 }
-
 /**
  * WHAT THE CARD QUOTES UNDERNEATH THE STATUS — one line, and which line it is
  * depends on what the pane is doing, because one rule cannot serve all four.
@@ -273,6 +338,9 @@ export interface OverviewCard {
   readonly location: string | null
   readonly state: PaneState
   readonly stateText: string
+  /** What the OS says about the session's process — see cardProcess. Null
+   *  when no helper answered for this pane at all. */
+  readonly process: string | null
   /** The one line under the status — see cardQuote. Null when the card has
    *  nothing to add that its title and status do not already say. */
   readonly quote: string | null
@@ -315,6 +383,7 @@ export function overviewGroups(snapshot: OverviewSnapshot, now = Date.now()): Ov
       location: cardLocation(f),
       state: paneState(f),
       stateText: stateText(f, now),
+      process: cardProcess(f, now),
       quote: cardQuote(f),
       excerpt: f.excerpt,
       isActive: f.paneId === snapshot.activePaneId,

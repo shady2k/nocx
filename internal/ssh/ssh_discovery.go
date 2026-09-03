@@ -131,8 +131,8 @@ func (b *cappedBuffer) Bytes() []byte { return b.buf.Bytes() }
 // underlying connection closes when the LAST reference — tabs and leases
 // alike — releases.
 type discoveryConn struct {
-	client *gossh.Client
-
+	client      *gossh.Client
+	fingerprint string
 	// done closes on transport shutdown (the loss signal); closed closes on
 	// Close. Exec fails after either, closed checked first: when the lease
 	// was explicitly closed AND the connection died (closing the last ref
@@ -162,13 +162,11 @@ type discoveryConn struct {
 // newDiscoveryConn wires a lease. release drops this lease's pool reference
 // (pool.Release is already idempotent per handle; the once guard keeps the
 // watcher and Close from double-firing the callback).
-func newDiscoveryConn(client *gossh.Client, release func()) *discoveryConn {
+func newDiscoveryConn(client *gossh.Client, fingerprint string, release func()) *discoveryConn {
 	dc := &discoveryConn{
-		client:   client,
-		done:     make(chan struct{}),
-		closed:   make(chan struct{}),
-		release:  release,
-		sessions: make(map[*gossh.Session]struct{}),
+		client: client, fingerprint: fingerprint,
+		done: make(chan struct{}), closed: make(chan struct{}),
+		release: release, sessions: make(map[*gossh.Session]struct{}),
 	}
 	// One watcher per lease: gossh.Client.Wait returns when the transport
 	// shuts down. Report loss and drop our reference so a dead entry cannot
@@ -185,7 +183,8 @@ func newDiscoveryConn(client *gossh.Client, release func()) *discoveryConn {
 	return dc
 }
 
-func (c *discoveryConn) Done() <-chan struct{} { return c.done }
+func (c *discoveryConn) HostKeyFingerprint() string { return c.fingerprint }
+func (c *discoveryConn) Done() <-chan struct{}      { return c.done }
 
 func (c *discoveryConn) LostErr() error {
 	select {
@@ -406,5 +405,5 @@ func (rc *RealClient) DiscoveryConn(ctx context.Context, host string, opts ...Co
 	if err != nil {
 		return nil, err
 	}
-	return newDiscoveryConn(acq.client, func() { rc.pool.Release(acq.handle) }), nil
+	return newDiscoveryConn(acq.client, acq.pconn.HostKeyFingerprint(), func() { rc.pool.Release(acq.handle) }), nil
 }

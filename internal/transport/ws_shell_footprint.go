@@ -84,7 +84,8 @@ func WithRemoteUninstaller(u RemoteUninstaller) WSServerOption {
 // — without a closer the handler cannot prove the close-before-remove
 // order that is the whole point of the rule.
 type HelperChannelCloser interface {
-	CloseHelpersFor(fingerprint string)
+	CloseHelpersFor(ctx context.Context, fingerprint string) error
+	FinishHelpersFor(fingerprint string)
 }
 
 // RemoteHelperUninstaller removes a helper install from a remote host,
@@ -397,9 +398,18 @@ func (h footprintHandlers) handleFootprintHelperUninstall(ctx context.Context, r
 		return
 	}
 
-	// D25 first: every live helper channel on this machine is closed
-	// before the install directory is removed.
-	h.closer.CloseHelpersFor(params.Fingerprint)
+	// D25 first: enumerate and deliberately end every session the helper
+	// daemon reports, then close the coordinator's bridge channels.
+	if closeErr := h.closer.CloseHelpersFor(ctx, params.Fingerprint); closeErr != nil {
+		h.log.Warn("helper uninstall could not close live sessions",
+			"host", host, "error", closeErr)
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32603,
+			Message: "helper uninstall refused because live helper sessions could not be ended: " + closeErr.Error(),
+		})
+		return
+	}
+	defer h.closer.FinishHelpersFor(params.Fingerprint)
 
 	// The resolved config travels as one ConnectOption, the same shape the
 	// discovery scheduler uses: every credential, key and jump hop the
@@ -411,14 +421,32 @@ func (h footprintHandlers) handleFootprintHelperUninstall(ctx context.Context, r
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "helper uninstall failed"})
 		return
 	}
-	// The inventory row follows the remote removal: only a removal that
-	// succeeded is forgotten. A failure here is surfaced, never silent —
-	// the directory is gone but the listing would otherwise advertise an
-	// install that no longer exists, and a retry heals it (the remote
-	// half is then the idempotent no-op).
+	// Revoke consent before forgetting observations. If the observation write
+	// fails, restore the grant so a failed local cleanup leaves both stores
+	// describing the same machine state and a retry remains possible.
+	wasGranted := false
+	if h.consent != nil {
+		answer, ok := h.consent.Lookup(params.Fingerprint)
+		wasGranted = ok && answer == consent.Granted
+		if rerr := h.consent.Revoke(params.Fingerprint); rerr != nil {
+			h.log.Warn("helper removed but machine consent could not be revoked",
+				"host", host, "error", rerr)
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32603,
+				Message: "the helper was removed from " + host + " but machine consent could not be revoked: " + rerr.Error(),
+			})
+			return
+		}
+	}
 	if h.helperInstalls != nil {
-		if rerr := h.helperInstalls.Remove(params.Fingerprint, params.Path); rerr != nil {
-			h.log.Warn("helper removed but the footprint observation was not cleared",
+		if rerr := h.helperInstalls.RemoveMachine(params.Fingerprint); rerr != nil {
+			if wasGranted && h.consent != nil {
+				if restoreErr := h.consent.Grant(params.Fingerprint); restoreErr != nil {
+					h.log.Warn("helper uninstall rollback could not restore machine consent",
+						"host", host, "error", restoreErr)
+				}
+			}
+			h.log.Warn("helper removed but the footprint observations could not be cleared",
 				"host", host, "error", rerr)
 			_ = h.r.TryError(req.ID, RPCError{
 				Code:    -32603,

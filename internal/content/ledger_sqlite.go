@@ -38,9 +38,36 @@ import (
 
 func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 	return s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO sessions (id, workspace_id, started_at) VALUES (?, ?, ?)`,
-			sess.ID, sess.WorkspaceID, time.Now().UnixMilli())
+		payload := struct {
+			Generation string `json:"generation,omitempty"`
+			Host       string `json:"host,omitempty"`
+			Account    string `json:"account,omitempty"`
+			// The route back (nocx-k6p18.30). omitempty on all three: a
+			// session with no route recorded writes the same payload it
+			// always did, so "no route" and "an older row" are one state
+			// rather than two that have to be told apart.
+			Pane          string `json:"pane,omitempty"`
+			Profile       string `json:"profile,omitempty"`
+			HelperCommand string `json:"helperCommand,omitempty"`
+			Fingerprint   string `json:"fingerprint,omitempty"`
+		}{
+			Generation:    sess.Generation,
+			Host:          sess.Host,
+			Account:       sess.Account,
+			Pane:          sess.PaneID,
+			Profile:       sess.ProfileID,
+			HelperCommand: sess.HelperCommand,
+			Fingerprint:   sess.Fingerprint,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("content: encode session metadata: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT INTO sessions (id, workspace_id, started_at, payload) VALUES (?, ?, ?, ?)`,
+			// string(raw), not raw: `sessions` is STRICT and `payload` is
+			// TEXT, so a []byte binds as a BLOB and the constraint refuses it.
+			sess.ID, sess.WorkspaceID, time.Now().UnixMilli(), string(raw))
 		return err
 	})
 }
@@ -331,6 +358,11 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 		return nil, err
 	}
 	e.Environment = env.value()
+	// The third state, on the detail read as on the page (nocx-k6p18.5): a row
+	// whose session nobody could be asked about is neither running nor
+	// finished, and a surface that read it here would otherwise be told it was
+	// reconciled.
+	e.Unreconciled = s.unreconciledCause(e.SessionID)
 	execs, err := s.executionsFor(ctx, id)
 	if err != nil {
 		return nil, err
@@ -388,7 +420,8 @@ func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]
 // environment half of the join. One const, so ListEntries and QueryEntries
 // cannot drift into two row shapes.
 const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.source, e.intent,
-	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload, ` +
+	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload,
+	e.session_id, ` +
 	environmentColumns
 
 // rowQuerier is the read seam both the pool and a transaction satisfy, so
@@ -424,7 +457,7 @@ func entryPage(ctx context.Context, q rowQuerier, cond string, args []any, limit
 		dest := []any{
 			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind, &e.Source,
 			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
-			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload,
+			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload, &e.SessionID,
 		}
 		if err := rows.Scan(append(dest, env.dest()...)...); err != nil {
 			return nil, err
@@ -594,6 +627,11 @@ func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (Ledger
 	if !exhausted {
 		entries = entries[:q.Limit]
 	}
+	// The third state, stamped on the way out (nocx-k6p18.5): a row whose
+	// session is still awaiting a verdict is neither running nor finished, and
+	// the page is where a person meets it — the restore path draws this
+	// answer into the pane.
+	s.markUnreconciled(entries)
 
 	// HasRows is EXISTS rather than a count: the question is whether the
 	// ledger has anything to answer from, and a count would read every row

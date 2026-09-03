@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.detach.schema.json",
+  "title": "HelperSessionDetachResult",
+  "description": "Result of the helper session service's detach op.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["releasedWrite"],
+  "properties": {
+    "releasedWrite": {
+      "description": "Whether this attachment was holding the session's one write capability when it went. It is here because it is the fact the next caller acts on: a replacing coordinator can take the capability without arbitration precisely when the previous holder's connection released it, and a caller that cannot tell would have to guess between waiting and asking.",
+      "type": "boolean"
+    }
+  }
+}

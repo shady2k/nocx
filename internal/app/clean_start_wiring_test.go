@@ -30,6 +30,10 @@ func (p *clearWindowProbe) Layout() content.LayoutRepository               { ret
 func (p *clearWindowProbe) APIRuns() content.APIRunRepository              { return nil }
 func (p *clearWindowProbe) SessionOutput() content.SessionOutputRepository { return nil }
 
+// Reconcile: this fake inherited no sessions, so there is nothing to
+// reconcile and no reconciler to hand out.
+func (p *clearWindowProbe) Reconcile() content.SessionReconciler { return nil }
+
 type clearWindowLayout struct {
 	content.LayoutRepository
 	calls int

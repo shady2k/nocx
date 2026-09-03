@@ -12,6 +12,9 @@ import {
   makeUIStateBackend,
 } from './test-support/panes-fixtures'
 import type { SSHProfile } from './profiles'
+// The palette itself, not a stand-in for it: the regression below opens a
+// connection the way a person does (nocx-xhm9e).
+import { SSHQuickConnectProvider } from './quick-connect'
 import { BasePaneContent, type ContentDescriptor, type ContentViewport } from './pane-content'
 
 // The terminal renderer is mocked exactly as panes.test.ts mocks it: these
@@ -892,6 +895,102 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
     // The row is left exactly where it was: turning the setting back on
     // restores what was there.
     expect(backend.rows().panes.map((p) => p.id)).toContain('pane-ssh')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A palette connection on a non-22 port survives a restart (nocx-xhm9e)
+//
+// The whole round trip, through the seams a person reaches: the quick-connect
+// palette lists the saved connections, activating one opens a pane, and after
+// a restart that pane comes back ON ITS PROFILE — the branch that carries the
+// profile's port and its key — rather than as an unauthenticated direct-host
+// dial.
+//
+// ONE TEST RATHER THAN TWO, because either half alone passes with the product
+// broken. `endpointOf` returning the right string says nothing about the
+// restore, and a restore driven from a hand-written row says nothing about
+// what the palette stored. The defect lived exactly between them, and that is
+// how it shipped past both.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a connection opened from the palette comes back on its profile (nocx-xhm9e)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  afterEach(() => {
+    applyRestoreOnStartup(true)
+  })
+
+  // Neither 22 nor a default anywhere in this chain, so a port that was
+  // defaulted rather than carried cannot look like a pass.
+  const FIXTURE_PORT = 47311
+
+  /** A saved connection on its own port, with a key — the shape the palette
+   *  lists, and the shape only the profile branch can dial. */
+  const fixtureProfile: SSHProfile = {
+    id: 'profile-fixture-sshd',
+    type: 'ssh',
+    name: 'fixture sshd',
+    options: { host: '127.0.0.1', user: 'e2e', port: FIXTURE_PORT, keyPath: '~/.ssh/id_fixture' },
+  }
+
+  it('stores the port the profile names, and reconnects through the profile after a restart', async () => {
+    const backend = makeLayoutBackend()
+    const first = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [fixtureProfile],
+    )
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(1))
+
+    // THE PALETTE, wired as the composition root wires it (main.tsx): the
+    // provider reads the saved connections, and activating a row reaches the
+    // manager's own opener — not a lambda this test wrote, which is exactly
+    // where the port used to be dropped.
+    const provider = new SSHQuickConnectProvider(
+      { listProfiles: () => Promise.resolve([fixtureProfile]) } as never,
+      first.manager.newSSHPane.bind(first.manager),
+    )
+    const rows = await provider.getItems()
+    const row = rows.find((r) => r.id === fixtureProfile.id)
+    expect(row).toBeDefined()
+    row!.run()
+
+    // What the chain holds is WHERE THE PANE APPLIES, and that is the
+    // profile's port — not the default that used to land here.
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(2))
+    const stored = backend.rows().panes.find((p) => p.kind === 'ssh')
+    expect(stored?.endpoint).toBe(`e2e@127.0.0.1:${FIXTURE_PORT}`)
+
+    // THE RESTART: a second renderer over the same rows, knowing nothing but
+    // what the chain and the profile store tell it.
+    const second = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [fixtureProfile],
+    )
+
+    // THROUGH THE PROFILE, which is the branch that carries the key. The
+    // direct-host branch takes a key only from ssh -G and ~/.ssh/config, and
+    // this connection has none there — so the tab used to come back on
+    // "nothing to authenticate" instead of on its host.
+    await vi.waitFor(() => expect(second.client.openSSHSession).toHaveBeenCalledTimes(1))
+    const [, , profileId, anchor] = second.client.openSSHSession.mock.calls[0] as unknown[]
+    expect(profileId).toBe(fixtureProfile.id)
+    // THE SAME PANE, so its blocks are still found by this id.
+    expect(anchor).toEqual({ paneId: stored!.id })
+    expect(second.client.openSSHSessionByHost).not.toHaveBeenCalled()
   })
 })
 

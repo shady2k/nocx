@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.sessions.params.schema.json",
+  "title": "HelperSessionsParams",
+  "description": "Params of the helper session service's sessions op — the inventory. There is no router and no registry beside the helper: it holds the PTYs, so it is the only thing that can answer, and this is the call a replacing coordinator makes first. The workspace is the reserved filter on the read side and is empty in every level-1 call.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace"],
+  "properties": {
+    "workspace": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/workspaceId"
+    }
+  }
+}

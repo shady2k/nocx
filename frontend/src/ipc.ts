@@ -4,6 +4,7 @@ import { historyOutbox } from './history-client'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { SessionEntry, SessionsInventoryResult } from './generated/sessions.inventory'
 import type { LiveSession, SessionsLiveResult } from './generated/sessions.live'
 import type {
   EffectiveSize as SessionSize,
@@ -171,10 +172,24 @@ const EMPTY_RECORDING: SessionRecording = {
 }
 
 /** The gap reason for a stretch that neither the recording nor the ring
- *  holds. It is the renderer's word because the fact is the renderer's to
- *  derive: `produced` belongs to session.output and `replayFrom` to
- *  sessions.live, and neither owner can see the other's number. */
-const UNRECORDED = 'unrecorded'
+ *  holds. The renderer DERIVES this one because only it can: `produced`
+ *  belongs to session.output and `replayFrom` to sessions.live, and neither
+ *  owner can see the other's number.
+ *
+ *  The backend mints the same word for a range nobody recorded on its side
+ *  (internal/content's GapReasonUnrecorded, nocx-k6p18.2), and that is
+ *  deliberate rather than a second owner: it is one fact — nobody has these
+ *  bytes — arrived at from two directions, and one fact told to a user in two
+ *  vocabularies is the defect. Keep them equal. What must stay distinct is
+ *  this and `cap`: the cap dropped bytes that were here, and telling a person
+ *  the cap took bytes it never had would send them to a limit that did
+ *  nothing.
+ *
+ *  EXPORTED so the surface that reports the hole (recovery-notice.tsx) reads
+ *  the word this file mints rather than spelling a second copy of it
+ *  (nocx-fz4qa). Two string literals that must agree and only meet at runtime
+ *  is the same delay-fused shape, one layer up. */
+export const UNRECORDED = 'unrecorded'
 
 /** base64 → bytes. atob is the platform's, and its output is one byte per
  *  code unit by definition, so the copy below is exact rather than a
@@ -428,6 +443,10 @@ export class SessionHandle {
 
   close(): void {
     this.client.closeSession(this.sessionId)
+  }
+
+  detach(): void {
+    this.client.detachSession(this.sessionId)
   }
 
   onData(cb: (data: string) => void): void {
@@ -991,6 +1010,14 @@ export class WSClient {
       .then((result) => result.sessions)
   }
 
+  /** The sessions currently held by authenticated helper generations known
+   *  to the coordinator (contracts/sessions.inventory.schema.json). */
+  listHelperSessions(): Promise<SessionEntry[]> {
+    return this.dispatcher
+      .call<SessionsInventoryResult>('sessions.inventory', {})
+      .then((result) => result.sessions)
+  }
+
   // --- the recording -------------------------------------------------------
 
   /** Everything the backend recorded for one session, read back by OFFSET
@@ -1209,6 +1236,15 @@ export class WSClient {
    */
   signalSession(sessionId: string, signal: SessionSignal['signal']): Promise<SessionSignal> {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
+  }
+
+  detachSession(sessionId: string): void {
+    const ws = this.dispatcher.socket
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      void this.dispatcher.call('detach', { sessionId }).catch(() => {})
+    }
+    this._flushAck(sessionId)
+    this.sessions.delete(sessionId)
   }
 
   closeSession(sessionId: string): void {

@@ -97,6 +97,19 @@ func (k *Kernel) BindTransport(t TransportID, port Port) error {
 	return nil
 }
 
+// UnbindTransport removes a transport registration after a post-bind
+// construction failure. It is intentionally narrow: callers cannot unbind a
+// live transport through normal lifecycle operation.
+func (k *Kernel) UnbindTransport(t TransportID) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.ports[t]; !ok {
+		return ErrUnknownTransport
+	}
+	delete(k.ports, t)
+	return nil
+}
+
 // RequestDomain mints a Pending domain bound to the transport: a fresh id, a
 // fresh epoch and a fresh capability. The adapter substitutes the capability
 // into the integration script and waits for the shell's hello; nothing is
@@ -1243,4 +1256,82 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 		return "", err
 	}
 	return AttemptID("att-" + h), nil
+}
+
+// AdoptDomain installs a domain this kernel did not mint: the shell on the
+// far side of a helper-owned session is still speaking, still holds the
+// capability and epoch it was given at spawn, and has no idea that the
+// coordinator it was talking to was replaced (nocx-k6p18.31).
+//
+// # This is not a Lost domain being revived, and the distinction is the whole
+// # of the authority argument
+//
+// §12 says a Lost domain stays Lost and any future integration is a fresh
+// epoch. That rule is about a kernel that WATCHED a transport die and revoked
+// authority: it exists so that the renderer, having fallen back to a native
+// prompt, can never be told the old authority is good again. Nothing of the
+// sort happened here. The shell's end of the lifecycle channel is a
+// socketpair descriptor handed over at spawn, and the HELPER holds the parent
+// end — so when the coordinator process went away, the domain did not die,
+// the registry that could address it did. Adoption re-establishes the
+// coordinator↔helper leg and nothing else; the shell notices nothing, because
+// there is nothing for it to notice.
+//
+// # What still stops a stale or hostile writer
+//
+// Exactly what stopped it before, unchanged: the per-frame bearer. Ingest
+// authenticates domain, transport, epoch and capability before it consults
+// any state, and adoption alters none of that — a descendant of the shell
+// that inherited the descriptor still cannot produce the capability, and a
+// frame from any OTHER domain still names an id this kernel does not hold.
+// What adoption adds is one more holder of the capability: the replacing
+// coordinator, which is the same trust class that minted it in the first
+// place and which already owns the session's keyboard and its whole output
+// stream. The one new exposure adoption WOULD create is replay of the
+// helper's retained lifecycle window, and it is closed where the window is
+// read rather than here: the re-attachment resumes at the window's head, so
+// no frame the previous coordinator already consumed is ever re-delivered.
+//
+// The domain is installed Established and the lane PromptReady — the state
+// the shell is actually in, since it has its accept and speaks only from a
+// prompt. An attempt that was open when the coordinator was replaced is not
+// adopted with it: it belonged to the dead kernel, and its outcome comes back
+// from the bytes (nocx-k6p18.6), which is the existing answer to that half.
+func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability Capability, recovery FenceNonce, t TransportID) (DomainHandle, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.ports[t]; !ok {
+		return DomainHandle{}, ErrUnknownTransport
+	}
+	// A zero capability authenticates thirty-two zero bytes, which is the
+	// same trap ingest's own zero test guards; refused here so no such
+	// domain is ever registered.
+	if lane == "" || id == "" || epoch == 0 || capability == (Capability{}) {
+		return DomainHandle{}, ErrInvalidArgument
+	}
+	if _, exists := k.registry.Lookup(id); exists {
+		return DomainHandle{}, ErrDomainExists
+	}
+	ls := k.getLane(lane)
+	if ls.top() != "" {
+		return DomainHandle{}, ErrLaneBusy
+	}
+	d := &Domain{
+		ID:         id,
+		Epoch:      epoch,
+		Lane:       lane,
+		Transport:  t,
+		State:      DomainEstablished,
+		capability: capability,
+		recovery:   recovery,
+	}
+	k.registry.Register(d)
+	// The adopted epoch came from another process's counter. Lifting ours
+	// past it keeps `nextEpoch` the monotonic, never-reused value decision 8
+	// asks for across the two processes, not merely within this one.
+	k.registry.adoptEpoch(epoch)
+	ls.recoveryNonce = recovery
+	ls.stack = append(ls.stack, d.ID)
+	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
+	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery}, nil
 }

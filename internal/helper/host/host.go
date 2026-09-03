@@ -21,12 +21,21 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
-// ExitVersionMismatch is the helper's exit code for a hello carrying the
-// wrong protocol version. The helper writes nothing to stdout first (D5).
+// ExitVersionMismatch is the exit code a helper LAUNCHED DIRECTLY over the
+// exec lane takes on a hello carrying the wrong protocol version, having
+// written nothing to stdout first (D5). It is the value the coordinator's
+// client classifies, and it is stated here because it is a wire constant.
+//
+// No shipped path takes it any more, and that is not an oversight: a helper
+// serving its endpoint holds somebody's running shell, so one caller speaking
+// the wrong version at it ends that CONNECTION and nothing else. The version
+// cannot arrive unnoticed either way — the endpoint's socket is named for the
+// protocol version, so a coordinator only ever dials a helper that speaks its
+// own (internal/helper/endpoint).
 const ExitVersionMismatch = 42
 
 // ErrVersionMismatch reports a hello whose Version disagrees with
-// proto.Version. main maps it to ExitVersionMismatch.
+// proto.Version. The connection ends on it; the helper does not.
 var ErrVersionMismatch = errors.New("host: helper version mismatch")
 
 // Host serves one helper connection: hello, sentinel, then requests until
@@ -82,16 +91,24 @@ func New(in io.Reader, out io.Writer, contentHash, instanceID string, log *slog.
 	}
 }
 
-// Register adds a service to the host. The name session is reserved (D15):
-// registering it panics at construction, and requests for it answer
-// ErrCodeUnknownService like any other name. D3 is enforced here, not just
-// audited: every op of the service must declare its params type, and an op
-// whose params carry a free-form string list is refused at registration —
-// a rule the registration path cannot get past is stronger than a rule a
-// test must remember to check.
+// Register adds a service to the host. D3 is enforced here, not just audited:
+// every op of the service must declare its params type, and an op whose params
+// carry a free-form string list is refused at registration — a rule the
+// registration path cannot get past is stronger than a rule a test must
+// remember to check.
+//
+// The name `session` was RESERVED here until nocx-k6p18.3 and this call
+// panicked on it (D15). That reservation is now cashed in by
+// internal/helper/session, and what survives it is the reason it existed: one
+// owner per name. A duplicate registration is refused, whatever the name,
+// because serviceByName answers with the first match — so a second service
+// under one name is not a conflict anybody would see, it is a service that
+// silently never runs.
 func (h *Host) Register(s Service) {
-	if s.Name() == "session" {
-		panic(`host: "session" is a reserved service name (D15)`)
+	for _, existing := range h.Services() {
+		if existing.Name() == s.Name() {
+			panic(fmt.Sprintf("host: a service named %q is already registered", s.Name()))
+		}
 	}
 	for _, op := range s.Ops() {
 		schema := s.ParamsSchema(op)
@@ -218,16 +235,101 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.cancel(payload)
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
+	case proto.TypeSessionData:
+		h.sessionData(ctx, payload)
+	case proto.TypeLifecycleData:
+		h.lifecycleData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
+}
+
+// sessionData handles an inbound data-plane frame: it is routed to the session
+// service when this generation has one, and DROPPED when it does not.
+//
+// The drop path is not a leftover. Generations are immutable and coexist for
+// months, and a build serving only the git service — which is every build
+// before nocx-k6p18.3, and any later one composed without the session service
+// — will still be sent these frames by a newer coordinator. An unknown type
+// byte is garbage to the decoder, which then resyncs forward one byte at a
+// time through whatever follows: a live PTY stream, in the case that matters.
+// Recognising the frame turns that into one dropped write. This is AD-1's own
+// move for its reserved metadata msg-type: logged and dropped, never a spawn
+// and never a torn-down connection.
+//
+// The bytes are counted here, never read: the helper moves PTY bytes and does
+// not interpret them (AD-6).
+func (h *Host) sessionData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	if svc := h.serviceByName(proto.ServiceSession); svc != nil {
+		if plane, ok := svc.(DataPlane); ok {
+			plane.SessionData(WithConnection(ctx, h), f)
+			return
+		}
+	}
+	h.log.Warn("session data frame dropped: no session service in this generation",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"epoch", uint64(f.Epoch), "bytes", len(f.Payload))
+}
+
+func (h *Host) lifecycleData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed lifecycle data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	if svc := h.serviceByName(proto.ServiceSession); svc != nil {
+		if plane, ok := svc.(LifecycleDataPlane); ok {
+			plane.LifecycleData(WithConnection(ctx, h), f)
+			return
+		}
+	}
+	h.log.Warn("lifecycle data frame dropped: no session service in this generation",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"bytes", len(f.Payload))
+}
+
+// SendSessionData writes one data-plane frame to the wire: the helper's own
+// output, on its way to one subscriber. It is the outbound half of DataPlane
+// and the reason this method is on the host rather than in the service — the
+// wire and its writer mutex are the host's, and a second writer would
+// interleave mid-frame.
+//
+// The error is returned rather than only logged, because its caller acts on
+// it: a per-subscriber pump whose wire has died drops its attachment, and the
+// session, the window and the process survive it.
+func (h *Host) SendSessionData(f proto.SessionFrame) error {
+	return h.write(proto.TypeSessionData, proto.EncodeSessionFrame(f))
+}
+
+// SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.
+// The helper never decodes the payload; the coordinator's lifecycle adapter
+// remains the sole semantic owner.
+func (h *Host) SendLifecycleData(f proto.SessionFrame) error {
+	return h.write(proto.TypeLifecycleData, proto.EncodeSessionFrame(f))
+}
+
+// SendNotification writes one unsolicited fact: a live reset, an exit. It
+// rides as a TypeNotify frame on the same wire as the data frames, so it is
+// ORDERED with respect to them — which is what lets a reader see exactly which
+// bytes a hole sits between.
+func (h *Host) SendNotification(n proto.Notification) error {
+	raw, err := json.Marshal(n)
+	if err != nil {
+		return fmt.Errorf("host: marshal notification: %w", err)
+	}
+	return h.write(proto.TypeNotify, raw)
 }
 
 // request serves one request on its own goroutine, so a blocking handler
 // never stalls the read loop or another request (D13). The per-request
 // context is stored by id so a TypeCancel can reach it.
 func (h *Host) request(ctx context.Context, req proto.Request) {
-	reqCtx, stop := context.WithCancel(ctx)
+	reqCtx, stop := context.WithCancel(WithConnection(ctx, h))
 	h.mu.Lock()
 	h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
 	h.mu.Unlock()
@@ -274,6 +376,26 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	resp.Result = raw
 	h.respond(resp)
 }
+
+// connKey carries the connection a request arrived on into the request's
+// context.
+type connKey struct{}
+
+// WithConnection stamps a request's context with the connection it arrived
+// on. A host serves ONE connection, so this is constant per host — but a
+// helper daemon runs several hosts at once (internal/helper/endpoint's accept
+// loop), and a service that answered "the current connection" would then
+// answer the wrong one: a reader attached by coordinator A would have its
+// frames written down coordinator B's socket, because B bound later. The
+// connection is a property of the REQUEST, so it travels with the request.
+func WithConnection(ctx context.Context, conn any) context.Context {
+	return context.WithValue(ctx, connKey{}, conn)
+}
+
+// ConnectionFrom returns the connection a request arrived on, or nil outside a
+// request. A service casts it to whatever it needs from a connection — the
+// session service wants a sink to write data frames and notifications down.
+func ConnectionFrom(ctx context.Context) any { return ctx.Value(connKey{}) }
 
 // abandonCancellable cancels every in-flight request whose service allows
 // cancellation, which is what a dead transport means for a read: the answer
@@ -439,13 +561,23 @@ func splitChunks(b []byte, size int) [][]byte {
 	return out
 }
 
-// writeFrame writes one frame to the wire under the writer mutex, so
-// concurrent responses cannot interleave mid-frame.
+// writeFrame writes one frame and logs a failure. It is the response path,
+// where there is nothing else to do with the error: the request it answers is
+// already finished.
 func (h *Host) writeFrame(ty proto.FrameType, raw []byte) {
+	if err := h.write(ty, raw); err != nil {
+		h.log.Error("write frame", "type", ty, "err", err)
+	}
+}
+
+// write puts one frame on the wire under the writer mutex, so concurrent
+// writers cannot interleave mid-frame, and RETURNS the failure. The session
+// service's pumps act on it — a dead wire drops an attachment — which is why
+// this half exists beside writeFrame rather than instead of it.
+func (h *Host) write(ty proto.FrameType, raw []byte) error {
 	frame := proto.EncodeFrame(ty, 0, 0, raw)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, err := h.out.Write(frame); err != nil {
-		h.log.Error("write frame", "type", ty, "err", err)
-	}
+	_, err := h.out.Write(frame)
+	return err
 }

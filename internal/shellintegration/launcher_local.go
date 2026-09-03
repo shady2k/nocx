@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // LocalBashRcfile renders the bash rcfile for a LOCAL enhanced session
@@ -223,15 +225,17 @@ func localZshEnv(dir, orig string, wasSet bool) []string {
 
 // LocalLaunch is how a local enhanced session is started: the shell binary, its
 // argv, the extra environment it needs, and the removal of whatever transient
-// artefact the tier wrote. Cleanup is the caller's to run when the spawn FAILS
-// — on success the shell removes the artefact itself, before any user code
-// runs, which is what keeps the capability off the disk for longer than one
-// startup.
+// artefact the tier wrote. Cleanup releases launch resources after the child
+// starts; legacy file-backed tiers also use it to remove an artefact when the
+// child fails to start. Abort cancels pending in-memory delivery on failure.
 type LocalLaunch struct {
-	Command string
-	Args    []string
-	Env     []string
-	Cleanup func()
+	Command    string
+	Args       []string
+	Env        []string
+	ExtraFiles []*os.File
+	Bootstrap  []byte
+	Cleanup    func()
+	Abort      func()
 }
 
 // LocalEnhancedLaunch builds the start shape for a local enhanced session on
@@ -293,4 +297,73 @@ func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (
 		// with no local tier is the caller's to start conventionally.
 		return LocalLaunch{}, fmt.Errorf("shellintegration: %q has no local enhanced tier", shellPath)
 	}
+}
+
+// LocalEnhancedLaunchInMemory builds the helper's launch shape. Unlike the
+// coordinator's local launch, a helper-hosted shell cannot rely on a script
+// installed under the host's home: the helper is the integration and the
+// installed Level-0 substrate may be absent. The existing renderers still own
+// every marker and hook; only their delivery changes to an inherited pipe.
+// Bash and POSIX shells consume fd 3 during startup. Zsh has no --rcfile and
+// cannot use a descriptor as ZDOTDIR, so it starts its normal login shell and
+// sources the same in-memory script through fd 3 after the coordinator writes
+// the bootstrap command. No script path is created on the host.
+func LocalEnhancedLaunchInMemory(shellPath string, kind ShellKind, opts LaunchOptions) (LocalLaunch, error) {
+	if !opts.Enhanced || opts.SessionID == "" {
+		return LocalLaunch{}, fmt.Errorf("shellintegration: in-memory launch requires an enhanced session with a session id")
+	}
+
+	switch kind {
+	case ShellBash:
+		rc, err := LocalBashRcfile(opts)
+		if err != nil {
+			return LocalLaunch{}, err
+		}
+		return pipeLaunch(shellPath, []string{"--rcfile", "/dev/fd/3", "-i"}, nil, rc, nil)
+	case ShellZsh:
+		script := launcherEnvBlock(opts) + "\n" + zshScript + "\n"
+		return pipeLaunch(shellPath, []string{"-l", "-i"}, nil, script, []byte(". /dev/fd/3\n"))
+	case ShellUnknown:
+		script := launcherEnvBlock(opts) + "\n" + posixScript + "\n"
+		return pipeLaunch(shellPath, []string{"-i"}, []string{"ENV=/dev/fd/3"}, script, nil)
+	default:
+		return LocalLaunch{}, fmt.Errorf("shellintegration: %q has no in-memory enhanced tier", shellPath)
+	}
+}
+
+func pipeLaunch(command string, args, env []string, script string, bootstrap []byte) (LocalLaunch, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return LocalLaunch{}, fmt.Errorf("shellintegration: in-memory launch pipe: %w", err)
+	}
+	written := make(chan struct{})
+	go func() {
+		_, _ = io.WriteString(writer, script)
+		_ = writer.Close()
+		close(written)
+	}()
+
+	var once sync.Once
+	closeReader := func() {
+		_ = reader.Close()
+	}
+	cleanup := func() {
+		// The child owns the duplicated reader. Closing only this parent's
+		// reader lets the writer finish without truncating an in-flight script.
+		once.Do(closeReader)
+	}
+	abort := func() {
+		_ = writer.Close()
+		<-written
+		once.Do(closeReader)
+	}
+	return LocalLaunch{
+		Command:    command,
+		Args:       args,
+		Env:        env,
+		ExtraFiles: []*os.File{reader},
+		Bootstrap:  bootstrap,
+		Cleanup:    cleanup,
+		Abort:      abort,
+	}, nil
 }

@@ -38,6 +38,41 @@ func (f fixedShell) Resolve() loginshell.Shell {
 	return loginshell.Shell{Path: f.path, Source: loginshell.SourceAccount}
 }
 
+// requireShellBinary resolves a real shell on THIS host and fails when there
+// is none. It is the companion to fixedShell: the fixture says which shell
+// nocx is told to start, and this says which path on this machine that answer
+// can point at.
+//
+// Resolved, never written down. /bin/bash is macOS's and Debian's answer and
+// is not NixOS's or Guix's, where the account's bash lives under
+// /run/current-system/sw/bin — internal/loginshell, which owns this question
+// in the PRODUCT, already answers it that way and carries the NixOS path as a
+// named case in its table. A fixture that hard-codes /bin/bash therefore
+// asserts the developer's filesystem layout rather than nocx's behaviour, and
+// on a host without it the test reports `fork/exec /bin/bash: no such file or
+// directory` about a product that never assumed the path (nocx-9jomd).
+//
+// WHY THIS DOES NOT MAKE THE ASSERTIONS TAUTOLOGICAL. The resolved path is
+// INJECTED through fixedShell, and the assertions compare what the product
+// reports against that injected value — not against whatever the machine
+// would have answered on its own. The product is told to start this shell and
+// must say so; reporting a name, a basename, the account's real login shell,
+// or nothing at all still fails, on every host. The machine supplies only a
+// path that exists, so that fork/exec can succeed at all.
+//
+// It FAILS rather than skips, for the reason nocx-gd84 gave: a skip here is
+// how the tier these tests exist to prove reports green on a machine that
+// never ran it.
+func requireShellBinary(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("%s is not installed: %v — the shell this test starts must be present, "+
+			"or the suite reports a product it never ran as a pass (nocx-gd84)", name, err)
+	}
+	return path
+}
+
 // TestLocalSession_TierFollowsTheLoginShell is the bead's first acceptance
 // criterion at the seam a person reaches: open a local tab, and the shell that
 // comes up is the account's own — integrated, not substituted. Both integrated
@@ -58,11 +93,7 @@ func TestLocalSession_TierFollowsTheLoginShell(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path, err := exec.LookPath(tt.bin)
-			if err != nil {
-				t.Fatalf("%s is not installed: %v — the shell this tier exists to prove must be present, "+
-					"or the suite reports a broken product as a skip (nocx-gd84)", tt.bin, err)
-			}
+			path := requireShellBinary(t, tt.bin)
 			storagetest.IsolateWithHome(t)
 			f := localFactory(t)
 			f.shells = fixedShell{path: path}

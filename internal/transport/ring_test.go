@@ -9,6 +9,13 @@ import (
 
 // TestOutputRing_CancellableWaitForData verifies that waitForData returns
 // when ctx is cancelled without needing data or ring closure (DEFECT 5 fix).
+// newOutputRing is a ring at stream offset zero, which is what a spawned
+// session's window base is and what every test here wants. It lives in a test
+// file rather than beside newOutputRingAt because nocx-k6p18.30 moved the
+// production path to the base-carrying constructor, and a convenience wrapper
+// no shipped call site reaches is dead code the ratchet is right to name.
+func newOutputRing() *outputRing { return newOutputRingAt(0) }
+
 func TestOutputRing_CancellableWaitForData(t *testing.T) {
 	ring := newOutputRing()
 
@@ -128,7 +135,7 @@ func recordEverything(t *testing.T, ring *outputRing) func() {
 		defer close(done)
 		var pos uint64
 		for {
-			data, _, _ := ring.snapshot(pos)
+			data, _, _, _ := ring.snapshot(pos)
 			if len(data) == 0 {
 				if ring.waitForData(ctx, pos) || ctx.Err() != nil {
 					return
@@ -285,7 +292,7 @@ func TestOutputRing_RecordCursorIsNotAnAck(t *testing.T) {
 
 	// The bytes are still replayable from zero: the ring has room, so
 	// nothing was reclaimed, and the client is owed every one of them.
-	data, from, needsReset := ring.snapshot(0)
+	data, from, needsReset, _ := ring.snapshot(0)
 	if needsReset || from != 0 || string(data) != string(body) {
 		t.Fatalf("snapshot(0) = (%q, %d, reset=%v); the recorder's cursor consumed the client's replay",
 			data, from, needsReset)
@@ -331,7 +338,7 @@ func TestOutputRing_DetachedReplaySurvivesWhileThereIsRoom(t *testing.T) {
 		t.Fatalf("recordTo: %v", err)
 	}
 
-	data, from, needsReset := ring.snapshot(0)
+	data, from, needsReset, _ := ring.snapshot(0)
 	if needsReset {
 		t.Fatal("a detached client was reset while the ring had room to spare")
 	}
@@ -356,7 +363,7 @@ func TestOutputRing_ReattachAfterReclaimIsNotWedgedByCredit(t *testing.T) {
 	}
 	stopRecorder()
 
-	if _, _, needsReset := ring.snapshot(0); !needsReset {
+	if _, _, needsReset, _ := ring.snapshot(0); !needsReset {
 		t.Fatal("an offset the ring reclaimed was answered as a resume")
 	}
 	w := ring.writtenLocked()

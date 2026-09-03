@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 )
 
 // requireArtifacts gates the tests in this package that assert the real
@@ -32,7 +33,7 @@ import (
 // default stays the skip, because a fresh checkout is not a broken build.
 func requireArtifacts(t *testing.T) {
 	t.Helper()
-	if _, _, err := deploy.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); errors.Is(err, deploy.ErrArtifactsNotBuilt) {
+	if _, _, err := helperartifacts.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
 		if os.Getenv("NOCX_REQUIRE_HELPER_ARTIFACTS") != "" {
 			t.Fatal("embedded helper artifacts absent while NOCX_REQUIRE_HELPER_ARTIFACTS is set: this build was supposed to run `make helpers` and did not")
 		}
@@ -104,7 +105,7 @@ func TestArtifactUnknownPlatformIsUnsupported(t *testing.T) {
 		{GOOS: "linux", GOARCH: "386"},
 		{GOOS: "freebsd", GOARCH: "arm64"},
 	} {
-		if _, _, err := deploy.DefaultSource.Artifact(p); !errors.Is(err, deploy.ErrUnsupportedPlatform) {
+		if _, _, err := helperartifacts.DefaultSource.Artifact(p); !errors.Is(err, deploy.ErrUnsupportedPlatform) {
 			t.Fatalf("Artifact(%+v) error = %v, want ErrUnsupportedPlatform", p, err)
 		}
 	}
@@ -126,7 +127,7 @@ func TestEveryMatrixPlatformResolves(t *testing.T) {
 		{GOOS: "darwin", GOARCH: "amd64"},
 		{GOOS: "darwin", GOARCH: "arm64"},
 	} {
-		if _, _, err := deploy.DefaultSource.Artifact(p); err != nil {
+		if _, _, err := helperartifacts.DefaultSource.Artifact(p); err != nil {
 			t.Fatalf("Artifact(%+v): %v", p, err)
 		}
 	}
@@ -141,7 +142,7 @@ func TestEveryMatrixPlatformResolves(t *testing.T) {
 // embedded binaries, so it alone is gated on them.
 func TestArtifactReturnsCompressedBytesAndDecompressedHash(t *testing.T) {
 	requireArtifacts(t)
-	data, contentHash, err := deploy.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"})
+	data, contentHash, err := helperartifacts.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"})
 	if err != nil {
 		t.Fatalf("Artifact: %v", err)
 	}

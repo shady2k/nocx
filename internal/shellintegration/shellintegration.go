@@ -1,7 +1,6 @@
 package shellintegration
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -9,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -26,9 +23,9 @@ type CwdInfo struct {
 }
 
 // ShellIntegration is the OSC 7/133 substrate contract (Tier A shell hooks
-// now; Tier B remote-helper seam later). Per AD-6 the backend never parses
-// OSC — the VT frontend surfaces OSC events and the backend only validates
-// the results.
+// remain available on hosts without a helper; Tier B uses helper-hosted
+// in-memory delivery). Per AD-6 the backend never parses OSC — the VT frontend
+// surfaces OSC events and the backend only validates the results.
 type ShellIntegration interface {
 	// ValidateCwd validates a frontend-supplied host and path from an
 	// OSC 7 event.
@@ -39,17 +36,23 @@ type ShellIntegration interface {
 	// VERSION matches. Best-effort: errors are logged, not fatal.
 	EnsureInstalled(home string) error
 
-	// EnsureInstalledRemote publishes the integration bundle on a remote
-	// host over SFTP through the same Publisher the self-installing
-	// launcher uses (design §4). No remote rc file is ever created or
-	// modified (N4). Best-effort: errors are logged, not fatal.
-	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
-
 	// ActivationEnv returns env vars to set when starting a shell so the
 	// rc gate activates the integration. When enhanced is true, it also
 	// emits NOCX_PROMPT_MODE=marker-only and a unique NOCX_SESSION_ID.
 	ActivationEnv(enhanced bool) []string
 }
+
+// RemoteCommandRunner is the narrow command seam used to discover a remote
+// account's home. The composition root adapts an SSH client to this seam.
+type RemoteCommandRunner interface {
+	Output(command string) ([]byte, error)
+}
+
+// Remote installation remains a method on Impl, but its transport is injected
+// through FS and RemoteCommandRunner rather than imported here. This is route
+// B from the k6p18.20 brief. Route A was rejected because moving the methods
+// would require exporting launchBundle (or duplicating the Bundle owner) and
+// would put the existing publisher tests across an import-cycle boundary.
 
 // Impl is the production implementation.
 type Impl struct {

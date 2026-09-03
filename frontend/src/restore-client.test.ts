@@ -209,6 +209,10 @@ describe('restore-client — the pane read', () => {
     status: 'success',
     durationMs: 10,
     exitCode: 0,
+    // The third state's field, null on the ordinary row — always present on
+    // the wire, because absent and null are different bytes (the contract
+    // requires it for that reason).
+    unreconciled: null,
     ...over,
   })
   it("carries the entry's source, so a command the assistant ran keeps its badge", async () => {
@@ -237,6 +241,42 @@ describe('restore-client — the pane read', () => {
     const client = fakeQuery([entry({})])
     const [block] = await blocksForPane(client, 'pane-1')
     expect(block.author).toBe('shell')
+  })
+
+  it('a row nobody could ask about is neither running nor finished', async () => {
+    // THE THIRD STATE (nocx-k6p18.5). A row still open at restore used to be
+    // proof that it had been abandoned, because a session could not outlive
+    // the coordinator that opened it. It can now, so an open row whose host
+    // nobody has been able to reach is a command that may still be running —
+    // and drawing it as `unknown` tells a person a running build finished.
+    const client = fakeQuery([
+      entry({
+        id: 'still-going',
+        status: 'running',
+        exitCode: null,
+        unreconciled: 'hostUnreachable',
+      }),
+    ])
+    const [block] = await blocksForPane(client, 'pane-1')
+    expect(block.status).toBe('unreconciled')
+    expect(block.unreconciled).toBe('hostUnreachable')
+  })
+
+  it('the mark outranks the status column, because the column is what was last written', async () => {
+    // The column says what the last coordinator wrote before it died; the
+    // mark says whether anybody has been able to check it since. A row that
+    // says `interrupted` and carries a mark is a row whose interruption
+    // nobody has confirmed.
+    const client = fakeQuery([entry({ status: 'interrupted', unreconciled: 'vaultSealed' })])
+    const [block] = await blocksForPane(client, 'pane-1')
+    expect(block.status).toBe('unreconciled')
+  })
+
+  it('a reconciled row is drawn exactly as before — the third state is not the ordinary one', async () => {
+    const client = fakeQuery([entry({ status: 'success', unreconciled: null })])
+    const [block] = await blocksForPane(client, 'pane-1')
+    expect(block.status).toBe('success')
+    expect(block.unreconciled).toBeNull()
   })
 
   it('an action is not a block and never becomes one', async () => {
@@ -347,6 +387,7 @@ describe('restore-client — blocks arranged by the relation', () => {
       durationMs: 0,
       exitCode: 0,
       author: 'shell' as const,
+      unreconciled: null,
     }) satisfies RestorableBlock
 
   const cause = (entryId: string, position: number) => ({

@@ -57,6 +57,24 @@ const (
 	ErrCodeCancelRefused  = "cancel_refused"
 	ErrCodeBadParams      = "bad_params"
 	ErrCodeInternal       = "internal"
+
+	// The session service's refusals (nocx-k6p18.3). ErrCodeNoSuchSession is
+	// the load-bearing one: it is an ANSWER that the session does not exist,
+	// which is what the coordinator's reconciliation turns into the `absent`
+	// verdict. A refused connection, a timeout or an unreachable host produce
+	// no code at all and stay `unknown` — a failure is never a verdict
+	// (level-1 design D5).
+	ErrCodeNoSuchSession = "no_such_session"
+	// ErrCodeWriteRefused covers every way an inbound data frame is not the
+	// current holder's at the current epoch. One code, because the caller's
+	// action is the same in all of them: ask for the capability.
+	ErrCodeWriteRefused = "write_refused"
+	// ErrCodeWindowBudget is the helper's aggregate memory budget refusing a
+	// spawn. It is distinct from a spawn failure because the caller can act on
+	// it — close a session — and cannot act on a failed fork.
+	ErrCodeWindowBudget = "window_budget"
+	// ErrCodeSpawnFailed is the shell or its PTY not starting.
+	ErrCodeSpawnFailed = "spawn_failed"
 )
 
 // ChunkedResult is the sentinel a Response carries when the real payload

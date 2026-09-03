@@ -8,6 +8,7 @@ package client
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,11 +66,12 @@ type Client struct {
 	// response to its waiting Call by request id; streams holds the D14
 	// reassembly state of each chunked response in flight, keyed by the
 	// stream id the ChunkedResult sentinel minted.
-	mu      sync.Mutex
-	pending map[uint64]chan proto.Response
-	streams map[uint64]*chunkStream
-	nextID  uint64
-	lost    bool
+	mu          sync.Mutex
+	pending     map[uint64]chan proto.Response
+	streams     map[uint64]*chunkStream
+	attachments map[[16]byte]*AttachedSession
+	nextID      uint64
+	lost        bool
 
 	done      chan struct{}
 	hsCh      chan error
@@ -211,8 +213,16 @@ func (c *Client) lose(reason error) {
 		c.lostErr = reason
 		c.mu.Lock()
 		c.lost = true
+		matched := make([]*AttachedSession, 0, len(c.attachments))
+		for _, a := range c.attachments {
+			matched = append(matched, a)
+		}
+		c.attachments = make(map[[16]byte]*AttachedSession)
 		c.mu.Unlock()
 		close(c.done)
+		for _, a := range matched {
+			a.finish()
+		}
 	})
 }
 
@@ -231,10 +241,133 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeNotify:
-		c.log.Warn("notify frame", "bytes", len(payload))
+		c.sessionNotify(payload)
+	case proto.TypeSessionData:
+		c.sessionData(payload)
+	case proto.TypeLifecycleData:
+		c.lifecycleData(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
+}
+
+func (c *Client) sessionNotify(payload []byte) {
+	var n proto.Notification
+	if err := json.Unmarshal(payload, &n); err != nil {
+		c.log.Warn("malformed notify frame", "err", err)
+		return
+	}
+	if n.Service != proto.ServiceSession {
+		return
+	}
+	raw, err := json.Marshal(n.Params)
+	if err != nil {
+		return
+	}
+	switch n.Event {
+	case proto.EventSessionExit:
+		c.sessionExited(raw)
+	case proto.EventSessionReset:
+		c.sessionReset(raw)
+	}
+}
+
+func (c *Client) sessionExited(raw json.RawMessage) {
+	var exit proto.SessionExit
+	if err := json.Unmarshal(raw, &exit); err != nil {
+		c.log.Warn("malformed session exit notification", "err", err)
+		return
+	}
+	for _, a := range c.attachedTo(exit.Session.Session, "") {
+		a.recordExit(exit.Status)
+		a.finish()
+	}
+}
+
+// sessionReset is AD-9's live reset arriving mid-stream: this reader's cursor
+// fell behind the helper's bounded window, the helper has already moved that
+// subscriber's own cursors to the base, and the attachment must move with it
+// or the very next ack is refused as behind and the tab reports a session that
+// is still running as over.
+func (c *Client) sessionReset(raw json.RawMessage) {
+	var reset proto.SessionReset
+	if err := json.Unmarshal(raw, &reset); err != nil {
+		c.log.Warn("malformed session reset notification", "err", err)
+		return
+	}
+	matched := c.attachedTo(reset.Session.Session, reset.Subscriber)
+	if len(matched) == 0 {
+		c.log.Warn("session reset dropped: no matching attachment",
+			"session", reset.Session.Session, "subscriber", string(reset.Subscriber))
+		return
+	}
+	for _, a := range matched {
+		a.applyReset(reset)
+	}
+}
+
+// attachedTo is the one match rule for a session notification: by session, so
+// several attachments on one session all hear it, and additionally by
+// subscriber when the event names one. A reset names one — it is a fact about
+// ONE reader's cursor — and applying it to another reader's would move a
+// cursor that never fell behind.
+func (c *Client) attachedTo(session string, subscriber proto.SubscriberID) []*AttachedSession {
+	sessionRaw, err := proto.SessionBytes(session)
+	if err != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	matched := make([]*AttachedSession, 0)
+	for raw, a := range c.attachments {
+		if a.session != sessionRaw {
+			continue
+		}
+		if subscriber != "" && proto.SubscriberID(hex.EncodeToString(raw[:])) != subscriber {
+			continue
+		}
+		matched = append(matched, a)
+	}
+	return matched
+}
+
+// sessionData routes raw PTY bytes to the attached subscriber. The subscriber
+// is part of the frame identity: a displaced attachment must never feed the
+// old coordinator.
+func (c *Client) sessionData(payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("session data frame dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"bytes", len(f.Payload))
+		return
+	}
+	a.deliver(f.Payload)
+}
+
+func (c *Client) lifecycleData(payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed lifecycle data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("lifecycle data frame dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"bytes", len(f.Payload))
+		return
+	}
+	a.deliverLifecycle(f.Payload)
 }
 
 // deliverResponse routes one response frame. A response whose result is a

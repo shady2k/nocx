@@ -122,6 +122,14 @@ const DefaultWorkspaceID = string(workspace.Default)
 // it, and the ensure never stamps it onto an existing row.
 const captureEnsuredSessionMarker = `{"ensure":"agent-capture"}`
 
+//
+// This marker is intentionally not the durable helper binding. The binding's
+// single owner is CreateSession, called by transport only after OpenHosted has
+// returned the helper-authoritative id, host, account and generation together.
+// Agent capture may still need to create a synthetic child session when no
+// open path recorded one, so retiring this marker writer would remove that
+// production behavior rather than resolve the binding defect.
+
 // ensureLedgerContext makes the environment, its observation, the default
 // workspace and the session row exist, and returns the observation the
 // transaction's execution pins. Inlined here, not called through the

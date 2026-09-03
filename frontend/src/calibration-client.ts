@@ -29,6 +29,14 @@ export type CalibrationState = NonNullable<AgentCalibration['calibration']>
 /** One thing the person is asked to produce. */
 export type CalibrationStep = CalibrationState['steps'][number]
 
+/** What the agent's rule has EARNED against the labelled set (nocx-jse6x):
+ *  whether nocx may type into a pane running it, how much of the set it was
+ *  checked against, and every label it reads differently from the person who
+ *  produced it. Always present — an agent with no set has an unverified
+ *  verdict rather than none, so there is no absence for a surface to invent
+ *  the safe reading of. */
+export type CalibrationVerdict = CalibrationState['verification']
+
 /** One step's outcome. Absent means nobody was ever asked; `skipped` means
  *  they were asked and declined, and only one of those is a decision. */
 export type CalibrationRecord = AgentCalibrationRecord

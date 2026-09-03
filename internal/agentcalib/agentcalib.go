@@ -162,14 +162,20 @@ type Calibrations struct {
 	log     log.Logger
 	screens Screens
 	store   Store
+	// rules is what a set is verified AGAINST. The concrete registry rather
+	// than a second interface over it, for the same reason internal/paneobserve
+	// takes it: the registry is already the composition root's decision about
+	// which agent has which rule, and one more seam over it would be a second
+	// place that decision could be made.
+	rules *agentdriver.Registry
 
 	mu    sync.Mutex
 	walks map[string]*walk
 }
 
 // New wires the calibration seam at the composition root.
-func New(lg log.Logger, screens Screens, store Store) *Calibrations {
-	return &Calibrations{log: lg, screens: screens, store: store, walks: map[string]*walk{}}
+func New(lg log.Logger, screens Screens, store Store, rules *agentdriver.Registry) *Calibrations {
+	return &Calibrations{log: lg, screens: screens, store: store, rules: rules, walks: map[string]*walk{}}
 }
 
 // walk is one calibration in progress: the pane it is being driven on, the
@@ -191,6 +197,13 @@ type Status struct {
 	Steps  []Step
 	Walk   *WalkStatus
 	Stored *StoredStatus
+	// Verification is what that set entitles the rule to (nocx-jse6x). It
+	// rides here rather than in a method of its own so a surface draws the
+	// set and the verdict OF that set from one answer: two round trips could
+	// show a person a set that had just changed beside a verdict about the
+	// one before it, and the verdict is the half that says whether nocx may
+	// type. Always present — an agent with no set has an unverified one.
+	Verification Verdict
 }
 
 // WalkStatus is a calibration in progress.
@@ -397,5 +410,6 @@ func (c *Calibrations) Status(pane, agent string) (Status, error) {
 	if found {
 		out.Stored = &StoredStatus{Complete: set.Complete(), Labels: set.Labels}
 	}
+	out.Verification = c.Verify(agent)
 	return out, nil
 }

@@ -67,12 +67,23 @@ func (s *screens) drive(t *testing.T, text string) panegrid.Frame {
 
 func newCalibrations(t *testing.T) (*agentcalib.Calibrations, *screens, agentcalib.Store) {
 	t.Helper()
+	c, sc, store, _ := newCalibrationsWith(t, registryOf(t, correct()))
+	return c, sc, store
+}
+
+// newCalibrationsWith is the same with the RULES named, for the tests that are
+// about the verdict rather than about the walk. The root comes back too,
+// because a set on disk is a thing a person can edit and some of those tests
+// edit it.
+func newCalibrationsWith(t *testing.T, rules *agentdriver.Registry) (*agentcalib.Calibrations, *screens, agentcalib.Store, string) {
+	t.Helper()
 	sc := newScreens(t)
-	store, err := agentcalib.NewFileStore(t.TempDir())
+	root := t.TempDir()
+	store, err := agentcalib.NewFileStore(root)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	return agentcalib.New(log.NewSlogAdapter(nil), sc, store), sc, store
+	return agentcalib.New(log.NewSlogAdapter(nil), sc, store, rules), sc, store, root
 }
 
 // walkAll answers every step: captured unless its label is in skip.
@@ -144,7 +155,7 @@ func TestTheCaptureIsTheOneTheCommandReplays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store)
+	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 
 	path := filepath.Join(root, "agents", "calibration", agent, "capture.jsonl")
@@ -186,7 +197,7 @@ func TestTheFirstLabelKeepsItsMarkOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	walkAll(t, agentcalib.New(log.NewSlogAdapter(nil), sc, store), sc, nil)
+	walkAll(t, agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct())), sc, nil)
 
 	data, err := os.ReadFile(filepath.Join(root, "agents", "calibration", agent, "labels.json")) //nolint:gosec // a path this test built
 	if err != nil {
@@ -245,7 +256,7 @@ func TestCompletenessIsDerivedNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store)
+	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 
 	set, _, err := store.Load(agent)

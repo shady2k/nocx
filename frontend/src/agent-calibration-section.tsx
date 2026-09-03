@@ -31,6 +31,20 @@
  * what declining means — that state falls to unknown, which is busy, which is a
  * refusal rather than a wrong answer.
  *
+ * # AND THE VERDICT, WITH ITS CONSEQUENCE (nocx-jse6x)
+ *
+ * A labelled set is evidence, not permission. The page draws both, in two
+ * sections and in that order: what this agent is calibrated for, and what its
+ * rule may therefore do. The second one says "may type" or "indicator only"
+ * rather than "verified" or "not verified", because the fact a person needs is
+ * what nocx will do with their keyboard — a mistimed keystroke answers whatever
+ * modal is on screen, and the modal a coding agent puts up is a tool approval
+ * whose first option is Yes.
+ *
+ * A rule that disagrees with a label has that label listed with both readings,
+ * because repair is the point: one of the two is wrong and only the person can
+ * say which.
+ *
  * # The interval, and both its ends
  *
  * The state is PULLED on a timer that lives with this component: it opens on
@@ -46,6 +60,7 @@ import {
   type CalibrationRecord,
   type CalibrationState,
   type CalibrationStep,
+  type CalibrationVerdict,
 } from './calibration-client'
 import { PageSection, Section, Select, Badge, Button, EmptyState } from './ui'
 import { Spinner } from './ui/spinner'
@@ -72,11 +87,10 @@ function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** What the set on disk entitles a person to expect, said with its
- *  consequence. It stops at what this bead knows: the set exists and holds
- *  these labels. Whether a RULE classifies them correctly is a verdict the
- *  verification bead owns, and claiming it here would be claiming a rule had
- *  been checked when nothing had checked it. */
+/** What the set on disk HOLDS. It stops there deliberately: whether the rule
+ *  classifies those labels is a separate question with a separate answer, and
+ *  the two are drawn as two sentences because a person repairing a rule needs
+ *  to know which of them is wrong — the evidence or the rule reading it. */
 function storedSummary(state: CalibrationState): string {
   const stored = state.stored
   if (!stored) return 'This agent has never been calibrated.'
@@ -94,6 +108,40 @@ function storedSummary(state: CalibrationState): string {
 function recordNote(rec: CalibrationRecord | undefined): string {
   if (!rec) return 'not asked yet'
   return rec.skipped ? 'declined — stays uncalibrated' : 'labelled'
+}
+
+/**
+ * THE VERDICT, SAID WITH ITS CONSEQUENCE (nocx-jse6x).
+ *
+ * Not "verified" and "not verified", which are facts about a check nobody
+ * asked for, but what nocx will and will not do — because the thing at stake
+ * is a keystroke landing in a tool-approval dialog whose first option is Yes.
+ * A soft degrade the UI does not state is how a feature that does not exist
+ * survives a release, so the unverified sentence names what the person still
+ * gets and what they do not.
+ */
+function verdictSummary(v: CalibrationVerdict, agent: string): string {
+  if (v.mayType) {
+    return `Verified against ${v.agreed} of ${v.labelled} labelled ${v.labelled === 1 ? 'state' : 'states'} — nocx may type into a pane running ${agent}.`
+  }
+  const consequence = `Not verified — indicator only: nocx will go on showing what this pane is doing and will not type into it.`
+  return v.reason === undefined ? consequence : `${consequence} ${sentence(v.reason)}`
+}
+
+/** The backend writes its reasons as clauses, in the person's vocabulary. This
+ *  is the only thing done to them, and it is punctuation rather than wording:
+ *  a reason is never rephrased here, because two places wording one refusal is
+ *  two places for it to be wrong. */
+function sentence(reason: string): string {
+  const head = reason.charAt(0).toUpperCase() + reason.slice(1)
+  return head.endsWith('.') ? head : `${head}.`
+}
+
+/** One label the rule reads differently from the person who produced it. Both
+ *  sides are named because the point of showing it is repair, and only the
+ *  person can say which of the two is wrong. */
+function disagreementNote(d: CalibrationVerdict['disagreements'][number]): string {
+  return `you produced this state, and the rule reads that screen as ${d.got} rather than ${d.expected}`
 }
 
 export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
@@ -217,6 +265,34 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                   </Badge>
                   <span class="st-calibration__summary">{storedSummary(s)}</span>
                 </div>
+              </Section>
+
+              <Section id="calibration-verdict" title="What this rule may do">
+                <div
+                  class="st-calibration__stored"
+                  data-may-type={s.verification.mayType ? 'true' : 'false'}
+                >
+                  <Badge tone={s.verification.mayType ? 'success' : 'warning'}>
+                    {s.verification.mayType ? 'may type' : 'indicator only'}
+                  </Badge>
+                  <span class="st-calibration__summary">
+                    {verdictSummary(s.verification, s.agent)}
+                  </span>
+                </div>
+                <p class="st-calibration__detail">
+                  A rule earns the right to be typed against by classifying every state you produced
+                  for it, and it earns that again every time you look — so an agent whose update
+                  changes what its screen looks like loses it here, rather than somewhere a
+                  keystroke lands in a dialog.
+                </p>
+                <For each={s.verification.disagreements}>
+                  {(d) => (
+                    <div class="st-calibration__row" data-disagreement={d.label}>
+                      <span class="st-calibration__name">{d.label}</span>
+                      <span class="st-calibration__detail">{disagreementNote(d)}</span>
+                    </div>
+                  )}
+                </For>
               </Section>
 
               <Show

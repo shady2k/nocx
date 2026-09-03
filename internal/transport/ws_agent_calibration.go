@@ -33,9 +33,21 @@ package transport
 // The AD-6 amendment grants an enrolled pane's grid exactly two powers, and
 // this exercises neither: it enrols nothing, types nothing, and lights no
 // indicator. It reads a screen the pane's own operator is looking at and
-// writes a file under the app directory that a later bead reads to decide
-// whether a rule may be typed against. The decision is that bead's; this one
-// only records what the person showed us.
+// writes a file under the app directory.
+//
+// # And it carries the VERDICT of that file (nocx-jse6x)
+//
+// The result now says whether the agent's rule, replayed against every frame
+// the person labelled, answered each one with the state they were asked for —
+// and therefore whether nocx may type into a pane running it. It rides in the
+// same result as the set rather than in a method of its own, because a surface
+// that fetched them separately could draw a set beside a verdict about the one
+// before it, and the verdict is the half that decides whether a keystroke is
+// sent into a tool-approval dialog.
+//
+// This boundary carries the verdict and cannot make one. MayType comes off a
+// method whose backing field is unexported in internal/agentcalib, so there is
+// no assignment anywhere in this package that could grant typing authority.
 
 import (
 	"context"
@@ -131,8 +143,30 @@ type agentCalibrationState struct {
 	SessionID string                  `json:"sessionId"`
 	Agent     string                  `json:"agent"`
 	Steps     []agentCalibrationStep  `json:"steps"`
+	Verified  agentCalibrationVerdict `json:"verification"`
 	Walk      *agentCalibrationWalk   `json:"walk,omitempty"`
 	Stored    *agentCalibrationStored `json:"stored,omitempty"`
+}
+
+// agentCalibrationVerdict is what the rule has EARNED against that set
+// (nocx-jse6x). It is a value rather than a pointer because there is always an
+// answer: an agent with no set has an unverified verdict, not no verdict, and
+// a surface that could receive nothing here would have to invent the safe
+// reading of nothing — which is the one place inventing is expensive.
+type agentCalibrationVerdict struct {
+	MayType       bool                           `json:"mayType"`
+	Labelled      int                            `json:"labelled"`
+	Agreed        int                            `json:"agreed"`
+	Disagreements []agentCalibrationDisagreement `json:"disagreements"`
+	// Reason is omitted when the rule verified. Empty would be a claim that
+	// there was a reason and it was nothing.
+	Reason string `json:"reason,omitempty"`
+}
+
+type agentCalibrationDisagreement struct {
+	Label    string `json:"label"`
+	Expected string `json:"expected"`
+	Got      string `json:"got"`
 }
 
 type agentCalibrationStep struct {
@@ -244,6 +278,7 @@ func calibrationState(sid string, in agentcalib.Status) *agentCalibrationState {
 			Ask: step.Ask, Expect: string(step.Expect),
 		})
 	}
+	out.Verified = calibrationVerdict(in.Verification)
 	if in.Walk != nil {
 		out.Walk = &agentCalibrationWalk{Pending: in.Walk.Pending, Given: calibrationRecords(in.Walk.Given)}
 	}
@@ -292,4 +327,24 @@ func (s *WSServer) agentCalibrationSpecs() []methodSpec {
 			s.calibrationAvailable,
 			"method not found: pane observation not wired"),
 	}
+}
+
+// calibrationVerdict projects the verdict onto the wire. MayType is READ from
+// the verdict's method rather than from a field, because the field it answers
+// from is unexported on purpose: nothing outside internal/agentcalib can write
+// typing authority into a value, so nothing here can hand it out by mistake.
+func calibrationVerdict(in agentcalib.Verdict) agentCalibrationVerdict {
+	out := agentCalibrationVerdict{
+		MayType:       in.MayType(),
+		Labelled:      in.Labelled,
+		Agreed:        in.Agreed,
+		Reason:        in.Reason,
+		Disagreements: make([]agentCalibrationDisagreement, 0, len(in.Disagreements)),
+	}
+	for _, d := range in.Disagreements {
+		out.Disagreements = append(out.Disagreements, agentCalibrationDisagreement{
+			Label: string(d.Label), Expected: string(d.Expected), Got: string(d.Got),
+		})
+	}
+	return out
 }

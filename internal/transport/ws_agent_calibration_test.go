@@ -43,7 +43,7 @@ func newCalibrationEnv(t *testing.T) *calibrationEnv {
 	}
 	env := newLifecycleTestEnv(t,
 		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentRules(rules),
-		WithAgentCalibration(agentcalib.New(logger, grid, store)))
+		WithAgentCalibration(agentcalib.New(logger, grid, store, rules)))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)
 	sid := env.openSession(t, 1)
 	if err := grid.Enrol(sid, 40, 14); err != nil {
@@ -145,6 +145,18 @@ func TestAgentCalibration_OverTheWireConformsToContract(t *testing.T) {
 			got.Calibration.Stored)
 	}
 
+	// A complete set is not authority (nocx-jse6x). These screens are plain
+	// text with none of the chrome the shipped rule reads, so the rule answers
+	// unknown for every one of them and earns nothing — which is the direction
+	// that matters: a set nobody could verify against leaves nocx lighting a
+	// dot rather than typing.
+	if v := got.Calibration.Verified; v.MayType {
+		t.Fatalf("a complete set of screens the rule cannot read granted typing: %+v", v)
+	}
+	if v := got.Calibration.Verified; len(v.Disagreements) != v.Labelled-v.Agreed || v.Agreed != 0 {
+		t.Fatalf("verdict %+v does not account for every labelled state it was checked against", v)
+	}
+
 	// And the set is on disk, replayable, with the frames the person produced.
 	set, found, err := e.store.Load("claude")
 	if err != nil || !found {
@@ -239,6 +251,148 @@ func TestAgentCalibrationUnwiredIsNotFound(t *testing.T) {
 		}
 		if got.Error == nil || got.Error.Code != -32601 {
 			t.Fatalf("unwired %s answered %+v, want method not found", method, got.Error)
+		}
+	}
+}
+
+// ── the verdict: what the rule has EARNED against that set (nocx-jse6x) ────
+
+// claudeWorkingScreen is the idle chrome with a live spinner in the status
+// stack — the contiguous run of rows directly above the token meter. The
+// grammar is what separates a live spinner from a finished turn's summary,
+// which lands in the same slot: a live one carries "… (" and closes it.
+func claudeWorkingScreen(cols int) string {
+	rule := strings.Repeat("─", cols)
+	return "\x1b[2J\x1b[6;1H* Misting… (2s)\x1b[7;1H              0 tokens" +
+		"\x1b[8;1H" + rule + "\x1b[9;1H❯ \x1b[10;1H" + rule +
+		"\x1b[12;1H  ⏵⏵ auto mode on\x1b[9;3H"
+}
+
+// claudePermissionScreen is the tool-approval dialog, which REPLACES the input
+// box rather than overlaying it. The cursor parks on the selected option, and
+// that is the marker the agent's own output cannot forge.
+func claudePermissionScreen(_ int) string {
+	return "\x1b[2J\x1b[6;1H Do you want to create note.txt?" +
+		"\x1b[7;1H ❯ 1. Yes\x1b[8;1H   2. No\x1b[7;2H"
+}
+
+// walkWith answers every step: it paints the screen named for that label and
+// captures, or declines the step when no screen is named for it.
+func (e *calibrationEnv) walkWith(t *testing.T, screens map[string]string, id int) agentCalibrationResult {
+	t.Helper()
+	got := e.call(t, "agent.calibration.answer",
+		map[string]any{"sessionId": e.sid, "action": "begin"}, id)
+	id++
+	for got.Calibration.Walk != nil {
+		st := got.Calibration
+		step := st.Steps[st.Walk.Pending]
+		action := "skip"
+		if screen, named := screens[step.Label]; named {
+			// The person drives their agent into the state they were asked
+			// for. The frame is read off the grid by the backend at the
+			// instant the answer arrives; this test never sends one.
+			e.grid.Feed(e.sid, []byte(screen))
+			action = "capture"
+		}
+		got = e.call(t, "agent.calibration.answer", map[string]any{
+			"sessionId": e.sid, "action": action, "step": st.Walk.Pending,
+		}, id)
+		id++
+	}
+	return got
+}
+
+// requiredScreens is the three states a calibration cannot complete without,
+// each painted as the SHIPPED claude rule reads it. Optional states are
+// declined, so what is verified is exactly what was produced.
+func requiredScreens() map[string]string {
+	return map[string]string{
+		"idle":     claudeIdleScreen(40),
+		"working":  claudeWorkingScreen(40),
+		"asks-you": claudePermissionScreen(40),
+	}
+}
+
+// TestAgentCalibrationVerdictIsOnTheWireWithItsConsequence is this bead's
+// acceptance criterion watched end to end, off the real socket, through the
+// shipped claude rule: a person walks the three required states with their
+// agent really in them, and the answer says the rule may now be typed against.
+//
+// It also pins the state BEFORE the walk, which is the one a person is in on
+// first opening the page: no set, and therefore no authority — with a reason
+// rather than a bare false, because a surface has to state the consequence.
+func TestAgentCalibrationVerdictIsOnTheWireWithItsConsequence(t *testing.T) {
+	e := newCalibrationEnv(t)
+
+	before := e.call(t, "agent.calibration", map[string]any{"sessionId": e.sid}, 2)
+	if before.Calibration.Verified.MayType {
+		t.Fatal("an agent nobody has calibrated may be typed into")
+	}
+	if before.Calibration.Verified.Reason == "" {
+		t.Fatal("an unverified verdict crossed the wire with no reason in it")
+	}
+
+	got := e.walkWith(t, requiredScreens(), 3)
+	v := got.Calibration.Verified
+	if !v.MayType {
+		t.Fatalf("after a correct walk the rule may not type: reason=%q disagreements=%+v",
+			v.Reason, v.Disagreements)
+	}
+	if v.Labelled != len(requiredScreens()) || v.Agreed != v.Labelled {
+		t.Fatalf("verdict is %d of %d, want all %d states that were produced",
+			v.Agreed, v.Labelled, len(requiredScreens()))
+	}
+	if v.Reason != "" {
+		t.Fatalf("a verified verdict carries a reason: %q", v.Reason)
+	}
+}
+
+// And the same rule loses that authority when a label stops classifying —
+// which is the shape an agent's update takes. Nothing about the rule changes
+// here: the set does, and the verdict follows it. The shipped rule is subject
+// to its own verification exactly like any other.
+func TestAgentCalibrationRevokesTypingWhenALabelStopsClassifying(t *testing.T) {
+	e := newCalibrationEnv(t)
+	if got := e.walkWith(t, requiredScreens(), 2); !got.Calibration.Verified.MayType {
+		t.Fatalf("the rule did not verify before the set was changed: %+v", got.Calibration.Verified)
+	}
+
+	// The two labels swap places on disk, the marks staying where they are:
+	// every frame is still one the person produced, and only what they are
+	// said to be has moved. The screen labelled idle is now the approval
+	// dialog, which is the direction that ends in an approved tool call.
+	set, found, err := e.store.Load("claude")
+	if err != nil || !found {
+		t.Fatalf("load the set: found=%v err=%v", found, err)
+	}
+	idle, asks := -1, -1
+	for i, rec := range set.Labels {
+		switch rec.Label {
+		case agentcalib.LabelIdle:
+			idle = i
+		case agentcalib.LabelAsksYou:
+			asks = i
+		}
+	}
+	set.Labels[idle].Label, set.Labels[asks].Label = agentcalib.LabelAsksYou, agentcalib.LabelIdle
+	if err := e.store.Save(set); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	after := e.call(t, "agent.calibration", map[string]any{"sessionId": e.sid}, 90)
+	v := after.Calibration.Verified
+	if v.MayType {
+		t.Fatal("a rule whose labels no longer classify kept its typing authority")
+	}
+	if len(v.Disagreements) != 2 {
+		t.Fatalf("disagreements = %+v, want both swapped labels", v.Disagreements)
+	}
+	if v.Reason == "" {
+		t.Fatal("a revoked verdict crossed the wire with no reason in it")
+	}
+	for _, d := range v.Disagreements {
+		if d.Expected == d.Got {
+			t.Fatalf("disagreement %+v names the same state twice", d)
 		}
 	}
 }

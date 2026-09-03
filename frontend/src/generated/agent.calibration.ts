@@ -60,6 +60,44 @@ export interface AgentCalibration {
       expect: 'free_text' | 'permission_choice' | 'modal_choice' | 'working' | 'error'
     }[]
     /**
+     * What this agent's rule has EARNED against the labelled set (nocx-jse6x). Typing authority is not a property of who wrote a rule: it is replayed against every labelled frame, and each must classify to the state the person was asked to produce. A rule that has not done that may still light the indicator — a wrong dot costs nothing — and may not be typed against, because a mistimed keystroke does not merely fail to arrive, it answers whatever modal is on screen. Always present: an agent with no set has an unverified verdict rather than none.
+     */
+    verification: {
+      /**
+       * Whether nocx may type into a pane running this agent. It is the whole consequence of everything else here, and a surface must state it rather than leave a person to infer it from a count.
+       */
+      mayType: boolean
+      /**
+       * How many labelled frames the set holds. A declined state contributes none, because nothing was captured for it — so this is what the rule was actually checked against rather than what it might have been.
+       */
+      labelled: number
+      /**
+       * How many of those the rule answered with their label's state. Equal to labelled exactly when the rule verified.
+       */
+      agreed: number
+      /**
+       * One entry per labelled frame the rule answered with something else, in the order the person was asked for them. Both sides travel because the point of showing them is repair: one of the two is wrong, and the person is the only one who can say which.
+       */
+      disagreements: {
+        /**
+         * The state the person was asked to produce.
+         */
+        label: string
+        /**
+         * The driver state that label must classify to. It is the same value the step carries, because the two vocabularies are mapped in exactly one place.
+         */
+        expected: string
+        /**
+         * What the rule actually answered for that frame.
+         */
+        got: string
+      }[]
+      /**
+       * Why an unverified verdict is unverified, in the words a person reads. ABSENT exactly when the rule verified — an empty string would be a claim that there was a reason and it was nothing.
+       */
+      reason?: string
+    }
+    /**
      * The calibration in progress on this pane, ABSENT when there is none. A walk that has answered every step has been written out and is no longer in progress, so it is absent then too — what it produced is under stored.
      */
     walk?: {

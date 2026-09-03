@@ -38,12 +38,29 @@ const STEPS: NonNullable<AgentCalibration['calibration']>['steps'] = [
   },
 ]
 
+/** The verdict a never-calibrated agent has: no authority, and a reason
+ *  saying why. There is no "absent" case to fixture — the wire always carries
+ *  one, so a surface never has to invent the safe reading of nothing. */
+const UNVERIFIED: NonNullable<AgentCalibration['calibration']>['verification'] = {
+  mayType: false,
+  labelled: 0,
+  agreed: 0,
+  disagreements: [],
+  reason: 'claude has never been calibrated, so there is nothing to check its rule against',
+}
+
 function answer(
   over: Partial<NonNullable<AgentCalibration['calibration']>> = {},
 ): AgentCalibration {
   return {
     panes: [{ sessionId: 'sess-1', agent: 'claude' }],
-    calibration: { sessionId: 'sess-1', agent: 'claude', steps: STEPS, ...over },
+    calibration: {
+      sessionId: 'sess-1',
+      agent: 'claude',
+      steps: STEPS,
+      verification: UNVERIFIED,
+      ...over,
+    },
   }
 }
 
@@ -250,5 +267,82 @@ describe('the guided calibration', () => {
     cleanup()
     await vi.advanceTimersByTimeAsync(CALIBRATION_POLL_MS * 4)
     expect(reads.mock.calls.length).toBe(before)
+  })
+
+  // ── the verdict, and its consequence (nocx-jse6x) ──────────────────────
+
+  it('says what a verified rule may DO, not merely that it verified', async () => {
+    const { client } = fakeClient(
+      answer({
+        stored: { complete: true, labels: [] },
+        verification: { mayType: true, labelled: 3, agreed: 3, disagreements: [] },
+      }),
+    )
+    const container = mount(client)
+    await settle()
+    await choosePane(container)
+
+    const verdict = container.querySelector('#calibration-verdict')!
+    expect(verdict.querySelector('[data-may-type]')!.getAttribute('data-may-type')).toBe('true')
+    expect(verdict.textContent).toContain('Verified against 3 of 3 labelled states')
+    expect(verdict.textContent).toContain('nocx may type into a pane running claude')
+  })
+
+  // The soft degrade stated in the product rather than in a log: a rule that
+  // has not classified its labels still lights the indicator, and the page
+  // says so — including which label stopped classifying, because that is what
+  // a person repairs.
+  it('states the consequence of an unverified rule, and names what stopped classifying', async () => {
+    const { client } = fakeClient(
+      answer({
+        stored: { complete: true, labels: [] },
+        verification: {
+          mayType: false,
+          labelled: 3,
+          agreed: 2,
+          disagreements: [{ label: 'asks-you', expected: 'permission_choice', got: 'free_text' }],
+          reason:
+            "claude's rule answered 1 of the 3 labelled states with something other than the state they were produced for",
+        },
+      }),
+    )
+    const container = mount(client)
+    await settle()
+    await choosePane(container)
+
+    const verdict = container.querySelector('#calibration-verdict')!
+    expect(verdict.querySelector('[data-may-type]')!.getAttribute('data-may-type')).toBe('false')
+    expect(verdict.textContent).toContain('indicator only')
+    expect(verdict.textContent).toContain('will not type into it')
+    const row = verdict.querySelector('[data-disagreement="asks-you"]')!
+    expect(row.textContent).toContain('free_text')
+    expect(row.textContent).toContain('permission_choice')
+  })
+
+  // A complete set is evidence, never authority. The two sentences sit in two
+  // sections precisely so a person can see which of them is the problem.
+  it('does not read a complete set as permission to type', async () => {
+    const { client } = fakeClient(
+      answer({
+        stored: { complete: true, labels: [{ label: 'idle', skipped: false, atMs: 0 }] },
+        verification: {
+          mayType: false,
+          labelled: 3,
+          agreed: 0,
+          disagreements: [],
+          reason: 'nothing in this build knows how to read claude\u2019s screen',
+        },
+      }),
+    )
+    const container = mount(client)
+    await settle()
+    await choosePane(container)
+
+    expect(container.querySelector('#calibration-stored')!.textContent).toContain('Calibrated:')
+    expect(
+      container
+        .querySelector('#calibration-verdict [data-may-type]')!
+        .getAttribute('data-may-type'),
+    ).toBe('false')
   })
 })

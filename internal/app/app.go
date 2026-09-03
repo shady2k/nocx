@@ -1317,7 +1317,13 @@ func New(opts ...Option) (*App, error) {
 	if calibrationErr != nil {
 		return nil, fmt.Errorf("agent calibration store: %w", calibrationErr)
 	}
-	paneCalibration := agentcalib.New(logger, paneGrid, calibrationStore)
+	// The registry goes in beside the store because a labelled set is only
+	// half of a verdict (nocx-jse6x): the calibration replays a set against
+	// the agent's own rule and answers whether that rule has earned the right
+	// to be typed against. The SAME registry the watcher classifies through,
+	// so the rule a person is shown a verdict about is the rule that reads
+	// their pane.
+	paneCalibration := agentcalib.New(logger, paneGrid, calibrationStore, paneDrivers)
 	// The establishment bound is stated here for the same reason the hello
 	// timeouts below are: how long a minted accept may wait for the
 	// renderer's acknowledgement before the domain is rolled back and the

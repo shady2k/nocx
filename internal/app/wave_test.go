@@ -383,3 +383,79 @@ func TestAReportOnALaneThatNamesNoSessionIsRefused(t *testing.T) {
 		t.Fatalf("a report on an unmapped lane was accepted")
 	}
 }
+
+// THE EPIC'S HAPPY PATH, in one sequence and in order (nocx-dkawo.2).
+//
+// It runs on the product's own objects — the real encrypted store, the real
+// session registry, the real session opener, the real record and both real
+// carriers — rather than on a harness beside them. What it does not have is a
+// model: a coordinator RUN needs an endpoint, so the coordinator's two calls
+// are exercised where they live (internal/assistant) and the sequence they
+// drive is exercised here.
+func TestOneCoordinatorStartsOneWorkerAndIsToldWhatItCameTo(t *testing.T) {
+	ctx := context.Background()
+	stand := newWaveStand(t)
+
+	// 1. The coordinator starts one worker and gives it a task.
+	worker := stand.registerWithEnrolment(t, "read AGENTS.md and report")
+	if worker.State != wave.StateLive {
+		t.Fatalf("the worker is %q, want %q", worker.State, wave.StateLive)
+	}
+
+	// 2. The coordinator goes idle. Nothing here stands in for that, and
+	//    that is the assertion: no lease is renewed, no call is outstanding,
+	//    and the steps below hold anyway because the BACKEND is what watches.
+
+	// 3. A fresh coordinator — a new run of the same session, holding none of
+	//    the previous run's context — asks what its session holds and is told
+	//    by name and by task.
+	held, err := stand.record.HeldBy(ctx, "sess-coordinator")
+	if err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if len(held) != 1 || held[0].ID != worker.ID {
+		t.Fatalf("held = %v, want exactly the worker %q", held, worker.ID)
+	}
+	if held[0].Task != "read AGENTS.md and report" {
+		t.Fatalf("the coordinator is told an id and not a task: %q", held[0].Task)
+	}
+	if held[0].State != wave.StateLive {
+		t.Fatalf("the worker reads %q to a fresh coordinator", held[0].State)
+	}
+
+	// 4. The worker declares what it produced. Still live: it said it
+	//    finished and its process is still there.
+	if reportErr := stand.report.Report("lane-participant", true, "read it; nothing to change"); reportErr != nil {
+		t.Fatalf("report: %v", reportErr)
+	}
+	after, err := stand.db.Waves().Participant(ctx, worker.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if after.State != wave.StateLive {
+		t.Fatalf("a declaration alone moved the worker to %q", after.State)
+	}
+
+	// 5. Its process exits. Only now, and only because BOTH facts are in, is
+	//    it complete.
+	if closeErr := stand.reg.Close(session.ID(worker.Liveness.SessionID)); closeErr != nil {
+		t.Fatalf("close the worker's session: %v", closeErr)
+	}
+	waittest.WaitFor(t, "the worker to complete", func() bool {
+		got, perr := stand.db.Waves().Participant(ctx, worker.ID)
+		return perr == nil && got.State == wave.StateCompleted
+	})
+
+	// 6. And the coordinator is told what it came to, in the worker's own
+	//    words, without having held anything across the turn.
+	held, err = stand.record.HeldBy(ctx, "sess-coordinator")
+	if err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if len(held) != 1 || held[0].State != wave.StateCompleted {
+		t.Fatalf("held = %v, want the worker completed", held)
+	}
+	if held[0].Declared == nil || held[0].Declared.Summary != "read it; nothing to change" {
+		t.Fatalf("the coordinator was not told what the worker produced: %+v", held[0].Declared)
+	}
+}

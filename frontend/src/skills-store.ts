@@ -74,12 +74,23 @@ export class SkillsStore {
     await this.refresh()
   }
 
-  // Reading is the client's directly (nothing changes, so nothing needs
-  // refreshing); installing goes through the store because the list is now
-  // different, and the caller still gets what was installed so the dialog can
-  // name it. The refresh is awaited BEFORE the result is returned, so a
-  // caller that closes its dialog on this promise cannot close it over a list
-  // that has not caught up.
+  // Reading REFRESHES NOTHING, deliberately: skills.preview writes nothing,
+  // so a list that changed after one would be a list that changed for a
+  // reason nobody can name. It is a passthrough rather than a call the
+  // surface makes on a client of its own, and that is what makes the pair
+  // answerable: skills.install compares against a digest the SERVER kept
+  // from its own preview, so the two calls have to reach one backend over
+  // one connection. Handing the surface a store for the write and a client
+  // for the read would be two collaborators that can differ.
+  preview(url: string): Promise<SkillsPreview> {
+    return this.client.preview(url)
+  }
+
+  // Installing goes through the store because the list is now different, and
+  // the caller still gets what was installed so the dialog can name it. The
+  // refresh is awaited BEFORE the result is returned, so a caller that closes
+  // its dialog on this promise cannot close it over a list that has not
+  // caught up.
   async install(url: string): Promise<SkillsInstall> {
     const installed = await this.client.install(url)
     await this.refresh()

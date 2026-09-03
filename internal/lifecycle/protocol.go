@@ -89,6 +89,29 @@ const (
 	// KindAgentWithdrawn answers a withdraw, so a caller can tell a close that
 	// happened from one that never arrived.
 	KindAgentWithdrawn EventKind = "agent_withdrawn"
+	// KindAgentReport is a wave participant saying what its own work
+	// produced. It is one of exactly TWO things permitted to decide a
+	// participant's state — the other is its process exit — and it rides this
+	// channel for the reason the enrolment does: ADR-0024 decision 2 makes
+	// this the authenticated one, and a second socket would be a second
+	// authenticator for one trust decision.
+	//
+	// It is NOT the withdraw one line above, and the difference is the whole
+	// reason it exists. A withdraw says "the agent I bracketed has returned",
+	// which is the interval's other end and carries no verdict; a report says
+	// what the work CAME TO. Reading a withdraw as a success would be
+	// inventing the one fact the participant did not send, in the fail-open
+	// direction.
+	//
+	// A report does not terminalize on its own. The agent that says it
+	// finished is still running, and may be given more work; only the
+	// conjunction of this and a process exit reaches a completion.
+	KindAgentReport EventKind = "agent_report"
+	// KindAgentReported answers a report, so a participant can tell a
+	// declaration that was admitted from one that never arrived. It carries
+	// Recorded, which defaults to false for the same reason AgentEnrolled's
+	// Enrolled does: an answer nobody filled in must read as a refusal.
+	KindAgentReported EventKind = "agent_reported"
 )
 
 // maxAgentNameLen bounds the agent name an enrolment may carry. The name is
@@ -148,6 +171,8 @@ type Event struct {
 	AgentEnrolled     *AgentEnrolled
 	AgentWithdraw     *AgentWithdraw
 	AgentWithdrawn    *AgentWithdrawn
+	AgentReport       *AgentReport
+	AgentReported     *AgentReported
 }
 
 // EventKind is the wire name of an event kind.
@@ -180,6 +205,8 @@ func (e Event) validInbound() bool {
 		return e.AgentEnrol != nil
 	case KindAgentWithdraw:
 		return e.AgentWithdraw != nil
+	case KindAgentReport:
+		return e.AgentReport != nil
 	}
 	return false
 }
@@ -384,7 +411,40 @@ type (
 	AgentWithdrawn struct {
 		RequestID RequestID `json:"request"`
 	}
+
+	// AgentReport is what a wave participant says its work produced.
+	AgentReport struct {
+		RequestID RequestID `json:"request"`
+		// OK is the participant's OWN verdict, and there is no third value.
+		// A participant that cannot say whether it succeeded says nothing at
+		// all, and the record then reads its exit as an abandonment — which
+		// is the honest answer and the fail-closed one.
+		OK bool `json:"ok"`
+		// Summary is what it says it produced. Free text FROM the
+		// participant: it is content, never a commitment, and nothing derives
+		// authority from it. Bounded by the kernel so one report cannot fill
+		// a frame.
+		Summary string `json:"summary,omitempty"`
+	}
+
+	// AgentReported answers a report. Recorded defaults to false, so a seam
+	// that is absent, that errored, or that was never wired cannot be
+	// mistaken for a declaration that landed (D4).
+	AgentReported struct {
+		RequestID RequestID `json:"request"`
+		Recorded  bool      `json:"recorded"`
+		// Reason says why not, for a participant that has to decide whether
+		// to say it again. Empty on success.
+		Reason string `json:"reason,omitempty"`
+	}
 )
+
+// MaxReportSummaryBytes bounds a participant's declaration text. It is small
+// on purpose: a summary is a sentence a coordinator reads between turns, not a
+// transcript, and the artifact a worker produced belongs in the files it
+// wrote. The frame ceiling is 64 KiB and a report that approached it would be
+// one message crowding out every other on the same channel.
+const MaxReportSummaryBytes = 4096
 
 // ShellState is the shell's answer about where it is.
 type ShellState string

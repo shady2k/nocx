@@ -372,7 +372,7 @@ func testLiveness() Liveness {
 		BackendInstance: "backend-A",
 		SessionID:       "sess-worker",
 		Epoch:           7,
-		Domain:          "dom-1",
+		Lane:            "lane-1",
 		Attempt:         1,
 		OutputOffset:    4096,
 	}

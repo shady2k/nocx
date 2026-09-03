@@ -153,8 +153,18 @@ type Liveness struct {
 	SessionID string
 	// Epoch distinguishes incarnations of one session.
 	Epoch uint64
-	// Domain is the lifecycle domain (ADR-0024) the participant speaks on.
-	Domain string
+	// Lane is the authenticated lifecycle channel (ADR-0024) the evidence
+	// arrived on.
+	//
+	// The design's list of what an observation is bound to says "lifecycle
+	// DOMAIN" here, and this is the lane instead, deliberately. The enrolment
+	// seam speaks in lanes — AgentEnroller.Enrol is handed one — and a lane
+	// carries nested domains, so a domain written here would be one nothing
+	// observed. A field populated by no carrier is worse than an absent one:
+	// it compares equal to itself and reads as evidence. The domain arrives
+	// with the DECLARATION carrier, which knows its own, and it lands in this
+	// struct together with the code that compares it.
+	Lane string
 	// Attempt is the execution attempt (ADR-0020 §4).
 	Attempt int
 	// OutputOffset is the session-relative byte offset the evidence sits at.
@@ -168,7 +178,7 @@ func (l Liveness) SameIncarnation(other Liveness) bool {
 	return l.BackendInstance == other.BackendInstance &&
 		l.SessionID == other.SessionID &&
 		l.Epoch == other.Epoch &&
-		l.Domain == other.Domain &&
+		l.Lane == other.Lane &&
 		l.Attempt == other.Attempt
 }
 

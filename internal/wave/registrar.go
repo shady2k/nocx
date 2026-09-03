@@ -106,7 +106,10 @@ type RegisterRequest struct {
 	CoordinatorSession string
 	Role               Role
 	Task               string
-	Environment        string
+	// Command is the line the participant runs, passed through to the
+	// spawner untouched.
+	Command     string
+	Environment string
 	// CreatedByRunID is provenance and nothing else. It records which run
 	// asked; it never decides whether an operation is allowed.
 	CreatedByRunID string
@@ -148,6 +151,7 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Particip
 		Participant: p.ID,
 		Wave:        req.Wave,
 		Task:        req.Task,
+		Command:     req.Command,
 		Environment: req.Environment,
 	})
 	if spawnErr != nil {

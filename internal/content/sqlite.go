@@ -876,11 +876,13 @@ CREATE TABLE IF NOT EXISTS wave_participants (
   -- evidence to a new incarnation: output offsets are per-session replay
   -- coordinates (AD-9), attempts restart, and a domain can be re-established
   -- under one session. All of it is compared, or a late observation from a
-  -- replaced attempt overwrites a current fact.
+  -- replaced attempt overwrites a current fact. The column is lane and not
+  -- domain: the enrolment seam speaks in lanes, and a domain column no
+  -- carrier fills would read as evidence while being none.
   backend_instance TEXT NOT NULL DEFAULT '',
   session_id       TEXT NOT NULL DEFAULT '',
   epoch            INTEGER NOT NULL DEFAULT 0,
-  domain           TEXT NOT NULL DEFAULT '',
+  lane             TEXT NOT NULL DEFAULT '',
   attempt          INTEGER NOT NULL DEFAULT 0,
   output_offset    INTEGER NOT NULL DEFAULT 0,
   -- THE TWO TERMINAL FACTS, each independently nullable, because they are

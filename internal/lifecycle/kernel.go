@@ -272,6 +272,8 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyAgentEnrol(d, ls, env)
 	case KindAgentWithdraw:
 		out, err = k.applyAgentWithdraw(d, ls, env)
+	case KindAgentReport:
+		out, err = k.applyAgentReport(d, ls, env)
 	default:
 		return nil, ErrIllegalEvent
 	}
@@ -851,6 +853,38 @@ func (k *Kernel) applyAgentWithdraw(d *Domain, ls *laneState, env Envelope) ([]O
 	return []Outbound{k.outbound(d, Event{
 		Kind:           KindAgentWithdrawn,
 		AgentWithdrawn: &AgentWithdrawn{RequestID: req.RequestID},
+	})}, nil
+}
+
+// applyAgentReport validates a participant's declaration and echoes it for the
+// seam that records it.
+//
+// The kernel keeps nothing here, exactly as it keeps nothing for an
+// enrolment, and for the same reason: a declaration is not lifecycle state —
+// it may not open, complete or alter an execution attempt (ADR-0024 decision
+// 1) — and a kernel that held it would be a second place where "what did this
+// participant produce" is answered. What only the kernel can do is say the
+// frame really came from this domain in this epoch; after that the fact
+// belongs to whoever owns the wave record, which is not this package.
+//
+// The summary is bounded HERE and not at the seam, because the bound is a
+// property of the frame: a report longer than this could not be sent at all,
+// and refusing it where the frame is parsed is what stops the rest of the
+// stack from having to have an opinion about length.
+func (k *Kernel) applyAgentReport(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentReport
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	if len(req.Summary) > MaxReportSummaryBytes {
+		return nil, ErrBadRequest
+	}
+	return []Outbound{k.outbound(d, Event{
+		Kind:          KindAgentReported,
+		AgentReported: &AgentReported{RequestID: req.RequestID},
 	})}, nil
 }
 

@@ -270,6 +270,7 @@ type options struct {
 	establishTimeout time.Duration
 	grantBuilder     GrantBuilder
 	agentEnroller    AgentEnroller
+	agentReporter    AgentReporter
 }
 
 // WithEstablishmentTimeout bounds how long a minted accept may wait for the
@@ -339,6 +340,27 @@ func WithGrantBuilder(b GrantBuilder) Option {
 type AgentEnroller interface {
 	Enrol(lane lifecycle.LaneID, agent string, cols, rows int) error
 	Withdraw(lane lifecycle.LaneID)
+}
+
+// AgentReporter records what a wave participant says its own work produced
+// (nocx-dkawo.7). It is a SEPARATE seam from the enroller above, not a third
+// method on it, because the two answer different questions and one of them is
+// almost always absent: every integrated shell may enrol, and only a pane the
+// backend spawned as a participant has a record to declare into.
+//
+// Report returns an error the participant is shown, for the same reason
+// Enrol does: a declaration that could not be recorded must say so in the
+// person's own pane rather than in a log they never read.
+type AgentReporter interface {
+	Report(lane lifecycle.LaneID, ok bool, summary string) error
+}
+
+// WithAgentReporter wires the seam behind the agent_report / agent_reported
+// pair. Without it every report is REFUSED and says so — a declaration that
+// looked accepted while nothing recorded it is the silent degrade this whole
+// record exists to prevent.
+func WithAgentReporter(r AgentReporter) Option {
+	return func(o *options) { o.agentReporter = r }
 }
 
 // WithAgentEnroller wires the seam that keeps a pane's grid behind the
@@ -413,6 +435,7 @@ type Publisher struct {
 	establishTimeout time.Duration
 	grantBuilder     GrantBuilder
 	agentEnroller    AgentEnroller
+	agentReporter    AgentReporter
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
@@ -432,6 +455,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 		establishTimeout: o.establishTimeout,
 		grantBuilder:     o.grantBuilder,
 		agentEnroller:    o.agentEnroller,
+		agentReporter:    o.agentReporter,
 	}
 }
 
@@ -597,6 +621,34 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 	_ = p.kernel.Deliver(out)
 }
 
+// answerAgentReport fills the verdict and delivers it.
+//
+// Every silent path is a refusal, exactly as in answerAgentEnrolment: a nil
+// seam, a nil payload or a seam that errored all leave Recorded false. Nothing
+// here can produce a "recorded" except a seam that actually wrote the
+// declaration and said so.
+func (p *Publisher) answerAgentReport(ask lifecycle.Envelope, out lifecycle.Outbound) {
+	ans := out.Envelope.Event.AgentReported
+	if ans == nil {
+		_ = p.kernel.Deliver(out)
+		return
+	}
+	req := ask.Event.AgentReport
+	switch {
+	case p.agentReporter == nil:
+		ans.Reason = "this backend is not wired to record what an agent produced"
+	case req == nil:
+		ans.Reason = "the report carried no declaration"
+	default:
+		if err := p.agentReporter.Report(out.Envelope.Lane, req.OK, req.Summary); err != nil {
+			ans.Reason = err.Error()
+		} else {
+			ans.Recorded = true
+		}
+	}
+	_ = p.kernel.Deliver(out)
+}
+
 // projection, ordering the replies (decision 9): mutation → publish → only
 // then the accept, and the accept only on a real acknowledgement. Published
 // on failure as well as success: the one mutation a kernel makes on a
@@ -646,6 +698,11 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// the parent is blocked waiting for it before it can launch
 			// the child.
 			p.buildAndDeliverGrant(out)
+		case lifecycle.KindAgentReported:
+			// A declaration is answered on the same terms as an enrolment:
+			// the participant is blocked on the verdict, and Recorded stays
+			// false unless a seam actually wrote the fact.
+			p.answerAgentReport(env, out)
 		case lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
 			// Same shape and the same reason: the caller is blocked waiting
 			// for the verdict before it launches the agent, and the answer

@@ -336,6 +336,14 @@ type wireEnvelope struct {
 	Rows     *int    `json:"rows,omitempty"`
 	Enrolled bool    `json:"enrolled,omitempty"`
 	Reason   *string `json:"reason,omitempty"`
+	// Agent report (nocx-dkawo.7): what a wave participant says its own work
+	// produced, and the answer saying it was recorded. OK and Recorded are
+	// VALUES rather than pointers for the reason Enrolled is: a missing field
+	// decodes to false, so a truncated or hostile frame reads as "not
+	// successful" and "not recorded" rather than as either.
+	OK       bool    `json:"ok,omitempty"`
+	Summary  *string `json:"summary,omitempty"`
+	Recorded bool    `json:"recorded,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -454,6 +462,18 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 	case lifecycle.KindAgentWithdrawn:
 		env.Event.AgentWithdrawn = &lifecycle.AgentWithdrawn{
 			RequestID: lifecycle.RequestID(str(w.Request)),
+		}
+	case lifecycle.KindAgentReport:
+		env.Event.AgentReport = &lifecycle.AgentReport{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			OK:        w.OK,
+			Summary:   str(w.Summary),
+		}
+	case lifecycle.KindAgentReported:
+		env.Event.AgentReported = &lifecycle.AgentReported{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Recorded:  w.Recorded,
+			Reason:    str(w.Reason),
 		}
 	default:
 		return lifecycle.Envelope{}, errFraming
@@ -584,6 +604,22 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	case lifecycle.KindAgentWithdrawn:
 		if p := env.Event.AgentWithdrawn; p != nil {
 			we.Request = new(string(p.RequestID))
+		}
+	case lifecycle.KindAgentReport:
+		if p := env.Event.AgentReport; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.OK = p.OK
+			if p.Summary != "" {
+				we.Summary = new(p.Summary)
+			}
+		}
+	case lifecycle.KindAgentReported:
+		if p := env.Event.AgentReported; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Recorded = p.Recorded
+			if p.Reason != "" {
+				we.Reason = new(p.Reason)
+			}
 		}
 	}
 	body, err := json.Marshal(&we)

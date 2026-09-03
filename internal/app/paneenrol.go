@@ -28,6 +28,13 @@ type paneEnroller struct {
 	// state for but declined to watch would be a claim with no evidence
 	// behind it, and one it watches without reporting is the silent degrade.
 	watch paneWatcher
+	// onEnrol is told when an enrolment actually opened a grid, so a wave
+	// registration blocked on that enrolment can proceed (nocx-dkawo.7). It
+	// is a NOTIFICATION and not a second enroller: it is called after the act
+	// succeeded, it cannot refuse one, and a nil hook is the ordinary case —
+	// most enrolments are a person running an agent in their own tab and
+	// belong to no wave.
+	onEnrol func(sessionID, lane string)
 }
 
 // paneWatcher is the enroller's narrow view of the observation (AD-8): open
@@ -81,6 +88,9 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 	}
 	// Only now, and only for an enrolment that actually opened a grid.
 	e.watch.Watch(sid, agent)
+	if e.onEnrol != nil {
+		e.onEnrol(sid, string(lane))
+	}
 	e.log.Info("agent enrolled", "lane", string(lane), "session_id", sid,
 		"agent", agent, "cols", cols, "rows", rows)
 	return nil

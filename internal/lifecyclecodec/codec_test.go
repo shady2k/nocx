@@ -130,6 +130,22 @@ func TestRoundTripAllKinds(t *testing.T) {
 		env(lifecycle.KindAgentWithdrawn, lifecycle.Event{Kind: lifecycle.KindAgentWithdrawn, AgentWithdrawn: &lifecycle.AgentWithdrawn{
 			RequestID: "r-agent-1-0",
 		}}, 0),
+		// The declaration a wave participant sends, both verdicts. A failure
+		// carries no summary here on purpose: the two halves are independent
+		// fields and a decoder that only ever saw them together would not
+		// prove either.
+		env(lifecycle.KindAgentReport, lifecycle.Event{Kind: lifecycle.KindAgentReport, AgentReport: &lifecycle.AgentReport{
+			RequestID: "r-agent-1-1", OK: true, Summary: "read AGENTS.md; nothing to change",
+		}}, 12),
+		env(lifecycle.KindAgentReport, lifecycle.Event{Kind: lifecycle.KindAgentReport, AgentReport: &lifecycle.AgentReport{
+			RequestID: "r-agent-1-1",
+		}}, 13),
+		env(lifecycle.KindAgentReported, lifecycle.Event{Kind: lifecycle.KindAgentReported, AgentReported: &lifecycle.AgentReported{
+			RequestID: "r-agent-1-1", Recorded: true,
+		}}, 0),
+		env(lifecycle.KindAgentReported, lifecycle.Event{Kind: lifecycle.KindAgentReported, AgentReported: &lifecycle.AgentReported{
+			RequestID: "r-agent-1-1", Reason: "this pane is not part of a wave",
+		}}, 0),
 	}
 
 	for _, want := range envs {
@@ -730,3 +746,41 @@ func TestNoOutboundFrameCarriesBearerMaterial(t *testing.T) {
 type captureKernelPort struct{}
 
 func (*captureKernelPort) Send(lifecycle.Envelope) error { return nil }
+
+// A frame that carries no verdict decodes to "not successful" and one that
+// carries no answer decodes to "not recorded". Both fields are values rather
+// than pointers precisely so a truncated or hostile frame cannot read as
+// consent, and this is the assertion that keeps them that way.
+func TestAnAgentReportWithNoVerdictDecodesAsUnsuccessful(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want func(lifecycle.Envelope) bool
+	}{
+		{
+			name: "a report with no ok field",
+			body: `{"v":1,"lane":"lane-1","dom":"dom-1","epoch":1,"seq":5,"cap":"` + strings.Repeat("a", 64) + `","evt":"agent_report","request":"r-agent-1-1"}`,
+			want: func(e lifecycle.Envelope) bool { return e.Event.AgentReport != nil && !e.Event.AgentReport.OK },
+		},
+		{
+			name: "an answer with no recorded field",
+			body: `{"v":1,"lane":"lane-1","dom":"dom-1","epoch":1,"seq":6,"cap":"` + strings.Repeat("a", 64) + `","evt":"agent_reported","request":"r-agent-1-1"}`,
+			want: func(e lifecycle.Envelope) bool {
+				return e.Event.AgentReported != nil && !e.Event.AgentReported.Recorded
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			writeRawFrame(&buf, tc.body)
+			dec := NewDecoder(&buf, Config{}, nil)
+			got, err := dec.ReadFrame()
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !tc.want(got) {
+				t.Fatalf("a frame with the field absent did not decode as a refusal: %+v", got.Event)
+			}
+		})
+	}
+}

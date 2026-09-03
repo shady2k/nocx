@@ -64,12 +64,12 @@ func (s *sqliteContent) CommitPrepared(ctx context.Context, p wave.Participant) 
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO wave_participants
 			   (id, wave_id, role, state, task, registered_at,
-			    backend_instance, session_id, epoch, domain, attempt, output_offset)
+			    backend_instance, session_id, epoch, lane, attempt, output_offset)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			string(p.ID), string(p.Wave), string(p.Role), string(p.State), p.Task,
 			p.RegisteredAt.UnixMilli(),
 			p.Liveness.BackendInstance, p.Liveness.SessionID, epoch,
-			p.Liveness.Domain, p.Liveness.Attempt, p.Liveness.OutputOffset,
+			p.Liveness.Lane, p.Liveness.Attempt, p.Liveness.OutputOffset,
 		); err != nil {
 			return fmt.Errorf("content: commit participant %q: %w", p.ID, err)
 		}
@@ -94,9 +94,9 @@ func (s *sqliteContent) MarkLive(ctx context.Context, id wave.ParticipantID, l w
 		res, err := s.db.ExecContext(ctx,
 			`UPDATE wave_participants
 			    SET state = 'live', backend_instance = ?, session_id = ?, epoch = ?,
-			        domain = ?, attempt = ?, output_offset = ?
+			        lane = ?, attempt = ?, output_offset = ?
 			  WHERE id = ? AND state = 'prepared'`,
-			l.BackendInstance, l.SessionID, epoch, l.Domain, l.Attempt, l.OutputOffset,
+			l.BackendInstance, l.SessionID, epoch, l.Lane, l.Attempt, l.OutputOffset,
 			string(id))
 		if err != nil {
 			return fmt.Errorf("content: mark live %q: %w", id, err)
@@ -212,7 +212,7 @@ func (s *sqliteContent) PutDelegation(ctx context.Context, d wave.Delegation) er
 }
 
 const participantColumns = `id, wave_id, role, state, task, registered_at,
-	backend_instance, session_id, epoch, domain, attempt, output_offset,
+	backend_instance, session_id, epoch, lane, attempt, output_offset,
 	declared_ok, declared_summary, declared_at, exit_cause, exit_code, exited_at`
 
 func (s *sqliteContent) Participant(ctx context.Context, id wave.ParticipantID) (wave.Participant, error) {
@@ -297,7 +297,7 @@ func scanParticipant(sc scanner) (wave.Participant, error) {
 		epoch, outOffset int64
 	)
 	if err := sc.Scan(&id, &waveID, &role, &state, &p.Task, &registeredAt,
-		&p.Liveness.BackendInstance, &p.Liveness.SessionID, &epoch, &p.Liveness.Domain,
+		&p.Liveness.BackendInstance, &p.Liveness.SessionID, &epoch, &p.Liveness.Lane,
 		&p.Liveness.Attempt, &outOffset,
 		&declaredOK, &declaredSummary, &declaredAt, &exitCause, &exitCode, &exitedAt); err != nil {
 		return wave.Participant{}, err

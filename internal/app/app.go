@@ -76,6 +76,8 @@ import (
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
+	"github.com/shady2k/nocx/internal/wave"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // noteBackupAdapter is the backup's view of the notes store. The store takes
@@ -1290,6 +1292,18 @@ func New(opts ...Option) (*App, error) {
 	// publisher opens and closes intervals through it, and the transport feeds
 	// it from the session read path.
 	paneGrid := panegrid.New(logger)
+	// The wave's rendezvous, built before the enroller because it is what the
+	// enroller notifies (nocx-dkawo.7). An enrolment is the ONE moment nocx
+	// knows an agent started rather than inferring it, so a registration
+	// waits on this and on nothing else — not on a dispatch returning, which
+	// is not delivery.
+	waveEnrol := newWaveEnrolments(logger, sess)
+	// The declaration's carrier, built beside the rendezvous and wired into
+	// the same publisher: a participant says what its work produced over the
+	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
+	// Its destination is bound after the record exists, for the same reason
+	// the supervisor's is.
+	waveReport := &waveReporter{lanes: childSessions, enrol: waveEnrol, now: time.Now, log: logger}
 	// One driver per agent (AD-8), validated once, here. NewRegistry fails
 	// only on a wiring mistake — a driver that cannot name its agent, or two
 	// for one agent — and a wiring mistake belongs to process start rather
@@ -1346,7 +1360,10 @@ func New(opts ...Option) (*App, error) {
 		// answers. Wired here rather than defaulted anywhere, because an
 		// unwired enroller refuses every enrolment — the fail-closed half of
 		// D4, and the opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid, paneWatch)))
+		lifecyclepub.WithAgentEnroller(waveEnrol.hookInto(newPaneEnroller(logger, childSessions, paneGrid, paneWatch))),
+		// The second fact's carrier. Unwired it refuses every report and says
+		// so, which is the same fail-closed stance as the enroller above.
+		lifecyclepub.WithAgentReporter(waveReport))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1836,6 +1853,54 @@ func New(opts ...Option) (*App, error) {
 	// set of helpers this process already holds, which on a cold start is none,
 	// and writing it out is what keeps the two sources of an inventory — held
 	// and re-adopted — visibly the same argument.
+	// THE WAVE RECORD (nocx-dkawo.2). Built here because every seam it needs
+	// exists only now: the durable rows from the content store, the pane and
+	// the session from the layout chain and the one session opener, the
+	// enrolment from the rendezvous above, and the process exit from the
+	// registry.
+	//
+	// The supervisor's destination is bound AFTER the registrar, because the
+	// two need each other: a registrar cannot be constructed without a
+	// supervisor to attach, and a supervisor has nowhere to report until the
+	// registrar exists. Two-phase wiring at the composition root, which is
+	// the ordinary shape for a cycle between two things the root owns — the
+	// same shape as the emitter and the liveness observer above.
+	waveSup := &waveSupervisor{sessions: sess, log: logger}
+	waveRecord := wave.NewRegistrar(
+		contentDB.Waves(),
+		&waveSpawner{
+			layout: contentDB.Layout(), opener: tp, sessions: sess,
+			enrolments: waveEnrol,
+			// Participants are minted in the default workspace until a
+			// coordinator names its own. It is the workspace the ledger
+			// already records every session nobody named one for, so this
+			// adds no new answer to "where does an unplaced thing go".
+			workspace: string(workspace.Default),
+			log:       logger,
+		},
+		waveEnrol,
+		waveSup,
+	)
+	waveSup.exited = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, e wave.Exit) {
+		if _, err := waveRecord.Exited(ctx, id, l, e); err != nil {
+			logger.Warn("wave: a participant's exit was not recorded",
+				"participant", string(id), "error", err)
+		}
+	}
+	waveReport.declare = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, d wave.Declaration) error {
+		_, err := waveRecord.Declared(ctx, id, l, d)
+		return err
+	}
+	// A restart closes what this backend can no longer judge. It never
+	// adopts: the worker died with the backend that held it, and no pin
+	// exists that could prove a process found at the far end was ours if it
+	// had not. An interrupted record costs a row that outlives its process by
+	// one start; a wrongly adopted participant costs a coordinator addressing
+	// a process that is not its worker, and the two are not symmetric.
+	if err := waveRecord.Sweep(ctx); err != nil {
+		logger.Warn("wave: the startup sweep left participants open", "error", err)
+	}
+
 	reconcileSessions(ctx, contentDB.Reconcile(),
 		helperReg.inventories(),
 		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},

@@ -107,9 +107,11 @@ child — and it is a separate question with a separate answer.
 | `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `reason`                                 | The verdict, and the reason when it is no. §15.                                    |
 | `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
 | `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
+| `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced. §16.                           |
+| `agent_reported`     | kernel → shell  | `request`, `recorded`, `reason`                                          | The declaration was written to the wave record, or why not. §16.                   |
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
-`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
+`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated.
 
 ## 4. Authentication
@@ -178,8 +180,8 @@ A listener existing is not a channel being live (decision 3). The sequence:
 6. Timeout (`hello_timeout`, 10 s) or any failure leaves the visible native
    prompt in place.
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
-`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
+`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated. **Three outbound kinds, one boundary:** the transport port
 carries exactly three kinds of envelope — `accept`, `refresh_request` and
 `domain_grant`, the replies the shell must see. `domain_established` (and
@@ -671,3 +673,53 @@ which is the one thing only it can do, and the fact then belongs to whoever owns
 grid answers what is on the screen and where the cursor is, and nothing else; the two
 decisions the amendment permits from one — may nocx type here, what does the indicator show
 — are made by callers reading a frame, never by the grid and never here.
+
+## 16. The participant's declaration: the second of the two facts
+
+- **Implements:** `D9` of the orchestration mechanism design — only process exit and the
+  participant's own declaration may decide a wave participant's state.
+- **Bead:** `nocx-dkawo.7`.
+
+A wave participant produces two facts at the end of its work, and they are independent:
+what it **declared** it produced, and its **process exit**. The exit is the backend's own,
+because nocx owns the PTY. This pair is the declaration.
+
+### 16.1 Why it rides this channel, and why it is not `agent_withdraw`
+
+It rides this channel for §15.1's reason unchanged: a second socket would be a second
+authenticator for one trust decision, and a binary launched by the shell inherits the
+descriptor without inheriting the domain.
+
+It is **not** the withdraw of §15.2, and that distinction is the whole reason the pair
+exists. A withdraw says "the agent I bracketed has returned", which is the interval's
+other end and carries no verdict at all. A report says what the work **came to**. Reading
+a withdraw as a success would invent the one fact the participant did not send, in the
+fail-open direction — and a wave whose completions are inferred is the self-matching
+sentinel the orchestration design exists to kill.
+
+### 16.2 A declaration does not terminalize anything on its own
+
+`ok` is the participant's own verdict and there is no third value. A participant that
+cannot say whether it succeeded says nothing at all, and the record then reads its exit as
+an **abandonment** — which is the honest answer and the fail-closed one.
+
+A declaration with no exit leaves the participant **live**: the agent that says it finished
+is still running and may be given more work. Only the conjunction of a declaration and a
+process exit reaches a completion. The record reduces from the fact SET rather than the
+arrival order, so an exit observed before the declaration reads as abandoned and is refined
+by the declaration that follows — the second half of a conjunction arriving late, not a
+resurrection.
+
+`summary` is free text FROM the participant. It is content, never a commitment, and nothing
+derives authority from it. The kernel bounds it at 4096 bytes: a summary is a sentence a
+coordinator reads between turns, not a transcript, and the artifact a worker produced
+belongs in the files it wrote. The declaration's TIME is the backend's, because there is no
+clock shared with a participant and one it supplied would be a value it could pick.
+
+### 16.3 The verdict is fail-closed, for §15.3's reason
+
+`recorded` is absent unless the declaration was actually written. A seam that is not wired,
+a payload that is missing, a record that refused: every one of them leaves it false, and
+the answer carries a `reason` the participant can print in its own pane. A pane that is not
+part of a wave is told so plainly — that is the ordinary case, since a person's own agent
+may well be integrated and enrolled and belong to no wave at all.

@@ -78,6 +78,11 @@ type SpawnRequest struct {
 	Participant ParticipantID
 	Wave        ID
 	Task        string
+	// Command is the line the participant runs. It is carried rather than
+	// derived because what makes an agent is the caller's business and not
+	// this package's: nocx has no list of agents, and a record that decided
+	// one would be the network manifest catalogue this design refused.
+	Command string
 	// Environment is where the worker runs. Spawning is the delegate effect
 	// over the resource environment, permitted only into an environment the
 	// run's own fence already names — reaching further is scope expansion.

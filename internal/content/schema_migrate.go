@@ -154,7 +154,7 @@ type migrationStep struct {
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
 	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild},
-	{from: 16, to: 17, apply: migrateWaveRecordTables16to17, schemaDigest: "fade5859046aef15fcbe7974fc60908d3a81135e58f2e2292c89f6005eace502"},
+	{from: 16, to: 17, apply: migrateWaveRecordTables16to17, schemaDigest: "079214912069b019c8225fde48c1072e4f073c21dcf65cc19242bdc37b305512"},
 }
 
 // migrateWaveRecordTables16to17 carries a database across the edge that added

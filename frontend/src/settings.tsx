@@ -38,6 +38,7 @@ import { AgentEmittingSection } from './agent-emitting-section'
 import { AgentCalibrationSection } from './agent-calibration-section'
 import type { EmittingClient } from './emitting-client'
 import type { CalibrationClient } from './calibration-client'
+import type { TypingClient } from './typing-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -264,6 +265,7 @@ export interface SettingsComponentProps {
   /** The guided calibration (nocx-etejh). Optional like every other client
    *  here: without it the page is still registered and says so. */
   calibrationClient?: CalibrationClient
+  typingClient?: TypingClient
   /** What the window calls a pane. The emitting view's picker lists panes the
    *  backend named by session id and agent; this is what turns one into the
    *  name on the tab. Optional — without it the picker says what the wire
@@ -727,7 +729,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </PageSection>
           }
         >
-          <AgentCalibrationSection client={props.calibrationClient!} nameOf={props.paneName} />
+          <AgentCalibrationSection
+            client={props.calibrationClient!}
+            typing={props.typingClient!}
+            nameOf={props.paneName}
+          />
         </Show>
       ),
     }

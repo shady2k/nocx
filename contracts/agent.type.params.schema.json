@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.type.params.schema.json",
+  "title": "AgentTypeParams",
+  "description": "Params for agent.type. THE AGENT IS NOT HERE, and its absence is the design: a caller that could name the agent could name one whose rule verifies while the pane runs something else, and the frame would then be read by a rule that was never about it. The agent comes from the enrolment act, which is also what opened the grid the frame is read from.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "text"],
+  "properties": {
+    "sessionId": {
+      "description": "The pane to type into, by the session that is its pipe. The connection must hold it, exactly as the data plane requires before it will carry a byte the person typed.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "text": {
+      "description": "What to type. It is framed as a bracketed paste on the way in, so a line break inside it is content rather than a submission. Text carrying a control character is refused whole rather than repaired: inside a paste an escape ends the paste early and everything after it stops being text and starts being keys.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "submit": {
+      "description": "Whether the key that submits is pressed after the text, as a SEPARATE write gated on its own frame. Absent means false, and the default is the safe direction on purpose: a caller that forgot the field leaves its text in the input region for a person to look at, rather than starting a turn nobody asked for.",
+      "type": "boolean"
+    }
+  }
+}

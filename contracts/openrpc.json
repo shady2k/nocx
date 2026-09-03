@@ -585,6 +585,55 @@
       }
     },
     {
+      "name": "agent.type",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/agent.type.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "agent.typeResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/agent.type.schema.json"
+        }
+      }
+    },
+    {
       "name": "api.collections.close",
       "params": [
         {
@@ -9993,6 +10042,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/agent.status.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/agent.type.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/api.collections.close.schema.json"

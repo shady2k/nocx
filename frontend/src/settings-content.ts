@@ -68,6 +68,11 @@ export class SettingsContent extends SolidPaneContent {
      *  emitting one, because the two answer different questions about the
      *  same pane — one looks, the other writes a labelled set. */
     private readonly calibrationClient?: import('./calibration-client').CalibrationClient,
+    /** The typing primitive (nocx-dkawo.1). It rides beside the calibration
+     *  because the verdict that page draws is a claim about what nocx will do
+     *  with somebody's keyboard, and a claim like that should be checkable
+     *  where it is made. */
+    private readonly typingClient?: import('./typing-client').TypingClient,
     private readonly paneName?: (sessionId: string) => string | null,
   ) {
     super()
@@ -87,6 +92,7 @@ export class SettingsContent extends SolidPaneContent {
           policyClient: this.policyClient,
           emittingClient: this.emittingClient,
           calibrationClient: this.calibrationClient,
+          typingClient: this.typingClient,
           paneName: this.paneName,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,

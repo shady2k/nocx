@@ -18,8 +18,14 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { CalibrationClient } from './calibration-client'
+import { TypingClient } from './typing-client'
+import type { AgentType } from './generated/agent.type'
 import type { AgentCalibration } from './generated/agent.calibration'
-import { AgentCalibrationSection, CALIBRATION_POLL_MS } from './agent-calibration-section'
+import {
+  AgentCalibrationSection,
+  CALIBRATION_POLL_MS,
+  TEST_LINE,
+} from './agent-calibration-section'
 
 const STEPS: NonNullable<AgentCalibration['calibration']>['steps'] = [
   { label: 'idle', required: true, ask: 'Leave the agent waiting for input.', expect: 'free_text' },
@@ -80,9 +86,24 @@ function fakeClient(read: AgentCalibration, answers: AgentCalibration[] = []) {
   return { client, calls, act, reads }
 }
 
-function mount(client: CalibrationClient): HTMLElement {
+/** The typing primitive, spied. What a test asserts about it is what the
+ *  surface ASKED for — the pane and the text — because everything that decides
+ *  whether a keystroke is sent is in the backend, on a frame it reads itself. */
+function fakeTyping(result?: AgentType, fail?: Error) {
+  const client = new TypingClient(new Dispatcher(fixedEndpoint(9876)))
+  const calls: { sessionId: string; text: string }[] = []
+  vi.spyOn(client, 'type').mockImplementation((sessionId, text) => {
+    calls.push({ sessionId, text })
+    return fail ? Promise.reject(fail) : Promise.resolve(result!)
+  })
+  return { client, calls }
+}
+
+function mount(client: CalibrationClient, typing?: TypingClient): HTMLElement {
   const container = document.body.appendChild(document.createElement('div'))
-  render(() => <AgentCalibrationSection client={client} />, { container })
+  render(() => <AgentCalibrationSection client={client} typing={typing ?? fakeTyping().client} />, {
+    container,
+  })
   return container
 }
 
@@ -286,6 +307,82 @@ describe('the guided calibration', () => {
     expect(verdict.querySelector('[data-may-type]')!.getAttribute('data-may-type')).toBe('true')
     expect(verdict.textContent).toContain('Verified against 3 of 3 labelled states')
     expect(verdict.textContent).toContain('nocx may type into a pane running claude')
+  })
+
+  // ── AND THE CLAIM IS CHECKABLE WHERE IT IS MADE (nocx-dkawo.1) ─────────
+
+  // The user path this bead exists for, as far as a person can walk it here:
+  // a rule that has earned typing authority, a button, and a line that lands
+  // in the agent's input box with nothing pressed after it.
+  it('offers to type a test line once the rule has earned it, and presses nothing', async () => {
+    const { client } = fakeClient(
+      answer({
+        stored: { complete: true, labels: [] },
+        verification: { mayType: true, labelled: 3, agreed: 3, disagreements: [] },
+      }),
+    )
+    const typing = fakeTyping({
+      sessionId: 'sess-1',
+      agent: 'claude',
+      outcome: 'typed',
+      state: 'free_text',
+    })
+    const container = mount(client, typing.client)
+    await settle()
+    await choosePane(container)
+
+    fireEvent.click(container.querySelector('[data-typing-action="try"]')!)
+    await settle()
+
+    expect(typing.calls).toHaveLength(1)
+    expect(typing.calls[0].sessionId).toBe('sess-1')
+    expect(typing.calls[0].text).toBe(TEST_LINE)
+    const said = container.querySelector('[data-typing-outcome]')!
+    expect(said.getAttribute('data-typing-outcome')).toBe('typed')
+    expect(said.textContent).toContain('nothing was sent')
+  })
+
+  // THE REFUSAL IS SAID OUT LOUD. It arrives as a result rather than an error
+  // precisely so it can be: a pane asking the person to approve a tool is not
+  // a malformed request, and a control that silently does nothing is
+  // indistinguishable from a broken one.
+  it('says which state refused when nothing was typed', async () => {
+    const { client } = fakeClient(
+      answer({
+        stored: { complete: true, labels: [] },
+        verification: { mayType: true, labelled: 3, agreed: 3, disagreements: [] },
+      }),
+    )
+    const typing = fakeTyping({
+      sessionId: 'sess-1',
+      agent: 'claude',
+      outcome: 'refused',
+      state: 'permission_choice',
+      reason:
+        'that pane is asking you to approve something, and nocx types only into a pane that is waiting for input',
+    })
+    const container = mount(client, typing.client)
+    await settle()
+    await choosePane(container)
+
+    fireEvent.click(container.querySelector('[data-typing-action="try"]')!)
+    await settle()
+
+    const said = container.querySelector('[data-typing-outcome]')!
+    expect(said.getAttribute('data-typing-outcome')).toBe('refused')
+    expect(said.getAttribute('data-typing-state')).toBe('permission_choice')
+    expect(said.textContent).toContain('asking you to approve something')
+  })
+
+  // And the button is not there at all for a rule that has not earned it, so
+  // the page never offers what the backend would refuse.
+  it('does not offer to type into a pane whose rule has not earned it', async () => {
+    const { client } = fakeClient(answer({ stored: { complete: true, labels: [] } }))
+    const container = mount(client)
+    await settle()
+    await choosePane(container)
+
+    expect(container.querySelector('[data-typing-action="try"]')).toBeNull()
   })
 
   // The soft degrade stated in the product rather than in a log: a rule that

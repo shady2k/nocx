@@ -313,6 +313,12 @@ type WSServer struct {
 	// when unwired, and both agent.calibration methods then answer "not
 	// found" rather than a step list nobody can answer.
 	agentCalibration agentCalibrator
+	// agentTypist is the one thing in nocx that writes into an agent's pane
+	// (nocx-dkawo.1). Nil when unwired, and agent.type then answers "not
+	// found" — a surface must be able to tell "nocx cannot type here" from
+	// "the rule refused", because only one of those is repairable by
+	// calibrating.
+	agentTypist agentTypist
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
 	// can be sure nothing is still sweeping. Same shape as panegrid's own
@@ -1614,6 +1620,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
+	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {

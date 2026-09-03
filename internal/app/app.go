@@ -1656,9 +1656,19 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-02uci): the SAME registry the watcher classifies with, so the
 	// reading a person is shown is the reading the product acted on. A
 	// second registry here would be a second answer to one question.
+	// And the one thing in nocx that writes INTO an enrolled pane
+	// (nocx-dkawo.1). It is built from the same three the rest of this
+	// paragraph is built from — the grid it reads a frame off, the registry
+	// whose rule classifies it, and the calibration that says whether that
+	// rule has earned the right to be typed against — plus the session
+	// registry, which is where a pane's input queue is. A second grid or a
+	// second registry here would be a second answer to the question a
+	// keystroke is decided on.
 	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
-		transport.WithAgentCalibration(paneCalibration))
+		transport.WithAgentCalibration(paneCalibration),
+		transport.WithAgentTypist(newPaneTypist(
+			logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries

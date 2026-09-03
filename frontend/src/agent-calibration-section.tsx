@@ -62,6 +62,7 @@ import {
   type CalibrationStep,
   type CalibrationVerdict,
 } from './calibration-client'
+import { type TypingClient, type TypingResult } from './typing-client'
 import { PageSection, Section, Select, Badge, Button, EmptyState } from './ui'
 import { Spinner } from './ui/spinner'
 
@@ -76,8 +77,25 @@ import { Spinner } from './ui/spinner'
  */
 export const CALIBRATION_POLL_MS = 500
 
+/**
+ * The line the test types. Fixed, and not a field the person fills in.
+ *
+ * This surface proves a primitive; it is not a way to talk to an agent from
+ * Settings, and a free-text box here would be a second place to submit into a
+ * pane beside the one a person already has — their keyboard. It says what it
+ * is so that a person who finds it in their input box a minute later knows
+ * where it came from.
+ */
+export const TEST_LINE = 'a test line from nocx — nothing was sent'
+
 export interface AgentCalibrationSectionProps {
   client: CalibrationClient
+  /** The typing primitive (nocx-dkawo.1). It is here rather than in a section
+   *  of its own because the fact it proves is this section's headline: the
+   *  verdict says nocx may type into a pane running this agent, and a claim
+   *  about what will happen to somebody's keyboard should be checkable in the
+   *  place it is made. */
+  typing: TypingClient
   /** What to call a pane, when the window knows. Optional: without it the
    *  picker says what the wire said, which is honest and unmemorable. */
   nameOf?: (sessionId: string) => string | null
@@ -137,6 +155,25 @@ function sentence(reason: string): string {
   return head.endsWith('.') ? head : `${head}.`
 }
 
+/**
+ * WHAT HAPPENED TO THE TEST LINE, said as what nocx did rather than as a code.
+ *
+ * A refusal is the product working, and it comes back as a RESULT rather than
+ * an error precisely so it can be said out loud: a pane asking the person to
+ * approve a tool is not a malformed request, and a control that silently does
+ * nothing is indistinguishable from a broken one. The backend's reason is
+ * shown as it came — it is written in the person's vocabulary, and two places
+ * wording one refusal is two places for it to be wrong.
+ */
+function typingNote(r: TypingResult): string {
+  if (r.outcome === 'typed') {
+    return 'The line is in that pane\u2019s input box now, and nothing was sent. Read it there, then send or clear it yourself.'
+  }
+  return r.reason === undefined
+    ? `Nothing was typed: that pane is ${r.state}.`
+    : `Nothing was typed. ${sentence(r.reason)}`
+}
+
 /** One label the rule reads differently from the person who produced it. Both
  *  sides are named because the point of showing it is repair, and only the
  *  person can say which of the two is wrong. */
@@ -151,6 +188,7 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
   const [loaded, setLoaded] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
   const [busy, setBusy] = createSignal(false)
+  const [typed, setTyped] = createSignal<TypingResult | null>(null)
 
   const adopt = (answer: { panes: CalibrationPane[]; calibration?: CalibrationState }): void => {
     setPanes(answer.panes)
@@ -187,6 +225,29 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
       // A refusal is the product working: a required state cannot be
       // skipped, and a stale answer cannot be applied. It is shown as it
       // came, because the backend says it in the person's vocabulary.
+      setError(messageOf(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Put one line into the pane's input and press NOTHING.
+   *
+   * Type rather than Submit, deliberately: this is a person checking that a
+   * rule they just calibrated works, and a button in Settings that started a
+   * turn in their agent would be spending their tokens to answer a question
+   * about a keystroke. The text lands where they can read it and they decide
+   * what happens next — which is also exactly what the primitive's `typed`
+   * outcome means.
+   */
+  const tryTyping = async (pane: string): Promise<void> => {
+    if (busy()) return
+    setBusy(true)
+    try {
+      setTyped(await props.typing.type(pane, TEST_LINE))
+    } catch (e) {
+      setTyped(null)
       setError(messageOf(e))
     } finally {
       setBusy(false)
@@ -249,6 +310,9 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
               onChange={(v) => {
                 setSelected(v)
                 setState(null)
+                // The answer was about the pane that was selected, and it
+                // stops being true the moment another one is.
+                setTyped(null)
                 void read()
               }}
             />
@@ -293,6 +357,38 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                     </div>
                   )}
                 </For>
+                <Show when={s.verification.mayType}>
+                  <div class="st-calibration__actions">
+                    <Button
+                      variant="default"
+                      disabled={busy()}
+                      onClick={() => void tryTyping(s.sessionId)}
+                      data-typing-action="try"
+                    >
+                      Type a test line into this pane
+                    </Button>
+                  </div>
+                  <p class="st-calibration__detail">
+                    nocx types only into a pane its rule reads as waiting for input, and it looks
+                    again in the instant before each write — so if your agent starts working, or
+                    asks you to approve something, between now and then, nothing is typed and this
+                    says which of those it was.
+                  </p>
+                  <Show when={typed()} keyed>
+                    {(result) => (
+                      <div
+                        class="st-calibration__row"
+                        data-typing-outcome={result.outcome}
+                        data-typing-state={result.state}
+                      >
+                        <Badge tone={result.outcome === 'refused' ? 'warning' : 'success'}>
+                          {result.outcome === 'refused' ? 'nothing typed' : 'typed'}
+                        </Badge>
+                        <span class="st-calibration__detail">{typingNote(result)}</span>
+                      </div>
+                    )}
+                  </Show>
+                </Show>
               </Section>
 
               <Show

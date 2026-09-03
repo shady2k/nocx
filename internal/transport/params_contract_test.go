@@ -736,6 +736,14 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
 		},
+		// Typing carries a pane and text and NEVER an agent or a state, both
+		// of which the backend reads for itself (nocx-dkawo.1). The submit
+		// key is asked for explicitly; absent is false, which is the safe
+		// direction.
+		"agent.type": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up","submit":true}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

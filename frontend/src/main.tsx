@@ -39,6 +39,7 @@ import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { EmittingClient } from './emitting-client'
 import { CalibrationClient } from './calibration-client'
+import { TypingClient } from './typing-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -251,6 +252,10 @@ function main(): void {
   // it drives lives in the backend, keyed by the pane, so a window that goes
   // away leaves nothing half-open.
   const calibrationClient = new CalibrationClient(dispatcher)
+  // The typing primitive (nocx-dkawo.1). Stateless like its two neighbours:
+  // every decision about whether a keystroke may be sent is taken in the
+  // backend, on a frame it reads itself, in the instant before each write.
+  const typingClient = new TypingClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -564,6 +569,7 @@ function main(): void {
         skillsStore,
         emittingClient,
         calibrationClient,
+        typingClient,
         // The window already names every pane in its tab strip, and the
         // backend answers the emitting view with a session id and an agent
         // name. This is the one place those two meet; deriving a name inside

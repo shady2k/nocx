@@ -1784,6 +1784,64 @@ export function ApiPane(props: ApiPaneProps) {
   })
 
   /**
+   * A SOURCE READ THAT IS OWED, because there was nowhere to check it
+   * against yet (nocx-s47is, second path).
+   *
+   * `previewPostman` answers two questions at once — what the archive holds,
+   * and whether the destination can take it — so it needs both, and the
+   * backend refuses outright with "dest is required" when it has only one.
+   * The source's own read is started by the person finishing with the paste
+   * box, and the gesture that finishes it is usually the click on the pencil
+   * BESIDE it: pasting and then reaching for the destination is the ordinary
+   * order, not a corner. If `defaultRoot` has not landed by then there is no
+   * folder to name, and the call went out with an empty one.
+   *
+   * What made that fatal rather than merely wasted is `previewSource`'s own
+   * rule, which is right and was being applied to the wrong refusal: a read
+   * of the SOURCE forgets the source when it is refused, because the source
+   * is what was refused. Here the archive was fine and the PLACE was
+   * missing, so the ask threw away the export the person had just pasted,
+   * showed them the backend's sentence about a parameter, and offered
+   * nothing further — Import disabled, no vault offer, no way back except
+   * pasting again.
+   *
+   * So the read waits for a destination instead of being spent on nothing.
+   * The interval, with both ends: from the moment the person is finished
+   * with the source until the ask has a folder to check it against, and the
+   * effect below closes it whichever way the folder arrives — the root
+   * landing, or the person typing one.
+   */
+  const [sourceReadOwed, setSourceReadOwed] = createSignal<ImportSource | null>(null)
+
+  const readSource = (readable: ImportSource, dest: string): void => {
+    const requestId = ++archivePreviewRequest
+    void previewSource(readable, dest, requestId, true)
+  }
+
+  /** Finished with the source: read it now if there is a destination, and
+   *  otherwise hold the read until there is one. */
+  const readSourceWhenPlaced = (readable: ImportSource): void => {
+    const dest = untrack(() => postmanDest().trim())
+    if (dest === '') {
+      setSourceReadOwed(() => readable)
+      return
+    }
+    setSourceReadOwed(null)
+    readSource(readable, dest)
+  }
+
+  createEffect(() => {
+    const dest = postmanDest().trim()
+    if (dest === '') return
+    untrack(() => {
+      const owed = sourceReadOwed()
+      if (owed === null) return
+      setSourceReadOwed(null)
+      readSource(owed, dest)
+    })
+  })
+
+  /**
    * THE OFFER ITSELF, once, whichever of the three derivations made it — a
    * file's stem, a pasted export's `info.name`, a URL's last segment.
    *
@@ -3205,8 +3263,7 @@ export function ApiPane(props: ApiPaneProps) {
             // control.
             const readable = readableSource(postmanSource())
             if (readable === null || !('document' in readable)) return
-            const requestId = ++archivePreviewRequest
-            void previewSource(readable, postmanDest().trim(), requestId, true)
+            readSourceWhenPlaced(readable)
           }}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}
           onBrowse={pickerLive() ? browseForImportDest : undefined}

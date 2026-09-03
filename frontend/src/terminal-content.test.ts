@@ -12664,6 +12664,76 @@ describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () =>
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane shows the work that never stopped (nocx-ht15k)
+// ═══════════════════════════════════════════════════════════════════════════
+// The lifecycle facts of a reclaimed session are replayed by the backend the
+// instant the attach installs its subscriber (ws_lifecycle replayLifecycleFacts)
+// — which is INSIDE the bind, because since nocx-k6p18.6 a reclaiming bind
+// awaits `awaitWriteBarrier()` over the recovered scrollback before it returns.
+// mount publishes `this.renderer` only after that bind, so a block port that
+// read the field instead of the renderer it was built with saw null for the
+// whole of that window, and LifecycleProjections.pump records an attempt in
+// `_bound` before it calls the port: the drop is permanent, and the person who
+// came back to their pane never saw the command that was still running.
+describe('a reclaimed pane shows the work that never stopped (nocx-ht15k)', () => {
+  const RECLAIM_GRID = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  it('opens the running block for a fact replayed during the reclaim write barrier', async () => {
+    const client = makeClient()
+    const session = makeSession({
+      cwd: '',
+      recovered: { bytes: 32, gaps: [], size: RECLAIM_GRID },
+      pendingData: 'the screen this window was away for',
+    })
+    // The replay, fired from INSIDE the barrier — the one moment the bind is
+    // still running and mount has not published the renderer. Programmed
+    // before the mount because that is when it is awaited.
+    const { XtermRenderer } = await import('./renderers/xterm')
+    let replayed = false
+    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+      const renderer = createRendererMock()
+      renderer.awaitWriteBarrier.mockImplementation(() => {
+        if (!replayed) {
+          replayed = true
+          const deliver = lifecycleHandler(client, session.sessionId)
+          deliver({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+          deliver({
+            lane: 'lane-1',
+            lifecycle: 'running',
+            domain: 'd1',
+            epoch: 1,
+            attempt: {
+              id: 'att-reclaimed',
+              state: 'open',
+              origin: 'shell',
+              command: 'make deploy',
+            },
+          })
+        }
+        return Promise.resolve()
+      })
+      return renderer as unknown as InstanceType<typeof XtermRenderer>
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) } },
+      client,
+    )
+    try {
+      expect(replayed, 'the reclaiming bind must await the recovered write').toBe(true)
+      const blocks = scrollbackFor(content).blockManager
+      const block = blocks.blockForAttempt('att-reclaimed')
+      expect(block, 'the replayed running attempt must have opened a block').not.toBeNull()
+      expect(block!.status).toBe('running')
+      expect(block!.el.classList.contains('cmd-block-running')).toBe(true)
+      expect(block!.el.textContent).toContain('make deploy')
+    } finally {
+      teardown()
+    }
+  })
+})
+
 describe('replayed completion restores a durable block outcome (nocx-gm21o)', () => {
   it('lands OSC 133 D on the restored entry rather than leaving it unknown', async () => {
     const session = makeSession({

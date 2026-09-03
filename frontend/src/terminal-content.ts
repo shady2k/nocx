@@ -2742,6 +2742,27 @@ export class TerminalContent extends BasePaneContent {
       this._projections = new LifecycleProjections(
         this.lifecycle,
         this.ledger,
+        // THE RENDERER THIS MOUNT BUILT, not `this.renderer`, and that is the
+        // whole of nocx-ht15k. Every callback below needs a cursor line, and
+        // reading the FIELD made them wait for mount to publish it — which
+        // happens only after `_bindSession` returns. For a pane that opens
+        // its own session that window is empty, because the backend replays
+        // a session's lifecycle facts the instant its subscriber lands and a
+        // fresh shell has none yet. A RECLAIM has a whole projection waiting,
+        // and since nocx-k6p18.6 the reclaiming bind AWAITS the write barrier
+        // over the recovered scrollback before it returns — so the replayed
+        // `running` fact of the command that never stopped arrived while the
+        // field was still null, every callback below refused it, and
+        // LifecycleProjections.pump had already recorded the attempt in
+        // `_bound`, so nothing ever opened the block again. The person who
+        // came back to their pane held the session and could not see the work
+        // (the same shape as nocx-07cf4, which moved onCwd/onTitle above the
+        // bind for the same window).
+        //
+        // There is exactly one renderer per TerminalContent — mount builds it,
+        // `this.renderer` is assigned that same object and a rebind reads it
+        // back — so this closure is not a second owner of anything. It is the
+        // one that exists from the moment the port does.
         {
           bindBlock: (attempt) => {
             // The running block opened at the app-owned submit binds to the
@@ -2752,7 +2773,7 @@ export class TerminalContent extends BasePaneContent {
             // A shell-originated attempt: the block gives a native-mode
             // command structure; its text is already on the terminal and
             // never persists (the command-text decision).
-            if (!this.scrollback || !this.renderer) return
+            if (!this.scrollback) return
             // No outputStart override here — unlike the app-owned submit,
             // this block opens at the cursor line at fact time, AFTER the
             // echo: the user typed the command at the shell and it was
@@ -2762,7 +2783,7 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback.beginBlock(
               attempt.command || '(empty)',
               this._cwd,
-              this.renderer.cursorLine(),
+              renderer.cursorLine(),
             )
             this.scrollback.blockManager.bindAttempt(attempt.id)
           },
@@ -2771,15 +2792,15 @@ export class TerminalContent extends BasePaneContent {
             // authenticated completion (kernel derivation). The render-fence
             // rendezvous is bead nocx-u7uh.8; the freeze lands on the event
             // for now, at the current output end.
-            if (!this.scrollback || !this.renderer) return
+            if (!this.scrollback) return
             if (!kernelFreezeBlock(attempt, attempt.domain)) return
-            this.scrollback.freezeFromAttempt(attempt, this.renderer.cursorLine())
+            this.scrollback.freezeFromAttempt(attempt, renderer.cursorLine())
           },
           abandonBlock: (attempt) => {
             // The attempt went unknown (loss, closure, native escape): the
             // block freezes as abandoned — never successful.
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.abandonAttempt(attempt, this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.abandonAttempt(attempt, renderer.cursorLine())
           },
           enterBlock: () => {
             // The far session began: the local `ssh` block ends here with
@@ -2788,16 +2809,16 @@ export class TerminalContent extends BasePaneContent {
             // the far host's blocks. Wired here for the first time: the
             // block manager has always had freezeEntered and nothing ever
             // called it, so every ssh block ran forever (nocx-z5k9).
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.enterBlock(this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.enterBlock(renderer.cursorLine())
           },
           abandonPending: () => {
             // The block opened at the submit and its domain ended before any
             // attempt arrived — `exit` is the case, and the start frame it
             // would have needed dies with the shell (nocx-mlyu). Nothing can
             // complete it, so it freezes as unknown rather than climbing.
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.abandonUnbound(this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.abandonUnbound(renderer.cursorLine())
           },
         },
         (rec, attempt) =>

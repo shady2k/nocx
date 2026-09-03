@@ -323,15 +323,6 @@ func rowTextFrom(f panegrid.Frame, y, from int) string {
 	return strings.TrimRight(b.String(), " ")
 }
 
-func nearestNonBlankAbove(f panegrid.Frame, y int) (string, bool) {
-	for i := y - 1; i >= 0; i-- {
-		if _, ok := firstNonBlankCol(f, i); ok {
-			return f.Text(i), true
-		}
-	}
-	return "", false
-}
-
 func firstNonBlankRowBelow(f panegrid.Frame, y int) (int, bool) {
 	for i := y + 1; i < f.Rows && i < len(f.Lines); i++ {
 		if _, ok := firstNonBlankCol(f, i); ok {

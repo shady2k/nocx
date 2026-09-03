@@ -284,6 +284,45 @@ open is a `slog.Warn` while Settings goes on offering a toggle, a retention age 
 that govern nothing. A silent degrade the UI contradicts is how a feature that does not
 exist survives a release.
 
+## There is no "not ours"
+
+**"Not mine, it was already broken" is not a finding, and it is never an answer.** Whoever
+is looking at the broken thing owns it — a red CI job, a failing local test, a defect
+noticed in passing, a bead somebody else filed three weeks ago, a feature adjacent to the
+one you were sent to build. The repository has one queue and everything in it is ours.
+
+Establishing that a defect predates your branch is still worth doing — but as the FIRST
+line of the diagnosis, never as its conclusion. It tells you where the defect lives; it
+does not tell you to stop. So the shape of the answer is always: name the failing
+assertion or the wrong behaviour exactly, say where it lives (`git diff origin/main...HEAD
+-- <path>` settles "did I bring this"), and then fix it. If a bead already owns it, work
+that bead — a fifth "another occurrence" note is worth less than one line of fix.
+
+This is about BREAKAGE YOU HAVE ENCOUNTERED, and it does not license widening the task
+you were given. New work still comes off the queue in [What to work on
+next](#what-to-work-on-next), and a brief still means what it says. The distinction: nobody
+asked you to build the adjacent feature, and everybody expects you to fix the adjacent
+thing that is broken.
+
+**A rerun is legitimate exactly once**, to see a failure a second time. A green rerun is
+not evidence the defect is gone, only that it did not fire. **A flake is a defect, not
+weather:** a test that fails one run in five is reporting a real race, in the product or in
+itself, and the run that passed is the one that got lucky. Never "fix" it by widening a
+timeout or adding a retry — that converts a report into silence, which is the failure mode
+the [testing rules](#testing-five-rules-each-bought-by-a-green-suite-over-a-broken-product)
+exist to prevent.
+
+**When you genuinely cannot fix it in this session** — the cause sits in a package another
+worker is mid-flight in, or the fix is an epic — say that IN THOSE WORDS, with what you
+found, what is left and what it would take, and ask. That is a report. "Not ours" is not.
+
+> Bought on 2026-09-03 (`nocx-s6h4x`), on the third occurrence of `nocx-n26p1` and the
+> second red CI in one session. Both reds were answered with a correct diagnosis, an occurrence appended to
+> an existing bead, and a rerun; neither was fixed. That bead had carried an unverified
+> candidate cause since 2026-08-30 — a named line, a named hypothesis and a named way to
+> check it — and three sessions running read it, agreed with it, and re-filed it. The
+> owner: «Я не хочу больше слышать аргумент "не наше". Это все наше. Чиним.»
+
 ## Before you fix anything
 
 A bug report is a symptom, not a mandate to edit. Five checks, in order — skipping them is

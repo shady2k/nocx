@@ -217,6 +217,19 @@ type ApprovalRequest struct {
 	ArgHash string `json:"argHash"`
 	// Effect is the effect class the gate decided on.
 	Effect content.Effect `json:"effect"`
+	// DerivedEffects are every class the call's own resources derived, which
+	// for a command naming resources of more than one kind is more than one
+	// (nocx-jxq97). Effect above remains the single row that governs the
+	// decision (ADR-0020 §7); this is what lets the surface also say that the
+	// call reached a host AND wrote a file, so a person is not answering
+	// about the network while a file is written on the strength of that
+	// answer. It is a complete account or empty — never partial — and it is
+	// empty for a call whose resources did not fully resolve, whose
+	// unresolved parts are carried with their reasons in Invocation.
+	//
+	// Internal checkpoint state, like Resources above, until the notification
+	// contract grows the shape that carries it to the renderer.
+	DerivedEffects []content.Effect `json:"-"`
 	// Resources are every resource resolved from the validated call. They are
 	// internal checkpoint state; Resource remains the singular wire projection
 	// until the notification contract grows its multi-resource shape.
@@ -786,6 +799,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	req := m.request(decl, callID, rawArgs, resources)
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
+	req.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
 	// After the ledger record and before the latch: the person is shown the
@@ -822,6 +836,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.ArgHash = ap.ArgHash
 	ask.CommandInvocation = decl.CommandArg != ""
 	ask.Invocation = cloneInvocation(invocation)
+	ask.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
 	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	m.bindApprovalExpansions(ctx, &ap, ask, decl, rawArgs)

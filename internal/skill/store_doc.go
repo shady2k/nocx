@@ -520,9 +520,23 @@ func (s *Store) Approve(name string) error {
 		return err
 	}
 	defer unlock()
-	if rootErr := s.requireManagedRoot(); rootErr != nil {
-		return rootErr
-	}
+	// There is deliberately no root check here (nocx-ablu5). This used to call
+	// requireManagedRoot, which is the precondition of a write INTO the managed
+	// root — and Approve performs no such write. Its only write is the document,
+	// which does not live under the managed root at all: DocumentPath puts
+	// skills.json beside the parent of the first filesystem root, whichever that
+	// is. So the guard was already vestigial for a managed skill, and once the
+	// installed root landed it was actively wrong: approving an INSTALLED skill
+	// on a machine whose managed-skills is a symlink failed with "skill root is
+	// a symlink", about a directory the call never touches.
+	//
+	// The precondition Approve actually has is the provenance and status check
+	// immediately below — the skill must exist, must be one whose bytes are
+	// digested, and must have changed. Nothing is checked about the skill's own
+	// root either: Approve only READS that directory, to hash it, and a
+	// symlinked skill directory that hashes fine is not a failure worth
+	// manufacturing. The three remaining requireManagedRoot callers in write.go
+	// do write into the managed root and keep it.
 	var target *discovered
 	for _, found := range discoverDetailed(s.roots, true) {
 		if found.Name == name {

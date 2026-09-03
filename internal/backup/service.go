@@ -370,7 +370,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 			}
 			return nil, fmt.Errorf("replace skills: %w", serr)
 		}
-		result.Skills = len(doc.Skills.Authored) + len(doc.Skills.Managed)
+		result.Skills = doc.Skills.TreeCount()
 	}
 	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); werr != nil {
 		if recErr := s.Recover(); recErr != nil {
@@ -458,7 +458,7 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, sn
 	}
 	if skills != nil {
 		doc.Skills = skills
-		sum.Skills = len(skills.Authored) + len(skills.Managed)
+		sum.Skills = skills.TreeCount()
 	}
 	// An empty library is omitted entirely (the omitempty on Document
 	// Snippets): a backup without the key predates the section, and restore
@@ -1205,7 +1205,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	p.Groups.Included = len(doc.Connections.Groups)
 	p.Snippets.Included = len(doc.Snippets)
 	if doc.Skills != nil {
-		p.Skills.Included = len(doc.Skills.Authored) + len(doc.Skills.Managed)
+		p.Skills.Included = doc.Skills.TreeCount()
 	}
 	// What a person reads before deciding to restore over what they have.
 	p.Notes.Included = len(doc.Notes)

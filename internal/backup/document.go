@@ -80,9 +80,9 @@ type NoteStore interface {
 	ReplaceNotes([]note.Note) error
 }
 
-// SkillStore reads and replaces authored and managed skill trees together
-// with the skills.json enablement document. Builtin skills are embedded in
-// the binary and never belong to a backup.
+// SkillStore reads and replaces the authored, managed and installed skill
+// trees together with the skills.json enablement document. Builtin skills are
+// embedded in the binary and never belong to a backup.
 type SkillStore interface {
 	Snapshot() (skill.Snapshot, error)
 	RestoreSnapshot(skill.Snapshot) error
@@ -104,9 +104,11 @@ type Document struct {
 	// Notes is the notes library at backup time, oldest first. Absent for a
 	// backup written before this section existed, with the same rule.
 	Notes []BackupNote `json:"notes,omitempty"`
-	// Skills is the authored and managed skill library. Absent for a backup
-	// written before this section existed; restore leaves the current library
-	// alone in that case.
+	// Skills is the authored, managed and installed skill library. Absent for
+	// a backup written before this section existed; restore leaves the current
+	// library alone in that case, and the same holds one level down for a
+	// backup written before installed skills travelled — an absent `installed`
+	// decodes as nil and restore writes nothing into that root.
 	Skills *skill.Snapshot `json:"skills,omitempty"`
 }
 

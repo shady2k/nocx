@@ -96,6 +96,24 @@ const (
 	// the DETECTOR that turns "silently did something else" into "loudly
 	// refused", which is the trade this repo makes everywhere else.
 	RefusedExpansionChanged PolicyRefusalReason = "refused-expansion-changed"
+	// The three bounds on the WIDENING ask (design §5.3, nocx-b453p). An
+	// out-of-scope resource inside an editable row scope is a question, and
+	// a question is an approval-fatigue channel: a model that keeps
+	// proposing out-of-scope resources can walk a person into widening a
+	// scope one prompt at a time. So the asking is bounded, and each bound
+	// has its own sentence, because "we already asked", "you said no" and
+	// "we have stopped asking" are three different facts about the run.
+	//
+	// RefusedWideningAsked: this exact (effect, resource) was already put to
+	// a person in this run. The second occurrence is answered, not re-asked.
+	RefusedWideningAsked PolicyRefusalReason = "refused-widening-asked"
+	// RefusedWideningDeclined: the person refused to widen the row for this
+	// (effect, resource), and that no holds for the rest of the run.
+	RefusedWideningDeclined PolicyRefusalReason = "refused-widening-declined"
+	// RefusedWideningCapped: this answer has already asked to widen a scope
+	// as often as one answer may. The person is told, in the run itself
+	// (WideningCapSentence) — a silent stop is a soft degrade.
+	RefusedWideningCapped PolicyRefusalReason = "refused-widening-capped"
 )
 
 // ToolFailedError is the FOURTH cause a run can end on, and the one the
@@ -259,6 +277,34 @@ type ApprovalRequest struct {
 	// shell could be asked at all — that fact and its reason. Absent for
 	// every non-command proposal.
 	Expansion *ExpansionFacts `json:"expansion,omitempty"`
+	// OutOfScope is present only when a resource of this call fell outside a
+	// bound (design §5.3). It is what makes the widening answer offerable,
+	// and its cause is what decides whether an offer may be made at all.
+	OutOfScope *OutOfScopeFact `json:"outOfScope,omitempty"`
+}
+
+// OutOfScopeFact is the ask's account of the resource that fell outside a
+// bound, and of WHICH bound (design §5.3, nocx-b453p).
+//
+// It exists because the three widths an answer has — this call, this session,
+// always — widen NOTHING. A person shown an out-of-scope question without this
+// fact can press every button the prompt has and the next identical call asks
+// again, for ever; an ask a person cannot usefully answer is worse than a
+// refusal. With it the surface can offer the ONE answer that changes the
+// outcome, and the backend can apply that answer from the question alone.
+//
+// Cause is content.OutOfScopeRowScope when the bound is an operator's row
+// selector — editable, so the answer may widen it — and content.OutOfScopeFence
+// when it is the run fence or a narrowed capability, which no answer can widen.
+// A fence fact therefore carries no offer: offering a question whose yes cannot
+// be honoured is the lie this shape exists to remove.
+//
+// Resource is the scope the row would have to GROW TO COVER, in the form a row
+// states it in, so the widening is written from the verdict rather than
+// re-derived from the command line a second time.
+type OutOfScopeFact struct {
+	Cause    content.OutOfScopeCause `json:"cause"`
+	Resource content.GrantScope      `json:"resource"`
 }
 
 // SkillScanFinding is the first suspicious instruction pattern found in a
@@ -572,9 +618,13 @@ const (
 	policyRefuse
 )
 
-func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
+// The fourth result is the VERDICT the answer came from, and it is returned
+// rather than recomputed because the ask needs its cause and its resource: an
+// out-of-scope question that does not name what fell outside cannot offer the
+// only answer that would change it (design §5.3).
+func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string, content.Verdict) {
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
-		return policyRefuse, RefusedByFloor, reason
+		return policyRefuse, RefusedByFloor, reason, content.Verdict{Decision: content.DecisionRefuse}
 	}
 	verdict := m.verdict(t, resources, resourceDeclaration, invocation)
 	switch verdict.Decision {
@@ -585,17 +635,55 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 		// resource outside an EDITABLE row scope is no longer either — it
 		// is the ask below (design §5.3).
 		if verdict.Cause == content.OutOfScopeFence {
-			return policyRefuse, RefusedOutOfScope, ""
+			return policyRefuse, RefusedOutOfScope, "", verdict
 		}
-		return policyRefuse, RefusedByDecision, ""
+		return policyRefuse, RefusedByDecision, "", verdict
 	case content.DecisionPermit:
 		if isSkillMutationTool(t) {
-			return policyAsk, "", ""
+			return policyAsk, "", "", verdict
 		}
-		return policyPermit, "", ""
+		return policyPermit, "", "", verdict
 	default:
-		return policyAsk, "", ""
+		return policyAsk, "", "", verdict
 	}
+}
+
+// outOfScopeFact is the ask's half of a verdict: a row-scope miss is the only
+// cause a question may be built on, because it is the only one an answer can
+// change. A fence miss never reaches here — resourceVerdict turns it into a
+// refusal — and an ask with nothing outside carries no fact at all.
+func outOfScopeFact(verdict content.Verdict) *OutOfScopeFact {
+	if verdict.Cause == "" {
+		return nil
+	}
+	return &OutOfScopeFact{Cause: verdict.Cause, Resource: verdict.Resource}
+}
+
+// boundWideningAsk is the approval-fatigue bound on the widening question
+// (design §5.3): one ask per (effect, resource) per run, a cap per run, and a
+// declined widening that refuses that pair until the run ends. It returns the
+// refusal that must REPLACE the ask, or nil when the ask may be raised — and
+// it records the ask when it returns nil, so the count is of questions a
+// person actually met.
+//
+// Without an approval store there is nowhere to remember any of it, and the
+// unbounded ask is the old behaviour rather than a silent permit.
+func (m *effectKernel) boundWideningAsk(tool string, effect content.Effect, fact *OutOfScopeFact) *modelResult {
+	if fact == nil || fact.Cause != content.OutOfScopeRowScope || m.approvals == nil {
+		return nil
+	}
+	var reason PolicyRefusalReason
+	switch m.approvals.BeginWideningAsk(m.runID, effect, fact.Resource) {
+	case WideningAskRaise:
+		return nil
+	case WideningAskDuplicate:
+		reason = RefusedWideningAsked
+	case WideningAskDeclined:
+		reason = RefusedWideningDeclined
+	default:
+		reason = RefusedWideningCapped
+	}
+	return &modelResult{text: refusalResult(tool, reason, ""), kind: modelNocxMessage}
 }
 
 // verdict is the kernel's whole policy answer for one call, and it computes
@@ -772,9 +860,13 @@ func (m *effectKernel) bindApprovalExpansions(ctx context.Context, ap *Approval,
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation) error {
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, outOfScope *OutOfScopeFact) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	// The pending record carries the fact too: the answer arrives on another
+	// method, on another connection's turn, and by then only the record
+	// remembers which resource the widening would have to cover.
+	ap.OutOfScope = outOfScope
 	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
@@ -785,6 +877,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 		entryID = id
 	}
 	req := m.request(decl, callID, rawArgs, resources)
+	req.OutOfScope = outOfScope
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
 	req.DerivedEffects = commandSelection(invocation, decl.Declaration.Effect).Candidates
@@ -812,6 +905,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	ap.OutOfScope = ask.OutOfScope
 	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
@@ -1020,6 +1114,12 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 		default:
 			return "REFUSED: the person declined your call to " + tool + " — it did not run. Say what you needed in words instead."
 		}
+	case RefusedWideningAsked:
+		return "REFUSED: nocx did not run your call to " + tool + ": it named something outside what this question may reach, and that exact resource was already put to the person in this answer. Do not propose it a third time — say what you needed in words."
+	case RefusedWideningDeclined:
+		return "REFUSED: nocx did not run your call to " + tool + ": the person refused to widen what this answer may reach to cover that resource. Do not propose it again in this answer."
+	case RefusedWideningCapped:
+		return "REFUSED: nocx did not run your call to " + tool + ": this answer has already asked the person to widen what it may reach as often as one answer may, so nocx has stopped asking. Work within what you were given, or say what you would need."
 	case RefusedFileChanged:
 		reason := "the file changed since approval, so the old approval no longer applies"
 		if len(detail) > 0 && detail[0] != "" {
@@ -1573,8 +1673,11 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 		}
 	}
-	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
+	outcome, refusal, floorReason, verdict := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
 	skillMutation := isSkillMutationTool(decl)
+	// What fell outside, and under which bound — nil unless something did.
+	// The ask carries it; the bound below decides whether the ask happens.
+	outOfScope := outOfScopeFact(verdict)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1597,7 +1700,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			if k.approvals != nil && k.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; verify before dispatch
 			}
-			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
+			if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
+				return *bounded, nil
+			}
+			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope)
 		}
 
 	}
@@ -1625,10 +1731,15 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		classifierFact = fact
 	}
 	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		if classifierFact != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources), classifierFact, resources, invocation)
+		if bounded := k.boundWideningAsk(decl.Name, decl.Effect, outOfScope); bounded != nil {
+			return *bounded, nil
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
+		if classifierFact != nil {
+			ask := k.request(decl, callID, rawArgs, resources)
+			ask.OutOfScope = outOfScope
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, classifierFact, resources, invocation)
+		}
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, outOfScope)
 	}
 
 	// An approved proposal may reach here through either policyAsk or the

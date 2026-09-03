@@ -73,6 +73,11 @@ type Approval struct {
 	// asked — and then there is nothing to compare and the call proceeds,
 	// because the window the person answered said exactly that.
 	ExpansionValues []ExpansionValue
+	// OutOfScope is the bound a resource of this proposal fell outside, and
+	// which bound it was (design §5.3). A carrier, never part of the key: it
+	// is what agent.approve reads to know whether this question offered a
+	// widening and which scope the row would have to grow to cover.
+	OutOfScope *OutOfScopeFact
 }
 
 type approvalKey struct {
@@ -91,6 +96,7 @@ type approvalEntry struct {
 	fileVersionState  FileVersionBindingState
 	fileVersions      []FileVersion
 	expansionValues   []ExpansionValue
+	outOfScope        *OutOfScopeFact
 }
 
 // DeclineKind is what a person's no means, recorded with the declined
@@ -112,6 +118,7 @@ const (
 
 type declinedEntry struct {
 	runID             string
+	outOfScope        *OutOfScopeFact
 	kind              DeclineKind
 	effect            content.Effect
 	invocation        content.Invocation
@@ -132,12 +139,69 @@ type retainedValue struct {
 // the approvals (what the human said yes to), the declined proposals (what
 // the human said no to) and the retained egress results (what was withheld
 // pending the decision). All keyed by the exact proposal.
+// wideningKey is what the widening bound counts: one RUN, one effect row, one
+// resource. Not the proposal key — two different calls naming the same
+// out-of-scope resource are one question to a person, and asking it twice is
+// the fatigue this bound exists to stop.
+type wideningKey struct {
+	runID  string
+	effect content.Effect
+	kind   content.ResourceKind
+	id     string
+}
+
+// MaxWideningAsksPerRun bounds how many times ONE answer may ask a person to
+// widen a scope. Three is enough for a run that legitimately reaches a little
+// past its row and few enough that a model cannot walk somebody through a
+// scope one prompt at a time. Reaching it is stated in the run
+// (WideningCapSentence) — a silent stop is the soft degrade AGENTS.md forbids.
+const MaxWideningAsksPerRun = 3
+
+// WideningAskOutcome is what the bound answers for one proposed widening ask.
+type WideningAskOutcome int
+
+const (
+	// WideningAskRaise: put the question to the person, and it is recorded.
+	WideningAskRaise WideningAskOutcome = iota
+	// WideningAskDuplicate: this exact (effect, resource) was already asked
+	// in this run.
+	WideningAskDuplicate
+	// WideningAskDeclined: the person refused to widen for this pair, and
+	// that no holds until the run ends.
+	WideningAskDeclined
+	// WideningAskCapped: this run has already raised MaxWideningAsksPerRun
+	// of them.
+	WideningAskCapped
+)
+
+// WideningCapSentence is what the RUN says when it stopped asking — one owner
+// of the words, so the product and the test that asserts them cannot drift.
+func WideningCapSentence() string {
+	return fmt.Sprintf(
+		"nocx stopped asking to widen what this answer may reach: %d requests in one answer is the bound. Widen the scope yourself in Settings → Assistant permissions, or ask again.",
+		MaxWideningAsksPerRun)
+}
+
+// ApprovalStore keeps the pending requests (what the human is being asked),
+// the approvals (what the human said yes to), the declined proposals (what
+// the human said no to) and the retained egress results (what was withheld
+// pending the decision). All keyed by the exact proposal.
+//
+// The widening maps are the exception, and deliberately so: they are keyed by
+// the RUN and the (effect, resource) pair rather than by a proposal, because
+// the fatigue bound is about how often a PERSON is asked one question, not
+// about how many ways a model spells the call that raises it.
 type ApprovalStore struct {
 	mu       sync.Mutex
 	approved map[approvalKey]approvalEntry
 	declined map[approvalKey]declinedEntry
 	pending  map[approvalKey]approvalEntry
 	retained map[approvalKey]retainedValue
+
+	wideningAsked    map[wideningKey]bool
+	wideningDeclined map[wideningKey]bool
+	wideningCount    map[string]int
+	wideningCapped   map[string]bool
 }
 
 // NewApprovalStore builds the process-lifetime approval store. The transport
@@ -150,7 +214,69 @@ func NewApprovalStore() *ApprovalStore {
 		declined: make(map[approvalKey]declinedEntry),
 		pending:  make(map[approvalKey]approvalEntry),
 		retained: make(map[approvalKey]retainedValue),
+
+		wideningAsked:    make(map[wideningKey]bool),
+		wideningDeclined: make(map[wideningKey]bool),
+		wideningCount:    make(map[string]int),
+		wideningCapped:   make(map[string]bool),
 	}
+}
+
+func wideningKeyOf(runID string, e content.Effect, r content.GrantScope) wideningKey {
+	return wideningKey{runID: runID, effect: e, kind: r.Kind, id: r.ID}
+}
+
+// BeginWideningAsk applies the three bounds of design §5.3 and RECORDS the ask
+// when it answers WideningAskRaise, so the count is of questions a person
+// actually met rather than of times the kernel considered asking.
+//
+// The order is the product's: the person's own no first (it is the strongest
+// answer and the most specific), then the duplicate, then the cap. A pair that
+// was declined is never counted against the cap a second time — the run has
+// already spent that question.
+func (s *ApprovalStore) BeginWideningAsk(runID string, e content.Effect, r content.GrantScope) WideningAskOutcome {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := wideningKeyOf(runID, e, r)
+	if s.wideningDeclined[k] {
+		return WideningAskDeclined
+	}
+	if s.wideningAsked[k] {
+		return WideningAskDuplicate
+	}
+	if s.wideningCount[runID] >= MaxWideningAsksPerRun {
+		// Latched, and latched HERE rather than at the read: the run must
+		// say it stopped asking even if it never asks again, and the read
+		// side must not have to guess from a count.
+		s.wideningCapped[runID] = true
+		return WideningAskCapped
+	}
+	s.wideningAsked[k] = true
+	s.wideningCount[runID]++
+	return WideningAskRaise
+}
+
+// DeclineWidening records a person's refusal to widen the row for one
+// (effect, resource) pair. It holds from the decline until the run ends and
+// not one moment longer: the map is keyed by the run id, and a new run over
+// the same store asks again — a decline that outlived its run would be a
+// standing answer nobody gave.
+func (s *ApprovalStore) DeclineWidening(runID string, e content.Effect, r content.GrantScope) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wideningDeclined[wideningKeyOf(runID, e, r)] = true
+}
+
+// RunNotices is what the RUN must state to the person about itself — today,
+// only that it stopped asking to widen a scope. Empty for a run that never
+// reached the bound, which is every ordinary run.
+func (s *ApprovalStore) RunNotices(runID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.wideningCapped[runID] {
+		return nil
+	}
+	return []string{WideningCapSentence()}
 }
 
 func (s *ApprovalStore) Request(ap Approval) {
@@ -162,6 +288,7 @@ func (s *ApprovalStore) Request(ap Approval) {
 		fileVersionState:  ap.FileVersionState,
 		fileVersions:      cloneFileVersions(ap.FileVersions),
 		expansionValues:   cloneExpansionValues(ap.ExpansionValues),
+		outOfScope:        ap.OutOfScope,
 	}
 }
 
@@ -202,7 +329,30 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 		// wire's approve carries none of them, and taking them from the
 		// answer would let a changed question re-authorise itself.
 		expansionValues: cloneExpansionValues(cur.expansionValues),
+		outOfScope:      cur.outOfScope,
 	}
+	return true
+}
+
+// Revoke moves an approved proposal back to pending — the rollback half of an
+// answer whose OTHER half did not stick (design §5.3: a widening and its
+// approval are one answer, and a store failure must leave NEITHER applied).
+// It is not "unapprove and forget": the question returns to being asked, so
+// the person can answer it again rather than face a run that resumed on an
+// approval whose widening vanished.
+//
+// It returns false when the proposal was not approved, which is the race with
+// another connection's answer; the caller then reports the honest refusal.
+func (s *ApprovalStore) Revoke(ap Approval) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := keyOf(ap)
+	cur, ok := s.approved[k]
+	if !ok {
+		return false
+	}
+	delete(s.approved, k)
+	s.pending[k] = cur
 	return true
 }
 
@@ -305,6 +455,7 @@ func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
 		commandInvocation: cur.commandInvocation,
 		fileVersionState:  cur.fileVersionState,
 		fileVersions:      cloneFileVersions(cur.fileVersions),
+		outOfScope:        cur.outOfScope,
 	}
 	return true
 }
@@ -399,6 +550,46 @@ func (s *ApprovalStore) NoteEffect(ap Approval) {
 	}
 	e.effect = ap.Effect
 	s.pending[k] = e
+}
+
+// NoteOutOfScope records the out-of-scope fact onto a PENDING record, for the
+// same reason NoteEffect exists: the wire's question is built in the
+// transport, and a suspension that surfaced by any path other than the
+// middleware's own escalation would otherwise reach a person with an offer
+// nothing remembers. A nil fact notes nothing — a question that had nothing
+// outside must not acquire a widening offer here.
+func (s *ApprovalStore) NoteOutOfScope(ap Approval) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ap.OutOfScope == nil {
+		return
+	}
+	k := keyOf(ap)
+	e, ok := s.pending[k]
+	if !ok {
+		return
+	}
+	e.outOfScope = ap.OutOfScope
+	s.pending[k] = e
+}
+
+// OutOfScopeFor returns the bound a resource of this proposal fell outside.
+// Read across pending, approved AND declined, like EffectFor: the answer that
+// consults it has already settled the proposal by the time it needs to know
+// whether that question offered a widening.
+func (s *ApprovalStore) OutOfScopeFor(ap Approval) (OutOfScopeFact, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := keyOf(ap)
+	for _, m := range []map[approvalKey]approvalEntry{s.pending, s.approved} {
+		if e, ok := m[k]; ok && e.outOfScope != nil {
+			return *e.outOfScope, true
+		}
+	}
+	if e, ok := s.declined[k]; ok && e.outOfScope != nil {
+		return *e.outOfScope, true
+	}
+	return OutOfScopeFact{}, false
 }
 
 // EffectFor returns the effect class the proposal was decided under. ok is

@@ -38,7 +38,7 @@ export interface AgentApprove {
    */
   approved: boolean
   /**
-   * How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'session' and 'always' are refused for an egress question — 'always send secrets to the provider' is not a standing decision.
+   * How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'expand' is not a fourth width but the distinct administrative answer to an out-of-scope question (design §5.3) — it widens the effect row's scopes to cover the resource that fell outside AND approves this call, as one act, and is accepted only where agent.approvalRequested's outOfScope.widening.available said it could be given. 'session', 'always' and 'expand' are refused for an egress question — 'always send secrets to the provider' is not a standing decision — and 'expand' is refused on a decline, because a widening is an approval.
    */
-  scope: 'once' | 'session' | 'always'
+  scope: 'once' | 'session' | 'always' | 'expand'
 }

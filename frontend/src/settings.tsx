@@ -34,6 +34,8 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
 import type { PolicyClient } from './policy-client'
+import { AgentEmittingSection } from './agent-emitting-section'
+import type { EmittingClient } from './emitting-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -252,6 +254,16 @@ export interface SettingsComponentProps {
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
+  /** What an enrolled pane is emitting, and what its rule reads on it
+   *  (nocx-02uci). Optional like every other client here: without it the page
+   *  is still registered and says so, because a surface that appears only once
+   *  some other state exists is how a feature ships unreachable. */
+  emittingClient?: EmittingClient
+  /** What the window calls a pane. The emitting view's picker lists panes the
+   *  backend named by session id and agent; this is what turns one into the
+   *  name on the tab. Optional — without it the picker says what the wire
+   *  said, which is honest and unmemorable. */
+  paneName?: (sessionId: string) => string | null
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -663,6 +675,33 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // Snippets. It is the page nobody navigates to on purpose until something
     // has gone wrong, which is exactly why it must be findable in the obvious
     // place rather than clever about where it sits.
+    // BESIDE the agent policy, in the same 'assistant' group: both answer
+    // "what is the assistant doing and on what terms", and a person who has
+    // come to repair a detection rule is looking for the agent group.
+    const emittingPage: SettingsPage = {
+      kind: 'component',
+      id: 'emitting',
+      title: 'Agent screens',
+      groupId: 'assistant',
+      // 'page' rather than 'contained': the grid is inside a kit CodeBlock,
+      // which owns its own scroll cap, so this page has no second scroll
+      // owner of its own.
+      scrollMode: 'page',
+      // Registered unconditionally, like the pages above it.
+      renderContent: () => (
+        <Show
+          when={props.emittingClient}
+          fallback={
+            <PageSection title="Agent screens">
+              What an agent is emitting is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentEmittingSection client={props.emittingClient!} nameOf={props.paneName} />
+        </Show>
+      ),
+    }
+
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
@@ -695,6 +734,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       skillsPage,
       rolesPage,
       policyPage,
+      emittingPage,
       aboutPage,
     ]
   })

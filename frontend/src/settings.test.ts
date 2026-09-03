@@ -552,6 +552,7 @@ describe('SettingsContent', () => {
       'Endpoints',
       'Roles',
       'Agent policy',
+      'Agent screens',
       'Protection',
       'Secrets',
       'Terminal',

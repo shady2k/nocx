@@ -37,6 +37,7 @@ import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
+import { EmittingClient } from './emitting-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -241,6 +242,10 @@ function main(): void {
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
   const skillsStore = new SkillsStore(new SkillsClient(dispatcher))
   const policyClient = new PolicyClient(dispatcher)
+  // What an enrolled pane is emitting, and what its rule reads on it
+  // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
+  // the interval, and there is nothing here to close.
+  const emittingClient = new EmittingClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -552,6 +557,12 @@ function main(): void {
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
         skillsStore,
+        emittingClient,
+        // The window already names every pane in its tab strip, and the
+        // backend answers the emitting view with a session id and an agent
+        // name. This is the one place those two meet; deriving a name inside
+        // the Settings page would be a second owner of what a pane is called.
+        (sessionId: string) => tm.sessionDisplayName(sessionId),
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

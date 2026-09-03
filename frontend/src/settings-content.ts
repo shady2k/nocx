@@ -60,6 +60,10 @@ export class SettingsContent extends SolidPaneContent {
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
+    /** What an enrolled pane is emitting (nocx-02uci), and what the window
+     *  calls that pane. */
+    private readonly emittingClient?: import('./emitting-client').EmittingClient,
+    private readonly paneName?: (sessionId: string) => string | null,
   ) {
     super()
   }
@@ -76,6 +80,8 @@ export class SettingsContent extends SolidPaneContent {
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
           policyClient: this.policyClient,
+          emittingClient: this.emittingClient,
+          paneName: this.paneName,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,

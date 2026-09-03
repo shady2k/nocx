@@ -1,0 +1,121 @@
+/* The emitting view (nocx-02uci): an enrolled pane's frame beside the rule's
+   own reading of it. Layout only; the kit owns every component's paint — the
+   grid sits inside a kit CodeBlock and the classes below are this surface's
+   own, so a cell may carry a mark of its own without repainting a kit part. */
+
+.st-emitting__picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* One row of the grid: a row number, the cells, and what the rule reads on
+   this row. The cells column is fixed-content so the gutter and the marks do
+   not shift as the screen redraws — a grid whose columns move on every poll is
+   a grid nobody can compare a rule against. */
+.st-emitting__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  white-space: pre;
+}
+
+.st-emitting__gutter {
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.st-emitting__cells {
+  flex: 0 0 auto;
+}
+
+/* WHERE THE CURSOR IS. It is the one thing an agent cannot forge — printed
+   text cannot take the cursor — so several predicates are about nothing else,
+   and a person cannot check them without seeing the cell it is parked in. */
+.st-emitting__cursor {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+}
+
+/* A full-width rule is what the input box is FOUND by, and a region is what
+   the engine permitted a predicate to search. Both are said in the marks
+   column as words as well as drawn, so the reading does not depend on a
+   colour anybody has to have learned. */
+.st-emitting__row[data-rule='true'] .st-emitting__gutter {
+  color: var(--color-accent);
+}
+
+.st-emitting__row[data-region='true'] .st-emitting__gutter::after {
+  content: '▏';
+  color: var(--color-text-muted);
+}
+
+.st-emitting__marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.st-emitting__verdict {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.st-emitting__from,
+.st-emitting__detail {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.st-emitting__branch,
+.st-emitting__extractor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.st-emitting__branch:first-of-type,
+.st-emitting__extractor:first-of-type {
+  border-top: none;
+}
+
+.st-emitting__name {
+  font-weight: 600;
+}
+
+/* The branch that answered, and the predicate a branch stopped at. Marked
+   rather than merely ordered, because "which of these decided it" is the
+   question a person opens this page with. */
+.st-emitting__branch[data-matched='true'] .st-emitting__name {
+  color: var(--color-accent);
+}
+
+.st-emitting__branch[data-reached='false'] {
+  opacity: 0.6;
+}
+
+.st-emitting__predicate {
+  display: flex;
+  gap: 0.5rem;
+  padding-left: 1rem;
+}
+
+.st-emitting__predicate[data-held='false'] .st-emitting__kind {
+  color: var(--color-danger);
+}
+
+.st-emitting__predicate[data-evaluated='false'] {
+  opacity: 0.6;
+}
+
+.st-emitting__yield {
+  padding-left: 1rem;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}

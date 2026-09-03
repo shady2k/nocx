@@ -7,6 +7,8 @@ import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { BufferLine } from './test-helpers'
+import { PetOverlay } from '../pets/overlay'
+import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -1272,5 +1274,178 @@ describe('follow intent survives block geometry changes (nocx-n5q44)', () => {
     )
 
     expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+})
+
+// ── The pet hears about the command (nocx-q4qeh.1) ────────────────────────
+//
+// This exists because the first wiring was hung on `onCommandEnd`, which
+// reads like the obvious seam and has no caller at all — so the reaction
+// fired never, and both the unit tests of the pet and a look at the running
+// app agreed it worked. The check is therefore about the SEAM, not about the
+// animal: every freeze path settles through `_settleFrozen`, and the pet must
+// be told there.
+describe('ScrollbackController tells the pet how the command went', () => {
+  const FENCE = 'ab'.repeat(16)
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd-pet',
+    epoch: 1,
+  }) as IntegrationDomain
+
+  const protoScrollIntoView = Element.prototype.scrollIntoView?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollIntoView = protoScrollIntoView
+    unmountWindowPet()
+    vi.restoreAllMocks()
+  })
+
+  function petController(): {
+    controller: ScrollbackController
+    sight: (ev: RenderFenceEvent) => void
+    heard: ReturnType<typeof vi.spyOn>
+  } {
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    // Spied on the prototype: the overlay is built inside the controller, so
+    // there is no instance to hand a double to — which is the point. A double
+    // injected from the test would have passed against the dead method too.
+    const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
+    mountWindowPet(document.createElement('div'))
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    return { controller, sight: (ev) => fenceCb?.(ev), heard }
+  }
+
+  function finish(
+    controller: ScrollbackController,
+    sight: (ev: RenderFenceEvent) => void,
+    exitCode: number,
+    author: 'shell' | 'agent' = 'shell',
+  ): void {
+    controller.beginBlock('ls', '~', 0, undefined, author)
+    controller.blockManager.bindAttempt('att-1')
+    sight({ hex: FENCE, line: 2, buffer: 'normal' })
+    controller.freezeFromAttempt(
+      { id: 'att-1', domain, state: 'completed', exitCode, fence: FENCE },
+      2,
+    )
+  }
+
+  it('says success when the command succeeded', () => {
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 0)
+    expect(heard).toHaveBeenCalledWith('success', 'shell')
+  })
+
+  it('says failure when it did not', () => {
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 2)
+    expect(heard).toHaveBeenCalledWith('failure', 'shell')
+  })
+
+  it('says unknown for a block that is neither — an environment entry', () => {
+    // 'entered' is not a verdict on the command, and a pet that read it as
+    // failure would sulk at every ssh.
+    const { controller, heard } = petController()
+    controller.beginBlock('ssh prod', '~', 0)
+    controller.enterBlock(1)
+    expect(heard).toHaveBeenCalledWith('unknown', 'shell')
+  })
+
+  it('says WHOSE command it was, rather than leaving the pet to guess', () => {
+    // The author is minted at submit and carried on the block. Deriving which
+    // lane a finished block came from is exactly what the ledger exists to
+    // make unnecessary.
+    const { controller, sight, heard } = petController()
+    finish(controller, sight, 0, 'agent')
+    expect(heard).toHaveBeenCalledWith('success', 'agent')
+  })
+
+  it('says nothing at all in a window with no pet', () => {
+    unmountWindowPet()
+    const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    finish(controller, (ev) => fenceCb?.(ev), 0)
+    expect(heard).not.toHaveBeenCalled()
+  })
+})
+
+// ── The pet hears about a command STARTING too (nocx-q4qeh.1) ─────────────
+//
+// Endings were all it ever learned about, so during the minute a build takes
+// — the minute somebody is actually watching the terminal — it wandered
+// about as though nothing were happening.
+describe('ScrollbackController tells the pet a command has started', () => {
+  const protoScrollIntoView = Element.prototype.scrollIntoView?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollIntoView = protoScrollIntoView
+    unmountWindowPet()
+    vi.restoreAllMocks()
+  })
+
+  function petController(): {
+    controller: ScrollbackController
+    heard: ReturnType<typeof vi.spyOn>
+  } {
+    const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
+    mountWindowPet(document.createElement('div'))
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer: makeRenderer(),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    return { controller, heard }
+  }
+
+  it('tells it when a command of yours begins', () => {
+    const { controller, heard } = petController()
+    controller.beginBlockNow('go build ./...', '~', 0)
+    expect(heard).toHaveBeenCalledWith('shell')
+  })
+
+  it('tells it whose lane the command is in', () => {
+    const { controller, heard } = petController()
+    controller.beginBlockNow('go test ./...', '~', 0, undefined, 'agent')
+    expect(heard).toHaveBeenCalledWith('agent')
+  })
+
+  it('says nothing at all in a window with no pet', () => {
+    unmountWindowPet()
+    const heard = vi.spyOn(PetOverlay.prototype, 'attendTo').mockImplementation(() => {})
+    const controller = new ScrollbackController({
+      pane: document.createElement('div'),
+      renderer: makeRenderer(),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    controller.beginBlockNow('ls', '~', 0)
+    expect(heard).not.toHaveBeenCalled()
   })
 })

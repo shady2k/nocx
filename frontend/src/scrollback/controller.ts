@@ -15,6 +15,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
+import { windowPet } from '../pets/window-pet'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -668,6 +669,10 @@ export class ScrollbackController {
   ): void {
     const cmd = command || '(empty)'
     this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
+    // The pet learned only about endings before this, so during the minute a
+    // build takes — the minute somebody is actually watching the terminal —
+    // it wandered about as though nothing were happening.
+    windowPet()?.attendTo(author)
     this.setRunning()
   }
 
@@ -990,6 +995,30 @@ export class ScrollbackController {
    * the seventh path to arrive would have been written without it.
    */
   private _settleFrozen(rec: BlockRecord, followIntent = this._followIntent()): void {
+    // Every freeze path arrives here — the attempt-driven one, the abandoned
+    // one, the environment entry — so this is where the pet learns how the
+    // command went. `onCommandEnd` looks like the obvious place and is not:
+    // nothing calls it in the current wiring, and a reaction hung there fires
+    // never (AGENTS.md: a method on main is not a feature).
+    //
+    // 'entered' and 'unknown' are neither success nor failure and must not be
+    // read as one: a pet that sulked at every ssh and every abandoned attempt
+    // would sulk most of the time.
+    // The author is the block's own, minted at submit and never derived: the
+    // animal answers your command differently from the assistant's, and
+    // guessing which lane a finished block came from is exactly the kind of
+    // derivation the ledger exists to make unnecessary.
+    windowPet()?.reactTo(
+      rec.status === 'success' || rec.status === 'failure' ? rec.status : 'unknown',
+      rec.author,
+    )
+    // And if something is STILL running, the animal goes back to watching it.
+    // A freeze waits on a render fence and a start does not, so the verdict
+    // on the last command routinely arrives after the next one has begun;
+    // without this the pet stopped attending the moment it answered, and the
+    // command actually in flight had nobody watching it.
+    const stillRunning = this._blockManager.runningBlock
+    if (stillRunning) windowPet()?.attendTo(stillRunning.author)
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()

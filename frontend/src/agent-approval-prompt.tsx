@@ -121,6 +121,7 @@ import {
   Stack,
   StatusCard,
   type Fact,
+  type StatusCardTone,
 } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
 import { scanPatternWords } from './scan-pattern-words'
@@ -179,6 +180,76 @@ const expansionRowNote = (part: ExpansionPart, facts: ExpansionFacts): string | 
       return facts.reason || 'no shell could be asked for this value'
   }
 }
+
+/** What the classifier's verdict says on the window: the state, the sentence
+ *  beneath it, and the tone it is painted in. */
+type ClassifierNotice = { tone: StatusCardTone; title: string; description?: string }
+
+/**
+ * The classifier's verdict in a person's words (nocx-u43bb).
+ *
+ * A pure function rather than four ternaries in the JSX, because the shapes
+ * are four and the wire allows all four: cleared, suspect, a gate that never
+ * ran, and — the schema requires only `consulted` and `reason` — a
+ * consultation that came back with no verdict at all.
+ *
+ * THE TONE IS NEVER `danger`. Same reason as the scan finding one block
+ * above: the tone a person reads is part of what the window claims, and a
+ * second model's suspicion is evidence beside the bytes, not a refusal — the
+ * write is still theirs to allow or refuse. And `clear` is deliberately NOT
+ * `ok`: `ok` is the tone of a thing that is fine, and a model saying it
+ * raises no suspicion is not a guarantee that the body is safe. It is one
+ * cheap reader's opinion, which is worth stating and not worth dressing as a
+ * clean bill of health — so it reads as `neutral`, a fact among the facts.
+ *
+ * A gate that DID NOT RUN says so, out loud. An absent gate rendered as
+ * silence is indistinguishable from a clean one, which is the silent degrade
+ * AGENTS.md forbids; `reason` carries why (role resolution refused, or the
+ * input gate withheld the call) and is rendered with it.
+ *
+ * The sentence is ASSEMBLED from the parts that exist, so an absent `model`
+ * removes its own clause instead of leaving "said by ." on the window. The
+ * reason is copied verbatim — it is already bounded and masked by the kernel
+ * and re-wording a fact would be this surface inventing one.
+ */
+const classifierNotice = (
+  classifier: NonNullable<AgentApprovalRequested['classifier']>,
+): ClassifierNotice => {
+  const parts: string[] = []
+  if (classifier.reason) parts.push(endSentence(classifier.reason))
+  if (classifier.model) parts.push(`Verdict from ${classifier.model}.`)
+  const description = parts.length > 0 ? parts.join(' ') : undefined
+
+  if (!classifier.consulted) {
+    return { tone: 'warning', title: 'The classifier gate did not run.', description }
+  }
+  switch (classifier.verdict) {
+    case 'clear':
+      return {
+        tone: 'neutral',
+        title: 'A second model read this proposal and raised no suspicion.',
+        description,
+      }
+    case 'suspect':
+      return {
+        tone: 'warning',
+        title: 'A second model read this proposal and judged it suspect.',
+        description,
+      }
+    default:
+      // Consulted, and no verdict came back. The wire permits it and
+      // inventing either verdict for it would be worse than saying so.
+      return {
+        tone: 'warning',
+        title: 'A second model was consulted and returned no verdict.',
+        description,
+      }
+  }
+}
+
+/** A fact that has to sit next to another one, given its full stop — the
+ *  kernel's reason is a bounded sentence and may arrive without one. */
+const endSentence = (text: string): string => (/[.!?…]$/.test(text) ? text : `${text}.`)
 
 export interface AgentApprovalPromptProps {
   open: boolean
@@ -665,6 +736,30 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               </CodeBlock>
             </Stack>
           )}
+        </Show>
+        {/*
+          The classifier's verdict is the finding's sibling and reads like it:
+          a condition stated as a card, after the body it judged. What it does
+          NOT have is a CodeBlock, and the asymmetry is deliberate — the
+          finding's `line` is verbatim bytes quoted out of the proposed body,
+          which is why it earns a block, while the classifier's `reason` is a
+          masked, bounded sentence a person reads. Prose belongs in the card's
+          description; putting it in a block would dress a sentence as machine
+          output. Absent entirely, this renders nothing at all: an ordinary
+          policy approval carries no classifier and must not grow an empty
+          slot for one.
+        */}
+        <Show when={ask().classifier}>
+          {(classifier) => {
+            const notice = () => classifierNotice(classifier())
+            return (
+              <StatusCard
+                tone={notice().tone}
+                title={notice().title}
+                description={notice().description}
+              />
+            )
+          }}
         </Show>
         <Show when={(ask().findings?.length ?? 0) > 0}>
           <Stack gap="loose">

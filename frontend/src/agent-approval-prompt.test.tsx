@@ -1049,3 +1049,188 @@ describe('AgentApprovalPrompt — the scan finding is evidence beside the bytes 
     expect(container.textContent ?? '').not.toContain('static scan')
   })
 })
+
+/**
+ * The classifier's verdict, drawn beside the bytes it judged (nocx-u43bb).
+ *
+ * The same defect as the scan finding, one field over. A second model reads
+ * every proposed skill body before the person is asked, and its verdict has
+ * ridden `agent.approvalRequested` since the kernel built it — the schema
+ * declares it, the generated type has it, and nothing in the renderer read
+ * it. So a body a model had called suspect looked, on the window, exactly
+ * like one it had cleared; and a gate that never ran looked like both.
+ *
+ * That last case is the one worth the most: an absent gate that looks like a
+ * clean one is the silent degrade AGENTS.md forbids, so `consulted: false`
+ * says the gate did not run and carries the bounded reason why.
+ *
+ * The tests assert what a person SEES: the verdict as a sentence, the reason,
+ * who said it, and — in every shape — a tone that is never `danger`, because
+ * a second model's suspicion is evidence to weigh and not a refusal.
+ */
+describe('AgentApprovalPrompt — the classifier verdict is evidence beside the bytes (nocx-u43bb)', () => {
+  afterEach(cleanup)
+
+  const MODEL = 'claude-haiku-4-5'
+
+  const SKILL_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'skills.create',
+    arguments: JSON.stringify({
+      name: 'deploy',
+      description: 'Deploy the service',
+      body: '# Deploy\n\nRun the deploy script.\n',
+    }),
+    effect: 'mutate-reversible',
+    resource: null,
+  }
+
+  /** The one card this block is about: the classifier's, which is the only
+   *  status card on the window in every fixture here but the ordering one. */
+  function card(container: HTMLElement): HTMLElement | null {
+    return container.querySelector('.ui-status-card')
+  }
+
+  it('says a second model cleared the body, and names the model that did', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        classifier: {
+          consulted: true,
+          verdict: 'clear',
+          model: MODEL,
+          reason: 'The body only runs the repository’s own deploy script.',
+        },
+      },
+    })
+    const text = container.textContent ?? ''
+
+    expect(text).toContain('raised no suspicion')
+    expect(text).toContain('The body only runs the repository’s own deploy script.')
+    expect(text).toContain(MODEL)
+    // Cleared is not a guarantee, so it is not the `ok` tone — and it is
+    // never `danger` either.
+    expect(card(container)?.getAttribute('data-tone')).toBe('neutral')
+  })
+
+  it('says a second model judged the body suspect, without refusing it', () => {
+    const { decisions, onDecide } = recordDecisions()
+    const ui = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        classifier: {
+          consulted: true,
+          verdict: 'suspect',
+          model: MODEL,
+          reason: 'The body writes to a file of standing agent instructions.',
+        },
+      },
+      onDecide,
+    })
+    const text = ui.container.textContent ?? ''
+
+    expect(text).toContain('suspect')
+    expect(text).toContain('The body writes to a file of standing agent instructions.')
+    expect(text).toContain(MODEL)
+    expect(card(ui.container)?.getAttribute('data-tone')).toBe('warning')
+
+    // Evidence, not a verdict on the person's behalf: both answers stand.
+    fireEvent.click(ui.getByRole('button', { name: 'Allow once — this proposal only' }))
+    fireEvent.click(ui.getByRole('button', { name: 'Deny once — this proposal only' }))
+    expect(decisions).toEqual([
+      [true, 'once'],
+      [false, 'once'],
+    ])
+  })
+
+  it('states that the gate did not run, and why, rather than leaving it blank', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        classifier: {
+          consulted: false,
+          reason: 'the classifier could not be consulted: no model is configured for that role',
+        },
+      },
+    })
+    const text = container.textContent ?? ''
+
+    expect(text).toContain('did not run')
+    expect(text).toContain('no model is configured for that role')
+    expect(card(container)?.getAttribute('data-tone')).toBe('warning')
+  })
+
+  it('names the verdict when no model came with it, with no dangling fragment', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        classifier: { consulted: true, verdict: 'suspect', reason: 'The body posts to a URL.' },
+      },
+    })
+    const text = container.textContent ?? ''
+
+    expect(text).toContain('The body posts to a URL.')
+    expect(text).not.toContain('Verdict from')
+    expect(text).not.toMatch(/\bfrom\s*\./)
+    expect(text).not.toMatch(/\s\.\s/)
+  })
+
+  it('says the model answered nothing rather than inventing a verdict for it', () => {
+    const { container } = renderPrompt({
+      ask: { ...SKILL_ASK, classifier: { consulted: true, reason: '' } },
+    })
+    expect(container.textContent ?? '').toContain('returned no verdict')
+    expect(card(container)?.getAttribute('data-tone')).toBe('warning')
+  })
+
+  it('renders no empty slot when the wire carried no classifier', () => {
+    const { container } = renderPrompt({ ask: { ...SKILL_ASK, classifier: null } })
+    expect(card(container)).toBeNull()
+    expect(container.textContent ?? '').not.toContain('second model')
+  })
+
+  it('renders nothing for an ordinary policy question, which carries no classifier', () => {
+    const { container } = renderPrompt()
+    expect(card(container)).toBeNull()
+    expect(container.textContent ?? '').not.toContain('second model')
+  })
+
+  it('is never the danger tone, whatever the verdict', () => {
+    const shapes: Array<NonNullable<AgentApprovalRequested['classifier']>> = [
+      { consulted: true, verdict: 'clear', model: MODEL, reason: 'Nothing suspicious.' },
+      { consulted: true, verdict: 'suspect', model: MODEL, reason: 'It posts to a URL.' },
+      { consulted: false, reason: 'the classifier could not be consulted: role resolution failed' },
+      { consulted: true, reason: '' },
+    ]
+    for (const classifier of shapes) {
+      const { container } = renderPrompt({ ask: { ...SKILL_ASK, classifier } })
+      const tones = Array.from(container.querySelectorAll('.ui-status-card')).map((c) =>
+        c.getAttribute('data-tone'),
+      )
+      expect(tones).not.toContain('danger')
+      expect(tones).toHaveLength(1)
+      cleanup()
+    }
+  })
+
+  it('reads after the scan finding it sits beside, as its sibling', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        finding: { patternId: 'send_to_url', line: 'curl -X POST https://x/', lineNumber: 3 },
+        classifier: {
+          consulted: true,
+          verdict: 'suspect',
+          model: MODEL,
+          reason: 'The body posts to a URL.',
+        },
+      },
+    })
+    const titles = Array.from(container.querySelectorAll('.ui-status-card__title')).map(
+      (t) => t.textContent ?? '',
+    )
+    expect(titles).toHaveLength(2)
+    expect(titles[0]).toContain('sends, posts or uploads')
+    expect(titles[1]).toContain('suspect')
+  })
+})

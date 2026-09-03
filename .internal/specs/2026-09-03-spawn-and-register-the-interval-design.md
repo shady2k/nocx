@@ -2,7 +2,8 @@
 
 - **Date:** 2026-09-03
 - **Bead:** `nocx-u0apy`, a child of `nocx-dkawo`
-- **Status:** draft, awaiting owner review
+- **Status:** approved by the owner, 2026-09-03 — delegated review; see
+  `.internal/plans/2026-09-03-the-wave-record.md` §0 for the two citation corrections applied below
 - **Closes:** open question 5 of `.internal/specs/2026-08-24-orchestration-mechanism-design.md` §10
 - **Reads with:** `.internal/specs/2026-09-03-the-waves-authority-model-design.md`, whose `A12`
   decides what recovery is allowed to do
@@ -176,7 +177,7 @@ partial-failure test today**. That is `nocx-cujkz`, filed rather than fixed here
 
 ## 7. Deliberately out
 
-- **Adoption of a found process** (§5). It returns when a pin exists — `nocx-aqz7o` and the
+- **Adoption of a found process** (§5). It returns when a pin exists — `nocx-zo2ng` and the
   enrolment work — and this document is where the next author should look for why it was refused.
 - **Worktree creation** as part of step 3. `worktree create` returning workspace, tab, root pane
   and worktree in one call is the wave primitive herdr has and we do not; it is layer 3 of the

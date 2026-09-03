@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.preview.schema.json",
+  "title": "SkillsPreview",
+  "description": "Result of skills.preview — what a person reads before deciding whether to install a skill somebody else wrote. Nothing has been written to disk when this is returned; a refusal comes back as a JSON-RPC error naming the step that refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "body", "url", "findings"],
+  "properties": {
+    "name": {
+      "description": "The skill's name, taken from the document's frontmatter and matching ^[a-z0-9][a-z0-9-]{0,63}$. The URL's path never names a skill.",
+      "type": "string"
+    },
+    "description": {
+      "description": "The frontmatter description, which is what the assistant is offered on every ask.",
+      "type": "string"
+    },
+    "body": {
+      "description": "The WHOLE body, frontmatter stripped. A person adopting instructions reads all of them; an excerpt is not something anybody can approve responsibly.",
+      "type": "string"
+    },
+    "url": {
+      "description": "The address that was fetched, as the person gave it — never a redirect target.",
+      "type": "string"
+    },
+    "findings": {
+      "description": "EVERY static-scan match in the body, in pattern order, never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. Never null: no matches is []. A finding is evidence and never a refusal.",
+      "type": "array",
+      "items": {
+        "description": "One scan match. The three fields are the ones agent.approvalRequested already declares for a finding, because two shapes for one fact is how they come to disagree; they are inlined rather than named so the generated renderer type has no second export nothing consumes.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["patternId", "line", "lineNumber"],
+        "properties": {
+          "patternId": { "type": "string", "minLength": 1 },
+          "line": { "type": "string" },
+          "lineNumber": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

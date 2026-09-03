@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -75,6 +76,11 @@ type Store struct {
 	roots      []Root
 	managedDir string
 	docStore   storage.DocumentStore
+	// fetcher acquires a skill document by URL (preview.go). It is optional
+	// because only the composition root has one: a store built by a test that
+	// never installs anything needs no network seam, and Preview says so
+	// rather than reaching for a client of its own.
+	fetcher apifetch.TextFetcher
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -84,10 +90,29 @@ type Store struct {
 	docFailure error
 }
 
+// StoreOption configures a Store at construction. It is variadic rather than
+// another positional parameter because the seams it carries are optional by
+// nature: every caller needs roots and a document store, and only the
+// composition root has a network fetcher to hand over.
+type StoreOption func(*Store)
+
+// WithFetcher wires the seam Preview acquires a skill document through
+// (preview.go). It takes apifetch's TextFetcher rather than an interface of
+// this package's own so there is ONE owner of "fetch a text document over the
+// guarded transport" — the same seam internal/assistant and internal/transport
+// already hold.
+func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
+	return func(s *Store) { s.fetcher = fetcher }
+}
+
 // NewStore builds a skill store. The roots must include one managed directory;
 // authored and builtin roots are retained for collision checks and precedence.
-func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *Store {
-	return newStore(fsys, roots, docStore)
+func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore, opts ...StoreOption) *Store {
+	s := newStore(fsys, roots, docStore)
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // FS exposes the injected write surface for failure-path tests and composition
@@ -291,15 +316,27 @@ func (s *Store) managedPaths(name string) (string, string, error) {
 	return filepath.Join(root, name), filepath.Join(root, name, "SKILL.md"), nil
 }
 
-func (s *Store) refuseForeignCollision(name string) error {
+// holder answers WHO ALREADY HOLDS a name, across every root and including
+// disabled skills, by asking discoverDetailed — which owns precedence, the
+// seen map and therefore the collision rule. One answer, because the two
+// callers ask the same question for different reasons: a write asks whether
+// the assistant may touch this name, and a preview asks whether the name is
+// free at all (preview.go).
+func (s *Store) holder(name string) (Provenance, bool) {
 	for _, found := range discoverDetailed(s.roots, true) {
-		if found.Name != name {
-			continue
+		if found.Name == name {
+			return found.Provenance, true
 		}
-		if found.Provenance == ProvenanceManaged {
-			continue
-		}
-		return fmt.Errorf("skill %q belongs to %s and cannot be changed by the assistant", name, holderPhrase(found.Provenance))
+	}
+	return "", false
+}
+
+func (s *Store) refuseForeignCollision(name string) error {
+	// Managed is exempt HERE and nowhere else: this is the assistant asking
+	// to change a skill it wrote. An install has no such exemption — every
+	// provenance is in the way of a name it wants.
+	if provenance, held := s.holder(name); held && provenance != ProvenanceManaged {
+		return fmt.Errorf("skill %q belongs to %s and cannot be changed by the assistant", name, holderPhrase(provenance))
 	}
 	return nil
 }

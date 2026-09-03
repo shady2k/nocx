@@ -1,6 +1,7 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
 import type { SkillsList } from './generated/skills.list'
+import type { SkillsPreview } from './generated/skills.preview'
 import type { SkillsSetEnabled } from './generated/skills.setEnabled'
 import type { SkillsRemove } from './generated/skills.remove'
 
@@ -21,5 +22,13 @@ export class SkillsClient {
 
   approve(name: string): Promise<SkillsApprove> {
     return this.dispatcher.call<SkillsApprove>('skills.approve', { name })
+  }
+
+  // Reading, never writing: the backend fetches the document at this address,
+  // parses it, refuses what it must and answers with the body and every scan
+  // finding. Nothing is installed until the person says so, which is why the
+  // preview is a method of its own rather than a flag on an install.
+  preview(url: string): Promise<SkillsPreview> {
+    return this.dispatcher.call<SkillsPreview>('skills.preview', { url })
   }
 }

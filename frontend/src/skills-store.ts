@@ -1,4 +1,5 @@
 import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
+import type { SkillsPreview } from './generated/skills.preview'
 
 export type Skill = GeneratedSkill
 
@@ -7,6 +8,7 @@ export interface SkillsClientLike {
   setEnabled(name: string, enabled: boolean): Promise<unknown>
   remove(name: string): Promise<unknown>
   approve(name: string): Promise<unknown>
+  preview(url: string): Promise<SkillsPreview>
 }
 
 export type SkillsState =

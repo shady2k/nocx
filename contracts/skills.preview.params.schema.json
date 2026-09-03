@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.preview.params.schema.json",
+  "title": "SkillsPreviewParams",
+  "description": "Params for skills.preview: the address the person pasted. The URL is the whole request — the name of the skill comes from the document's frontmatter, never from this path.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {
+    "url": { "type": "string", "minLength": 1, "maxLength": 2048 }
+  }
+}

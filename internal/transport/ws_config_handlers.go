@@ -2440,6 +2440,10 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		regResponder(configSub, "skills.preview", params(validateSkillPreviewRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
 		regResponder(configSub, "settings.getSnapshot", noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

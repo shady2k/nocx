@@ -8,10 +8,15 @@ import (
 // Finding identifies a suspicious pattern and the source line where it first
 // occurs. The line is included so an approval or read result can name the
 // evidence without returning a second copy of the content.
+//
+// The json tags are the wire spelling declared once, here: three fields for
+// one fact, so a finding travelling in an approval request and a finding
+// travelling in a skill preview cannot come to disagree about what a finding
+// is (contracts/agent.approvalRequested.schema.json, skills.preview).
 type Finding struct {
-	PatternID  string
-	Line       string
-	LineNumber int
+	PatternID  string `json:"patternId"`
+	Line       string `json:"line"`
+	LineNumber int    `json:"lineNumber"`
 }
 
 // filler bounds the words an attacker may insert between key tokens

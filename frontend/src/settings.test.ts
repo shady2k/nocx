@@ -198,6 +198,13 @@ function fakeSkillsClient(): SkillsClientLike {
     setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
     remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
     approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
+    preview: vi.fn().mockResolvedValue({
+      name: 'deploy',
+      description: 'Deploy the service',
+      body: 'body',
+      url: 'https://example.com/SKILL.md',
+      findings: [],
+    }),
   }
 }
 

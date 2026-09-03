@@ -17,8 +17,14 @@ package content_test
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 )
 
@@ -450,5 +456,282 @@ func TestResolvePolicy_InvalidSessionDecisionIsIgnored(t *testing.T) {
 	})
 	if d := got.DecisionFor(content.EffectObserve); d != content.DecisionAsk {
 		t.Fatalf("invalid override: got %q, want the untouched ask", d)
+	}
+}
+
+// ── a command's resources produce scopes of every kind they can name (nocx-c88xr) ──
+//
+// The defect these tests exist for: namedResourceScope yielded a scope only
+// for an absolute path, always of kind ResourcePath, so every resource a
+// command names over the network — a curl URL, an ssh destination, a kubectl
+// cluster, all recorded with verb ResourceNetwork — produced no scope at all
+// and no row could bound it. A destination scope governed fetch.url, which
+// resolves a real ResourceDestination, and did not govern curl.
+
+// curlInvocation is what internal/assistant's parser produces for
+// `curl <url>`: one resolved resource, the URL, under ResourceNetwork
+// (cmdeffect.go, the curl branch of appendResourceReport). It is built here
+// rather than parsed because parseCanonicalInvocation is unexported and
+// internal/content may not reach into the assistant; the cross-path test
+// below is what keeps this shape honest, since it drives the same address
+// through fetch.url's real resolver.
+func curlInvocation(url string) content.Invocation {
+	return content.Invocation{
+		Commands: [][]string{{"curl", url}},
+		Parsed:   true,
+		Resources: content.ResourceReport{
+			Resources: []content.Resource{{Path: url, Verb: content.ResourceNetwork}},
+		},
+	}
+}
+
+func crossBoundaryPermitting(scopes ...content.GrantScope) content.EffectPolicy {
+	var p content.EffectPolicy
+	p.CrossBoundary = content.EffectRow{Decision: content.DecisionPermit, Scopes: scopes}
+	return p
+}
+
+func TestARowDestinationScopeBoundsACommandToo(t *testing.T) {
+	// A person who narrowed "reach another host" to github.com has narrowed
+	// the command path too, and the endpoint form of Task 2 is what the
+	// narrowing is written in.
+	cases := []struct {
+		name    string
+		scope   content.GrantScope
+		command string
+		want    content.Decision
+	}{
+		{
+			name:    "another host is outside the only scope",
+			scope:   content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com"},
+			command: "https://example.com",
+			want:    content.DecisionAsk,
+		},
+		{
+			name:    "a document at the granted place is inside it",
+			scope:   content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com"},
+			command: "https://github.com/owner/repo",
+			want:    content.DecisionPermit,
+		},
+		{
+			name:    "a subdomain is outside a scope that does not claim subdomains",
+			scope:   content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com"},
+			command: "https://api.github.com/x",
+			want:    content.DecisionAsk,
+		},
+		{
+			name:    "a subdomain is inside a scope that claims them",
+			scope:   content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com", IncludeSubdomains: true},
+			command: "https://api.github.com/x",
+			want:    content.DecisionPermit,
+		},
+		{
+			name:    "a host that merely ends in the granted name is outside it",
+			scope:   content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com", IncludeSubdomains: true},
+			command: "https://notgithub.com/x",
+			want:    content.DecisionAsk,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := crossBoundaryPermitting(tc.scope)
+			got := policy.DecisionForInvocation(content.EffectCrossBoundary, curlInvocation(tc.command))
+			if got != tc.want {
+				t.Fatalf("curl %s under a row scoped to %q (subdomains=%t) decides %s, want %s",
+					tc.command, tc.scope.ID, tc.scope.IncludeSubdomains, got, tc.want)
+			}
+		})
+	}
+}
+
+// scopeFormPerVerb states, independently of the implementation, the scope
+// kind each ResourceVerb is written in — one resource a command can name, a
+// row scope that holds it and a row scope of the same kind that does not.
+var scopeFormPerVerb = map[content.ResourceVerb]struct {
+	resource content.Resource
+	holds    content.GrantScope
+	excludes content.GrantScope
+}{
+	content.ResourceRead: {
+		resource: content.Resource{Path: "/home/dev/notes.txt", Verb: content.ResourceRead},
+		holds:    content.GrantScope{Kind: content.ResourcePath, ID: "/home/dev"},
+		excludes: content.GrantScope{Kind: content.ResourcePath, ID: "/etc"},
+	},
+	content.ResourceWrite: {
+		resource: content.Resource{Path: "/home/dev/notes.txt", Verb: content.ResourceWrite},
+		holds:    content.GrantScope{Kind: content.ResourcePath, ID: "/home/dev"},
+		excludes: content.GrantScope{Kind: content.ResourcePath, ID: "/etc"},
+	},
+	content.ResourceDelete: {
+		resource: content.Resource{Path: "/home/dev/notes.txt", Verb: content.ResourceDelete},
+		holds:    content.GrantScope{Kind: content.ResourcePath, ID: "/home/dev"},
+		excludes: content.GrantScope{Kind: content.ResourcePath, ID: "/etc"},
+	},
+	content.ResourceExecute: {
+		resource: content.Resource{Path: "/usr/local/bin/deploy", Verb: content.ResourceExecute},
+		holds:    content.GrantScope{Kind: content.ResourcePath, ID: "/usr/local/bin"},
+		excludes: content.GrantScope{Kind: content.ResourcePath, ID: "/etc"},
+	},
+	content.ResourceSource: {
+		resource: content.Resource{Path: "/home/dev/.env", Verb: content.ResourceSource},
+		holds:    content.GrantScope{Kind: content.ResourcePath, ID: "/home/dev"},
+		excludes: content.GrantScope{Kind: content.ResourcePath, ID: "/etc"},
+	},
+	content.ResourceNetwork: {
+		resource: content.Resource{Path: "https://github.com/owner/repo", Verb: content.ResourceNetwork},
+		holds:    content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com"},
+		excludes: content.GrantScope{Kind: content.ResourceDestination, ID: "https://example.com"},
+	},
+}
+
+// verbsWithNoScopeForm is the explicit other half of the mapping: a verb a
+// row can never bound, and the reason it is not a hole.
+var verbsWithNoScopeForm = map[content.ResourceVerb]string{
+	content.ResourceUnknown: "the verb of an UnresolvedResource only — never of a resolved Resource, " +
+		"and an unresolved report already takes the worst declared effect",
+}
+
+func TestEveryResourceVerbHasAScopeKind(t *testing.T) {
+	// The exhaustiveness tripwire. A verb added to resources.go and to
+	// neither map above is a resource a row can never bound, which is this
+	// task's whole defect; it fails here rather than returning false in
+	// silence.
+	for _, verb := range declaredResourceVerbs(t) {
+		_, mapped := scopeFormPerVerb[verb]
+		reason, excused := verbsWithNoScopeForm[verb]
+		switch {
+		case mapped && excused:
+			t.Errorf("verb %q both has a scope form and is excused from one (%s)", verb, reason)
+		case !mapped && !excused:
+			t.Errorf("verb %q maps to no scope kind: a row can never bound it. "+
+				"Give it a form in scopeFormPerVerb, or say in verbsWithNoScopeForm why it needs none.", verb)
+		}
+	}
+}
+
+func TestEachVerbIsBoundedByItsOwnScopeForm(t *testing.T) {
+	// The consequence of the mapping, per verb: a row scoped away from the
+	// resource does not permit, and a row scoped over it does.
+	for verb, form := range scopeFormPerVerb {
+		t.Run(string(verb), func(t *testing.T) {
+			inv := content.Invocation{
+				Commands:  [][]string{{"anything"}},
+				Parsed:    true,
+				Resources: content.ResourceReport{Resources: []content.Resource{form.resource}},
+			}
+			var out content.EffectPolicy
+			out.Observe = content.EffectRow{Decision: content.DecisionPermit, Scopes: []content.GrantScope{form.excludes}}
+			if got := out.DecisionForInvocation(content.EffectObserve, inv); got != content.DecisionAsk {
+				t.Errorf("%s resource %q under a row scoped to %q decides %s, want ask",
+					verb, form.resource.Path, form.excludes.ID, got)
+			}
+			var in content.EffectPolicy
+			in.Observe = content.EffectRow{Decision: content.DecisionPermit, Scopes: []content.GrantScope{form.holds}}
+			if got := in.DecisionForInvocation(content.EffectObserve, inv); got != content.DecisionPermit {
+				t.Errorf("%s resource %q under a row scoped to %q decides %s, want permit",
+					verb, form.resource.Path, form.holds.ID, got)
+			}
+		})
+	}
+}
+
+// declaredResourceVerbs reads the ResourceVerb constants out of resources.go
+// rather than from a hand-kept list, because a hand-kept list is exactly the
+// thing a newly added verb would not appear in.
+func declaredResourceVerbs(t *testing.T) []content.ResourceVerb {
+	t.Helper()
+	const source = "resources.go"
+	file, err := parser.ParseFile(token.NewFileSet(), source, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", source, err)
+	}
+	var verbs []content.ResourceVerb
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if ident, ok := value.Type.(*ast.Ident); !ok || ident.Name != "ResourceVerb" {
+				continue
+			}
+			for _, expr := range value.Values {
+				lit, ok := expr.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Fatalf("%s: a ResourceVerb constant is not a string literal", source)
+				}
+				text, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("%s: unquote %s: %v", source, lit.Value, err)
+				}
+				verbs = append(verbs, content.ResourceVerb(text))
+			}
+		}
+	}
+	if len(verbs) == 0 {
+		t.Fatalf("%s declares no ResourceVerb constants — the tripwire is reading the wrong file", source)
+	}
+	return verbs
+}
+
+func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) {
+	// One policy, one address, two paths to it: the command path through
+	// DecisionForInvocation, and the declared path through fetch.url's real
+	// resolver and the row scopes the kernel checks it against
+	// (internal/assistant/kernel.go, inScope). They must agree on whether
+	// the call is permitted. They do NOT yet agree on the CAUSE — the
+	// command path answers ask and the declared path refuses out of scope —
+	// which is nocx-okdsm, the next task.
+	reg, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("assemble the real tool registry: %v", err)
+	}
+	tool, ok := reg.Lookup("fetch.url")
+	if !ok {
+		t.Fatal("fetch.url is not in the registry — the declared path this test compares against does not exist")
+	}
+
+	scope := content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com", IncludeSubdomains: true}
+	policy := crossBoundaryPermitting(scope)
+
+	for _, address := range []string{
+		"https://github.com/owner/repo",
+		"https://api.github.com/x",
+		"https://example.com",
+		"https://notgithub.com/x",
+	} {
+		t.Run(address, func(t *testing.T) {
+			refs, err := tool.ResolveResources(map[string]any{"url": address}, agenttools.RunContext{})
+			if err != nil {
+				t.Fatalf("fetch.url resolves %q: %v", address, err)
+			}
+			if len(refs) != 1 || refs[0].Kind != content.ResourceDestination {
+				t.Fatalf("fetch.url resolved %+v, want one destination", refs)
+			}
+			declaredPermits := policy.DecisionFor(content.EffectCrossBoundary) == content.DecisionPermit
+			for _, ref := range refs {
+				inside := false
+				for _, s := range policy.RowScopes(content.EffectCrossBoundary) {
+					if s.Contains(content.GrantScope{Kind: ref.Kind, ID: ref.ID}) {
+						inside = true
+						break
+					}
+				}
+				if !inside {
+					declaredPermits = false
+				}
+			}
+			commandPermits := policy.DecisionForInvocation(
+				content.EffectCrossBoundary, curlInvocation(address),
+			) == content.DecisionPermit
+			if declaredPermits != commandPermits {
+				t.Fatalf("%s: fetch.url permits=%t but curl permits=%t — one path is bounded and the other is not",
+					address, declaredPermits, commandPermits)
+			}
+		})
 	}
 }

@@ -12,7 +12,6 @@
  * Uses the Page layout primitives (nocx-imkb.1) and the UI kit (nocx-vxqj.4).
  */
 
-import type { JSX } from 'solid-js'
 import {
   For,
   Show,
@@ -30,6 +29,7 @@ import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { SkillsSection } from './skills-section'
 import type { SkillsStore } from './skills-store'
+import { reconcileRailPages, type SettingsPage } from './settings-rail-pages'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
@@ -110,6 +110,8 @@ const INSTRUCTIONS_SECTION = 'Instructions'
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
 const PETS_SECTION = 'Pets'
+/** The section `skills.enabled` is declared in, which the Skills page owns. */
+const SKILLS_SECTION = 'Skills'
 
 /** The clipboard an embedding without one hands the About page. It refuses
  *  rather than resolving: a Copy button that reports success while nothing was
@@ -120,27 +122,6 @@ const unavailableClipboard: ClipboardAccess = {
   writeText: () => Promise.reject(new Error('no clipboard in this window')),
 }
 
-export type SettingsPage =
-  | { kind: 'generated'; id: string; title: string; groupId?: string }
-  // A component page renders itself. It is a thunk rather than a bare
-  // Component because such a page needs context the registry does not have —
-  // Connections needs the ProfileClient and the connect callback — and binding
-  // that at registration is what keeps the registry from having to know it.
-  // scrollMode (design spec §3.8): 'page' — PageScroller owns vertical scroll;
-  // 'contained' — Page provides a bounded content area and the surface assigns
-  // its own scroll owners (e.g. Connections' two-column panels).
-  // groupId names a group from the Go-declared catalogue (settings.describe);
-  // undefined means the page renders at top level beside the groups.
-  | {
-      kind: 'component'
-      id: string
-      title: string
-      groupId?: string
-      description?: string
-      actions?: JSX.Element
-      scrollMode: 'page' | 'contained'
-      renderContent: () => JSX.Element
-    }
 /** Stable DOM id for a setting row, derived from the declaration key. */
 export function keyToDomId(key: string): string {
   return 'st-setting-' + encodeURIComponent(key)
@@ -600,12 +581,20 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    // ASSISTANT, not Application: a skill is something the assistant reads
+    // and acts on, so it belongs beside Roles and Agent policy rather than
+    // beside Backup and Clipboard. And it OWNS its section: `skills.enabled`
+    // is declared in Go under section "Skills" (internal/settings), which
+    // would otherwise mint a second rail row of the same name holding one
+    // switch — see settings-rail-pages.ts. Owning it puts the switch above
+    // the list it governs, which is the only place it means anything.
     const skillsPage: SettingsPage = {
       kind: 'component',
       id: 'skills',
       title: 'Skills',
-      groupId: 'application',
+      groupId: 'assistant',
       scrollMode: 'page',
+      ownsSection: SKILLS_SECTION,
       renderContent: () => (
         <Show
           when={props.skillsStore}
@@ -684,7 +673,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
         />
       ),
     }
-    return [
+    // Reconciled, never concatenated: a component page absorbs the section
+    // it declares it owns, and two pages left answering to one name are a
+    // defect this refuses rather than renders (nocx-fe7fe.2).
+    return reconcileRailPages([
       connectionPage,
       ...generated,
       backupPage,
@@ -692,11 +684,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
-      skillsPage,
       rolesPage,
       policyPage,
+      // Last in Assistant, after the two pages that decide what the assistant
+      // may do at all: a skill is what it does once that is settled.
+      skillsPage,
       aboutPage,
-    ]
+    ])
   })
 
   /** The rail rows the grouped rail renders: every page resolved to a group
@@ -708,7 +702,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
       groupId: page.groupId,
       // Accessors, not values: the row objects stay stable across navigation
       // and the rail updates them in place (Solid fine-grained updates).
-      count: () => (page.kind === 'generated' ? modifiedBySection().get(page.id) : undefined),
+      // A page's count is its section's, and an owning component page has
+      // one — the dot has to follow the rows, or the rail would report a
+      // change on a page that no longer exists and none on the one showing it.
+      count: () =>
+        modifiedBySection().get(page.kind === 'generated' ? page.id : (page.ownsSection ?? '')),
       active: () =>
         page.kind === 'component'
           ? activeComponentPage() === page.id
@@ -1520,7 +1518,33 @@ export function SettingsComponent(props: SettingsComponentProps) {
               (truthy → different truthy) left the previous page on screen.
               Keying re-creates the subtree whenever the page identity changes. */}
         <Show when={activePage()} keyed>
-          {(page) => page.renderContent()}
+          {(page) => (
+            <>
+              {/* The section this page OWNS, above the content it governs.
+                  A component page with settings of its own used to have two
+                  choices, and both were wrong: leave the declarations to mint
+                  a rail row of their own — which is the duplicate Skills row
+                  this fixed — or stop declaring them and lose search, the
+                  modified dot and backup with them. Owning the section keeps
+                  the declaration exactly where it was and moves only where it
+                  renders. Same SettingRow as the generated body, so a switch
+                  looks and behaves the same on either side. */}
+              <Show when={page.ownsSection}>
+                {(section) => (
+                  <PageSection
+                    id={'st-section-' + encodeURIComponent(section())}
+                    title={section()}
+                    divided
+                  >
+                    <For each={declarations().filter((d) => d.section === section())}>
+                      {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                    </For>
+                  </PageSection>
+                )}
+              </Show>
+              {page.renderContent()}
+            </>
+          )}
         </Show>
 
         {/* Generated settings sections — hidden when a component page is active. */}

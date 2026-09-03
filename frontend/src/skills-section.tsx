@@ -1,11 +1,60 @@
+/**
+ * The Skills page's list (nocx-fe7fe.3).
+ *
+ * Every row is the kit's RecordRow. It was not, and the page paid for it: the
+ * row was a bare `<div>` wrapping four naked `<div>`s — name, description,
+ * `provenance · path` — with the enable switch and the sentence "Built-in
+ * skills cannot be deleted" glued to each other underneath, no spacing, no
+ * columns, no separators. Nothing in the kit permitted that so much as failed
+ * to SEE it: `nocx/no-raw-controls` looks for a reimplemented control, the
+ * role rule for a role that duplicates a primitive, the class rule for a
+ * kit class copied inline, and a classless roleless div is none of those.
+ *
+ * The mapping onto the composite, since a record's parts are its argument:
+ *
+ *   title   the skill's name, which is what it is addressed by.
+ *   kind    its provenance, one badge — where the bytes came from is the
+ *           record's category, and it is what decides whether Delete exists.
+ *   meta    the skill's own description line, from its front matter.
+ *   detail  the path, in the detail slot's monospace: verbatim evidence, and
+ *           the answer to "which file am I looking at" that the Settings page
+ *           is the only place to get.
+ *   status  shown ONLY when the bytes changed since approval. Enabled state
+ *           is not a status here — the switch beside it already says so, and
+ *           a row that reports one fact twice is how the two come to disagree.
+ */
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
-import { Button, Checkbox, EmptyState, Section, Stack, StatusCard } from './ui'
+import {
+  ActionGroup,
+  Button,
+  Checkbox,
+  EmptyState,
+  RecordRow,
+  Section,
+  Stack,
+  StatusCard,
+} from './ui'
 import { showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
+import type { BadgeTone } from './ui/badge'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
 export interface SkillsSectionProps {
   store: SkillsStore
+}
+
+/** Provenance as a badge tone: `builtin` is neutral because it is the state
+ *  nobody chose, `authored` is what the person wrote, `managed` what the
+ *  assistant wrote after they approved it. */
+function provenanceTone(provenance: Skill['provenance']): BadgeTone {
+  switch (provenance) {
+    case 'builtin':
+      return 'neutral'
+    case 'authored':
+      return 'info'
+    case 'managed':
+      return 'success'
+  }
 }
 
 export function SkillsSection(props: SkillsSectionProps) {
@@ -64,7 +113,11 @@ export function SkillsSection(props: SkillsSectionProps) {
   }
 
   return (
-    <Section title="Skills" divided dense>
+    /* The Section is NOT divided: its children are the status cards and the
+       list, and the list draws its own separators. Two nested divided stacks
+       put the dense rhythm on the whole list as one child and again on every
+       row inside it. */
+    <Section title="Discovered skills">
       <Show when={state().kind === 'loading'}>
         <StatusCard
           tone="neutral"
@@ -85,49 +138,63 @@ export function SkillsSection(props: SkillsSectionProps) {
           fallback={
             <EmptyState
               title="No skills discovered"
-              description="Add a SKILL.md under your skills directory."
+              description="Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure."
             />
           }
         >
-          <Stack gap="default">
+          <Stack divided dense>
             <For each={readySkills()}>
               {(skill) => (
-                <div data-skill-name={skill.name}>
-                  <div>{skill.name}</div>
-                  <div>{skill.description}</div>
-                  <div>
-                    {skill.provenance} · {skill.path}
-                  </div>
-                  <Show when={skill.status === 'changed'}>
-                    <StatusCard
-                      tone="danger"
-                      title="Changed since approval"
-                      description={`The person approved different bytes at ${skill.path}.`}
-                    />
-                    <Button disabled={busy() === skill.name} onClick={() => void approve(skill)}>
-                      Re-approve
-                    </Button>
-                  </Show>
-                  <Checkbox
-                    variant="switch"
-                    checked={skill.enabled}
-                    disabled={busy() === skill.name}
-                    ariaLabel={`${skill.name} enabled`}
-                    onChange={(enabled) => void toggle(skill, enabled)}
-                  />
-                  <Show when={skill.provenance === 'builtin'}>
-                    <span>Built-in skills cannot be deleted.</span>
-                  </Show>
-                  <Show when={skill.provenance !== 'builtin'}>
-                    <Button
-                      variant="danger"
-                      disabled={busy() === skill.name}
-                      onClick={() => void remove(skill)}
-                    >
-                      Delete
-                    </Button>
-                  </Show>
-                </div>
+                <RecordRow
+                  title={skill.name}
+                  kind={{ label: skill.provenance, tone: provenanceTone(skill.provenance) }}
+                  meta={skill.description}
+                  detail={skill.path}
+                  status={
+                    skill.status === 'changed'
+                      ? { tone: 'error', text: 'Changed since approval' }
+                      : undefined
+                  }
+                  actions={
+                    <ActionGroup ariaLabel={`${skill.name} actions`}>
+                      <Checkbox
+                        variant="switch"
+                        checked={skill.enabled}
+                        disabled={busy() === skill.name}
+                        ariaLabel={`${skill.name} enabled`}
+                        onChange={(enabled) => void toggle(skill, enabled)}
+                      />
+                      {/* Only when the bytes moved. A permanent Re-approve
+                          would invite re-approving a skill nobody changed,
+                          which is a person clicking past the one prompt that
+                          is load-bearing. */}
+                      <Show when={skill.status === 'changed'}>
+                        <Button
+                          size="sm"
+                          disabled={busy() === skill.name}
+                          onClick={() => void approve(skill)}
+                        >
+                          Re-approve
+                        </Button>
+                      </Show>
+                      {/* A builtin ships inside the binary, so there is
+                          nothing on disk to delete and no button to explain
+                          away. The sentence that used to say so sat in the
+                          row's body as loose text on every builtin row; the
+                          absence says it once and says it everywhere. */}
+                      <Show when={skill.provenance !== 'builtin'}>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={busy() === skill.name}
+                          onClick={() => void remove(skill)}
+                        >
+                          Delete
+                        </Button>
+                      </Show>
+                    </ActionGroup>
+                  }
+                />
               )}
             </For>
           </Stack>

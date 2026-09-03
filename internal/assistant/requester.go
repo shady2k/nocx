@@ -3,8 +3,11 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 )
@@ -132,6 +135,188 @@ type RendererRequester interface {
 	RequestRun(ctx context.Context, sessionID string, command string) (json.RawMessage, error)
 }
 
+// RunDecision is what a continuation says about a run the quiet bound asked
+// about: keep waiting, or stop it. Two values and no third — "do nothing" is
+// not an answer a party who was asked may give, and leaving a command
+// running with nobody watching is what the bound exists to prevent.
+type RunDecision string
+
+const (
+	// RunKeepWaiting re-attaches to the SAME execution. It never re-submits
+	// the command: the renderer was never told to cancel and the process has
+	// been running the whole time.
+	RunKeepWaiting RunDecision = "continue"
+	// RunStop terminalizes the execution — INT → TERM → KILL against its own
+	// process group — and the run reports the stop, not a timeout.
+	RunStop RunDecision = "stop"
+)
+
+// ErrRunNotWaiting is the answer to a continuation that names a run which is
+// no longer waiting: it finished on its own, it was already stopped, or the
+// id was never real.
+//
+// IT IS AN ANSWER AND NOT A FAILED RUN, and the distinction is the whole
+// reason it is a named value. A command can finish in the moment between
+// nocx asking about its silence and the model answering — that is a RACE THE
+// MODEL CANNOT WIN and did nothing wrong by losing. Killing the turn for it
+// would punish the model for answering a question we asked. The kernel turns
+// this into a sentence the model reads and carries on from, the way it
+// already does for a refusal and for a lease bound.
+var ErrRunNotWaiting = errors.New("no command is waiting under that run id — it has already finished or been stopped")
+
+// RunWaiter is the continuation seam of the run lease's quiet bound
+// (ADR-0020 decision 2, nocx-6dzxq). It is deliberately SEPARATE from
+// RendererRequester rather than a fifth method on it: a requester with no
+// parked run to continue implements nothing, and session.wait says so
+// honestly instead of every fake in the tree growing a method it has no
+// answer for. The transport implements both.
+//
+// The runID is the one the still-running answer named. It is not a session,
+// not a command and not a ledger entry: it is the exact execution the model
+// was asked about, so an answer can never land on a different command that
+// happens to be running in the same pane.
+type RunWaiter interface {
+	RequestRunWait(ctx context.Context, runID string, decision RunDecision) (json.RawMessage, error)
+}
+
+// runQuietBoundContextKey carries the model's own quiet bound for ONE call
+// from the tool executor down to the transport that arms the lease.
+//
+// It travels in the context rather than in RequestRun's signature for the
+// reason RunLeaseDegradation does: the bound is per-call wiring that only
+// the transport consumes, the interface is implemented by every fake in the
+// tree, and a fifth parameter on a seam four packages deep buys nothing that
+// a context value does not.
+type runQuietBoundContextKey struct{}
+
+// WithRunQuietBound states the quiet bound this ONE call asked for. Zero (or
+// absent) means the call asked for nothing and the person's setting applies
+// unchanged. It is an ASK: the transport clamps it to the person's ceiling
+// and never widens past it (ADR-0047 — a program may ask; it never chooses).
+func WithRunQuietBound(ctx context.Context, d time.Duration) context.Context {
+	if d <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, runQuietBoundContextKey{}, d)
+}
+
+// RunQuietBoundFromContext reads the quiet bound this call asked for.
+func RunQuietBoundFromContext(ctx context.Context) time.Duration {
+	if ctx == nil {
+		return 0
+	}
+	d, _ := ctx.Value(runQuietBoundContextKey{}).(time.Duration)
+	return d
+}
+
+// RunStillRunningError is the QUIET BOUND'S QUESTION, and it is not a
+// failure: nothing was terminalized, the command is still executing, and the
+// renderer was never told to cancel. It exists because the model is reachable
+// only through a tool result, so the attempt has to END in order to ask —
+// see internal/transport/run_park.go for why the alternative (a new
+// mid-run push) was refused.
+//
+// It carries what the model needs to answer: which run to answer about, the
+// bound that fired, how much of the person's ceiling is left, and how many
+// times this same question has already been answered on this execution.
+type RunStillRunningError struct {
+	// RunID is the handle session.wait continues or stops the execution
+	// with.
+	RunID string
+	// Quiet is the silence bound that fired.
+	Quiet time.Duration
+	// Remaining is what is left of the person's wall-clock ceiling. It is
+	// the number that makes "keep waiting" a decision rather than a reflex:
+	// the model can see that the command cannot outlive it.
+	Remaining time.Duration
+	// Renewals is how many times "keep waiting" has already been answered
+	// for this execution. Zero on the first ask.
+	Renewals int
+	// ClampedFrom is what this call asked for when it asked for MORE than
+	// the person allows, and zero otherwise. A clamp is stated, never
+	// silent.
+	ClampedFrom time.Duration
+	// EntryID is the ledger entry the renderer minted for the command. It
+	// is here for the same reason RunLeaseError carries one: the block
+	// EXISTS — a person is looking at it — and the command→turn edge must be
+	// written even though this call is ending without the command's result.
+	// Empty when the store wrote no row.
+	EntryID string
+}
+
+func (e *RunStillRunningError) Error() string {
+	return "run still running: " + RunStillRunningSentence("", e)
+}
+
+// RunStillRunningSentence is what the model reads. It names the bound that
+// fired, its value, what is left of the ceiling, and the continuation — in
+// words, because the model acts on the sentence and not on a reason code.
+//
+// The person is deliberately not mentioned as somebody to wake: the ladder
+// is "the lease asks the model; the model may ask the person if it needs
+// to", and which of those the model does is its own judgement, taken through
+// the paths it already has.
+func RunStillRunningSentence(tool string, e *RunStillRunningError) string {
+	if e == nil {
+		return ""
+	}
+	call := "the command"
+	if tool != "" {
+		call = "your call to " + tool
+	}
+	s := "STILL RUNNING: " + call + " has printed nothing for " +
+		humanDuration(e.Quiet) + " and has NOT been stopped — it is still executing. " +
+		"Judge whether that silence is expected for this command: a stuck mount, a compile with no progress output and a wedged process all look like this. " +
+		"Answer with session.wait on run id " + e.RunID +
+		": \"continue\" keeps waiting on the SAME execution (it is not restarted), \"stop\" ends it. " +
+		"It will be stopped anyway in " + humanDuration(e.Remaining) + ", which is the limit the person set and which you cannot extend."
+	if e.Renewals > 0 {
+		s += " You have already chosen to keep waiting " + plural(e.Renewals, "time", "times") + " on this command."
+	}
+	if e.ClampedFrom > 0 {
+		s += " You asked for a quiet bound of " + humanDuration(e.ClampedFrom) +
+			"; the person's limit is " + humanDuration(e.Quiet) + ", so that is what was used."
+	}
+	return s
+}
+
+// humanDuration writes a lease bound in words, always — "10 minutes",
+// "90 seconds" as "1 minute 30 seconds" — so the number the model is told is
+// spelled the way the settings screen spells it and the way the rest of the
+// sentence around it is spelled. Go's own "1m30s" was the one token in that
+// paragraph a reader had to decode, and a bound the model misreads is a
+// bound it plans badly against.
+func humanDuration(d time.Duration) string {
+	if d <= 0 {
+		return "no time at all"
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		s := int(d / time.Second)
+		if s == 0 {
+			return "under a second"
+		}
+		return plural(s, "second", "seconds")
+	}
+	minutes := int(d / time.Minute)
+	seconds := int((d % time.Minute) / time.Second)
+	if seconds == 0 {
+		return plural(minutes, "minute", "minutes")
+	}
+	return plural(minutes, "minute", "minutes") + " " + plural(seconds, "second", "seconds")
+}
+
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+func plural(n int, one, many string) string {
+	return strconv.Itoa(n) + " " + pluralWord(n, one, many)
+}
+
 // RunLeaseError is the terminal failure of a run whose lease bound fired
 // (ADR-0020 decision 2). When SubmissionExpired is false, the execution was
 // terminalized by its wall-clock deadline (TermTimeout), its inactivity
@@ -170,7 +355,12 @@ func RunLeaseSentence(reason content.TerminationReason, submissionExpired bool) 
 	case content.TermTimeout:
 		return "the command did not finish within its wall-clock deadline and was terminalized"
 	case content.TermInactivity:
+		// Reachable only for a lease with no quiet-bound answerer at all.
+		// The ordinary path no longer terminalizes on silence: it parks and
+		// asks (RunStillRunningSentence).
 		return "the command was terminalized for inactivity: it produced no output for too long"
+	case content.TermAgentDeclined:
+		return "you were asked whether to keep waiting for this command and answered stop, so it was ended"
 	case content.TermOutputBudget:
 		return "the command was terminalized: its output exceeded the budget, and was bounded rather than truncated"
 	default:

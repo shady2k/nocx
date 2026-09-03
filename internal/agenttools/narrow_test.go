@@ -31,8 +31,14 @@ func skillFenceFixture(t *testing.T) (string, []string, string, string) {
 	return configDir, skillRoots, filepath.Join(skillRoots[0], "deploy", "SKILL.md"), filepath.Join(otherDir, "ordinary.txt")
 }
 
+// configPathGrant is the fixture grant these skill-fence tests narrow under.
+// It mints through the policy matrix rather than assembling a bare
+// content.Grant literal, because a capability's roots come from the effect
+// ROW's scopes (nocx-cd6vp): a grant's Scopes field is declaration coverage,
+// and expresses no authority for an effect. Every assertion below is
+// unchanged.
 func configPathGrant(configDir string) content.Grant {
-	return content.Grant{Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: configDir}}}
+	return pathScopeGrant(configDir)
 }
 
 func TestNarrowFilesReadRefusesSkillRoot(t *testing.T) {

@@ -1357,11 +1357,12 @@ func New(opts ...Option) (*App, error) {
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
 	// The run lease (ADR-0020 decision 2) every agent run is supervised
-	// under, named here the way the lane capacity is: the wall-clock
-	// deadline, the inactivity deadline, the output budget and the
-	// escalation grace. The transport's default IS the production value —
-	// this line names it, so the seam stays reachable from production and
-	// a future settings surface flips one option here, not a default.
+	// under, named here the way the lane capacity is. What this line still
+	// decides is the output budget and the escalation grace. The two TIME
+	// bounds — the wall clock and the quiet bound — are the PERSON's now
+	// (Settings → Answers, nocx-6dzxq): the transport reads them from the
+	// settings registry when a run starts, so what arrives here is the
+	// fallback for a backend with no registry, not the product value.
 	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
 	// The notification router (ADR-0047): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was

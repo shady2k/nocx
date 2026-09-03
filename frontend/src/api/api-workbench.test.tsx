@@ -2262,6 +2262,71 @@ describe('the import ask asks one question', () => {
     await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
   })
 
+  // ── AND THE PERSON CAN BE FINISHED WITH IT BEFORE THE ROOT LANDS ───────
+  //
+  // The second path of the same interval, and the one that cost a spec its
+  // whole window in CI. `previewPostman` answers two questions at once — what
+  // the archive holds, and whether the destination can take it — so the
+  // backend refuses outright when it has only one, with "dest is required".
+  // The source's own read is started by the person finishing with the paste
+  // box, and the gesture that finishes it is usually the click on the pencil
+  // beside it: paste, then reach for the destination. With the root still in
+  // flight there was no folder to name, so the call went out with none.
+  //
+  // What made that fatal rather than merely wasted is `previewSource`'s own
+  // rule, applied to the wrong refusal: a read of the SOURCE forgets the
+  // source when it is refused, because the source is what was refused. Here
+  // the archive was fine and the PLACE was missing, so the ask threw away the
+  // export that had just been pasted and showed the backend's sentence about
+  // a parameter instead (nocx-s47is).
+  it('a source finished with before the root lands is kept, and read once it has a folder', async () => {
+    let land: () => void = () => {}
+    const listCollections = vi.fn(
+      () =>
+        new Promise<{ collections: never[]; defaultRoot: string }>((resolve) => {
+          land = () => resolve({ collections: [], defaultRoot: DEFAULT_ROOT })
+        }),
+    )
+    // The backend's own answer to a preview with no destination, because
+    // that is the refusal the ask used to hand itself.
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockImplementation((_source, dest) =>
+        dest.trim() === ''
+          ? Promise.reject(new Error('Invalid params: dest is required'))
+          : Promise.resolve({
+              unsupported: [],
+              documents: [{ kind: 'collection', name: 'Acme API', unsupported: [] }],
+            }),
+      )
+    const { bar } = await mountApp({ listCollections, previewPostman })
+    await openImportAsk(bar)
+
+    paste('{"info":{"name":"Acme API"}}')
+    await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
+
+    // Finished with the paste box, while the listing is still in flight.
+    fireEvent.blur(field('api-import-paste'))
+
+    // Nothing is spent on a read there is nowhere to place, and — the part
+    // that matters — the export is still held.
+    expect(previewPostman).not.toHaveBeenCalled()
+    expect(sourceLine()).not.toBe('')
+
+    // The root lands, the ask names a folder, and the read it was holding
+    // goes out against it.
+    land()
+
+    await vi.waitFor(() =>
+      expect(previewPostman).toHaveBeenCalledWith(
+        { document: '{"info":{"name":"Acme API"}}' },
+        `${DEFAULT_ROOT}/acme-api`,
+      ),
+    )
+    expect(sourceLine()).not.toBe('')
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+  })
+
   it('refuses a curl line here rather than spending a round trip on it', async () => {
     // curl has its own door in the request editor and is deliberately not
     // this ask's question: `parseImport` would hand it to the curl parser,

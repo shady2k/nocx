@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
@@ -92,6 +93,12 @@ type toolSeams struct {
 	fetcher          apifetch.TextFetcher
 	snapshots        *runSnapshots
 	runID            string
+	// expansions asks ONE live shell what the safe expansions in a proposed
+	// command currently read as (nocx-4h0m7.5). Nil is the ordinary shape
+	// for every caller that is not the transport, and it is also the
+	// product's honest answer wherever our integration is not deployed:
+	// expand nothing, mark every variable unresolved, say so.
+	expansions ExpansionSource
 }
 
 type noteSearchRow struct {
@@ -882,6 +889,22 @@ type runResult struct {
 	Truncated bool             `json:"truncated,omitempty"`
 	Dropped   int64            `json:"dropped,omitempty"`
 	Remaining int64            `json:"remaining,omitempty"`
+	// Bounds is what this execution was actually held to, and whether the
+	// call's own ask for a shorter silence bound was cut down to reach it
+	// (nocx-6dzxq). Present whenever the transport stated them; absent for a
+	// requester that arms no lease at all.
+	Bounds *runBoundsResult `json:"bounds,omitempty"`
+}
+
+// runBoundsResult is the model-facing half of the lease's two ceilings. A
+// clamp is REPORTED here rather than only in the sentence a fired bound
+// produces: a model that learns its bound was cut only at the moment it
+// fires has spent the whole run planning against a number nobody enforced.
+type runBoundsResult struct {
+	QuietSeconds     float64 `json:"quietSeconds"`
+	WallClockSeconds float64 `json:"wallClockSeconds"`
+	Clamped          bool    `json:"clamped,omitempty"`
+	AskedSeconds     float64 `json:"askedSeconds,omitempty"`
 }
 
 // runResultStopped is the one interpretation of the renderer's explicit
@@ -914,6 +937,10 @@ type runBodyWire struct {
 	Start    int    `json:"start"`
 	End      int    `json:"end"`
 	Text     string `json:"text"`
+	// LeaseBounds is the BACKEND's addition to the renderer's answer, not
+	// the renderer's: the transport joins the bounds it armed to the body it
+	// received, because it is the only place that holds both.
+	LeaseBounds *runBoundsResult `json:"leaseBounds,omitempty"`
 }
 
 // executeRun runs the run tool: the narrowed session capability (the
@@ -937,7 +964,8 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		return "", err
 	}
 	var p struct {
-		Command string `json:"command"`
+		Command      string  `json:"command"`
+		QuietSeconds float64 `json:"quietSeconds"`
 	}
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		// Unreachable through the middleware (validation precedes policy,
@@ -954,11 +982,24 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	if requester == nil {
 		return "", errors.New("run: no renderer requester is wired for this run")
 	}
+	// The call's OWN quiet bound, if it asked for one. It is an ask and not
+	// a choice: the transport clamps it to the person's ceiling and says so
+	// in the result (nocx-6dzxq). Nothing here compares it to anything —
+	// there is exactly one clamp, and it is not in this package.
+	ctx = WithRunQuietBound(ctx, secondsToDuration(p.QuietSeconds))
 	body, err := requester.RequestRun(ctx, sessionID, p.Command)
 	if err != nil {
 		var leaseErr *RunLeaseError
 		if errors.As(err, &leaseErr) && caused != nil && leaseErr.EntryID != "" {
 			caused(leaseErr.EntryID)
+		}
+		// A PARKED run has a block on the person's screen already, so the
+		// command→turn edge is written here too. It is the same fact for the
+		// same reason as the lease-error case above; the only difference is
+		// that this command has not finished yet.
+		var stillRunning *RunStillRunningError
+		if errors.As(err, &stillRunning) && caused != nil && stillRunning.EntryID != "" {
+			caused(stillRunning.EntryID)
 		}
 		return "", err
 	}
@@ -1013,9 +1054,117 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		out.Dropped = int64(len(b.Text) - len(text))
 		out.Remaining = out.Dropped
 	}
+	out.Bounds = b.LeaseBounds
 	res, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("run: marshal result: %w", err)
+	}
+	return string(res), nil
+}
+
+// secondsToDuration reads a model-supplied number of seconds. A negative or
+// absent value is "asked for nothing", never a bound of zero: a zero bound
+// would mean "no silence at all is tolerated", which is not something the
+// schema lets a call say and not something it could mean.
+func secondsToDuration(seconds float64) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+// ── wait (nocx-6dzxq: the continuation of a run whose quiet bound asked
+//
+//	the model — ADR-0020 decision 2's "renewable" clause) ────────────────
+
+// runWaitResult is what a continuation hands back when the command finally
+// ends: the ordinary run result. "keep waiting" that ends in the command
+// completing is the SAME answer the first call would have given had it
+// waited, deliberately — there is one shape for "this command finished",
+// and a second one would be a second thing to teach the model.
+//
+// The "stop" decision has no successful shape at all: it produces the lease
+// error the kernel turns into the terminated sentence, so a stopped command
+// can never be read as a command that returned nothing.
+func executeRunWait(ctx context.Context, watcher *agenttools.RunWatcher, requester RendererRequester, args json.RawMessage) (string, error) {
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		RunID        string  `json:"runId"`
+		Decision     string  `json:"decision"`
+		QuietSeconds float64 `json:"quietSeconds"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("wait: args: %w", unmarshalErr)
+	}
+	if p.RunID == "" {
+		return "", errors.New("wait: a continuation must name the run it is answering about")
+	}
+	var decision RunDecision
+	switch p.Decision {
+	case string(RunKeepWaiting):
+		decision = RunKeepWaiting
+	case string(RunStop):
+		decision = RunStop
+	default:
+		return "", fmt.Errorf("wait: %q is not a decision about a waiting command", p.Decision)
+	}
+	sessionID := watcher.SessionID()
+	if !watcher.Allows(sessionID) {
+		return "", fmt.Errorf("wait: session %q is outside the run's grant — the request never reached the renderer", sessionID)
+	}
+	if requester == nil {
+		return "", errors.New("wait: no renderer requester is wired for this run")
+	}
+	// The continuation seam is OPTIONAL on the requester: a requester that
+	// arms no lease has nothing parked and says so, rather than every fake
+	// in the tree growing a method with no answer.
+	runWaiter, ok := requester.(RunWaiter)
+	if !ok {
+		return "", errors.New("wait: this run has no waiting command to continue")
+	}
+	ctx = WithRunQuietBound(ctx, secondsToDuration(p.QuietSeconds))
+	body, err := runWaiter.RequestRunWait(ctx, p.RunID, decision)
+	if err != nil {
+		return "", err
+	}
+	var b runBodyWire
+	if decodeErr := json.Unmarshal(body, &b); decodeErr != nil {
+		return "", fmt.Errorf("wait: resolved body: %w", decodeErr)
+	}
+	total := b.Total
+	if total < 0 || b.Start < 0 || b.End < b.Start || b.End > total {
+		return "", fmt.Errorf("wait: the renderer's window [%d,%d) is outside the block's [0,%d)", b.Start, b.End, total)
+	}
+	returned := readScreenWindow{Start: b.Start, End: b.End}
+	text, returnedEnd := boundBlockText(b.Text, b.Start, b.End, bound.MaxBytes)
+	returned.End = returnedEnd
+	truncated := len(text) < len(b.Text)
+	out := runResult{
+		SessionID: sessionID,
+		EntryID:   b.EntryID,
+		ExitCode:  b.ExitCode,
+		Status:    b.Status,
+		Stopped:   b.Stopped,
+		Total:     total,
+		Window:    readScreenWindow{Start: 0, End: total},
+		Returned:  returned,
+		Text:      text,
+		Truncated: truncated,
+		Bounds:    b.LeaseBounds,
+	}
+	if out.Stopped {
+		out.Message = runStoppedMessage
+	}
+	if truncated {
+		out.Dropped = int64(len(b.Text) - len(text))
+		out.Remaining = out.Dropped
+	}
+	res, marshalErr := json.Marshal(out)
+	if marshalErr != nil {
+		return "", fmt.Errorf("wait: marshal result: %w", marshalErr)
 	}
 	return string(res), nil
 }

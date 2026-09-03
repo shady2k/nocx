@@ -173,6 +173,24 @@ const runSchema = `{
   }}
 }`
 
+// waitSchema is session.wait's fixture: the continuation carries a run id
+// and a decision, never a command (nocx-6dzxq).
+const waitSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "decision"],
+  "properties": {
+    "runId": {"type": "string"},
+    "decision": {"type": "string", "enum": ["continue", "stop"]}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["text"],
+    "properties": {"text": {"type": "string"}}
+  }}
+}`
+
 const contentToolSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -401,6 +419,10 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 			content.EffectMutateDestructive, content.EffectDelegate,
 			content.EffectCrossBoundary,
 		},
+		// session.wait answers a question nocx asked about a command that is
+		// already running under an authority the person already granted, so
+		// it exercises none of its own (nocx-6dzxq).
+		"session.wait":     {content.EffectObserve},
 		"files.edit":       {content.EffectMutateReversible},
 		"files.create":     {content.EffectMutateReversible},
 		"git.status":       {content.EffectObserve},
@@ -418,8 +440,8 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.update":    {content.EffectMutateReversible},
 		"skills.delete":    {content.EffectMutateReversible},
 	}
-	if len(declarations) != 21 {
-		t.Fatalf("declaration count = %d, want 21", len(declarations))
+	if len(declarations) != 22 {
+		t.Fatalf("declaration count = %d, want 22", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -522,6 +544,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
 		"session.run.schema.json":      runSchema,
+		"session.wait.schema.json":     waitSchema,
 		"notes.search.schema.json":     contentToolSchema,
 		"notes.create.schema.json":     contentToolSchema,
 		"notes.update.schema.json":     contentToolSchema,
@@ -579,7 +602,10 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// observe, including the command carrier. The carrier's command argument
 	// selects the actual effect at execution time.
 	sessionObserve := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)))
-	wantSession := []string{"session.list", "session.read", "session.run"}
+	// session.wait joins the list: it is an observe tool over a session, and
+	// the right to keep waiting on a command travels with the right to have
+	// started one (nocx-6dzxq).
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -662,6 +688,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
 		"session.run.schema.json":      runSchema,
+		"session.wait.schema.json":     waitSchema,
 		"notes.search.schema.json":     contentToolSchema,
 		"notes.create.schema.json":     contentToolSchema,
 		"notes.update.schema.json":     contentToolSchema,
@@ -1147,12 +1174,12 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 		t.Fatalf("WriteFile other: %v", err)
 	}
 
-	capability, err := narrowFilesRead(content.Grant{
-		Scopes: []content.GrantScope{
-			{Kind: content.ResourcePath, ID: insideRoot},
-			{Kind: content.ResourcePath, ID: otherRoot},
-		},
-	}, []ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
+	// The grant is minted through the policy matrix: a capability's roots are
+	// the effect ROW's path scopes (nocx-cd6vp), so a bare content.Grant
+	// literal names declaration coverage and no authority. The assertions
+	// below are unchanged.
+	capability, err := narrowFilesRead(pathScopeGrant(insideRoot, otherRoot),
+		[]ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
 	if err != nil {
 		t.Fatalf("narrowFilesRead: %v", err)
 	}
@@ -1186,10 +1213,8 @@ func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
 			t.Fatalf("WriteFile %s: %v", path, err)
 		}
 	}
-	grant := content.Grant{Scopes: []content.GrantScope{
-		{Kind: content.ResourcePath, ID: insideRoot},
-		{Kind: content.ResourcePath, ID: otherRoot},
-	}}
+	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
+	grant := pathScopeGrant(insideRoot, otherRoot)
 	resolved := []ResourceRef{{Kind: content.ResourcePath, ID: inside}}
 	capability, err := narrowFilesEdit(grant, resolved, RunContext{})
 	if err != nil {
@@ -1229,10 +1254,8 @@ func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
 	}
 	target := filepath.Join(insideRoot, "new.txt")
 	other := filepath.Join(otherRoot, "other.txt")
-	grant := content.Grant{Scopes: []content.GrantScope{
-		{Kind: content.ResourcePath, ID: insideRoot},
-		{Kind: content.ResourcePath, ID: otherRoot},
-	}}
+	// Minted through the policy matrix; see TestNarrowFilesRead_UsesOnlyResolvedResources.
+	grant := pathScopeGrant(insideRoot, otherRoot)
 	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, RunContext{})
 	if err != nil {
 		t.Fatalf("narrowFilesCreate: %v", err)

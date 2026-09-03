@@ -815,3 +815,145 @@ describe('AgentApprovalPrompt — standing answers name the carried rule (nocx-t
     expect(names(container)).toContain('standing')
   })
 })
+
+/**
+ * The expanded form beside the verbatim one (nocx-4h0m7.5).
+ *
+ * The incident: a script referred to `$HOME/xxx`, something upstream had been
+ * rewriting `$HOME`, the rewrite silently stopped, and files in the real home
+ * were deleted. Nothing that reads command TEXT could have caught it — the
+ * text was correct. So the window shows what the variables READ AS, beside
+ * the verbatim command and never instead of it.
+ *
+ * What a user can do that they could not before: see what `$HOME` currently
+ * is before approving `rm -rf $HOME/x`, see which parts nocx refused to read
+ * and why, and see when nocx could not read anything at all — three
+ * different facts, three different words.
+ */
+describe('AgentApprovalPrompt — what the command’s variables read as (nocx-4h0m7.5)', () => {
+  afterEach(cleanup)
+
+  const EXPANSION_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'run',
+    effect: 'mutate-destructive',
+    arguments: '{"command":"rm -rf $HOME/x $(id -u)"}',
+    resource: null,
+    expansion: {
+      asked: true,
+      command: 'rm -rf /home/dev/x $(id -u)',
+      parts: [
+        { text: '$HOME', name: 'HOME', kind: 'parameter', state: 'expanded', value: '/home/dev' },
+        {
+          text: '$(id -u)',
+          kind: 'command-substitution',
+          state: 'unsafe',
+          reason: 'it runs a command to produce its value',
+        },
+      ],
+    },
+  }
+
+  it('shows the expanded form beside the verbatim command, never instead of it', () => {
+    const { container } = renderPrompt({ ask: EXPANSION_ASK })
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent,
+    )
+    expect(blocks).toContain('rm -rf $HOME/x $(id -u)')
+    expect(blocks).toContain('rm -rf /home/dev/x $(id -u)')
+    expect(container.textContent).toContain('the line above is what runs, exactly as written')
+  })
+
+  it('names each variable and what it reads as, on its own row', () => {
+    const { container } = renderPrompt({ ask: EXPANSION_ASK })
+    expect(rows(container)).toContainEqual(['$HOME', '/home/dev'])
+  })
+
+  it('leaves an unsafe expansion as written and says why', () => {
+    const { container } = renderPrompt({ ask: EXPANSION_ASK })
+    expect(rows(container)).toContainEqual(['$(id -u)', 'left exactly as written'])
+    expect(container.textContent).toContain('it runs a command to produce its value')
+  })
+
+  it('says a value was NOT READ rather than implying nocx refused to read it', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...EXPANSION_ASK,
+        expansion: {
+          asked: false,
+          reason: 'nocx’s shell integration is not live in this session',
+          command: 'rm -rf $HOME/x $(id -u)',
+          parts: [
+            { text: '$HOME', name: 'HOME', kind: 'parameter', state: 'unasked' },
+            {
+              text: '$(id -u)',
+              kind: 'command-substitution',
+              state: 'unsafe',
+              reason: 'it runs a command to produce its value',
+            },
+          ],
+        },
+      },
+    })
+    expect(rows(container)).toContainEqual(['$HOME', 'not read'])
+    expect(rows(container)).toContainEqual(['$(id -u)', 'left exactly as written'])
+    expect(container.textContent).toContain('nocx’s shell integration is not live in this session')
+    // Nothing was read, so there is no second block claiming otherwise.
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent,
+    )
+    expect(blocks.filter((b) => b === 'rm -rf $HOME/x $(id -u)')).toHaveLength(1)
+  })
+
+  it('states an assignment the command makes to itself', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...EXPANSION_ASK,
+        arguments: '{"command":"HOME=/tmp rm -rf $HOME/x"}',
+        expansion: {
+          asked: true,
+          command: 'HOME=/tmp rm -rf $HOME/x',
+          assignments: [{ name: 'HOME', value: '/tmp' }],
+          parts: [
+            {
+              text: '$HOME',
+              name: 'HOME',
+              kind: 'parameter',
+              state: 'unsafe',
+              reason:
+                'the command sets HOME itself for this command, so the shell’s value is not the one it will be read with',
+            },
+          ],
+        },
+      },
+    })
+    expect(rows(container)).toContainEqual(['HOME', '/tmp'])
+    expect(container.textContent).toContain('the command sets HOME itself for this command')
+  })
+
+  it('says what a program word actually is, because nocx does not read rc files', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...EXPANSION_ASK,
+        expansion: {
+          asked: true,
+          command: 'rm -rf /home/dev/x $(id -u)',
+          parts: [],
+          programs: [{ word: 'rm', kind: 'alias', target: 'rm -i' }],
+        },
+      },
+    })
+    expect(rows(container)).toContainEqual([
+      'rm',
+      'an alias in this shell, not the program of that name',
+    ])
+  })
+
+  it('says nothing about expansion when the backend sent none', () => {
+    const { container } = renderPrompt({
+      ask: { ...POLICY_ASK, tool: 'run', arguments: '{"command":"df -h"}' },
+    })
+    expect(container.querySelectorAll('.ui-code-block')).toHaveLength(1)
+    expect(names(container)).not.toContain('$HOME')
+  })
+})

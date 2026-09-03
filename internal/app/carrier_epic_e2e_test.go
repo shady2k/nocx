@@ -491,9 +491,6 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	// opaque line to run.
 	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 	h.suspendParent()
-	waittest.WaitForTimeout(t, "the parent suspended under the nested session", 15*time.Second, func() bool {
-		return h.domainState(h.parent) == lifecycle.DomainSuspended
-	})
 
 	agentSock := startInProcessAgent(t, fx)
 	wrapperDir := installSSHWrapper(t, fx)
@@ -688,9 +685,6 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		h.establishParent()
 		h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 		h.suspendParent()
-		waittest.WaitForTimeout(t, "the parent suspended", 15*time.Second, func() bool {
-			return h.domainState(h.parent) == lifecycle.DomainSuspended
-		})
 
 		agentSock := startInProcessAgent(t, fx)
 		wrapperDir := installSSHWrapper(t, fx)

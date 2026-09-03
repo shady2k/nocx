@@ -212,7 +212,15 @@
    wrapped, make it taller — the field reserves exactly one line for it, and
    a caption longer than the control simply extends away from the edge it is
    aligned to. */
-.ui-text-field:has(> .ui-text-field__caption) {
+/* DESCENDANT, not child: a field with a label wraps its control in `.ui-field`,
+   so the slot is a grandchild there and a child only on the bare settings
+   control. Matched as a child, a labelled field reserved nothing and its
+   absolutely-positioned caption resolved against whatever ancestor happened to
+   be positioned — which is why the caption slot could not be used for a
+   labelled field's validation message until now (nocx-n26p1). `.ui-text-field`
+   is the field's own box either way, so it is the right thing to anchor to and
+   the right thing to reserve the strip on. */
+.ui-text-field:has(.ui-text-field__caption) {
   position: relative;
   padding-bottom: calc(var(--font-size-2xs) * 1.4 + 2px);
 }

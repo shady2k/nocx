@@ -146,7 +146,11 @@ export interface TextFieldProps {
    * A permanent caption beneath the control — a number field's allowed
    * range. When `error` is present it REPLACES the caption in this same
    * single-line slot, so the layout does not jump and the two never
-   * compete. Without a caption the error renders through Field as before.
+   * compete.
+   *
+   * A field that passes `error` but no caption owns the slot too, empty until
+   * there is a message — see `captionSlot` below for why the alternative was a
+   * press that silently did nothing.
    */
   caption?: string
   /**
@@ -198,6 +202,32 @@ export function TextField(props: TextFieldProps) {
   const descriptionId = () => (props.description ? `${inputId()}__desc` : undefined)
   const errorId = () => (props.error ? `${inputId()}__error` : undefined)
   const ariaDescribedBy = () => [descriptionId(), errorId()].filter(Boolean).join(' ') || undefined
+
+  /**
+   * Whether this field can ever show a validation message — read from whether
+   * the surface wrote an `error` prop at all, not from whether one is set now.
+   * A surface that wires validation writes it on every render; one that does
+   * not never writes it, so nothing at any call site has to be remembered.
+   *
+   * It decides whether the caption slot exists from the FIRST render, which is
+   * what makes revealing a message cost nothing in layout: the slot is out of
+   * flow above a reserved strip (text-field.css), so the message appears into
+   * space the field already owns. Without it a field with no caption fell
+   * through to Field's error line, which is IN flow and moves everything under
+   * it — and `blur` fires on MOUSEDOWN, so the form reflowed between a press
+   * and its release, the release landed on whatever had moved under the
+   * pointer, and the browser dispatched `click` on the nearest common ancestor
+   * instead of on the button. The button's handler never ran and the press did
+   * nothing at all (`nocx-n26p1`: `+ Add header`, pressed first in a dialog
+   * whose required Name field is focused and empty).
+   *
+   * This is the decision the caption slot was already built on — "never both,
+   * never a second line, so the field's height does not change" — extended
+   * from the fields that happen to carry a caption to every field that can
+   * carry a message.
+   */
+  const declaresError = 'error' in props
+  const captionSlot = (): string | undefined => props.caption ?? (declaresError ? '' : undefined)
 
   const [focused, setFocused] = createSignal(false)
   let fieldControl: HTMLInputElement | HTMLTextAreaElement | undefined
@@ -441,14 +471,20 @@ export function TextField(props: TextFieldProps) {
       {/* One caption slot beneath the control: the permanent caption, or the
           error in its place — never both, never a second line, so the field's
           height does not change when a value goes out of range. */}
-      <Show when={props.caption !== undefined}>
+      <Show when={captionSlot() !== undefined}>
+        {/* The slot carries the error's id while it is showing one, so the
+            control's `aria-describedby` names an element that exists. It did
+            not before: a captioned field's message has always been rendered
+            here, and `errorId()` has always pointed at a Field error line that
+            a captioned field never draws. */}
         <p
           class="ui-text-field__caption"
+          id={props.error !== undefined ? errorId() : undefined}
           data-align={props.captionAlign ?? 'start'}
           data-tone={props.error !== undefined ? 'error' : 'caption'}
           role={props.error !== undefined ? 'alert' : undefined}
         >
-          {props.error ?? props.caption}
+          {props.error ?? captionSlot()}
         </p>
       </Show>
     </>
@@ -464,7 +500,7 @@ export function TextField(props: TextFieldProps) {
   const hasFieldContent = () =>
     props.label !== undefined ||
     props.description !== undefined ||
-    (props.error !== undefined && props.caption === undefined) ||
+    (props.error !== undefined && captionSlot() === undefined) ||
     props.required === true
 
   return (
@@ -480,7 +516,7 @@ export function TextField(props: TextFieldProps) {
           for={inputId()}
           label={props.label}
           description={props.description}
-          error={props.caption !== undefined ? undefined : props.error}
+          error={captionSlot() !== undefined ? undefined : props.error}
           required={props.required}
         >
           {input()}

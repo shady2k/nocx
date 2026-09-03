@@ -359,14 +359,32 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     await page.locator(BODY).fill(MESSAGE_BODY)
     await page.locator(COMMIT).click()
 
-    // The commit ran ON THE REMOTE HOST, through that repository's own
-    // pre-commit hook: the marker exists there. The poll waits on the
-    // observable state, never on a duration.
-    await expect.poll(() => remoteFileExists(fixture, fixture.marker)).toBe(true)
+    // THE COMMIT'S CLOSING EVENT IS HEAD MOVING, and nothing earlier.
+    //
+    // The marker was the latch here and it is the wrong one: the hook writes
+    // it on its FIRST line and then prints about 88 KiB — 500 lines to stdout
+    // and 500 to stderr, which is the packet stress this fixture exists for
+    // (cmd/e2e-sshd/main.go). Git updates the branch only once a pre-commit
+    // hook has EXITED, so between the marker appearing and HEAD moving there
+    // is a whole hook's worth of output during which the repository still
+    // says `initial`. The poll returned in that interval and the next line
+    // read HEAD inside it: 263 passed, this one red, and the captured DOM
+    // showed a dead connection because the failure's own `finally` SIGKILLs
+    // the fixture before the trace is written (nocx-n1de1).
+    //
+    // So the poll waits on the state the assertion is about. It is still a
+    // state and not a duration, which is the rule that matters.
+    await expect
+      .poll(() => sshExec(fixture, `git -C '${fixture.repo}' log -1 --format=%B`), {
+        message: 'the commit never reached HEAD on the remote host',
+      })
+      .toBe(MESSAGE)
 
-    // HEAD's message is the exact message, byte for byte.
-    const head = sshExec(fixture, `git -C '${fixture.repo}' log -1 --format=%B`)
-    expect(head).toBe(MESSAGE)
+    // And the marker is then a fact about HOW it got there: the commit ran on
+    // the REMOTE machine, through that repository's own hook. Asserted absent
+    // before the commit and present after, it still cannot be satisfied by a
+    // stale file — it has simply stopped being the thing that says "done".
+    expect(remoteFileExists(fixture, fixture.marker)).toBe(true)
 
     // The commit touched exactly that one path.
     const committed = sshExec(

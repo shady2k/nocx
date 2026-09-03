@@ -399,6 +399,59 @@ var declarations = []Declaration{
 		OpensBlock:       true,
 	},
 	{
+		Name:        "session.wait",
+		Description: "Answer nocx when it tells you a command you started is still running and has gone quiet: \"continue\" keeps waiting on that same command, \"stop\" ends it. It never starts anything and never re-runs the command — reach for it only with a run id nocx gave you.",
+		// OBSERVE, AND THE `stop` DECISION IS NOT AN EXCEPTION TO IT. The
+		// question this tool exists to answer is worth restating before the
+		// argument: a continuation exercises no authority of its own. It
+		// cannot start anything, it carries no command, it names no session,
+		// and it can address exactly one execution — the one nocx itself
+		// named, in an answer to THIS run. Both decisions are answers about
+		// that execution and nothing else.
+		//
+		// `continue` plainly changes nothing. `stop` does signal a process
+		// group, which is not an observation by any reading of the word —
+		// but the group it signals is that of a command the person already
+		// authorized, and stopping it can only REDUCE what that command
+		// does. It cannot cause an effect this run was not already permitted
+		// to cause, and there is no argument by which withdrawing an effect
+		// already in flight needs more authority than causing it did. That
+		// is the same reason a person's own Stop on a running block is not
+		// policy-gated: stopping is the undoing of an authority, never the
+		// exercise of one.
+		//
+		// The alternative was declaring session.run's whole effect set, so
+		// the tool is offered exactly wherever session.run is. It is refused:
+		// WorstEffect would classify every continuation as
+		// mutate-destructive and raise an approval on each one — waking the
+		// person for precisely the question the model was handed so that
+		// nobody would be woken (ADR-0020 decision 2 as the owner settled it,
+		// nocx-6dzxq).
+		//
+		// The price of that choice is stated rather than hidden: a policy
+		// that refuses observe does not offer this tool, so such a run cannot
+		// answer the quiet bound and its parked command meets the wall clock
+		// instead. That is the honest outcome — a run forbidden to look at
+		// anything is not the run to ask a judgement of.
+		Effect:      []content.Effect{content.EffectObserve},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		// Like session.run: the transport's run lease is the sole execution
+		// bound, and a second deadline above it would end the continuation
+		// while the command it is waiting on is still bound by the lease.
+		Deadline:         0,
+		Cancellation:     CancellationReturnResult,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InRenderer,
+		Params:           "session.wait.schema.json",
+		Narrow:           narrowRunWait,
+		// The command's block was opened by session.run and IS the account
+		// of it. A continuation opens nothing: it keeps the line that says
+		// the call happened.
+		OpensBlock: false,
+	},
+	{
 		Name:             "files.edit",
 		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
 		Effect:           []content.Effect{content.EffectMutateReversible},

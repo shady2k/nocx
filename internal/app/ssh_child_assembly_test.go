@@ -623,10 +623,32 @@ func (h *sshChildHarness) completeParentAttempt(att lifecycle.AttemptID, code in
 	})
 }
 
+// suspendParent yields the lane and RETURNS ONLY ONCE THE KERNEL AGREES.
+//
+// The frame is written to the listener and applied by its pump, so sending is
+// not the same as having suspended, and the difference is not academic: a
+// caller that sends suspend, sends activate and then waits for Established is
+// waiting for a state the parent was ALREADY in before either frame landed.
+// That predicate is satisfied by the state it is supposed to be waiting past,
+// so it can return before the suspend has been applied at all — and the next
+// assertion then reads a parent the pump has just moved to Suspended.
+//
+// Four of this harness's five callers already wrote that wait themselves,
+// one of them with the comment "the suspend frame is processed by the
+// listener's pump; wait for it". The fifth did not, and it is the one where
+// the two frames are back to back with nothing between them:
+// TestLiveSshd_SSHChildAssembly_LateCandidateAfterParentActivation failed on
+// CI's macOS runner with "parent state after late hello = 3, want
+// Established" — 3 being DomainSuspended (nocx-x2nu0). So the wait lives here
+// now, where it cannot be the one thing a sixth caller forgets.
 func (h *sshChildHarness) suspendParent() {
+	h.t.Helper()
 	h.send(lifecycle.Event{
 		Kind:            lifecycle.KindDomainSuspended,
 		DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	})
+	waittest.WaitForTimeout(h.t, "parent Suspended", 15*time.Second, func() bool {
+		return h.domainState(h.parent) == lifecycle.DomainSuspended
 	})
 }
 
@@ -766,10 +788,6 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 	}
 
 	h.suspendParent()
-	// The suspend frame is processed by the listener's pump; wait for it.
-	waittest.WaitForTimeout(t, "parent Suspended", 10*time.Second, func() bool {
-		return h.domainState(h.parent) == lifecycle.DomainSuspended
-	})
 	if ls := h.laneSnapshot(); ls.Domain != "" {
 		t.Fatalf("lane has an active domain %q after the parent suspended, want none", ls.Domain)
 	}
@@ -854,9 +872,6 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 
 	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 	h.suspendParent()
-	waittest.WaitForTimeout(t, "parent Suspended", 10*time.Second, func() bool {
-		return h.domainState(h.parent) == lifecycle.DomainSuspended
-	})
 	// Suspension is not completion: the parent's block is still open, and it
 	// must stay open for the whole nested interval.
 	if a, _ := h.kernel.Attempt(parentAtt); a.State != lifecycle.AttemptOpen {

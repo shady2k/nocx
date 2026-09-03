@@ -241,6 +241,18 @@ type AskParams struct {
 	// honestly as an error — a declaration without its transport is a
 	// wiring gap, never a silent no-op.
 	Requester RendererRequester
+	// Expansions asks ONE live shell what the safe expansions in a proposed
+	// command currently read as, so the approval question can show the
+	// expanded form beside the verbatim one (nocx-4h0m7.5). The query never
+	// carries anything that would execute — the classification is syntactic
+	// and refuses `$(…)`, backticks, `<(…)`, `${VAR:=x}` and `${VAR:?msg}`
+	// before the query is built.
+	//
+	// Nil is the honest shape wherever our integration is not deployed —
+	// every remote host without it, and every session whose shell cannot be
+	// reached: nothing is expanded, every expansion is marked NOT ASKED with
+	// its reason, and the run is otherwise unaffected.
+	Expansions ExpansionSource
 	// NoteOperation and SnippetOperation are the existing guard-bound domain
 	// operations used by the Notes and Snippets panels. The assistant carries
 	// them as seams; it never owns a service or a second store implementation.

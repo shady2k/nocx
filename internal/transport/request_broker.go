@@ -203,6 +203,22 @@ type Broker struct {
 	runLeases       map[string]*runLease
 	runAttempts     map[string]string
 	runLeaseStarted map[string]bool
+	// parked holds requests whose caller stopped waiting WITHOUT
+	// withdrawing them (nocx-6dzxq): the renderer is still executing the
+	// command and will still answer, so the pending request stays armed and
+	// resolvable, and this map keeps the handle a later waiter resumes on.
+	// Distinct from pending on purpose — Resolve deletes the pending entry
+	// the moment an answer lands, and the answer must survive that in the
+	// channel's buffer until somebody comes back for it.
+	parked map[string]*parkedRequest
+}
+
+// parkedRequest is one request nobody is currently waiting on. It carries
+// only what a resumption needs: the kind (to withdraw with the right cancel
+// notification) and the buffered channel the resolution lands in.
+type parkedRequest struct {
+	kind RequestKind
+	ch   chan resolution
 }
 
 // pendingRequest tracks one in-flight request. It is resolvable from before
@@ -242,6 +258,7 @@ func NewBroker(conns Conns, deliver Deliver) *Broker {
 		runLeases:       make(map[string]*runLease),
 		runAttempts:     make(map[string]string),
 		runLeaseStarted: make(map[string]bool),
+		parked:          make(map[string]*parkedRequest),
 	}
 }
 
@@ -258,31 +275,59 @@ func NewBroker(conns Conns, deliver Deliver) *Broker {
 // delivery at all; a context cancelled after delivery withdraws the request
 // notification before returning.
 func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, result any) error {
+	_, err := b.RequestParkable(ctx, kind, params, result, nil)
+	return err
+}
+
+// ErrRequestParked is returned by RequestParkable and ResumeParked when the
+// caller's park channel fired before the resolution. It is NOT a failure and
+// NOT a withdrawal: the renderer was never told to cancel, the pending
+// request is still armed and still resolvable, and the returned request id
+// is the handle a later ResumeParked waits on. A parked request must be
+// resumed or withdrawn (withdrawParked) — leaving it is an orphan.
+var ErrRequestParked = errors.New("request parked: nobody is waiting on it and it was not withdrawn")
+
+// RequestParkable is Request with one extra ending. When park fires before
+// the resolution, the request is PARKED rather than withdrawn: no cancel
+// notification reaches the renderer, the pending request keeps its
+// recipients, and the buffered resolution channel keeps whatever answer
+// arrives until ResumeParked comes back for it.
+//
+// It exists for exactly one thing — ADR-0020 decision 2's renewable lease
+// (nocx-6dzxq). A quiet command must be ASKED ABOUT, not killed, and the
+// party being asked is the model, which can only be reached by returning
+// from the tool call it is inside. Returning without this ending would mean
+// cancelling the request's context, which is precisely how the broker is
+// told to withdraw the command. park is the seam that separates "stop
+// waiting" from "stop the command".
+//
+// A nil park channel is exactly Request: one fewer arm in the select.
+func (b *Broker) RequestParkable(ctx context.Context, kind RequestKind, params any, result any, park <-chan struct{}) (string, error) {
 	// A caller that is already terminal must not cause a delivery: the
 	// renderer would be asked to perform an effect for a request nobody is
 	// waiting for. Cancellation after this point is observed by the select
 	// below, which withdraws the pending request and returns ctx.Err().
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	if kind.Resolve == nil {
-		return fmt.Errorf("request kind %q has no resolve mapping", kind.NotifyMethod)
+		return "", fmt.Errorf("request kind %q has no resolve mapping", kind.NotifyMethod)
 	}
 	if kind.NoClientErr == nil {
-		return fmt.Errorf("request kind %q has no no-client error", kind.NotifyMethod)
+		return "", fmt.Errorf("request kind %q has no no-client error", kind.NotifyMethod)
 	}
 	if result == nil {
-		return errors.New("request result must be a non-nil pointer")
+		return "", errors.New("request result must be a non-nil pointer")
 	}
 
 	rid, ch, err := b.register(kind)
 	if err != nil {
-		return err
+		return "", err
 	}
 	payload, err := marshalWithRequestID(rid, params)
 	if err != nil {
 		b.drop(rid)
-		return fmt.Errorf("marshal request params: %w", err)
+		return "", fmt.Errorf("marshal request params: %w", err)
 	}
 
 	// The recipient snapshot is taken after the id exists but before any
@@ -292,7 +337,7 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 	recipients := b.conns()
 	if len(recipients) == 0 {
 		b.drop(rid)
-		return kind.NoClientErr
+		return "", kind.NoClientErr
 	}
 	// The handles must be comparable: the broker stores recipients in a map
 	// keyed by Conn, and an unhashable value would panic at the insert. A
@@ -301,7 +346,7 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 	for _, c := range recipients {
 		if !comparableConn(c) {
 			b.drop(rid)
-			return fmt.Errorf("request recipient %T is not comparable: the transport must hand the broker comparable connection handles", c)
+			return "", fmt.Errorf("request recipient %T is not comparable: the transport must hand the broker comparable connection handles", c)
 		}
 	}
 
@@ -334,8 +379,17 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 		timerC = timer.C
 	}
 
+	return rid, b.await(ctx, rid, kind, ch, timerC, park, result)
+}
+
+// await is the one wait every ending is decided in: the resolution, the
+// kind's timeout, the caller's context, and the park signal. It is shared by
+// the first wait and by every resumption, so a parked request cannot end in
+// a way an un-parked one could not.
+func (b *Broker) await(ctx context.Context, rid string, kind RequestKind, ch chan resolution, timerC <-chan time.Time, park <-chan struct{}, result any) error {
 	select {
 	case res := <-ch:
+		b.forgetParked(rid)
 		if res.err != nil {
 			return res.err
 		}
@@ -344,12 +398,89 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 		}
 		return nil
 	case <-timerC:
+		b.forgetParked(rid)
 		b.cancel(rid, kind)
 		return ErrRequestTimedOut
+	case <-park:
+		// NOT a withdrawal. The pending request keeps its recipients and
+		// stays resolvable; only the waiting stops. The answer, whenever it
+		// comes, lands in ch's buffer and waits there.
+		b.mu.Lock()
+		b.parked[rid] = &parkedRequest{kind: kind, ch: ch}
+		b.mu.Unlock()
+		return ErrRequestParked
 	case <-ctx.Done():
+		b.forgetParked(rid)
 		b.cancel(rid, kind)
 		return ctx.Err()
 	}
+}
+
+// ResumeParked waits again on a request that was parked. It is the second
+// half of RequestParkable's park ending and takes the same four endings,
+// including parking again — a model may answer "keep waiting" more than
+// once, and each answer is one more wait, never a new command.
+//
+// An unknown id is an honest error rather than a hang: the request was
+// already resolved, withdrawn, or never parked.
+func (b *Broker) ResumeParked(ctx context.Context, rid string, result any, park <-chan struct{}) error {
+	if result == nil {
+		return errors.New("request result must be a non-nil pointer")
+	}
+	b.mu.Lock()
+	p, ok := b.parked[rid]
+	b.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrParkedRequestUnknown, rid)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var timerC <-chan time.Time
+	if p.kind.Timeout > 0 {
+		timer := time.NewTimer(p.kind.Timeout)
+		defer timer.Stop()
+		timerC = timer.C
+	}
+	return b.await(ctx, rid, p.kind, p.ch, timerC, park, result)
+}
+
+// ErrParkedRequestUnknown is ResumeParked's answer for an id that is not
+// parked: already resolved, already withdrawn, or never real. The same
+// honest answer Resolve gives an unknown id, and never a wait.
+var ErrParkedRequestUnknown = errors.New("no parked request with that id")
+
+// withdrawParked ends a parked request from OUTSIDE — the run's wall-clock
+// ceiling expired while the model was being asked, the model answered
+// "stop", or the turn that owned it ended. The pending request is dropped,
+// the renderer is told to cancel, and err is left in the channel so a
+// resumption that arrives anyway reads the real outcome instead of hanging.
+// Reports whether a parked request was actually there.
+func (b *Broker) withdrawParked(rid string, err error) bool {
+	b.mu.Lock()
+	p, ok := b.parked[rid]
+	if !ok {
+		b.mu.Unlock()
+		return false
+	}
+	delete(b.parked, rid)
+	b.mu.Unlock()
+	b.cancel(rid, p.kind)
+	select {
+	case p.ch <- resolution{err: err}:
+	default:
+		// The renderer's own answer beat the withdrawal into the buffer.
+		// It is the truer outcome and it stays.
+	}
+	return true
+}
+
+// forgetParked drops a park record without touching the request: the wait
+// ended some other way and there is nothing left to resume.
+func (b *Broker) forgetParked(rid string) {
+	b.mu.Lock()
+	delete(b.parked, rid)
+	b.mu.Unlock()
 }
 
 // Pending reports how many requests are currently in flight. A test's

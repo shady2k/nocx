@@ -433,6 +433,13 @@ func (n *Number) Options() []SelectOption { return nil }
 func (n *Number) Min() *float64           { return n.min }
 func (n *Number) Max() *float64           { return n.max }
 
+// DefaultValue is Default() in the type the number was declared with. It
+// exists so a package that must hold a fallback for a number setting — the
+// transport's run lease, when no settings registry is wired at all — reads
+// the declared default rather than restating it, and the two can never drift
+// apart (AGENTS.md: one owner per behaviour).
+func (n *Number) DefaultValue() float64 { return n.default_ }
+
 func (n *Number) toDeclaration() Declaration {
 	return Declaration{
 		Key:         n.key,
@@ -950,6 +957,57 @@ var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
 	Description: "Open the thinking note on every answer instead of leaving it collapsed. You can still close any single note by clicking it, and a model that returns no thinking still shows nothing at all.",
 	DataClass:   PublicConfig,
 	Default:     false,
+})
+
+// ── The two ceilings a command the assistant runs is bound by ──────────
+//
+// ADR-0020 decision 2 gives every agent execution a wall-clock deadline
+// ("renewable, with a bounded ceiling") and a SEPARATE inactivity deadline,
+// because silence is a different failure from slowness. Both numbers used to
+// be constants in internal/transport, and the owner met the consequence: `df`
+// against a stuck mount printed nothing for two minutes and was killed, while
+// a chatty eight-minute build survived. The bound was doing exactly what it
+// was written to do; nobody had ever been asked what the number should be.
+//
+// So both are the person's, here, declared beside every other number. The
+// transport reads them WHEN A RUN STARTS (internal/transport/run_lease.go,
+// effectiveRunLease), so changing one changes what the next command is bound
+// by and never moves a bound under a command already running.
+//
+// THE CEILING IS A CEILING. The model may ask for a shorter quiet bound on
+// its own call and gets it; a call asking for a longer one is clamped to the
+// number here and told so. Nothing the model does — including answering "keep
+// waiting" forever — can carry a command past the wall clock below.
+
+// AgentRunWallClockMinutes is the outer bound of one command the assistant
+// runs: from the request to the resolution, reset by nothing. When it is
+// reached the command is signalled INT → TERM → KILL and the run says so.
+var AgentRunWallClockMinutes = MustRegisterNumber(NumberSpec{
+	Key:         "assistant.runWallClockMinutes",
+	Section:     "Answers",
+	Label:       "Stop an assistant's command after",
+	Description: "The longest one command the assistant runs may take, counted from when it starts and reset by nothing. When it is reached the command is stopped and the assistant is told which bound ended it. The assistant can ask for less on a single command; it can never ask for more than this.",
+	DataClass:   PublicConfig,
+	Default:     10,
+	Min:         fp(1),
+	Max:         fp(240),
+	Unit:        "minutes",
+})
+
+// AgentRunQuietMinutes is the SILENCE bound: how long a command may print
+// nothing before nocx asks the model — not the person — whether to keep
+// waiting. It is reset by every byte of output, which is what makes it a
+// different question from the wall clock above.
+var AgentRunQuietMinutes = MustRegisterNumber(NumberSpec{
+	Key:         "assistant.runQuietMinutes",
+	Section:     "Answers",
+	Label:       "Ask about a silent command after",
+	Description: "How long a command the assistant runs may print nothing before nocx asks the assistant whether it is still worth waiting for. The command is not stopped: the assistant answers, and it is the assistant — not you — that is interrupted. The timer restarts on every line the command prints, so a slow but talkative command never reaches it.",
+	DataClass:   PublicConfig,
+	Default:     10,
+	Min:         fp(1),
+	Max:         fp(240),
+	Unit:        "minutes",
 })
 
 // The sidebar's width used to be registered here as `sidebar.width`. It is

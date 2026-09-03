@@ -371,7 +371,7 @@ type testSrv struct {
 func (s *testSrv) URL() string  { return s.url }
 func (s *testSrv) Close() error { return nil }
 
-func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness {
+func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServerOption) *runLeaseHarness {
 	t.Helper()
 	fake, srv := newRunToolCallingServer("")
 	t.Cleanup(srv.Close)
@@ -425,6 +425,9 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 		WithLifecyclePublisher(pub),
 		WithRunLease(leaseCfg),
 	)
+	for _, opt := range extra {
+		opt(ws)
+	}
 	pub.SetEmitter(ws)
 	if err := ws.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -808,10 +811,23 @@ func TestRunLease_ConnectionLossKillsCommandAndRecordsTransportGone(t *testing.T
 // A silent command — no output for the inactivity bound — is terminalized
 // for INACTIVITY, and the ledger says so. The wall-clock is far longer, so
 // only the silence can explain the outcome.
-func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
+// THE DEFECT THIS TEST USED TO GUARANTEE (nocx-6dzxq). It asserted that a
+// command silent past the inactivity bound was terminalized and that the
+// ledger said "inactivity" — which is precisely what killed the owner's
+// healthy `df` after two minutes of normal silence. Silence is now a
+// QUESTION put to the model, so the assertions are inverted: the command is
+// still alive, no inactivity reason was ever written, and the model was
+// asked.
+//
+// It keeps the shape it had — a real child, a real pty — and adds the case
+// nothing else covers: the model is asked and simply does not answer. The
+// run stays parked, and the command STAYS ALIVE rather than being killed for
+// being quiet. Its ceiling is what will eventually end it; that is proven
+// deterministically in run_lease_park_test.go.
+func TestRunLease_AQuietCommandIsNotKilledAndTheModelIsAsked(t *testing.T) {
 	h := newRunLeaseHarness(t, RunLeaseConfig{
-		WallClock:   60 * time.Second, // cannot explain the outcome
-		Inactivity:  1500 * time.Millisecond,
+		WallClock:   60 * time.Second, // far away: it cannot explain anything here
+		Inactivity:  700 * time.Millisecond,
 		SignalGrace: 200 * time.Millisecond,
 	})
 	h.createEndpointAt()
@@ -831,6 +847,8 @@ func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	waitChildAlive(t, pid)
 
 	// The echo above broke the silence once; then nothing for the bound.
+	// The default fake model does not answer the question — it just writes
+	// its answer — so the run is left parked.
 	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
@@ -838,14 +856,15 @@ func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
-	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "inactivity") {
-		t.Fatalf("model request after lease = %v, want the inactivity tool result", h.fake.bodies)
+	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "STILL RUNNING") {
+		t.Fatalf("model request after the quiet bound = %v, want the still-running question", h.fake.bodies)
 	}
-	waitChildDead(t, pid)
+	// THE ASSERTION THAT IS THE WHOLE BEAD: the command is still running.
+	waitChildAlive(t, pid)
 
 	reason := terminationReasonOfRun(t, h)
-	if reason == nil || *reason != content.TermInactivity {
-		t.Fatalf("ledger termination = %v, want inactivity — silence is a different failure from slowness", reason)
+	if reason != nil && *reason == content.TermInactivity {
+		t.Fatal("the ledger recorded an inactivity termination: silence must no longer end a command")
 	}
 }
 

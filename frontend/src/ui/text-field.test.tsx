@@ -239,10 +239,37 @@ describe('TextField number variance: unit and caption slot (nocx-w7h.7)', () => 
     expect(container.querySelector('.ui-field-error')).toBeNull()
   })
 
-  it('without a caption, the error still renders through Field as before', () => {
-    const { container } = subject({ error: 'Required' })
-    expect(container.querySelector('.ui-field-error')?.textContent).toBe('Required')
+  it('a field that declares an error owns a caption slot before there is one', () => {
+    // The slot exists from the first render, empty, because that is what makes
+    // the message cost nothing in layout when it arrives: it is out of flow
+    // above a strip the field already reserves. A surface that wires no
+    // validation writes no `error` prop and gets no slot.
+    const quiet = subject({ error: undefined })
+    expect(quiet.container.querySelector('.ui-text-field__caption')?.textContent).toBe('')
+
+    const loud = subject({ error: 'Required' })
+    expect(loud.container.querySelector('.ui-text-field__caption')?.textContent).toBe('Required')
+    // Field must not render a second message beside the slot that owns it.
+    expect(loud.container.querySelector('.ui-field-error')).toBeNull()
+  })
+
+  it('a field with no validation wiring has no slot at all', () => {
+    const { container } = render(() => <TextField id="plain" label="Name" value="x" />)
     expect(container.querySelector('.ui-text-field__caption')).toBeNull()
+  })
+
+  // The uncaptioned half of the no-jump property, and the one nocx-n26p1 was
+  // bought by. `blur` fires on MOUSEDOWN, so a message that arrives in flow
+  // reflows the form between a press and its release: the release lands on
+  // whatever moved under the pointer, the browser dispatches `click` on the
+  // nearest common ancestor rather than on the button, and the button's
+  // handler never runs. Same element tree in both states, same box.
+  it('a validated field keeps the same structure when its message appears', () => {
+    const quiet = subject({ error: undefined })
+    const loud = subject({ error: 'Required' })
+    const shape = (c: Element) =>
+      [...c.querySelectorAll('*')].map((e) => e.tagName + '.' + (e.className || '')).join(' > ')
+    expect(shape(loud.container)).toBe(shape(quiet.container))
   })
 
   // "No jump" is a claim about the box, and jsdom has no boxes — so the
@@ -288,7 +315,7 @@ describe('composition with Field', () => {
       <TextField id="cred-x" value="x" error="Required" onInput={() => {}} />
     ))
     expect(container.querySelector('label')).toBeNull()
-    expect(container.querySelector('.ui-field-error')?.textContent).toBe('Required')
+    expect(container.querySelector('.ui-text-field__caption')?.textContent).toBe('Required')
   })
 
   it('still labels the control when a label is given', () => {

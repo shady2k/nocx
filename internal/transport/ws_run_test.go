@@ -34,6 +34,13 @@ type runToolCallingServer struct {
 	requests atomic.Int64
 	bodies   []string
 	args     string
+	// script, when set, decides what the model does on each request: which
+	// tool it calls with which arguments, or nothing at all (it answers).
+	// It exists for the quiet bound's continuation (nocx-6dzxq), where the
+	// model must make a SECOND call whose argument it reads out of the
+	// FIRST call's result — which the fixed one-call shape above cannot
+	// express, because the run id is minted at run time.
+	script func(n int64, body string) (tool, args string, call bool)
 }
 
 func newRunToolCallingServer(args string) (*runToolCallingServer, *httptest.Server) {
@@ -42,6 +49,15 @@ func newRunToolCallingServer(args string) (*runToolCallingServer, *httptest.Serv
 		body, _ := io.ReadAll(r.Body)
 		n := s.requests.Add(1)
 		s.bodies = append(s.bodies, string(body))
+		if s.script != nil {
+			tool, args, call := s.script(n, string(body))
+			if call {
+				streamToolCallChunk(w, tool, args)
+				return
+			}
+			streamOKChunks(w)
+			return
+		}
 		if n == 1 {
 			streamToolCallChunk(w, "session.run", s.args)
 			return

@@ -91,6 +91,23 @@
  * NOW, and a shell can `cd` between the question and the answer. Binding an
  * effect to its preconditions is nocx-d6gn4.1 and is not claimed here.
  *
+ * AND A FOURTH ANSWER, WHICH IS NOT A FOURTH WIDTH (nocx-4yjwk.1, design
+ * §5.3). The three widths all answer "how long"; none of them moves the bound
+ * that excluded a resource. So a call refused because a path fell outside a
+ * row's scopes could be allowed `once` and would ask again on the next
+ * identical call, for ever, because nothing widened what excluded it. When
+ * the wire carries `outOfScope`, the question is that one, and `expand` is
+ * the answer that settles it: it widens the effect row's scopes to cover the
+ * resource that fell outside AND approves this call, as ONE act.
+ *
+ * The OFFER is read off the wire, never re-derived from `outOfScope.cause`.
+ * The backend applies a widening, so the backend is what says whether it can
+ * be given — the same rule that keeps the effect off this surface. Where the
+ * bound is an immutable fence the backend sends no offer and a reason
+ * instead, and the reason is on screen: a window that hit a bound and said
+ * nothing about it would leave a person answering a question whose yes the
+ * layer below refuses.
+ *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
  * will. It does NOT promise the domain is untouched: a permitted sibling
@@ -225,6 +242,13 @@ const approvalScopeCoverage = (
       return `${covered} — until this terminal session ends`
     case 'always':
       return `${covered} — in every session, from now on`
+    case 'expand':
+      // The widening does not save an invocation rule, so it does NOT read
+      // `standing.rule`: what it edits is the effect ROW's scopes, and the
+      // row is named by its effect. The resource it grows to cover is named
+      // by the label beside this sentence, so "it" here is that resource and
+      // never anything the surface derived for itself.
+      return `${effectLabel} may then reach it, in every session, from now on`
   }
 }
 
@@ -481,8 +505,49 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const offeredScopes = () =>
     SCOPES.filter(({ scope }) => scope === 'once' || ask().standing.available)
 
+  /**
+   * The fact that a resource fell outside a bound, or null when nothing did
+   * — the ordinary question, which this whole section leaves untouched.
+   */
+  const outOfScope = () => ask().outOfScope ?? null
+
+  /**
+   * Whether the widening answer may be OFFERED, read off the wire and never
+   * re-derived from `cause`. The backend is what applies a widening, so the
+   * backend is what says whether it can be given: a surface that inferred
+   * "row-scope means offer" would put a yes on screen that the layer below
+   * refuses, which is the failure this whole shape exists to remove (design
+   * §5.3, ADR-0028 decision 4 — the effect never comes from this side).
+   */
+  const wideningOffered = () => outOfScope()?.widening.available === true
+
+  /**
+   * Why no widening can be offered, when the backend said so — an immutable
+   * fence, most often. A person who can see that a bound was hit is owed the
+   * fact that this window cannot move it; the alternative is a question they
+   * answer and a call that fails anyway.
+   */
+  const wideningRefused = () => {
+    const fact = outOfScope()
+    if (fact === null || fact.widening.available) return ''
+    return fact.widening.reason
+  }
+
+  /** The resource the row would have to grow to cover, in the backend's own
+   *  words. The surface prints the id it was given and derives nothing from
+   *  the arguments — the widening is applied from the QUESTION. */
+  const wideningResource = () => outOfScope()?.resource.id ?? ''
+
+  /**
+   * One label builder for every answer, because two would be two spellings
+   * of one concept. `expand` is not a fourth WIDTH — the three widths answer
+   * "how long", and this one answers "over what" — so its words are built
+   * from the resource rather than looked up in SCOPES.
+   */
   const answerLabel = (verb: string, scope: ApprovalScope) =>
-    `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
+    scope === 'expand'
+      ? `${verb} and widen to ${wideningResource()}`
+      : `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
 
   const answerAriaLabel = (verb: string, scope: ApprovalScope) =>
     `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing, effectLabel())}`
@@ -545,6 +610,36 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <>
             {group(true, 'Allow', 'primary')}
             {group(false, 'Deny', 'danger')}
+            {/*
+              The widening answer sits LAST, in a group of its own, and that
+              placement is the argument. It belongs to neither row: it is
+              broader than `always` in the axis it moves — it edits the effect
+              row's own scopes, which is administration and not a width — and
+              narrower in another, since it grows the row by exactly the one
+              resource that fell outside. Putting it in the Allow row would
+              read as a fourth width and would sit where a hurried person's
+              eye already is; last and named is where a deliberate answer
+              belongs. It is never focused on open either way, because Prompt
+              puts the caret on the first enabled button and that is still
+              `Allow once` (the reason SCOPES leads with it).
+
+              There is no Deny twin: a widening is an approval, and the wire
+              refuses `expand` on a decline. Denying is what the Deny row
+              already does.
+            */}
+            <Show when={wideningOffered()}>
+              <ActionGroup ariaLabel="Allow this action and widen what it may reach">
+                <Button
+                  variant="default"
+                  secondary={`— ${approvalScopeCoverage('expand', ask().standing, effectLabel())}`}
+                  disabled={props.busy}
+                  ariaLabel={answerAriaLabel('Allow', 'expand')}
+                  onClick={() => props.onDecide(true, 'expand')}
+                >
+                  {answerLabel('Allow', 'expand')}
+                </Button>
+              </ActionGroup>
+            </Show>
           </>
         </Show>
       }
@@ -636,6 +731,16 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           does not promise the terminal is untouched — a permitted call earlier in this batch may
           already have run.
         </p>
+        <Show when={wideningRefused() !== ''}>
+          {/*
+            A bound was hit and no answer here can move it. The sentence sits
+            with the answers rather than among the facts because it is about
+            what this window can and cannot do — a person who reads the row
+            and then finds no widening answer must be told which bounds are
+            immovable from here, or they will read the absence as an omission.
+          */}
+          <p>{wideningRefused()}</p>
+        </Show>
         <Show when={ask().reason === 'policy' && ask().standing.available}>
           <p>
             An answer in this session lasts until this terminal session ends; restarting the shell

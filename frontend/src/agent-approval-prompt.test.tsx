@@ -24,6 +24,7 @@
  * claim the domain is untouched.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { createSignal } from 'solid-js'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { AgentApprovalPrompt } from './agent-approval-prompt'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
@@ -955,5 +956,180 @@ describe('AgentApprovalPrompt — what the command’s variables read as (nocx-4
     })
     expect(container.querySelectorAll('.ui-code-block')).toHaveLength(1)
     expect(names(container)).not.toContain('$HOME')
+  })
+})
+
+/**
+ * The fourth answer (nocx-4yjwk.1, design §5.3). A call refused because a
+ * resource fell outside a row's scopes cannot be settled by any of the three
+ * WIDTHS: `once`, `session` and `always` all answer "how long", and none of
+ * them moves the bound that excluded the resource — so the same call asks
+ * again on the next turn, for ever. `expand` is the answer that does, and it
+ * widens and approves as one act.
+ *
+ * Everything here drives the BUTTON. A test that called `onDecide` directly
+ * would pass against a prompt that renders no fourth answer at all, which is
+ * the entire defect (AGENTS.md testing rule 1).
+ */
+describe('AgentApprovalPrompt — the widening answer (nocx-4yjwk.1)', () => {
+  afterEach(cleanup)
+
+  /** A resource that fell outside an operator's own row selector, which is
+   *  editable — so the backend says the widening may be offered. */
+  const WIDENABLE_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    arguments: '{"path":"/repo/secrets/b.txt"}',
+    resource: { kind: 'path', id: '/repo/secrets/b.txt' },
+    outOfScope: {
+      cause: 'row-scope',
+      resource: { kind: 'path', id: '/repo/secrets/b.txt' },
+      widening: { available: true, reason: '' },
+    },
+  }
+
+  /** The same shape outside an immutable fence: no answer can move it, so
+   *  the backend offers nothing and says why instead. */
+  const FENCED_ASK: AgentApprovalRequested = {
+    ...WIDENABLE_ASK,
+    outOfScope: {
+      cause: 'fence',
+      resource: { kind: 'path', id: '/repo/secrets/b.txt' },
+      widening: {
+        available: false,
+        reason:
+          'this path is outside the run fence, which no answer here can move — start a run with wider bounds',
+      },
+    },
+  }
+
+  const widenButton = (container: HTMLElement): HTMLButtonElement | null =>
+    (Array.from(container.querySelectorAll('.ui-button')).find((b) =>
+      (b.textContent ?? '').startsWith('Allow and widen to'),
+    ) as HTMLButtonElement | undefined) ?? null
+
+  it('offers a fourth answer when the backend says the widening is available', () => {
+    const { container } = renderPrompt({ ask: WIDENABLE_ASK })
+    const widen = widenButton(container)
+    expect(widen).not.toBeNull()
+    // Enabled from the state a person OPENS the prompt in — an answer that
+    // needs another click first is not an answer they can give.
+    expect(widen!.disabled).toBe(false)
+  })
+
+  it('answers with the direction AND the widening scope, in one act', () => {
+    const { decisions, onDecide } = recordDecisions()
+    const { container } = renderPrompt({ ask: WIDENABLE_ASK, onDecide })
+    fireEvent.click(widenButton(container)!)
+    expect(decisions).toEqual([[true, 'expand']])
+  })
+
+  it('names the resource that fell outside, in the backend’s own words', () => {
+    const { container } = renderPrompt({ ask: WIDENABLE_ASK })
+    expect(widenButton(container)!.textContent).toContain('/repo/secrets/b.txt')
+    // …and the accessible name says what widening costs, not only what it does.
+    expect(widenButton(container)!.getAttribute('aria-label')).toBe(
+      'Allow and widen to /repo/secrets/b.txt — read and inspect may then reach it, in every session, from now on',
+    )
+  })
+
+  /**
+   * The offer is READ off the wire and never re-derived from `cause`: the
+   * backend applies the answer, so the backend is what says whether it can be
+   * given (ADR-0028 decision 4). A prompt that inferred "row-scope means
+   * offer" would offer a yes the layer below refuses.
+   */
+  it('offers nothing when the widening is unavailable, and says why instead', () => {
+    const { container } = renderPrompt({ ask: FENCED_ASK })
+    expect(widenButton(container)).toBeNull()
+    expect(container.textContent).toContain(
+      'this path is outside the run fence, which no answer here can move',
+    )
+  })
+
+  it('does not re-derive the offer from the cause', () => {
+    // cause 'row-scope' — the editable one — with the offer withheld. The
+    // surface must follow `available`, not the cause it usually accompanies.
+    const { container } = renderPrompt({
+      ask: {
+        ...WIDENABLE_ASK,
+        outOfScope: {
+          cause: 'row-scope',
+          resource: { kind: 'path', id: '/repo/secrets/b.txt' },
+          widening: { available: false, reason: 'this row is managed and cannot be widened here' },
+        },
+      },
+    })
+    expect(widenButton(container)).toBeNull()
+    expect(container.textContent).toContain('this row is managed and cannot be widened here')
+  })
+
+  it('leaves an ordinary policy question exactly as it was', () => {
+    const { container } = renderPrompt({ ask: STANDING_ASK })
+    expect(container.querySelectorAll('.ui-button')).toHaveLength(6)
+    expect(widenButton(container)).toBeNull()
+    expect(container.textContent).not.toContain('widen')
+  })
+
+  it('leaves an egress question exactly as it was', () => {
+    const { container } = renderPrompt({ ask: EGRESS_ASK })
+    expect(container.querySelectorAll('.ui-button')).toHaveLength(2)
+    expect(widenButton(container)).toBeNull()
+    expect(container.textContent).not.toContain('widen')
+  })
+
+  /**
+   * A widening is administrative and reaches further than any of the three
+   * widths in the axis it moves. It must never be what a hurried person lands
+   * on: Prompt puts the caret on the first enabled button, and that is still
+   * `Allow once`.
+   */
+  it('is not what the prompt focuses on open', () => {
+    const { container } = renderPrompt({ ask: WIDENABLE_ASK })
+    const widen = widenButton(container)
+    // Assert the answer is THERE before asserting where the caret is not:
+    // a prompt that renders no fourth answer would satisfy the second half
+    // of this test for the wrong reason.
+    expect(widen).not.toBeNull()
+    expect(document.activeElement).not.toBe(widen)
+    expect((document.activeElement as HTMLElement)?.textContent).toContain('Allow once')
+  })
+
+  /**
+   * A widening that did not stick must not leave the call resumed, so
+   * `agent.approve` with scope `expand` can come back an RPC ERROR rather
+   * than a warning. The caller's failure path (main.tsx) keeps the question
+   * queued and lowers `busy`; what this surface owes is that the question is
+   * then ANSWERABLE AGAIN — still open, every answer enabled.
+   */
+  it('a failed decide leaves the question answerable', async () => {
+    const [busy, setBusy] = createSignal(false)
+    let rejected: (() => void) | null = null
+    const onDecide = () => {
+      setBusy(true)
+      // What decideApproval does with a refusal: the question is NOT
+      // dequeued, the toast reports it, and busy falls again.
+      rejected = () => setBusy(false)
+    }
+    const { container } = render(() => (
+      <AgentApprovalPrompt open ask={WIDENABLE_ASK} busy={busy()} onDecide={onDecide} />
+    ))
+    fireEvent.click(widenButton(container)!)
+    expect(
+      Array.from(container.querySelectorAll('.ui-button')).every(
+        (b) => (b as HTMLButtonElement).disabled,
+      ),
+    ).toBe(true)
+
+    rejected!()
+    await Promise.resolve()
+
+    // Still open, and every answer — the widening included — can be given again.
+    expect(container.querySelector('.ui-prompt')).not.toBeNull()
+    expect(widenButton(container)).not.toBeNull()
+    expect(
+      Array.from(container.querySelectorAll('.ui-button')).some(
+        (b) => (b as HTMLButtonElement).disabled,
+      ),
+    ).toBe(false)
   })
 })

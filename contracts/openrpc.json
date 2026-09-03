@@ -7697,6 +7697,55 @@
       }
     },
     {
+      "name": "skills.install",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/skills.install.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "skills.installResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/skills.install.schema.json"
+        }
+      }
+    },
+    {
       "name": "skills.list",
       "params": [
         {
@@ -10327,6 +10376,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/skills.approve.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/skills.install.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/skills.list.schema.json"

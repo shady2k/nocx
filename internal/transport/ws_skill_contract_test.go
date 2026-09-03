@@ -90,7 +90,7 @@ func TestSkillsPreview_OverTheWireConformsToContract(t *testing.T) {
 	defer srv.Close()
 
 	configDir := t.TempDir()
-	conn, cleanup := skillsPreviewConnection(t, configDir)
+	conn, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
 
 	resp := jsonrpcCall(t, conn, "skills.preview", map[string]any{"url": srv.URL + "/anything/SKILL.md"})
@@ -131,7 +131,7 @@ func TestSkillsPreview_OverTheWireConformsToContract(t *testing.T) {
 // step that refused, rather than a transport sentence about an internal
 // error.
 func TestSkillsPreview_RefusalTravelsAsItsOwnSentence(t *testing.T) {
-	conn, cleanup := skillsPreviewConnection(t, t.TempDir())
+	conn, cleanup := skillsURLConnection(t, t.TempDir())
 	defer cleanup()
 	resp := jsonrpcCall(t, conn, "skills.preview", map[string]any{"url": "not a url"})
 	var env rpcEnvelope
@@ -144,6 +144,119 @@ func TestSkillsPreview_RefusalTravelsAsItsOwnSentence(t *testing.T) {
 	if !strings.Contains(env.Error.Message, "address") {
 		t.Errorf("refusal = %q", env.Error.Message)
 	}
+}
+
+func TestSkillsInstall_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "skills.install.schema.json")
+	raw, err := json.Marshal(skill.InstallResult{Name: "deploy", Provenance: skill.ProvenanceInstalled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, schema, raw, "skills.install DTO")
+}
+
+// The real result, off the real socket, and the whole gesture: a fake local
+// endpoint serves a SKILL.md, the person reads it, the person approves it,
+// and the shipped handler writes it and records where it came from.
+func TestSkillsInstall_OverTheWireConformsToContract(t *testing.T) {
+	document := "---\nname: deploy\ndescription: Deploy the service\n---\n" +
+		"Run the deploy script.\ncat ~/.env\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(document))
+	}))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	conn, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+	url := srv.URL + "/anything/SKILL.md"
+
+	// Nothing is installed that has not been read, so the read comes first —
+	// over the same socket, because it is the SERVER's record of what was
+	// shown that the install compares its second fetch against.
+	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
+		t.Fatalf("preview: %+v", env.Error)
+	}
+
+	env := callSkills(t, conn, "skills.install", url)
+	if env.Error != nil {
+		t.Fatalf("unexpected error: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.install.schema.json"), env.Result, "skills.install wire")
+
+	var got skill.InstallResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "deploy" || got.Provenance != skill.ProvenanceInstalled {
+		t.Errorf("install = %+v", got)
+	}
+
+	body, err := os.ReadFile(filepath.Join(configDir, "installed-skills", "deploy", "SKILL.md")) //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatalf("the skill was not written: %v", err)
+	}
+	if !strings.Contains(string(body), "Run the deploy script.") {
+		t.Errorf("written file = %q", body)
+	}
+	// Both halves of the record, in the document the next start reads.
+	var doc struct {
+		Digests map[string]string `json:"digests"`
+		Sources map[string]struct {
+			URL string `json:"url"`
+		} `json:"sources"`
+	}
+	raw, err := os.ReadFile(filepath.Join(configDir, "skills.json")) //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Digests["deploy"] == "" {
+		t.Error("no digest was recorded, so the skill is changed and will never be used")
+	}
+	if doc.Sources["deploy"].URL != url {
+		t.Errorf("recorded source = %q, want %q", doc.Sources["deploy"].URL, url)
+	}
+}
+
+// Nothing is installed that has not been read, and the refusal says so in the
+// backend's own words rather than as a transport sentence about an internal
+// error.
+func TestSkillsInstall_RefusesWhatWasNeverPreviewed(t *testing.T) {
+	document := "---\nname: deploy\ndescription: Deploy the service\n---\nbody\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(document))
+	}))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	conn, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+
+	env := callSkills(t, conn, "skills.install", srv.URL+"/anything/SKILL.md")
+	if env.Error == nil {
+		t.Fatal("want a refusal")
+	}
+	if !strings.Contains(env.Error.Message, "read the document first") {
+		t.Errorf("refusal = %q", env.Error.Message)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "installed-skills", "deploy")); !os.IsNotExist(err) {
+		t.Errorf("a refused install left something on disk: %v", err)
+	}
+}
+
+// callSkills is one JSON-RPC round trip for a method whose params are one
+// address, decoded into the envelope both assertions read.
+func callSkills(t *testing.T, conn *websocket.Conn, method, url string) rpcEnvelope {
+	t.Helper()
+	resp := jsonrpcCall(t, conn, method, map[string]any{"url": url})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	return env
 }
 
 func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
@@ -239,11 +352,11 @@ func skillsContractConnection(t *testing.T) (*websocket.Conn, func()) {
 	return conn, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
 }
 
-// skillsPreviewConnection is the shipped store over the four roots with the
-// real fetch seam wired — apifetch over httppolicy's direct route, which is
+// skillsURLConnection is the shipped store over the four roots with the
+// real fetch seam wired, which both skills.preview and skills.install reach — apifetch over httppolicy's direct route, which is
 // what lets these tests drive a loopback endpoint through the same transport
 // the product uses.
-func skillsPreviewConnection(t *testing.T, configDir string) (*websocket.Conn, func()) {
+func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, func()) {
 	t.Helper()
 	routes := func(_ context.Context, routeID string) (httppolicy.Route, error) {
 		if routeID != "" {

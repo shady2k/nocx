@@ -12,11 +12,17 @@ type skillSettingsSource interface {
 	SetEnabled(name string, enabled bool) error
 	Remove(name string) error
 	Approve(name string) error
-	// Preview is the only method here that reaches the network, and it is
-	// person-initiated: it fetches the document at a URL, parses it, refuses
-	// what it must, scans it and answers. It writes nothing, so a refusal
-	// leaves the library exactly as it was.
+	// Preview is one of the two methods here that reach the network, and both
+	// are person-initiated: it fetches the document at a URL, parses it,
+	// refuses what it must, scans it and answers. It writes nothing, so a
+	// refusal leaves the library exactly as it was.
 	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
+	// Install adopts the document at a URL the person has just read. It
+	// fetches it AGAIN and compares against what the preview showed, because
+	// a body that made a round trip through the renderer is a body that could
+	// have changed on the way back — which is why the params carry the
+	// address and nothing else.
+	Install(ctx context.Context, url string) (skill.InstallResult, error)
 }
 
 type skillSetEnabledParams struct {
@@ -28,7 +34,11 @@ type skillRemoveParams struct {
 	Name string `json:"name"`
 }
 
-type skillPreviewParams struct {
+// skillURLParams is the params shape of both network-reaching skill methods:
+// one address and nothing else. It is one struct rather than two identical
+// ones, because "install what you just read" is expressed by the two methods
+// naming the SAME address, and a second shape would invite a second field.
+type skillURLParams struct {
 	URL string `json:"url"`
 }
 
@@ -74,7 +84,7 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(map[string]string{"name": p.Name}))
 	case "skills.preview":
-		var p skillPreviewParams
+		var p skillURLParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.URL == "" {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
@@ -88,6 +98,22 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(result))
+	case "skills.install":
+		var p skillURLParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.URL == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		// Same as the preview: the refusal already names the step that
+		// refused and what state the library was left in, so it travels as
+		// the message rather than being replaced by a transport sentence
+		// about an internal error.
+		installed, err := h.source.Install(ctx, p.URL)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(installed))
 	case "skills.approve":
 		var p skillRemoveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
@@ -134,8 +160,12 @@ func validateSkillApproveRaw(raw json.RawMessage) string {
 	return validateSkillRemoveRaw(raw)
 }
 
-func validateSkillPreviewRaw(raw json.RawMessage) string {
-	var p skillPreviewParams
+// validateSkillURLRaw is registered for both skills.preview and
+// skills.install, because both contracts declare the same one field and a
+// second copy of this function would be a second answer to what an address
+// param is.
+func validateSkillURLRaw(raw json.RawMessage) string {
+	var p skillURLParams
 	if msg := decodeObject(raw, &p, "url"); msg != "" {
 		return msg
 	}

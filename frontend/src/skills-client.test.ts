@@ -26,6 +26,37 @@ function fakeDispatcher(answers: unknown[]): {
   return { dispatcher: { call } as unknown as Dispatcher, calls }
 }
 
+describe('SkillsClient.install', () => {
+  it('sends the address and nothing else', async () => {
+    const { dispatcher, calls } = fakeDispatcher([{ name: 'deploy', provenance: 'installed' }])
+
+    const got = await new SkillsClient(dispatcher).install(
+      'https://example.com/skills/anything/SKILL.md',
+    )
+
+    // The body, the name and a digest are all ABSENT on purpose. The backend
+    // fetches the address again and compares against the document its own
+    // preview showed; a renderer that sent the bytes back would be asserting
+    // what the person approved, which is the one thing a client may not do.
+    expect(calls).toEqual([
+      {
+        method: 'skills.install',
+        params: { url: 'https://example.com/skills/anything/SKILL.md' },
+      },
+    ])
+    expect(got).toEqual({ name: 'deploy', provenance: 'installed' })
+  })
+
+  it('lets the backend refusal through as it was written', async () => {
+    const { dispatcher } = fakeDispatcher([
+      new Error('the document at that address is no longer the one you read'),
+    ])
+    await expect(
+      new SkillsClient(dispatcher).install('https://example.com/SKILL.md'),
+    ).rejects.toThrow('no longer the one you read')
+  })
+})
+
 describe('SkillsClient.preview', () => {
   it('asks the backend about one address and returns what it read', async () => {
     const answer = {

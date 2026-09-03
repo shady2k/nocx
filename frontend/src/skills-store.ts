@@ -1,4 +1,5 @@
 import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
+import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsPreview } from './generated/skills.preview'
 
 export type Skill = GeneratedSkill
@@ -9,6 +10,7 @@ export interface SkillsClientLike {
   remove(name: string): Promise<unknown>
   approve(name: string): Promise<unknown>
   preview(url: string): Promise<SkillsPreview>
+  install(url: string): Promise<SkillsInstall>
 }
 
 export type SkillsState =
@@ -70,5 +72,17 @@ export class SkillsStore {
   async approve(name: string): Promise<void> {
     await this.client.approve(name)
     await this.refresh()
+  }
+
+  // Reading is the client's directly (nothing changes, so nothing needs
+  // refreshing); installing goes through the store because the list is now
+  // different, and the caller still gets what was installed so the dialog can
+  // name it. The refresh is awaited BEFORE the result is returned, so a
+  // caller that closes its dialog on this promise cannot close it over a list
+  // that has not caught up.
+  async install(url: string): Promise<SkillsInstall> {
+    const installed = await this.client.install(url)
+    await this.refresh()
+    return installed
   }
 }

@@ -16,6 +16,10 @@ type fakeFS struct {
 	inner      OSFileSystem
 	failRename error
 	failWrite  error
+	// failRemove makes the undo of a write fail too, which is how
+	// install_test reaches the one arm of the install interval that cannot
+	// be closed by code.
+	failRemove error
 	mkdirCalls int
 }
 
@@ -41,7 +45,12 @@ func (f *fakeFS) Rename(oldPath, newPath string) error {
 
 func (f *fakeFS) Sync(path string) error { return f.inner.Sync(path) }
 
-func (f *fakeFS) Remove(path string) error { return f.inner.Remove(path) }
+func (f *fakeFS) Remove(path string) error {
+	if f.failRemove != nil {
+		return f.failRemove
+	}
+	return f.inner.Remove(path)
+}
 
 type failingWriteCloser struct {
 	io.WriteCloser

@@ -205,6 +205,7 @@ function fakeSkillsClient(): SkillsClientLike {
       url: 'https://example.com/SKILL.md',
       findings: [],
     }),
+    install: vi.fn().mockResolvedValue({ name: 'deploy', provenance: 'installed' }),
   }
 }
 

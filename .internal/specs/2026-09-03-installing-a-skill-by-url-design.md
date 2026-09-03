@@ -259,6 +259,22 @@ findings[]}`, or a refusal. It fetches, parses, scans and **writes nothing**.
   round trip through the client is a place for the bytes to change, and the
   digest recorded must be over what was written.
 
+**How the server knows what was previewed, since the params carry only a URL.**
+`skills.preview` keeps, ON THE SERVER, the digest of the document text it showed —
+one slot, not a map, because the dialog holds one source at a time (§9). Install
+fetches again and compares against that record. The client's only input is the
+URL, which SELECTS the record; there is no field in the params in which it could
+SUPPLY one, so a client cannot assert what the bytes were. A mismatch refuses
+because the document is no longer the one that was read; no record at all refuses
+because nothing was read. The approval is spent on success rather than standing,
+and previewing one address does not authorise installing byte-identical bytes
+from another.
+
+The cost is that a backend restart between reading and approving refuses with
+"read the document first". That is one click to recover and it is what makes the
+comparison possible at all — the alternative is a token the client holds, which
+is the client asserting the answer.
+
 That re-fetch is a deliberate cost. The alternative — install what preview
 returned — is one request cheaper and makes the person's approval refer to bytes
 the server never verified. If the second fetch returns something different, the

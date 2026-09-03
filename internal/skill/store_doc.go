@@ -110,11 +110,16 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 		fsys = OSFileSystem{}
 	}
 	copyRoots := append([]Root(nil), roots...)
-	var managedDir string
+	var managedDir, installedDir string
 	for _, root := range copyRoots {
-		if root.Provenance == ProvenanceManaged && root.Dir != "" {
+		if root.Dir == "" {
+			continue
+		}
+		switch {
+		case root.Provenance == ProvenanceManaged && managedDir == "":
 			managedDir = root.Dir
-			break
+		case root.Provenance == ProvenanceInstalled && installedDir == "":
+			installedDir = root.Dir
 		}
 	}
 	if docStore == nil {
@@ -124,7 +129,7 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 		}
 	}
 	s := &Store{
-		fs: fsys, roots: copyRoots, managedDir: managedDir,
+		fs: fsys, roots: copyRoots, managedDir: managedDir, installedDir: installedDir,
 		docStore: docStore, locks: make(map[string]*sync.Mutex),
 	}
 	for i := range s.roots {
@@ -365,7 +370,29 @@ func (s *Store) writeDocumentLocked(d document, disabled map[string]struct{}) er
 	return nil
 }
 
-func (s *Store) recordApprovalDigest(name, dir string) error {
+// recordApprovalDigest writes down what the person approved: the digest of the
+// bytes now on disk, and — when the skill came from an address — where they
+// came from, in ONE document write.
+//
+// The two halves are not separable and there is no second call that adds the
+// source afterwards. An installed skill whose digest is recorded and whose
+// source is not can never be updated; one whose source is recorded and whose
+// digest is not is `changed`, which is dropped from the prompt index entirely.
+// Both are states this repo would rather not be able to reach, so they are
+// reached through one writeDocumentLocked or not at all (install.go states the
+// interval this closes).
+//
+// sourceURL is empty for everything the assistant writes and for an Approve:
+// there is no address behind a managed skill, and approving an edited
+// installed skill changes its bytes rather than where it came from — so an
+// empty sourceURL LEAVES the recorded source alone rather than clearing it.
+// Forgetting a source is clearApprovalDigest's job and happens only when the
+// skill itself goes.
+//
+// The digest is computed from the DIRECTORY, after the write, not from
+// whatever the caller believed it was writing. That is what makes it a record
+// of the bytes on disk rather than a record of an intention.
+func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
 	digest, err := hashSkillDirectory(dir)
 	if err != nil {
 		return fmt.Errorf("skill %q: hash: %w", name, err)
@@ -380,11 +407,31 @@ func (s *Store) recordApprovalDigest(name, dir string) error {
 		d.Digests = make(map[string]string)
 	}
 	d.Digests[name] = digest
+	if sourceURL != "" {
+		if d.Sources == nil {
+			d.Sources = make(map[string]skillSource)
+		}
+		d.Sources[name] = skillSource{URL: sourceURL, InstalledAt: time.Now().UTC().Format(time.RFC3339)}
+	}
 	disabled := make(map[string]struct{}, len(d.Disabled))
 	for _, item := range d.Disabled {
 		disabled[item] = struct{}{}
 	}
 	return s.writeDocumentLocked(d, disabled)
+}
+
+// recordedSource answers where an installed skill was installed from. It is
+// the document's copy and never provenance: provenance is the root, and a row
+// here for a name the authored root holds means nothing at all.
+func (s *Store) recordedSource(name string) (skillSource, bool, error) {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return skillSource{}, false, err
+	}
+	source, found := d.Sources[name]
+	return source, found, nil
 }
 
 // clearApprovalDigest forgets everything the document records about one skill:
@@ -438,7 +485,9 @@ func (s *Store) Approve(name string) error {
 	if target.Status != StatusChanged {
 		return fmt.Errorf("skill %q is not changed", name)
 	}
-	return s.recordApprovalDigest(name, target.BaseDir)
+	// Approving records the bytes, never the address: an edited installed
+	// skill still came from where it came from.
+	return s.recordApprovalDigest(name, target.BaseDir, "")
 }
 
 // Remove deletes the person-facing authored, managed or installed skill.

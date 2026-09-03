@@ -263,7 +263,34 @@ func probeHelperPlatform(sess session.Session, lanes helperInstallProvider, sour
 }
 
 func probeHelperPlatformAt(ctx context.Context, host string, opts []ssh.ConnectOption, lanes helperInstallProvider, source deploy.ArtifactSource) (string, deploy.Platform, bool, error) {
-	probe, err := lanes.DiscoveryConn(ctx, host, opts...)
+	// The probe dials with the interactive rung removed, and the reason is
+	// the open path rather than the git one. Selection now runs BEFORE the
+	// session exists (OpenHosted), so the probe's lease is the only reference
+	// on the pooled connection: it dials, and when the decision is made it
+	// releases, which closes the connection. On a destination whose only
+	// credential is a password the user types, that dial raised the ask, and
+	// the session's own dial a moment later raised a SECOND one — in front of
+	// a user who had already answered, on an open that was blocked behind it.
+	// The password reached an authentication that was then thrown away, and
+	// the session never opened (nocx-bzac4).
+	//
+	// Suppressing the ask rather than sharing the connection is the choice
+	// because it is a rule this codebase already has: a probe answers a
+	// question the product asked itself and may not stop a person to do it
+	// (internal/ssh, TestPromptRung_ProbeNeverFiresTheAsk). Every silent
+	// credential still applies, so a key, an agent or a remembered password
+	// probes exactly as before; only the destination that would have to
+	// interrupt someone declines — and declining degrades to the plain
+	// terminal, which is the direction §4.2 requires.
+	//
+	// The option list is COPIED before the suppression is appended: the
+	// caller's slice is the destination's own options and is used again for
+	// the install lease and the helper channel, both of which are the user's
+	// chosen action rather than a probe.
+	probeOpts := make([]ssh.ConnectOption, 0, len(opts)+1)
+	probeOpts = append(probeOpts, opts...)
+	probeOpts = append(probeOpts, ssh.WithoutPasswordPrompt())
+	probe, err := lanes.DiscoveryConn(ctx, host, probeOpts...)
 	if err != nil {
 		return "", deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", host, err)
 	}

@@ -752,6 +752,24 @@ func WithPasswordRequester(r ConnectionPasswordRequester) ConnectOption {
 	return func(c *ConnectConfig) { c.PasswordRequester = r }
 }
 
+// WithoutPasswordPrompt takes the prompt rung back off a dial that has
+// inherited it. It exists for PROBES: a probe answers a question the product
+// asked itself, so it may not stop and ask a person — the same boundary
+// firstAuthMethod already draws for the connectivity probe, which reports the
+// prompt rung as needing interaction rather than firing it
+// (TestPromptRung_ProbeNeverFiresTheAsk).
+//
+// It is an option rather than a flag on the requester because the probe's
+// options are the SESSION's options: they are built once, for the destination,
+// and a probe borrows them. Appended last, this un-wires the one rung a probe
+// must not use and leaves every other credential the session would offer
+// exactly as it is — so a probe still authenticates silently wherever a key,
+// an agent or a stored password can answer, and simply declines where only a
+// person could.
+func WithoutPasswordPrompt() ConnectOption {
+	return func(c *ConnectConfig) { c.PasswordRequester = nil }
+}
+
 // WithJumpHost sets the jump host configuration for SSH connection.
 // Password authentication for the jump host comes from JumpCredentials
 // (late-bound via the credential store), never as plaintext.

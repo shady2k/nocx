@@ -25,7 +25,12 @@
       "requireCell": "❯",
       "requireCol": 0
     },
-    { "name": "meter", "kind": "offset", "from": "prompt", "offset": -2 },
+    {
+      "name": "meter",
+      "kind": "offset",
+      "from": "prompt",
+      "offset": -2
+    },
     {
       "name": "boxBottom",
       "kind": "offset",
@@ -33,29 +38,78 @@
       "offset": 0,
       "requireBound": ["meter"]
     },
-    { "name": "modeLine", "kind": "firstNonBlankBelow", "from": "boxBottom" }
+    {
+      "name": "modeLine",
+      "kind": "firstNonBlankBelow",
+      "from": "boxBottom"
+    }
   ],
   "branches": [
     {
       "state": "permission_choice",
       "when": [
-        { "kind": "cursorOn", "glyph": "❯" },
-        { "kind": "cursorOpensItsRow" },
-        { "kind": "numberedOptionAfterCursor" },
-        { "kind": "cursorAboveAnchorIfBound", "anchor": "meter" },
-        { "kind": "nearestNonBlankAboveCursorContains", "text": "Do you want to" }
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "numberedOptionAfterCursor"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "nearestNonBlankAboveCursorContains",
+          "text": "Do you want to"
+        }
       ]
     },
     {
       "state": "modal_choice",
       "when": [
-        { "kind": "cursorOn", "glyph": "❯" },
-        { "kind": "cursorOpensItsRow" },
-        { "kind": "numberedOptionAfterCursor" },
-        { "kind": "cursorAboveAnchorIfBound", "anchor": "meter" }
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "numberedOptionAfterCursor"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        }
       ]
     },
-    { "state": "unknown", "when": [{ "kind": "anchorUnbound", "anchor": "meter" }] },
+    {
+      "state": "unknown",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "· Retrying in"
+        }
+      ]
+    },
     {
       "state": "working",
       "when": [
@@ -81,7 +135,13 @@
     },
     {
       "state": "working",
-      "when": [{ "kind": "rowContains", "anchor": "modeLine", "text": "/tasks to see subagents" }]
+      "when": [
+        {
+          "kind": "rowContains",
+          "anchor": "modeLine",
+          "text": "/tasks to see subagents"
+        }
+      ]
     }
   ],
   "default": "free_text"

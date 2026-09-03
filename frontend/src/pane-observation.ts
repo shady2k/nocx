@@ -39,6 +39,7 @@ const PANE_STATES: readonly DriverState[] = [
   'permission_choice',
   'modal_choice',
   'working',
+  'error',
   'unknown',
   'exited',
 ]
@@ -58,11 +59,12 @@ export function isDriverState(v: unknown): v is DriverState {
  *  two would disagree at exactly the moment it mattered — a pane whose title
  *  still spins while its driver says a dialog is waiting.
  *
- *  Deliberately smaller than DriverState: the two kinds of menu need a person
- *  identically. WHICH menu it is decides whether answering it answers the
+ *  Deliberately smaller than DriverState, but NOT everywhere: the two kinds of
+ *  menu need a person identically, and 'error' needs one differently from both
+ *  of its neighbours. WHICH menu it is decides whether answering it answers the
  *  agent, and that matters to the caller that TYPES (nocx-dkawo.1), never to a
  *  dot on a tab. */
-export type PaneActivity = AgentStatus | 'waiting' | 'unknown' | 'exited'
+export type PaneActivity = AgentStatus | 'waiting' | 'error' | 'unknown' | 'exited'
 
 /** Where the value came from. `title` is the weaker row of the provenance
  *  table and may light the indicator; it decides nothing. */
@@ -83,6 +85,12 @@ function fromDriver(state: DriverState): PaneActivity {
     case 'permission_choice':
     case 'modal_choice':
       return 'waiting'
+    // 'error' does NOT collapse, and this is the one projection that must not.
+    // The two menus collapse because a dot cannot act on the difference; error
+    // is the opposite case — folding it into 'working' says leave it alone,
+    // and folding it into 'waiting' says answer something that is not there.
+    case 'error':
+      return 'error'
     case 'exited':
       return 'exited'
     case 'unknown':

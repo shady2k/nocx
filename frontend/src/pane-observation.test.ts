@@ -99,3 +99,22 @@ describe('an unreachable host', () => {
     expect(paneIndicator('working', null)?.activity).toBe('working')
   })
 })
+
+describe("the TUI's own error", () => {
+  it('is its own activity and collapses into neither neighbour', () => {
+    const err = paneIndicator('error', null)
+    expect(err).toEqual({ activity: 'error', source: 'driver' })
+
+    // The two it would otherwise be mistaken for. 'working' says leave it
+    // alone and 'waiting' says answer something that is not there; the whole
+    // point of the value is that neither is true.
+    expect(paneIndicator('working', null)?.activity).toBe('working')
+    expect(paneIndicator('permission_choice', null)?.activity).toBe('waiting')
+    expect(err?.activity).not.toBe('working')
+    expect(err?.activity).not.toBe('waiting')
+  })
+
+  it('is a state the boundary guard lets through', () => {
+    expect(isDriverState('error')).toBe(true)
+  })
+})

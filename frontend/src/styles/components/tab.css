@@ -311,6 +311,17 @@
   background: var(--color-warning);
 }
 
+/* The agent's OWN error is on screen — the API unreachable, overloaded, or the
+   quota gone. It is danger rather than warning because it is not the same ask:
+   `waiting` means answer me and I will go on, and this means nothing here will
+   resolve itself until you come. It is solid rather than spinning for the same
+   reason — a spinner says work is happening, and none is. Distinct from both
+   neighbours at a glance is the requirement, and these are the two it would
+   otherwise be mistaken for. */
+.nocx-tab[data-agent-status='error'] .nocx-tab-status {
+  background: var(--color-danger);
+}
+
 /* The driver could not read the screen, or nocx has no driver for this agent.
    Every consumer treats that as busy, and the dot says "something is here and
    nocx cannot tell you what" rather than picking a state. */

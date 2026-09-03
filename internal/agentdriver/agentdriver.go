@@ -66,6 +66,20 @@ const (
 	// or a background agent the main turn may be blocked on. No input is
 	// being invited even when an input box is visible.
 	StateWorking State = "working"
+	// StateError is the TUI's OWN error, drawn as chrome: the API is
+	// unreachable, overloaded, or the quota is gone. It earns its own value
+	// because the two neighbours are both wrong. StateUnknown would fold it
+	// into busy, and busy tells the person "it is running, leave it alone"
+	// when the truth is "come here, this will not resolve itself". And it is
+	// not a choice awaiting an answer, so it is not StatePermissionChoice
+	// either: there is nothing to answer.
+	//
+	// An error the agent PRINTED into its transcript and then went back to
+	// waiting is StateFreeText, deliberately. On the screen it is
+	// indistinguishable from idle because it IS idle — the agent finished,
+	// badly, and is waiting for you. Telling those apart needs meaning, and
+	// no driver reads meaning.
+	StateError State = "error"
 	// StateUnknown means the driver could not positively identify the state.
 	// Every caller treats it as busy.
 	StateUnknown State = "unknown"
@@ -78,7 +92,7 @@ const (
 func States() []State {
 	return []State{
 		StateFreeText, StatePermissionChoice, StateModalChoice,
-		StateWorking, StateUnknown, StateExited,
+		StateWorking, StateError, StateUnknown, StateExited,
 	}
 }
 

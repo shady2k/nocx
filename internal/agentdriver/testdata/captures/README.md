@@ -47,6 +47,15 @@ produces one.
 | `claude-permission-60` | `permission.script` | the Write tool's approval dialog at 60×40 (`49000`)                                 |
 | `claude-modal`         | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)            |
 | `claude-subagent`      | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`) |
+| `claude-error`         | `error.script`      | the TUI's own error: the API unreachable, retrying (`20000`, `30000`, `44000`)      |
+
+`claude-error` was captured against v2.1.245 by pointing `ANTHROPIC_BASE_URL` at a dead port,
+which is how the error chrome is reproduced without waiting for a real outage. What it settled:
+the error is drawn in the SAME slot as the spinner — the status-stack row directly above the
+token meter — so position cannot separate them and only the grammar can. Before it existed the
+frame classified as `free_text`, not as `unknown`: nocx reported a pane whose agent could not
+reach its API as ready for input. Only the RETRYING class of error is captured; quota
+exhaustion and overload draw their own chrome and are not in this corpus.
 
 Captured against Claude Code v2.1.238: the baseline five captures are 120×40;
 narrow captures cover idle at 60×40 and 80×40, plus the approval dialog at 60×40.

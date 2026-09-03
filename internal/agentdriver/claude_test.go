@@ -157,6 +157,7 @@ func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
 // taken from the screen.
 func TestEveryFrameOfEveryCaptureAnswersFromTheClosedSet(t *testing.T) {
 	captures := []string{
+		"claude-error",
 		"claude-idle", "claude-idle-60", "claude-idle-80", "claude-working",
 		"claude-permission", "claude-permission-60", "claude-modal", "claude-subagent",
 	}
@@ -220,5 +221,64 @@ func TestAPromptMarkerTheCursorSitsOnIsAChoice(t *testing.T) {
 	f := screen(t, 40, 10, lines, 1, 6)
 	if got := agentdriver.Claude().Classify(f); got != agentdriver.StatePermissionChoice {
 		t.Errorf("dialog shape = %q, want %q", got, agentdriver.StatePermissionChoice)
+	}
+}
+
+// The TUI's own error is read from the SAME slot as the spinner — the status
+// stack row directly above the token meter — and separated from it by grammar,
+// not by position. That is the spinner's own lesson applied a second time.
+//
+// Measured against an unreachable API (claude-error.jsonl): before this branch
+// existed the frame classified as "free_text", not as "unknown". The bead
+// predicted unknown, and unknown would at least have been treated as busy.
+// free_text is worse: it reports a pane whose agent cannot reach its API as
+// ready for input, and a coordinator reads that worker as idle and available.
+func TestTheTUIsOwnErrorIsErrorAndNotFreeText(t *testing.T) {
+	d := agentdriver.Claude()
+	for _, at := range []int64{20000, 30000, 44000} {
+		if got := d.Classify(replay(t, "claude-error", at)); got != agentdriver.StateError {
+			t.Errorf("claude-error at %dms = %q, want %q", at, got, agentdriver.StateError)
+		}
+	}
+}
+
+// The near-miss the error branch must refuse: the input box is live and the
+// status stack carries a FINISHED turn's summary, which sits in the same slot
+// and starts with the same glyph. That is idle, and it stays idle.
+func TestAFinishedTurnsSummaryInTheSameSlotIsNotAnError(t *testing.T) {
+	d := agentdriver.Claude()
+	if got := d.Classify(replay(t, "claude-subagent", 70000)); got == agentdriver.StateError {
+		t.Fatalf("claude-subagent at 70000ms = %q; the finished-turn summary was read as an error", got)
+	}
+}
+
+// The boundary the state model says must not move: an error the agent PRINTED
+// into its transcript, with the input box live beneath it, is idle. It is idle
+// because it IS idle — the agent finished, badly, and is waiting for you — and
+// telling that apart from a working agent's error needs meaning, which no
+// driver reads.
+//
+// What separates them is not the words. It is WHERE the row sits: the status
+// stack is the run of unindented rows directly above the token meter, and the
+// transcript is indented and above that. The same text in the transcript must
+// not reach the error branch, or every agent that ever printed the word
+// "Retrying" would refuse input for the rest of its session.
+func TestAnErrorPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"  Error: connection refused · Retrying in 4s · attempt 5/10",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an indented transcript line was read as chrome: %q, want %q", got, agentdriver.StateFreeText)
 	}
 }

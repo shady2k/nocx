@@ -27,9 +27,17 @@
       "minLength": 1
     },
     "state": {
-      "description": "What the screen is inviting, from a CLOSED set. 'free_text' means an input box is on screen and waiting, and it is the only state nocx may type into. 'permission_choice' means the agent raised a tool-approval dialog and is waiting on a human, so answering it answers the agent. 'modal_choice' means a menu the agent did not raise is up — a user-opened one such as /model. 'working' means work is in progress: a turn in flight, or a background agent the main turn may be blocked on, which Claude Code shows with the input box still live and no spinner at all. 'unknown' means the driver could not positively identify the state, or the agent has no driver; every caller treats it as busy, because refusal is the containment here rather than mitigation — a mistimed keystroke does not merely fail to arrive, it answers whatever modal is on screen. 'exited' is a fact about the PROCESS and is never read off the screen; no driver returns it.",
+      "description": "What the screen is inviting, from a CLOSED set. 'free_text' means an input box is on screen and waiting, and it is the only state nocx may type into. 'permission_choice' means the agent raised a tool-approval dialog and is waiting on a human, so answering it answers the agent. 'modal_choice' means a menu the agent did not raise is up — a user-opened one such as /model. 'working' means work is in progress: a turn in flight, or a background agent the main turn may be blocked on, which Claude Code shows with the input box still live and no spinner at all. 'error' means the TUI's OWN error is on screen — the API unreachable, overloaded, or the quota gone — which the agent draws as chrome. It is not 'unknown', because unknown is treated as busy and busy tells a person to leave it alone when the truth is that this will not resolve itself; and it is not 'permission_choice', because there is nothing to answer. An error the agent PRINTED into its transcript before going back to waiting is 'free_text', deliberately: on the screen that is indistinguishable from idle because it IS idle. 'unknown' means the driver could not positively identify the state, or the agent has no driver; every caller treats it as busy, because refusal is the containment here rather than mitigation — a mistimed keystroke does not merely fail to arrive, it answers whatever modal is on screen. 'exited' is a fact about the PROCESS and is never read off the screen; no driver returns it.",
       "type": "string",
-      "enum": ["free_text", "permission_choice", "modal_choice", "working", "unknown", "exited"]
+      "enum": [
+        "free_text",
+        "permission_choice",
+        "modal_choice",
+        "working",
+        "error",
+        "unknown",
+        "exited"
+      ]
     }
   }
 }

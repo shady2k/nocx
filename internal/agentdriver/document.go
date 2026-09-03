@@ -25,10 +25,20 @@ package agentdriver
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/panegrid"
 )
+
+// maxExtractorRows is the ENGINE's ceiling on how many rows a document may ask
+// an extractor to read. It is the same bound region.maxRows already carries for
+// the predicates, moved one level up: a document chooses a cap, and may not
+// choose one large enough for the region to leave the chrome it is anchored in
+// and reach the transcript. Sixteen is the claude panel's four with room for a
+// screenful of children, and it is still far short of the distance from the
+// mode line back up past the input box.
+const maxExtractorRows = 16
 
 // Document is one agent's rule.
 type Document struct {
@@ -37,6 +47,10 @@ type Document struct {
 	Anchors []AnchorSpec `json:"anchors"`
 	// Branches are evaluated in order. First match wins.
 	Branches []Branch `json:"branches"`
+	// Extractors read VALUES off the same frame, beside the branches and
+	// never inside them. Their yield cannot reach a branch, which is what
+	// makes reading more off a screen unable to change what it is called.
+	Extractors []Extractor `json:"extractors,omitempty"`
 	// Default is the answer when no branch matched. It is a field rather
 	// than a constant because a rule the engine does not understand should
 	// be able to end in unknown, and free_text is the expensive direction.
@@ -94,24 +108,110 @@ type Below struct {
 	Counterexample State    `json:"counterexample"`
 }
 
+// RegionSpec is WHERE something looks: an anchor, a direction from it, and the
+// cap on how far it may go. It is one type because a predicate and an
+// extractor ask the same question of the frame and must not be able to answer
+// it differently — the boolean half and the reading half share a bound or the
+// bound is decoration.
+//
+// The fields are promoted into the JSON of whatever embeds it, so a document
+// spells a region the same way wherever one appears.
+type RegionSpec struct {
+	Anchor      string `json:"anchor,omitempty"`
+	Up          bool   `json:"up,omitempty"`
+	MaxRows     int    `json:"maxRows,omitempty"`
+	Col0Only    bool   `json:"col0Only,omitempty"`
+	StopAtBlank bool   `json:"stopAtBlank,omitempty"`
+}
+
+func (r RegionSpec) at(row int) region {
+	return region{anchor: row, up: r.Up, maxRows: r.MaxRows, col0Only: r.Col0Only, stopAtBlank: r.StopAtBlank}
+}
+
 // Pred is one predicate invocation. Kind selects which; the rest are its
-// arguments, and an argument a kind does not use is ignored.
+// arguments, and an argument a kind does not use is ignored. Every predicate
+// that names a position names it through RegionSpec.Anchor, region or not.
 type Pred struct {
 	Kind   string `json:"kind"`
-	Anchor string `json:"anchor,omitempty"`
 	Glyph  string `json:"glyph,omitempty"`
 	Text   string `json:"text,omitempty"`
 	Suffix string `json:"suffix,omitempty"`
 
-	// Region arguments, for kind "regionAny".
-	Up          bool `json:"up,omitempty"`
-	MaxRows     int  `json:"maxRows,omitempty"`
-	Col0Only    bool `json:"col0Only,omitempty"`
-	StopAtBlank bool `json:"stopAtBlank,omitempty"`
+	RegionSpec
 }
 
-// documentDriver is a Driver whose Classify is an evaluation of a Document.
-type documentDriver struct{ doc Document }
+// Extractor is the value-reading half of the grammar: a REGION, which is where
+// the engine permits reading, plus a PATTERN, which is what the document reads
+// out of a row there.
+//
+// The split is the safety property. A document may say what a row looks like
+// and may not say how far to look, because the far half is what an agent's
+// printed output can reach. The pattern is RE2 (Go's regexp), so a
+// user-authored pattern — untrusted input — cannot backtrack catastrophically,
+// and it is applied to the row rendered WHOLE and right-trimmed, which is the
+// same rendering the region hands a predicate.
+//
+// Fields are NAMED CAPTURE GROUPS and nothing else. A pattern that names no
+// group reads nothing, and a group that did not participate contributes no
+// field rather than an empty one.
+type Extractor struct {
+	Name    string `json:"name"`
+	Pattern string `json:"pattern"`
+
+	RegionSpec
+}
+
+// compiledExtractor is an Extractor with its pattern already compiled. A
+// Classify that compiled a regexp per frame would be paying for the grammar on
+// the sweep's hot path, and the compile is also where a bad pattern is caught —
+// which belongs to process start, not to the first frame that finds it silent.
+type compiledExtractor struct {
+	spec Extractor
+	re   *regexp.Regexp
+}
+
+// documentDriver is an Observer whose answer is an evaluation of a Document.
+type documentDriver struct {
+	doc        Document
+	extractors []compiledExtractor
+}
+
+// newDocumentDriver validates and compiles a document once. Everything it
+// refuses is a wiring mistake — a rule that could never answer, or an
+// extractor that could never read — and a wiring mistake belongs to process
+// start, exactly as NewRegistry's three refusals do.
+func newDocumentDriver(doc Document) (documentDriver, error) {
+	if err := doc.validate(); err != nil {
+		return documentDriver{}, err
+	}
+	ex, err := compileExtractors(doc.Extractors)
+	if err != nil {
+		return documentDriver{}, err
+	}
+	return documentDriver{doc: doc, extractors: ex}, nil
+}
+
+func compileExtractors(specs []Extractor) ([]compiledExtractor, error) {
+	out := make([]compiledExtractor, 0, len(specs))
+	for _, e := range specs {
+		re, err := regexp.Compile(e.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("agentdriver: extractor %q has a pattern that does not compile: %w", e.Name, err)
+		}
+		named := false
+		for _, n := range re.SubexpNames() {
+			if n != "" {
+				named = true
+				break
+			}
+		}
+		if !named {
+			return nil, fmt.Errorf("agentdriver: extractor %q names no capture group, so it could only ever read nothing", e.Name)
+		}
+		out = append(out, compiledExtractor{spec: e, re: re})
+	}
+	return out, nil
+}
 
 func (d documentDriver) Agent() string { return d.doc.Agent }
 
@@ -119,14 +219,33 @@ func (d documentDriver) Agent() string { return d.doc.Agent }
 // which is what makes "did this bind" askable.
 type bound map[string]int
 
-// Classify evaluates the document against one frame.
+// Classify is the SCALAR PROJECTION of Observe. It is written as one rather
+// than as a second evaluation so that there is one place the answer comes
+// from; two evaluations of one question is how the two come to disagree.
 func (d documentDriver) Classify(f panegrid.Frame) State {
+	return d.Observe(f).State
+}
+
+// Observe evaluates the document against one frame: the branches for the
+// state, then the extractors for whatever else the rule can read.
+//
+// The order is not an implementation detail. The state is decided BEFORE any
+// extractor runs and from a value no extractor can see, which is what makes
+// "extras never decide the state" a property of the shape rather than a
+// promise about the branches somebody wrote.
+func (d documentDriver) Observe(f panegrid.Frame) Observation {
 	// The degenerate frame is the engine's, not a branch: a document cannot
 	// express "there is no grid to read", and should not have to.
 	if f.Rows <= 0 || f.Cols <= 0 || len(f.Lines) == 0 {
-		return StateUnknown
+		return Observation{State: StateUnknown}
 	}
 	anchors := d.bindAnchors(f)
+	return Observation{State: d.decide(f, anchors), Extras: d.extract(f, anchors)}
+}
+
+// decide is the ordered branch walk. It reads predicates and anchors, and
+// nothing an extractor produced.
+func (d documentDriver) decide(f panegrid.Frame, anchors bound) State {
 	for _, b := range d.doc.Branches {
 		if b.Below != nil {
 			switch belowAnchorOpensOnlyWith(f, anchors[b.Below.Anchor], b.Below.Glyphs) {
@@ -146,6 +265,27 @@ func (d documentDriver) Classify(f panegrid.Frame) State {
 		}
 	}
 	return d.doc.Default
+}
+
+// extract runs every extractor whose anchor bound, in document order. An
+// extractor that matched no row contributes NOTHING — not an empty entry —
+// because a reader must be able to tell "the panel is not on screen" from "the
+// panel is on screen and says nothing", and only the first of those is true
+// here.
+func (d documentDriver) extract(f panegrid.Frame, anchors bound) []Extra {
+	var out []Extra
+	for _, e := range d.extractors {
+		row, ok := anchors[e.spec.Anchor]
+		if !ok {
+			continue
+		}
+		rows := e.spec.at(row).capture(f, e.re)
+		if len(rows) == 0 {
+			continue
+		}
+		out = append(out, Extra{Name: e.spec.Name, Rows: rows})
+	}
+	return out
 }
 
 func allHold(f panegrid.Frame, anchors bound, preds []Pred) bool {
@@ -192,8 +332,7 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 		if !ok {
 			return false
 		}
-		r := region{anchor: row, up: p.Up, maxRows: p.MaxRows, col0Only: p.Col0Only, stopAtBlank: p.StopAtBlank}
-		return r.anyRow(f, func(text string) bool {
+		return p.at(row).anyRow(f, func(text string) bool {
 			if p.Text != "" && !strings.Contains(text, p.Text) {
 				return false
 			}
@@ -311,6 +450,20 @@ func (d Document) validate() error {
 			if p.Anchor != "" && !seen[p.Anchor] {
 				return fmt.Errorf("agentdriver: branch %d names anchor %q, which no anchor binds", i, p.Anchor)
 			}
+		}
+	}
+	for _, e := range d.Extractors {
+		if e.Name == "" {
+			return fmt.Errorf("agentdriver: an extractor has no name, so nothing could ever read its yield")
+		}
+		if !seen[e.Anchor] {
+			return fmt.Errorf("agentdriver: extractor %q reads from %q, which no anchor binds", e.Name, e.Anchor)
+		}
+		if e.MaxRows <= 0 {
+			return fmt.Errorf("agentdriver: extractor %q declares no row cap, and an uncapped region is how a forged row gets read", e.Name)
+		}
+		if e.MaxRows > maxExtractorRows {
+			return fmt.Errorf("agentdriver: extractor %q asks for %d rows; the engine allows %d", e.Name, e.MaxRows, maxExtractorRows)
 		}
 	}
 	return nil

@@ -156,12 +156,7 @@ func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
 // "exited" — that one is a fact about the process and is deliberately not
 // taken from the screen.
 func TestEveryFrameOfEveryCaptureAnswersFromTheClosedSet(t *testing.T) {
-	captures := []string{
-		"claude-error",
-		"claude-idle", "claude-idle-60", "claude-idle-80", "claude-working",
-		"claude-permission", "claude-permission-60", "claude-modal", "claude-subagent",
-	}
-	for _, name := range captures {
+	for _, name := range captureNames {
 		for at := int64(0); at <= 70000; at += 1000 {
 			t.Run(fmt.Sprintf("%s@%d", name, at), func(t *testing.T) {
 				got := classify(t, replay(t, name, at))

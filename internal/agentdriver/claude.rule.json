@@ -144,5 +144,13 @@
       ]
     }
   ],
+  "extractors": [
+    {
+      "name": "subagents",
+      "anchor": "modeLine",
+      "maxRows": 8,
+      "pattern": "^\\s*(?P<glyph>[●◯])\\s(?P<name>\\S+)(?:\\s{2,}(?P<task>\\S.*?))?(?:\\s{2,}(?P<elapsed>\\d+[smh])(?:\\s·\\s(?P<flow>[↑↓])\\s(?P<tokens>[0-9.]+k?)\\stokens)?)?$"
+    }
+  ],
   "default": "free_text"
 }

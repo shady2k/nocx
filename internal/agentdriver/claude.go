@@ -70,6 +70,23 @@ package agentdriver
 // claude-subagent it appears at 40s and is GONE by 70s, when the background
 // agent has finished and the pane is genuinely waiting. A rule without that
 // second end would leave the pane refusing input for the rest of the session.
+//
+// # The panel says more than "working", and the extractor is how that survives
+//
+// The same panel that decides the verdict carries, per row, an agent name, the
+// task it was given, how long it has been running and how many tokens have
+// flowed which way — and the verdict is the single word "working". The
+// "subagents" extractor reads those rows out of the SAME chrome the verdict is
+// decided from, and its yield reaches nothing that decides: it is anchored on
+// the mode line, capped by the engine, and evaluated after the branches. So the
+// panel can be reported row by row without any of it being able to move the
+// answer.
+//
+// The fields are what the rows actually carry, not what a subagent feature will
+// want. "● main" is the parent and carries a name only; a child carries a task
+// and, once it has run a second, an elapsed time and a token flow. A capture
+// group that did not participate contributes no field at all, so a child with
+// no timing yet is SILENT about timing rather than claiming zero.
 
 import (
 	_ "embed"
@@ -80,22 +97,24 @@ import (
 //go:embed claude.rule.json
 var claudeRuleJSON []byte
 
-// claudeRule is parsed once, at package init. A malformed document is a wiring
-// mistake and belongs to process start, exactly as NewRegistry's three
-// refusals do — and Claude() cannot report it, because it takes no arguments,
-// returns no error, and is called twice in one expression by an existing test.
-var claudeRule = mustParseDocument(claudeRuleJSON)
+// claudeDriver is parsed, validated and compiled once, at package init. A
+// malformed document is a wiring mistake and belongs to process start, exactly
+// as NewRegistry's three refusals do — and Claude() cannot report it, because
+// it takes no arguments, returns no error, and is called twice in one
+// expression by an existing test.
+var claudeDriver = mustParseDocument(claudeRuleJSON)
 
 // Claude returns the driver for Claude Code.
-func Claude() Driver { return documentDriver{doc: claudeRule} }
+func Claude() Driver { return claudeDriver }
 
-func mustParseDocument(raw []byte) Document {
+func mustParseDocument(raw []byte) documentDriver {
 	var doc Document
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		panic(fmt.Sprintf("agentdriver: rule document does not parse: %v", err))
 	}
-	if err := doc.validate(); err != nil {
+	d, err := newDocumentDriver(doc)
+	if err != nil {
 		panic(fmt.Sprintf("agentdriver: rule document is not usable: %v", err))
 	}
-	return doc
+	return d
 }

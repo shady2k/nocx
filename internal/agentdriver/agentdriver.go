@@ -107,6 +107,50 @@ func (s State) Valid() bool {
 	return false
 }
 
+// Observation is a driver's whole answer about ONE frame: the scalar state,
+// and whatever else the rule was able to read off the same screen.
+//
+// # Why the answer stopped being a scalar
+//
+// It answered one question well and three requirements have each hit the same
+// wall. The claude task panel carries, per child, a name, a task, an elapsed
+// time and a token flow, and the whole panel reduced to the single word
+// "working". Progress needs a measurement beside the state, not instead of it.
+// And a declared checkpoint and a measured one must be shown side by side and
+// never merged, which is two values where there was one.
+//
+// # Extras are OPTIONAL, and that is a safety property rather than a courtesy
+//
+// A rule that extracts nothing observes exactly the scalar it observed before
+// extraction existed, with an empty Extras. So no agent regresses when the
+// shape grows, and nothing is invented for a screen that did not say it: a
+// missing field is ABSENT, never zero and never empty-string.
+//
+// # Extras never decide the state
+//
+// The branches of a rule document read predicates; extractors run beside that
+// evaluation and their yield is not visible to it. A rule that reads MORE off
+// a screen can therefore never answer that screen differently — which is what
+// keeps the closed set closed and keeps the typing decision where it was.
+type Observation struct {
+	// State is the closed-set answer, and it is exactly what Classify
+	// returns for the same frame.
+	State State
+	// Extras is one entry per extractor that matched at least one row, in
+	// document order. An extractor that matched nothing is absent rather
+	// than present and empty, because absent and empty are different claims
+	// and only one of them is true.
+	Extras []Extra
+}
+
+// Extra is one extractor's yield: the name the document gave it, and one map
+// per row it matched, from a capture group's name to the text it captured. A
+// group that did not participate in the match contributes no key.
+type Extra struct {
+	Name string
+	Rows []map[string]string
+}
+
 // Driver classifies one agent's screen. One implementation per agent (AD-8).
 type Driver interface {
 	// Agent names the agent this driver drives, as the enrolment act names
@@ -116,6 +160,22 @@ type Driver interface {
 	// It reads only the frame it is given: a driver holds no state between
 	// frames, because a rule that remembers is a rule that can be stuck.
 	Classify(f panegrid.Frame) State
+}
+
+// Observer is the richer half of Driver: a driver whose rule can read VALUES
+// off the screen as well as name its state.
+//
+// It is a separate interface rather than a third method on Driver because
+// answering the scalar is the whole of what a driver must do — a driver that
+// only classifies is an observer that extracts nothing, and Registry.Observe
+// says so by lifting its answer. Nothing is required to implement this, and a
+// caller that only wants the state never looks for it.
+type Observer interface {
+	Driver
+	// Observe answers the whole observation for one frame. Its State is the
+	// same value Classify returns, and its Extras are whatever the rule
+	// could extract; the same no-memory contract applies.
+	Observe(f panegrid.Frame) Observation
 }
 
 // Registry maps an agent name to its driver, and fails closed.
@@ -153,12 +213,25 @@ func (r *Registry) For(agent string) (Driver, bool) {
 	return d, ok
 }
 
-// Classify is the failing-closed form of For: an agent with no driver answers
-// StateUnknown rather than an error the caller has to remember to handle.
-func (r *Registry) Classify(agent string, f panegrid.Frame) State {
+// Observe is the failing-closed form of For: an agent with no driver answers
+// StateUnknown with no extras, rather than an error the caller has to remember
+// to handle. A driver that is not an Observer answers the same way it always
+// did, lifted — which is the whole of what "extras are optional" means at this
+// seam.
+func (r *Registry) Observe(agent string, f panegrid.Frame) Observation {
 	d, ok := r.For(agent)
 	if !ok {
-		return StateUnknown
+		return Observation{State: StateUnknown}
 	}
-	return d.Classify(f)
+	if o, ok := d.(Observer); ok {
+		return o.Observe(f)
+	}
+	return Observation{State: d.Classify(f)}
+}
+
+// Classify is the scalar projection of Observe, and it is written as one so
+// there is a single evaluation behind both. Two paths answering one question
+// is how the two come to disagree on the frame nobody tried.
+func (r *Registry) Classify(agent string, f panegrid.Frame) State {
+	return r.Observe(agent, f).State
 }

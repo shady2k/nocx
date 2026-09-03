@@ -12,6 +12,7 @@ package agentdriver
 // rule that remembers is a rule that can be stuck".
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/panegrid"
@@ -106,21 +107,27 @@ type region struct {
 	stopAtBlank bool
 }
 
-// anyRow reports whether any row inside the region satisfies match, which is
-// handed the row's text right-trimmed.
-func (r region) anyRow(f panegrid.Frame, match func(text string) bool) bool {
+// eachRow walks the region once, in order, handing every candidate row's
+// right-trimmed text to visit, and stops when visit says so or the region ends.
+//
+// It is the ONE walk. anyRow is this with a boolean out-parameter and capture
+// is this collecting, so the cap, the blank terminator, the indent skip and the
+// frame's own edge are enforced in a single place — a second walk written
+// beside it is a second set of bounds, and the whole argument for the region is
+// that its bounds are the engine's.
+func (r region) eachRow(f panegrid.Frame, visit func(text string) bool) {
 	for i := 0; i < r.maxRows; i++ {
 		y := r.anchor + 1 + i
 		if r.up {
 			y = r.anchor - 1 - i
 		}
 		if y < 0 || y >= f.Rows {
-			return false
+			return
 		}
 		text := strings.TrimRight(f.Text(y), " ")
 		if strings.TrimSpace(text) == "" {
 			if r.stopAtBlank {
-				return false
+				return
 			}
 			continue
 		}
@@ -129,11 +136,54 @@ func (r region) anyRow(f panegrid.Frame, match func(text string) bool) bool {
 				continue
 			}
 		}
-		if match(text) {
-			return true
+		if !visit(text) {
+			return
 		}
 	}
-	return false
+}
+
+// anyRow reports whether any row inside the region satisfies match, which is
+// handed the row's text right-trimmed.
+func (r region) anyRow(f panegrid.Frame, match func(text string) bool) bool {
+	found := false
+	r.eachRow(f, func(text string) bool {
+		if match(text) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// capture is the region's OTHER answer, and the half predicate.go did not have
+// until the driver had to report a subagent panel it could plainly see. Every
+// predicate above says yes or no about a row; this reads values out of one.
+//
+// The pattern chooses WHAT comes out. The region chooses WHERE the rows come
+// from, and a document cannot widen it — which is the same argument maxRows
+// carries for a forged spinner, applied to a forged panel row. A group that did
+// not participate in a match contributes no key, so an absent field is absent
+// rather than empty.
+func (r region) capture(f panegrid.Frame, re *regexp.Regexp) []map[string]string {
+	names := re.SubexpNames()
+	var out []map[string]string
+	r.eachRow(f, func(text string) bool {
+		m := re.FindStringSubmatch(text)
+		if m == nil {
+			return true
+		}
+		row := make(map[string]string, len(names))
+		for i, name := range names {
+			if i == 0 || name == "" || m[i] == "" {
+				continue
+			}
+			row[name] = m[i]
+		}
+		out = append(out, row)
+		return true
+	})
+	return out
 }
 
 // numberedOption matches the option grammar after a menu marker: optional

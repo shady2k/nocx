@@ -268,6 +268,15 @@ func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error 
 	if len(via) >= t.maxRedirects {
 		return fmt.Errorf("%s: stopped after %d redirects", t.component, t.maxRedirects)
 	}
+	// A hop lands on a URL the caller never named. Whatever authority let
+	// the FIRST request out is asked again here, by the caller's own
+	// predicate, because this package cannot know what a grant is and the
+	// caller cannot see the hop.
+	if guard := redirectGuard(req.Context()); guard != nil {
+		if err := guard(req.URL); err != nil {
+			return fmt.Errorf("%s: %w", t.component, err)
+		}
+	}
 	if len(via) > 0 && Origin(req.URL) != Origin(via[0].URL) {
 		if secretInURL(req.Context()) {
 			// The ORIGIN and never the URL: the URL is the thing carrying
@@ -286,6 +295,32 @@ func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error 
 		}
 	}
 	return nil
+}
+
+// redirectGuardKey carries a caller-owned per-hop predicate. It is a
+// function and not a value because the question it answers — "may this
+// request go THERE" — belongs to the caller's own authority model, which
+// this package deliberately knows nothing about: the assistant asks its
+// destination grant (design §5.4), and a caller that marks nothing is
+// unaffected, exactly as with the two marks below.
+//
+// It rides the context because the context is the one channel that survives
+// from the initial request into every redirect hop.
+type redirectGuardKey struct{}
+
+// WithRedirectGuard attaches a predicate consulted before EVERY redirect hop
+// is followed. A non-nil error refuses the hop, and its sentence is the
+// caller's own — this package only prefixes the component.
+func WithRedirectGuard(ctx context.Context, allow func(*url.URL) error) context.Context {
+	if allow == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, redirectGuardKey{}, allow)
+}
+
+func redirectGuard(ctx context.Context) func(*url.URL) error {
+	guard, _ := ctx.Value(redirectGuardKey{}).(func(*url.URL) error)
+	return guard
 }
 
 // customHeaderNamesKey carries the canonical names of the endpoint's custom

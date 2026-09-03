@@ -19,12 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -178,6 +180,17 @@ func executeFetchURL(ctx context.Context, cap agenttools.Capability, args json.R
 	if !scope.Allows(p.URL) {
 		return "", errors.New("fetch.url: URL is outside the run's destination grant")
 	}
+	// EVERY redirect hop is judged by the same grant, through the same
+	// predicate: a chain that walked off the granted endpoint would return
+	// another endpoint's document under the URL the person granted
+	// (design §5.4). The guard rides the context, which is what survives
+	// into each hop.
+	ctx = httppolicy.WithRedirectGuard(ctx, func(hop *url.URL) error {
+		if !scope.Allows(hop.String()) {
+			return fmt.Errorf("fetch.url: the redirect to %s is outside the run's destination grant", hop.Redacted())
+		}
+		return nil
+	})
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err

@@ -1360,3 +1360,156 @@ func TestSessionRunDefersToRunLease(t *testing.T) {
 		t.Fatalf("session.run deadline = %s, want zero so the run lease is the only bound", run.Deadline)
 	}
 }
+
+// ── the endpoint form, in the capability that dials (bead nocx-67byy) ────
+
+func endpointScope(id string, includeSubdomains bool) content.GrantScope {
+	return content.GrantScope{Kind: content.ResourceDestination, ID: id, IncludeSubdomains: includeSubdomains}
+}
+
+func TestURLScopeHonoursTheEndpointForm(t *testing.T) {
+	scope := &URLScope{Endpoints: []content.GrantScope{endpointScope("https://github.com", true)}}
+	if !scope.Allows("https://api.github.com/x") {
+		t.Error("the capability refused a URL the policy covers; the page would show a grant the dialler ignores")
+	}
+	if scope.Allows("https://github.com.evil.example/x") {
+		t.Error("the capability allowed a suffix-alike")
+	}
+	if scope.Allows("http://github.com/x") {
+		t.Error("the capability allowed a scheme downgrade")
+	}
+	bare := &URLScope{Endpoints: []content.GrantScope{endpointScope("https://github.com", false)}}
+	if bare.Allows("https://api.github.com/x") {
+		t.Error("a grant over the host alone reached a subdomain")
+	}
+	if !bare.Allows("https://github.com/owner/repo") {
+		t.Error("a grant over the host refused a document at that host")
+	}
+}
+
+// The capability and the page read ONE predicate. This is the test that says
+// so: for every URL, what URLScope.Allows answers is what the policy's
+// GrantScope.Contains answers, so the two cannot drift apart.
+func TestURLScopeAnswersExactlyWhatThePolicyPredicateAnswers(t *testing.T) {
+	for _, granted := range []content.GrantScope{
+		endpointScope("https://github.com", false),
+		endpointScope("https://github.com", true),
+		endpointScope("https://github.com:8443", false),
+		endpointScope("http://127.0.0.1:8080", false),
+		endpointScope("*", false),
+	} {
+		capability := &URLScope{Endpoints: []content.GrantScope{granted}}
+		for _, raw := range []string{
+			"https://github.com/owner/repo",
+			"https://github.com:443/x",
+			"https://github.com:8443/x",
+			"https://api.github.com/x",
+			"https://notgithub.com/x",
+			"https://github.com.evil.example/x",
+			"http://github.com/x",
+			"http://127.0.0.1:8080/x",
+			"http://127.0.0.1:9090/x",
+			"https://user@github.com/x",
+			"not a url",
+		} {
+			want := granted.Contains(content.GrantScope{Kind: content.ResourceDestination, ID: raw})
+			if got := capability.Allows(raw); got != want {
+				t.Errorf("URLScope{%v}.Allows(%q) = %v, policy says %v", granted, raw, got, want)
+			}
+		}
+	}
+}
+
+// A capability holding two endpoints keeps each one's marker. Collapsing
+// them into a single flag would silently widen the endpoint that never asked
+// for subdomains.
+func TestURLScopeKeepsEachEndpointsMarker(t *testing.T) {
+	scope := &URLScope{Endpoints: []content.GrantScope{
+		endpointScope("https://github.com", true),
+		endpointScope("https://internal.example", false),
+	}}
+	if !scope.Allows("https://api.github.com/x") {
+		t.Error("the marked endpoint stopped covering its subdomains")
+	}
+	if scope.Allows("https://secret.internal.example/x") {
+		t.Error("the unmarked endpoint was widened by its neighbour's marker")
+	}
+}
+
+func TestURLScopeStarStillMeansEveryAddress(t *testing.T) {
+	scope := &URLScope{Endpoints: []content.GrantScope{endpointScope("*", false)}}
+	if !scope.Allows("https://anything.example/x") {
+		t.Error("* stopped meaning every address")
+	}
+	if (&URLScope{}).Allows("https://github.com/x") {
+		t.Error("an empty capability allowed a URL")
+	}
+	var nilScope *URLScope
+	if nilScope.Allows("https://github.com/x") {
+		t.Error("a nil capability allowed a URL")
+	}
+}
+
+// The capability carries the GRANT's endpoints — the sentence the page shows
+// a person — and not the URL this call happened to resolve, because a
+// redirect lands on a URL nobody resolved and must still be judged. It
+// carries only the endpoints that actually covered a resolved resource, so an
+// endpoint the call never reached stays out of the capability.
+func TestNarrowURL_CarriesTheCoveringEndpointsOnly(t *testing.T) {
+	grant := content.Grant{Scopes: []content.GrantScope{
+		endpointScope("https://github.com", true),
+		endpointScope("https://internal.example", false),
+	}}
+	resolved := []ResourceRef{{Kind: content.ResourceDestination, ID: "https://github.com/owner/repo"}}
+
+	capability, err := narrowURL(grant, resolved, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowURL: %v", err)
+	}
+	scope, ok := capability.(*URLScope)
+	if !ok {
+		t.Fatalf("capability = %T, want *URLScope", capability)
+	}
+	if !scope.Allows("https://github.com/owner/repo") {
+		t.Fatal("the capability refused the URL the call resolved")
+	}
+	if !scope.Allows("https://api.github.com/x") {
+		t.Error("the capability refused a subdomain the grant covers; a redirect there would be refused while the page shows it granted")
+	}
+	if scope.Allows("https://internal.example/x") {
+		t.Error("the capability carried a grant endpoint the call never resolved")
+	}
+	if scope.Allows("https://github.com.evil.example/x") {
+		t.Error("the capability allowed a suffix-alike")
+	}
+}
+
+func TestNarrowURL_RefusesADestinationOutsideTheGrant(t *testing.T) {
+	grant := content.Grant{Scopes: []content.GrantScope{endpointScope("https://github.com", false)}}
+	capability, err := narrowURL(grant, []ResourceRef{{Kind: content.ResourceDestination, ID: "https://elsewhere.example/x"}}, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowURL: %v", err)
+	}
+	scope, ok := capability.(*URLScope)
+	if !ok {
+		t.Fatalf("capability = %T, want *URLScope", capability)
+	}
+	if scope.Allows("https://elsewhere.example/x") {
+		t.Error("a resolved destination the grant does not cover was carried into the capability")
+	}
+}
+
+// A grant scope is passed to the predicate WHOLE. Rebuilding it from its
+// kind and id drops the subdomain marker, and the resource that the grant
+// covers is then reported outside it — the capability and the page
+// disagreeing about one grant, which is the drift this task exists to close.
+func TestResourceInGrant_CarriesTheSubdomainMarker(t *testing.T) {
+	grant := content.Grant{Scopes: []content.GrantScope{endpointScope("https://github.com", true)}}
+	ref := ResourceRef{Kind: content.ResourceDestination, ID: "https://api.github.com/x"}
+	if !resourceInGrant(grant, ref) {
+		t.Fatal("a subdomain-marked grant scope did not cover a subdomain resource")
+	}
+	if got := grantedResources(grant, []ResourceRef{ref}); len(got) != 1 {
+		t.Fatalf("grantedResources = %v, want the covered destination kept", got)
+	}
+}

@@ -660,7 +660,11 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 	for _, resource := range resources {
 		inside := false
 		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
-			inside = (content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
+			// The row's scope is asked WHOLE: rebuilding it from kind and id
+			// drops a destination's subdomain marker (design §5.4), and a
+			// row that grants a host with its subdomains would then refuse
+			// one of them.
+			inside = scope.Contains(
 				content.GrantScope{Kind: resource.Kind, ID: resource.ID},
 			)
 			if inside {

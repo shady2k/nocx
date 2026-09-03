@@ -128,7 +128,16 @@ func TestCommandEffect_EveryReadAllowlistEntryLowers(t *testing.T) {
 	}
 }
 
-func TestCommandEffect_SortOutputFormsKeepWorstCase(t *testing.T) {
+// CHANGED EXPECTATION (nocx-jxq97). These four used to assert `delegate` — the
+// worst member of session.run's declaration set — because the report mixes the
+// read of `file` with the write of `/etc/passwd`, and a mixed report took the
+// declared worst. It takes the worst DERIVED candidate now, which is the write.
+//
+// What the test was built to catch is untouched, and is what it still asserts:
+// `sort` sits in the read-program allowlist, so an -o form the parser fails to
+// notice collapses the command to `observe` and a person is asked nothing about
+// the file it overwrites. Every spelling of the option must stay above observe.
+func TestCommandEffect_SortOutputFormsAreNotLoweredToObserve(t *testing.T) {
 	for _, command := range []string{
 		"sort -o /etc/passwd file",
 		"sort -o/etc/passwd file",
@@ -136,16 +145,28 @@ func TestCommandEffect_SortOutputFormsKeepWorstCase(t *testing.T) {
 		"sort --output=/etc/passwd file",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectDelegate {
-				t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
+			got := commandEffect(parseCanonicalInvocation(command), runEffects)
+			if got == content.EffectObserve {
+				t.Fatalf("%q was lowered to %q — the file it overwrites is invisible", command, got)
+			}
+			if got != content.EffectMutateReversible {
+				t.Fatalf("effect = %q, want %q — writing the file is the worst of what it does",
+					got, content.EffectMutateReversible)
 			}
 		})
 	}
 }
 
-func TestCommandEffect_UniqSecondOperandKeepsWorstCase(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("uniq input output"), runEffects); got != content.EffectDelegate {
-		t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
+// CHANGED EXPECTATION (nocx-jxq97), for the same reason and with the same
+// surviving point: `uniq` is a read program, and its second operand is a write
+// the allowlist would otherwise hide.
+func TestCommandEffect_UniqSecondOperandIsNotLoweredToObserve(t *testing.T) {
+	got := commandEffect(parseCanonicalInvocation("uniq input output"), runEffects)
+	if got == content.EffectObserve {
+		t.Fatalf("effect = %q — the second operand is a write and it is invisible", got)
+	}
+	if got != content.EffectMutateReversible {
+		t.Fatalf("effect = %q, want %q", got, content.EffectMutateReversible)
 	}
 }
 
@@ -622,19 +643,59 @@ func TestCommandResources_CurlOutputOptionIsAWrittenResource(t *testing.T) {
 		t.Errorf("the feature a refusal has to match is absent: %+v", inv.Resources.Features)
 	}
 
-	// The report now mixes ResourceNetwork with ResourceWrite, so Effect
-	// takes the declared set's worst member rather than the network mapping.
-	// For session.run's set that member is `delegate` (effectOrder 6), NOT
-	// `mutate-destructive` (2) as the brief's parenthetical says — the
-	// binding half of the criterion is WorstEffect(declared), and the
-	// security property holds either way because both outrank the
-	// cross-boundary row this command used to be filed under.
-	got := commandEffect(inv, runEffects)
-	if got == content.EffectCrossBoundary {
-		t.Errorf("a curl that writes a file is still filed under the network row: %q", got)
+	// CHANGED EXPECTATION (nocx-jxq97). This assertion used to read "not
+	// cross-boundary, and equal to WorstEffect(runEffects)" — which for
+	// session.run's declaration set is `delegate`, "hand work to another
+	// agent". This command hands work to nobody. The row is now the worst of
+	// what it actually did, and both things it did are named beside it.
+	selection := commandSelection(inv, runEffects)
+	if selection.Effect != content.EffectCrossBoundary {
+		t.Errorf("effect = %q, want %q — reaching a host is the worst of what it did",
+			selection.Effect, content.EffectCrossBoundary)
 	}
-	if want := content.WorstEffect(runEffects); got != want {
-		t.Errorf("effect = %q, want the declared set's worst member %q", got, want)
+	if selection.Effect == content.EffectDelegate {
+		t.Errorf("a curl that writes a file is still filed under the delegate row")
+	}
+	if got := commandEffect(inv, runEffects); got != selection.Effect {
+		t.Errorf("commandEffect = %q but commandSelection = %q", got, selection.Effect)
+	}
+}
+
+// TestCommandResources_CurlThatWritesAFileNamesBothCandidates is the second
+// half of nocx-jxq97: one row governs the decision (ADR-0020 §7), and the
+// person is still told that this call BOTH reached a host and wrote a file.
+// Without this the ask would say "reach another host" and the file would be
+// written on the strength of an answer that never mentioned it.
+func TestCommandResources_CurlThatWritesAFileNamesBothCandidates(t *testing.T) {
+	inv := parseCanonicalInvocation("curl -o /tmp/x https://y")
+
+	selection := commandSelection(inv, runEffects)
+	if len(selection.Candidates) != 2 {
+		t.Fatalf("candidates = %v, want exactly the two this command derived", selection.Candidates)
+	}
+	for _, want := range []content.Effect{content.EffectCrossBoundary, content.EffectMutateReversible} {
+		var found bool
+		for _, candidate := range selection.Candidates {
+			if candidate == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("candidates = %v, want %q among them", selection.Candidates, want)
+		}
+	}
+}
+
+// TestCommandSelection_UnparsedCommandOffersNoCandidates: a command the parser
+// could not read takes the declared worst, and names nothing — a candidate for
+// a command nobody could parse would be a guess presented as a fact.
+func TestCommandSelection_UnparsedCommandOffersNoCandidates(t *testing.T) {
+	selection := commandSelection(content.Invocation{Parsed: false}, runEffects)
+	if want := content.WorstEffect(runEffects); selection.Effect != want {
+		t.Fatalf("effect = %q, want the declared worst %q", selection.Effect, want)
+	}
+	if len(selection.Candidates) != 0 {
+		t.Fatalf("candidates = %v, want none", selection.Candidates)
 	}
 }
 

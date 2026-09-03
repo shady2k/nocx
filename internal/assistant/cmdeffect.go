@@ -78,11 +78,22 @@ func finalizeInvocation(inv content.Invocation, command string) content.Invocati
 	return inv
 }
 
-func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
+// commandSelection is the one classification of a run command: the row that
+// governs it and every candidate its resources derived (nocx-jxq97). The
+// candidates are carried so an approval surface can say that a call both
+// reached a host and wrote a file while one row still governs the decision
+// (ADR-0020 §7). A command the parser could not read has no report to derive
+// from: it takes the declared worst and names nothing, because a candidate for
+// an unparsed command would be a guess offered as a fact.
+func commandSelection(inv content.Invocation, declared []content.Effect) content.EffectSelection {
 	if !inv.Parsed {
-		return content.WorstEffect(declared)
+		return content.EffectSelection{Effect: content.WorstEffect(declared)}
 	}
-	return inv.Resources.Effect(declared)
+	return inv.Resources.SelectEffect(declared)
+}
+
+func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
+	return commandSelection(inv, declared).Effect
 }
 
 type readProgramRule struct {

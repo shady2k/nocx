@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/wave.spawn.schema.json",
+  "title": "WaveSpawnParams",
+  "description": "Parameters for the wave.spawn agent tool: start one worker in a terminal pane of its own and hand it a task. The person may be asked to approve it first, and a refusal is an answer. Nothing you do after this keeps the worker supervised — nocx watches it whether or not you ask again.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "task"],
+  "properties": {
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "The command line that starts the worker, exactly as a person would type it — for example `claude`. It runs in the worker's own pane."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "What this worker is for, in your own words. It is recorded, so a later wave.holdings can tell you what you started even if you have lost the context you started it from."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WaveSpawnResult",
+      "description": "The worker that now exists. It is live: its enrolment arrived, which is what proves the agent started — never that this call returned.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The worker's id."
+        },
+        "state": {
+          "type": "string",
+          "enum": ["live"],
+          "description": "Always live: a spawn that did not reach live is an error, not a result."
+        }
+      }
+    }
+  }
+}

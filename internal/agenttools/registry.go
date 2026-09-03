@@ -688,6 +688,60 @@ var declarations = []Declaration{
 		Params:           "skills.delete.schema.json",
 		Narrow:           narrowSkillsWrite,
 	},
+	{
+		Name:        "wave.holdings",
+		Description: "Ask what workers your own session is responsible for, and what each of them is doing. It takes no arguments: the session is the one you are running in. Reach for it at the start of a turn when you have lost track of what you started — nocx has been watching them the whole time, including across a restart of yours.",
+		// Reading a record nocx keeps about this session. It reaches no
+		// machine and changes nothing.
+		Effect: []content.Effect{content.EffectObserve},
+		// The task text and any summary come from a WORKER, which is an
+		// agent reading a machine. It is untrusted for the same reason
+		// session.read's output is.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The SESSION, resolved from the run and never from an argument.
+		// This is A9's rule exactly: the holder's own resource lives inside
+		// the object, and the model has no way to name another. It is
+		// declared rather than left resourceless because a tool with no
+		// resource kind is offered under any grant carrying its effect, and
+		// "what is my session responsible for" is a question about a session
+		// — a grant that names none should not be offered it.
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "wave.holdings.schema.json",
+		Narrow:           narrowWave,
+	},
+	{
+		Name:        "wave.spawn",
+		Description: "Start one worker in a terminal pane of its own and give it a task. Reach for this when a piece of work is genuinely separate and can run while you do something else — never to parallelise something you could just do. nocx watches the worker from the moment it starts, so you do not have to remember it: ask wave.holdings later and you will be told what it came to.",
+		// DELEGATE, and no eighth effect. Handing work to another agent is
+		// exactly what the seventh member of the closed lattice already
+		// names — it is in the grant_effects CHECK, in the policy contract
+		// and in the settings UI as "hand work to another agent". Adding a
+		// `spawn` member would cost eight coordinated edits to express what
+		// this one already expresses.
+		Effect:      []content.Effect{content.EffectDelegate},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 4 << 10, Truncation: TruncationDropTail},
+		// Bounded by the enrolment interval rather than by the agent's work:
+		// this returns when the worker has STARTED, not when it has
+		// finished, and what happens after is the record's business.
+		Deadline:     60 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The environment is WHERE the worker runs, and spawning into one
+		// outside the run's fence is scope expansion. The resolver names the
+		// only environment this slice can reach — the machine nocx itself
+		// runs on — so a fence that does not contain it refuses the call
+		// before any pane is minted.
+		ResourceKinds:    []content.ResourceKind{content.ResourceEnvironment},
+		ResolveResources: resourceLocalEnvironment,
+		Executes:         InGo,
+		Params:           "wave.spawn.schema.json",
+		Narrow:           narrowWave,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

@@ -639,6 +639,11 @@ type WSServer struct {
 	// that is where the admission gates it runs under exist — which is
 	// NewWSServer, so it is ready before the server serves anything.
 	opener *sessionOpener
+	// waves is the wave record a coordinator run reaches through its tools
+	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two wave
+	// tools refusing with a sentence rather than starting a worker into
+	// nothing.
+	waves assistant.WaveRecord
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -3890,3 +3895,14 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 	}
 	return tag
 }
+
+// SetWaveRecord wires the wave record a coordinator run reaches through
+// wave.spawn and wave.holdings. Without it those tools refuse and say why: a
+// spawn accepted into a record that does not exist is exactly the unaccounted
+// agent the record was built to prevent.
+//
+// A setter rather than an option, for the reason the emitter is one: the
+// record is built from seams this server provides — its own session opener
+// among them — so it cannot exist before the server does. The window before
+// this line is empty, because no run can have been asked yet.
+func (s *WSServer) SetWaveRecord(w assistant.WaveRecord) { s.waves = w }

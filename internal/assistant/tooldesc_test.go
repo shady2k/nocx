@@ -57,12 +57,22 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 	}
 
 	f := askWithGrant(t, &content.Grant{
-		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary},
+		// A grant that reaches EVERYTHING, which is what makes the count
+		// below an assertion about descriptions rather than about
+		// eligibility. delegate and the environment scope are here for
+		// wave.spawn; without them the grant would silently stop covering
+		// one tool and the test would be measuring the wrong set.
+		Effects: []content.Effect{
+			content.EffectObserve, content.EffectMutateReversible,
+			content.EffectMutateDestructive, content.EffectCrossBoundary,
+			content.EffectDelegate,
+		},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
 			{Kind: content.ResourceContent, ID: "content"},
 			{Kind: content.ResourceDestination, ID: "*"},
+			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 		},
 	})
 	got := toolDescriptions(t, f.body())

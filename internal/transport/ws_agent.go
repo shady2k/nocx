@@ -590,6 +590,10 @@ type agentHandlers struct {
 	// today, and why the honest refusal is the product's own outcome rather
 	// than a stub.
 	expansions assistant.ExpansionSource
+	// waves is the wave record a coordinator run may start workers in and ask
+	// about (nocx-dkawo.8). Nil until the composition root wires one, which
+	// is what an unopened content store leaves.
+	waves assistant.WaveRecord
 	// knownMaterial is the egress gate's vault comparison (design §7.1,
 	// assistant.KnownMaterial) — the seam that answers "does this tool
 	// result contain a value the vault holds", in the backend, nothing
@@ -1387,15 +1391,21 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:              secret,
-		BaseURL:          rc.endpoint.BaseURL,
-		Model:            rc.model,
-		Headers:          headers,
-		Messages:         msgs,
-		Grant:            rc.grant,
-		AttemptLedger:    h.attemptLedger,
-		Requester:        h.requester,
-		Expansions:       h.expansions,
+		Key:           secret,
+		BaseURL:       rc.endpoint.BaseURL,
+		Model:         rc.model,
+		Headers:       headers,
+		Messages:      msgs,
+		Grant:         rc.grant,
+		AttemptLedger: h.attemptLedger,
+		Requester:     h.requester,
+		Expansions:    h.expansions,
+		Waves:         h.waves,
+		// The one environment a spawn can reach in this slice: the machine
+		// nocx itself runs on. Derived through content's own id rule so the
+		// run fence and the tool's resolver name the same string without
+		// either restating the other.
+		WaveEnvironment:  content.EnvironmentIDFor(content.EnvLocal, ""),
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
@@ -2591,6 +2601,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, knownMaterial: s.agentKnownMaterial,
+			waves:     s.waves,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,

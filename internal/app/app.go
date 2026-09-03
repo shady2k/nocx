@@ -1887,6 +1887,10 @@ func New(opts ...Option) (*App, error) {
 				"participant", string(id), "error", err)
 		}
 	}
+	// The coordinator's own two calls reach the record through the transport
+	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
+	// is: the server is built above, and the record needs it.
+	tp.SetWaveRecord(waveRecord)
 	waveReport.declare = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, d wave.Declaration) error {
 		_, err := waveRecord.Declared(ctx, id, l, d)
 		return err

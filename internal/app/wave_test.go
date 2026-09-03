@@ -116,8 +116,8 @@ func newWaveStand(t *testing.T) *waveStand {
 		}
 	}
 
-	if err := db.Waves().CreateWave(ctx, "wave-1", "sess-coordinator"); err != nil {
-		t.Fatalf("create wave: %v", err)
+	if err := db.Waves().EnsureWave(ctx, "wave-1", "sess-coordinator"); err != nil {
+		t.Fatalf("ensure wave: %v", err)
 	}
 	return &waveStand{db: db, dir: dir, reg: reg, enrol: enrol, lanes: lanes, report: report, record: record}
 }

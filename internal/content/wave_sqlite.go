@@ -33,13 +33,17 @@ var _ wave.Store = (*sqliteContent)(nil)
 // lets the registrar be constructed against a double.
 func (s *sqliteContent) Waves() wave.Store { return s }
 
-func (s *sqliteContent) CreateWave(ctx context.Context, id wave.ID, coordinatorSession string) error {
+func (s *sqliteContent) EnsureWave(ctx context.Context, id wave.ID, coordinatorSession string) error {
 	return s.run(ctx, func(ctx context.Context) error {
+		// DO NOTHING and not an upsert: the coordinator session of a wave is
+		// its identity, and a second call reassigning it would move every
+		// participant to a controller that never spawned them.
 		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO waves (id, coordinator_session, created_at) VALUES (?, ?, ?)`,
+			`INSERT INTO waves (id, coordinator_session, created_at) VALUES (?, ?, ?)
+			 ON CONFLICT(id) DO NOTHING`,
 			string(id), coordinatorSession, time.Now().UnixMilli())
 		if err != nil {
-			return fmt.Errorf("content: create wave %q: %w", id, err)
+			return fmt.Errorf("content: ensure wave %q: %w", id, err)
 		}
 		return nil
 	})

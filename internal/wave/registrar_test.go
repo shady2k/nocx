@@ -72,8 +72,8 @@ func (m *memStore) hit(kind string) error {
 	return nil
 }
 
-func (m *memStore) CreateWave(_ context.Context, id ID, coord string) error {
-	if err := m.hit("createwave"); err != nil {
+func (m *memStore) EnsureWave(_ context.Context, id ID, coord string) error {
+	if err := m.hit("ensurewave"); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -392,8 +392,8 @@ func newHarness(t *testing.T) *harness {
 		WithIDs(func() ParticipantID { return ParticipantID(fmt.Sprintf("p-%d", h.store.counts["commitprepared"]+1)) }),
 		WithClock(func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }),
 	)
-	if err := h.store.CreateWave(context.Background(), testWave, coordSession); err != nil {
-		t.Fatalf("create wave: %v", err)
+	if err := h.store.EnsureWave(context.Background(), testWave, coordSession); err != nil {
+		t.Fatalf("ensure wave: %v", err)
 	}
 	return h
 }

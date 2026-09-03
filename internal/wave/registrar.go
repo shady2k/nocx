@@ -121,6 +121,17 @@ type RegisterRequest struct {
 // that cannot name the record cannot check what happened to it — and "a
 // registration that failed" is exactly when naming it matters.
 func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Participant, error) {
+	// The wave exists because a coordinator spawned into it, never because
+	// somebody opened one: a coordinator's first spawn is what a wave IS.
+	// Its id defaults to the coordinator's session, which is the identity D3
+	// answers by — one coordinator session, one wave — so nothing has to
+	// carry a second name for the same thing.
+	if req.Wave == "" {
+		req.Wave = ID(req.CoordinatorSession)
+	}
+	if err := r.store.EnsureWave(ctx, req.Wave, req.CoordinatorSession); err != nil {
+		return Participant{}, fmt.Errorf("wave: ensure: %w", err)
+	}
 	// Step 1. Nothing is forked and no record exists, so a refusal is free.
 	held, reserveErr := r.store.NonTerminal(ctx, req.Wave)
 	if reserveErr != nil {

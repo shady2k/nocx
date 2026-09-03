@@ -13,9 +13,13 @@ import "context"
 // transactional across methods; CommitPrepared is the one place a transaction
 // is required, and it is required inside that single call.
 type Store interface {
-	// CreateWave records a wave and the session that coordinates it. Called
-	// once, before any participant.
-	CreateWave(ctx context.Context, id ID, coordinatorSession string) error
+	// EnsureWave records a wave and the session that coordinates it, and does
+	// nothing if it is already there. Idempotent rather than
+	// create-once, because a coordinator does not open its wave: it spawns a
+	// worker, and the wave is what that act implies. A create that failed the
+	// second time would make the second spawn of a session an error for a
+	// reason the caller could do nothing about.
+	EnsureWave(ctx context.Context, id ID, coordinatorSession string) error
 
 	// NonTerminal lists the participants this wave holds that are not
 	// finished. It answers two questions with one row set, which is why it is

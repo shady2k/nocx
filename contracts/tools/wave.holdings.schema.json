@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/wave.holdings.schema.json",
+  "title": "WaveHoldingsParams",
+  "description": "Parameters for the wave.holdings agent tool: ask what workers your own session is responsible for. It takes NOTHING — the session is the one you are running in, and you cannot ask about another. Reach for it when you have lost track of what you started, including at the beginning of a turn after a restart.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {},
+  "$defs": {
+    "result": {
+      "title": "WaveHoldingsResult",
+      "description": "The workers this session is responsible for. An empty list is honest and ordinary: it means you have started none, or every one you started has finished.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["participants"],
+      "properties": {
+        "participants": {
+          "type": "array",
+          "description": "One entry per worker, oldest first.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "state", "task"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The worker's id, which is how you name it in a later call."
+              },
+              "state": {
+                "type": "string",
+                "enum": ["prepared", "live", "completed", "failed", "abandoned", "interrupted"],
+                "description": "prepared: recorded, not yet started. live: running. completed and failed: it said what it produced AND its process is gone — the verdict is its own. abandoned: its process is gone and it never said what it produced, which is not a completion. interrupted: nocx restarted and could not judge it."
+              },
+              "task": {
+                "type": "string",
+                "description": "What this worker was given to do, as you gave it."
+              },
+              "summary": {
+                "type": "string",
+                "description": "What the worker said it produced, when it said anything. Absent while it has not reported."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

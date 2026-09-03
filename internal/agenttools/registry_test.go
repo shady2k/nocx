@@ -439,9 +439,14 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.create":    {content.EffectMutateReversible},
 		"skills.update":    {content.EffectMutateReversible},
 		"skills.delete":    {content.EffectMutateReversible},
+		"wave.holdings":    {content.EffectObserve},
+		// DELEGATE and nothing else. Handing work to another agent is what
+		// the seventh member of the closed lattice already names, so a
+		// `spawn` effect would be an eighth expressing the same thing.
+		"wave.spawn": {content.EffectDelegate},
 	}
-	if len(declarations) != 22 {
-		t.Fatalf("declaration count = %d, want 22", len(declarations))
+	if len(declarations) != 24 {
+		t.Fatalf("declaration count = %d, want 24", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -558,6 +563,8 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
+		"wave.holdings.schema.json":    waveHoldingsSchema,
+		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -605,7 +612,10 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// session.wait joins the list: it is an observe tool over a session, and
 	// the right to keep waiting on a command travels with the right to have
 	// started one (nocx-6dzxq).
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait"}
+	// wave.holdings joins them for the same reason session.wait did: it is
+	// an observe tool over a session, and "what is my session responsible
+	// for" is a question about the session the grant already named.
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -702,6 +712,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
+		"wave.holdings.schema.json":    waveHoldingsSchema,
+		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1360,3 +1372,33 @@ func TestSessionRunDefersToRunLease(t *testing.T) {
 		t.Fatalf("session.run deadline = %s, want zero so the run lease is the only bound", run.Deadline)
 	}
 }
+
+// The wave tools' schemas, as this package's tests need them: a params shape
+// and a result shape. The real ones live in contracts/tools and are asserted
+// against the wire elsewhere; these exist so an assembly test does not depend
+// on the whole directory.
+const waveHoldingsSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["participants"],
+    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const waveSpawnSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "task"],
+  "properties": {"command": {"type": "string"}, "task": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "state"],
+    "properties": {"id": {"type": "string"}, "state": {"type": "string"}}
+  }}
+}`

@@ -69,6 +69,8 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"skills.create":    executeSkillsCreate,
 	"skills.update":    executeSkillsUpdate,
 	"skills.delete":    executeSkillsDelete,
+	"wave.holdings":    executeWaveHoldings,
+	"wave.spawn":       executeWaveSpawn,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is
@@ -99,6 +101,16 @@ type toolSeams struct {
 	// product's honest answer wherever our integration is not deployed:
 	// expand nothing, mark every variable unresolved, say so.
 	expansions ExpansionSource
+	// waves is the wave record. Nil is the ordinary shape for every caller
+	// that is not the transport, and it is also the honest answer where the
+	// encrypted store never opened: the tools refuse and say so, rather than
+	// starting a worker into a record that would not hold it.
+	waves WaveRecord
+	// waveEnvironment names the environment a spawn would reach. It is a
+	// SEAM value and not an argument for the reason resourceLocalEnvironment
+	// is a constant: the spawner opens a local session, so a parameter would
+	// let the model name an environment nothing could deliver.
+	waveEnvironment string
 }
 
 type noteSearchRow struct {

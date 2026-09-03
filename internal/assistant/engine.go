@@ -418,6 +418,8 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			snapshots:        c.snapshots,
 			runID:            p.RunID,
 			expansions:       p.Expansions,
+			waves:            p.Waves,
+			waveEnvironment:  p.WaveEnvironment,
 		})
 		if err != nil {
 			return err

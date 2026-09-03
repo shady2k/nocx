@@ -43,8 +43,8 @@ func testWaveLiveness() wave.Liveness {
 func newWaveStore(t *testing.T) (content.ContentDB, string) {
 	t.Helper()
 	db, dir := newTestStore(t)
-	if err := db.Waves().CreateWave(context.Background(), testWaveID, testCoordSession); err != nil {
-		t.Fatalf("create wave: %v", err)
+	if err := db.Waves().EnsureWave(context.Background(), testWaveID, testCoordSession); err != nil {
+		t.Fatalf("ensure wave: %v", err)
 	}
 	return db, dir
 }
@@ -314,7 +314,7 @@ func TestTheStubRefusesEveryWaveCall(t *testing.T) {
 	w := content.NewStub(log.NewSlogAdapter(nil)).Waves()
 
 	for name, call := range map[string]func() error{
-		"create wave":     func() error { return w.CreateWave(ctx, testWaveID, testCoordSession) },
+		"create wave":     func() error { return w.EnsureWave(ctx, testWaveID, testCoordSession) },
 		"commit prepared": func() error { return w.CommitPrepared(ctx, testParticipant("p-1")) },
 		"mark live":       func() error { return w.MarkLive(ctx, "p-1", testWaveLiveness()) },
 		"terminalize":     func() error { return w.Terminalize(ctx, "p-1", wave.StateInterrupted) },

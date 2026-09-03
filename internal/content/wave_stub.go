@@ -35,8 +35,8 @@ func (w *waveStub) errNoRecord(op string) error {
 	return fmt.Errorf("content: wave %s: %w", op, wave.ErrRecordUnavailable)
 }
 
-func (w *waveStub) CreateWave(context.Context, wave.ID, string) error {
-	return w.errNoRecord("create wave")
+func (w *waveStub) EnsureWave(context.Context, wave.ID, string) error {
+	return w.errNoRecord("ensure wave")
 }
 
 func (w *waveStub) NonTerminal(context.Context, wave.ID) ([]wave.Participant, error) {

@@ -296,6 +296,16 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 		{Kind: content.ResourceContent, ID: "note"},
 		{Kind: content.ResourceContent, ID: "snippet"},
 		{Kind: content.ResourceDestination, ID: "*"},
+		// The environment a run may start a worker in (nocx-dkawo.8, A7 of
+		// the wave authority model). It is the LOCAL machine and only that:
+		// the spawner opens a local session, so a fence naming any other
+		// environment would offer an authority nothing could deliver. A
+		// remote participant needs the helper and is not this slice.
+		//
+		// Without this scope Registry.ForGrant's kind check silently omits
+		// wave.spawn and it is never offered — which is why the scope is
+		// minted here rather than assumed by the tool.
+		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 	}
 	if s.skillsEnabled() {
 		scopes = append(scopes, content.GrantScope{Kind: content.ResourceContent, ID: "skill"})

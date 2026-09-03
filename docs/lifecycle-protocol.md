@@ -22,42 +22,69 @@ and a frontend author can both work from this document alone.
 | **Lane**       | One input-routing lane (one terminal tab). At most one **active** domain per lane. A lane holds a stack of domains; the top of the stack is the active one.                                                                                                                                                        |
 | **Domain**     | One authenticated shell or helper instance. Logical — never an alias for a transport. Carries an id, an epoch and an optional parent.                                                                                                                                                                              |
 | **Epoch**      | The generation of a domain instance. Monotonic per kernel instance, assigned at creation, never reused, never resumed: a new establishment is a new domain with a new epoch.                                                                                                                                       |
-| **Capability** | The per-epoch authenticator: at least 256 random bits, minted by the kernel, substituted into the integration script text, never passed as an environment variable, never derived from the transport.                                                                                                              |
+| **Capability** | The per-epoch authenticator: at least 256 random bits, minted by the kernel, delivered to the shell by one of the two carriers ADR-0049 left standing (§4), never passed as an environment variable, never derived from the transport, and carried on the INBOUND half of the channel only (§2).                   |
 | **Attempt**    | One command execution. Belongs to exactly one domain; cannot cross an activation boundary.                                                                                                                                                                                                                         |
 | **Lifecycle**  | The per-lane authority axis: `Native                                                                                                                                                                                                                                                                               | PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost` (ADR-0024 decision 6). |
 
 ## 2. The envelope
 
 Every event travels in an envelope. **Every** envelope carries the full addressing
-tuple — protocol version, lane id, domain id, epoch, monotonic sequence, and the
-bearer capability. No API anywhere obtains lane, domain or epoch from a singleton;
-they are addressed explicitly in every message. This is the property that keeps
-the remote helper a third adapter instead of a protocol rewrite.
+tuple — protocol version, lane id, domain id, epoch and monotonic sequence — and
+every INBOUND envelope also carries the bearer capability. No API anywhere obtains
+lane, domain or epoch from a singleton; they are addressed explicitly in every
+message. This is the property that keeps the remote helper a third adapter instead
+of a protocol rewrite.
 
 ```
 +--------+--------+--------+--------+------------------+
 | length |  v:1   |  lane  |  dom   |  epoch (u64)     |
 +--------+--------+--------+--------+------------------+
-|  seq (u64)      |  cap (32 bytes)   |  event payload  |
+|  seq (u64)      |  cap (32 bytes)*  |  event payload  |
 +-----------------+-------------------+-----------------+
+                     * inbound only
 ```
 
 Wire encoding: **JSON** (UTF-8), length-delimited by a 4-byte big-endian length
 prefix preceding the JSON bytes. The envelope fields:
 
-| Field      | JSON    | Type                   | Rule                                                                                |
-| ---------- | ------- | ---------------------- | ----------------------------------------------------------------------------------- |
-| Version    | `v`     | integer                | `1` today. Anything else is rejected before any state is consulted.                 |
-| Lane       | `lane`  | string                 | The lane the event addresses. Must equal the addressed domain's lane.               |
-| Domain     | `dom`   | string                 | The domain instance. Must exist and be bound to the transport the frame arrived on. |
-| Epoch      | `epoch` | integer                | Must equal the domain's live epoch.                                                 |
-| Sequence   | `seq`   | integer                | Strictly increasing per domain within its epoch. See §11.                           |
-| Capability | `cap`   | 64 lowercase hex chars | The bearer. Authenticates the frame. See §4.                                        |
-| Event      | `evt`   | string                 | The event kind, §6.                                                                 |
+| Field      | JSON    | Type                   | Rule                                                                                              |
+| ---------- | ------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Version    | `v`     | integer                | `1` today. Anything else is rejected before any state is consulted.                               |
+| Lane       | `lane`  | string                 | The lane the event addresses. Must equal the addressed domain's lane.                             |
+| Domain     | `dom`   | string                 | The domain instance. Must exist and be bound to the transport the frame arrived on.               |
+| Epoch      | `epoch` | integer                | Must equal the domain's live epoch.                                                               |
+| Sequence   | `seq`   | integer                | Strictly increasing per domain within its epoch. See §11.                                         |
+| Capability | `cap`   | 64 lowercase hex chars | The bearer. Authenticates the frame. **Inbound only** — absent from every outbound frame. See §4. |
+| Event      | `evt`   | string                 | The event kind, §6.                                                                               |
 
-Outbound envelopes (kernel → shell: `accept`, `refresh_request`) use the same
-envelope. The bearer authenticates both directions; the shell's copy of the
-capability is what its bootstrap holds.
+Outbound envelopes (kernel → shell: `accept`, `refresh_request`, `domain_grant`,
+`agent_enrolled`, `agent_withdrawn`) use the same envelope shape, **minus the
+`cap` field, which they omit entirely**. The direction is not symmetric and must
+not be made so:
+
+- The kernel is the only sender on the outbound half, and the shell already holds
+  the capability its bootstrap gave it, so an echoed bearer authenticates nobody
+  to anybody. It cannot even authenticate the peer to the shell: the shell's own
+  `hello` hands that peer the capability one frame earlier.
+- The outbound half is the direction an actor the transport does not stop can
+  read. The local carrier is a socketpair whose child end is handed over with
+  `exec.Cmd.ExtraFiles` (which clears `FD_CLOEXEC`) and whose number is exported
+  as `NOCX_LIFECYCLE_FD`, so every descendant of the shell holds a reader on it
+  for the shell's whole life — and that descendant is precisely the actor ADR-0024
+  names when it makes the capability mandatory rather than belt-and-braces.
+
+A shell identifies an inbound-to-it frame by `dom` and `epoch`, which are names
+rather than secrets and are already in its environment. The kernel, receiving a
+frame with no `cap`, refuses it: an absent capability decodes to the zero value,
+and a zero capability authenticates nobody (`internal/lifecycle`'s explicit zero
+test). Recorded 2026-09-03 (`nocx-aqz7o`), when every outbound frame carried the
+capability in cleartext and the property above did not hold by construction.
+
+**What this does not cover.** A `domain_grant`'s `bootstrap` is opaque text the
+parent executes, and for a local nested environment that text is the child's
+rcfile, containing the CHILD's capability. It travels the same descriptor. That
+is inherent to the shape of §9 — the parent has to receive something to hand its
+child — and it is a separate question with a separate answer.
 
 ## 3. Event kinds
 
@@ -90,9 +117,12 @@ protocol violation. Everything else is shell-originated.
 **Property (ADR-0024 decision 2):** possession of the transport is not possession
 of the domain. An inherited descriptor, a discovered listening address, or a mere
 connection must never let a descendant or another local user publish an event.
-Every envelope therefore carries the domain's per-epoch **bearer capability**, and
-the kernel verifies it **before any domain or sequence state is consulted or
-mutated** (decision 7). A frame with a wrong capability is rejected as if it never
+Every INBOUND envelope therefore carries the domain's per-epoch **bearer
+capability**, and the kernel verifies it **before any domain or sequence state is
+consulted or mutated** (decision 7). The outbound direction carries none, and it
+is that asymmetry — not the bearer alone — that makes the property hold: a
+capability written back onto a descriptor the descendant inherits is a capability
+the descendant can read (§2). A frame with a wrong capability is rejected as if it never
 arrived: no state read, no counter advance, and the failure counts toward the
 handshake rate limit (§5).
 
@@ -109,10 +139,25 @@ epoch, never exported, never in the environment, and replay-safe within its epoc
 via the sequence rule (§11); authority rotates with the epoch, and a new epoch is a
 new capability.
 
-The capability never enters a filesystem object where the installer can avoid it;
-the bootstrap script is substituted at install time (`@CAP@`, the pattern
-`internal/shellintegration` already uses for `@SID@`), and the kernel keeps it only
-in memory on the domain record.
+The capability never enters an argv word, an environment variable or a filesystem
+NAME, and the kernel keeps it only in memory on the domain record. There are
+exactly two carriers by which it reaches a shell, and
+`internal/shellintegration/capability_source.go` owns both:
+
+- the shell reads it once from an **inherited, already-unlinked descriptor** and
+  closes that descriptor — the remote tiers, whose rcfile is an installed
+  generation file published long before the session and therefore capability-free
+  by construction;
+- the value is written into the **text of an rcfile that is itself delivered
+  through a descriptor** (`/dev/fd/N`) — the local nested child, where the
+  bootstrap IS the rcfile and never becomes a filesystem object.
+
+**Amended 2026-08-20 (ADR-0049).** This paragraph used to say the capability was
+substituted into the integration script text at install time (`@CAP@`), which was
+true of a carrier that is gone: that text travelled inside the remote SSH command,
+so the bearer reached the far host's process arguments and every recorder of the
+exec request. The substitution point is `@CAPSRC@` now, and what goes in it is one
+of the two forms above.
 
 ## 5. Establishment: the handshake
 

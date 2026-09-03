@@ -3,6 +3,7 @@ package lifecyclecodec
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -588,3 +589,144 @@ func TestAgentEnrolmentRefusalIsAbsenceOnTheWire(t *testing.T) {
 		t.Errorf("a refusal must carry its reason for the person reading it, got %s", no.String())
 	}
 }
+
+// TestNoOutboundFrameCarriesBearerMaterial is the assertion nocx-aqz7o asks
+// for, made where the bytes actually are: a REAL kernel is driven through
+// every path that answers a shell, every envelope it produces is encoded with
+// the production encoder, and the resulting frames are searched for the
+// domain's capability.
+//
+// Why this test and not a reading of Encode. The exposure it guards was never
+// a codec bug: Encode wrote whatever the envelope carried, the kernel's four
+// outbound constructors carried the capability, and the two halves were
+// correct separately. It is also the direction that reaches an actor the
+// transport does not stop — the local channel is a socketpair whose child end
+// is handed over with exec.Cmd.ExtraFiles, which clears FD_CLOEXEC, so every
+// descendant of the shell holds a reader on it for the shell's whole life.
+// ADR-0024 makes the capability mandatory rather than belt-and-braces for
+// precisely that actor and states twice that it "cannot produce the
+// capability"; while the accept echoed the capability back onto that
+// descriptor in cleartext, the property did not hold by construction.
+//
+// It searches for the capability's HEX, its raw bytes and the `cap` key
+// independently: the first two are what a descendant would grep for, and the
+// third catches a future encoder that puts a placeholder there rather than
+// nothing.
+func TestNoOutboundFrameCarriesBearerMaterial(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	port := &captureKernelPort{}
+	if err := k.BindTransport("T", port); err != nil {
+		t.Fatalf("BindTransport: %v", err)
+	}
+	h, err := k.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	if h.Capability == (lifecycle.Capability{}) {
+		t.Fatal("the minted domain has no capability, so this test cannot look for one")
+	}
+
+	shell := func(seq uint64, evt lifecycle.Event) []lifecycle.Outbound {
+		t.Helper()
+		outs, ierr := k.Ingest("T", lifecycle.Envelope{
+			Version: lifecycle.ProtocolVersion, Lane: "L", Domain: h.Domain,
+			Epoch: h.Epoch, Sequence: seq, Capability: h.Capability, Event: evt,
+		})
+		if ierr != nil {
+			t.Fatalf("Ingest(%s): %v", evt.Kind, ierr)
+		}
+		return outs
+	}
+
+	var outs []lifecycle.Outbound
+	// hello → accept. The first frame of the handshake, and the one the
+	// integration script reads before it will speak at all.
+	outs = append(outs, shell(1, lifecycle.Event{
+		Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "bash"},
+	})...)
+	for _, out := range outs {
+		if derr := k.Deliver(out); derr != nil {
+			t.Fatalf("Deliver(%s): %v", out.Envelope.Event.Kind, derr)
+		}
+	}
+	// domain_request → domain_grant, the answer a nested sudo/su/ssh reads.
+	outs = append(outs, shell(2, lifecycle.Event{
+		Kind: lifecycle.KindDomainRequest, DomainRequest: &lifecycle.DomainRequest{
+			RequestID: "r-dom-0", Env: lifecycle.EnvSSH, Host: "box.example.com", User: "alice", Port: 22,
+		},
+	})...)
+	// agent_enrol → agent_enrolled, and agent_withdraw → agent_withdrawn.
+	outs = append(outs, shell(3, lifecycle.Event{
+		Kind: lifecycle.KindAgentEnrol, AgentEnrol: &lifecycle.AgentEnrol{
+			RequestID: "r-agent-0", Agent: "claude", Cols: 120, Rows: 40,
+		},
+	})...)
+	outs = append(outs, shell(4, lifecycle.Event{
+		Kind: lifecycle.KindAgentWithdraw, AgentWithdraw: &lifecycle.AgentWithdraw{RequestID: "r-agent-1"},
+	})...)
+	// A garbage region → refresh_request, the fourth and last kind the
+	// kernel sends.
+	refresh, gerr := k.NotifyGap("T", h.Domain, 64, 1)
+	if gerr != nil {
+		t.Fatalf("NotifyGap: %v", gerr)
+	}
+	outs = append(outs, refresh...)
+
+	kinds := map[lifecycle.EventKind]bool{}
+	for _, out := range outs {
+		kinds[out.Envelope.Event.Kind] = true
+	}
+	for _, want := range []lifecycle.EventKind{
+		lifecycle.KindAccept, lifecycle.KindDomainGrant, lifecycle.KindAgentEnrolled,
+		lifecycle.KindAgentWithdrawn, lifecycle.KindRefreshRequest,
+	} {
+		if !kinds[want] {
+			t.Fatalf("the kernel produced no %s, so this test does not cover it", want)
+		}
+	}
+
+	capHex := hex.EncodeToString(h.Capability[:])
+	for _, out := range outs {
+		var frame bytes.Buffer
+		if _, eerr := Encode(&frame, out.Envelope); eerr != nil {
+			t.Fatalf("Encode(%s): %v", out.Envelope.Event.Kind, eerr)
+		}
+		body := frame.String()
+		if strings.Contains(body, capHex) {
+			t.Errorf("the %s frame carries the capability as hex: %s", out.Envelope.Event.Kind, body)
+		}
+		if bytes.Contains(frame.Bytes(), h.Capability[:]) {
+			t.Errorf("the %s frame carries the capability as raw bytes", out.Envelope.Event.Kind)
+		}
+		if strings.Contains(body, `"cap"`) {
+			t.Errorf("the %s frame carries a cap field at all: %s", out.Envelope.Event.Kind, body)
+		}
+		// And it is still addressed: what the shell identifies a frame by
+		// are the names, and they must survive the removal.
+		if !strings.Contains(body, `"dom":"`+string(h.Domain)+`"`) ||
+			!strings.Contains(body, `"epoch":`+strconv.FormatUint(h.Epoch, 10)+`,`) {
+			t.Errorf("the %s frame lost the addressing the shell identifies it by: %s", out.Envelope.Event.Kind, body)
+		}
+	}
+
+	// The other direction is untouched: the shell still authenticates every
+	// frame it sends, so a capability handed to Encode is still written.
+	var inbound bytes.Buffer
+	if _, eerr := Encode(&inbound, lifecycle.Envelope{
+		Version: lifecycle.ProtocolVersion, Lane: "L", Domain: h.Domain, Epoch: h.Epoch,
+		Sequence: 9, Capability: h.Capability,
+		Event: lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}},
+	}); eerr != nil {
+		t.Fatalf("Encode(inbound): %v", eerr)
+	}
+	if !strings.Contains(inbound.String(), `"cap":"`+capHex+`"`) {
+		t.Fatalf("an inbound frame must still carry the bearer, got %s", inbound.String())
+	}
+}
+
+// captureKernelPort is the transport seam for the test above: the kernel
+// delivers through it and it keeps nothing, because the assertion is made on
+// the encoded frames rather than on the envelopes.
+type captureKernelPort struct{}
+
+func (*captureKernelPort) Send(lifecycle.Envelope) error { return nil }

@@ -15,8 +15,11 @@
 //
 // The descriptor is deliberately not private: bash's {var} redirection is
 // not close-on-exec, so descendants inherit fd 3 (ADR-0024 decision 2,
-// measured). That is survivable only because every frame must carry the
-// epoch's capability, which the kernel verifies before consulting any state.
+// measured). That is survivable only because every INBOUND frame must carry
+// the epoch's capability, which the kernel verifies before consulting any
+// state — and because no frame this adapter WRITES carries it, so a
+// descendant reading the descriptor learns nothing it could speak with
+// (nocx-aqz7o; the accept used to echo the capability straight back at it).
 // A shell that execs another shell therefore needs no adapter action: the
 // new image keeps speaking for the same domain (same capability, same
 // epoch), and a re-hello within the epoch is a reconnect the kernel accepts

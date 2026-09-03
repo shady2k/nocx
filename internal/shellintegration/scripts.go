@@ -228,7 +228,15 @@ var (
 // environment (ADR-0024 decision 2): a child process can reach the descriptor
 // and cannot authenticate on it. A refusal is printed in the pane and the agent
 // still runs, unorchestrated.
-const version = "43"
+// 44: the accept the shell waits for is identified by DOMAIN and EPOCH, not
+// by the capability echoed back at it (nocx-aqz7o). The kernel no longer
+// writes the bearer on the outbound direction at all, and it could not have
+// stayed: that direction is the descriptor every descendant of the shell
+// inherits, which is the one actor ADR-0024 made the capability mandatory
+// for. Every installed copy must be rewritten — a shell still sourcing 43
+// checks a `cap` field the kernel has stopped sending and never establishes.
+
+const version = "44"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

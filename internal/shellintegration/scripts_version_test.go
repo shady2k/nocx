@@ -174,6 +174,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// decoder that reads the grant, so a shell still sourcing 42 goes
 		// on running `exec 2>1` in the carrier loader (nocx-eoijp).
 		"43": "55c7fe381542aaceb58f8eec52c81d3224ee3da5003f5623b9305b856eb94c9f",
+		// 44: the accept is identified by domain and epoch. The kernel stopped
+		// echoing the capability on the outbound direction — the descriptor
+		// every descendant of the shell inherits — so a shell still sourcing
+		// 43 waits for a `cap` field that no longer arrives (nocx-aqz7o).
+		"44": "59cdeeb24d397d3b2ef4c3ccdd17c6de9c4e88a329aac25f880555e36b50c2de",
 	}
 
 	h := sha256.New()

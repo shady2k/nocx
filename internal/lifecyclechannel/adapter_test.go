@@ -95,8 +95,12 @@ func mustEstablish(t *testing.T, a *Adapter, child *os.File) *lifecyclecodec.Dec
 	if accept.Lane != a.lane || accept.Domain != a.domain || accept.Epoch != a.epoch {
 		t.Fatalf("accept addressing mismatch: %+v", accept)
 	}
-	if accept.Capability != a.capability {
-		t.Fatal("accept does not carry the domain capability")
+	// And it carries NO capability: the accept is the first thing the
+	// kernel writes on a descriptor every descendant of the shell inherits,
+	// and it used to write the epoch's bearer there in cleartext — to the
+	// one actor ADR-0024 made the capability mandatory for (nocx-aqz7o).
+	if accept.Capability != (lifecycle.Capability{}) {
+		t.Fatal("the accept carries the domain capability back down the inherited descriptor")
 	}
 	return sh
 }

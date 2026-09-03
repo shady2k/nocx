@@ -831,7 +831,7 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 	if req.Cols <= 0 || req.Rows <= 0 || req.Cols > maxPaneDimension || req.Rows > maxPaneDimension {
 		return nil, ErrBadRequest
 	}
-	return []Outbound{k.agentOutbound(d, Event{
+	return []Outbound{k.outbound(d, Event{
 		Kind:          KindAgentEnrolled,
 		AgentEnrolled: &AgentEnrolled{RequestID: req.RequestID, Agent: req.Agent},
 	})}, nil
@@ -848,41 +848,65 @@ func (k *Kernel) applyAgentWithdraw(d *Domain, ls *laneState, env Envelope) ([]O
 	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
 		return nil, ErrRequestIDShape
 	}
-	return []Outbound{k.agentOutbound(d, Event{
+	return []Outbound{k.outbound(d, Event{
 		Kind:           KindAgentWithdrawn,
 		AgentWithdrawn: &AgentWithdrawn{RequestID: req.RequestID},
 	})}, nil
 }
 
-// agentOutbound addresses an answer back to the domain that asked, by the same
-// tuple the adapter routes a grant by.
-func (k *Kernel) agentOutbound(d *Domain, evt Event) Outbound {
+// outbound addresses one kernel→shell envelope to the domain that asked, by
+// the tuple the adapter routes by: lane, domain and epoch. It is the ONE
+// place that builds an outbound envelope, so that what follows is decided
+// once rather than four times.
+//
+// # The outbound direction carries no capability, deliberately
+//
+// It used to carry it on every frame, and that undid what the capability is
+// for (nocx-aqz7o). ADR-0024 makes the per-epoch capability mandatory rather
+// than belt-and-braces for one named actor: a DESCENDANT of the shell, which
+// inherits the lifecycle descriptor because bash's redirection is not
+// close-on-exec and exec.Cmd.ExtraFiles clears FD_CLOEXEC. The transport
+// stops whatever can only write to the terminal; the capability was supposed
+// to stop that descendant. Writing the capability back onto the same
+// descriptor, in cleartext, on the very first frame of the handshake, handed
+// it to the actor it exists to exclude — a passive read, needing no ptrace
+// and no /proc, by exactly the actor the ADR names and does not exclude.
+//
+// Nothing needed it. The kernel is the only sender on this direction; the
+// shell already holds the capability it was given at bootstrap, so an echo
+// authenticates nobody to anybody. Its one production reader was the accept
+// check in the integration scripts, which used it as an "is this frame
+// mine" test — and could not have been authenticating the peer, because the
+// shell's own hello carries the capability to that peer one frame earlier.
+// The scripts now make that test on the domain and epoch, which are the
+// non-secret halves of the same tuple and are already in the shell's
+// environment.
+//
+// What this does NOT close: a domain_grant's bootstrap payload is the child
+// shell's rcfile text, and for a local nested environment that text contains
+// the CHILD's capability. It rides this same descriptor, and it is inherent
+// to the design — the parent has to receive something to hand its child.
+// That is a separate exposure with a separate answer, and it is not this one.
+func (k *Kernel) outbound(d *Domain, evt Event) Outbound {
 	return Outbound{
 		Transport: d.Transport,
 		Envelope: Envelope{
 			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
+			Epoch: d.Epoch,
 			Event: evt,
 		},
 	}
 }
 
 func (k *Kernel) grantOutbound(d *Domain, req *DomainRequest) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindDomainGrant, DomainGrant: &DomainGrant{
-				RequestID: req.RequestID,
-				Env:       req.Env,
-				Host:      req.Host,
-				User:      req.User,
-				Port:      req.Port,
-				Opts:      req.Opts,
-			}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindDomainGrant, DomainGrant: &DomainGrant{
+		RequestID: req.RequestID,
+		Env:       req.Env,
+		Host:      req.Host,
+		User:      req.User,
+		Port:      req.Port,
+		Opts:      req.Opts,
+	}})
 }
 
 func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
@@ -1032,25 +1056,11 @@ func (k *Kernel) Deliver(out Outbound) error {
 }
 
 func (k *Kernel) acceptOutbound(d *Domain) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindAccept, Accept: &Accept{}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindAccept, Accept: &Accept{}})
 }
 
 func (k *Kernel) refreshOutbound(d *Domain, rid RequestID) Outbound {
-	return Outbound{
-		Transport: d.Transport,
-		Envelope: Envelope{
-			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
-			Epoch: d.Epoch, Capability: d.capability,
-			Event: Event{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: rid}},
-		},
-	}
+	return k.outbound(d, Event{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: rid}})
 }
 
 // requireActive enforces that the domain is live, established (not
@@ -1282,8 +1292,11 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // Exactly what stopped it before, unchanged: the per-frame bearer. Ingest
 // authenticates domain, transport, epoch and capability before it consults
 // any state, and adoption alters none of that — a descendant of the shell
-// that inherited the descriptor still cannot produce the capability, and a
-// frame from any OTHER domain still names an id this kernel does not hold.
+// that inherited the descriptor cannot produce the capability, because the
+// only place it could have READ one is the channel itself and the outbound
+// direction no longer writes it there (see outbound; it did until
+// nocx-aqz7o, and while it did this sentence was false). A frame from any
+// OTHER domain still names an id this kernel does not hold.
 // What adoption adds is one more holder of the capability: the replacing
 // coordinator, which is the same trust class that minted it in the first
 // place and which already owns the session's keyboard and its whole output

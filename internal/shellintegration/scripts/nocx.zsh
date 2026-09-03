@@ -14,13 +14,21 @@ __nocx_loaded=1
 
 # --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
 # The command lifecycle rides a channel that is not the tty; every envelope
-# is authenticated by the per-epoch capability. The capability reaches the
-# shell substituted into the bootstrap script text (the launcher rcfile's
-# @CAP@, or the first line of the in-band raw-mode stream); it is NEVER in
-# the environment, never exported, and never written to a file. A shell
-# without a capability, a transport or an accept is a conventional terminal:
-# the native prompt stays visible and no lifecycle event is sent (ADR-0024
-# decisions 3 and 9).
+# THIS SHELL SENDS is authenticated by the per-epoch capability. The
+# capability reaches the shell through one of the two forms ADR-0049 left
+# standing (internal/shellintegration/capability_source.go): read once from
+# an inherited, already-unlinked descriptor and closed, or written into the
+# text of an rcfile that is itself delivered through a descriptor. Either
+# way it is NEVER in the environment, never exported, and never a filesystem
+# name. A shell without a capability, a transport or an accept is a
+# conventional terminal: the native prompt stays visible and no lifecycle
+# event is sent (ADR-0024 decisions 3 and 9).
+#
+# Nothing the shell RECEIVES carries a capability, and that asymmetry is the
+# point (nocx-aqz7o). This descriptor is inherited by every descendant of
+# this shell, so a bearer written on the inbound-to-the-shell direction would
+# be readable by exactly the actor the capability exists to exclude. Frames
+# arriving here are identified by domain and epoch, which are names.
 #
 # The envelope addresses lane, domain and epoch explicitly — they are names,
 # not secrets, and arrive via the launcher environment (NOCX_LIFECYCLE_*) or
@@ -254,16 +262,31 @@ __nocx_lc_init() {
     if ! __nocx_lc_read_frame; then
         return 1
     fi
-    # Two independent substring checks, not one ordered pattern: the
+    # Three independent substring checks, not one ordered pattern: the
     # envelope's field order is the adapter's, and a case pattern like
-    # *evt*cap* would silently reject a valid accept whose cap field
-    # precedes evt.
+    # *evt*dom* would silently reject a valid accept whose fields arrive in
+    # the other order.
+    #
+    # The identity checked is the DOMAIN and the EPOCH, not the capability.
+    # It used to be the capability, and that was wrong twice over: it made
+    # the kernel echo the bearer back onto a descriptor every descendant of
+    # this shell inherits (nocx-aqz7o), and it could never have authenticated
+    # the peer anyway — the hello one frame earlier hands that peer the
+    # capability. What the check is actually FOR is "is this accept mine",
+    # and the domain and the epoch answer that exactly, out of values that
+    # are already in this shell's environment and are not secrets. The epoch
+    # pattern keeps its trailing comma so that epoch 12 does not match 123;
+    # the envelope always has fields after the epoch, so the comma is there.
     case "$__nocx_lc_frame" in
         *'"evt":"accept"'*) : ;;
         *) return 1 ;;
     esac
     case "$__nocx_lc_frame" in
-        *'"cap":"'"$__nocx_cap"'"'*) : ;;
+        *'"dom":"'"$__nocx_lc_dom_esc"'"'*) : ;;
+        *) return 1 ;;
+    esac
+    case "$__nocx_lc_frame" in
+        *'"epoch":'"$__nocx_lc_epoch"','*) : ;;
         *) return 1 ;;
     esac
     __nocx_lc_active=1
@@ -402,8 +425,8 @@ __nocx_lc_json_unescape() {
 #
 # The bash script carries the long form of why this lives in the integration
 # script rather than in a launcher binary, and why it brackets the agent rather
-# than exec'ing it. The short form: the per-epoch capability is in this file's
-# text and never in the environment (ADR-0024 decision 2), so only something
+# than exec'ing it. The short form: the per-epoch capability is held by THIS
+# SHELL and never in the environment (ADR-0024 decision 2), so only something
 # sourced here can authenticate; and bracketing gives the interval a second end
 # the shell cannot forget.
 

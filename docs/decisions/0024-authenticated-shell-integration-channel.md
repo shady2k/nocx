@@ -14,7 +14,10 @@
   capability into the script text is retired there. Amended again the same day by
   the same design (§5.5), together with `AD-6`: decision 1 gains a **second
   carve-out** — the bootstrap window — and decision 4 gains the sentence that
-  keeps its first condition from contradicting it.
+  keeps its first condition from contradicting it. Amended again 2026-09-03 by
+  `nocx-aqz7o`: decision 2's measurement said the capability stops a descendant
+  that inherited the transport, and the kernel was writing that capability onto
+  the same transport. The outbound direction now carries no bearer.
 - **Related:** `nocx-u7uh` (the epic that implements it), `nocx-mu8s` (the defect that
   found it), `AD-8`.
 
@@ -324,6 +327,30 @@ of the shell inherits the descriptor: `bash -c 'exec {fd}>/tmp/x; …'` allocate
 redirection is not close-on-exec. The transport stops everything that can only
 write to the terminal; the capability stops a descendant that inherited the
 transport.
+
+> **Amended 2026-09-03 (`nocx-aqz7o`).** That last sentence is a claim about the
+> whole channel, and for as long as the capability travelled OUTBOUND it was
+> false. The kernel put the bearer on every frame it sent — the accept first of
+> all, which is the first thing written on the descriptor — and the descendant
+> this paragraph names holds a reader on that descriptor for the shell's whole
+> life. Reading it needs no `ptrace` and no `/proc`; it is the passive read of a
+> descriptor the actor legitimately inherited, which is inside this ADR's model,
+> not in the same-user active-inspection class decision 10 excludes. The
+> defence was therefore not "cannot produce the capability" but "must win a race
+> against the shell's own reader", which is a different and much weaker claim.
+>
+> The outbound direction now carries no bearer at all
+> (`docs/lifecycle-protocol.md` §2), and nothing needed it to: the kernel is the
+> only sender on that half, and the shell already holds the value. Its one
+> reader was the accept check in the integration scripts, which used it to ask
+> "is this frame mine" and now asks that of `dom` and `epoch`. The claim above
+> holds by construction from this point, and did not before it.
+>
+> One thing it still does not cover, stated so nobody reads more into the fix
+> than it bought: a `domain_grant`'s bootstrap for a LOCAL nested environment is
+> the child's rcfile text, which contains the child's capability, and it rides
+> the same descriptor. That is inherent to the shape of the nested handover and
+> is a separate question.
 
 `NOCX_SESSION_ID` stays exported and keeps its ADR-0006 §1 identity role. It is a
 name, not a secret, and it authenticates nothing.
@@ -742,7 +769,11 @@ before it consults any state. The two actors decision 10 names are unaffected �
 hostile output still cannot reach a transport that is not the tty, and a
 descendant that inherited the descriptor still cannot produce the capability,
 which is exactly the measurement that made the capability mandatory rather than
-belt-and-braces.
+belt-and-braces. (That second clause was false in the shipped code when this
+was written, for the reason the 2026-09-03 amendment to decision 2 gives: the
+kernel echoed the capability on the outbound half of the very descriptor. It is
+true now. Nothing else in this re-read is affected — adoption never added a
+reader of that direction.)
 
 What changes is the SET OF HOLDERS, by one: the replacing coordinator. The value
 travels back over the same authenticated coordinator↔helper connection it

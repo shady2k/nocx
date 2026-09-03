@@ -60,10 +60,18 @@ const (
 	//
 	// It rides this channel rather than a socket of its own because a second
 	// socket would be a second authenticator for the same trust decision, and
-	// because the per-epoch capability lives in the integration script's text
-	// and nowhere else (decision 2) — which is also why the caller is a
-	// function inside the bundle rather than a binary reading an environment
-	// variable.
+	// because the per-epoch capability never enters the environment (decision
+	// 2) — which is why the caller is a function inside the bundle, running in
+	// the shell that HOLDS the capability, rather than a binary that would have
+	// to be handed one. The capability reaches that shell by one of the two
+	// carriers ADR-0049 left standing, described in
+	// internal/shellintegration/capability_source.go: read once from an
+	// inherited unlinked descriptor, or written into the text of an rcfile that
+	// is itself delivered through a descriptor. This comment used to say the
+	// capability "lives in the integration script's text and nowhere else",
+	// which was the pre-ADR-0049 arrangement and is true of neither carrier
+	// today — the remote tier's rcfile is an installed generation file that
+	// cannot carry a per-session value at all.
 	KindAgentEnrol EventKind = "agent_enrol"
 	// KindAgentEnrolled is the kernel's answer to an agent_enrol, carrying the
 	// verdict so the caller can refuse VISIBLY. Failure here is closed: no

@@ -60,8 +60,12 @@ func TestPublisherGrantEnrichedAndDelivered(t *testing.T) {
 	grant := grantFrom(t, port)
 	// The grant addresses the PARENT: the adapter routes it to the parent's
 	// connection by this tuple.
-	if grant.Domain != h.Domain || grant.Epoch != h.Epoch || grant.Capability != h.Capability {
+	if grant.Domain != h.Domain || grant.Epoch != h.Epoch {
 		t.Fatalf("grant must be addressed to the parent, got dom=%s epoch=%d", grant.Domain, grant.Epoch)
+	}
+	// By the tuple, and by nothing secret (nocx-aqz7o).
+	if grant.Capability != (lifecycle.Capability{}) {
+		t.Fatal("the grant carries the parent's capability back down the inherited descriptor")
 	}
 	g := grant.Event.DomainGrant
 	if g == nil {

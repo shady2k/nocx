@@ -89,13 +89,22 @@ import (
 // also the one that fixed the most: a byte is not a proxy for a change's
 // weight, which is the assumption a size ratchet quietly invites.
 //
-// The CALL counts did not move on any of the six occasions —
-// 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
-// changed size, not the work. B = 256 KiB still holds, now at 3.51x
+// 2026-09-03, seventh move (nocx-aqz7o): 73,090 -> 73,326, +236 across the
+// two generation scripts. The accept a shell waits for is now identified by
+// its domain and its epoch instead of by the capability echoed back at it,
+// which is one `case` block per tier where there was one before, and one
+// more comparison. The kernel had been writing the per-epoch bearer onto the
+// outbound half of a descriptor every descendant of the shell inherits —
+// exactly the actor ADR-0024 made the capability mandatory for — and 236
+// bytes is what it costs to stop.
+//
+// The CALL counts did not move on any of the seven occasions —
+// 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
+// changed size, not the work. B = 256 KiB still holds, now at 3.50x
 // headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 73090
+	measuredMaxPublishBytes = 73326
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

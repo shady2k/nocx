@@ -115,14 +115,21 @@ type TunnelConn interface {
 	Close() error
 }
 
-// Config is what the caller substitutes into the integration script text —
-// the same mechanism the local path uses (shellintegration.LaunchOptions):
-// lane, domain and epoch are names (NOCX_LIFECYCLE_* env); the port is the
-// loopback port the shell connects to (NOCX_LIFECYCLE_PORT); the capability
-// is the per-epoch bearer (@CAP@ in the rcfile text). Only the capability is
-// never exported to the environment: it rides the script text, and a value
-// in /proc/<pid>/environ would leak the authenticator to every child. The
-// port is a name, not a secret, and is not the authenticator.
+// Config is what the caller hands the launch: lane, domain and epoch are
+// names and travel as NOCX_LIFECYCLE_* environment variables; the port is the
+// loopback port the shell connects to (NOCX_LIFECYCLE_PORT); the capability is
+// the per-epoch bearer. Only the capability is never exported to the
+// environment — a value in /proc/<pid>/environ would leak the authenticator to
+// every child. On this REMOTE path it reaches the shell as the first line of a
+// secret frame the shell reads once from an inherited unlinked descriptor and
+// closes (ADR-0049; internal/shellintegration/capability_source.go), not as a
+// substitution into an rcfile: the remote tier's rcfile is an installed
+// generation file published before the session and cannot carry a per-session
+// value at all. The port is a name, not a secret, and is not the
+// authenticator.
+//
+// The bearer travels INBOUND only. Frames this adapter sends carry none
+// (nocx-aqz7o) — see lifecyclecodec.Encode.
 type Config struct {
 	Lane       lifecycle.LaneID
 	Domain     lifecycle.DomainID

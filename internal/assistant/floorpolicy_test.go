@@ -66,7 +66,7 @@ func floorPermissivePolicy() content.EffectPolicy {
 		CrossBoundary:     row,
 		Delegate:          row,
 		Rules: []content.InvocationRule{{
-			Pattern:  [][]string{{"*"}},
+			Selector: content.InvocationSelector{Exact: [][]string{{"*"}}},
 			Decision: content.DecisionPermit,
 		}},
 	}

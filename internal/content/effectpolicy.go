@@ -256,7 +256,10 @@ type Verdict struct {
 // matrix answer and can never receive a rule exception. Then the SHAPE layer,
 // owned by InvocationRule.Matches in rules.go: a rule answers only what shape
 // this command line has, a matching permit is an exception to an ask row, and
-// among overlapping matching rules the most restrictive wins. Last the
+// among overlapping matching rules the most restrictive wins. A rule whose
+// selector covers more than one command line may only NARROW; the one form
+// that may widen carries the effect it was granted under, and this loop is
+// where that binding is checked against the effect the call classified as. Last the
 // RESOURCE layer, owned by resourceVerdict below.
 //
 // A rule is therefore an exception to the effect layer alone. A permit whose
@@ -275,6 +278,13 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 	ruleDecision := DecisionPermit
 	for _, rule := range p.Rules {
 		if !rule.Matches(inv) {
+			continue
+		}
+		if rule.Decision == DecisionPermit && rule.GrantedUnder != "" && rule.GrantedUnder != e {
+			// The permit was granted while this command did something
+			// milder. It does not reach this call. This is the whole
+			// guard, and it lives here rather than in Matches because
+			// only this layer is told what the call classified as.
 			continue
 		}
 		matched = true

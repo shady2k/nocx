@@ -124,7 +124,7 @@ func TestFloor_SurvivesWorkspaceAndSessionPolicyResolution(t *testing.T) {
 	workspace := EffectPolicy{Observe: EffectRow{Decision: DecisionPermit, Scopes: []GrantScope{{Kind: ResourcePath, ID: "/"}}}}
 	resolved := ResolvePolicy(global, &workspace, SessionOverrides{
 		Decisions: map[Effect]Decision{EffectObserve: DecisionPermit},
-		Rules:     []InvocationRule{{Pattern: [][]string{{"*"}}, Decision: DecisionPermit}},
+		Rules:     []InvocationRule{{Selector: InvocationSelector{Exact: [][]string{{"*"}}}, Decision: DecisionPermit}},
 	})
 
 	reason, denied := resolved.FloorRefusal(Invocation{Parsed: true}, []GrantScope{{

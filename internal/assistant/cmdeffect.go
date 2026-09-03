@@ -491,7 +491,11 @@ func isExecutablePath(program string) bool {
 // path named by one of its own option values rather than by an operand or a
 // shell redirection. A refusal matches this fact, never the spelling of the
 // token that carried it.
-const featureWritesOptionNamedPath = "writes-option-named-path"
+//
+// The name is content's, not this package's: content owns the closed feature
+// vocabulary because it owns the rules that match it, and one fact carries one
+// name rather than two spellings that agree until they do not.
+const featureWritesOptionNamedPath = content.FeatureWritesOptionNamedPath
 
 // resourceOperands returns the operands of an invocation, skipping options and
 // the values they consume. A skipped option value that is a path the command

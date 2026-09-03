@@ -68,7 +68,7 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import type { WSClient } from './ipc'
+import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
@@ -181,6 +181,10 @@ const rendererOf = (content: TerminalContent): RendererMock => {
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
+/** Adapt the public-only fake at the injected adoption seam. SessionHandle's
+ * private client prevents structural typing even though all used methods match. */
+const asSessionHandleForTest = (session: SessionFake): SessionHandle =>
+  session as unknown as SessionHandle
 
 /** The scrollback owner behind TerminalContent, for placement assertions. */
 const scrollbackFor = (content: TerminalContent): ScrollbackController => {
@@ -2135,6 +2139,83 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       teardown()
     }
   })
+  it('keeps a new recovery episode pending when an old bind acknowledgement settles late', async () => {
+    const client = makeClient()
+    const pending: Array<{
+      resolve: (value: unknown) => void
+      reject: (reason?: unknown) => void
+    }> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.recoverAck') return Promise.resolve({})
+      let resolve!: (value: unknown) => void
+      let reject!: (reason?: unknown) => void
+      const promise = new Promise<unknown>((release, fail) => {
+        resolve = release
+        reject = fail
+      })
+      pending.push({ resolve, reject })
+      return promise
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscriptions = () =>
+        client.dispatcher.subscribe.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.changed',
+        )
+      const first = client._sessions[0]
+      const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
+      firstHandler({ ...LOST_WITH_RECOVERY, sessionId: first.sessionId })
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      expect(pending).toHaveLength(1)
+
+      const onExit = first.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      expect(onExit).toBeDefined()
+      if (!onExit) throw new Error('the first session did not register an exit handler')
+      onExit({ sessionId: first.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+
+      const second = client._sessions[1]
+      const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
+      secondHandler({ ...LOST_WITH_RECOVERY, sessionId: second.sessionId })
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      expect(
+        pending,
+        'a fresh bind must claim its recovery acknowledgement without inheriting the old bind',
+      ).toHaveLength(2)
+
+      // The old bind settles after the new bind has claimed the same-shaped
+      // recovery contract. It must not clear the new episode.
+      pending[0]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+      const recoveryChip =
+        editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      expect(recoveryChip?.style.display).toBe('none')
+
+      // The current acknowledgement refuses. A genuinely fresh episode must
+      // be able to claim its own acknowledgement rather than inheriting the
+      // old bind's in-flight guard.
+      pending[1]?.reject(new Error('session is not open'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(recoveryChip?.style.display).toBe('none')
+      const freshRecovery = {
+        fence: '12'.repeat(32),
+        generation: 'ef'.repeat(32),
+      }
+      secondHandler({
+        sessionId: second.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'lost',
+        recovery: freshRecovery,
+      })
+      rendererOf(content)._fireRecoveryFence(freshRecovery.fence)
+      expect(pending).toHaveLength(3)
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
@@ -2178,6 +2259,74 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
       expect(
         call.mock.calls.filter((c: unknown[]) => c[0] === 'lifecycle.establishAck'),
       ).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+  it('does not let an old bind acknowledgement complete the new establishment episode', async () => {
+    const client = makeClient()
+    const pending: Array<{ resolve: (value: unknown) => void }> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
+      let resolve!: (value: unknown) => void
+      const promise = new Promise<unknown>((release) => {
+        resolve = release
+      })
+      pending.push({ resolve })
+      return promise
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const first = client._sessions[0]
+      const subscriptions = () =>
+        client.dispatcher.subscribe.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.changed',
+        )
+      const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
+      firstHandler({
+        sessionId: first.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-old',
+      })
+      expect(pending).toHaveLength(1)
+
+      const onExit = first.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit?.({ sessionId: first.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+
+      const second = client._sessions[1]
+      const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
+      const freshFact = {
+        sessionId: second.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        generation: 'est-new',
+      } as const
+      secondHandler(freshFact)
+      expect(pending).toHaveLength(2)
+
+      // The new bind lands first. The old bind then resolves late and must
+      // not overwrite which generation the current bind has acknowledged.
+      pending[1]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+      pending[0]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      secondHandler(freshFact)
+      expect(
+        client.dispatcher.call.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.establishAck',
+        ),
+        'a late acknowledgement from the old bind must not mint a duplicate acknowledgement for the current bind',
+      ).toHaveLength(2)
     } finally {
       teardown()
     }
@@ -12198,6 +12347,490 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       ).toHaveLength(0)
       expect(editorOf(content).isVisible).toBe(false)
       expect(content.pinnedFrame()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane says what is missing (nocx-fz4qa)
+// ═══════════════════════════════════════════════════════════════════════════
+// The backend already tells a reclaiming client which byte ranges it could
+// not give back (session.output's `gaps`, plus the renderer-derived
+// `unrecorded` stretch nothing kept), and until this bead nothing read it: a
+// pane came back short and said nothing about it. AGENTS.md forbids exactly
+// that — a soft degrade must be visible in the product.
+//
+// These go through the ADOPTION seam a restored tab actually takes
+// (TerminalContentHooks.adoptSession), not through the notice module, so
+// they can report the wiring being absent.
+describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
+  const RECLAIM_SIZE = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  /** The pane's own reclaim: a session handle carrying what the claim
+   *  recovered, handed back by the thunk PaneManager supplies. */
+  function reclaiming(recovered: SessionRecovery | null) {
+    const session = makeSession({ recovered: recovered ?? undefined })
+    return {
+      session,
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+    }
+  }
+
+  const cardTitle = (tab: Pane) =>
+    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__title')?.textContent ?? null
+  const cardDesc = (tab: Pane) =>
+    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__desc')?.textContent ?? null
+
+  it('tells the user how much of the run is gone and that the size limit took it', async () => {
+    const { hooks } = reclaiming({
+      bytes: 8192,
+      gaps: [{ start: 0, end: 3_000_000, reason: 'cap' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardTitle(tab)).toContain('3.0 MB')
+      expect(cardDesc(tab)).toContain('size limit')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the unrecorded stretch, which is a different fact from the bound', async () => {
+    const { hooks } = reclaiming({
+      bytes: 0,
+      gaps: [{ start: 100, end: 5100, reason: 'unrecorded' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardDesc(tab)).toContain('never recorded')
+      expect(cardDesc(tab)).not.toContain('size limit')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The negative, and the reason the positive means anything.
+  it('says nothing when the reclaim recovered the whole recording', async () => {
+    const { hooks } = reclaiming({ bytes: 8192, gaps: [], size: RECLAIM_SIZE })
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await expect(content.ready).resolves.toBe(true)
+      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  // A pane that opened a fresh session recovered nothing and has nothing to
+  // report — `recovered` is null, and a card here would be a claim about a
+  // session that never had a past.
+  it('says nothing on a pane that opened its own session', async () => {
+    const { content, tab, teardown } = await mountTerminal()
+    try {
+      await expect(content.ready).resolves.toBe(true)
+      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('is taken away when the user dismisses it', async () => {
+    const { hooks } = reclaiming({
+      bytes: 8192,
+      gaps: [{ start: 0, end: 1000, reason: 'cap' }],
+      size: RECLAIM_SIZE,
+    })
+    // In the document: Solid delegates `click` at the document root, so a
+    // detached pane never sees the press a user makes.
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      const cross = [...tab.pane.querySelectorAll('button')].find(
+        (b) => b.getAttribute('aria-label') === 'Dismiss',
+      )
+      expect(cross).toBeDefined()
+      cross!.click()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A client that is not the one the channel follows draws at the SESSION's
+// grid, not at its own window (nocx-eidfb.3)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The size a session runs at is the BACKEND's (nocx-eidfb.1) and it follows
+// the client that attached last (nocx-eidfb.2). Every other client therefore
+// has two answers in front of it — what its own window measures, and what the
+// channel is actually running at — and only one of them describes the bytes
+// arriving down the wire. A window that draws them at its own width wraps
+// them a second time, and no later resize can unpick that: two clients then
+// show two different screens of one session.
+//
+// The seam a person reaches is the window that takes a live session back. It
+// attaches without reporting any geometry (ipc.reclaimSession), so until its
+// own fit runs the session is still at somebody else's size, and the
+// recovered scrollback is written in exactly that interval.
+describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
+  const SESSION_GRID = { cols: 132, rows: 43, xpixel: 0, ypixel: 0 }
+  const RECOVERED = 'what the session printed while this window was away'
+
+  /** A pane that takes back a live session running at SESSION_GRID, with the
+   *  recovered scrollback waiting to be flushed the moment the surface
+   *  registers its data callback — which is what WSClient.onSessionData does
+   *  with the bytes reclaimSession queued ahead of the live stream. */
+  const reclaimingPane = async () => {
+    const session = makeSession({
+      recovered: { bytes: RECOVERED.length, gaps: [], size: SESSION_GRID },
+      pendingData: RECOVERED,
+    })
+    const mounted = await mountTerminal(makeClipboard(), {
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+    })
+    return { ...mounted, session }
+  }
+
+  it('writes the recovered screen at the grid the session is running at', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const renderer = rendererOf(content)
+      /* eslint-disable @typescript-eslint/unbound-method */
+      expect(renderer.setGrid).toHaveBeenCalledWith(132, 43)
+      // ORDER IS THE ASSERTION. Bytes wrapped at 132 columns written into an
+      // 80-column grid are wrapped twice over, and the grid change has to
+      // land before them or there is nothing left to correct.
+      const sized = (renderer.setGrid as Mock).mock.invocationCallOrder[0]
+      const wrote = (renderer.write as Mock).mock.invocationCallOrder[0]
+      /* eslint-enable @typescript-eslint/unbound-method */
+      expect(wrote).toBeGreaterThan(sized)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not report the session grid back as a size this window measured', async () => {
+    const { content, session, teardown } = await reclaimingPane()
+    try {
+      // The grid moved to 132×43, and xterm reports every grid change the
+      // same way whoever caused it. A report sent from here would be this
+      // window claiming a size it never measured — and under nocx-eidfb.2 a
+      // report is a claim on the session.
+      //
+      // Fake time rather than a wait: the report is debounced, so "it was not
+      // sent" is only a fact once the debounce has had its chance, and a real
+      // delay would be a test measuring a duration.
+      vi.useFakeTimers()
+      try {
+        rendererOf(content)._fireResize(132, 43)
+        vi.advanceTimersByTime(10_000)
+        expect(session.sendResize).not.toHaveBeenCalled()
+
+        // And the control, so the assertion above cannot pass by the report
+        // being broken for everyone: this window's OWN measurement is still
+        // reported, and it is what ends the borrowed grid.
+        content.viewportChanged({ width: 800, height: 400 })
+        rendererOf(content)._fireResize(100, 30)
+        vi.advanceTimersByTime(10_000)
+        expect(session.sendResize).toHaveBeenCalledWith(100, 30)
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      teardown()
+    }
+  })
+
+  it('lets the session grid pad or scroll inside the window rather than being cut', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const area = scrollbackFor(content).scrollbackArea
+      expect(area.dataset.gridOwner).toBe('session')
+
+      // …and the stylesheet is what makes that attribute mean something. The
+      // scroller's overflow-x is `hidden` for a grid this window chose —
+      // deliberately, so a wide grid can never widen the box its own cols are
+      // derived from. A grid this window did NOT choose is not in that loop,
+      // and being cut mid-glyph is the one outcome that is not allowed.
+      const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+      const owned =
+        css.match(/\.scrollback-area\[data-grid-owner=['"]session['"]\]\s*\{([^}]*)\}/)?.[1] ?? ''
+      expect(owned).toMatch(/overflow-x\s*:\s*auto/)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('hands the grid back to the window the moment this window measures itself', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const renderer = rendererOf(content)
+      // THE CLOSING END OF THE INTERVAL. A fit is this window taking the
+      // session's size over — applying it is what makes this the client the
+      // channel follows — so from here the grid is its own again, and so is
+      // the scroller's overflow.
+      content.viewportChanged({ width: 800, height: 400 })
+      /* eslint-disable-next-line @typescript-eslint/unbound-method */
+      expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
+      expect(scrollbackFor(content).scrollbackArea.dataset.gridOwner).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves the pane its own window: only the terminal takes the session grid', async () => {
+    const { content, tab, teardown } = await reclaimingPane()
+    try {
+      // Acceptance 3: the tab strip, the sidebar and the panels are DOM and
+      // lay themselves out. Nothing here may write the session's geometry
+      // onto the pane — a width put there is a window sized by somebody
+      // else's terminal.
+      expect(tab.pane.style.width).toBe('')
+      expect(scrollbackFor(content).scrollbackArea.style.width).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane is still named after where it is (nocx-07cf4)
+// ═══════════════════════════════════════════════════════════════════════════
+// A tab is named by its pane and a pane by its cwd, and for a session this
+// window OPENED the cwd arrives in the open ack. A RECLAIM carries no cwd —
+// `ipc.reclaimSession` passes '' on purpose, because a reclaim hands over the
+// session and never the pane's own facts — so the only statement of where a
+// reclaimed pane is, is the OSC 7 in the scrollback the claim recovered.
+//
+// That makes the SUBSCRIPTION ORDER load-bearing: `renderer.onCwd` installs
+// its OSC 7 parser handler at subscribe time and has no last-value replay, so
+// a sequence parsed before it is dispatched to nobody. Twelve e2e specs were
+// the only thing watching this, and only because they waited on a non-empty
+// tab title on their way to something else.
+describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () => {
+  const RECLAIM_GRID = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  /** A pane that takes a live session back and whose recovered scrollback
+   *  carries an OSC 7.
+   *
+   *  The renderer mock is programmed BEFORE the mount, because that is when
+   *  the bytes are parsed: `awaitWriteBarrier` is exactly "xterm has finished
+   *  parsing everything written so far", and a reclaiming bind awaits it over
+   *  the recovered write (nocx-k6p18.6). Firing the report from inside the
+   *  barrier is therefore where the real OSC 7 comes out — and it is the one
+   *  moment a subscription installed after the bind has already missed. */
+  const reclaimingPaneReporting = async (cwd: string) => {
+    const { XtermRenderer } = await import('./renderers/xterm')
+    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+      const renderer = createRendererMock()
+      renderer.awaitWriteBarrier.mockImplementation(() => {
+        renderer._fireCwd('', cwd)
+        return Promise.resolve()
+      })
+      return renderer as unknown as InstanceType<typeof XtermRenderer>
+    })
+    // No cwd on the handle, which is what a reclaim actually looks like.
+    const session = makeSession({
+      cwd: '',
+      recovered: { bytes: 32, gaps: [], size: RECLAIM_GRID },
+      pendingData: 'the screen this window was away for',
+    })
+    return mountTerminal(makeClipboard(), {
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+    })
+  }
+
+  it('names the tab from the OSC 7 in the scrollback the claim recovered', async () => {
+    const { tab, teardown } = await reclaimingPaneReporting(FIXTURE_CWD)
+    try {
+      // The pane's own title, not `displayTitle`: the descriptor's fallback
+      // would answer 'Terminal' for a pane that was never named, and the
+      // defect this guards is exactly a pane that is never named.
+      await vi.waitFor(() => expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL))
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane shows the work that never stopped (nocx-ht15k)
+// ═══════════════════════════════════════════════════════════════════════════
+// The lifecycle facts of a reclaimed session are replayed by the backend the
+// instant the attach installs its subscriber (ws_lifecycle replayLifecycleFacts)
+// — which is INSIDE the bind, because since nocx-k6p18.6 a reclaiming bind
+// awaits `awaitWriteBarrier()` over the recovered scrollback before it returns.
+// mount publishes `this.renderer` only after that bind, so a block port that
+// read the field instead of the renderer it was built with saw null for the
+// whole of that window, and LifecycleProjections.pump records an attempt in
+// `_bound` before it calls the port: the drop is permanent, and the person who
+// came back to their pane never saw the command that was still running.
+describe('a reclaimed pane shows the work that never stopped (nocx-ht15k)', () => {
+  const RECLAIM_GRID = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  it('opens the running block for a fact replayed during the reclaim write barrier', async () => {
+    const client = makeClient()
+    const session = makeSession({
+      cwd: '',
+      recovered: { bytes: 32, gaps: [], size: RECLAIM_GRID },
+      pendingData: 'the screen this window was away for',
+    })
+    // The replay, fired from INSIDE the barrier — the one moment the bind is
+    // still running and mount has not published the renderer. Programmed
+    // before the mount because that is when it is awaited.
+    const { XtermRenderer } = await import('./renderers/xterm')
+    let replayed = false
+    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+      const renderer = createRendererMock()
+      renderer.awaitWriteBarrier.mockImplementation(() => {
+        if (!replayed) {
+          replayed = true
+          const deliver = lifecycleHandler(client, session.sessionId)
+          deliver({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+          deliver({
+            lane: 'lane-1',
+            lifecycle: 'running',
+            domain: 'd1',
+            epoch: 1,
+            attempt: {
+              id: 'att-reclaimed',
+              state: 'open',
+              origin: 'shell',
+              command: 'make deploy',
+            },
+          })
+        }
+        return Promise.resolve()
+      })
+      return renderer as unknown as InstanceType<typeof XtermRenderer>
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) } },
+      client,
+    )
+    try {
+      expect(replayed, 'the reclaiming bind must await the recovered write').toBe(true)
+      const blocks = scrollbackFor(content).blockManager
+      const block = blocks.blockForAttempt('att-reclaimed')
+      expect(block, 'the replayed running attempt must have opened a block').not.toBeNull()
+      expect(block!.status).toBe('running')
+      expect(block!.el.classList.contains('cmd-block-running')).toBe(true)
+      expect(block!.el.textContent).toContain('make deploy')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('replayed completion restores a durable block outcome (nocx-gm21o)', () => {
+  it('lands OSC 133 D on the restored entry rather than leaving it unknown', async () => {
+    const session = makeSession({
+      recovered: {
+        bytes: 1,
+        gaps: [],
+        size: { cols: 80, rows: 24 },
+      },
+    })
+    const entry = {
+      id: 'entry-replayed-command',
+      seq: 1,
+      environmentId: 'env-1',
+      host: 'host.example',
+      cwd: '/repo',
+      kind: 'shell',
+      source: 'user',
+      intent: 'make deploy',
+      phase: 'bound',
+      status: 'running',
+      unreconciled: 'notYetAsked',
+      submittedAt: 1,
+      startedAt: 1,
+      endedAt: null,
+      durationMs: null,
+      exitCode: null,
+      maskedCount: 0,
+      maskedKinds: [],
+      redactions: [],
+    } as const
+    let resolveQuery!: (value: unknown) => void
+    const queryPending = new Promise<unknown>((resolve) => {
+      resolveQuery = resolve
+    })
+    const client = makeClient({
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.query') return queryPending
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry,
+            edges: [],
+            artifacts: [{ id: 'artifact-1', mediaType: 'application/vt' }],
+            proseEvicted: false,
+            caused: [],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          return Promise.resolve({
+            id: 'artifact-1',
+            mediaType: 'application/vt',
+            body: '',
+            truncated: null,
+            byteLen: 0,
+          })
+        }
+        return Promise.reject(new Error(`unexpected method ${method}`))
+      }),
+    })
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        visibleBeforeMount: true,
+        hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+      },
+      client,
+    )
+    try {
+      // The parsed C/D callbacks arrive while the durable page read is still
+      // pending. This is the replacement-reader race; xterm parser coverage
+      // is owned by parseOsc133 tests, while this test pins the association.
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'C', line: 1, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        exitCode: 7,
+        line: 2,
+        col: 0,
+        buffer: 'normal',
+      })
+      resolveQuery({
+        entries: [entry],
+        scope: 'everywhere',
+        exhausted: true,
+        hasRows: true,
+        coverage: null,
+      })
+
+      await vi.waitFor(() =>
+        expect(tab.pane.querySelector('[data-entry-id="entry-replayed-command"]')).not.toBeNull(),
+      )
+      const restored = tab.pane.querySelector<HTMLElement>(
+        '[data-entry-id="entry-replayed-command"]',
+      )
+      expect(
+        restored?.querySelector('.cmd-header-exit')?.textContent,
+        'the restored block still reads unknown after its completion replayed',
+      ).toBe('exit 7')
     } finally {
       teardown()
     }

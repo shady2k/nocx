@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sessions.inventory.schema.json",
+  "title": "SessionsInventoryResult",
+  "description": "Sessions currently held by the authenticated helper generations known to this coordinator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "description": "The helper-owned sessions. An empty array is an answered empty inventory, never a missing answer.",
+      "items": { "$ref": "#/$defs/sessionEntry" }
+    }
+  },
+  "$defs": {
+    "sessionEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hostSessionId",
+        "workspace",
+        "startedAt",
+        "launch",
+        "observed",
+        "window",
+        "lifecycleWindow",
+        "writer",
+        "writerEpoch",
+        "exit"
+      ],
+      "properties": {
+        "hostSessionId": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation", "session"],
+          "properties": {
+            "generation": { "type": "string", "minLength": 1 },
+            "session": { "type": "string", "minLength": 1 }
+          }
+        },
+        "workspace": { "type": "string" },
+        "startedAt": { "type": "string", "minLength": 1 },
+        "launch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
+          "properties": {
+            "shell": { "type": "string", "minLength": 1 },
+            "cwd": { "type": "string" },
+            "pid": { "type": "integer" },
+            "pgid": { "type": "integer" },
+            "cols": { "type": "integer", "minimum": 0 },
+            "rows": { "type": "integer", "minimum": 0 },
+            "windowBytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "observed": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["source", "unavailable"],
+          "properties": {
+            "source": { "type": "string" },
+            "cwd": { "type": "string" },
+            "argv": { "type": "array", "items": { "type": "string" } },
+            "foregroundPgid": { "type": "integer" },
+            "foregroundCommand": { "type": "string" },
+            "startTime": { "type": "string", "minLength": 1 },
+            "ppid": { "type": "integer", "minimum": 0 },
+            "state": {
+              "description": "The kernel's process state, normalised by the helper into one closed vocabulary. See contracts/helper/identities.schema.json for why it is normalised rather than carried in each kernel's own spelling.",
+              "type": "string",
+              "enum": ["running", "sleeping", "uninterruptible", "stopped", "zombie"]
+            },
+            "unavailable": {
+              "description": "Every diagnostic above that the inspector was asked for and could not supply. Always present, [] when everything was answered. A reader that ignores it falls back to the launch record and presents a value that was true once as a current observation.",
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["cwd", "argv", "foregroundCommand", "startTime", "ppid", "state"]
+              }
+            }
+          }
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base", "written"],
+          "properties": {
+            "base": { "type": "integer", "minimum": 0 },
+            "written": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "lifecycleWindow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base", "written"],
+          "properties": {
+            "base": { "type": "integer", "minimum": 0 },
+            "written": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "writer": { "type": ["string", "null"] },
+        "writerEpoch": { "type": "integer", "minimum": 0 },
+        "exit": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["code", "at"],
+          "properties": {
+            "code": { "type": "integer" },
+            "signal": { "type": "integer" },
+            "at": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

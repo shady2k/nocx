@@ -193,16 +193,17 @@ describe('PaneManager', () => {
     expect('onSetupVault' in hooks ? hooks.onSetupVault : undefined).toBe(onSetupVault)
   })
 
-  // ── closing closes the session and activates a neighbour ──────────────
-
-  it('closes the session when the active tab is closed', async () => {
+  // ── closing detaches the session and activates a neighbour ──────────────
+  it('detaches the session when the active tab is closed', async () => {
     const { client, manager } = await mountPaneManager()
 
     const session = client._sessions[0]
     manager.closeActivePane()
 
-    // The session should have been closed, but a new one created for the replacement
-    expect(session.close).toHaveBeenCalled()
+    // Closing level-1 chrome drops only this attachment. The helper process
+    // remains in its inventory for a later reattach.
+    expect(session.detach).toHaveBeenCalled()
+    expect(session.close).not.toHaveBeenCalled()
   })
 
   it('activates a neighbour tab when the active tab is closed', async () => {
@@ -398,6 +399,183 @@ describe('PaneManager', () => {
       cwd: '/tmp',
       cwdVerified: true,
     })
+  })
+
+  it('uses the helper observation for the overview and names unavailable cwd', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    const sessionId = client._sessions[1].sessionId
+    const entry = (observed: { cwd?: string; unavailable: string[] }) => ({
+      hostSessionId: { generation: 'generation-a', session: sessionId },
+      workspace: 'workspace-a',
+      startedAt: '2026-09-01T00:00:00Z',
+      launch: {
+        shell: '/bin/sh',
+        cwd: '/launch',
+        pid: 12,
+        pgid: 12,
+        cols: 80,
+        rows: 24,
+        windowBytes: 0,
+      },
+      observed: { source: 'procfs', ...observed },
+      window: { base: 0, written: 0 },
+      writer: null,
+      writerEpoch: 0,
+      exit: null,
+    })
+
+    client.listHelperSessions.mockResolvedValue([entry({ cwd: '/observed', unavailable: [] })])
+    await manager.refreshHelperSessions()
+    const pane = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(pane?.cwd).toEqual({ state: 'known', cwd: '/observed' })
+
+    client.listHelperSessions.mockResolvedValue([entry({ unavailable: ['cwd'] })])
+    await manager.refreshHelperSessions()
+    const unavailable = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(unavailable?.cwd).toEqual({ state: 'unavailable' })
+
+    // The case the whole three-state shape exists for, and the only one where
+    // the `unavailable` check does any work: the helper ASKED, could not
+    // answer, and a cwd value is present anyway. Omitting cwd here would let
+    // this pass with the check deleted — the empty-value branch would catch
+    // it — and a reader that showed the stale value would be the exact defect
+    // nocx-k6p18.10 built three states to prevent, silently, because such a
+    // value is always plausible.
+    client.listHelperSessions.mockResolvedValue([
+      entry({ cwd: '/stale-from-an-earlier-answer', unavailable: ['cwd'] }),
+    ])
+    await manager.refreshHelperSessions()
+    const stale = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(stale?.cwd, 'the overview showed a cwd the helper reported as unavailable').toEqual({
+      state: 'unavailable',
+    })
+  })
+
+  it("projects the helper's process diagnostics and never reads a value it named unavailable", async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    const sessionId = client._sessions[1].sessionId
+    const entry = (observed: {
+      startTime?: string
+      ppid?: number
+      state?: string
+      unavailable: string[]
+    }) => ({
+      hostSessionId: { generation: 'generation-a', session: sessionId },
+      workspace: 'workspace-a',
+      // The helper's OWN record of the spawn, three hours off the kernel's
+      // answer below. It is here so a reader that substituted one for the
+      // other would be caught rather than agreed with.
+      startedAt: '2026-09-01T00:00:00.000Z',
+      launch: {
+        shell: '/bin/sh',
+        cwd: '/launch',
+        pid: 12,
+        pgid: 12,
+        cols: 80,
+        rows: 24,
+        windowBytes: 0,
+      },
+      observed: { source: 'procfs', cwd: '/observed', ...observed },
+      window: { base: 0, written: 0 },
+      writer: null,
+      writerEpoch: 0,
+      exit: null,
+    })
+    const paneFacts = () =>
+      manager
+        .overviewPort()
+        .snapshot()
+        .workspaces.flatMap((workspace) => workspace.panes)
+        .find((candidate) => candidate.host === 'host.example.com')
+
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2026-09-01T03:00:00.000Z',
+        ppid: 4242,
+        state: 'sleeping',
+        unavailable: [],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(paneFacts()?.process).toEqual({
+      observed: true,
+      processState: 'sleeping',
+      startTimeMs: Date.parse('2026-09-01T03:00:00.000Z'),
+      ppid: 4242,
+    })
+
+    // THE CASE THE `unavailable` CHECK EXISTS FOR, and the only one where it
+    // does any work: every value is PRESENT and the helper has said it could
+    // not answer for it. Driving this with the fields omitted would pass with
+    // the check deleted, through the undefined branch — which is exactly how
+    // nocx-k6p18.13's first version of this test proved nothing.
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2020-01-01T00:00:00.000Z',
+        ppid: 999,
+        state: 'running',
+        unavailable: ['startTime', 'ppid', 'state'],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(
+      paneFacts()?.process,
+      'the overview read process values the helper reported as unavailable',
+    ).toEqual({ observed: true, processState: null, startTimeMs: null, ppid: null })
+
+    // And each is judged ALONE: one named diagnostic must not take the other
+    // two down with it.
+    client.listHelperSessions.mockResolvedValue([
+      entry({
+        startTime: '2026-09-01T03:00:00.000Z',
+        ppid: 4242,
+        state: 'running',
+        unavailable: ['ppid'],
+      }),
+    ])
+    await manager.refreshHelperSessions()
+    expect(paneFacts()?.process).toEqual({
+      observed: true,
+      processState: 'running',
+      startTimeMs: Date.parse('2026-09-01T03:00:00.000Z'),
+      ppid: null,
+    })
+  })
+
+  it('says nobody could be asked about the process when no helper holds the session', async () => {
+    const { client, manager } = await mountPaneManager()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    await vi.waitFor(() => {
+      expect(client.openSSHSession).toHaveBeenCalledTimes(1)
+    })
+    client.listHelperSessions.mockResolvedValue([])
+    await manager.refreshHelperSessions()
+    const pane = manager
+      .overviewPort()
+      .snapshot()
+      .workspaces.flatMap((workspace) => workspace.panes)
+      .find((candidate) => candidate.host === 'host.example.com')
+    expect(pane?.process).toEqual({ observed: false })
   })
 
   // ── fallback title consistency (badge vs title after close) ───────────
@@ -688,8 +866,8 @@ describe('PaneManager', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true }))
 
-    // The session dies with the chrome, in the same turn.
-    expect(session.close).toHaveBeenCalled()
+    // The attachment dies with the chrome, while the helper session survives.
+    expect(session.detach).toHaveBeenCalled()
     // The strip is never left empty, but the tab that fills it is the
     // backend's replacement and lands a round trip later.
     await vi.waitFor(() => {
@@ -797,7 +975,7 @@ describe('PaneManager', () => {
     tabButtons[0].dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
 
     // Check it was closed
-    expect(session0.close).toHaveBeenCalled()
+    expect(session0.detach).toHaveBeenCalled()
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
@@ -824,6 +1002,9 @@ describe('PaneManager', () => {
     await vi.waitFor(() => {
       expect(client.notifyPaneClosed).toHaveBeenCalledWith(first)
     })
+    // The same close-tab gesture also drops only the local attachment; the
+    // layout close below is durable-container bookkeeping, not session end.
+    expect(client._sessions[0].detach).toHaveBeenCalled()
     expect(client.notifyPaneClosed).not.toHaveBeenCalledWith(second)
 
     // Close the remaining tab: its own id is announced, and the replacement
@@ -1522,7 +1703,8 @@ describe('PaneManager', () => {
     // Mount should complete without throwing (error is caught internally).
     await mountPromise
 
-    // The session must have been closed by dispose.
+    // The first mount was aborted before the attachment could be handed to
+    // the pane, so the newly opened helper session is deliberately closed.
     expect(session.close).toHaveBeenCalled()
     expect(client.openSession).toHaveBeenCalledTimes(1)
 
@@ -2292,9 +2474,9 @@ describe('closing a tab that opened other tabs', () => {
     clickClose(bar, 0)
 
     await vi.waitFor(() => {
-      expect(opened[0].close).toHaveBeenCalled()
+      expect(opened[0].detach).toHaveBeenCalled()
     })
-    expect(opened[1].close).not.toHaveBeenCalled()
+    expect(opened[1].detach).not.toHaveBeenCalled()
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
     expect(bar.textContent).toContain('deploy-web')
   })
@@ -2309,7 +2491,7 @@ describe('closing a tab that opened other tabs', () => {
     clickClose(bar, 1)
 
     await vi.waitFor(() => {
-      expect(opened[1].close).toHaveBeenCalled()
+      expect(opened[1].detach).toHaveBeenCalled()
     })
     expect(showConfirmMock).not.toHaveBeenCalled()
   })
@@ -2412,7 +2594,7 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
     // before the answer, and a strip that still shows three tabs would say
     // nothing about whether the sessions behind them were closed.
     for (const session of client._sessions) {
-      expect(session.close).not.toHaveBeenCalled()
+      expect(session.detach).not.toHaveBeenCalled()
     }
     expect(client.notifyPaneClosed).not.toHaveBeenCalled()
     expect(manager.paneCount).toBe(3)
@@ -2425,11 +2607,11 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
 
     await manager.closeWorkspace('ansible-rollout', members)
 
-    expect(client._sessions[1].close).toHaveBeenCalled()
-    expect(client._sessions[2].close).toHaveBeenCalled()
+    expect(client._sessions[1].detach).toHaveBeenCalled()
+    expect(client._sessions[2].detach).toHaveBeenCalled()
     // The tab in another workspace is untouched — the close takes the
     // workspace's members and never a neighbour's.
-    expect(client._sessions[0].close).not.toHaveBeenCalled()
+    expect(client._sessions[0].detach).not.toHaveBeenCalled()
     expect(manager.paneCount).toBe(1)
     // The backend is told about each pane that went, so its captures die
     // with them (nocx-tsajw).

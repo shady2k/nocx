@@ -1,5 +1,5 @@
 # Helper build output, written by `make helpers` and embedded by
-# //go:embed all:artifacts. The binaries themselves are never committed; this
+# //go:embed all:bin (the bin directory). The binaries themselves are never committed; this
 # committed .gitignore is what lets a fresh checkout COMPILE — the all:
 # prefix includes dotfiles, so the embed always matches at least this file,
 # and Artifact answers ErrArtifactsNotBuilt until the artifacts exist.

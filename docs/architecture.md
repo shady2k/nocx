@@ -35,7 +35,7 @@ graph TB
         shellint["shellintegration<br/>(OSC 7/133 substrate)"]
     end
 
-    remote["Remote helper binary<br/>(Tier B) — Phase 2 seam"]
+    remote["nocx-helper<br/>(execution host: PTY, git, fs, completion)"]
 
     wails -.embeds.-> core
     webhost -.serves.-> core
@@ -84,7 +84,7 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 | `session`          | Own session lifecycle; act as the registry mapping session-id → one PTY/SSH channel + one goroutine. Owns the **channel**; references (never owns) a pooled `ssh` connection.                                   |
 | `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
-| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks now; Tier B remote-helper seam later).                                                                                                             |
+| `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
 
 **Frontend (xterm.js)**:
 
@@ -136,7 +136,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - Binds: cwd/prompt/block metadata and the features that consume it.
 - Prevents: coupling MVP features to a remote-install requirement.
-- Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) is the MVP substrate; Tier B = a cross-compiled Go helper scp'd to a remote host **augments** (never replaces) the remote shell and feeds richer metadata to the local terminal — a designed seam, not built now.
+- Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) remains the substrate wherever no helper is installed; Tier B = a consented cross-compiled Go helper that spawns the shell, owns its PTY and delivers the same hooks in-memory on a helper-installed host, replacing Tier A's delivery there.
   - The OSC-7 cwd event payload = `{host, path}` (percent-decoded). Ownership: the **backend** owns "local vs remote + host" and validates the host; the frontend only supplies the desired path.
   - Fallback: when the shell emits no OSC 7, cwd falls back to `$HOME` — **surfaced to the user, not applied silently.**
   - Tier A relies on the VT frontend surfacing OSC 7/133 as events — **verified on xterm.js** (`nocx-dej`, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).
@@ -168,7 +168,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: concurrency and session bookkeeping.
 - Prevents: shared-goroutine coupling across tabs.
 - Rule: one PTY (or SSH channel) per tab; one goroutine per session; the backend `session` module is the authoritative registry keyed by session-id.
-  - **Session-id authority is server-authoritative.** The client sends `open{correlationId, ...}`; the server assigns and returns the authoritative `sessionId` in an ack; the client MUST NOT send PTY frames for a session before its ack.
+  - **Session-id authority is server-authoritative.** The client sends `open{correlationId, ...}`; for a helper-hosted session, the execution host's helper mints the id and the server adopts and returns that same authoritative `sessionId`; otherwise the server assigns it. The client MUST NOT send PTY frames for a session before its ack.
   - **Channel/connection ownership**: `session` owns the channel and references (does not own) a pooled `ssh` connection from AD-4. The shared `Channel` interface declares `Resize() error` (may return an unsupported error) and a `Disconnected` signal, so local-PTY and SSH both feed AD-9 reconnect uniformly.
 
 **AD-8 — Interface-first + dependency injection paradigm.**
@@ -190,6 +190,10 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: transport + session + ipc + terminal.
 - Prevents: OOM, dropped bytes, and cross-tab head-of-line stalls on the shared WS.
 - Rule: bounded in-flight-byte **credit per session**; when the credit is exhausted, apply backpressure to the PTY/SSH read (throttle the source — **never drop, never grow unbounded**). Bytes are lossless and ordered; per-session fairness ensures one busy tab cannot starve others.
+- **Amendment (nocx-k6p18.3): exactly one lossy case, and only on a host the helper owns.** A helper-hosted session's output window is **bounded**; when it is full the **oldest bytes are discarded** rather than the source throttled, and a reader asking for a discarded offset is told the window's base instead, with the range it lost stated explicitly. Every other path stays lossless and ordered — the coordinator's own replay ring (AD-9) is unchanged and still throttles.
+  - Why the exception exists: on a host the coordinator can be replaced by an update, a crash or a quit, and throttling then means a three-hour build **stops because nobody is watching**. Losing the oldest bytes of a stream nobody is reading is the cheaper failure, and it is what makes the promise implementable without a disk on the host.
+  - The loss is **stated in the product**, never only logged: a reader whose cursor falls behind — at attach or mid-stream — receives an explicit reset carrying the gap, and the recording records the hole rather than stopping at it.
+  - The bound is per session, travels at spawn, and the session keeps it for its whole life; the helper clamps it to a floor strictly above the credit limit, a ceiling, and a helper-wide aggregate budget, because the memory is spent on somebody else's machine.
 
 ## Cross-Cutting Concerns
 
@@ -218,7 +222,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - **Web version** — same core served over the network. Revisit when a non-macOS or remote-access need appears (Phase 2/3).
 - **Secrets vault** — separate encrypted single-machine store, credentials injected through the SSH interface. Revisit at Phase 2 start.
-- **Tier-B remote helper** — cross-compiled Go binary augmenting the remote shell, feeding the reserved `metadata` msg-type (AD-1). Revisit when Tier A cwd fidelity proves insufficient or richer remote metadata (file-tree) is wanted. **Not** what Warp calls warpify: warpify is Tier A shell hooks, which is `nocx-pu4` and is being built now. This entry used to carry that name, which invited a reader to defer the wrong thing — the helper binary is deferred; the shell integration is not.
+- **The remote helper, and it is no longer a seam to revisit** — a cross-compiled Go binary that SPAWNS THE SHELL AND OWNS ITS PTY on the host, and answers git, filesystem, environment and completion natively. It is the EXECUTION HOST, not a metadata feed: it replaces the script substrate for hosts that install it by consent, while Tier A remains the substrate everywhere else, so AD-5's purpose — no MVP feature coupled to a remote install — is preserved. Because it holds the PTY, a session outlives the ssh channel and survives a nocx update; that is what turns this from an optional enrichment into the thing levels above it stand on. Planned and ordered rather than deferred: `bd list --label remote-host`. **Not** what Warp calls warpify: warpify is Tier A shell hooks, which is `nocx-pu4` and is being built now. This entry used to carry that name, which invited a reader to defer the wrong thing.
 - **Splits / panes** — in-window layout above the session model. Revisit at Phase 2.
 - **Scrollback search (find-in-output)** — frontend-owned over existing render state. Revisit at Phase 2.
 - **Plugin API** — no runtime built now; the interface-first + DI + composition-root design already is the seam. Revisit only if third-party extension becomes a goal.

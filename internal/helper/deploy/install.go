@@ -94,9 +94,9 @@ func installDir(home string, p Platform, contentHash string) string {
 // Ensure installs the artifact for p if it is not already complete, and
 // returns the absolute path of the installed binary and its content hash
 // (D7, D20, D21). The artifact bytes come from src — the seam the caller
-// gives it; production passes DefaultSource (the embedded binaries), tests
-// pass synthetic bytes, and the install semantics are identical either
-// way.
+// gives it; the composition root passes the embedded source from the sibling
+// artifacts package, tests pass synthetic bytes, and the install semantics
+// are identical either way.
 //
 // A directory is complete only when it carries .install-complete AND its
 // binary hashes to the directory's key; anything else is removed and

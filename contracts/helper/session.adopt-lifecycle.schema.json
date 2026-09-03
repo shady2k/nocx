@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.adopt-lifecycle.schema.json",
+  "title": "HelperSessionAdoptLifecycleResult",
+  "description": "The lifecycle launch this session's shell was spawned with, or null when the session is conventional. Null is an answer and is always present: a coordinator must be able to tell 'this session has no lifecycle channel' from 'this generation does not answer the question', because the first is a pane that is correct as it stands and the second is a degrade the product has to state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lifecycle"],
+  "properties": {
+    "lifecycle": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lane", "domain", "epoch", "capability", "recovery"],
+          "properties": {
+            "lane": { "type": "string" },
+            "domain": { "type": "string" },
+            "epoch": { "type": "integer", "minimum": 0 },
+            "capability": { "type": "string" },
+            "recovery": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -21,8 +21,10 @@ package content
 // author the renderer minted (nocx-iadtt); ledger.capture drives
 // CaptureOutput.
 //
-// WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
-// ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+// WHAT IS STILL TEST-REACHABLE ONLY: DeleteSession, ListEntries, DeleteEntry,
+// AppendArtifact, AddEdge and RunState. CreateSession is wired by the shipped
+// helper-hosted open path, which records the authoritative host, account and
+// generation before acknowledging the session.
 //
 // AddCause and Caused were never on that list: they arrived wired
 // (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for
@@ -314,6 +316,44 @@ const (
 type Session struct {
 	ID          string // server-authoritative (AD-7)
 	WorkspaceID string
+	// Host and Account identify the execution target whose helper owns the
+	// session id space. They are persisted in the existing session payload,
+	// rather than new columns, so reconciliation can select the right host
+	// before asking any helper.
+	Host    string
+	Account string
+	// Generation qualifies a helper-owned session's id space. Empty is
+	// deliberately unowned: rows written before helper generation tracking
+	// remain unknown rather than being attributed heuristically.
+	Generation string
+	// PaneID, ProfileID and HelperCommand are the rest of the route BACK to
+	// a session that outlived the coordinator that opened it
+	// (nocx-k6p18.30). Generation, Host and Account say WHICH helper owns
+	// the id space, which is all a verdict needs; re-adopting the session
+	// needs the three facts a verdict never asks for — which pane it was the
+	// pipe of, which saved connection reaches its host, and where on that
+	// host the helper binary the bridge execs lives.
+	//
+	// They live in this binding rather than being derived later for the
+	// reason nocx-k6p18.15's ordering exists: deriving a route from a
+	// session id would let a truthful "I do not hold that" from the wrong
+	// host become a deletion. All three are empty for a session no route
+	// was recorded for — a direct-host open has no profile — and an empty
+	// one is never guessed at, it simply means this session cannot be taken
+	// back and its verdict stays whatever it would have been.
+	PaneID        string
+	ProfileID     string
+	HelperCommand string
+	// Fingerprint is the execution machine's host public-key fingerprint —
+	// the CONSENT key (remote-helper design D8). It is part of the route back
+	// because re-adopting a session OPENS A HELPER CHANNEL to that machine,
+	// and a person who withdrew consent between two runs must not have one
+	// opened on their behalf by a startup pass they never triggered. That is
+	// the whole of what it is read for today; the uninstall path's own
+	// fingerprint (sessionFactory.fp) is a separate, still-unset field, and
+	// a helper-hosted session's channel is not closed by an uninstall
+	// whether it was opened or taken back.
+	Fingerprint string
 }
 
 // Environment is the durable identity of where work happens (design §3.1,
@@ -1081,6 +1121,56 @@ type Gap struct {
 	Reason string `json:"reason"`
 }
 
+// The vocabulary for Gap.Reason. One owner for the word (AD-8): the store
+// mints it, the wire carries it verbatim (contracts' gap.reason is a free
+// string), and the renderer picks its sentence from it. A surface that
+// invented its own synonym would be telling a user about the same hole in a
+// second set of words.
+//
+// The three that matter are three DIFFERENT FACTS about who had the bytes,
+// and that is why one value cannot serve for any two of them:
+const (
+	// GapReasonCap — the bytes were here and the per-command retention cap
+	// took them to stay inside its bound. Actionable: the knob that dropped
+	// them is the knob that would have kept them.
+	GapReasonCap = "cap"
+	// GapReasonUnrecorded — nobody ever had them. No recorder was attached
+	// to the stream over this range (nocx-k6p18.2: a coordinator can be
+	// replaced under a live session), so the cap never touched them and
+	// naming it would be a false statement in the product. The renderer
+	// already coined this exact word for the same fact it derives on its
+	// side — the stretch between a recording's end and the ring's oldest
+	// byte (frontend/src/ipc.ts) — and the two are deliberately the same
+	// word because they are the same sentence to a user.
+	GapReasonUnrecorded = "unrecorded"
+	// GapReasonHostWindow — the EXECUTION HOST's own bounded output window
+	// reclaimed the bytes before this machine could receive them (AD-9 on
+	// the helper's side of the wire, internal/helper/proto's Gap). A third
+	// distinct fact, and the distinction is what a person does next: `cap`
+	// means we had the bytes and the retention bound here evicted them, so
+	// the knob that dropped them is on this machine; `unrecorded` means
+	// nobody was recording, so no bound acted at all; this one means nothing
+	// on this machine could have kept them, because they never crossed the
+	// wire — the knob that governs it is the session's WindowBytes on the
+	// host, and raising retention here would change nothing.
+	//
+	// The helper's own word for the same cause is proto.GapReasonWindow
+	// ("window"), and this is deliberately not that string. The two live on
+	// different sides of a frozen ABI: proto's vocabulary is per generation
+	// and is read by one coordinator, while this one is the store's and is
+	// read by a person, where a bare "window" would be ambiguous with the
+	// coordinator's OWN replay window (internal/transport's ring) — a
+	// recording read a week later would not say which window lost the bytes.
+	// They meet in exactly one place, transport's sessionOutputHoleReason,
+	// so there is one translation and not a vocabulary.
+	GapReasonHostWindow = "hostWindow"
+	// GapReasonUnknown — a hole whose reason nothing recorded. It is what a
+	// reader says INSTEAD OF GUESSING; see sessionOutputGapReason in
+	// internal/transport, which named the cap here until a second legitimate
+	// reason existed to make that a lie.
+	GapReasonUnknown = "unknown"
+)
+
 // Edge is one relation between entries (design §3.4): the difference
 // between a log and a memory. Cheap, one narrow table.
 type Edge struct {
@@ -1221,6 +1311,21 @@ type LedgerEntrySummary struct {
 	// hands the column over rather than decoding it, so there is exactly one
 	// decoder per key and it is the one that already exists.
 	Payload string
+	// SessionID is the entry's provenance — which pipe it ran in. On the
+	// summary because the row's THIRD state is derived from it (below), and
+	// deriving it anywhere else would need a second read per row.
+	SessionID *string
+	// Unreconciled is the third state (nocx-k6p18.5): this entry's session
+	// was carried over from a previous incarnation and NOBODY COULD BE ASKED
+	// whether it still exists, so the row is neither running nor finished and
+	// the value says why. Nil is the ordinary case — the session was judged,
+	// or the entry names none.
+	//
+	// It is DERIVED at read time from the store's pending set rather than
+	// stored on the row, because it is a fact about this incarnation's
+	// attempts and not about the entry: the next start has its own answer and
+	// must not inherit this one's.
+	Unreconciled *UnreconciledCause
 }
 
 // Summary is the timeline row of a recall-shaped entry — a projection, never
@@ -1233,8 +1338,10 @@ func (e LedgerEntry) Summary() LedgerEntrySummary {
 		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
 		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
 		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
-		Source:  e.Source,
-		Payload: e.Payload,
+		Source:       e.Source,
+		Payload:      e.Payload,
+		SessionID:    e.SessionID,
+		Unreconciled: e.Unreconciled,
 	}
 }
 
@@ -1351,6 +1458,11 @@ type LedgerEntry struct {
 	// wrote it exited (design §6.1).
 	PaneID    *string
 	SessionID *string
+	// Unreconciled is the third state (nocx-k6p18.5), derived at read time
+	// from the store's pending set exactly as it is on the summary — one
+	// derivation, so the page and the detail read cannot disagree about
+	// whether anybody has been able to check this row's session.
+	Unreconciled *UnreconciledCause
 	// ParentID and Pos are the entry's place in the tree (ADR-0040): the
 	// block it sits inside and its seat among that block's children. Both nil
 	// on a top-level block.

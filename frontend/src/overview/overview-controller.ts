@@ -43,6 +43,8 @@ export interface OverviewControllerOptions {
   /** Where the document-level chord listener is installed. Defaults to
    *  `document`, which is where the other two ⌥⌘ surfaces install theirs. */
   target?: Pick<Document, 'addEventListener' | 'removeEventListener'>
+  /** Refresh application-owned facts before mounting the transient surface. */
+  onOpen?: () => void
 }
 
 /** Wire the overview to a port and to the keyboard. */
@@ -83,6 +85,7 @@ export function createOverviewController(
     // see the overview, not to see it and then not.
     if (isOpen()) return
 
+    options.onOpen?.()
     // Recorded for the overlay stack's own bookkeeping, and read BEFORE the
     // panel takes focus: mounting focuses a card in the same turn, so an
     // `activeElement` read afterwards would be that card. Closing does not

@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/identities.schema.json",
+  "title": "HelperABIIdentities",
+  "description": "The shared vocabulary of the FROZEN helper ABI: the three identities a host session is addressed by, and the shapes an attach and a mid-stream reset both speak. It declares $defs and nothing else — every other schema in this directory $refs into it, so one concept has one declaration (AD-8). The three identities are separate types on the wire for the same reason they are separate Go types: before the correction of 2026-08-31 'the session' meant the coordinator-owned PTY channel, so the channel's death was the session's death, and conflating the two is exactly what makes a replacing coordinator delete live work.",
+  "$defs": {
+    "workspaceId": {
+      "description": "An opaque, coordinator-minted workspace handle. Reserved by D15 and unused by this generation — the workspace is coordinator-owned today and workspace.Default is a coordinator-side constant — and REQUIRED TO STAY: document 2 makes one workspace reachable from two machines at once and needs no wire break to do it precisely because the room is carried from the first day. Opaque and NEVER a display name: human names bring rename, collision, normalisation, case and guessability into execution-host policy, and the helper owns no policy and no human-authored name.",
+      "type": "string"
+    },
+    "launchRecord": {
+      "description": "What the helper RECORDED at the moment it spawned. This is the canonical identity of a session and nothing read from the OS afterwards may overwrite it: argv is mutable by the process itself, a process can be replaced by exec, /proc does not exist on macOS and proc_pidinfo answers a different set of questions there. The helper's own record is the authority; OS inspection is a cross-check (see `observation`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
+      "properties": {
+        "shell": {
+          "description": "The binary the helper actually started, as exec resolved it. Chosen by the helper's composition root and never nameable over the wire: no operation may accept argv.",
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Where the shell was actually started — the RESOLVED directory, not the requested one, so an empty request is answered with the answer rather than with the blank that was sent.",
+          "type": "string"
+        },
+        "pid": { "type": "integer", "minimum": 0 },
+        "pgid": {
+          "description": "The process group the helper owns and signals. It is the pid by construction — the PTY is started with setsid, so the shell leads its own group — and the kernel call is the cross-check rather than the authority.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "windowBytes": {
+          "description": "The output-window bound this session ACTUALLY got, after the helper's floor, ceiling and aggregate budget were applied to what the coordinator asked for. Reported rather than assumed: a caller whose request was clamped must be able to see that it was, because a silently ignored setting is the degrade the product must never hide. The session keeps this bound for its whole life — changing the setting affects the next session, never a running one.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "observation": {
+      "description": "What the OS says about the process NOW. EVIDENCE, never authority: every fact here can be wrong in a way the launch record cannot. It is null — never an empty object, and never an omitted field — when the OS could not be asked, which is the ordinary answer on an entire platform: macOS has no /proc, so an empty record there would decode as 'we looked and this process has no working directory'.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["source", "unavailable"],
+      "properties": {
+        "source": {
+          "description": "Where the evidence came from — 'procfs' on Linux, 'sysctl' on macOS. Evidence that cannot say where it came from cannot be weighed against a launch record it contradicts, and the two sources answer different subsets: see `unavailable`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "description": "The process's CURRENT working directory. It changes as the user cds, which is exactly why it is evidence and not part of the launch record.",
+          "type": "string"
+        },
+        "argv": {
+          "description": "The shell's argument vector as the OS reports it. Mutable by the process itself, which is why it is evidence. A string list in a RESULT is untouched by the rule that refuses argv: that rule refuses argv as an INPUT, because an input reaches a command line.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "foregroundPgid": {
+          "description": "The process group the terminal is currently giving input to, and the most volatile fact here. Absent when the shell itself is in the foreground: there is no job, and saying so by omission is more honest than naming the shell as though it were one.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "foregroundCommand": { "type": "string" },
+        "startTime": {
+          "description": "When the KERNEL says this process began, RFC 3339 with nanoseconds and an offset. It is NOT `startedAt` one level up: that is the helper's own record of when it spawned, which is authority, and this is what the OS says about whatever process wears that pid now, which is evidence. The pair is the PID-REUSE GUARD — a pid alone cannot say whether the process answering today is the one we launched, and (pid, startTime) can — so they must be two fields and they are allowed to disagree; that disagreement is the only way anything can notice a recycled pid. They are told apart by where they sit rather than by a longer name, because every field in here is already scoped by `observed`. The resolution differs by platform and neither is exact: macOS reports microseconds, Linux hundredths of a second. It is an identity, not a stopwatch.",
+          "type": "string",
+          "minLength": 1
+        },
+        "ppid": {
+          "description": "The parent as the OS reports it NOW. Evidence rather than a constant: a helper that dies leaves its sessions reparented, and the entry then says so instead of implying the helper still owns them. Absent means it was not answered, and `unavailable` then names it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "description": "The kernel's process state, normalised into one closed vocabulary — because the two kernels spell it differently and a field carrying `R` from one and `2` from the other would be two facts wearing one name. Linux's /proc/<pid>/stat gives a letter, macOS's kinfo_proc gives an SRUN/SSLEEP/SSTOP/SZOMB integer, and both are mapped by the helper rather than by the reader, which cannot know which kernel answered. `uninterruptible` exists because Linux distinguishes it and a shell hung on a dead network mount is precisely the session a person is looking for; macOS does not distinguish it and reports `sleeping`, which is less precise and still true. A code outside this set is reported by naming `state` in `unavailable` — never as a value invented to fill the field. This is the fact that makes a stopped shell and a live one tell apart, which they cannot be today.",
+          "type": "string",
+          "enum": ["running", "sleeping", "uninterruptible", "stopped", "zombie"]
+        },
+        "unavailable": {
+          "description": "Every diagnostic above that this inspector was asked for and could NOT supply. Always present — [] when everything asked for was answered — because a missing diagnostic and a stale one must not look alike. Every other field here is omitted when empty, so a diagnostic the OS could not answer arrives as nothing at all, and a reader with nothing falls back to the LAUNCH record: a value that was true once and goes stale the moment the user cds. That is a stale value presented as a current observation, which is exactly the lie the authority/evidence split exists to prevent, arriving by the back door. macOS is where it bites and why this field exists: there is no /proc, and the only route to another process's working directory is proc_pidinfo(PROC_PIDVNODEPATHINFO) in libproc, which needs cgo — refused by the helper's size argument — so the shipped platform answers argv and the foreground command through sysctl and reports ['cwd'] here. The rule is per-OBSERVATION and not per-platform: a /proc read that was refused is named the same way, because the reader's problem is identical and the reason is not its business. The vocabulary is closed so a reader can switch on it exhaustively; a free-form string would let a later generation invent a name nothing understands, which is the defect additionalProperties:false refuses one level up.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["cwd", "argv", "foregroundCommand", "startTime", "ppid", "state"]
+          }
+        }
+      }
+    },
+    "windowSpan": {
+      "description": "The current extent of a session's bounded output window, both ends named: the oldest offset that still exists and the total ever produced. A reader can tell from it exactly which offsets will be served and which will be reset — and a reader with no position of its own attaches at `base`, exactly as a fresh renderer attaches at sessions.live's replayFrom today.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "written"],
+      "properties": {
+        "base": { "$ref": "#/$defs/streamOffset" },
+        "written": { "$ref": "#/$defs/streamOffset" }
+      }
+    },
+    "sessionExitStatus": {
+      "description": "How a session's process ended. The helper owns exit status, and an entry goes on carrying it after the process is gone: the coordinator that will want it may not exist yet, because the one that started the command was replaced while it ran.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "at"],
+      "properties": {
+        "code": {
+          "description": "The exit status, or -1 when the process was killed by a signal or no status could be collected.",
+          "type": "integer"
+        },
+        "signal": { "type": "integer", "minimum": 0 },
+        "at": {
+          "description": "When the helper observed the end, RFC 3339 with nanoseconds and an offset.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "sessionEntry": {
+      "description": "One live host session as the helper knows it — the row of the inventory, and the answer a spawn gives back, so a caller that spawned one and a caller that found one hold the same value and cannot drift into two decoders. `launch` and `observed` are two fields and never one: merging them would report a lie with the authority of a launch record. There is no NAME here and there never will be: the helper may report derived diagnostics because the OS is their source, and may not persist a name a person typed — a friendly alias is a projection owned by the local server. One owner ever.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "workspace",
+        "startedAt",
+        "launch",
+        "observed",
+        "window",
+        "lifecycleWindow",
+        "writer",
+        "writerEpoch",
+        "exit"
+      ],
+      "properties": {
+        "session": { "$ref": "#/$defs/hostSessionId" },
+        "workspace": { "$ref": "#/$defs/workspaceId" },
+        "startedAt": {
+          "description": "When the helper spawned the process, RFC 3339 with nanoseconds and an offset. A wall-clock time rather than an elapsed duration because the reader is a different process on a different machine, and 'how long ago' is a question only the reader's own clock can answer honestly.",
+          "type": "string",
+          "minLength": 1
+        },
+        "launch": { "$ref": "#/$defs/launchRecord" },
+        "observed": { "$ref": "#/$defs/observation" },
+        "lifecycleWindow": {
+          "description": "Bounded raw lifecycle bytes carried separately from PTY output.",
+          "$ref": "#/$defs/windowSpan"
+        },
+        "window": { "$ref": "#/$defs/windowSpan" },
+        "writer": {
+          "description": "The subscriber holding the session's one write capability, or null when nobody holds it. Always present, like a write grant's own holder, so 'nobody is writing' and 'this helper does not say' are different bytes.",
+          "type": ["string", "null"]
+        },
+        "writerEpoch": { "$ref": "#/$defs/leaseEpoch" },
+        "exit": {
+          "description": "How the process ended, or null while it runs.",
+          "oneOf": [{ "$ref": "#/$defs/sessionExitStatus" }, { "type": "null" }]
+        }
+      }
+    },
+    "generationId": {
+      "description": "One content-addressed helper install. It qualifies every host session that install minted, so a durable handle addresses its generation rather than needing a lookup service. At least 128 bits, base32-encoded; the identifier is never truncated to fit a path, and a path that does not fit is refused visibly instead.",
+      "type": "string",
+      "minLength": 1
+    },
+    "hostSessionId": {
+      "description": "The PTY and its process group, minted by the helper and qualified by the generation that minted it. It SURVIVES coordinator replacement, and it is what the ledger's entries.session_id references. An object rather than a string because the qualification is load-bearing: there is no way to spell a session without its generation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "session"],
+      "properties": {
+        "generation": { "$ref": "#/$defs/generationId" },
+        "session": {
+          "description": "32 lowercase hex characters — the same 16 raw bytes, and the same spelling, the coordinator's own session id already uses, so the data-plane frame header carries it raw exactly as internal/transport's does.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "attachmentId": {
+      "description": "One coordinator-to-helper connection and its lease. DISPOSABLE: it dies with the connection, it is what detach names, and it appears NOWHERE in the ledger — a durable row keyed by it would tie surviving work to a pipe.",
+      "type": "string",
+      "minLength": 1
+    },
+    "subscriberId": {
+      "description": "A reader of a host session's output. Several may read one stream at once, each on its own cursor, and one of them may also hold the write capability. It is opaque to the helper and confers nothing: it ADDRESSES, it does not authorize. Any nocx under the same Unix account may connect, no session capability is reserved, and that cannot be retrofitted into a generation already deployed.",
+      "type": "string",
+      "minLength": 1
+    },
+    "streamOffset": {
+      "description": "The monotonic output coordinate of a host session, in bytes from the first byte it ever produced. It survives attachments — a new attachment is a new READER of the same stream, never a new stream — and it is 64-bit deliberately, because 32 bits wrap after 4 GiB and one long build reaches that.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "leaseEpoch": {
+      "description": "Numbers the grants of a session's one write capability, minted from 1 so that zero names no grant. It rises on every grant, and every input frame carries it, so bytes from a displaced holder that were still in flight are rejected rather than applied late.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "gap": {
+      "description": "One range of output a reader will never receive, in the ledger's own Gap shape — what is missing is said the same way here as on an artifact and in a recording.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "reason"],
+      "properties": {
+        "start": { "$ref": "#/$defs/streamOffset" },
+        "end": { "$ref": "#/$defs/streamOffset" },
+        "reason": {
+          "description": "Why the bytes are missing, and it is a SECOND VALUE rather than the recording's `cap` on purpose: telling a person the cap dropped bytes nobody ever had is a false statement in the product. `window` is the only reason this generation sends — the helper's bounded output window was reclaimed past this range while the reader was behind it, so nobody ever held these bytes. A coordinator meeting a reason it does not recognise must treat it as an unqualified loss and must not refuse the frame: generations coexist, and a newer one may name a loss this one cannot.",
+          "type": "string",
+          "enum": ["window"]
+        }
+      }
+    },
+    "resume": {
+      "description": "Where a reader stands in the stream. This is the coordinator's own attach vocabulary (contracts/attach.schema.json) unchanged, because AD-9 already owns how a reader resumes a stream and a second notion of resumability here would be two owners that agree everywhere anybody looks. Both booleans are always present rather than one being omitted: the contract is exact only when a reader can tell 'the helper said no reset' from 'the helper did not mention reset'. Exactly one of them is true, and the gap is present exactly when reset is — a reset with no gap hides what was lost, and a gap on a resume claims a loss that did not happen.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resumed", "reset", "from"],
+      "properties": {
+        "resumed": {
+          "description": "The requested offset was still in the window and the stream continues from it: nothing was lost and the reader keeps what it has drawn.",
+          "type": "boolean"
+        },
+        "reset": {
+          "description": "The requested offset is older than the window's base. The reader must clear its decoder and its screen and resync from `from` — replay cannot begin inside a UTF-8 sequence spliced onto a different stream position.",
+          "type": "boolean"
+        },
+        "from": {
+          "description": "The offset the stream resumes at: the requested offset when resumed, the window's base when reset.",
+          "$ref": "#/$defs/streamOffset"
+        },
+        "gap": { "$ref": "#/$defs/gap" }
+      },
+      "oneOf": [
+        {
+          "required": ["resumed", "reset"],
+          "properties": { "resumed": { "const": true }, "reset": { "const": false } },
+          "not": { "required": ["gap"] }
+        },
+        {
+          "required": ["resumed", "reset", "gap"],
+          "properties": { "resumed": { "const": false }, "reset": { "const": true } }
+        }
+      ]
+    },
+    "writeGrant": {
+      "description": "The answer to an attach that asked for the session's one write capability. Exactly one attachment holds it at a time; a second request is REFUSED and names the holder, never silently promoted and never a displacement — displacement is a product decision the coordinator already makes for its own clients, and a second, lower, divergent policy would be two owners of one behaviour.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["granted", "epoch", "holder"],
+      "properties": {
+        "granted": {
+          "description": "Whether this attachment now holds the capability.",
+          "type": "boolean"
+        },
+        "epoch": {
+          "description": "The lease this grant carries, or 0 when it was not granted.",
+          "$ref": "#/$defs/leaseEpoch"
+        },
+        "holder": {
+          "description": "Who holds it, when this request was refused; null otherwise. A refusal that does not say who holds it leaves the caller with nothing to do about it.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

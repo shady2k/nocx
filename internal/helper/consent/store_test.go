@@ -147,3 +147,23 @@ func TestGrantWriteFailureDoesNotGrant(t *testing.T) {
 		t.Fatalf("a failed grant must not answer granted, got %q", ans)
 	}
 }
+
+// TestRevokeForgetsTheMachineAnswer is the uninstall half of the consent
+// interval: after remote removal succeeds, the machine is no longer granted.
+func TestRevokeForgetsTheMachineAnswer(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := s.Revoke("SHA256:abc"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, ok := s.Lookup("SHA256:abc"); ok {
+		t.Fatal("revoked machine still has a consent answer")
+	}
+	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if _, ok := again.Lookup("SHA256:abc"); ok {
+		t.Fatal("revoked consent resurrected after reopening the store")
+	}
+}

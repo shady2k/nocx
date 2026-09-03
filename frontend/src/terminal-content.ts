@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { XtermRenderer } from './renderers/xterm'
-import type { MarkerAdapter } from './renderers/types'
+import type { MarkerAdapter, TerminalRenderer } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
 import {
   LifecycleKernel,
@@ -62,6 +62,8 @@ import {
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountRecoveryNotice } from './recovery-notice'
+import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
 import {
@@ -117,6 +119,7 @@ import {
   blocksForPane,
   restoredBody,
   toolResultForEntry,
+  type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
@@ -924,6 +927,12 @@ export class TerminalContent extends BasePaneContent {
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
   private _recoveryAcking = false
+  private _recoveryAckClaim: {
+    bindGeneration: number
+    sessionId: string
+    fence: string
+    generation: string
+  } | null = null
   /** The establishment generation whose acknowledgement is in flight, and the
    *  one whose acknowledgement the backend accepted. Replays are intentionally
    *  idempotent — the same projection may arrive from a live transition and
@@ -940,6 +949,10 @@ export class TerminalContent extends BasePaneContent {
    *  accept expired. */
   private _establishmentAckInFlight: string | null = null
   private _establishmentAcked: string | null = null
+  /** Monotonic identity for the pane's current session bind. Async
+   *  acknowledgements from an old shell may settle after reconnect, but they
+   *  must never mutate the new shell's episode. */
+  private _bindGeneration = 0
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -1016,6 +1029,16 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
+  /** The disposer for the reclaimed-pane card that names the output this
+   *  session produced and nothing kept (nocx-fz4qa). Separate from the card
+   *  above because the two report different KINDS of fact: that one is a
+   *  session state that comes and goes, this one is a settled fact about one
+   *  reclaim that will never stop being true. */
+  private _recoveryNoticeDispose: (() => void) | null = null
+  /** The third state's card (nocx-k6p18.5), raised by a RESTORE rather
+   *  than by a session: it is a fact about the blocks this pane read back,
+   *  not about the pipe it is attached to now. */
+  private _unreconciledNoticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
   // The last thing the backend said about REACHING this pane's host, and the
@@ -2556,13 +2579,20 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       renderer.onCommandMarker((marker) => {
-        // SEVERED (ADR-0024 §1): PTY output is render-only. OSC 133 A/B
-        // partition prompt bytes from output bytes for rendering and interop
-        // with other tools; C and D have no meaning to nocx. No stream
-        // sequence may grant keyboard ownership, open or complete an attempt,
-        // assign an exit status, persist history, open or freeze a block,
-        // activate an environment or enable rewriting — every one of those
-        // paths was deleted with the marker cycle (nocx-u7uh.1).
+        // OSC 133 remains render-derived (AD-6): live C/D markers never
+        // authorize or complete a lifecycle attempt. During the adopted
+        // session's recovered write and the restore transaction only, the
+        // same parsed markers are retained for the open ledger entry.
+        if ((this._replayCapture || this._pastRestoring) && marker.buffer === 'normal') {
+          if (marker.kind === 'C') {
+            this._replayCommandOpen = true
+          } else if (marker.kind === 'D') {
+            if (this._replayCommandOpen && marker.exitCode !== undefined) {
+              this._replayCompletions.push(marker.exitCode)
+            }
+            this._replayCommandOpen = false
+          }
+        }
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
         // ONE thing is read off a marker here, and it is not a decision about
         // the session: B is prompt-end, so the shell has finished starting
@@ -2712,6 +2742,27 @@ export class TerminalContent extends BasePaneContent {
       this._projections = new LifecycleProjections(
         this.lifecycle,
         this.ledger,
+        // THE RENDERER THIS MOUNT BUILT, not `this.renderer`, and that is the
+        // whole of nocx-ht15k. Every callback below needs a cursor line, and
+        // reading the FIELD made them wait for mount to publish it — which
+        // happens only after `_bindSession` returns. For a pane that opens
+        // its own session that window is empty, because the backend replays
+        // a session's lifecycle facts the instant its subscriber lands and a
+        // fresh shell has none yet. A RECLAIM has a whole projection waiting,
+        // and since nocx-k6p18.6 the reclaiming bind AWAITS the write barrier
+        // over the recovered scrollback before it returns — so the replayed
+        // `running` fact of the command that never stopped arrived while the
+        // field was still null, every callback below refused it, and
+        // LifecycleProjections.pump had already recorded the attempt in
+        // `_bound`, so nothing ever opened the block again. The person who
+        // came back to their pane held the session and could not see the work
+        // (the same shape as nocx-07cf4, which moved onCwd/onTitle above the
+        // bind for the same window).
+        //
+        // There is exactly one renderer per TerminalContent — mount builds it,
+        // `this.renderer` is assigned that same object and a rebind reads it
+        // back — so this closure is not a second owner of anything. It is the
+        // one that exists from the moment the port does.
         {
           bindBlock: (attempt) => {
             // The running block opened at the app-owned submit binds to the
@@ -2722,7 +2773,7 @@ export class TerminalContent extends BasePaneContent {
             // A shell-originated attempt: the block gives a native-mode
             // command structure; its text is already on the terminal and
             // never persists (the command-text decision).
-            if (!this.scrollback || !this.renderer) return
+            if (!this.scrollback) return
             // No outputStart override here — unlike the app-owned submit,
             // this block opens at the cursor line at fact time, AFTER the
             // echo: the user typed the command at the shell and it was
@@ -2732,7 +2783,7 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback.beginBlock(
               attempt.command || '(empty)',
               this._cwd,
-              this.renderer.cursorLine(),
+              renderer.cursorLine(),
             )
             this.scrollback.blockManager.bindAttempt(attempt.id)
           },
@@ -2741,15 +2792,15 @@ export class TerminalContent extends BasePaneContent {
             // authenticated completion (kernel derivation). The render-fence
             // rendezvous is bead nocx-u7uh.8; the freeze lands on the event
             // for now, at the current output end.
-            if (!this.scrollback || !this.renderer) return
+            if (!this.scrollback) return
             if (!kernelFreezeBlock(attempt, attempt.domain)) return
-            this.scrollback.freezeFromAttempt(attempt, this.renderer.cursorLine())
+            this.scrollback.freezeFromAttempt(attempt, renderer.cursorLine())
           },
           abandonBlock: (attempt) => {
             // The attempt went unknown (loss, closure, native escape): the
             // block freezes as abandoned — never successful.
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.abandonAttempt(attempt, this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.abandonAttempt(attempt, renderer.cursorLine())
           },
           enterBlock: () => {
             // The far session began: the local `ssh` block ends here with
@@ -2758,16 +2809,16 @@ export class TerminalContent extends BasePaneContent {
             // the far host's blocks. Wired here for the first time: the
             // block manager has always had freezeEntered and nothing ever
             // called it, so every ssh block ran forever (nocx-z5k9).
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.enterBlock(this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.enterBlock(renderer.cursorLine())
           },
           abandonPending: () => {
             // The block opened at the submit and its domain ended before any
             // attempt arrived — `exit` is the case, and the start frame it
             // would have needed dies with the shell (nocx-mlyu). Nothing can
             // complete it, so it freezes as unknown rather than climbing.
-            if (!this.scrollback || !this.renderer) return
-            this.scrollback.abandonUnbound(this.renderer.cursorLine())
+            if (!this.scrollback) return
+            this.scrollback.abandonUnbound(renderer.cursorLine())
           },
         },
         (rec, attempt) =>
@@ -3139,10 +3190,29 @@ export class TerminalContent extends BasePaneContent {
       // the import that would create a path. The backend routes facts to
       // this session's lane; the kernel adopts the first lane and rejects
       // the rest.
-      // The session and everything hanging off it. Extracted so it can run
-      // again: a reconnect rebuilds exactly this and nothing above it.
-      if (!(await this._bindSession(signal, renderer, false))) return
-
+      // SUBSCRIBED BEFORE THE BIND, because the bind is what delivers the
+      // bytes these two read. `onCwd` installs an OSC 7 parser handler and
+      // `onTitle` an OSC 0/2 listener at SUBSCRIBE time, so a sequence xterm
+      // has already parsed is dispatched to nobody and is gone — neither has
+      // a last-value replay behind it.
+      //
+      // For a pane that OPENS its own session the old order never showed:
+      // xterm parses asynchronously, so the shell's first prompt was still
+      // queued while these lines ran and the handlers won the race. A
+      // RECLAIMED session made that race deterministic and lost it. Its
+      // recovered recording is written during the bind, and since
+      // nocx-k6p18.6 the bind AWAITS `awaitWriteBarrier()` over exactly those
+      // bytes — so by the time it returned, the OSC 7 and OSC 0/2 the
+      // replayed scrollback carries had been parsed and discarded. The pane
+      // then kept the reclaim's lane seed, whose cwd is '' by design (ipc.ts
+      // `reclaimSession`: a reclaim carries the session, never the pane's
+      // own facts), `directoryLabel('')` is '', and every reclaimed tab drew
+      // an empty title (nocx-07cf4).
+      //
+      // Registered ONCE, here, and not inside the bind: a rebind reuses this
+      // renderer and a second registration would report one OSC 7 twice.
+      // `this.env` is null until the first open, which both bodies already
+      // tolerate — nothing writes to this renderer before a session exists.
       renderer.onTitle((title: string) => {
         // An OSC 0/2 title is attributed to the ACTIVE domain (the stream
         // has no writer identity; the domain that was active when the bytes
@@ -3168,6 +3238,11 @@ export class TerminalContent extends BasePaneContent {
         // parent's authenticated activation (bead nocx-u7uh.11).
         this.env?.recordCwd(path)
       })
+
+      // The session and everything hanging off it. Extracted so it can run
+      // again: a reconnect rebuilds exactly this and nothing above it.
+      if (!(await this._bindSession(signal, renderer, false))) return
+
       renderer.onBell(() => {
         // TWO facts, not one, and neither replaces the other. The tab dot is
         // "something happened in a pane you are not looking at" — local,
@@ -3264,6 +3339,13 @@ export class TerminalContent extends BasePaneContent {
         if (cols === this.cols && rows === this.rows) return
         this.cols = cols
         this.rows = rows
+        // A grid this window BORROWED is not a measurement this window made
+        // (nocx-eidfb.3). xterm reports every grid change the same way
+        // whoever caused it, and reporting this one back would be the window
+        // claiming a size it never measured — which under nocx-eidfb.2 is a
+        // claim on the session, made on behalf of the client that actually
+        // chose it.
+        if (this.sessionGrid) return
         clearTimeout(this.resizeTimer)
         this.resizeTimer = window.setTimeout(() => {
           // A resize makes the shell redraw its prompt, and that redraw arrives
@@ -3488,11 +3570,16 @@ export class TerminalContent extends BasePaneContent {
       this.session?.close()
       this.session = null
 
+      this._replayCapture = false
+      this._replayCompletions = []
+      this._replayCommandOpen = false
       // The state that DESCRIBES the shell that is gone. The kernel's domains,
       // the markers that point into a stream nobody is writing any more, the
       // handshake generation that was acknowledged to a backend lane that no
       // longer exists. Left standing, each of them would answer a question
       // about the new shell with a fact about the old one.
+      this._recoveryAcking = false
+      this._recoveryAckClaim = null
       this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
@@ -3564,6 +3651,7 @@ export class TerminalContent extends BasePaneContent {
     renderer: XtermRenderer,
     rebind: boolean,
   ): Promise<boolean> {
+    const bindGeneration = ++this._bindGeneration
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -3588,9 +3676,20 @@ export class TerminalContent extends BasePaneContent {
       // editor holds no authority and offers none). A native fact ends
       // the episode.
       if (fact.lifecycle === 'lost' && fact.recovery) {
-        this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+        const nextRecovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+        if (
+          this._recovery !== null &&
+          (this._recovery.fence !== nextRecovery.fence ||
+            this._recovery.generation !== nextRecovery.generation)
+        ) {
+          this._recoveryAcking = false
+          this._recoveryAckClaim = null
+        }
+        this._recovery = nextRecovery
       } else if (fact.lifecycle === 'native') {
         this._recovery = null
+        this._recoveryAcking = false
+        this._recoveryAckClaim = null
       }
       // The kernel applies the fact and notifies onChange on a real
       // change; the ownership sync runs there, once.
@@ -3612,16 +3711,14 @@ export class TerminalContent extends BasePaneContent {
         this.session
       ) {
         const generation = fact.generation
+        const sessionId = this.session.sessionId
         this._establishmentAckInFlight = generation
         new LifecycleClient(this.client.dispatcher)
-          .establishAck(
-            this.session.sessionId,
-            fact.lane,
-            fact.domain ?? '',
-            fact.epoch ?? 0,
-            generation,
-          )
+          .establishAck(sessionId, fact.lane, fact.domain ?? '', fact.epoch ?? 0, generation)
           .then(() => {
+            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
+              return
+            }
             // Only a landed acknowledgement retires the generation. The
             // backend has flushed the accept, so a later replay of the
             // same projection needs no second ack.
@@ -3631,6 +3728,9 @@ export class TerminalContent extends BasePaneContent {
             }
           })
           .catch((e: unknown) => {
+            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
+              return
+            }
             // Release the claim: this generation was NOT acknowledged, and
             // a replay carrying it again — the reattach case, where only a
             // fresh shell hello would have minted a new one — is the retry
@@ -3684,6 +3784,29 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // Reclaimed bytes are flushed as soon as onData is registered. Start
+    // capture before that registration so their parsed C/D markers cannot
+    // outrun the later ledger restore.
+    this._replayCapture = session.recovered !== undefined
+    // A RECLAIMED session was sized by somebody else, and its recovered
+    // scrollback is about to be written (nocx-eidfb.3). The claim reports no
+    // geometry — reclaimSession attaches at an offset and nothing else — so
+    // the channel is still running at the size the last client left it at,
+    // and `recovered.size` is what the backend says that is. Draw at it, or
+    // bytes wrapped at 132 columns land in the 80×24 grid xterm booted with
+    // and are wrapped a second time, which no later fit can unpick.
+    //
+    // An OPEN has nothing here: it created the channel at this window's own
+    // measurement, so the two answers are already the same one.
+    if (session.recovered) this.renderAtSessionGrid(session.recovered.size, renderer)
+
+    // What the reclaim could NOT give back, said where a person will see it
+    // (nocx-fz4qa). The recovered bytes are already queued for the terminal
+    // by the time this handle exists; the hole is the half the terminal
+    // cannot show, because a missing stretch of a byte stream looks exactly
+    // like a session that printed less. Mounted here, with the session,
+    // because that is where the fact arrives and where the pane is known.
+    this._showRecoveryNotice(session, target)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
     // session is what the drop has to be routed to, and it does not exist
@@ -3800,6 +3923,17 @@ export class TerminalContent extends BasePaneContent {
         host.requestAttention()
       }
     })
+    if (this._replayCapture) {
+      try {
+        await renderer.awaitWriteBarrier()
+      } catch (err) {
+        log.warn('nocx: recovered marker parsing did not settle', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        this._replayCapture = false
+      }
+    }
 
     // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
     // bytes were handed over. `write()` parses asynchronously, so the
@@ -4037,6 +4171,79 @@ export class TerminalContent extends BasePaneContent {
   private lastFitGeometry: { width: number; height: number } | null = null
 
   /**
+   * The grid the SESSION is running at, while that is not this window's own
+   * (nocx-eidfb.3). Null whenever the two are the same thing, which is every
+   * moment this window is the client the channel follows.
+   *
+   * THE INTERVAL, both ends named. It OPENS when the pane is handed a session
+   * whose size somebody else chose — today that is a reclaim, which attaches
+   * without reporting any geometry (ipc.reclaimSession), so the channel keeps
+   * running at the size the last client left it at while this pane draws the
+   * recovered scrollback. It CLOSES at this window's first applied fit, which
+   * is the act of taking the size over: under nocx-eidfb.2 the client that
+   * reports last is the one the channel follows, so a fit that reaches the
+   * backend makes the window's answer and the session's the same answer
+   * again.
+   *
+   * While it is open the grid is the session's and this window pads or
+   * scrolls around it. Everything else in the window — the tab strip, the
+   * sidebar, the splits — is DOM and lays itself out; only the grid is
+   * borrowed.
+   */
+  private sessionGrid: { cols: number; rows: number } | null = null
+
+  /**
+   * Draw at the grid the session is running at rather than at this window's.
+   *
+   * The size decision belongs to the backend (nocx-eidfb.1) and follows the
+   * client that attached last (nocx-eidfb.2). A client that is not that one
+   * has the session's answer and its own window's answer in front of it at
+   * the same time, and only the session's describes the bytes it is being
+   * sent: the same stream wraps differently at two widths, so a window that
+   * draws them at its own width wraps them a second time and no later resize
+   * can unpick that. Two clients would then show two different screens of one
+   * session, which is the whole thing this epic exists to prevent.
+   *
+   * Called with the session's geometry BEFORE any of its bytes are written —
+   * a grid corrected afterwards corrects nothing.
+   *
+   * `target` exists for exactly that reason. The bind runs before mount
+   * publishes the renderer on `this.renderer`, and the recovered bytes are
+   * written inside the bind, so the one caller that has to beat them has to
+   * name the renderer it is binding.
+   */
+  renderAtSessionGrid(
+    size: { cols: number; rows: number },
+    target: TerminalRenderer | null = this.renderer,
+  ): void {
+    if (size.cols <= 0 || size.rows <= 0) return
+    this.sessionGrid = { cols: size.cols, rows: size.rows }
+    // The fit memo is stale the moment the grid stops being the one that
+    // rectangle produced. Left standing, a pane that was already fitted — a
+    // rebind — would dedupe its next fit against a rectangle that no longer
+    // describes the grid, and the borrowed one would never be handed back.
+    this.lastFitGeometry = null
+    // The scroller is told, because a grid this window did not choose is
+    // wider or narrower than the box it is shown in and must pad or scroll
+    // rather than be cut mid-glyph. It is safe here and only here: the
+    // `overflow-x: hidden` this replaces is what keeps a self-fitted grid out
+    // of a feedback loop with the clientWidth it was derived from, and a grid
+    // that came from the backend is not in that loop at all.
+    const area = this.scrollback?.scrollbackArea
+    if (area) area.dataset.gridOwner = 'session'
+    target?.setGrid(size.cols, size.rows)
+  }
+
+  /** The closing end of the interval above: this window's own measurement is
+   *  being applied, so the grid and the scroller are its own again. */
+  private releaseSessionGrid(): void {
+    if (!this.sessionGrid) return
+    this.sessionGrid = null
+    const area = this.scrollback?.scrollbackArea
+    if (area) delete area.dataset.gridOwner
+  }
+
+  /**
    * Re-fit the grid when the space it is shown in has changed size.
    *
    * `viewportChanged` only fires when the PANE's geometry changes, and the
@@ -4082,6 +4289,12 @@ export class TerminalContent extends BasePaneContent {
     const last = this.lastFitGeometry
     if (last && last.width === usable.width && last.height === usable.height) return
     this.lastFitGeometry = { width: usable.width, height: usable.height }
+    // Applying a fit IS this window taking the session's size over — the
+    // measurement goes to the backend on the grid change below, and the
+    // client that reports last is the one the channel follows (nocx-eidfb.2).
+    // So the borrowed grid ends here rather than being overwritten behind its
+    // own back.
+    this.releaseSessionGrid()
     this.renderer.fitViewport(usable)
   }
 
@@ -4282,6 +4495,32 @@ export class TerminalContent extends BasePaneContent {
     )
   }
 
+  /** A recovered OSC 133 D adjudicates the next unreconciled command entry.
+   *  The marker has no durable identity, so ledger order is the only honest
+   *  association. Missing replay leaves the row in its third state. */
+  private applyReplayCompletions(blocks: RestorableBlock[]): void {
+    const pending = blocks.filter((block) => block.unreconciled !== null)
+    let next = 0
+    for (const exitCode of this._replayCompletions) {
+      while (next < pending.length) {
+        const candidate = pending[next++]
+        if (
+          this.scrollback?.blockManager.completeRestoredBlock(
+            candidate.entryId,
+            exitCode,
+            candidate.durationMs,
+          )
+        ) {
+          break
+        }
+      }
+    }
+    this._replayCompletions = []
+    this._replayCommandOpen = false
+    this._replayCapture = false
+    this._pastRestoring = false
+  }
+
   /** One shot. A pane is shown many times — every tab switch — and its past
    *  is drawn once; the guard is set before the first await so two switches
    *  in the same turn cannot both start. */
@@ -4289,6 +4528,16 @@ export class TerminalContent extends BasePaneContent {
   /** Guards the window between asking and answering: a tab switched away and
    *  back while the read is in flight must not start a second one. */
   private _pastRestoring = false
+  /** Captures markers from the adopted session's recovered write before the
+   *  restore transaction starts, then remains active for that transaction. */
+  private _replayCapture = false
+  /** Parsed OSC 133 D events retained while the durable page is unresolved.
+   *  They are applied only to restored entries; live blocks remain
+   *  lifecycle-authorized. */
+  private _replayCompletions: number[] = []
+  /** A replay C starts the command whose D adjudicates one unreconciled
+   *  restored entry. */
+  private _replayCommandOpen = false
   /** A retry that arrived while a read was in flight. Without it the window
    *  is small but real: a reconnect report landing between "asked" and "the
    *  ask failed" would be dropped, and the pane would wait for another
@@ -4344,8 +4593,19 @@ export class TerminalContent extends BasePaneContent {
     }
     this._pastRetryPending = false
     this._pastRestored = true
-    this._pastRestoring = false
-    if (blocks.length === 0) return
+    // THE THIRD STATE, said before the blocks are drawn (nocx-k6p18.5). Some
+    // of these rows may be neither running nor finished: their session was
+    // carried over from a previous coordinator and nobody could be asked
+    // whether it still exists. The blocks themselves claim nothing — no
+    // outcome chip, no spinner — and this is where the reason is said, once
+    // for the pane rather than once per block. A page with none of them
+    // raises nothing: mountUnreconciledNotice answers null, and the decision
+    // lives there so this side is not a second reader of it.
+    this._showUnreconciledNotice(blocks)
+    if (blocks.length === 0) {
+      this.applyReplayCompletions(blocks)
+      return
+    }
     const snapshot = fromITheme(getCurrentTheme())
     // Every block's body AND its causal flow, in the one round trip pair the
     // body already cost (restore-client restoredBody). Both are needed
@@ -4543,6 +4803,7 @@ export class TerminalContent extends BasePaneContent {
       )
     }
     this.scrollback.restorePast(els)
+    this.applyReplayCompletions(blocks)
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
@@ -4636,6 +4897,74 @@ export class TerminalContent extends BasePaneContent {
    *  nothing is kept — that is a different sentence and it would be wrong. */
   private _recording(): OutputRecordingSource {
     return this.hooks.outputRecording ?? RECORDING_UNKNOWN
+  }
+
+  /** Raise the reclaimed-pane card, when this session came back short
+   *  (nocx-fz4qa).
+   *
+   *  A FRESH SESSION RAISES NOTHING: `recovered` is null for a pane that
+   *  opened its own, and a reclaim that got the whole recording back has no
+   *  gaps — mountRecoveryNotice answers null for both, and the decision lives
+   *  there so this side is not a second reader of it.
+   *
+   *  Any card from a PREVIOUS session goes first. A rebind is a new session
+   *  with its own past, and a card left over from the old one would be
+   *  describing bytes that have nothing to do with what is on screen now. */
+  private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
+    this._dropRecoveryNotice()
+    this._recoveryNoticeDispose = session.recovered
+      ? mountRecoveryNotice(target, {
+          recovery: session.recovered,
+          onDismiss: () => this._dropRecoveryNotice(),
+        })
+      : null
+    // The card takes its height off the top of the pane, so the scroller is
+    // smaller than the grid fitted to it — the same re-measure the
+    // integration card goes through, and for the same reason: the pane's own
+    // box is unchanged, so no viewport observer fires for this.
+    if (this._recoveryNoticeDispose) this.scheduleLiveResize()
+  }
+
+  /** Raise the third state's card for a restored page, when it has one
+   *  (nocx-k6p18.5).
+   *
+   *  A page whose rows were all judged raises nothing, which is nearly every
+   *  page: the notice exists for the tab whose host has not been reachable
+   *  since the app restarted, and one that appeared otherwise would be noise
+   *  on every tab. Any card from a previous restore goes first — a second
+   *  read is a new answer, and a stale card would be describing blocks that
+   *  have since been judged. */
+  private _showUnreconciledNotice(
+    rows: readonly { unreconciled: UnreconciledCause | null }[],
+  ): void {
+    this._dropUnreconciledNotice()
+    const target = this._paneTarget
+    if (!target) return
+    this._unreconciledNoticeDispose = mountUnreconciledNotice(target, {
+      rows,
+      onDismiss: () => this._dropUnreconciledNotice(),
+    })
+    // The card takes its height off the top of the pane, so the scroller is
+    // smaller than the grid fitted to it — the same re-measure the reclaim
+    // card goes through, and for the same reason.
+    if (this._unreconciledNoticeDispose) this.scheduleLiveResize()
+  }
+
+  /** Take the third state's card down and give the pane back to the
+   *  terminal. */
+  private _dropUnreconciledNotice(): void {
+    if (!this._unreconciledNoticeDispose) return
+    this._unreconciledNoticeDispose()
+    this._unreconciledNoticeDispose = null
+    this.scheduleLiveResize()
+  }
+
+  /** Take the reclaim card down and give the pane back to the terminal. */
+  private _dropRecoveryNotice(): void {
+    if (!this._recoveryNoticeDispose) return
+    this._recoveryNoticeDispose()
+    this._recoveryNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -4738,23 +5067,64 @@ export class TerminalContent extends BasePaneContent {
    *  applied. The acknowledgement is deliberately narrow — session identity
    *  and the generation; the backend validates it against the episode it
    *  opened, and the transition permits only Lost → Native. Cleared on
-   *  success; a refusal (session died, episode superseded) is a fact about
-   *  the session, and the exit path closes the tab. */
+   *  success; a refusal keeps the episode pending but releases this
+   *  acknowledgement claim so a later fence replay may retry. */
   private async _ackRecovery(): Promise<void> {
     if (!this._recovery || this._recoveryAcking || !this.session || this._sessionExited) return
     const rec = this._recovery
+    const bindGeneration = this._bindGeneration
+    const sessionId = this.session.sessionId
     this._recoveryAcking = true // claim the episode: exactly one ack per fence
+    this._recoveryAckClaim = {
+      bindGeneration,
+      sessionId,
+      fence: rec.fence,
+      generation: rec.generation,
+    }
     try {
-      await new LifecycleClient(this.client.dispatcher).recoverAck(
-        this.session.sessionId,
-        rec.generation,
-      )
+      await new LifecycleClient(this.client.dispatcher).recoverAck(sessionId, rec.generation)
+      const claim = this._recoveryAckClaim
+      if (
+        claim === null ||
+        claim.bindGeneration !== bindGeneration ||
+        claim.sessionId !== sessionId ||
+        claim.fence !== rec.fence ||
+        claim.generation !== rec.generation ||
+        this._bindGeneration !== bindGeneration ||
+        this.session?.sessionId !== sessionId ||
+        this._recovery?.fence !== rec.fence ||
+        this._recovery?.generation !== rec.generation
+      ) {
+        return
+      }
       this._recovery = null
+      this._recoveryAckClaim = null
+      this._recoveryAcking = false
     } catch (e) {
-      // A refusal is a fact about the episode (session died, generation
-      // superseded, lane no longer lost): the pending guard stays, and the
-      // exit path closes the tab. Re-arming lets a replayed episode retry.
-      log.warn('nocx: recovery acknowledgement refused', { error: e })
+      const claim = this._recoveryAckClaim
+      if (
+        claim === null ||
+        claim.bindGeneration !== bindGeneration ||
+        claim.sessionId !== sessionId ||
+        claim.fence !== rec.fence ||
+        claim.generation !== rec.generation ||
+        this._bindGeneration !== bindGeneration ||
+        this.session?.sessionId !== sessionId ||
+        this._recovery?.fence !== rec.fence ||
+        this._recovery?.generation !== rec.generation
+      ) {
+        return
+      }
+      // A refusal is usually the backend's own bookkeeping (stale
+      // generation, superseded establishment, replaced subscriber),
+      // and then the replay simply does not come. Retrying costs one
+      // refused call in that case and recovers the session in the
+      // case that matters, so releasing is the safe direction.
+      log.warn('nocx: recovery acknowledgement refused', {
+        reason: e instanceof Error ? e.message : String(e),
+        generation: rec.generation,
+      })
+      this._recoveryAckClaim = null
       this._recoveryAcking = false
     }
   }
@@ -6179,6 +6549,10 @@ export class TerminalContent extends BasePaneContent {
     this._integrationUnsub = null
     this._noticeDispose?.()
     this._noticeDispose = null
+    this._recoveryNoticeDispose?.()
+    this._recoveryNoticeDispose = null
+    this._unreconciledNoticeDispose?.()
+    this._unreconciledNoticeDispose = null
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
     this._projections?.detach()
@@ -6203,7 +6577,7 @@ export class TerminalContent extends BasePaneContent {
       this._targetChordKeydown = null
     }
     this._endSummon(true)
-    this.session?.close()
+    this.session?.detach()
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()

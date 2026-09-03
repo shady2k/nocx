@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sessions.inventory.params.schema.json",
+  "title": "SessionsInventoryParams",
+  "description": "Params for asking the known helper generations for their current sessions.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

@@ -4,12 +4,14 @@ package content
 // (nocx-rtg0.24).
 //
 // WHY THE RECEIPT IS IN entries.payload AND NOT IN COLUMNS OF ITS OWN.
-// sqlite.go states the protocol: any change to schemaV1 bumps schemaVersion,
-// and a bump DROPs every table — including command_history, which is still
-// the live history path and holds the user's real commands. nocx-rtg0.19
-// deletes command_history and pays that cost once. Adding three columns here
-// would make the user pay it twice for a receipt on a table nothing reads
-// yet. So the receipt rides the payload column, which needs no bump.
+// sqlite.go states the protocol: any change to schemaV1 bumps schemaVersion.
+// When this was written a bump DROPPED every table — including
+// command_history, which was then the live history path holding the user's
+// real commands — so adding three columns here would have made the user pay
+// that cost a second time for a receipt on a table nothing read yet. A bump
+// is a migration now (nocx-lmb6v.1) and costs a rung rather than the rows,
+// so the argument for the payload column is the weaker one it always also
+// was: a receipt is not kind-specific and needs no shape of its own.
 //
 // That column's comment calls it "kind payload, sparse extension only", and a
 // redaction is not kind-specific — this widens the field's meaning

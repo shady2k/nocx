@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ageLabel,
   cardLocation,
+  cardProcess,
   cardTitle,
   overviewGroups,
   paneState,
@@ -16,7 +17,8 @@ function facts(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFacts {
     paneId: 'p1',
     title: null,
     host: null,
-    cwd: null,
+    cwd: { state: 'unobserved' },
+    process: { observed: false },
     branch: null,
     agentStatus: null,
     runningCommand: null,
@@ -29,6 +31,8 @@ function facts(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFacts {
     ...over,
   }
 }
+
+const knownCwd = (cwd: string): OverviewPaneFacts['cwd'] => ({ state: 'known', cwd })
 
 describe('what state a pane is in', () => {
   it("calls Claude's ✳ WAITING ON YOU, not idle", () => {
@@ -96,14 +100,16 @@ describe('how long it has been in that state', () => {
 
 describe('what a card says it is', () => {
   it('prefers the title the pane composed', () => {
-    expect(cardTitle(facts({ title: 'claude', runningCommand: 'claude', cwd: '~/x' }))).toBe(
-      'claude',
-    )
+    expect(
+      cardTitle(facts({ title: 'claude', runningCommand: 'claude', cwd: knownCwd('~/x') })),
+    ).toBe('claude')
   })
 
   it('falls back to the running command, then the cwd, then the host', () => {
-    expect(cardTitle(facts({ runningCommand: 'go test ./...', cwd: '~/x' }))).toBe('go test ./...')
-    expect(cardTitle(facts({ cwd: '~/repos/nocx' }))).toBe('~/repos/nocx')
+    expect(cardTitle(facts({ runningCommand: 'go test ./...', cwd: knownCwd('~/x') }))).toBe(
+      'go test ./...',
+    )
+    expect(cardTitle(facts({ cwd: knownCwd('~/repos/nocx') }))).toBe('~/repos/nocx')
     expect(cardTitle(facts({ host: 'deploy@srv-01' }))).toBe('deploy@srv-01')
   })
 
@@ -117,19 +123,113 @@ describe('what a card says it is', () => {
 describe('where a card says it is', () => {
   it('names host, cwd and branch when it knows them', () => {
     expect(
-      cardLocation(facts({ title: 'claude', host: 'deploy@srv-01', cwd: '~/app', branch: 'main' })),
+      cardLocation(
+        facts({ title: 'claude', host: 'deploy@srv-01', cwd: knownCwd('~/app'), branch: 'main' }),
+      ),
     ).toBe('deploy@srv-01 · ~/app · main')
   })
 
-  it('is absent when the pane knows nowhere', () => {
-    expect(cardLocation(facts())).toBeNull()
+  it('renders the three cwd observation states differently', () => {
+    const known = cardLocation(facts({ cwd: knownCwd('~/observed') }))
+    const unobserved = cardLocation(facts({ cwd: { state: 'unobserved' } }))
+    const unavailable = cardLocation(facts({ cwd: { state: 'unavailable' } }))
+
+    expect(known).toBe('~/observed')
+    expect(unobserved).toBe('Directory not observed')
+    expect(unavailable).toBe('Directory unavailable')
+    expect(new Set([known, unobserved, unavailable]).size).toBe(3)
+  })
+
+  it('does not show the launch directory when cwd observation is unavailable', () => {
+    const pane = facts({ title: 'shell', cwd: { state: 'unavailable' } })
+    const location = cardLocation(pane)
+    expect(location).toBe('Directory unavailable')
+    expect(location).not.toContain('~/launch')
+  })
+
+  it('does not use an unavailable cwd as the card title', () => {
+    expect(cardTitle(facts({ cwd: { state: 'unavailable' } }))).toBe('Untitled pane')
   })
 
   it('does not repeat the title back as the location', () => {
     // The pane's own title is `programTitle || runningCommand || cwd`, so a
     // pane at a prompt is titled by its cwd — printing that cwd again under
     // it is one fact twice.
-    expect(cardLocation(facts({ title: '~/repos/nocx', cwd: '~/repos/nocx' }))).toBeNull()
+    expect(cardLocation(facts({ title: '~/repos/nocx', cwd: knownCwd('~/repos/nocx') }))).toBeNull()
+  })
+})
+
+describe("what the card says about the session's own process", () => {
+  const NOW = Date.parse('2026-09-02T12:00:00Z')
+  const THREE_HOURS_EARLIER = NOW - 3 * 60 * 60 * 1000
+
+  it('names the state, the age and the parent when the helper answered all three', () => {
+    expect(
+      cardProcess(
+        facts({
+          process: {
+            observed: true,
+            processState: 'sleeping',
+            startTimeMs: THREE_HOURS_EARLIER,
+            ppid: 4242,
+          },
+        }),
+        NOW,
+      ),
+    ).toBe('Sleeping · started 3h ago · parent 4242')
+  })
+
+  it('tells a suspended shell apart from a live one, which nothing else in the product can', () => {
+    const stopped = cardProcess(
+      facts({
+        process: { observed: true, processState: 'stopped', startTimeMs: null, ppid: null },
+      }),
+      NOW,
+    )
+    const sleeping = cardProcess(
+      facts({
+        process: { observed: true, processState: 'sleeping', startTimeMs: null, ppid: null },
+      }),
+      NOW,
+    )
+    expect(stopped).toContain('Stopped')
+    expect(sleeping).toContain('Sleeping')
+    expect(stopped).not.toBe(sleeping)
+  })
+
+  it('says which of the three it does not know, one at a time', () => {
+    const observed = {
+      observed: true,
+      processState: 'running',
+      startTimeMs: THREE_HOURS_EARLIER,
+      ppid: 4242,
+    } as const
+
+    expect(cardProcess(facts({ process: { ...observed, processState: null } }), NOW)).toBe(
+      'State unavailable · started 3h ago · parent 4242',
+    )
+    expect(cardProcess(facts({ process: { ...observed, startTimeMs: null } }), NOW)).toBe(
+      'Running · start time unavailable · parent 4242',
+    )
+    expect(cardProcess(facts({ process: { ...observed, ppid: null } }), NOW)).toBe(
+      'Running · started 3h ago · parent unavailable',
+    )
+  })
+
+  it('says nothing at all when nobody could be asked, and something whenever one was', () => {
+    // The distinction the two levels exist for. "No helper answered for this
+    // pane" is silence; "the helper answered and knew none of the three" is a
+    // sentence, because a reader must not read the second as the first and go
+    // looking for the answer in the launch record.
+    expect(cardProcess(facts({ process: { observed: false } }), NOW)).toBeNull()
+    expect(
+      cardProcess(
+        facts({
+          process: { observed: true, processState: null, startTimeMs: null, ppid: null },
+        }),
+        NOW,
+      ),
+    ).toBe('State unavailable · start time unavailable · parent unavailable')
   })
 })
 

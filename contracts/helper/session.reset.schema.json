@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.reset.schema.json",
+  "title": "HelperSessionResetNotification",
+  "description": "The LIVE reset: an attached reader whose cursor fell behind the window's base is told so explicitly, mid-stream, and resumes at the base. It exists because the lossy case is wider than 'nobody is attached' — it fires whenever any reader is slower than the source, so an attach-time reset alone is not enough. Without it a slow reader simply goes quiet, which is the silent degrade the product must never show: the loss is stated where a person will see it, never only in a log. It rides as a notify frame on the same wire as the data frames, so it is ordered with respect to them and the reader sees exactly which bytes the hole sits between. It carries the SAME resume shape an attach answers with, because a reader must decode 'where am I and what did I lose' identically whether it learned it at attach or while attached, and two shapes would be two decoders that eventually disagree.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subscriber", "session", "resume"],
+  "properties": {
+    "subscriber": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/subscriberId"
+    },
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "resume": { "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/resume" }
+  }
+}

@@ -23,6 +23,58 @@
 import type { PaneActivity } from '../pane-observation'
 import type { CommandStatus } from '../command-ledger'
 import type { WorkspaceColour } from '../layout/workspace-colours'
+import type { SessionEntry } from '../generated/sessions.inventory'
+
+/** The helper's three answers about a session's current working directory.
+ *
+ * The launch directory is deliberately not carried here. It is a historical
+ * fact, not an observation, and using it as a fallback would make a stale
+ * path look current.
+ */
+export type CwdObservation =
+  | { readonly state: 'unobserved' }
+  | { readonly state: 'known'; readonly cwd: string }
+  | { readonly state: 'unavailable' }
+
+/** The kernel's process state, in the helper's own closed vocabulary.
+ *
+ * Derived from the generated wire type rather than re-listed here: the schema
+ * owns the vocabulary, and a second copy of a closed set is the shape that
+ * agrees everywhere anybody looks and disagrees on the one value somebody
+ * added later.
+ */
+export type ProcessState = NonNullable<NonNullable<SessionEntry['observed']>['state']>
+
+/** What the OS says about the session's own process, as the helper's three
+ *  derived diagnostics (nocx-k6p18.12).
+ *
+ * TWO LEVELS, NOT ONE, and the split is load-bearing. `observed: false` is
+ * "nobody could be asked" — no helper answered for this pane at all. Inside an
+ * observation, each of the three facts is independently a value or `null`, and
+ * `null` means the helper ASKED and could not answer: it names the diagnostic
+ * in `unavailable` on the wire and this is what that becomes. Collapsing the
+ * three into one verdict would report a parent as unknown because a start time
+ * was, which is a different lie from the one this shape prevents but the same
+ * kind.
+ *
+ * The launch record is deliberately unreachable from here, exactly as it is
+ * for the directory: `startedAt` is when the HELPER spawned the session and
+ * `startTimeMs` is when the KERNEL says the process began, and quietly
+ * substituting the first for the second would hide the pid reuse the pair
+ * exists to expose.
+ */
+export type ProcessObservation =
+  | { readonly observed: false }
+  | {
+      readonly observed: true
+      /** The kernel's state, or null when it was asked for and unavailable. */
+      readonly processState: ProcessState | null
+      /** Epoch milliseconds the kernel says the process began, or null when
+       *  it was asked for and unavailable. */
+      readonly startTimeMs: number | null
+      /** The parent pid, or null when it was asked for and unavailable. */
+      readonly ppid: number | null
+    }
 
 /** One pane, as the application knows it at the moment the overview opens. */
 export interface OverviewPaneFacts {
@@ -38,8 +90,10 @@ export interface OverviewPaneFacts {
   /** The machine this pane is talking to (`user@host` or `host`), or null for
    *  a local session and for a pane holding no session at all. */
   readonly host: string | null
-  /** The shell's working directory, or null when it is not knowable. */
-  readonly cwd: string | null
+  /** The shell's current directory as observed by the helper or local shell. */
+  readonly cwd: CwdObservation
+  /** What the OS says about the session's own process right now. */
+  readonly process: ProcessObservation
   /** The git branch the pane's repository is on, or null when the pane is not
    *  in a repository, or when nothing has asked. */
   readonly branch: string | null

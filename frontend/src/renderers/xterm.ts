@@ -616,19 +616,35 @@ export class XtermRenderer implements TerminalRenderer {
     if (!cell) return
     const cols = Math.max(1, Math.floor(viewport.width / cell.width))
     const rows = Math.max(1, Math.floor(viewport.height / cell.height))
-    if (cols !== t.cols || rows !== t.rows) {
-      t.resize(cols, rows)
-      // A resize rebuilds the char atlas; cells xterm does not re-mark dirty
-      // go on drawing from the old one, which on WKWebView is the mangled
-      // overlapping glyphs of nocx-q18. Repaint the viewport so no cell is
-      // left pointing at atlas coordinates that have moved. Only after a real
-      // grid change: the live region delivers a viewport on every layout tick
-      // as output grows, and repainting per tick would be a full redraw per
-      // frame. Nothing outside the renderer can be asked to remember this —
-      // e0d0a490 moved the resize out to the presentation layer and the
-      // repaint stayed behind (nocx-jfgb).
-      this._repaintViewport()
-    }
+    this.setGrid(cols, rows)
+  }
+
+  /**
+   * Set the grid explicitly — the session's answer rather than the window's
+   * (nocx-eidfb.3). See TerminalRenderer.setGrid.
+   *
+   * The one place the grid actually moves, so both callers share the atlas
+   * repaint below rather than each remembering it.
+   */
+  setGrid(cols: number, rows: number): void {
+    const t = this.term
+    if (!t || cols <= 0 || rows <= 0) return
+    if (cols === t.cols && rows === t.rows) return
+    t.resize(cols, rows)
+    // A resize rebuilds the char atlas; cells xterm does not re-mark dirty
+    // go on drawing from the old one, which on WKWebView is the mangled
+    // overlapping glyphs of nocx-q18. Repaint the viewport so no cell is
+    // left pointing at atlas coordinates that have moved. Only after a real
+    // grid change: the live region delivers a viewport on every layout tick
+    // as output grows, and repainting per tick would be a full redraw per
+    // frame. Nothing outside the renderer can be asked to remember this —
+    // e0d0a490 moved the resize out to the presentation layer and the
+    // repaint stayed behind (nocx-jfgb).
+    //
+    // _repaintViewport rather than a bare t.refresh: an atlas PAGE MERGE
+    // rearranges glyph coordinates without marking anything dirty, which a
+    // refresh alone does not survive (nocx-4z5hv, from main).
+    this._repaintViewport()
   }
 
   /**

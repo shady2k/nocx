@@ -49,6 +49,9 @@ type activePTY struct {
 	once sync.Once
 
 	mu sync.Mutex
+	// closed is set by Close, so a resize after the channel is gone fails the
+	// way a real ioctl on a dead descriptor does.
+	closed bool
 	// resizeErr, when set, is what Resize answers: the failure of the one
 	// external call the attach-time resize makes.
 	resizeErr error
@@ -74,6 +77,9 @@ func (p *activePTY) Close() error {
 	p.once.Do(func() {
 		_ = p.pw.CloseWithError(io.EOF)
 		close(p.done)
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 	})
 	return nil
 }
@@ -81,6 +87,13 @@ func (p *activePTY) Close() error {
 func (p *activePTY) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// A CLOSED CHANNEL REFUSES, because a real one does: the ioctl goes to a
+	// file descriptor that is gone. A fake that quietly accepted it would make
+	// "nothing asked a dead session to resize" unfalsifiable — the ask would
+	// succeed and report nothing either way.
+	if p.closed {
+		return errors.New("resize on a closed pty")
+	}
 	if p.resizeErr != nil {
 		return p.resizeErr
 	}
@@ -92,6 +105,16 @@ func (p *activePTY) resizeCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.resizes)
+}
+
+// appliedResizes is every geometry the channel actually took, in order. The
+// count alone cannot answer "was it ever put back to the default", because a
+// spurious resize followed by a correct one leaves both the count and the
+// final size looking right.
+func (p *activePTY) appliedResizes() []session.Size {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]session.Size(nil), p.resizes...)
 }
 
 type activeFactory struct {

@@ -12,6 +12,12 @@
 // garbage is real: a remote shell prints "command not found" before the
 // helper ever runs, and a valid frame can start anywhere inside it.
 //
+// "payload JSON" is true of every frame type but one. TypeSessionData is the
+// DATA PLANE, and AD-1 governs it here exactly as it governs the WebSocket:
+// raw PTY bytes are never wrapped in JSON, JSON-RPC or base64. Its payload is
+// a fixed binary header followed by the bytes, and the codec frames it without
+// looking at it — see SessionFrame in session_frame.go.
+//
 // seq and ack are written by the sender and ignored by every reader in this
 // deliverable; they are reserved so a later PTY-owning service can resume
 // without a wire break (D15).
@@ -34,6 +40,21 @@ const (
 	TypeCancel    FrameType = 6
 	TypeChunk     FrameType = 7
 	TypeKeepAlive FrameType = 9
+
+	// TypeSessionData carries raw PTY bytes in both directions, and it is
+	// the helper wire's DATA PLANE: its payload is a fixed binary header
+	// followed by the bytes themselves, never JSON and never base64 (AD-1).
+	// The type byte is allocated NOW, before the session service exists,
+	// for the reason AD-1 allocated its own metadata msg-type up front: the
+	// decoder below treats an unknown type byte as garbage and scans past
+	// it one byte at a time, so a generation that did not know this type
+	// would resync THROUGH a live PTY stream rather than dropping one
+	// frame. See SessionFrame.
+	TypeSessionData FrameType = 10
+	// TypeLifecycleData carries the raw lifecycle protocol on its own data
+	// plane tag. It shares SessionFrame's binary identity only as a carrier;
+	// the helper routes bytes and never decodes lifecycle envelopes.
+	TypeLifecycleData FrameType = 11
 )
 
 // valid reports whether the type belongs to the closed set above. A byte
@@ -41,7 +62,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData:
 		return true
 	}
 	return false

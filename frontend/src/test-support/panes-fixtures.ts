@@ -36,6 +36,7 @@ import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
+import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
 import type { DriverState } from '../pane-observation'
 import type { Open } from '../generated/open'
@@ -292,6 +293,13 @@ export function createRendererMock(): RendererMock {
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
     fitViewport: vi.fn(),
+    // The session's answer rather than the window's (nocx-eidfb.3). It moves
+    // the mock's cols/rows, because the whole claim a caller makes with it is
+    // that the grid IS that size when the next byte is written.
+    setGrid: vi.fn((cols: number, rows: number) => {
+      mock.cols = cols
+      mock.rows = rows
+    }),
     registerMarker: vi.fn().mockReturnValue(undefined),
     cellHeight: 16,
     viewportTopLine: 0,
@@ -406,6 +414,7 @@ export interface SessionFake {
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
   signal: ReturnType<typeof vi.fn>
+  detach: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
@@ -417,6 +426,17 @@ export interface SessionFake {
   /** What an enrolled pane's driver says its screen is inviting
    *  (nocx-szb40.3). */
   onObservation: ReturnType<typeof vi.fn>
+  /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
+   *  undefined for a handle that was opened rather than taken back. `size` is
+   *  the grid the BACKEND says the session runs at — the one the recovered
+   *  bytes were wrapped at (nocx-eidfb.3). */
+  recovered?: { bytes: number; gaps: unknown[]; size: { cols: number; rows: number } }
+  /** Bytes waiting for a data callback, flushed synchronously the moment one
+   *  is registered — exactly what WSClient.onSessionData does with what
+   *  reclaimSession queued ahead of the live stream (ipc.ts). A fixture that
+   *  only stored the callback could not show a caller writing recovered
+   *  scrollback into the wrong grid, because in it nothing was ever written. */
+  pendingData?: string
   /** Fire the registered data callback. */
   fireData(data: string): void
   /** Fire the registered liveness callback with one observation. */
@@ -453,9 +473,15 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.
     signal: vi.fn((signal: string) => Promise.resolve({ signal, outcome: 'delivered' })),
+    detach: vi.fn(),
     close: vi.fn(),
     onData: vi.fn((cb: (data: string) => void) => {
       dataCb = cb
+      // The flush the real client does at registration time, not later: the
+      // recovered scrollback is already queued when the surface subscribes,
+      // so the grid it lands in is whatever the grid is at THIS moment.
+      const queued = overrides?.pendingData
+      if (queued) cb(queued)
     }),
     onExit: vi.fn(),
     onReset: vi.fn(),
@@ -547,6 +573,7 @@ export interface ClientFake {
   close: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
+  detachSession: ReturnType<typeof vi.fn>
   closeSession: ReturnType<typeof vi.fn>
   onSessionData: ReturnType<typeof vi.fn>
   onSessionExit: ReturnType<typeof vi.fn>
@@ -578,6 +605,8 @@ export interface ClientFake {
    *  backend and the ordinary case; a restore test that means to RECLAIM a
    *  pane overrides it with an entry naming that pane. */
   listLiveSessions: ReturnType<typeof vi.fn>
+  /** Helper-owned inventory returned to the overview reader. */
+  listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
    *  that adopts one still has a handle to drive. */
   reclaimSession: ReturnType<typeof vi.fn>
@@ -657,9 +686,11 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     listLiveSessions: vi.fn(() => Promise.resolve([])),
     reclaimSession: vi.fn(() => Promise.resolve(newSession())),
+    listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),
+    detachSession: vi.fn(),
     closeSession: vi.fn(),
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),

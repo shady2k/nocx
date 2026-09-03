@@ -95,7 +95,6 @@ import { PetPreview } from './pets/preview'
 import { systemPromptText } from './systemprompt'
 import {
   detachedOutputSentence,
-  historyDiscardSentence,
   historyUnavailableSentence,
   type HistoryStatus,
   type HistoryStatusStore,
@@ -300,15 +299,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
    *  say. One owner for the words (history-status.ts) — the recall panel
    *  tells the same person the same thing a moment later. */
   const historyNotice = createMemo(() => historyUnavailableSentence(historyStatus()))
-  /** And the other thing the History section may have to say: history is
-   *  running and starts from nothing, because the storage format changed.
-   *  A separate memo because it is a separate fact — the notice above says a
-   *  feature is down, this says a working one lost what it had. */
-  const discardNotice = createMemo(() => historyDiscardSentence(historyStatus()))
-  /** And the third: what these switches do to a session whose window is
-   *  closed. Separate again, and for the sharpest reason of the three — it is
-   *  not about the history panel at all, it is about the terminal stopping,
-   *  and this is the only screen where the cause is visible. */
+  /** And the other thing the History section may have to say: what these
+   *  switches do to a session whose window is closed. A separate memo because
+   *  it is a separate fact, and for the sharper reason of the two — it is not
+   *  about the history panel at all, it is about the terminal stopping, and
+   *  this is the only screen where the cause is visible. */
   const detachedNotice = createMemo(() => detachedOutputSentence(historyStatus()))
 
   // Promise that resolves when the initial data load finishes.
@@ -1605,23 +1600,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         description={historyNotice()!.description}
                       />
                     </Show>
-                    {/* The discard is `neutral`, not `warning`: nothing is
-                        wrong and there is nothing to fix — it is a thing
-                        that happened, which the person is entitled to know
-                        because an empty history after an update is
-                        otherwise indistinguishable from a fresh install.
-                        The kit has no `info` tone and does not need one;
-                        neutral is what "a fact, not a fault" already
-                        means here. */}
-                    <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
-                      <StatusCard
-                        tone="neutral"
-                        title={discardNotice()!.title}
-                        description={discardNotice()!.description}
-                      />
-                    </Show>
-                    {/* `neutral` like the discard and unlike the degrade:
-                        nothing is broken and nothing needs fixing. It is a
+                    {/* `neutral` and unlike the degrade above: nothing is
+                        broken and nothing needs fixing. It is a
                         consequence of the switches below, chosen by the
                         person who set them, and they are entitled to know
                         their sessions stop when the window closes — which is

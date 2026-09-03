@@ -25,7 +25,13 @@ function twoWorkspaces(): OverviewSnapshot {
       {
         id: 'w-default',
         name: null,
-        panes: [fakePane({ paneId: 'here', title: '~/repos/nocx', cwd: '~/repos/nocx' })],
+        panes: [
+          fakePane({
+            paneId: 'here',
+            title: '~/repos/nocx',
+            cwd: { state: 'known', cwd: '~/repos/nocx' },
+          }),
+        ],
       },
       {
         id: 'w1',
@@ -35,7 +41,7 @@ function twoWorkspaces(): OverviewSnapshot {
             paneId: 'elsewhere',
             title: 'claude',
             host: 'deploy@srv-01',
-            cwd: '~/app',
+            cwd: { state: 'known', cwd: '~/app' },
             branch: 'main',
             agentStatus: 'idle',
             since: NOW - 5 * 60_000,
@@ -67,6 +73,60 @@ describe('the overview a person opens', () => {
     expect(remote).toContain('main')
     expect(remote).toContain('Waiting on you for 5m')
     expect(remote).toContain('Should I drop the column?')
+  })
+
+  it("shows what the OS says about a session's process, and says so when it does not know", () => {
+    // The reader nocx-k6p18.13 built, extended to the three diagnostics
+    // nocx-k6p18.12 added. It reaches the surface a person actually looks at,
+    // because a projection nothing renders is a field nobody reads.
+    const port = new FakeOverviewPort({
+      activePaneId: null,
+      workspaces: [
+        {
+          id: 'w1',
+          name: 'hosts',
+          panes: [
+            fakePane({
+              paneId: 'stopped',
+              title: 'suspended shell',
+              process: {
+                observed: true,
+                processState: 'stopped',
+                startTimeMs: NOW - 3 * 60 * 60 * 1000,
+                ppid: 4242,
+              },
+            }),
+            fakePane({
+              paneId: 'blind',
+              title: 'blind shell',
+              process: {
+                observed: true,
+                processState: null,
+                startTimeMs: null,
+                ppid: null,
+              },
+            }),
+          ],
+        },
+      ],
+    })
+    const { container } = render(() => (
+      <OverviewPanel port={port} onClose={() => {}} now={() => NOW} />
+    ))
+
+    const texts = cards(container).map((c) => c.textContent ?? '')
+    const stopped = texts.find((t) => t.includes('suspended shell'))
+    expect(stopped).toContain('Stopped')
+    expect(stopped).toContain('started 3h ago')
+    expect(stopped).toContain('parent 4242')
+
+    // Asked and unanswered is a SENTENCE on the card, not an absence: a
+    // reader shown nothing goes looking in the launch record.
+    const blind = texts.find((t) => t.includes('blind shell'))
+    expect(blind).toContain('State unavailable')
+    expect(blind).toContain('start time unavailable')
+    expect(blind).toContain('parent unavailable')
+    expect(blind).not.toContain('Stopped')
   })
 
   it('draws no pixel thumbnail of a terminal anywhere', () => {

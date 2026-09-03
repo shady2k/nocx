@@ -24,7 +24,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -42,10 +41,7 @@ import (
 // so readiness is an observable fact rather than a duration.
 func openLocalEnhancedWatched(t *testing.T) (session.Session, func() string) {
 	t.Helper()
-	shell, err := exec.LookPath("bash")
-	if err != nil {
-		t.Fatalf("bash is not installed: %v — the integrated tier this test signals must be present", err)
-	}
+	shell := requireShellBinary(t, "bash")
 	storagetest.IsolateWithHome(t)
 	f := localFactory(t)
 	f.shells = fixedShell{path: shell}

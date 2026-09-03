@@ -56,21 +56,9 @@ type Config struct {
 	// Logger receives operational logging. When nil, the default slog
 	// adapter is used.
 	Logger log.Logger
-	// OnDiscard is called, once, when Open REBUILT the file because it was
-	// written by a different schema — with the number of commands that went
-	// with it, or -1 when the file held no countable table.
-	//
-	// IT EXISTS BECAUSE A LOG LINE IS NOT THE PRODUCT (nocx-rtg0.19).
-	// "your history was discarded" is a fact the user is entitled to, and
-	// AGENTS.md is explicit that a soft degrade must be visible where a
-	// person is looking rather than only in a warning nobody reads. This is
-	// a callback rather than a return value or an interface method so that
-	// adding it costs no caller anything: the composition root is the only
-	// place that knows what a product surface even is, and every test that
-	// opens a store keeps working without naming it.
-	//
-	// Nil means nobody is listening, which is the ordinary state in tests.
-	OnDiscard func(rows int)
+	// Clock supplies wall time for restart marks and their retention bound.
+	// Production uses time.Now; tests may provide a deterministic clock.
+	Clock func() time.Time
 }
 
 const (
@@ -134,6 +122,14 @@ type sqliteContent struct {
 	closed  atomic.Bool
 	closeMu sync.Once
 	wg      sync.WaitGroup
+
+	// pending is the set of sessions a PREVIOUS incarnation left behind,
+	// read once at Open and emptied by verdicts (reconcile.go). It is in
+	// memory and not on the rows because it is exact without a stamp: Open
+	// is the first thing this incarnation does, so what it finds is what it
+	// inherited, and what is written afterwards is its own.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingSession
 }
 
 // writeReq is one mutation on the serialized write path: a function the
@@ -228,6 +224,9 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	if cfg.Policy == nil {
 		cfg.Policy = NewPolicy()
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 
 	dir := filepath.Dir(cfg.Path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -271,6 +270,8 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	var pending map[string]*pendingSession
+	var carryErr error
 	creationErr := func() error {
 		if _, err := createConn.ExecContext(ctx, "PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
 			return fmt.Errorf("content: auto_vacuum: %w", err)
@@ -284,33 +285,61 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, "SELECT count(*) FROM sqlite_master"); err != nil {
 			return fmt.Errorf("content: open %s: %w (wrong key or corrupt file)", cfg.Path, err)
 		}
-		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger, cfg.OnDiscard); err != nil {
+		// The ladder, and it runs BEFORE schemaV1 (schema_migrate.go): a
+		// database behind this build is walked forward one explicit edge
+		// at a time, one ahead of it is refused, and one whose version the
+		// chain cannot reach is refused too. Nothing here drops a table.
+		//
+		// The order is load-bearing in both directions. A step edits the
+		// shape the PREVIOUS version left, so it has to run before the
+		// current shape is asserted over the top of it; and schemaV1 is
+		// `IF NOT EXISTS` throughout, so what a step deliberately does not
+		// write — a table or an index that is simply new — arrives on the
+		// line below at no cost.
+		//
+		// These two lines are the WHOLE schema sequence, which they were not
+		// until schema 16: a third step used to follow them and version the
+		// `api_run*` tables through a counter of its own, outside the ladder
+		// and outside every refusal it makes (nocx-lmb6v.5). Those tables are
+		// in schemaV1 now and the counter is retired by the 15→16 rung, so
+		// one number — user_version — answers for the whole file.
+		if err := migrateSchema(ctx, createConn, schemaLadder, cfg.Logger); err != nil {
 			return err
 		}
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
 		}
-		if err := migrateAPIRuns(ctx, createConn); err != nil {
+		// Startup reconciliation, and its scope is now half of what it was
+		// (nocx-k6p18.5; reconcile.go carries the argument). An entry that
+		// never reached 'closed' AND NAMES NO SESSION belonged to a pipe
+		// whose provenance had already ended, so nothing could ever report
+		// it live and closing it here is still right. An entry that names a
+		// session is not judged here at all: its session may be running on a
+		// host that outlived this coordinator, and only whoever can ask that
+		// host may say.
+		if err := closeUnanchoredEntries(ctx, createConn, cfg.Logger); err != nil {
 			return err
 		}
-		// Startup reconciliation (spec §4.3): every entry that never reached
-		// 'closed' — a crash, a force-quit, a session that died — is closed
-		// as status='unknown' through the entries_open partial index. Must
-		// run before the store is handed out: after this, no open row
-		// survives a restart.
-		if err := closeOpenEntries(ctx, createConn, cfg.Logger); err != nil {
-			return err
+		// The other half is no longer a sweep. `sessions` rows and the
+		// recordings beside them SURVIVE Open; they are carried over as the
+		// pending set and judged later by whoever could reach the host
+		// (reconcile.go). Open cannot ask — asking needs a carrier, the
+		// carrier may need the vault, and the vault needs this store — so
+		// Open judges nothing. Capture the unreconciled mark once for every
+		// carried-over row; retention is measured from this outage, not from
+		// the session's original start.
+		pending, carryErr = carryOver(ctx, createConn, cfg.Clock().UnixMilli())
+		if carryErr != nil {
+			return carryErr
 		}
-		// And the other half of the same reconciliation (nocx-rtg0.28): every
-		// sessions row at store-open belongs to a PREVIOUS incarnation,
-		// because a session dies with the backend (D5) and this Open is the
-		// new one. Removing them is what nulls entries.session_id through the
-		// foreign key, which is what makes "provenance, null once that pipe
-		// is gone" (design §6.1) a fact rather than an affordance nobody
-		// triggers. The block itself is untouched — it hangs on its pane.
-		if err := dropDeadSessions(ctx, createConn, cfg.Logger); err != nil {
-			return err
-		}
+		// The stamp for a file the ladder did not walk: a CREATION. Every
+		// other path arrives here already stamped — an unchanged file was
+		// current before Open touched it, and a migrated one was stamped
+		// by the edge that carried it, inside that edge's own transaction
+		// (schema_migrate.go). This line is therefore a no-op on both, and
+		// it must stay one: a stamp out here that could move a file the
+		// ladder declined to move is exactly the half-migrated state the
+		// interval forbids.
 		if _, err := createConn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return fmt.Errorf("content: stamp schema version: %w", err)
 		}
@@ -325,12 +354,13 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	enforceFileModes(cfg.Path)
 
 	s := &sqliteContent{
-		log:    cfg.Logger,
-		cfg:    cfg,
-		db:     db,
-		keyHex: keyHex,
-		path:   cfg.Path,
-		policy: cfg.Policy,
+		log:     cfg.Logger,
+		cfg:     cfg,
+		db:      db,
+		keyHex:  keyHex,
+		path:    cfg.Path,
+		policy:  cfg.Policy,
+		pending: pending,
 	}
 	s.writeCh = make(chan writeReq)
 	s.stop = make(chan struct{})
@@ -339,21 +369,48 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	return s, nil
 }
 
-// closeOpenEntries is the startup sweep of design §5 (one sweep, both
-// lifecycles), run once per Open on the creation connection, ONE
+// closeUnanchoredEntries is what is LEFT of the startup sweep of design §5
+// (one sweep, both lifecycles) once a session can outlive the coordinator
+// (nocx-k6p18.5). It runs once per Open on the creation connection, in ONE
 // transaction so the two tables can never disagree:
 //
-//   - entries: every open entry closes. An agent-kind entry (a question)
-//     whose run was non-terminal says `interrupted` — the block says so and
-//     the user asks again (design §4.2) — every other kind closes as
+//   - entries: every open entry NOTHING COULD STILL BE RUNNING closes — one
+//     that names no session, and every question. An agent-kind entry (a
+//     question) whose run was non-terminal says `interrupted` — the block says
+//     so and the user asks again (design §4.2) — every other kind closes as
 //     `unknown`: the reconstruction UI shows the gap, never a fabricated
-//     outcome. Frame entries are already closed at ingest and never reach
-//     this update.
-//   - executions: every non-terminal agent run (state IS NOT NULL and not
-//     in the terminal set) becomes `interrupted`, with the termination
-//     reason and an end time — an interrupted run has an end. Executions
-//     without a state (frame captures, future shell runs) are not runs and
-//     are untouched.
+//     outcome. Frame entries are already closed at ingest and never reach this
+//     update.
+//   - executions: every non-terminal agent run becomes `interrupted`, with the
+//     termination reason and an end time — an interrupted run has an end.
+//     Executions without a state (frame captures, future shell runs) are not
+//     runs and are untouched.
+//
+// WHY THE WHERE CLAUSE GREW TWO TERMS, and they are the whole of what this
+// bead changed here. The question each asks is the same one: could anything,
+// anywhere, still be running this?
+//
+//   - `session_id IS NULL` — provenance is "which pipe it ran in, null once
+//     that pipe is gone", so an open entry with a NULL one is an entry whose
+//     pipe was already gone before this Open. No inventory owns it and nothing
+//     can report it live, so leaving it open would show a running command that
+//     no process anywhere is running.
+//   - `kind = 'ask'` — a question is answered by the ASSISTANT, which lives in
+//     THIS process and dies with it (design §4.2: on start every non-terminal
+//     run becomes interrupted, the block says so, and the user asks again).
+//     Nothing survives a replacement to go on answering it, whatever host its
+//     session was on. A shell command is the opposite: its process belongs to
+//     the session, and since nocx-k6p18.3 the session belongs to the helper.
+//
+// What is left open is therefore exactly the shape this bead exists for: a
+// SHELL entry that still names a session. Closing one is what would declare a
+// running command finished; it waits for its session's verdict (reconcile.go).
+//
+// The executions half is NOT narrowed, for the same reason `ask` is closed
+// here: an execution with a state is an agent run (frame captures and shell
+// runs carry none), and an agent run is this process's own work. Delivering
+// the real exit status to a shell entry left open is a different problem with
+// a different authority, and it is nocx-k6p18.6.
 //
 // Both updates run in one transaction because the interval they guard has
 // one closing event: a restart that interrupted the run also closed the
@@ -361,7 +418,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 // half of "this ask was interrupted" — and the next start repairs it, but
 // a reader between the two would see an inconsistency that never existed
 // in any running process.
-func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
+func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
@@ -371,7 +428,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 	res, err := tx.ExecContext(ctx,
 		`UPDATE entries SET phase = 'closed', status =
 		   CASE WHEN kind = 'ask' THEN 'interrupted' ELSE 'unknown' END
-		 WHERE phase != 'closed'`)
+		 WHERE phase != 'closed' AND (session_id IS NULL OR kind = 'ask')`)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
@@ -389,238 +446,34 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
 	if n > 0 && logger != nil {
-		logger.Info("content: startup sweep closed open entries", "closed", n)
-	}
-	return nil
-}
-
-// dropDeadSessions removes the ledger sessions written by earlier
-// incarnations of the backend, at the one moment when that is every row there
-// is: a session is server-authoritative (AD-7), lives inside one backend
-// process and cannot outlive it (D5), so at store-open none of them names
-// anything live.
-//
-// It runs for the entries, not for the sessions. entries.session_id is
-// PROVENANCE with an explicit end — "null after that pipe is gone" (design
-// §6.1) — and before this nothing ever ended it: DeleteSession had no
-// production caller at all, so a restarted backend left every block pointing
-// at a session id that resolved to a dead process, which reads as a live edge
-// and is not one. The block keeps its own anchor, entries.pane_id, which is
-// durable exactly because it is not this.
-func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
-	res, err := conn.ExecContext(ctx, `DELETE FROM sessions`)
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead sessions: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead sessions: %w", err)
-	}
-	if n > 0 && logger != nil {
-		logger.Info("content: startup sweep dropped sessions of a previous backend", "sessions", n)
-	}
-	// The output recordings go with them, and for the same sentence
-	// (nocx-22k1c.1): a recording is the bytes ONE pipe produced, the pipe
-	// cannot outlive the process, so at open no recording names anything
-	// live. This is also why session_output is absent from the budget sweep
-	// — its unit is `artifacts.byte_len` ordered by `ingest_seq`, and a
-	// recording has neither; the bound on a live recording is the per-command
-	// cap, and the bound on a dead one is this line.
-	rec, err := conn.ExecContext(ctx, `DELETE FROM session_output`)
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead session recordings: %w", err)
-	}
-	if m, affErr := rec.RowsAffected(); affErr == nil && m > 0 && logger != nil {
-		logger.Info("content: startup sweep dropped session recordings of a previous backend", "recordings", m)
+		logger.Info("content: startup sweep closed open entries with no session", "closed", n)
 	}
 	return nil
 }
 
 // schemaVersion stamps the shape below into the file's user_version. Bump it
-// in the same commit as any change to schemaV1 — that is the whole protocol.
+// in the same commit as any change to schemaV1 AND add the rung that carries
+// an existing database across the edge (schema_migrate.go) — the three move
+// together or a build creates one shape and migrates to another.
 //
-// We write no migrations (greenfield), and `CREATE TABLE IF NOT EXISTS` is a
-// no-op against a table that already exists, so before this check an added
-// column produced a database that opened perfectly and then failed every
-// INSERT and every SELECT with "no such column". The store went on reporting
-// itself healthy while recording nothing; recall quietly fell back to the
-// session, which is the only reason it was noticeable at all. A silent
-// half-broken store is worse than no store, so the file is rebuilt instead —
-// and it says so, because "your history was discarded" is a fact the user is
-// entitled to rather than something to infer from an empty panel.
-const schemaVersion = 15
-
-// rebuildDropOrder is the complete set of user tables this build owns,
-// children first — a habit kept for readability rather than for correctness,
-// since resetIfSchemaChanged suspends foreign keys for the demolition and no
-// ordering could satisfy entries' self-reference anyway. It is also the
-// membership gate in resetIfSchemaChanged: a
-// file whose user tables are all in this set was written by an earlier
-// schema of THIS store and is discarded deliberately; one containing any
-// other table is refused.
-var rebuildDropOrder = []string{
-	"session_output_chunks", "session_output",
-	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
-	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
-	"edges", "executions", "environment_observations", "entries",
-	"panes", "tabs",
-	"sessions", "environments", "workspaces", "ledger_sequence",
-	"retention_watermark",
-	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
-	// was the interim table this build no longer creates, reads or writes —
-	// but a file written by an earlier nocx still HAS it, and this list is
-	// also the membership gate below: a file holding a table that is not
-	// here is REFUSED as "written by a newer schema", not rebuilt. Dropping
-	// the name with the table would therefore turn every existing user's
-	// database into one the app declines to open, which is a worse answer
-	// than the discard the rebuild already promises. It comes out when no
-	// file in the wild can still carry it, and not before.
-	"command_history",
-}
-
-// resetIfSchemaChanged rebuilds the file when it was written by a different
-// schema. Rows are lost by design: they belong to a shape this build cannot
-// read, and inventing a migration to keep them is the backwards compatibility
-// this project deliberately does not carry.
+// It exists because `CREATE TABLE IF NOT EXISTS` is a no-op against a table
+// that already exists, so an added column once produced a database that
+// opened perfectly and then failed every INSERT and every SELECT with "no
+// such column". The store went on reporting itself healthy while recording
+// nothing, and recall quietly fell back to the session, which is the only
+// reason it was noticeable at all.
 //
-// The rebuild is all-or-nothing (nocx-rtg0.17): every DROP and the
-// discarded-row count share ONE transaction, so a crash, a cancellation or a
-// failed DROP midway leaves the file wholly old or wholly new, and the
-// warning is logged only after the commit, with the count that commit
-// actually discarded. SQLite DDL is transactional, so this costs nothing.
-func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger, onDiscard func(rows int)) error {
-	var onDisk int
-	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
-		return fmt.Errorf("content: read schema version: %w", err)
-	}
-	if onDisk == schemaVersion {
-		return nil
-	}
-	// A fresh file is version 0 with no tables — that is a creation, not a
-	// reset, and must not be announced as data loss. Any user table at all
-	// means the file belongs to a different schema and is rebuilt.
-	names, err := conn.QueryContext(ctx,
-		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-	if err != nil {
-		return fmt.Errorf("content: probe schema: %w", err)
-	}
-	var tables []string
-	for names.Next() {
-		var name string
-		if scanErr := names.Scan(&name); scanErr != nil {
-			_ = names.Close()
-			return fmt.Errorf("content: probe schema: %w", scanErr)
-		}
-		tables = append(tables, name)
-	}
-	if iterErr := names.Err(); iterErr != nil {
-		return fmt.Errorf("content: probe schema: %w", iterErr)
-	}
-	if closeErr := names.Close(); closeErr != nil {
-		return fmt.Errorf("content: probe schema: %w", closeErr)
-	}
-	if len(tables) == 0 {
-		return nil
-	}
-	// A table this build does not know about is refused, deliberately: its
-	// content is unaccounted for, so discarding it is not the "history
-	// discarded" the rebuild promises — it is data this build cannot name.
-	// This gate is what makes the foreign-key suspension below safe to
-	// reason about: everything that will be dropped is a table this build
-	// owns, so there is no relationship left for the engine to protect. A
-	// file that reaches here with an unknown table was written by a newer
-	// schema (or is not a ContentDB file at all).
-	for _, name := range tables {
-		known := false
-		for _, t := range rebuildDropOrder {
-			if t == name {
-				known = true
-				break
-			}
-		}
-		if !known {
-			return fmt.Errorf("content: rebuild refused: table %q is not part of schema %d — the file was written by a newer schema (or is not a ContentDB file); update nocx rather than discard it",
-				name, schemaVersion)
-		}
-	}
-	// Count inside the transaction, before any DROP: the number is the only
-	// measure of what the user lost, and the count that is logged is the one
-	// this commit discards. It counts ENTRIES — the ledger's commands — since
-	// nocx-rtg0.19 made that the only place a command lives; before it, the
-	// number came from the interim table beside it. A count that fails (a
-	// file written before the ledger existed has no such table) is not a
-	// reason to abandon the rebuild — report it as unknown and carry on.
-	// FOREIGN KEYS OFF FOR THE DEMOLITION, and it is not a relaxation — it is
-	// the only order that exists. `DROP TABLE` runs an implicit DELETE of
-	// every row, which fires ON DELETE actions; entries.parent_id is a SELF
-	// reference with ON DELETE SET NULL, so dropping `entries` nulls its own
-	// children's parent_id and the table's
-	// `CHECK (parent_id IS NOT NULL OR pos IS NULL)` then refuses the child
-	// that still holds a seat. rebuildDropOrder's children-first rule cannot
-	// reach this: a self-referencing table is its own child, so no ordering
-	// drops it after its children. The result was a hard stop — every user
-	// with one nested block could never open a file written by an older
-	// schema again, so app.go fell back to the content stub and the renderer
-	// said "Tabs are not being remembered" for good.
-	//
-	// Referential integrity has nothing to protect here anyway: the whole
-	// point of a rebuild is that every table this build owns goes, and the
-	// membership gate above has already refused a file holding anything
-	// else. This is SQLite's own documented procedure for a schema change.
-	//
-	// It is set OUTSIDE the transaction because `PRAGMA foreign_keys` is a
-	// no-op inside one, and restored on every path — the connection is the
-	// store's one connection (nocx-4p3l2) and everything after this depends
-	// on the ON that Open set.
-	if _, offErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); offErr != nil {
-		return fmt.Errorf("content: suspend foreign keys for rebuild: %w", offErr)
-	}
-	defer func() {
-		if _, onErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); onErr != nil && logger != nil {
-			logger.Warn("content: foreign keys could not be restored after the rebuild", "error", onErr)
-		}
-	}()
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("content: begin rebuild: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	// BOTH TABLES, SUMMED, because a file reaching here may be from either
-	// side of nocx-rtg0.19: a current one keeps its commands in `entries`,
-	// and one written before the cutover keeps them in the retired
-	// `command_history`. Counting only the table this build knows would
-	// report "0 rows discarded" while discarding a user's entire history,
-	// which is the one number this warning exists to get right. Each count
-	// fails independently to zero — an absent table is not an error — and
-	// the total is -1 only when neither could be read at all.
-	rowsDiscarded := -1
-	for _, table := range []string{"entries", "command_history"} {
-		var n int
-		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil { //nolint:gosec // constant table names
-			continue
-		}
-		if rowsDiscarded < 0 {
-			rowsDiscarded = 0
-		}
-		rowsDiscarded += n
-	}
-	for _, t := range rebuildDropOrder {
-		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
-			return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("content: commit rebuild: %w", err)
-	}
-	if logger != nil {
-		logger.Warn("content: history discarded — the database was written by an older schema",
-			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rowsDiscarded)
-	}
-	if onDiscard != nil {
-		onDiscard(rowsDiscarded)
-	}
-	return nil
-}
+// The answer to that mismatch used to be a rebuild — every table dropped and
+// the count of discarded rows announced to the user. It is a MIGRATION now
+// (nocx-lmb6v.1): the ladder in schema_migrate.go walks one explicit step per
+// edge, and a database it has no step for is refused rather than emptied.
+//
+// It governs the WHOLE file — the ledger, the layout and the api runs alike.
+// That is a decision and its argument is in schema_migrate.go under "ONE
+// COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
+// by folding the `api_run*` tables in and retiring the private counter they
+// used to carry (nocx-lmb6v.5).
+const schemaVersion = 16
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -1065,7 +918,13 @@ CREATE TABLE IF NOT EXISTS session_output (
   byte_len     INTEGER NOT NULL DEFAULT 0, -- what is currently KEPT, across every chunk
   head_end     INTEGER NOT NULL,        -- offset one past the reserved head; head chunks end at or before it
   truncated    TEXT CHECK (truncated IN ('cap','gap','suppressed')),
-  gaps         TEXT NOT NULL DEFAULT '[]', -- JSON [{start,end,reason}]; recomputed, never accumulated
+  -- JSON [{start,end,reason}]. The cap's own entries are RECOMPUTED from the
+  -- chunks on every write and never accumulated, so they cannot drift from
+  -- them; the rest are ranges nobody was there to record (nocx-k6p18.2),
+  -- which nothing can recompute -- the chunk layout of "the cap took these"
+  -- and "nobody ever offered these" is identical -- so those are read back
+  -- and carried forward. See session_output_sqlite.go's header.
+  gaps         TEXT NOT NULL DEFAULT '[]',
   started_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 ) STRICT;
@@ -1120,6 +979,54 @@ CREATE INDEX IF NOT EXISTS observations_by_env   ON environment_observations(env
 -- The frame idempotency replay check is an index lookup, never a scan: one
 -- capture_key per frame (nocx-f4s5).
 CREATE UNIQUE INDEX IF NOT EXISTS entries_capture_key ON entries(capture_key) WHERE capture_key IS NOT NULL;
+
+-- The API panel's exchanges (nocx-lmb6v.5). They are NOT the ledger's
+-- artifacts and are deliberately tables of their own: an artifact hangs on an
+-- ENTRY, a block a person ran, and these bytes belong to a REQUEST nobody
+-- typed into a shell — the same argument session_output makes above.
+--
+-- These are the shapes migrateAPIRuns used to create as a THIRD schema step
+-- after this constant, versioning them through a private
+-- api_run_schema counter of its own. Its justification was that a user_version
+-- bump REBUILT the whole ledger, so the api runs needed a counter that could
+-- survive somebody else's change; that reason expired with the rebuild
+-- (nocx-lmb6v.1), and the tables are ordinary members of this schema now. The
+-- 15 to 16 rung drops the counter off files that still carry it.
+CREATE TABLE IF NOT EXISTS api_runs (
+  id               INTEGER PRIMARY KEY,
+  collection_path  TEXT NOT NULL,
+  request_rel_path TEXT NOT NULL,
+  repeated_from    INTEGER REFERENCES api_runs(id) ON DELETE SET NULL,
+  method           TEXT NOT NULL,
+  url              TEXT NOT NULL,
+  outcome          TEXT NOT NULL CHECK (outcome IN ('pending','answered','failed','stopped')),
+  request_spans    TEXT NOT NULL DEFAULT '[]',
+  metadata         TEXT NOT NULL DEFAULT '{}',
+  started_at       INTEGER NOT NULL,
+  ended_at         INTEGER,
+  logical_bytes    INTEGER NOT NULL DEFAULT 0 CHECK (logical_bytes >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS api_run_artifacts (
+  id          INTEGER PRIMARY KEY,
+  run_id      INTEGER NOT NULL REFERENCES api_runs(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('request','response-text','response-raw')),
+  byte_len    INTEGER NOT NULL DEFAULT 0 CHECK (byte_len >= 0),
+  chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
+  UNIQUE (run_id, kind)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS api_run_artifact_chunks (
+  artifact_id INTEGER NOT NULL REFERENCES api_run_artifacts(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL CHECK (seq >= 1),
+  body        BLOB NOT NULL,
+  PRIMARY KEY (artifact_id, seq)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS api_runs_by_request
+  ON api_runs(collection_path, request_rel_path, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS api_run_artifacts_by_run
+  ON api_run_artifacts(run_id, kind);
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this

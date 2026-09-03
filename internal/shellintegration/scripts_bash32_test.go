@@ -3,6 +3,7 @@ package shellintegration
 import (
 	"os/exec"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -77,7 +78,10 @@ func resolveBash(name string) (path, version string, ok bool) {
 // every machine except the CI runner that found the bug in the first place.
 const noBash32 = "no GNU bash 3.2 found (looked for `bash`, `bash32` and /bin/bash).\n" +
 	"3.2 is macOS's /bin/bash and the OLDEST bash this product must work on, so a run\n" +
-	"without it is not a run. The container images install the fixture:\n" +
+	"without it is not a run. Install the fixture on this host, or run the package\n" +
+	"where it is already installed:\n" +
+	"  sudo scripts/install-bash32.sh          # what the CI Linux runner calls\n" +
+	"  make ci-backend                         # ubuntu-24.04, the fixture baked in\n" +
 	"  sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized' .githooks/pre-commit"
 
 // requireBash32 returns a path to a GNU bash 3.2 — macOS's /bin/bash, or the
@@ -139,5 +143,46 @@ func forEachBash(t *testing.T, body func(t *testing.T, shell string)) {
 	t.Helper()
 	for _, v := range bashVariants(t) {
 		t.Run("bash"+v.version, func(t *testing.T) { body(t, v.name) })
+	}
+}
+
+// TestBash32Probe_AgreesWithTheSuite keeps the GATE's reading of "is there a
+// GNU bash 3.2 on this machine" and the SUITE's from drifting apart.
+//
+// There are two readings because there have to be. requireBash32 above is a
+// `go test` helper, and a Makefile cannot ask it; scripts/have-bash32.sh is a
+// shell script, and a test binary would have to fork it per call to use it.
+// `make test-ci` asks the script which packages the HOST leg of the gate can
+// cover and which it must leave to the containerized leg, so a disagreement
+// costs a whole package either way round: one that cannot pass gets run, or
+// one that could have been checked here gets deferred.
+//
+// So neither list is copied and hoped about — they are asked the same question
+// on whatever machine this suite runs on, and this fails if the answers
+// differ. On a host with the fixture that is an exact path match; on a host
+// without one it is still a real check, that both say so.
+func TestBash32Probe_AgreesWithTheSuite(t *testing.T) {
+	out, probeErr := exec.Command("../../scripts/have-bash32.sh").Output()
+	probePath := strings.TrimSpace(string(out))
+	probeFound := probeErr == nil
+
+	var suitePath string
+	for _, cand := range bashCandidates {
+		if path, version, ok := resolveBash(cand); ok && version == "3.2" {
+			suitePath = path
+			break
+		}
+	}
+	suiteFound := suitePath != ""
+
+	if probeFound != suiteFound {
+		t.Fatalf("scripts/have-bash32.sh says found=%v (%q, %v) and this package's requireBash32 says found=%v (%q).\n"+
+			"They answer one question and `make test-ci` trusts the script for it: a package is run\n"+
+			"or deferred on this answer, so the two must not disagree.",
+			probeFound, probePath, probeErr, suiteFound, suitePath)
+	}
+	if probeFound && probePath != suitePath {
+		t.Errorf("scripts/have-bash32.sh resolved %q, requireBash32 resolved %q — same candidate list, same order, one answer",
+			probePath, suitePath)
 	}
 }

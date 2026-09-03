@@ -12,9 +12,9 @@
 // offered only where a removableProfileId is present (a saved connection
 // resolves to them) — an action that is valid from the state the user is
 // in. The backend owns the dial; the renderer never sees an SSH client.
-// The helper uninstall closes the running helper's channel before removing
-// the tree (D25) and forgets the observation, so the next status call
-// stops listing the host.
+// The helper uninstall closes every running helper-hosted session through the
+// daemon's session service before removing its tree and revokes machine
+// consent, so the next status call stops listing the host.
 
 import type { Dispatcher } from './dispatcher'
 import type { ShellFootprintHelperUninstallResult } from './generated/shell.footprint.helperUninstall'

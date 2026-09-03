@@ -620,6 +620,17 @@ describe('close', () => {
     expect(closeReq?.params).toEqual({ sessionId: SID })
   })
 
+  it('sends detach and forgets the local attachment without closing the session', async () => {
+    const { session, ws } = await connectedSession()
+    session.detach()
+
+    const detachReq = ws.requests().find((r) => r.method === 'detach')
+    expect(detachReq?.params).toEqual({ sessionId: SID })
+    expect(ws.requests().some((r) => r.method === 'close')).toBe(false)
+    expect(() => session.send('still open\n')).not.toThrow()
+    expect(ws.binaryFrames()).toHaveLength(0)
+  })
+
   it('closes the WebSocket connection and clears state', async () => {
     const { client, ws } = await connectedSession()
     client.close()

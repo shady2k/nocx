@@ -43,6 +43,7 @@ import (
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -118,6 +119,10 @@ type App struct {
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
 	// the process.
 	gitFactory *gitlocal.Factory
+	// helperRegistry owns the live helper channels shared by git and the
+	// sessions inventory. Kept here so the composition root's ownership is
+	// explicit; the registry itself remains private to app.
+	helperRegistry *helperRegistry
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -637,6 +642,7 @@ func New(opts ...Option) (*App, error) {
 	installLogrusContainment(logger)
 
 	shint := shellintegration.New(logger)
+	remoteInstaller := &remoteInstallerAdapter{inner: shint}
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -678,7 +684,7 @@ func New(opts ...Option) (*App, error) {
 		log:      logger,
 		wrapper:  ssh.NewTypedWrapper(logger, sshCfgResolver, ssh.DefaultControlRoot()),
 		dial:     DialTypedMux,
-		publish:  shint,
+		publish:  remoteInstaller,
 		sessions: sessionWindows{reg: sess},
 		probes:   defaultMasterProbes,
 	}
@@ -780,7 +786,8 @@ func New(opts ...Option) (*App, error) {
 	// both the factory's per-session helpers and the uninstall surface's
 	// close-before-remove, so a machine's channels are closed by the same
 	// bookkeeping that started them.
-	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
+	helperFactory, helperReg := helperGitFactory(sshClient, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
+	helperReg.registry = sess
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -951,13 +958,6 @@ func New(opts ...Option) (*App, error) {
 		Budget: budget,
 		Policy: historyPolicy,
 		Logger: logger,
-		// The rebuild's own announcement (nocx-rtg0.19). A schema change
-		// discards the file, and the store says so in a slog.Warn nobody
-		// reads — while the symptom a person actually sees, an empty
-		// history, is indistinguishable from a fresh install. This is the
-		// composition root handing that fact to the surface that already
-		// exists to say when history is not what the settings promise.
-		OnDiscard: func(rows int) { historyStatus.Discarded(rows) },
 	}); openErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
 		historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())
@@ -970,6 +970,24 @@ func New(opts ...Option) (*App, error) {
 		// draining) closes its episode on.
 		historyStatus.Clear()
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
+		// Restart reconciliation (nocx-k6p18.5) USED TO RUN HERE, and this
+		// comment is what is left of it because the reason it moved is worth
+		// keeping. `Open` no longer judges the sessions it inherits — a session
+		// can outlive the coordinator that opened it now, so deleting its row,
+		// its recording and its open block at startup would destroy work that
+		// is still going on — and the verdicts landed at this line instead.
+		//
+		// The pass now runs where the resolver and the transport exist, further
+		// down (nocx-k6p18.30). It was correct here while a verdict needed only
+		// the store and whatever helpers this process already held; on a cold
+		// start it held none, so every carried-over session was
+		// `unknown/noInventory` and the store's age bound did all the work.
+		// Taking a session BACK needs the connection resolver and the
+		// transport's replay ring, and neither exists at this line: the
+		// resolver needs the transport (it asks for a connection password) and
+		// the transport needs the session store. That is the same ordering
+		// argument this file already makes about `Open` — judge nothing until
+		// the thing that can ask has been built.
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -1130,7 +1148,7 @@ func New(opts ...Option) (*App, error) {
 		// itself. The carrier carries no payload, so this is now the only
 		// thing that puts a launch carrier on the far host, and without it
 		// a direct-host session can never integrate (design §4.1).
-		transport.WithRemoteInstaller(shint),
+		transport.WithRemoteInstaller(remoteInstaller),
 		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
 		// memory of which resolved destinations carry a committed
 		// integration. The footprint status surface reads it; the
@@ -1227,6 +1245,8 @@ func New(opts ...Option) (*App, error) {
 		// uninstall surface needs it to close them before removing an
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
+		transport.WithHelperSessionOpener(helperReg),
+		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before
 		// shell.footprint.helperUninstall removes its install directory —
@@ -1313,6 +1333,9 @@ func New(opts ...Option) (*App, error) {
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
 	ptf.kernel = lifecyclePub
+	// Helper-hosted sessions use this same publisher; their byte carrier is
+	// remote, but lifecycle facts still follow the coordinator's session route.
+	helperReg.lifecycle = lifecyclePub
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
 	// bead nocx-u7uh.4): the composition root implements the ssh layer's
 	// RemoteLifecycle seam with the lifecycle kernel and the ssh client —
@@ -1660,15 +1683,14 @@ func New(opts ...Option) (*App, error) {
 	// wired into every ConnectConfig the resolver builds.
 	//
 	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
-	// same shellintegration.Impl the in-band bootstrap uses satisfies
-	// ssh.RemoteInstaller without an adapter — the signatures are
-	// identical — and WithRemoteInstaller stamps it on every ConnectConfig
-	// the resolver builds for a SAVED profile. A saved connection in
-	// script mode therefore publishes the integration bundle over SFTP
-	// through P1's publisher before the session starts (design §4), while
-	// direct-host opens (no profile, no resolver) never publish. Before
-	// this line the carrier was reachable from its own tests and nowhere
-	// else (AGENTS.md check 5).
+	// composition-root remoteInstallerAdapter owns the SSH/SFTP transport,
+	// while shellintegration.Impl owns the publisher through its FS seam.
+	// WithRemoteInstaller stamps this adapter on every ConnectConfig the
+	// resolver builds for a SAVED profile. A saved connection in script mode
+	// therefore publishes the integration bundle over SFTP through P1's
+	// publisher before the session starts (design §4), while direct-host opens
+	// (no profile, no resolver) never publish. Before this line the carrier
+	// was reachable from its own tests and nowhere else (AGENTS.md check 5).
 
 	// The lane-registration callback binds a minted lifecycle lane to the
 	// session that owns it, so published facts route to the right
@@ -1721,6 +1743,11 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
+	// The same seam for a HELPER-hosted session's channel, opened or taken
+	// back (nocx-k6p18.31). One sink and not two: the axis does not care
+	// which transport carried the lane, and the loss cause spelling has one
+	// owner either way.
+	helperReg.lifecycleLoss = ptf.noteLifecycleLoss
 	// The third seam onto the same axis (nocx-cgzc): the observer says the
 	// shell was replaced before it ever answered, and the transport decides
 	// whether that still applies. The factory does not decide it, because
@@ -1745,7 +1772,7 @@ func New(opts ...Option) (*App, error) {
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),
-		connection.WithRemoteInstaller(shint),
+		connection.WithRemoteInstaller(remoteInstaller),
 	)
 	tp.SetProfileResolver(resolver)
 	// The same resolver the transport uses, handed to the API route table.
@@ -1756,6 +1783,30 @@ func New(opts ...Option) (*App, error) {
 	// resolver, not two — the API route asks the same question a tab asks
 	// and gets the same answer, credentials and jump route included.
 	apiRoutes.setResolver(resolver)
+
+	// RESTART RECONCILIATION AND RE-ADOPTION, in one pass (nocx-k6p18.5,
+	// nocx-k6p18.30). This is the first line at which all three collaborators
+	// exist: the store carried the bindings over at Open, the resolver can turn
+	// a stored connection into a route, and the transport can give a re-adopted
+	// session the ring its recording continues into.
+	//
+	// IT RUNS ON THIS GOROUTINE, before Start opens the listener. The whole
+	// point is that a client asking `sessions.live` finds the session it left
+	// running; a pass racing the first client would answer an empty list to the
+	// window that is already open, which is the symptom this bead was filed
+	// for, reintroduced as a race. What makes a synchronous pass safe is that
+	// each attempt is bounded (readoptAttemptTimeout) — a host that neither
+	// answers nor refuses costs that much and does not cost a start.
+	//
+	// `helperReg.inventories()` is empty here and is passed anyway: it is the
+	// set of helpers this process already holds, which on a cold start is none,
+	// and writing it out is what keeps the two sources of an inventory — held
+	// and re-adopted — visibly the same argument.
+	reconcileSessions(ctx, contentDB.Reconcile(),
+		helperReg.inventories(),
+		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},
+		content.DefaultUnreconciledRetention, slogger)
+
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -1770,6 +1821,7 @@ func New(opts ...Option) (*App, error) {
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
+		helperRegistry:   helperReg,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,

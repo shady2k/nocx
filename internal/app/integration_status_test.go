@@ -60,12 +60,13 @@ func newIntegrationKernel() *lifecyclepub.Publisher {
 func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	rec := &integrationRecorder{}
+	bash := requireShellBinary(t, "bash")
 	ptf := &localPTYFactory{
 		log:               logger,
 		shint:             shellintegration.New(logger),
 		kernel:            newIntegrationKernel(),
 		reportIntegration: rec.report,
-		shells:            fixedShell{path: "/bin/bash"},
+		shells:            fixedShell{path: bash},
 	}
 	p, err := ptf.NewPTY(context.Background(), pty.Config{
 		SessionID: "0123456789abcdef0123456789abcdef",
@@ -93,8 +94,11 @@ func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
 	// INJECTED answer, not against a name: since nocx-wwz0 the factory starts
 	// whatever the resolver returns, so a test that hard-coded "bash" would
 	// pass or fail on what the developer's own account record happens to say.
-	if !filepath.IsAbs(got.shell) || got.shell != "/bin/bash" {
-		t.Errorf("shell = %q, want the absolute path the resolver named", got.shell)
+	// `bash` is that injected answer and NOT what this machine would resolve
+	// on its own, so the comparison still fails for a factory that reports a
+	// name, a basename, the account's own shell or nothing (requireShellBinary).
+	if !filepath.IsAbs(got.shell) || got.shell != bash {
+		t.Errorf("shell = %q, want %q — the absolute path the resolver named", got.shell, bash)
 	}
 }
 

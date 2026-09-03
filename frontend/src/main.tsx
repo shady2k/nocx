@@ -520,7 +520,9 @@ function main(): void {
   // installs its own ⌥⌘O listener on the document — like the other two ⌥⌘
   // surfaces, because which pane you are in is not the question it answers —
   // and the strip's head button opens the same one rather than a second.
-  const overview = createOverviewController(tm.overviewPort())
+  const overview = createOverviewController(tm.overviewPort(), {
+    onOpen: () => void tm.refreshHelperSessions(),
+  })
   tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)
@@ -1335,9 +1337,11 @@ function main(): void {
   const qcContainer = document.createElement('div')
   document.body.append(qcContainer)
 
-  const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
-    tm.newSSHPane(id, host, user),
-  )
+  // The manager's own method, not a lambda re-listing its arguments: the
+  // lambda that used to be here spelled three of them and silently dropped
+  // the profile's port, so every pane opened from the palette stored `:22`
+  // and could not be matched back to its profile on restore (nocx-xhm9e).
+  const sshProvider = new SSHQuickConnectProvider(profileClient, tm.newSSHPane.bind(tm))
   // "Forward a port" (nocx-4t37): a command that needs a target drills in
   // INSIDE the palette — server, then port — instead of dead-ending or
   // opening a second dialog. The forward is the same tunnel.open the ports

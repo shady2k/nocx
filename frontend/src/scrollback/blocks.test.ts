@@ -122,6 +122,36 @@ describe('createRunningBlock', () => {
 describe('createCommandBlock', () => {
   const c = (): HTMLElement => document.createElement('div')
 
+  // THE THIRD STATE (nocx-k6p18.5). A restored block whose session nobody
+  // could be asked about must claim nothing: no outcome chip in either
+  // direction, and no spinner. A chip here would be the answer this build does
+  // not have — and an exit code arriving later must not start painting one,
+  // which is why the rule is keyed on the STATUS and not on the code.
+  it('a block nobody could reconcile paints no outcome, whatever code it carries', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'make build',
+      '~',
+      '',
+      'output',
+      null,
+      0,
+      'unreconciled',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(el.classList.contains('cmd-block-unreconciled')).toBe(true)
+    expect(el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(el.querySelector('.cmd-header-exit-ok')).toBeNull()
+    expect(el.querySelector('.cmd-header-exit-fail')).toBeNull()
+    // Not running either: its rows are fixed, so there is no spinner. Neither
+    // running nor finished is the whole of what it says.
+    expect(el.querySelector('.cmd-header-spinner')).toBeNull()
+  })
+
   it('creates a frozen block with success status', () => {
     const el = createCommandBlock(
       'command',
@@ -783,6 +813,80 @@ describe('BlockManager', () => {
   it('restorePast with nothing to draw adds no boundary — an empty past is not a past', () => {
     manager.restorePast([])
     expect(inner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+
+  it('completeRestoredBlock settles only the matching restored command and keeps its duration', () => {
+    const restored = createCommandBlock(
+      'command',
+      1,
+      'echo restored',
+      '~',
+      '',
+      '',
+      1_234,
+      null,
+      'unreconciled',
+      () => inner,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      undefined,
+      'entry-restored',
+    )
+    restored.dataset.restored = 'true'
+    manager.restorePast([restored])
+    manager.startBlock('live', '~', 0)
+
+    expect(manager.completeRestoredBlock('missing', 7, 9_999)).toBe(false)
+    expect(restored.classList.contains('cmd-block-unreconciled')).toBe(true)
+    expect(restored.querySelector('.cmd-header-exit')).toBeNull()
+
+    expect(manager.completeRestoredBlock('entry-restored', 7, 1_234)).toBe(true)
+    expect(restored.classList.contains('cmd-block-unreconciled')).toBe(false)
+    expect(restored.dataset.restoredStatus).toBe('failure')
+    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
+    expect(restored.querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
+    expect(manager.completeRestoredBlock('entry-restored', 0, 0)).toBe(false)
+    expect(restored.querySelector('.cmd-header-exit-fail')?.textContent).toBe('exit 7')
+
+    expect(manager.completeRestoredBlock('1', 0, 0)).toBe(false)
+    expect(manager.blocks.find((block) => block.command === 'live')?.status).toBe('running')
+  })
+
+  it('completeRestoredBlock reaches a command nested in a restored causal turn', () => {
+    const turn = document.createElement('div')
+    turn.className = 'cmd-block'
+    turn.dataset.restored = 'true'
+    turn.dataset.blockKind = 'ask'
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    const nested = createCommandBlock(
+      'command',
+      2,
+      'echo nested',
+      '~',
+      '',
+      '',
+      2_000,
+      null,
+      'unreconciled',
+      () => inner,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      undefined,
+      'entry-nested',
+    )
+    nested.dataset.restored = 'true'
+    children.appendChild(nested)
+    turn.appendChild(children)
+    manager.restorePast([turn])
+
+    expect(manager.completeRestoredBlock('entry-nested', 0, 2_000)).toBe(true)
+    expect(nested.classList.contains('cmd-block-unreconciled')).toBe(false)
+    expect(nested.querySelector('.cmd-header-exit-ok')?.textContent).toBe('ok')
   })
 
   it('clearAll removes all blocks and resets state', () => {

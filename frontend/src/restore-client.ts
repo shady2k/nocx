@@ -12,6 +12,7 @@
 // merges.
 import type { WSClient } from './ipc'
 import type { LedgerQuery } from './generated/ledger.query'
+import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
 import type { Caused, LedgerGet } from './generated/ledger.get'
 
@@ -33,7 +34,12 @@ export interface RestorableBlock {
    *  saying where it ran even when the pane is local again — which is what
    *  makes an inline ssh honest without any code of its own (design §7). */
   host: string
-  status: 'success' | 'failure' | 'entered' | 'unknown'
+  status: 'success' | 'failure' | 'entered' | 'unknown' | 'unreconciled'
+  /** WHY nobody could say whether this block's session still exists, or null
+   *  when the question was settled (nocx-k6p18.5). Carried in the wire's own
+   *  closed vocabulary — the sentence is chosen in unreconciled-notice.ts,
+   *  once, so a backend rewording never changes what a person reads. */
+  unreconciled: UnreconciledCause | null
   /** How long it took, or NULL for a time the store never recorded — which
    *  is not the same fact as zero and must not draw the same chip. A turn
    *  whose run predates the close that measures it carries null forever,
@@ -63,8 +69,22 @@ function authorFromSource(source: 'user' | 'assistant'): 'shell' | 'agent' {
 /** The ledger's status vocabulary, narrowed to what a frozen block draws.
  *  A restored entry that never closed is `unknown`, which is exactly what an
  *  abandoned attempt renders as — the block says "this did not finish", and
- *  it did not. */
-function frozenStatus(status: string): RestorableBlock['status'] {
+ *  it did not.
+ *
+ *  UNLESS NOBODY COULD BE ASKED. Since nocx-k6p18.5 a session can outlive the
+ *  coordinator that opened it, so a row still open at restore is no longer
+ *  proof that it was abandoned: its host may not have been reachable since the
+ *  app restarted. `unreconciled` outranks the status column for exactly that
+ *  row, because the column says what was last WRITTEN and the mark says
+ *  whether anybody has been able to check it since. Rendering it as `unknown`
+ *  would tell a person a running build had finished, which is the lie this
+ *  whole change exists to remove — and rendering it as running would be the
+ *  same lie from the other end. */
+function frozenStatus(
+  status: string,
+  unreconciled: UnreconciledCause | null,
+): RestorableBlock['status'] {
+  if (unreconciled !== null) return 'unreconciled'
   switch (status) {
     case 'success':
       return 'success'
@@ -105,7 +125,8 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
       command: e.intent,
       cwd: e.cwd,
       host: e.host ?? '',
-      status: frozenStatus(e.status),
+      status: frozenStatus(e.status, e.unreconciled ?? null),
+      unreconciled: e.unreconciled ?? null,
       durationMs: e.durationMs,
       exitCode: e.exitCode,
       author: authorFromSource(e.source),

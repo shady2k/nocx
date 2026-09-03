@@ -100,6 +100,8 @@
 @import './styles/components/toggle-matrix.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
+@import './styles/surfaces/recovery-notice.css';
+@import './styles/surfaces/unreconciled-notice.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
@@ -834,6 +836,32 @@
    scroll container, and the stable gutter above means no width moves. */
 .scrollback-area.is-settling {
   overflow-y: hidden;
+}
+
+/* THE GRID IS THE SESSION'S, NOT THIS WINDOW'S (nocx-eidfb.3).
+
+   `overflow-x: hidden` above is load-bearing for a grid this window fitted:
+   the cols come from this box's clientWidth, so a wide grid that could widen
+   the box would be a fit feeding its own input. A grid the BACKEND chose is
+   not in that loop — nothing here derived it — so the argument does not
+   apply, and being cut mid-glyph is the one outcome that is not allowed: the
+   whole point is that both clients see the same screen.
+
+   So it scrolls when the session's grid is wider than the window, and leaves
+   margin when it is narrower — herdr's cost, and the same one: a smaller
+   window crops or scrolls, a larger one shows margins. `min-width: 100%`
+   is what keeps the narrow case a margin rather than a shrunken box, and the
+   layers below the scroller stop clipping only while the attribute is set. */
+.scrollback-area[data-grid-owner='session'] {
+  overflow-x: auto;
+}
+
+.scrollback-area[data-grid-owner='session'] .xterm-live-container,
+.scrollback-area[data-grid-owner='session'] .xterm-live-viewport,
+.scrollback-area[data-grid-owner='session'] .xterm-inner {
+  width: max-content;
+  min-width: 100%;
+  overflow: visible;
 }
 
 .scrollback-inner {

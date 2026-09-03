@@ -203,6 +203,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			h := footprintHandlers{
 				r:                 r,
 				helperInstalls:    s.helperInstalls,
+				consent:           s.helperConsent,
 				helperUninstaller: s.helperUninstaller,
 				closer:            s.helperCloser,
 				resolver:          s.resolver,

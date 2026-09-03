@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/detach.params.schema.json",
+  "title": "DetachParams",
+  "description": "Params for dropping this attachment while leaving the helper-hosted session alive and reattachable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": { "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" } }
+}

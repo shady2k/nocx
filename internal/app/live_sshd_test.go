@@ -250,6 +250,58 @@ func reservePort(t *testing.T) int {
 // carries a .bashrc naming the native prompt. The host and client keys are
 // generated in Go; nothing beyond the sshd binary is required of the
 // environment.
+// sshdDefaultPath is the search path sshd compiles in (_PATH_STDPATH) and
+// hands to a session: the whole of what a session gets, since sshd runs a
+// request as `<login shell> -c <request>` and no profile is read.
+const sshdDefaultPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+// shellDirsOffTheDefaultPath is the directory of every shell this fixture's
+// sessions start BY NAME that the default path above does not already cover.
+// It is empty on a runner and on any FHS machine, which is why the rc line it
+// feeds is written only when it is not.
+//
+// WHY A FIXTURE NEEDS THIS AT ALL. The launcher execs its shell by name —
+// `exec zsh -l`, launcher_zsh.go — because a remote host keeps its shells
+// wherever it keeps them and nocx cannot know the path. On this developer's
+// NixOS box zsh is installed in the user's own nix profile, under
+// $HOME/.nix-profile/bin, and the fixture deliberately MOVES $HOME to a
+// disposable directory; the host then recomputes the session's PATH from that
+// new HOME, so the profile the zsh lives in is no longer on it. The tier
+// proof failed after fifteen seconds with `/bin/sh: line 1: exec: zsh: not
+// found` — a sentence about the machine, with nothing in it about nocx
+// (nocx-9jomd).
+//
+// It is fed through the planted .bashrc and NOT through sshd_config's SetEnv,
+// which was measured and does not survive: this host's own bashrc rebuilds
+// PATH after sshd has set it, so SetEnv PATH is overwritten before the
+// launcher's command runs.
+//
+// Nothing is weakened. The launcher still resolves its shell through PATH and
+// still has to complete the whole handshake; the directory is APPENDED, so no
+// binary the session would otherwise have found is shadowed; and on a machine
+// that keeps its shells in /usr/bin — every CI runner, which is where
+// scripts/install-zsh-ci.sh puts zsh — the list is empty and the fixture is
+// byte-for-byte what it was.
+func shellDirsOffTheDefaultPath() []string {
+	covered := make(map[string]bool)
+	for _, dir := range strings.Split(sshdDefaultPath, ":") {
+		covered[dir] = true
+	}
+	var extra []string
+	for _, name := range []string{"bash", "zsh", "sh"} {
+		resolved, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		dir := filepath.Dir(resolved)
+		if !covered[dir] {
+			covered[dir] = true
+			extra = append(extra, dir)
+		}
+	}
+	return extra
+}
+
 func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liveSshd {
 	t.Helper()
 	var fxCfg liveSshdConfig
@@ -329,8 +381,14 @@ func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liv
 		// it, and the environment reaches every one of them.
 		rcHist = ""
 	}
+	// Never an empty element: an empty entry in PATH means the current
+	// directory, so the line is written only when there is something to add.
+	rcPath := ""
+	if dirs := shellDirsOffTheDefaultPath(); len(dirs) > 0 {
+		rcPath = "PATH=\"$PATH:" + strings.Join(dirs, ":") + "\"\n"
+	}
 	if err := os.WriteFile(filepath.Join(home, ".bashrc"),
-		[]byte(rcRecorder+"PS1='NATIVE_PROMPT> '\n"+rcHist), 0o600); err != nil {
+		[]byte(rcRecorder+"PS1='NATIVE_PROMPT> '\n"+rcPath+rcHist), 0o600); err != nil {
 		t.Fatalf("write fixture .bashrc: %v", err)
 	}
 
@@ -815,7 +873,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -887,7 +945,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 // SSH_FX_FAILURE, and a subsequent enhanced session establishes its domain.
 func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := shellintegration.New(log.NewSlogAdapter(nil))
+	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
 	client := fx.rawClient(t)
 	if err := installer.EnsureInstalledRemote(context.Background(), client, fx.home); err != nil {
 		t.Fatalf("first remote publish: %v", err)
@@ -918,7 +976,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	// The refusal is synchronous: no domain may ever be minted. The native
 	// prompt is the observable that the bootstrap has finished and the
@@ -976,7 +1034,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -1045,7 +1103,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
+	ch, out := fx.connect(t, kernel, ssh.ShellZsh, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
 
 	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
 		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },

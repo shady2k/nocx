@@ -121,6 +121,22 @@ export interface TerminalRenderer {
   fitViewport(viewport: { width: number; height: number }): void
 
   /**
+   * Set the grid to an explicit cols × rows, independent of any viewport.
+   *
+   * `fitViewport` answers the WINDOW's question — how many cells fit in this
+   * rectangle. This answers the SESSION's — the channel is running at this
+   * grid (nocx-eidfb.1), and the bytes on the wire were wrapped at it. The
+   * two are different facts, and a client that is not the one the channel
+   * follows has both in front of it at once (nocx-eidfb.3): it must draw the
+   * session's, and pad or scroll inside its own window.
+   *
+   * It does not touch the viewport the renderer remembers, because that
+   * rectangle is still true — placement's box did not move, only what is
+   * drawn inside it.
+   */
+  setGrid(cols: number, rows: number): void
+
+  /**
    * Write PTY output into the terminal. The write is QUEUED, not applied:
    * parsing is async, so hasUnsettledWrite() stays true until the bytes
    * have been parsed, and awaitWriteBarrier() is how a capture waits for

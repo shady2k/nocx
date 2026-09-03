@@ -20,31 +20,6 @@ ok()   { printf "OK:   %s\n" "$1"; }
 # process may not. Add it so the checks below find them wherever the hook runs.
 command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
 
-# --- check all binaries first, report all missing together ------------------
-CHECK_CMD_TRUE=true
-check_cmd() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        warn "$1 not found — install: $2"
-        CHECK_CMD_TRUE=false
-    fi
-}
-
-check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
-check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
-check_cmd go "install Go from https://go.dev/dl/"
-check_cmd node "install Node.js from https://nodejs.org/"
-check_cmd npm "install Node.js from https://nodejs.org/"
-
-if [ ! -d frontend/node_modules ]; then
-    warn "frontend/node_modules not found — run: cd frontend && npm ci"
-    CHECK_CMD_TRUE=false
-fi
-
-if [ "$CHECK_CMD_TRUE" = false ]; then
-    printf "\nPre-commit hook FAILED — install missing tools above and try again.\n"
-    exit 1
-fi
-
 # --- 0. what does this commit touch? ----------------------------------------
 # Scope the expensive per-language gates to the language the commit changes. The
 # rule is conservative in one direction only: anything we cannot classify runs
@@ -75,6 +50,52 @@ if [ -n "$CHANGED" ]; then
     done <<CHANGED_EOF
 $CHANGED
 CHANGED_EOF
+fi
+
+# --- check the binaries the ENABLED gates need, report all missing together --
+# BELOW the classification, deliberately (nocx-02vx). This block used to sit
+# above it and demand the whole toolchain unconditionally, so a docs-only
+# commit — which the classification above sets every RUN_* to 0 for, and which
+# therefore runs no per-language gate at all — was refused in any worktree
+# without frontend/node_modules. The only ways forward were `npm ci` to satisfy
+# a gate that checks nothing (and nocx-x6z3: concurrent installs across
+# worktrees break each other's tree) or --no-verify, which is the habit
+# AGENTS.md most wants not to form. A hook that makes bypassing itself the
+# reasonable option trains the wrong reflex.
+#
+# node, npm and the ROOT node_modules are demanded unconditionally because
+# prettier and root eslint below are unconditional — section 4 says why, and a
+# check scoped tighter than the gate it guards is the same defect in reverse.
+CHECK_CMD_TRUE=true
+check_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        warn "$1 not found — install: $2"
+        CHECK_CMD_TRUE=false
+    fi
+}
+
+check_cmd node "install Node.js from https://nodejs.org/"
+check_cmd npm "install Node.js from https://nodejs.org/"
+
+if [ ! -d node_modules ]; then
+    warn "node_modules not found — run: npm ci"
+    CHECK_CMD_TRUE=false
+fi
+
+if [ "$RUN_GO" = 1 ]; then
+    check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
+    check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
+    check_cmd go "install Go from https://go.dev/dl/"
+fi
+
+if [ "$RUN_FE" = 1 ] && [ ! -d frontend/node_modules ]; then
+    warn "frontend/node_modules not found — run: cd frontend && npm ci"
+    CHECK_CMD_TRUE=false
+fi
+
+if [ "$CHECK_CMD_TRUE" = false ]; then
+    printf "\nPre-commit hook FAILED — install missing tools above and try again.\n"
+    exit 1
 fi
 
 # host_gate runs a check and, on failure, prints it and aborts the commit.

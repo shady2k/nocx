@@ -202,3 +202,63 @@ func belowAnchorOpensOnlyWith(f panegrid.Frame, anchor int, glyphs []string) bel
 	}
 	return out
 }
+
+// ── frame arithmetic ──────────────────────────────────────────────────────
+//
+// These were claude.go's until the rule became a document. They are not
+// predicates — they are how a predicate reads a row — and they are here rather
+// than beside one agent because every rule needs them.
+
+func cellAt(f panegrid.Frame, x, y int) (panegrid.Cell, bool) {
+	if y < 0 || y >= len(f.Lines) {
+		return panegrid.Cell{}, false
+	}
+	if x < 0 || x >= len(f.Lines[y]) {
+		return panegrid.Cell{}, false
+	}
+	return f.Lines[y][x], true
+}
+
+func firstNonBlankCol(f panegrid.Frame, y int) (int, bool) {
+	if y < 0 || y >= len(f.Lines) {
+		return 0, false
+	}
+	for x, c := range f.Lines[y] {
+		if c.Width == 0 {
+			continue
+		}
+		if strings.TrimSpace(c.Text) != "" {
+			return x, true
+		}
+	}
+	return 0, false
+}
+
+// rowTextFrom renders a row from a column onwards, so a marker's own cell does
+// not have to be trimmed off the front of the text it introduces.
+func rowTextFrom(f panegrid.Frame, y, from int) string {
+	if y < 0 || y >= len(f.Lines) {
+		return ""
+	}
+	var b strings.Builder
+	for x, c := range f.Lines[y] {
+		if x < from || c.Width == 0 {
+			continue
+		}
+		if c.Text == "" {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteString(c.Text)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+func firstNonBlankRowBelow(f panegrid.Frame, y int) (int, bool) {
+	for i := y + 1; i < f.Rows && i < len(f.Lines); i++ {
+		if _, ok := firstNonBlankCol(f, i); ok {
+			return i, true
+		}
+	}
+	return 0, false
+}

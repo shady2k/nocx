@@ -1,0 +1,88 @@
+{
+  "agent": "claude",
+  "anchors": [
+    {
+      "name": "bottomRule",
+      "kind": "searchUp",
+      "ruleGlyph": "─",
+      "floor": 0,
+      "minRow": 2
+    },
+    {
+      "name": "topRule",
+      "kind": "searchUp",
+      "from": "bottomRule",
+      "fromOffset": -2,
+      "ruleGlyph": "─",
+      "floor": 1,
+      "minRow": 1
+    },
+    {
+      "name": "prompt",
+      "kind": "offset",
+      "from": "topRule",
+      "offset": 1,
+      "requireCell": "❯",
+      "requireCol": 0
+    },
+    { "name": "meter", "kind": "offset", "from": "prompt", "offset": -2 },
+    {
+      "name": "boxBottom",
+      "kind": "offset",
+      "from": "bottomRule",
+      "offset": 0,
+      "requireBound": ["meter"]
+    },
+    { "name": "modeLine", "kind": "firstNonBlankBelow", "from": "boxBottom" }
+  ],
+  "branches": [
+    {
+      "state": "permission_choice",
+      "when": [
+        { "kind": "cursorOn", "glyph": "❯" },
+        { "kind": "cursorOpensItsRow" },
+        { "kind": "numberedOptionAfterCursor" },
+        { "kind": "cursorAboveAnchorIfBound", "anchor": "meter" },
+        { "kind": "nearestNonBlankAboveCursorContains", "text": "Do you want to" }
+      ]
+    },
+    {
+      "state": "modal_choice",
+      "when": [
+        { "kind": "cursorOn", "glyph": "❯" },
+        { "kind": "cursorOpensItsRow" },
+        { "kind": "numberedOptionAfterCursor" },
+        { "kind": "cursorAboveAnchorIfBound", "anchor": "meter" }
+      ]
+    },
+    { "state": "unknown", "when": [{ "kind": "anchorUnbound", "anchor": "meter" }] },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "… (",
+          "suffix": ")"
+        }
+      ]
+    },
+    {
+      "below": {
+        "anchor": "boxBottom",
+        "glyphs": ["●", "◯"],
+        "allMatched": "working",
+        "counterexample": "unknown"
+      }
+    },
+    {
+      "state": "working",
+      "when": [{ "kind": "rowContains", "anchor": "modeLine", "text": "/tasks to see subagents" }]
+    }
+  ],
+  "default": "free_text"
+}

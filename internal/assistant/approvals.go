@@ -448,6 +448,7 @@ func cloneInvocation(inv content.Invocation) content.Invocation {
 		Resources: content.ResourceReport{
 			Resources:  append([]content.Resource(nil), inv.Resources.Resources...),
 			Unresolved: append([]content.UnresolvedResource(nil), inv.Resources.Unresolved...),
+			Features:   append([]string(nil), inv.Resources.Features...),
 		},
 	}
 	if inv.Commands == nil {

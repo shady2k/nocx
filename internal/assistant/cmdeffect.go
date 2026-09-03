@@ -223,7 +223,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, operands[len(operands)-1], content.ResourceWrite)
 	case "mv":
-		operands := resourceOperands("mv", args)
+		operands := resourceOperands("mv", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named operand")
 		}
@@ -233,7 +233,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, operands[len(operands)-1], content.ResourceWrite)
 	case "rm":
-		operands := resourceOperands("rm", args)
+		operands := resourceOperands("rm", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named path")
 		}
@@ -242,35 +242,19 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return report
 	case "tee":
-		for _, operand := range resourceOperands("tee", args) {
+		for _, operand := range resourceOperands("tee", args, &report) {
 			report = addResource(report, operand, content.ResourceWrite)
 		}
 		return report
 	case "sort":
-		for i := 0; i < len(args); i++ {
-			if args[i].value == "-o" || args[i].value == "--output" {
-				if i+1 >= len(args) {
-					return unresolvedCommand(report, program, "has an output option without a path")
-				}
-				report = addResource(report, args[i+1], content.ResourceWrite)
-				i++
-				continue
-			}
-			if strings.HasPrefix(args[i].value, "-o") && args[i].value != "-o" {
-				report = addResource(report, commandWordFact{value: strings.TrimPrefix(args[i].value, "-o"), dynamic: args[i].dynamic}, content.ResourceWrite)
-				continue
-			}
-			if strings.HasPrefix(args[i].value, "--output=") {
-				report = addResource(report, commandWordFact{value: strings.TrimPrefix(args[i].value, "--output="), dynamic: args[i].dynamic}, content.ResourceWrite)
-				continue
-			}
-			if !strings.HasPrefix(args[i].value, "-") {
-				report = addResource(report, args[i], content.ResourceRead)
-			}
+		// The output option and its three spellings are resolved by the same
+		// table curl uses, so a written option value has one owner.
+		for _, operand := range resourceOperands("sort", args, &report) {
+			report = addResource(report, operand, content.ResourceRead)
 		}
 		return report
 	case "uniq":
-		operands := resourceOperands("uniq", args)
+		operands := resourceOperands("uniq", args, &report)
 		for i, operand := range operands {
 			verb := content.ResourceRead
 			if i == len(operands)-1 && len(operands) > 1 {
@@ -282,7 +266,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	case "source", ".":
 		// Sourcing runs in the current shell and can permanently change its
 		// environment; it is not subprocess execution of a file.
-		operands := resourceOperands(program, args)
+		operands := resourceOperands(program, args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named source file")
 		}
@@ -297,7 +281,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return addResource(report, script, content.ResourceExecute)
 	case "curl":
-		operands := resourceOperands("curl", args)
+		operands := resourceOperands("curl", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named URL")
 		}
@@ -306,7 +290,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return report
 	case "ssh":
-		operands := resourceOperands("ssh", args)
+		operands := resourceOperands("ssh", args, &report)
 		if len(operands) == 0 {
 			return unresolvedCommand(report, program, "has no statically named destination")
 		}
@@ -321,7 +305,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		}
 		return unresolvedCommand(report, program, "is not a recognized resource access form")
 	}
-	for _, operand := range readOperands(program, args) {
+	for _, operand := range readOperands(program, args, &report) {
 		report = addResource(report, operand, content.ResourceRead)
 	}
 	return report
@@ -371,6 +355,16 @@ func addResource(report content.ResourceReport, fact commandWordFact, verb conte
 		return report
 	}
 	report.Resources = append(report.Resources, content.Resource{Path: fact.value, Verb: verb})
+	return report
+}
+
+func addFeature(report content.ResourceReport, feature string) content.ResourceReport {
+	for _, existing := range report.Features {
+		if existing == feature {
+			return report
+		}
+	}
+	report.Features = append(report.Features, feature)
 	return report
 }
 
@@ -482,7 +476,17 @@ func isExecutablePath(program string) bool {
 		strings.HasPrefix(program, "../")
 }
 
-func resourceOperands(program string, args []commandWordFact) []commandWordFact {
+// featureWritesOptionNamedPath is recorded when a command writes a file to a
+// path named by one of its own option values rather than by an operand or a
+// shell redirection. A refusal matches this fact, never the spelling of the
+// token that carried it.
+const featureWritesOptionNamedPath = "writes-option-named-path"
+
+// resourceOperands returns the operands of an invocation, skipping options and
+// the values they consume. A skipped option value that is a path the command
+// WRITES is not silently dropped: it is appended to the report through the
+// pointer, because it is a resource exactly as an operand would be.
+func resourceOperands(program string, args []commandWordFact, report *content.ResourceReport) []commandWordFact {
 	operands := make([]commandWordFact, 0, len(args))
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
@@ -492,6 +496,16 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 			continue
 		}
 		if !optionsEnded && strings.HasPrefix(arg.value, "-") {
+			if handled, resolved, target, consumed := optionWrittenTarget(program, args, i); handled {
+				if resolved {
+					*report = addResource(*report, target, content.ResourceWrite)
+					*report = addFeature(*report, featureWritesOptionNamedPath)
+				} else {
+					*report = unresolvedCommand(*report, program, "has an output option without a path")
+				}
+				i += consumed
+				continue
+			}
 			if optionTakesNextValue(program, arg.value) && i+1 < len(args) {
 				i++
 			}
@@ -500,6 +514,64 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 		operands = append(operands, arg)
 	}
 	return operands
+}
+
+// optionWritesNextValue reports whether this option's VALUE is a path the
+// command writes. It is strictly a subset of optionTakesNextValue for any
+// program whose operands are read through resourceOperands: an entry here that
+// is missing there would never be consulted, because the value would already
+// have been taken for an operand. sort is the exception and is deliberate —
+// its branch consults this table directly so that "which option value is a
+// written path" has one owner rather than two.
+//
+// The distinction is per program and cannot be guessed from the letter.
+// curl -o and sort -o name output files; ssh -o is a config keyword, bash -o
+// is a shell option name, install -o is an owner, and grep -f is a pattern
+// file the command READS. install -t and cp -t also name a written path, but
+// targetDirectoryOperands has owned those since before this table existed and
+// records them as the write target rather than as a skipped option value.
+func optionWritesNextValue(program, option string) bool {
+	name := option
+	if i := strings.IndexByte(option, '='); i >= 0 {
+		name = option[:i]
+	}
+	switch program {
+	case "curl", "sort":
+		return name == "-o" || name == "--output"
+	default:
+		return false
+	}
+}
+
+// optionWrittenTarget resolves the target of a write-bearing option in the
+// three forms it can take: "-o file" and "--output file" (the value is the
+// next word), "--output=file" (attached after =), and "-ofile" (attached to a
+// short option).
+//
+// handled reports that args[i] is a write-bearing option; resolved reports
+// that it had a value at all, so a trailing "-o" becomes an unresolved report
+// rather than a silently ignored write. consumed is the number of ADDITIONAL
+// words taken.
+func optionWrittenTarget(program string, args []commandWordFact, i int) (handled, resolved bool, target commandWordFact, consumed int) {
+	arg := args[i]
+	if eq := strings.IndexByte(arg.value, '='); eq >= 0 {
+		if !optionWritesNextValue(program, arg.value) {
+			return false, false, commandWordFact{}, 0
+		}
+		return true, true, commandWordFact{value: arg.value[eq+1:], dynamic: arg.dynamic}, 0
+	}
+	if optionWritesNextValue(program, arg.value) {
+		if i+1 >= len(args) {
+			return true, false, commandWordFact{}, 0
+		}
+		return true, true, args[i+1], 1
+	}
+	// An attached short option: "-ofile" is "-o" and "file".
+	if !strings.HasPrefix(arg.value, "--") && len(arg.value) > 2 &&
+		optionWritesNextValue(program, arg.value[:2]) {
+		return true, true, commandWordFact{value: arg.value[2:], dynamic: arg.dynamic}, 0
+	}
+	return false, false, commandWordFact{}, 0
 }
 
 func shellScriptOperand(program string, args []commandWordFact) (commandWordFact, bool) {
@@ -599,8 +671,8 @@ func targetDirectoryOperands(program string, args []commandWordFact) ([]commandW
 	return operands, target
 }
 
-func readOperands(program string, args []commandWordFact) []commandWordFact {
-	operands := resourceOperands(program, args)
+func readOperands(program string, args []commandWordFact, report *content.ResourceReport) []commandWordFact {
+	operands := resourceOperands(program, args, report)
 	if program != "grep" && program != "rg" {
 		return operands
 	}

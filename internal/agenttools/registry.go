@@ -33,20 +33,30 @@ type ResourceRef struct {
 	ID   string               `json:"id"`
 }
 
-// URLScope is the narrowed authority for fetch.url. It retains only the
-// destination identities this call resolved and the grant covers; the
-// executor still obtains the actual network capability from its composition
-// root seam.
+// URLScope is the narrowed authority for fetch.url. It retains the GRANT's
+// destination endpoints — those that covered a destination this call
+// resolved — rather than the resolved URLs themselves; the executor still
+// obtains the actual network capability from its composition root seam.
+//
+// It holds the endpoints and not the URLs because a REDIRECT lands on a URL
+// nobody resolved and must still be judged against what was granted
+// (design §5.4). An endpoint of the grant that covered nothing this call
+// resolved is not carried, so the capability is still bounded by the call.
 type URLScope struct {
-	URLs []string
+	Endpoints []content.GrantScope
 }
 
+// Allows asks the POLICY's containment predicate, and owns no rule of its
+// own. An endpoint taught only to content.GrantScope.Contains would be shown
+// by the settings page and ignored by the capability that dials; one owner
+// per behaviour is what keeps those two answers the same one (AGENTS.md).
 func (s *URLScope) Allows(rawURL string) bool {
 	if s == nil {
 		return false
 	}
-	for _, allowed := range s.URLs {
-		if allowed == "*" || allowed == rawURL {
+	child := content.GrantScope{Kind: content.ResourceDestination, ID: rawURL}
+	for _, endpoint := range s.Endpoints {
+		if endpoint.Contains(child) {
 			return true
 		}
 	}
@@ -125,8 +135,10 @@ type Narrow func(grant content.Grant, resources []ResourceRef, runCtx RunContext
 func resourceInGrant(grant content.Grant, ref ResourceRef) bool {
 	child := content.GrantScope{Kind: ref.Kind, ID: ref.ID}
 	for _, scope := range grant.Scopes {
-		parent := content.GrantScope{Kind: scope.Kind, ID: scope.ID}
-		if parent.Contains(child) {
+		// The scope goes to the predicate WHOLE. Rebuilding it from kind and
+		// id drops a destination's subdomain marker, and the grant then
+		// stops covering what the page says it covers.
+		if scope.Contains(child) {
 			return true
 		}
 	}

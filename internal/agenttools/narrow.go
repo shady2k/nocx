@@ -195,15 +195,28 @@ func narrowSession(grant content.Grant, resources []ResourceRef, runCtx RunConte
 	return NewSessionReader(scopes, runCtx.AutomaticSessionItems, runCtx.MarkedSessionWindows), nil
 }
 
+// narrowURL carries the grant's destination ENDPOINTS, not this call's
+// resolved URLs: a redirect hop lands on a URL the call never named and is
+// judged against the same endpoint the page shows. Only endpoints that
+// actually cover a resolved destination are carried, so an endpoint this
+// call never reached stays out of the capability.
 func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
-	scoped := grantedResources(grant, resources)
-	urls := make([]string, 0, len(scoped))
-	for _, ref := range scoped {
-		if ref.Kind == content.ResourceDestination {
-			urls = append(urls, ref.ID)
+	endpoints := make([]content.GrantScope, 0, len(grant.Scopes))
+	for _, scope := range grant.Scopes {
+		if scope.Kind != content.ResourceDestination {
+			continue
+		}
+		for _, ref := range resources {
+			if ref.Kind != content.ResourceDestination {
+				continue
+			}
+			if scope.Contains(content.GrantScope{Kind: ref.Kind, ID: ref.ID}) {
+				endpoints = append(endpoints, scope)
+				break
+			}
 		}
 	}
-	return &URLScope{URLs: urls}, nil
+	return &URLScope{Endpoints: endpoints}, nil
 }
 
 // narrowRun is the run row's capability constructor. It carries only the

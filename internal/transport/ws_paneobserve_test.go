@@ -104,6 +104,128 @@ func TestSessionObservationChangedOverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// The task panel, drawn where claude draws it: under the mode line, the pane's
+// own row first and one row per child below it.
+func claudeSubagentChrome(cols int) string {
+	return claudeIdleChrome(cols) +
+		"\x1b[14;1H  ● main" +
+		"\x1b[15;1H  ◯ Explore  List files in directory" +
+		"\x1b[9;3H"
+}
+
+// THE HAPPY PATH, off the real socket: a person watching a pane whose agent
+// spawned a child is sent that child's name and what it is doing.
+//
+// It is a separate test from the idle one above rather than an extra assertion
+// in it, because the interesting half is a payload shape the idle case never
+// produces — and validating a payload the test itself built proves the struct
+// is well-formed, never that the server sends it.
+//
+// Nothing here waits on a duration: it reads notifications until one carries
+// children, and the read itself is what has the deadline.
+func TestSessionObservationChangedCarriesTheChildRowsOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "session.observationChanged.schema.json")
+	ws, store, watch, term := newObservedWS(t)
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	if err := store.Enrol(sid, 60, 18); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	watch.Watch(sid, "claude")
+	term.emit(t, claudeSubagentChrome(60))
+
+	// The screen is fed in one write, but the session read path may split it,
+	// so a sweep can land on a half-painted panel and report the pane before
+	// the panel is whole. Every observation that arrives is validated; the one
+	// being waited for is the one that names a child, and the wait ends on
+	// THAT ARRIVING under a single deadline — never on a duration elapsing.
+	var got observationChangedParams
+	deadline := time.Now().Add(wantWithin)
+	for len(got.Children) == 0 {
+		msg, err := awaitFrame(conn, deadline, isNotification("session.observationChanged"))
+		if err != nil {
+			t.Fatalf("the panel was on screen and no observation ever named a child (last: %+v): %v", got, err)
+		}
+		f, ok := decodeFrame(msg)
+		if !ok {
+			t.Fatalf("undecodable notification: %s", msg)
+		}
+		validateJSON(t, schema, f.Params, "session.observationChanged params (real socket, task panel drawn)")
+		got = observationChangedParams{}
+		if err := json.Unmarshal(f.Params, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+	}
+	if len(got.Children) != 1 {
+		t.Fatalf("children = %+v, want exactly the one child the panel drew", got.Children)
+	}
+	if got.Children[0].Name != "Explore" {
+		t.Errorf("child name = %q, want %q", got.Children[0].Name, "Explore")
+	}
+	if got.Children[0].Task != "List files in directory" {
+		t.Errorf("child task = %q, want %q", got.Children[0].Task, "List files in directory")
+	}
+	// The pane's OWN row heads that panel and is not a child of itself.
+	for _, c := range got.Children {
+		if c.Name == "main" {
+			t.Errorf("the pane's own row crossed as a child: %+v", got.Children)
+		}
+	}
+	// And the parent's own state is decided by its chrome, not by the row:
+	// a backgrounded agent keeps the input box live and shows no spinner, so
+	// this is exactly the frame a rule without the panel calls idle.
+	if got.State != string(agentdriver.StateWorking) {
+		t.Errorf("state = %q, want %q", got.State, agentdriver.StateWorking)
+	}
+}
+
+// A pane with no children carries NO children field at all, rather than an
+// empty array. The two are different claims — "the panel is not on screen"
+// against "the panel is on screen and names nobody" — and the schema refuses
+// the second, so this is the assertion that keeps `omitempty` from being
+// quietly dropped as tidiness.
+func TestAPaneWithNoChildrenOmitsTheFieldEntirely(t *testing.T) {
+	raw, err := json.Marshal(observationChangedParams{
+		SessionID:    "sess-1",
+		InstanceID:   "inst-1",
+		SessionEpoch: 1,
+		Agent:        "claude",
+		State:        string(agentdriver.StateFreeText),
+		Children:     observationChildren(nil),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "children") {
+		t.Errorf("a pane with no children said so on the wire: %s", raw)
+	}
+	validateJSON(t, loadSchema(t, "session.observationChanged.schema.json"), raw, "session.observationChanged DTO, no children")
+}
+
+// The DTO carrying children conforms too, including a child with no task — a
+// row the screen has drawn but not yet described. Absent, never empty.
+func TestSessionObservationChangedChildrenDTOConformsToContract(t *testing.T) {
+	raw, err := json.Marshal(observationChangedParams{
+		SessionID:    "sess-1",
+		InstanceID:   "inst-1",
+		SessionEpoch: 1,
+		Agent:        "claude",
+		State:        string(agentdriver.StateWorking),
+		Children: observationChildren([]agentdriver.Subagent{
+			{Name: "Explore", Task: "List files in directory"},
+			{Name: "Plan"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"task":""`) {
+		t.Errorf("a child with no task claimed an empty one: %s", raw)
+	}
+	validateJSON(t, loadSchema(t, "session.observationChanged.schema.json"), raw, "session.observationChanged DTO with children")
+}
+
 // A pane that is enrolled but NOT watched produces nothing. The control for
 // the test above: without it a green run could mean "the classification
 // crossed" or "this socket says something whenever bytes move".

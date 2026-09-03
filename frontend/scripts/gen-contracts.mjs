@@ -19,6 +19,7 @@ import { compileFromFile } from 'json-schema-to-typescript'
 const here = dirname(fileURLToPath(import.meta.url))
 const contractsDir = resolve(here, '../../contracts')
 const outDir = resolve(here, '../src/generated')
+const prettierConfig = resolve(here, '../../.prettierrc.json')
 
 const BANNER = `/**
  * GENERATED FILE — do not edit.
@@ -38,6 +39,14 @@ function outputName(schemaFile) {
 async function main() {
   const check = process.argv.includes('--check')
   const manifest = JSON.parse(await readFile(resolve(contractsDir, 'openrpc.json'), 'utf8'))
+  // The formatter's settings are READ rather than restated. They used to be
+  // three of the six fields, copied inline, and json-schema-to-typescript
+  // bundles a prettier whose defaults differ from ours for the other three —
+  // so the first schema whose output wrapped over several lines produced a
+  // file this generator wrote and `prettier --check` rejected, with no way to
+  // satisfy both. One statement of the style, and the two gates cannot
+  // disagree.
+  const style = JSON.parse(await readFile(prettierConfig, 'utf8'))
   const entries = (manifest['x-nocx-schemaRefs'] ?? [])
     .map((schema) => basename(new URL(schema.$ref).pathname))
     .filter((f) => f.endsWith('.schema.json') && !f.endsWith('.params.schema.json'))
@@ -55,7 +64,7 @@ async function main() {
     const generated = await compileFromFile(join(contractsDir, schemaFile), {
       bannerComment: BANNER.replace('%SCHEMA%', schemaFile),
       additionalProperties: false,
-      style: { semi: false, singleQuote: true, printWidth: 100 },
+      style,
     })
     const target = join(outDir, outputName(schemaFile))
 

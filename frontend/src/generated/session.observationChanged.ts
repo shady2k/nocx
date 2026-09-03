@@ -34,4 +34,31 @@ export interface SessionObservationChanged {
    */
   state:
     'free_text' | 'permission_choice' | 'modal_choice' | 'working' | 'error' | 'unknown' | 'exited'
+  /**
+   * The child agents this pane's agent has spawned, as the pane's OWN CHROME names them, in the order it drew them — read off the live VT grid, never from a vendor hook. That is the whole reason this field can exist: the two other tools that model subagents at all carry them over a hook the agent has to be configured to send, and with no hook there are no rows at all and the parent flips to done while children still run. Absent means the pane's chrome named none — which is the ordinary case for almost every pane, and is not a degraded reading. Present is never empty: a panel that is on screen and says nothing is a different claim from one that is not on screen, and only the first would be an empty array. A CHILD FACT MAY NEVER DECIDE THE PARENT'S STATE: these rows ride beside `state` and never through it, they are extracted after the driver's verdict is decided and from a value no branch of it can see, and a child appearing or vanishing changes nothing about `state`. Depth is ONE. A child of a child has no representation here, because the screen draws none. What is NOT carried is deliberate: the panel also draws an elapsed time and a token flow per row, and both move on every single frame. This notification is sent only when the answer CHANGES, so carrying them would mean either a notification per repaint — eight a second per pane — or a number frozen at whatever it read when the row set last moved, which is worse than no number because it looks live. So the wire carries what is stable for the life of a row, and the interval is exact: a child is here from the first sweep in which the chrome names it until the first sweep in which it does not. There is no per-child running/finished flag for a measured reason rather than a chosen one: no glyph on a child row was ever seen to change. A child that finishes LEAVES the panel, and that is the whole of what the screen says about it.
+   *
+   * @minItems 1
+   */
+  children?: [
+    {
+      /**
+       * The child's name, verbatim from the row — the name of the child, not of the agent running in this pane. It is never the pane's own agent: the pane's own row heads the panel and is structurally excluded before extraction. A row the screen did not name is dropped rather than carried with an empty one.
+       */
+      name: string
+      /**
+       * What the child was given to do, as the row states it. OPTIONAL, because a row carries one only once the task has been drawn — and absent means the screen did not say, which is a different claim from an empty task and must not be rendered as one.
+       */
+      task?: string
+    },
+    ...{
+      /**
+       * The child's name, verbatim from the row — the name of the child, not of the agent running in this pane. It is never the pane's own agent: the pane's own row heads the panel and is structurally excluded before extraction. A row the screen did not name is dropped rather than carried with an empty one.
+       */
+      name: string
+      /**
+       * What the child was given to do, as the row states it. OPTIONAL, because a row carries one only once the task has been drawn — and absent means the screen did not say, which is a different claim from an empty task and must not be rendered as one.
+       */
+      task?: string
+    }[],
+  ]
 }

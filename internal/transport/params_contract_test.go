@@ -376,6 +376,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"agent.approve": {
 			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"once"}`),
+			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"expand"}`),
 		},
 		"agent.ask": {
 			[]byte(`{"askId":"ask-1","sessionId":"session-1","question":"What happened?","attachedContent":[{"itemId":"item-1","command":"echo hi","state":"exited"}],"cwd":"/tmp"}`),

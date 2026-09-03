@@ -428,6 +428,12 @@ type agentRunState struct {
 	Error         string   `json:"error,omitempty"`
 	DroppedDeltas int      `json:"droppedDeltas,omitempty"`
 	UnarmedBounds []string `json:"unarmedBounds,omitempty"`
+	// Notices are what the RUN must state about ITSELF — today, only that it
+	// stopped asking to widen a scope because it reached the bound on how
+	// often one answer may ask (design §5.3). A silent stop is the soft
+	// degrade AGENTS.md forbids: the person is told the assistant stopped
+	// asking rather than left to infer it from questions that never arrive.
+	Notices []string `json:"notices,omitempty"`
 }
 
 // agentApprovalRequested is the agent.approvalRequested notification (design
@@ -469,6 +475,43 @@ type agentApprovalRequested struct {
 	// state — the surface must never present "we refuse to ask" and "we
 	// could not ask" as the same fact. Absent for non-command proposals.
 	Expansion *assistant.ExpansionFacts `json:"expansion,omitempty"`
+	// OutOfScope is present only when a resource of the call fell outside a
+	// bound (design §5.3, nocx-b453p). Without it the prompt's three widths
+	// — this call, this session, always — widen NOTHING that excluded the
+	// resource, so the next identical call asks again, for ever.
+	OutOfScope *agentApprovalOutOfScope `json:"outOfScope,omitempty"`
+}
+
+// agentApprovalOutOfScope is what fell outside, which bound it fell outside,
+// and whether an answer can move that bound. The offer is carried rather than
+// derived from the cause in the renderer for the reason the effect is
+// (ADR-0028 decision 4): the backend is what will apply the answer, so the
+// backend is what says whether it can be given.
+type agentApprovalOutOfScope struct {
+	Cause    string                `json:"cause"`
+	Resource content.GrantScope    `json:"resource"`
+	Widening agentApprovalWidening `json:"widening"`
+}
+
+// agentApprovalWidening is the offer, shaped like agentApprovalStanding for
+// the same reason: available says whether the prompt may show the answer, and
+// reason is what it says instead when it may not.
+type agentApprovalWidening struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// wideningOffer decides whether the fourth answer may be shown. An editable
+// row scope is the ONLY yes: a fence — the run's own bound, or a narrowed
+// capability — cannot be moved by any answer, and offering a question whose
+// yes cannot be honoured is the lie §5.3 exists to remove.
+func wideningOffer(cause content.OutOfScopeCause) agentApprovalWidening {
+	if cause == content.OutOfScopeRowScope {
+		return agentApprovalWidening{Available: true}
+	}
+	return agentApprovalWidening{
+		Reason: "this bound is the run's own fence, and no answer here can widen it",
+	}
 }
 
 type agentApprovalStanding struct {
@@ -504,6 +547,13 @@ const (
 	approveScopeOnce    = "once"
 	approveScopeSession = "session"
 	approveScopeAlways  = "always"
+	// approveScopeExpand is the fourth answer, and it is not a fourth WIDTH
+	// (design §5.3): it is the distinct administrative answer to an
+	// out-of-scope question — widen the row's scopes to cover the resource
+	// that fell outside AND approve this call, as one act. It is offered
+	// only where agent.approvalRequested said it could be, and refused
+	// everywhere else.
+	approveScopeExpand = "expand"
 )
 
 // approveParams is the agent.approve request (design §7.2): the full binding
@@ -1674,6 +1724,13 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 		n.Expansion = ap.Expansion
+		if ap.OutOfScope != nil {
+			n.OutOfScope = &agentApprovalOutOfScope{
+				Cause:    string(ap.OutOfScope.Cause),
+				Resource: ap.OutOfScope.Resource,
+				Widening: wideningOffer(ap.OutOfScope.Cause),
+			}
+		}
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -1708,6 +1765,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		proposal.Invocation = ap.Invocation
 		proposal.CommandInvocation = ap.CommandInvocation
+		proposal.OutOfScope = ap.OutOfScope
 	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
@@ -1724,6 +1782,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	// scripted-suspension test exercises and missing in the real one, which
 	// is a green suite over an "always" that writes no row.
 	h.approvals.NoteEffect(proposal)
+	// And the out-of-scope fact, for the same reason and by the same rule: a
+	// suspension that reached the wire without the middleware's own record
+	// would otherwise offer a widening nothing remembers how to apply. A nil
+	// fact notes nothing.
+	h.approvals.NoteOutOfScope(proposal)
 	if ap != nil {
 		invocation, hasInvocation, commandInvocation := h.approvals.InvocationFor(proposal)
 		n.Standing = standingOffer(invocation, hasInvocation, commandInvocation, proposal.Effect)
@@ -1850,6 +1913,17 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 	if !p.Approved {
+		// "No, and widen it" is not an answer anybody can mean: the widening
+		// answer IS an approval. Refused rather than silently read as a
+		// plain decline, which would apply a decision the person did not
+		// give — an answer to a question they were not asked.
+		if p.Scope == approveScopeExpand {
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32602,
+				Message: "Invalid params: a widening is an approval — a decline is answered with once, session or always",
+			})
+			return
+		}
 		// The person declined (nocx-uvac6.1): the run is NOT over — the
 		// refusal becomes this call's result and the model answers it in
 		// words ("a refusal is an answer", systemprompt.go). The decline
@@ -1882,6 +1956,11 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 			})
 			return
 		}
+		// A no to a WIDENING question refuses that (effect, resource) for the
+		// rest of this run's life — not longer: the record is keyed by the
+		// run, so the next run asks again (design §5.3, both ends). Recorded
+		// after the decline settled, for the same reason the standing part is.
+		h.declineWidening(p, ap)
 		// The standing part is recorded only after the decline settled,
 		// so a loser can never write a row for a question it did not win.
 		warning := h.applyStandingAnswer(p, ap, rc.sessionID)
@@ -1902,6 +1981,15 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 		return
 	}
+	// The offer is what makes the widening answer legitimate, and it is
+	// checked BEFORE the proposal is settled: an answer to a question that
+	// never offered it must leave the question exactly as it was.
+	if p.Scope == approveScopeExpand {
+		if msg := h.wideningRefusal(ap); msg != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
+			return
+		}
+	}
 	if !h.approvals.Approve(ap) {
 		// The pending check passed but the approve lost the race (another
 		// connection answered first). Honest refusal: nothing resumed.
@@ -1914,7 +2002,23 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	// The yes is recorded, and only now is the part of it that outlives
 	// this proposal: an answer the server went on to refuse — the race
 	// above — must not leave a standing rule behind it.
-	warning := h.applyStandingAnswer(p, ap, rc.sessionID)
+	var warning string
+	if p.Scope == approveScopeExpand {
+		if msg := h.applyWidening(ap); msg != "" {
+			// NEITHER half applied (design §5.3): the widening and the
+			// approval are one answer, so a store that refused the write
+			// must not leave a run resumed on an approval whose standing
+			// half vanished. The approval is revoked, which puts the
+			// question back to pending — the person answers it again,
+			// differently if they like — and this is therefore the one
+			// answer that is REFUSED rather than warned about.
+			h.approvals.Revoke(ap)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return
+		}
+	} else {
+		warning = h.applyStandingAnswer(p, ap, rc.sessionID)
+	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
 	// SUBSEQUENT attempt. The approval store is passed again, so the yes
@@ -1928,6 +2032,74 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
+}
+
+// wideningRefusal answers "may this proposal be widened at all", in the words
+// the person's surface would use. Empty means yes.
+//
+// The pending record is the source of truth, not the answer: a renderer that
+// sent scope "expand" for a question that never offered it is answering a
+// question nobody asked, and the row must not grow on the strength of it.
+func (h agentHandlers) wideningRefusal(ap assistant.Approval) string {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok {
+		return "Invalid params: this question offered no widening — nothing about this call fell outside a scope"
+	}
+	if fact.Cause != content.OutOfScopeRowScope {
+		return "Invalid params: this question offered no widening — the bound it fell outside is the run's own fence, which no answer can move"
+	}
+	if _, effectKnown := h.approvals.EffectFor(ap); !effectKnown {
+		return "Invalid params: this question named no effect class, so there is no row to widen"
+	}
+	if h.globalPolicy == nil {
+		return "Invalid params: there is no policy store to widen a row in"
+	}
+	return ""
+}
+
+// applyWidening is the widening half of the answer: ONE store write that adds
+// the resource that fell outside to the row it fell outside of. It returns the
+// sentence the answer is refused with, or empty on success.
+//
+// The row is the GLOBAL matrix row, and deliberately so: a session overlay
+// carries decisions and invocation rules and has no scopes to grow, so a
+// "widen for this session only" would be an answer the storage cannot hold.
+// §5.3 says the answer widens the row's scopes, and the row is one document
+// with one owner — the same one the settings page writes through.
+func (h agentHandlers) applyWidening(ap assistant.Approval) string {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok {
+		return "the widening could not be applied: the question no longer names what fell outside"
+	}
+	effect, ok := h.approvals.EffectFor(ap)
+	if !ok {
+		return "the widening could not be applied: the question named no effect class"
+	}
+	next, err := assistant.WidenRowScope(h.globalPolicy.Policy(), effect, fact.Resource)
+	if err == nil {
+		err = h.globalPolicy.SetPolicy(next)
+	}
+	if err != nil {
+		h.log.Warn("agent.approve: the row could not be widened, so nothing was approved",
+			"run", ap.RunID, "tool", ap.Tool, "effect", string(effect), "error", err)
+		return "the row could not be widened, so this call was not approved either: " + err.Error()
+	}
+	return ""
+}
+
+// declineWidening records a no to a widening question against the RUN. A
+// question that offered no widening records nothing — a plain decline is
+// already carried by the approval store's DeclineKind.
+func (h agentHandlers) declineWidening(p approveParams, ap assistant.Approval) {
+	fact, ok := h.approvals.OutOfScopeFor(ap)
+	if !ok || fact.Cause != content.OutOfScopeRowScope {
+		return
+	}
+	effect, ok := h.approvals.EffectFor(ap)
+	if !ok {
+		return
+	}
+	h.approvals.DeclineWidening(p.RunID, effect, fact.Resource)
 }
 
 // applyStandingAnswer records the part of a decision that outlives the
@@ -2044,12 +2216,12 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 		return "argHash is required and bounded"
 	}
 	switch p.Scope {
-	case approveScopeOnce, approveScopeSession, approveScopeAlways:
+	case approveScopeOnce, approveScopeSession, approveScopeAlways, approveScopeExpand:
 	default:
 		// No default: an answer with no scope is not "once". A default
 		// here would be a standing decision nobody expressed, and the
 		// schema requires the field for the same reason.
-		return "scope is required and must be one of once, session, always"
+		return "scope is required and must be one of once, session, always, expand"
 	}
 	return ""
 }
@@ -2174,11 +2346,23 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		State:         string(state),
 		DroppedDeltas: dropped,
 		UnarmedBounds: unarmedBounds,
+		Notices:       h.runNotices(rc.runID),
 	}
 	if wireError {
 		notification.Error = sentence
 	}
 	_ = r.TryNotify("agent.runState", mustMarshal(notification))
+}
+
+// runNotices is what this run must say about itself. Read at the terminal
+// rather than emitted when the bound was reached, because that is the moment
+// the person turns back to the answer — and because the fact is about the
+// whole run, not about the call that happened to be refused when it latched.
+func (h agentHandlers) runNotices(runID int64) []string {
+	if h.approvals == nil {
+		return nil
+	}
+	return h.approvals.RunNotices(strconv.FormatInt(runID, 10))
 }
 
 func unarmedRunLeaseSentences(rc askRunContext) []string {

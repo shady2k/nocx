@@ -680,12 +680,16 @@ func declaredResourceVerbs(t *testing.T) []content.ResourceVerb {
 
 func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) {
 	// One policy, one address, two paths to it: the command path through
-	// DecisionForInvocation, and the declared path through fetch.url's real
-	// resolver and the row scopes the kernel checks it against
-	// (internal/assistant/kernel.go, inScope). They must agree on whether
-	// the call is permitted. They do NOT yet agree on the CAUSE — the
-	// command path answers ask and the declared path refuses out of scope —
-	// which is nocx-okdsm, the next task.
+	// EvaluateInvocation, and the declared path through fetch.url's real
+	// resolver and EvaluateResources — which is what the assistant kernel
+	// calls (internal/assistant/kernel.go, effectKernel.verdict).
+	//
+	// They must agree on the WHOLE VERDICT, not on the decision. Comparing
+	// decisions is what let the two paths ship disagreeing on the cause for
+	// as long as they did: the command path answered ask and the declared
+	// path refused out of scope for one address, and a decision-only
+	// comparison could not see it. Whole-verdict equality is nocx-t6h2u's
+	// acceptance criterion.
 	reg, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
 	if err != nil {
 		t.Fatalf("assemble the real tool registry: %v", err)
@@ -697,6 +701,31 @@ func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) 
 
 	scope := content.GrantScope{Kind: content.ResourceDestination, ID: "https://github.com", IncludeSubdomains: true}
 	policy := crossBoundaryPermitting(scope)
+	fences := map[string][]content.GrantScope{
+		"unfenced": nil,
+		"fenced":   {{Kind: content.ResourceDestination, ID: "https://github.com", IncludeSubdomains: true}},
+	}
+
+	// Equality alone would be satisfied by two paths that are identically
+	// wrong, so each case also states the verdict both must reach.
+	want := map[string]map[string]content.Verdict{
+		"https://github.com/owner/repo": {
+			"unfenced": {Decision: content.DecisionPermit},
+			"fenced":   {Decision: content.DecisionPermit},
+		},
+		"https://api.github.com/x": {
+			"unfenced": {Decision: content.DecisionPermit},
+			"fenced":   {Decision: content.DecisionPermit},
+		},
+		"https://example.com": {
+			"unfenced": {Decision: content.DecisionAsk, Cause: content.OutOfScopeRowScope, Resource: content.GrantScope{Kind: content.ResourceDestination, ID: "https://example.com"}},
+			"fenced":   {Decision: content.DecisionRefuse, Cause: content.OutOfScopeFence, Resource: content.GrantScope{Kind: content.ResourceDestination, ID: "https://example.com"}},
+		},
+		"https://notgithub.com/x": {
+			"unfenced": {Decision: content.DecisionAsk, Cause: content.OutOfScopeRowScope, Resource: content.GrantScope{Kind: content.ResourceDestination, ID: "https://notgithub.com/x"}},
+			"fenced":   {Decision: content.DecisionRefuse, Cause: content.OutOfScopeFence, Resource: content.GrantScope{Kind: content.ResourceDestination, ID: "https://notgithub.com/x"}},
+		},
+	}
 
 	for _, address := range []string{
 		"https://github.com/owner/repo",
@@ -704,34 +733,143 @@ func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) 
 		"https://example.com",
 		"https://notgithub.com/x",
 	} {
-		t.Run(address, func(t *testing.T) {
-			refs, err := tool.ResolveResources(map[string]any{"url": address}, agenttools.RunContext{})
-			if err != nil {
-				t.Fatalf("fetch.url resolves %q: %v", address, err)
-			}
-			if len(refs) != 1 || refs[0].Kind != content.ResourceDestination {
-				t.Fatalf("fetch.url resolved %+v, want one destination", refs)
-			}
-			declaredPermits := policy.DecisionFor(content.EffectCrossBoundary) == content.DecisionPermit
-			for _, ref := range refs {
-				inside := false
-				for _, s := range policy.RowScopes(content.EffectCrossBoundary) {
-					if s.Contains(content.GrantScope{Kind: ref.Kind, ID: ref.ID}) {
-						inside = true
-						break
-					}
+		for fenceName, fence := range fences {
+			t.Run(address+"/"+fenceName, func(t *testing.T) {
+				refs, err := tool.ResolveResources(map[string]any{"url": address}, agenttools.RunContext{})
+				if err != nil {
+					t.Fatalf("fetch.url resolves %q: %v", address, err)
 				}
-				if !inside {
-					declaredPermits = false
+				if len(refs) != 1 || refs[0].Kind != content.ResourceDestination {
+					t.Fatalf("fetch.url resolved %+v, want one destination", refs)
 				}
-			}
-			commandPermits := policy.DecisionForInvocation(
-				content.EffectCrossBoundary, curlInvocation(address),
-			) == content.DecisionPermit
-			if declaredPermits != commandPermits {
-				t.Fatalf("%s: fetch.url permits=%t but curl permits=%t — one path is bounded and the other is not",
-					address, declaredPermits, commandPermits)
-			}
-		})
+				declaredResources := make([]content.GrantScope, 0, len(refs))
+				for _, ref := range refs {
+					declaredResources = append(declaredResources, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
+				}
+				declared := policy.EvaluateResources(
+					content.EffectCrossBoundary,
+					policy.DecisionFor(content.EffectCrossBoundary),
+					declaredResources, fence,
+				)
+				command := policy.EvaluateInvocation(
+					content.EffectCrossBoundary, curlInvocation(address), fence,
+				)
+				if declared != command {
+					t.Fatalf("%s: fetch.url answers %+v and curl answers %+v — one address, two verdicts",
+						address, declared, command)
+				}
+				if command != want[address][fenceName] {
+					t.Fatalf("%s %s: both paths answer %+v, want %+v",
+						address, fenceName, command, want[address][fenceName])
+				}
+			})
+		}
+	}
+}
+
+// ── one evaluator, one typed cause (nocx-t6h2u) ──
+//
+// The defect these tests exist for: two containment paths answered "the call
+// named a resource outside the row scopes" differently — the command path
+// asked (DecisionForInvocation), the declared path refused
+// (internal/assistant/kernel.go, RefusedOutOfScope) — and EffectRow's own doc
+// comment stated refusal for both. The split is not between the two paths; it
+// is between two CAUSES, and one evaluator now reports which.
+
+// catInvocation is what internal/assistant's parser produces for
+// `cat <path>`: one resolved resource, the path, under ResourceRead. Built
+// here for the same reason curlInvocation is — parseCanonicalInvocation is
+// unexported and internal/content may not reach into the assistant.
+func catInvocation(path string) content.Invocation {
+	return content.Invocation{
+		Commands: [][]string{{"cat", path}},
+		Parsed:   true,
+		Resources: content.ResourceReport{
+			Resources: []content.Resource{{Path: path, Verb: content.ResourceRead}},
+		},
+	}
+}
+
+func observePermitting(scopes ...content.GrantScope) content.EffectPolicy {
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{Decision: content.DecisionPermit, Scopes: scopes}
+	return p
+}
+
+func TestOutOfScopeCauseSeparatesAQuestionFromARefusal(t *testing.T) {
+	policy := observePermitting(content.GrantScope{Kind: content.ResourcePath, ID: "/workspace"})
+
+	editable := policy.EvaluateInvocation(content.EffectObserve, catInvocation("/etc/hosts"), nil)
+	if editable.Decision != content.DecisionAsk || editable.Cause != content.OutOfScopeRowScope {
+		t.Errorf("a path outside an editable row scope gave %+v; it must be a question", editable)
+	}
+	if editable.Resource.ID != "/etc/hosts" || editable.Resource.Kind != content.ResourcePath {
+		t.Errorf("the verdict does not name what fell outside: %+v", editable.Resource)
+	}
+
+	fenced := policy.EvaluateInvocation(content.EffectObserve, catInvocation("/etc/hosts"),
+		[]content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}})
+	if fenced.Decision != content.DecisionRefuse || fenced.Cause != content.OutOfScopeFence {
+		t.Errorf("a path outside the fence gave %+v; approval cannot make it executable", fenced)
+	}
+	if fenced.Resource.ID != "/etc/hosts" {
+		t.Errorf("the fence refusal does not name what fell outside: %+v", fenced.Resource)
+	}
+}
+
+// TestTheRowScopeCauseHoldsFromExclusionUntilTheScopeIsWidened states the
+// invariant with BOTH ends (AGENTS.md testing rule 3): the cause is
+// row-scope from the moment the row's scope excludes the resource until the
+// moment that scope is widened to include it — not "the evaluator returns
+// row-scope for an excluded path", which names one instant and is what a
+// test guarding only the opening event would have asserted.
+//
+// The closing event is stated as precisely as the opening one: only a
+// widening that REACHES this resource ends the interval. A widening that
+// moves the scope elsewhere, and a widening of a different resource KIND, are
+// both inside the interval and must still answer row-scope.
+func TestTheRowScopeCauseHoldsFromExclusionUntilTheScopeIsWidened(t *testing.T) {
+	const resource = "/workspace/lib/b.txt"
+	inv := catInvocation(resource)
+	named := content.GrantScope{Kind: content.ResourcePath, ID: resource}
+
+	// Before the interval opens: a row with no scope of this kind bounds
+	// nothing a command names, so there is no cause at all.
+	if got := observePermitting().EvaluateInvocation(content.EffectObserve, inv, nil); got.Decision != content.DecisionPermit || got.Cause != "" {
+		t.Fatalf("an unscoped row answered %+v; the interval has not opened", got)
+	}
+
+	// Inside the interval: every scope that excludes the resource.
+	for _, scopes := range [][]content.GrantScope{
+		{{Kind: content.ResourcePath, ID: "/workspace/src"}},
+		{{Kind: content.ResourcePath, ID: "/workspace/lib2"}},
+		// A widening that reaches somewhere else entirely.
+		{{Kind: content.ResourcePath, ID: "/workspace/src"}, {Kind: content.ResourcePath, ID: "/etc"}},
+		// A widening of a DIFFERENT kind: the path is still excluded.
+		{{Kind: content.ResourcePath, ID: "/workspace/src"}, {Kind: content.ResourceDestination, ID: "*"}},
+		// The nearest miss there is: the parent's sibling, and the
+		// resource's own directory spelled one character short.
+		{{Kind: content.ResourcePath, ID: "/workspace/lib/b.txt.bak"}},
+	} {
+		got := observePermitting(scopes...).EvaluateInvocation(content.EffectObserve, inv, nil)
+		if got.Decision != content.DecisionAsk || got.Cause != content.OutOfScopeRowScope || got.Resource != named {
+			t.Errorf("row scoped to %+v answered %+v; inside the interval it is ask/row-scope naming %+v", scopes, got, named)
+		}
+	}
+
+	// The closing event, and only it: a scope that includes the resource.
+	for _, scopes := range [][]content.GrantScope{
+		{{Kind: content.ResourcePath, ID: resource}},
+		{{Kind: content.ResourcePath, ID: "/workspace/lib"}},
+		{{Kind: content.ResourcePath, ID: "/workspace"}},
+		{{Kind: content.ResourcePath, ID: "/"}},
+		// Widened by ADDING a scope, which is what a scope-expansion
+		// answer does: the original selector is still there.
+		{{Kind: content.ResourcePath, ID: "/workspace/src"}, {Kind: content.ResourcePath, ID: "/workspace/lib"}},
+	} {
+		got := observePermitting(scopes...).EvaluateInvocation(content.EffectObserve, inv, nil)
+		if got.Decision != content.DecisionPermit || got.Cause != "" {
+			t.Errorf("row scoped to %+v answered %+v; the widening closed the interval, so nothing fell outside", scopes, got)
+		}
 	}
 }

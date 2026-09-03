@@ -57,9 +57,29 @@ func (d Decision) valid() bool {
 // EffectRow is one row of the matrix: the decision for one effect class plus
 // the resource scopes (including canonical content and workspace sub-scopes)
 // the decision applies within. A row with NO stated scope applies within the
-// grant's own bound — the run's session scope the mint supplies — and a call
-// naming a resource outside the row's scopes is refused, never silently
-// re-scoped (ADR-0020 decision 6: scope expansion invalidates prior approval).
+// grant's own bound — the run's session scope the mint supplies.
+//
+// A call naming a resource outside those scopes is never silently re-scoped
+// (ADR-0020 decision 6: scope expansion invalidates prior approval), and it
+// is not one outcome but two, because the two are different products and the
+// layer that owns each is different:
+//
+//   - Outside this row's EDITABLE scope, which an operator wrote and can
+//     widen, the policy ASKS — Verdict{Cause: OutOfScopeRowScope}. The
+//     question is answerable: widening the scope makes the same call run.
+//   - Outside an IMMUTABLE bound — the run fence the mint supplied, or the
+//     narrowed capability the tool holds — the answer is REFUSE,
+//     Verdict{Cause: OutOfScopeFence}. No answer a person can give makes the
+//     call executable, so asking would promise something the layer below
+//     refuses anyway. The fence is therefore checked FIRST.
+//
+// Neither of those is the enforcement. GrantScope.Contains (resource_scope.go,
+// its doc at :64-72) is a policy-time predicate over recorded scope ids and is
+// NEVER a filesystem authorization check: it does no provider
+// canonicalization, so it cannot see a symlink escape. The capability owns
+// that — internal/filesystem/scoped.go refuses out-of-scope reads on canonical
+// identity, and it refuses them whether this matrix permitted, asked or
+// refused. Two layers, both intact: the policy asks, the fence refuses.
 type EffectRow struct {
 	Decision Decision
 	Scopes   []GrantScope
@@ -192,7 +212,38 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 	return d
 }
 
-// DecisionForInvocation resolves one validated command, and this comment is
+// OutOfScopeCause says WHY a resource fell outside, because the two answers
+// are different products: a row scope a person can widen is a question, and a
+// fence they cannot is a refusal. The empty value is "nothing fell outside" —
+// a Verdict carrying a decision the resource layer did not reach.
+type OutOfScopeCause string
+
+const (
+	// OutOfScopeRowScope: the resource is outside the SELECTED row's own
+	// scopes, which an operator wrote and can widen. Editable, so the
+	// answer is ask, and the surface may offer to widen the scope.
+	OutOfScopeRowScope OutOfScopeCause = "row-scope"
+	// OutOfScopeFence: the resource is outside an immutable bound — the run
+	// fence the mint supplied, or the narrowed capability. Approval cannot
+	// make the call executable, so the answer is refuse and no expansion is
+	// offered.
+	OutOfScopeFence OutOfScopeCause = "fence"
+)
+
+// Verdict is what one evaluation answers. Decision is what happens; Cause and
+// Resource are what the surface needs in order to say why, and to offer the
+// only answer that would change it.
+//
+// Resource is the resource that fell outside, in the scope form a row states
+// it in — so a widening answer can be written from the verdict alone, without
+// re-deriving the scope from the command line a second time.
+type Verdict struct {
+	Decision Decision
+	Cause    OutOfScopeCause
+	Resource GrantScope
+}
+
+// EvaluateInvocation resolves one validated command, and this comment is
 // the ONE place the composition order of the layers it crosses is written
 // down (ADR-0020 §7 as amended: the matrix decides, the narrowed capability
 // enforces). The layers compose most-restrictive-wins, and no layer is an
@@ -206,22 +257,18 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 // owned by InvocationRule.Matches in rules.go: a rule answers only what shape
 // this command line has, a matching permit is an exception to an ask row, and
 // among overlapping matching rules the most restrictive wins. Last the
-// RESOURCE layer, owned by EffectRow.Scopes together with GrantScope.Contains
-// in resource_scope.go: the resources the parser named must lie inside the
-// SELECTED row's scopes, into which WithRunScopes has already folded the run
-// fence — so the fence binds here as part of the row rather than as a second
-// list to consult.
+// RESOURCE layer, owned by resourceVerdict below.
 //
 // A rule is therefore an exception to the effect layer alone. A permit whose
 // invocation names a resource outside its row falls back to asking a person:
 // never to something more permissive, and never past a refusal.
-func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
+func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []GrantScope) Verdict {
 	if !inv.Parsed {
-		return DecisionAsk
+		return Verdict{Decision: DecisionAsk}
 	}
 	base := p.DecisionFor(e)
 	if base == DecisionRefuse || inv.Disqualified {
-		return base
+		return Verdict{Decision: base}
 	}
 	decision := base
 	matched := false
@@ -243,56 +290,145 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 			decision = ruleDecision
 		}
 	}
-	if decision == DecisionPermit && !p.namedResourcesWithinRow(e, inv.Resources) {
-		return DecisionAsk
-	}
-	return decision
+	return p.resourceVerdict(e, decision, namedScopes(inv.Resources), fence, boundKindWise)
 }
 
-// namedResourcesWithinRow is the resource layer of DecisionForInvocation:
-// every resource the command named must fall inside the selected row's
-// scopes. The row is the whole resource authority here because WithRunScopes
-// folds the run fence into every row at mint, which is also why the kernel's
-// own scope check reads the row and never the derived Grant.Scopes union.
+// DecisionForInvocation is EvaluateInvocation's decision alone, over the
+// policy's own mint-supplied fence. It is the retained shape for every caller
+// that wants the outcome and not the reason.
+func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
+	return p.EvaluateInvocation(e, inv, p.runFence).Decision
+}
+
+// EvaluateResources is the RESOURCE layer alone, for a call whose resources a
+// DECLARATION resolved rather than a command parser inferred. It is the
+// declared half of the same question EvaluateInvocation asks, answered by the
+// same function underneath, so the two paths cannot drift into two answers
+// again (design §5.2 — one evaluator, one typed cause).
 //
-// The bound is kind-wise, the same rule intersectScopeSet applies when a
-// selector meets the fence: a row narrows only the resource kinds it names,
-// and a kind no scope of the row names is not narrowed here. Anything else
-// would make a session-fenced run refuse every path a command mentions, since
-// a command's resources are inferred from a command line rather than declared
-// by a tool — unlike the resolved resources of a declaration, whose kinds the
-// grant's coverage already filtered, and which must therefore be contained
-// outright.
+// decision is the effect layer's answer for this call, already computed by the
+// caller; the resource layer can only make it more restrictive.
 //
-// Like the kernel's check this is the advisory lexical approximation, not the
-// enforcement: the capability resolves canonical identity (ADR-0020 §7), and
-// a call this predicate lets through can still be refused by it.
-func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) bool {
-	scopes := p.rowFor(e).Scopes
-	if len(scopes) == 0 {
-		return true
+// The bound differs from a command's, and the difference is deliberate: a
+// declaration's resources are RESOLVED and their kinds were already filtered
+// by the grant's coverage, so each one must be contained OUTRIGHT — a row that
+// names no scope of that kind contains nothing, and the call is out of scope.
+// A command's resources are inferred from a command line instead, so they are
+// bounded kind-wise (see resourceVerdict).
+func (p EffectPolicy) EvaluateResources(e Effect, decision Decision, resources, fence []GrantScope) Verdict {
+	return p.resourceVerdict(e, decision, resources, fence, boundOutright)
+}
+
+// scopeBound is how a resource set meets a scope set.
+type scopeBound int
+
+const (
+	// boundKindWise: a scope set narrows only the resource kinds it names,
+	// and a kind no scope names is not narrowed. An empty scope set bounds
+	// nothing. This is the rule intersectScopeSet applies when a selector
+	// meets the fence, and it is what a COMMAND's inferred resources get:
+	// anything else would make a session-fenced run refuse every path a
+	// command mentions.
+	boundKindWise scopeBound = iota
+	// boundOutright: every resource must lie inside some scope of the set,
+	// and an empty set therefore contains nothing. This is what a
+	// DECLARATION's resolved resources get.
+	boundOutright
+)
+
+// resourceVerdict is the resource layer of both paths, and the one place the
+// two causes are decided.
+//
+// The FENCE IS CHECKED FIRST, and that order is the whole point: the row
+// scopes have already had the fence folded into them at mint
+// (WithRunScopes), so a resource outside the fence is also outside the row.
+// Checking the row first would report every immutable bound as an editable
+// one and offer a question whose only useful answer does not exist.
+//
+// Both checks run for any decision that is not already a refusal, not only
+// for a permit. A row-scope miss under an ask row leaves the decision at ask
+// and adds the cause the surface needs to offer the widening; a fence miss
+// under an ask row turns it into the refusal it always was at the layer
+// below, rather than a question answered by "Approve" and then refused.
+//
+// Like the kernel's own check this is the advisory lexical approximation, not
+// the enforcement: the capability resolves canonical identity (ADR-0020 §7),
+// and a call this predicate lets through can still be refused by it.
+func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fence []GrantScope, bound scopeBound) Verdict {
+	if decision == DecisionRefuse {
+		return Verdict{Decision: decision}
 	}
-	for _, resource := range report.Resources {
-		child, ok := namedResourceScope(resource)
-		if !ok {
-			continue
+	if len(fence) > 0 {
+		if outside, ok := firstOutside(resources, fence, bound); ok {
+			return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: outside}
 		}
-		bounded, inside := false, false
+	}
+	scopes := p.rowFor(e).Scopes
+	if bound == boundOutright && len(scopes) == 0 && len(resources) > 0 {
+		// NO scope at all is not a narrow selector somebody could widen: it
+		// is authority nobody minted. A grant whose matrix field was never
+		// set arrives here, and the only honest answer is the immutable one
+		// — there is no bound to expand, so the question would have no
+		// answer. Under boundKindWise the same emptiness means the opposite
+		// (see the constant's doc), which is why this is asked here and not
+		// inside firstOutside.
+		return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: resources[0]}
+	}
+	if outside, ok := firstOutside(resources, scopes, bound); ok {
+		return Verdict{Decision: DecisionAsk, Cause: OutOfScopeRowScope, Resource: outside}
+	}
+	return Verdict{Decision: decision}
+}
+
+// firstOutside returns the first resource not contained by scopes, under the
+// stated bound. First, not all of them: the verdict names ONE resource,
+// because the answer it offers is about that one and a person cannot answer a
+// list.
+func firstOutside(resources, scopes []GrantScope, bound scopeBound) (GrantScope, bool) {
+	if bound == boundKindWise && len(scopes) == 0 {
+		return GrantScope{}, false
+	}
+	for _, resource := range resources {
+		bounded := bound == boundOutright
+		inside := false
 		for _, scope := range scopes {
-			if scope.Kind != child.Kind {
-				continue
+			if bound == boundKindWise {
+				if scope.Kind != resource.Kind {
+					continue
+				}
+				bounded = true
 			}
-			bounded = true
-			if scope.Contains(child) {
+			// The scope is asked WHOLE: rebuilding it from kind and id
+			// drops a destination's subdomain marker (design §5.4), and a
+			// row that grants a host with its subdomains would then refuse
+			// one of them.
+			if scope.Contains(resource) {
 				inside = true
 				break
 			}
 		}
 		if bounded && !inside {
-			return false
+			return resource, true
 		}
 	}
-	return true
+	return GrantScope{}, false
+}
+
+// namedScopes is the command path's resource input: every resource the parser
+// named, in the scope form a row states it in. A resource with no scope form
+// is dropped rather than compared, because comparing an operand the parser
+// could not resolve against a real scope could only ever declare it inside
+// one (see scopeKindForVerb on ResourceUnknown).
+func namedScopes(report ResourceReport) []GrantScope {
+	out := make([]GrantScope, 0, len(report.Resources))
+	for _, resource := range report.Resources {
+		child, ok := namedResourceScope(resource)
+		if !ok {
+			continue
+		}
+		out = append(out, child)
+	}
+	return out
 }
 
 // scopeKindForVerb is the mapping from what a command DOES to a resource to
@@ -308,8 +444,8 @@ func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) b
 // ResourceUnknown is decided explicitly and deliberately has NO scope kind.
 // It is the verb of an UnresolvedResource and never of a resolved Resource
 // (internal/assistant/cmdeffect.go emits it on the Unresolved slice alone),
-// so it cannot reach namedResourcesWithinRow, which walks Resources. Giving
-// it a kind would be worse than useless: the parser is saying it could not
+// so it cannot reach namedScopes, which walks Resources. Giving it a kind
+// would be worse than useless: the parser is saying it could not
 // determine what the operand is, and comparing that undetermined string
 // against a real scope could only ever declare it INSIDE one. Uncertainty is
 // answered a row earlier instead — ResourceReport.Effect sends any report

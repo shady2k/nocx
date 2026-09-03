@@ -68,8 +68,14 @@ func TestMatrixCriterion2PerScopePermitAskRefuse(t *testing.T) {
 	if got := decideOutcome(t, grant, tool, map[string]any{"path": filepath.Join(home, "a.txt")}); got != policyPermit {
 		t.Fatalf("observe inside its row scope = %v, want permit", got)
 	}
-	if got := decideOutcome(t, grant, tool, map[string]any{"path": filepath.Join(ectc, "a.txt")}); got != policyRefuse {
-		t.Fatalf("observe on a path another effect's row covers = %v, want refuse — per-row scopes, no union leak", got)
+	// The other row's scope does not leak into this one: observe's own
+	// selector is what answers, and it does not cover this path. Since that
+	// selector is an operator's own and there is no fence here, the answer
+	// is the question a person can settle by widening it (design §5.3,
+	// nocx-t6h2u) — what it must never be is permit, which is what a union
+	// leak would have produced.
+	if got := decideOutcome(t, grant, tool, map[string]any{"path": filepath.Join(ectc, "a.txt")}); got != policyAsk {
+		t.Fatalf("observe on a path another effect's row covers = %v, want ask — per-row scopes, no union leak", got)
 	}
 
 	// The ask end of the same effect row: observe asks.

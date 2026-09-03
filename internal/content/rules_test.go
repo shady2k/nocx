@@ -241,8 +241,15 @@ func TestPermittingRuleDoesNotCoverAResourceOutsideTheRunFence(t *testing.T) {
 	if got := fenced.DecisionForInvocation(content.EffectObserve, inside); got != content.DecisionPermit {
 		t.Fatalf("in-fence invocation = %q, want permit", got)
 	}
-	if got := fenced.DecisionForInvocation(content.EffectObserve, outside); got != content.DecisionAsk {
-		t.Fatalf("out-of-fence invocation = %q, want ask — the fence bounds every row for the run", got)
+	// Outside the fence is a REFUSAL, not a question (design §5.3): the run
+	// fence is immutable for the run's life, so no answer a person could
+	// give would make this call executable and offering the question would
+	// promise something the capability refuses anyway.
+	if got := fenced.EvaluateInvocation(content.EffectObserve, outside, fenced.RunFence()); got.Decision != content.DecisionRefuse || got.Cause != content.OutOfScopeFence {
+		t.Fatalf("out-of-fence invocation = %+v, want refuse with cause fence — the fence bounds every row for the run", got)
+	}
+	if got := fenced.DecisionForInvocation(content.EffectObserve, outside); got != content.DecisionRefuse {
+		t.Fatalf("out-of-fence invocation = %q through the decision-only wrapper, want refuse", got)
 	}
 	// Without the fence the same policy permits the same command: the fence,
 	// not the command shape, is what closed it.

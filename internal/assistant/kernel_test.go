@@ -16,6 +16,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 // kernelFor builds the effect kernel for one test grant + the real registry,
@@ -125,4 +127,173 @@ func declaresKernelMethod(file *ast.File) bool {
 		}
 	}
 	return false
+}
+
+// ── one evaluator, one typed cause (nocx-t6h2u) ──
+//
+// The kernel used to compute its own containment answer beside
+// content.EffectPolicy's, and the two disagreed: the command path asked, the
+// declared path refused with RefusedOutOfScope, and EffectRow's doc comment
+// stated refusal for both. The kernel now asks the same evaluator, and
+// RefusedOutOfScope is the sentence for ONE cause — the immutable fence.
+
+// observeGrantFencedTo mints a grant whose observe row permits within
+// selector, inside the run fence. Both are path scopes, so the fence is the
+// immutable half and the selector is the half a person can widen.
+func observeGrantFencedTo(t *testing.T, fence, selector string) content.Grant {
+	t.Helper()
+	policy := autonomousMatrix()
+	policy.Observe.Scopes = []content.GrantScope{{Kind: content.ResourcePath, ID: selector}}
+	return policy.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: fence}})
+}
+
+func TestDeclaredResourceOutsideARowScopeIsAQuestionAndOutsideTheFenceIsARefusal(t *testing.T) {
+	root := t.TempDir()
+	selector := filepath.Join(root, "src")
+	kernel := &effectKernel{grant: observeGrantFencedTo(t, root, selector)}
+	tool := agenttools.Tool{
+		Declaration: agenttools.Declaration{Effect: []content.Effect{content.EffectObserve}},
+		Effect:      content.EffectObserve,
+	}
+	parsed := content.Invocation{Parsed: true}
+
+	// Inside the selector: nothing fell outside, so the row's own permit stands.
+	inside := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: filepath.Join(selector, "a.txt")}}
+	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, inside, true, parsed); outcome != policyPermit || reason != "" {
+		t.Errorf("a declared resource inside the selector gave outcome=%v reason=%q, want permit", outcome, reason)
+	}
+
+	// Inside the fence, outside the operator's selector: a question. The
+	// person can widen the selector, so refusing would withhold the only
+	// answer that helps.
+	editable := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: filepath.Join(root, "lib", "b.txt")}}
+	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, editable, true, parsed); outcome != policyAsk || reason != "" {
+		t.Errorf("a declared resource outside the editable row scope gave outcome=%v reason=%q, want ask with no refusal reason",
+			outcome, reason)
+	}
+
+	// Outside the fence: a refusal, and RefusedOutOfScope is its sentence.
+	// No answer a person could give makes this call executable.
+	fenced := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: "/etc/hosts"}}
+	if outcome, reason, _ := kernel.decideInvocationWithReason(tool, fenced, true, parsed); outcome != policyRefuse || reason != RefusedOutOfScope {
+		t.Errorf("a declared resource outside the run fence gave outcome=%v reason=%q, want refuse/%s",
+			outcome, reason, RefusedOutOfScope)
+	}
+}
+
+// TestTheKernelAndThePolicyReturnOneVerdictForOneResource is the acceptance
+// criterion that closes the disagreement: for one policy and one resource,
+// the command path and the declared path answer the SAME Verdict — decision,
+// cause and resource — not merely the same decision.
+func TestTheKernelAndThePolicyReturnOneVerdictForOneResource(t *testing.T) {
+	root := t.TempDir()
+	selector := filepath.Join(root, "src")
+	grant := observeGrantFencedTo(t, root, selector)
+	fence := grant.Policy.RunFence()
+
+	for _, path := range []string{
+		filepath.Join(selector, "a.txt"),    // inside both
+		filepath.Join(root, "lib", "b.txt"), // inside the fence, outside the selector
+		"/etc/hosts",                        // outside both
+	} {
+		t.Run(path, func(t *testing.T) {
+			command := grant.Policy.EvaluateInvocation(
+				content.EffectObserve,
+				content.Invocation{
+					Commands: [][]string{{"cat", path}},
+					Parsed:   true,
+					Resources: content.ResourceReport{
+						Resources: []content.Resource{{Path: path, Verb: content.ResourceRead}},
+					},
+				},
+				fence,
+			)
+			declared := grant.Policy.EvaluateResources(
+				content.EffectObserve,
+				grant.Policy.DecisionFor(content.EffectObserve),
+				[]content.GrantScope{{Kind: content.ResourcePath, ID: path}},
+				fence,
+			)
+			if command != declared {
+				t.Fatalf("one resource, two verdicts: `cat %s` gave %+v and the declared path gave %+v", path, command, declared)
+			}
+		})
+	}
+}
+
+// TestAPolicyAskDoesNotBecomeAFilesystemRead is the other half of §5.3, and
+// the reason the row scope may ask at all: asking is not a widening. The
+// policy layer and the capability layer are two layers, and moving the row's
+// answer from refuse to ask moves nothing at the capability.
+//
+// content.GrantScope.Contains is a policy-time predicate over spelled ids and
+// does no provider canonicalization (resource_scope.go, its doc at :64-72),
+// so it cannot see a symlink escape. internal/filesystem/scoped.go can, and
+// it is what actually authorizes the read — it refuses on canonical identity
+// whether the matrix permitted, asked or refused.
+func TestAPolicyAskDoesNotBecomeAFilesystemRead(t *testing.T) {
+	root := t.TempDir()
+	selector := filepath.Join(root, "src")
+	outside := filepath.Join(root, "lib")
+	for _, dir := range []string{selector, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	target := filepath.Join(outside, "b.txt")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", target, err)
+	}
+	// A symlink INSIDE the row scope that resolves OUTSIDE it. Its spelled
+	// path is inside the scope, so the policy predicate cannot tell it from
+	// any other file in there; only the canonical identity can.
+	escape := filepath.Join(selector, "escape.txt")
+	if err := os.Symlink(target, escape); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	grant := observeGrantFencedTo(t, root, selector)
+	kernel := &effectKernel{grant: grant}
+	decl := filesReadTool(t)
+	decl.Effect = content.EffectObserve
+
+	// The policy ASKS for the path outside the selector: it is inside the
+	// run fence, so the selector is the only thing excluding it and a person
+	// could widen it.
+	refs := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: target}}
+	outcome, reason, _ := kernel.decideInvocationWithReason(decl, refs, true, content.Invocation{Parsed: true})
+	if outcome != policyAsk || reason != "" {
+		t.Fatalf("policy on %q gave outcome=%v reason=%q, want ask", target, outcome, reason)
+	}
+
+	// And the capability minted from that very grant still refuses it.
+	capability, err := decl.Narrow(grant, refs, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("narrow files.read: %v", err)
+	}
+	reader, ok := capability.(*filesystem.ScopedReader)
+	if !ok {
+		t.Fatalf("files.read narrowed to %T, not *filesystem.ScopedReader", capability)
+	}
+	if _, readErr := reader.Read(context.Background(), target, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
+		t.Fatalf("the asked-about path read back with error %v, want ErrOutOfScope — a policy ask is not a widening", readErr)
+	}
+
+	// The symlink escape: spelled inside the scope, canonically outside it.
+	// The policy predicate lets it through, and the capability does not.
+	escapeRefs := []agenttools.ResourceRef{{Kind: content.ResourcePath, ID: escape}}
+	if outcome, _, _ := kernel.decideInvocationWithReason(decl, escapeRefs, true, content.Invocation{Parsed: true}); outcome != policyPermit {
+		t.Fatalf("policy on the symlink %q gave outcome=%v; the lexical predicate cannot see the escape and must permit it here", escape, outcome)
+	}
+	escapeCapability, err := decl.Narrow(grant, escapeRefs, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("narrow files.read for the symlink: %v", err)
+	}
+	escapeReader, ok := escapeCapability.(*filesystem.ScopedReader)
+	if !ok {
+		t.Fatalf("files.read narrowed to %T, not *filesystem.ScopedReader", escapeCapability)
+	}
+	if _, readErr := escapeReader.Read(context.Background(), escape, 1<<20); !errors.Is(readErr, filesystem.ErrOutOfScope) {
+		t.Fatalf("the symlink escape read back with error %v, want ErrOutOfScope — the capability is the enforcement", readErr)
+	}
 }

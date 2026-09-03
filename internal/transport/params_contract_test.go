@@ -722,6 +722,20 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		// The calibration asks the same way, and answers with an action —
+		// never with a label, which is what the bead is falsified by
+		// (nocx-etejh).
+		"agent.calibration": {
+			[]byte(`{}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"agent.calibration.answer": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"begin"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"abandon"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"capture","step":0}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

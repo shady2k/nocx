@@ -33,9 +33,12 @@ go run ./cmd/agent-capture capture -out /tmp/bash-capture.jsonl -- \
 go run ./cmd/agent-capture replay -at 100 /tmp/bash-capture.jsonl
 ```
 
-The command-line replay feeds `charmbracelet/x/vt`. The driver-test helper replays through
-`internal/panegrid`, so what a test asserts on is a frame produced the way production
-produces one.
+Both replays now go through `internal/panegrid`, so what anything asserts on is a frame
+produced the way production produces one. The format itself — the header, the chunks, the
+mark arithmetic and the replay — lives in `internal/agentcapture`, because a calibration
+set (`internal/agentcalib`, nocx-etejh) is a capture too: one chunk per labelled state and
+one mark per label, so `agent-capture replay` reads a person's calibration as readily as it
+reads this corpus.
 
 | capture                | script              | what it holds                                                                       |
 | ---------------------- | ------------------- | ----------------------------------------------------------------------------------- |

@@ -35,7 +35,9 @@ import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
 import type { PolicyClient } from './policy-client'
 import { AgentEmittingSection } from './agent-emitting-section'
+import { AgentCalibrationSection } from './agent-calibration-section'
 import type { EmittingClient } from './emitting-client'
+import type { CalibrationClient } from './calibration-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -259,6 +261,9 @@ export interface SettingsComponentProps {
    *  is still registered and says so, because a surface that appears only once
    *  some other state exists is how a feature ships unreachable. */
   emittingClient?: EmittingClient
+  /** The guided calibration (nocx-etejh). Optional like every other client
+   *  here: without it the page is still registered and says so. */
+  calibrationClient?: CalibrationClient
   /** What the window calls a pane. The emitting view's picker lists panes the
    *  backend named by session id and agent; this is what turns one into the
    *  name on the tab. Optional — without it the picker says what the wire
@@ -702,6 +707,31 @@ export function SettingsComponent(props: SettingsComponentProps) {
       ),
     }
 
+    // BESIDE the emitting view, in the same 'assistant' group and directly
+    // after it. The two are one job seen from two ends: the emitting view is
+    // what a person looks at while repairing a rule, and calibration is where
+    // the evidence that rule is checked against comes from. A person who has
+    // found one has found the other.
+    const calibrationPage: SettingsPage = {
+      kind: 'component',
+      id: 'calibration',
+      title: 'Calibrate an agent',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.calibrationClient}
+          fallback={
+            <PageSection title="Calibrate an agent">
+              Calibrating an agent is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentCalibrationSection client={props.calibrationClient!} nameOf={props.paneName} />
+        </Show>
+      ),
+    }
+
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
@@ -735,6 +765,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       rolesPage,
       policyPage,
       emittingPage,
+      calibrationPage,
       aboutPage,
     ]
   })

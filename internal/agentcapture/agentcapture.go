@@ -67,9 +67,12 @@ type Moment struct {
 
 // Write stores a capture atomically enough for a file a person may be reading:
 // it is written whole, and a failure part-way leaves the previous file alone.
+//
+// Mode 0600, because a capture holds whatever was on the screen — the same
+// reason the app directory's documents are written that way (ADR-0011).
 func Write(path string, header Header, chunks []Chunk) error {
 	tmp := path + ".tmp"
-	file, err := os.Create(tmp) //nolint:gosec // the caller explicitly supplies the capture path
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // the caller explicitly supplies the capture path
 	if err != nil {
 		return fmt.Errorf("cannot create capture %q: %w", path, err)
 	}
@@ -230,9 +233,6 @@ func (r *Replayer) Feed(chunks []Chunk) error {
 	}
 	return nil
 }
-
-// FeedBytes paints raw bytes onto the replayed screen.
-func (r *Replayer) FeedBytes(b []byte) { r.store.Feed(r.pane, b) }
 
 // Frame is the screen as it stands.
 func (r *Replayer) Frame() (panegrid.Frame, error) { return r.store.Frame(r.pane) }

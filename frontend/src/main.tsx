@@ -38,6 +38,7 @@ import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { EmittingClient } from './emitting-client'
+import { CalibrationClient } from './calibration-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -246,6 +247,10 @@ function main(): void {
   // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
   // the interval, and there is nothing here to close.
   const emittingClient = new EmittingClient(dispatcher)
+  // The guided calibration (nocx-etejh). Stateless in the same way: the walk
+  // it drives lives in the backend, keyed by the pane, so a window that goes
+  // away leaves nothing half-open.
+  const calibrationClient = new CalibrationClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -558,6 +563,7 @@ function main(): void {
         secretSource,
         skillsStore,
         emittingClient,
+        calibrationClient,
         // The window already names every pane in its tab strip, and the
         // backend answers the emitting view with a session id and an agent
         // name. This is the one place those two meet; deriving a name inside

@@ -553,6 +553,7 @@ describe('SettingsContent', () => {
       'Roles',
       'Agent policy',
       'Agent screens',
+      'Calibrate an agent',
       'Protection',
       'Secrets',
       'Terminal',

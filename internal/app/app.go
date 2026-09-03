@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
@@ -1306,6 +1307,17 @@ func New(opts ...Option) (*App, error) {
 	// observation beside the grid's interval, and the transport touches it
 	// from the session read path and is where its reports go.
 	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers)
+	// The guided calibration (nocx-etejh): nocx asks a person to drive their
+	// agent into a named state and labels the frame with the state it asked
+	// for. It reads the grid through the same Observer the watcher does, so
+	// the frame a label lands on is the frame the product classifies, and it
+	// writes its sets under the profile directory THIS build owns — a dev
+	// stand keeps its own, like every other document here.
+	calibrationStore, calibrationErr := agentcalib.NewFileStore(paths.ConfigDir())
+	if calibrationErr != nil {
+		return nil, fmt.Errorf("agent calibration store: %w", calibrationErr)
+	}
+	paneCalibration := agentcalib.New(logger, paneGrid, calibrationStore)
 	// The establishment bound is stated here for the same reason the hello
 	// timeouts below are: how long a minted accept may wait for the
 	// renderer's acknowledgement before the domain is rolled back and the
@@ -1639,7 +1651,8 @@ func New(opts ...Option) (*App, error) {
 	// reading a person is shown is the reading the product acted on. A
 	// second registry here would be a second answer to one question.
 	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
-		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers))
+		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
+		transport.WithAgentCalibration(paneCalibration))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries

@@ -309,6 +309,10 @@ type WSServer struct {
 	// that it is not available rather than a screen with no reading beside
 	// it — the half of that view the design says may not be missing.
 	agentRules agentRules
+	// agentCalibration runs the guided calibration walk (nocx-etejh). Nil
+	// when unwired, and both agent.calibration methods then answer "not
+	// found" rather than a step list nobody can answer.
+	agentCalibration agentCalibrator
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
 	// can be sure nothing is still sweeping. Same shape as panegrid's own
@@ -1609,6 +1613,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
+	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {

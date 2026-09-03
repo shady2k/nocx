@@ -58,9 +58,13 @@ export interface Scope {
    */
   kind: 'environment' | 'session' | 'path' | 'credential' | 'destination'
   /**
-   * The scope's id: an absolute path for kind 'path', an opaque identity otherwise.
+   * The scope's id: an absolute path for kind 'path', an endpoint 'scheme://host[:port]' or the universal '*' for kind 'destination', an opaque identity otherwise.
    */
   id: string
+  /**
+   * Destination scopes only, and absent when false: the grant covers the endpoint's subdomains as well, matched label-wise so 'notgithub.com' and 'github.com.evil.example' stay outside a grant over 'github.com' (design §5.4). Refused on an IP literal, which has no subdomains, and on '*', which already covers every address.
+   */
+  includeSubdomains?: boolean
 }
 /**
  * mutate-reversible — changes that can be undone.

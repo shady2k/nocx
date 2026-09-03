@@ -581,3 +581,209 @@ func TestCommandEffect_DisqualifiedAlwaysHasUnresolvedCause(t *testing.T) {
 		})
 	}
 }
+
+func hasResource(r content.ResourceReport, path string, verb content.ResourceVerb) bool {
+	for _, res := range r.Resources {
+		if res.Path == path && res.Verb == verb {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFeature(r content.ResourceReport, feature string) bool {
+	for _, f := range r.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
+}
+
+// A path curl writes through -o used to appear in no resource, under no verb,
+// in no row: optionTakesNextValue("curl", "-o") swallowed the option together
+// with its value, so the only resource left was the URL, whose verb is
+// ResourceNetwork and whose row is "Reach another host". Answering that row
+// with Allowed therefore allowed writing any file on the machine.
+func TestCommandResources_CurlOutputOptionIsAWrittenResource(t *testing.T) {
+	inv := parseCanonicalInvocation("curl -o /tmp/proof https://example.com")
+
+	if !inv.Parsed || inv.Disqualified {
+		t.Fatalf("expected a parsed, qualified invocation, got parsed=%v disqualified=%v",
+			inv.Parsed, inv.Disqualified)
+	}
+	if !hasResource(inv.Resources, "/tmp/proof", content.ResourceWrite) {
+		t.Errorf("the file curl writes is not in the report: %+v", inv.Resources)
+	}
+	if !hasResource(inv.Resources, "https://example.com", content.ResourceNetwork) {
+		t.Errorf("the URL is no longer in the report: %+v", inv.Resources)
+	}
+	if !hasFeature(inv.Resources, featureWritesOptionNamedPath) {
+		t.Errorf("the feature a refusal has to match is absent: %+v", inv.Resources.Features)
+	}
+
+	// The report now mixes ResourceNetwork with ResourceWrite, so Effect
+	// takes the declared set's worst member rather than the network mapping.
+	// For session.run's set that member is `delegate` (effectOrder 6), NOT
+	// `mutate-destructive` (2) as the brief's parenthetical says — the
+	// binding half of the criterion is WorstEffect(declared), and the
+	// security property holds either way because both outrank the
+	// cross-boundary row this command used to be filed under.
+	got := commandEffect(inv, runEffects)
+	if got == content.EffectCrossBoundary {
+		t.Errorf("a curl that writes a file is still filed under the network row: %q", got)
+	}
+	if want := content.WorstEffect(runEffects); got != want {
+		t.Errorf("effect = %q, want the declared set's worst member %q", got, want)
+	}
+}
+
+// A dynamic target cannot be resolved without running the shell, so the
+// invocation is disqualified rather than classified as harmless.
+func TestCommandResources_CurlOutputOptionWithDynamicTargetIsUnresolved(t *testing.T) {
+	inv := parseCanonicalInvocation(`curl -o "$OUT" https://example.com`)
+
+	if len(inv.Resources.Unresolved) == 0 {
+		t.Fatalf("a dynamic output path resolved: %+v", inv.Resources)
+	}
+	if hasResource(inv.Resources, "$OUT", content.ResourceWrite) {
+		t.Errorf("a dynamic output path was recorded as a resolved write: %+v", inv.Resources)
+	}
+	if got := commandEffect(inv, runEffects); got != content.WorstEffect(runEffects) {
+		t.Errorf("effect = %q, want the declared set's worst member", got)
+	}
+}
+
+// The plain form is untouched: one network resource, the network row.
+func TestCommandResources_CurlWithoutOutputOptionIsUnchanged(t *testing.T) {
+	inv := parseCanonicalInvocation("curl https://example.com")
+
+	if len(inv.Resources.Resources) != 1 ||
+		inv.Resources.Resources[0].Path != "https://example.com" ||
+		inv.Resources.Resources[0].Verb != content.ResourceNetwork {
+		t.Fatalf("resources = %+v, want one network resource", inv.Resources.Resources)
+	}
+	if len(inv.Resources.Features) != 0 {
+		t.Errorf("features = %+v, want none", inv.Resources.Features)
+	}
+	if got := commandEffect(inv, runEffects); got != content.EffectCrossBoundary {
+		t.Errorf("effect = %q, want cross-boundary", got)
+	}
+}
+
+// -ofile, --output file and --output=file are one fact written three ways.
+func TestCommandResources_WrittenOptionSpellings(t *testing.T) {
+	for _, command := range []string{
+		"curl -o /tmp/p https://example.com",
+		"curl -o/tmp/p https://example.com",
+		"curl --output /tmp/p https://example.com",
+		"curl --output=/tmp/p https://example.com",
+	} {
+		t.Run(command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(command)
+			if !hasResource(inv.Resources, "/tmp/p", content.ResourceWrite) {
+				t.Errorf("%q did not record its output file: %+v", command, inv.Resources)
+			}
+			if !hasFeature(inv.Resources, featureWritesOptionNamedPath) {
+				t.Errorf("%q did not carry the feature: %+v", command, inv.Resources.Features)
+			}
+			if !hasResource(inv.Resources, "https://example.com", content.ResourceNetwork) {
+				t.Errorf("%q lost its URL: %+v", command, inv.Resources)
+			}
+		})
+	}
+}
+
+// The audit of optionTakesNextValue, stated as a test. Every entry whose value
+// is NOT a written path stays out of the resource report: the distinction is
+// per program and cannot be guessed from the letter.
+func TestCommandResources_OptionValuesThatAreNotWrittenPaths(t *testing.T) {
+	// value is the option value that must not become a resource. install -o
+	// is the case that shows why the assertion is per value rather than
+	// "records no write at all": `install -o root /src /dst` genuinely does
+	// write /dst, and `root` is still not a path.
+	for _, tc := range []struct{ name, command, value string }{
+		{"ssh -o is a config keyword", "ssh -o StrictHostKeyChecking=no host", "StrictHostKeyChecking=no"},
+		{"ssh -oAttached is a config keyword", "ssh -oStrictHostKeyChecking=no host", "StrictHostKeyChecking=no"},
+		{"ssh -i is an identity file it reads", "ssh -i /home/dev/.ssh/id_ed25519 host", "/home/dev/.ssh/id_ed25519"},
+		{"bash -o is a shell option name", "bash -o pipefail script.sh", "pipefail"},
+		{"install -o is an owner", "install -o root /src /dst", "root"},
+		{"grep -f reads a pattern file", "grep -f patterns.txt file", "patterns.txt"},
+		{"grep -e is a pattern", "grep -e out file", "out"},
+		{"cut -f is a field list", "cut -f 2 file", "2"},
+		{"head -n is a line count", "head -n 20 file", "20"},
+		{"uniq -f is a field count", "uniq -f 2 file", "2"},
+		{"du -d is a depth", "du -d 2 /tmp", "2"},
+		{"curl -H is a header", "curl -H out https://example.com", "out"},
+		{"curl -X is a method", "curl -X POST https://example.com", "POST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := parseCanonicalInvocation(tc.command)
+			if hasFeature(inv.Resources, featureWritesOptionNamedPath) {
+				t.Errorf("%q was read as writing a file through an option: %+v",
+					tc.command, inv.Resources)
+			}
+			for _, res := range inv.Resources.Resources {
+				if res.Path == tc.value {
+					t.Errorf("%q recorded its option value %q as a %s resource: %+v",
+						tc.command, tc.value, res.Verb, inv.Resources)
+				}
+			}
+		})
+	}
+}
+
+// The other option in the table whose value IS a written path: install -t and
+// cp -t name a target DIRECTORY, and targetDirectoryOperands has owned that
+// since before this change. Named here so the audit is complete.
+func TestCommandResources_TargetDirectoryOptionsWriteTheirValue(t *testing.T) {
+	for _, tc := range []struct{ command, target string }{
+		{"install -t /dest source", "/dest"},
+		{"install --target-directory=/dest source", "/dest"},
+		{"cp -t /dest source", "/dest"},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(tc.command)
+			if !hasResource(inv.Resources, tc.target, content.ResourceWrite) {
+				t.Errorf("%q did not record %q as written: %+v",
+					tc.command, tc.target, inv.Resources)
+			}
+		})
+	}
+}
+
+// sort -o is the one other write-bearing option value, and it shares the
+// table so that "which option value is a written path" has a single owner.
+func TestCommandResources_SortOutputOptionSpellings(t *testing.T) {
+	for _, command := range []string{
+		"sort -o /tmp/p file",
+		"sort -o/tmp/p file",
+		"sort --output /tmp/p file",
+		"sort --output=/tmp/p file",
+	} {
+		t.Run(command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(command)
+			if !hasResource(inv.Resources, "/tmp/p", content.ResourceWrite) {
+				t.Errorf("%q did not record its output file: %+v", command, inv.Resources)
+			}
+			if !hasResource(inv.Resources, "file", content.ResourceRead) {
+				t.Errorf("%q lost its input file: %+v", command, inv.Resources)
+			}
+			if !hasFeature(inv.Resources, featureWritesOptionNamedPath) {
+				t.Errorf("%q did not carry the feature: %+v", command, inv.Resources.Features)
+			}
+		})
+	}
+}
+
+// A stored approval is re-checked against its clone, so a clone that loses the
+// features loses the fact a narrowing refusal matches on.
+func TestCloneInvocation_KeepsFeatures(t *testing.T) {
+	inv := parseCanonicalInvocation("curl -o /tmp/proof https://example.com")
+	if !hasFeature(inv.Resources, featureWritesOptionNamedPath) {
+		t.Fatalf("precondition: the parse did not record the feature: %+v", inv.Resources)
+	}
+	if !hasFeature(cloneInvocation(inv).Resources, featureWritesOptionNamedPath) {
+		t.Errorf("the clone dropped the feature: %+v", cloneInvocation(inv).Resources)
+	}
+}

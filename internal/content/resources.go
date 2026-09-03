@@ -33,6 +33,14 @@ type UnresolvedResource struct {
 type ResourceReport struct {
 	Resources  []Resource           `json:"resources,omitempty"`
 	Unresolved []UnresolvedResource `json:"unresolved,omitempty"`
+
+	// Features are semantic facts the parser established about the
+	// invocation, as opposed to the resources it named. A narrowing rule
+	// matches a feature rather than the spelling of a token, because -o,
+	// --output, --output=file and an attached short option are the same
+	// fact written four ways (ADR-0028 decision 4 is untouched: a feature
+	// names a command's behaviour, never a tool).
+	Features []string `json:"features,omitempty"`
 }
 
 // Effect selects one class from the declaration set. Unresolved, unknown or

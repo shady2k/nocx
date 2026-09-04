@@ -53,6 +53,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
 	"github.com/shady2k/nocx/internal/skill"
@@ -146,6 +147,34 @@ func (e *ToolFailedError) Message() string {
 		return ""
 	}
 	return e.Err.Error()
+}
+
+// capabilityRefusal reports whether a tool's error is the NARROWED CAPABILITY
+// refusing the call as outside what it holds — the carve-out from
+// ToolFailedError above, and the one place that question is decided.
+//
+// The distinction is the whole of nocx-4yjwk.3. A tool that FAILED tried and
+// could not: the file was unreadable, the command would not start, the
+// endpoint was down. A capability that REFUSED never tried, because the call
+// it was handed is not one it can express at all — and that is a policy fact
+// in the capability's hands (ADR-0028 decision 4: the dispatcher narrows, it
+// does not check), so it is a refusal, and "a refusal is an answer"
+// (nocx-uvac6.1) applies to it exactly as it applies to the gate's own no.
+//
+// It reaches here at all only when the LEXICAL predicate the policy uses said
+// yes and the capability's canonical identity said no — a symlink inside the
+// fence resolving outside it. The policy asked, a person answered, and the
+// call then met the enforcement. Nothing about that ordering is wrong: the
+// lexical check is advisory by design and the capability is the enforcement.
+// What would be wrong is ending the run over it.
+//
+// Sentinel, never text: the message names a path and belongs to the provider,
+// and a predicate reading it would break the first time a message was
+// reworded. The list grows by addition — a capability that gains its own
+// out-of-scope sentinel joins it here rather than growing a second answer to
+// this question somewhere else.
+func capabilityRefusal(err error) bool {
+	return errors.Is(err, filesystem.ErrOutOfScope)
 }
 
 // EgressScreeningError marks a result withheld because the egress gate could
@@ -1844,6 +1873,32 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: err}
 		}
+	}
+
+	// 6c. A CAPABILITY REFUSAL IS AN ANSWER, NOT A FAULT (nocx-4yjwk.3).
+	// The narrowed capability refused a call it cannot express, which is
+	// the same kind of no the policy gate makes at step 3 — so it takes
+	// the same shape: OUR sentence, in the refused call's own slot, and
+	// the run continues. Before this, it left as a *ToolFailedError and
+	// ended the run on the provider's sentence about a path, which is what
+	// a person got back after being asked a question and answering it.
+	//
+	// BEFORE THE EGRESS GATE, deliberately. Nothing was read, so there is
+	// no result to screen; what would reach the gate is the capability's
+	// error text, whose only content is the path the model already named.
+	// Screening it could suspend the run for a person's decision about
+	// bytes that were never produced. Every other refusal in this pipeline
+	// returns unscreened for the same reason: the sentence is ours, and it
+	// says nothing the policy keeps from the person.
+	//
+	// The attempt closes here rather than being left open — the interval
+	// ends with a reason, always. TermFailed is the honest existing
+	// reason: this attempt did not do what it was opened for.
+	// TermAgentDeclined names the agent's own no, which this is not, and
+	// content owns that vocabulary.
+	if runErr != nil && capabilityRefusal(runErr) {
+		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
 	}
 
 	// 7. Result ingest — the egress gate (design §7.1) FIRST, then the

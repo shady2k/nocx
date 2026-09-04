@@ -252,6 +252,69 @@ const approvalScopeCoverage = (
   }
 }
 
+/**
+ * The verb an answer is given with. Two spellings of "Allow" would be two
+ * vocabularies for one act — the buttons say it, the aria labels repeat it,
+ * and the receipt afterwards has to say the same word or the person cannot
+ * tell that it is reporting what they clicked.
+ */
+const approvalAnswerVerb = (approved: boolean) => (approved ? 'Allow' : 'Deny')
+
+/**
+ * One label builder for every answer, because two would be two spellings of
+ * one concept. `expand` is not a fourth WIDTH — the three widths answer "how
+ * long", and this one answers "over what" — so its words are built from the
+ * resource that fell outside rather than looked up in SCOPES.
+ */
+const approvalAnswerLabel = (verb: string, scope: ApprovalScope, wideningResource = '') =>
+  scope === 'expand'
+    ? `${verb} and widen to ${wideningResource}`
+    : `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
+
+/**
+ * The WHOLE of one answer in one sentence: the direction and how far it
+ * reaches. It is what the buttons' aria labels read, and — with "Saved:" in
+ * front of it — what the receipt afterwards says, so the sentence a person is
+ * told they configured is character for character the sentence they chose.
+ */
+const approvalAnswerSentence = (
+  verb: string,
+  scope: ApprovalScope,
+  standing: AgentApprovalRequested['standing'],
+  effectLabel: string,
+  wideningResource = '',
+) =>
+  `${approvalAnswerLabel(verb, scope, wideningResource)} — ${approvalScopeCoverage(scope, standing, effectLabel)}`
+
+/**
+ * What a SAVED standing answer says it did (nocx-2019q). No second
+ * sentence-builder: the whole line is the answer's own sentence with one word
+ * in front of it, so it cannot drift from the button that produced it — and
+ * when the button's words change, this changes with them.
+ *
+ * `Saved`, not `Allowed`: what the line reports is not that the call went
+ * through — the person watched that — but that something was written down
+ * which will govern calls nobody is looking at yet.
+ */
+export const standingAnswerReceipt = (
+  approved: boolean,
+  scope: ApprovalScope,
+  /** The canonical invocation the answer covers, exactly as the question
+   *  offered it; empty for a non-command answer, whose coverage is the row. */
+  rule: string,
+  effectLabel: string,
+) =>
+  `Saved: ${approvalAnswerSentence(
+    approvalAnswerVerb(approved),
+    scope,
+    // The coverage builder reads a standing OFFER, because that is the shape
+    // the question arrives in and the shape the buttons hold. A receipt has
+    // only the two facts inside it, so it says so here rather than making
+    // every caller assemble an offer for an answer already given.
+    { available: true, rule, reason: '' },
+    effectLabel,
+  )}`
+
 export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const ask = () => props.ask
   const effectLabel = () => EFFECT_LABEL[ask().effect]
@@ -538,19 +601,12 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    *  the arguments — the widening is applied from the QUESTION. */
   const wideningResource = () => outOfScope()?.resource.id ?? ''
 
-  /**
-   * One label builder for every answer, because two would be two spellings
-   * of one concept. `expand` is not a fourth WIDTH — the three widths answer
-   * "how long", and this one answers "over what" — so its words are built
-   * from the resource rather than looked up in SCOPES.
-   */
+  /** The kit builders above, bound to this question's own facts. */
   const answerLabel = (verb: string, scope: ApprovalScope) =>
-    scope === 'expand'
-      ? `${verb} and widen to ${wideningResource()}`
-      : `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
+    approvalAnswerLabel(verb, scope, wideningResource())
 
   const answerAriaLabel = (verb: string, scope: ApprovalScope) =>
-    `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing, effectLabel())}`
+    approvalAnswerSentence(verb, scope, ask().standing, effectLabel(), wideningResource())
 
   const group = (approved: boolean, verb: string, variant: 'primary' | 'danger') => (
     <ActionGroup ariaLabel={approved ? 'Allow this action' : 'Refuse this action'}>
@@ -608,8 +664,8 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           }
         >
           <>
-            {group(true, 'Allow', 'primary')}
-            {group(false, 'Deny', 'danger')}
+            {group(true, approvalAnswerVerb(true), 'primary')}
+            {group(false, approvalAnswerVerb(false), 'danger')}
             {/*
               The widening answer sits LAST, in a group of its own, and that
               placement is the argument. It belongs to neither row: it is

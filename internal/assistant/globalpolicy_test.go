@@ -391,3 +391,97 @@ func TestGlobalPolicyStore_ConcurrentRuleWritesAllLand(t *testing.T) {
 		t.Fatalf("rules after ten concurrent one-rule writes = %d, want 10", got)
 	}
 }
+
+// SetRowDecision is SetRule's twin (nocx-2019q): ONE row moves, and the other
+// six rows, this row's scopes and every stored rule are exactly what they
+// were. Before it, the approval prompt answered a non-command question by
+// reading the whole policy, editing its copy and writing the document back —
+// so a rule another prompt saved in between went back to not existing.
+func TestGlobalPolicyStore_SetRowDecisionMovesOneRowAndTouchesNothingElse(t *testing.T) {
+	store, _, seeded := seededStore(t)
+	before := store.Policy()
+
+	if err := store.SetRowDecision(content.EffectDisclose, content.DecisionRefuse); err != nil {
+		t.Fatalf("SetRowDecision: %v", err)
+	}
+
+	after := store.Policy()
+	if got := after.DecisionFor(content.EffectDisclose); got != content.DecisionRefuse {
+		t.Fatalf("disclose = %q, want the refuse that was written", got)
+	}
+	if got, want := ruleIDs(after.Rules), ruleIDs(seeded); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules after a ROW write = %v, want %v — a row write is not a rule write", got, want)
+	}
+	for _, e := range []content.Effect{
+		content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive,
+		content.EffectPrivilegeChange, content.EffectCrossBoundary, content.EffectDelegate,
+	} {
+		if got, want := after.DecisionFor(e), before.DecisionFor(e); got != want {
+			t.Fatalf("row %s decides %s after another row was written, want %s untouched", e, got, want)
+		}
+	}
+	if got, want := after.RowScopes(content.EffectDisclose), before.RowScopes(content.EffectDisclose); !reflect.DeepEqual(got, want) {
+		t.Fatalf("disclose scopes = %v after its DECISION moved, want %v untouched", got, want)
+	}
+}
+
+// The row write survives a restart, like every other one: a decision that was
+// not persisted is a decision that vanished.
+func TestGlobalPolicyStore_SetRowDecisionPersists(t *testing.T) {
+	store, doc := testPolicyStore(t, "agent-policy.json")
+	if err := store.SetRowDecision(content.EffectMutateDestructive, content.DecisionRefuse); err != nil {
+		t.Fatalf("SetRowDecision: %v", err)
+	}
+	reloaded := NewGlobalPolicyStore(doc, "agent-policy.json")
+	if got := reloaded.Policy().DecisionFor(content.EffectMutateDestructive); got != content.DecisionRefuse {
+		t.Fatalf("after reload mutate-destructive = %q, want the refuse that was written", got)
+	}
+}
+
+// A store that cannot be written leaves the SERVED value alone — the same
+// interval SetRule closes, asserted for the row seam too. A policy that
+// reported a decision it failed to persist would be one the next start
+// disagrees with.
+func TestGlobalPolicyStore_RowWriteFailureLeavesTheServedValueAlone(t *testing.T) {
+	store, _, _ := seededStore(t)
+	before := store.Policy().DecisionFor(content.EffectDisclose)
+	store.doc = refusingDocumentStore{inner: store.doc, err: errors.New("disk is full")}
+
+	if err := store.SetRowDecision(content.EffectDisclose, content.DecisionRefuse); err == nil {
+		t.Fatal("SetRowDecision on a store that cannot be written returned no error")
+	}
+	if got := store.Policy().DecisionFor(content.EffectDisclose); got != before {
+		t.Fatalf("disclose = %q after a refused write, want the unchanged %q", got, before)
+	}
+}
+
+// Ten row writes and ten rule writes at once, and every one of them lands.
+// This is the shape two prompts and a settings page make of one document.
+func TestGlobalPolicyStore_ConcurrentRowAndRuleWritesAllLand(t *testing.T) {
+	store, _ := testPolicyStore(t, "agent-policy.json")
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := store.SetRule(exactRule("echo", strconv.Itoa(i))); err != nil {
+				t.Errorf("SetRule %d: %v", i, err)
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			if err := store.SetRowDecision(content.EffectDisclose, content.DecisionRefuse); err != nil {
+				t.Errorf("SetRowDecision: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	after := store.Policy()
+	if got := len(after.Rules); got != 10 {
+		t.Fatalf("rules after ten rule writes racing ten row writes = %d, want 10", got)
+	}
+	if got := after.DecisionFor(content.EffectDisclose); got != content.DecisionRefuse {
+		t.Fatalf("disclose = %q, want the refuse every row write asked for", got)
+	}
+}

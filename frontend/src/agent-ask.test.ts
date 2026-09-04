@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { AgentInputTarget } from './agent-ask'
 import type { GrantBlock } from './ask-entry'
 import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
+import { BlockNotice } from './ui/block-notice'
 
 class FakeDispatcher {
   calls: { method: string; params: unknown }[] = []
@@ -58,6 +59,7 @@ function makeTarget(grants: GrantBlock[] = []) {
     append: vi.fn(),
     toolCall: vi.fn(),
     reasoning: vi.fn(),
+    notice: vi.fn(() => new BlockNotice({ text: '' })),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
@@ -306,6 +308,7 @@ describe('AgentInputTarget', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -364,6 +367,7 @@ describe('AgentInputTarget', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     let actions: RunningBlockActions | undefined
@@ -451,6 +455,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -492,6 +497,7 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -535,6 +541,7 @@ describe('AgentInputTarget refusal', () => {
       append: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
+      notice: vi.fn(() => new BlockNotice({ text: '' })),
       close: vi.fn(),
     }
     const onRefusal = vi.fn()
@@ -726,5 +733,55 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     expect(lines).toContain(
       '— the inactivity bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
     )
+  })
+})
+
+describe('AgentInputTarget standing-answer receipt routing (nocx-2019q)', () => {
+  const saved = (over: Record<string, unknown> = {}) => ({
+    runId: '7',
+    entryId: 'answer-1',
+    approved: true,
+    scope: 'always',
+    rule: 'df -h',
+    effect: 'observe',
+    ruleId: 'rule-42',
+    ...over,
+  })
+
+  it('draws the receipt on the turn that asked the question', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+    handle.el.dataset.entryId = 'answer-1'
+
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: String(runId) }))
+
+    expect(handle.notice).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a receipt for a run this pane does not hold', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+
+    // Another pane's run. Routed by id exactly as a delta is, so it lands
+    // where the question was asked and nowhere else.
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: '999' }))
+
+    expect(handle.notice).not.toHaveBeenCalled()
+  })
+
+  it('drops a receipt whose entry names a different block', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+
+    // A stale or misrouted notification: the same guard the deltas use, and
+    // for the same reason — it must never be drawn on the wrong turn.
+    dispatcher.emit(
+      'agent.standingAnswerSaved',
+      saved({ runId: String(runId), entryId: 'answer-elsewhere' }),
+    )
+
+    expect(handle.notice).not.toHaveBeenCalled()
   })
 })

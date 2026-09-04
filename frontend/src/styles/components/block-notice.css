@@ -1,0 +1,34 @@
+/* BlockNotice (ui/README table) — one line a block states about itself after
+   the fact, with the actions that act on it. This file owns the
+   ui-block-notice identity family only; the controls inside are the kit's own
+   ui-button and this file never repaints them (ADR-0013, gate 3). Colours are
+   tokens only, no literals. */
+.ui-block-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 4px 0;
+  padding: 4px 0 4px 10px;
+  /* The rule down the left is what makes it read as an aside on the turn
+     rather than another thing the assistant said. */
+  border-left: 2px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-block-notice[data-tone='warning'] {
+  border-left-color: var(--color-warning, var(--color-danger));
+  color: var(--color-text);
+}
+
+.ui-block-notice__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ui-block-notice__actions {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}

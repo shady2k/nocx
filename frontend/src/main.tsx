@@ -37,6 +37,7 @@ import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
+import { recordApprovalDecision } from './agent-approval-decision'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -323,31 +324,30 @@ function main(): void {
     if (!ask || approvalBusy()) return
     setApprovalBusy(true)
     try {
-      await dispatcher.call('agent.approve', {
-        runId: ask.runId,
-        attempt: ask.attempt,
-        tool: ask.tool,
-        callId: ask.callId,
-        argHash: ask.argHash,
-        approved,
-        // How far the answer reaches, as the person chose it in the prompt.
-        // It travels with the decision because the BACKEND applies it: a
-        // renderer that read the matrix, edited a row and wrote it back would
-        // be a second owner of the policy document, racing the settings page
-        // (nocx-gycwo, design §"Three wire changes").
-        scope,
-      } satisfies AgentApprove)
+      // The exchange itself is agent-approval-decision.ts: this surface owns
+      // the QUEUE — which question is up and which wait behind it — and that
+      // is a different job from putting one answer on the wire.
+      const recorded = await recordApprovalDecision(ask, approved, scope, {
+        dispatcher,
+        // The standing half did not stick. The decision itself stood, so
+        // nothing is refused; what must not happen is silence, which is how
+        // a person ends up being asked again a question they answered for
+        // good. Sticky, because it is about what will happen LATER and is
+        // therefore worth reading after the moment has passed.
+        onWarning: (sentence) => showToast({ level: 'warning', message: sentence, duration: 0 }),
+        onError: (message) =>
+          showToast({
+            level: 'danger',
+            message: `Could not record the decision: ${message}`,
+            duration: 0,
+          }),
+      })
       // Only a RECORDED decision closes the question. A refusal (a stale
       // binding — the question was already answered) keeps the prompt up:
       // the person sees the honest refusal and can answer anew or deny.
+      if (!recorded) return
       pendingApprovals.delete(ask.runId)
       nextApproval()
-    } catch (err) {
-      showToast({
-        level: 'danger',
-        message: `Could not record the decision: ${err instanceof Error ? err.message : String(err)}`,
-        duration: 0,
-      })
     } finally {
       setApprovalBusy(false)
     }
@@ -489,6 +489,10 @@ function main(): void {
   // names the one page that repairs it — and it reuses that seam for the
   // endpoints destination rather than growing a second one.
   tm.onOpenRoles = () => openSettingsPane().openPage('roles')
+  // The approval receipt's Manage permissions: the page that governs the
+  // standing answer the line is about (nocx-2019q). The same idea again — a
+  // fact on screen names the one page that manages it.
+  tm.onManagePermissions = () => openSettingsPane().openPage('policy')
   tm.onActivity = reportActivity
 
   // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────

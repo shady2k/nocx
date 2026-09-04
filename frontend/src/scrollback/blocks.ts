@@ -12,6 +12,7 @@ import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createDisclosure, type Disclosure } from '../ui/disclosure'
+import { BlockNotice, type BlockNoticeState } from '../ui/block-notice'
 import type { Drive } from '../generated/agent.dump'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
@@ -401,6 +402,16 @@ export interface AnswerBlockHandle {
    *  note is created at the FIRST chunk, so a model that returns no
    *  reasoning renders nothing at all. */
   reasoning(this: void, text: string): void
+  /** Draw one line the TURN states about ITSELF, as a child in the seat it
+   *  arrived at — a standing answer that was just saved, and what can be
+   *  done about it (nocx-2019q). It is not part of the model's answer and
+   *  never enters the prose: the run of text being written is ENDED first,
+   *  so a delta arriving afterwards opens a new run BELOW the line rather
+   *  than continuing one above it and reading as though it came first.
+   *
+   *  The notice is handed back so the caller can restate it in place when
+   *  an action changes what it says. */
+  notice(this: void, state: BlockNoticeState): BlockNotice
   /** Close the block: success, failure with a renderable reason, or the
    *  distinct cancelled outcome shown as "stopped". */
   close(
@@ -2819,6 +2830,20 @@ export class BlockManager {
         children.appendChild(cel)
         own(cel)
         showTyping()
+      },
+      notice(state: BlockNoticeState): BlockNotice {
+        // The same seat rule a tool call follows: the backend's run of prose
+        // is closed here, so what the model writes next opens its own run
+        // under this line instead of growing the one above it.
+        endProse()
+        const drawn = new BlockNotice(state)
+        children.appendChild(drawn.root)
+        own(drawn.root)
+        // The turn is still in flight — the answer resumes after the person
+        // decides — so the stand-in returns to the tail, where the next
+        // thing written will land.
+        showTyping()
+        return drawn
       },
       reasoning(text: string): void {
         if (text === '') return

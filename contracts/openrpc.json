@@ -9937,6 +9937,9 @@
       "$ref": "https://nocx.local/contracts/agent.runToolCall.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/agent.standingAnswerSaved.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/agent.status.schema.json"
     },
     {

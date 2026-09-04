@@ -206,9 +206,22 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 		)
 	}
 	rule := InvocationRule{
-		// The id is minted by the backend and never supplied by the
-		// renderer (AD-7), by the package's one existing mint.
-		ID:               mintID(),
+		// NO ID, and that is the decision (nocx-2019q). An id is the
+		// DOCUMENT's name for a rule — what a page takes it back by and
+		// what policy.forgetRule names — so it is minted where a rule is
+		// STORED (normalizeInvocationRules, on the one strict parse every
+		// stored policy crosses) and nowhere else. Minting here gave an
+		// identity to a rule that may never be stored: standingOffer builds
+		// one on every question purely to read its Label back to a person,
+		// and threw the id away every time. It also put a second mint in
+		// front of the store's own, so the id a caller held was not
+		// necessarily the id the document ended up wearing — and the
+		// approval receipt's Undo is exact only if it is.
+		//
+		// This is why GlobalPolicyStore.SetRule can keep its contract
+		// whole: an id names a rule to REPLACE, an absent id is a new rule
+		// the store names, and the in-process prompt goes through the same
+		// door as the wire with no exception carved for it.
 		Selector:         InvocationSelector{Exact: inv.Commands},
 		Decision:         decision,
 		CreatedAt:        time.Now(),

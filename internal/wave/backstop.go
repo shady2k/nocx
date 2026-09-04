@@ -24,13 +24,11 @@ package wave
 // never reported as sent; the deadline is still running under it, which is
 // what makes a refused wake an escalation rather than a loss.
 //
-// # The set is in memory, deliberately
+// # The set lives exactly as long as the backend
 //
-// The record's other five things are rows in the encrypted store. This one is
-// not, and the argument is the startup sweep's own: a restart terminalizes
-// every open participant as interrupted, because the worker died with the
-// backend that held it. A fact that survived the restart would need judgement
-// about a participant the same restart has already judged, and the
+// So does everything else the record holds, and for one reason: a participant
+// dies with the backend that spawned it (D5), so a fact that outlived the
+// restart would need judgement about a participant that is gone, and the
 // coordinator it would be dispatched to is gone with its run. What the human
 // is told about the restart ITSELF is open question §10.7 and is not this.
 

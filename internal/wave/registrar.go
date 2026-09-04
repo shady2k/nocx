@@ -24,9 +24,9 @@ import (
 //
 //  1. Validate and reserve the bound. A refusal here has forked NOTHING, which
 //     is the whole reason it is first.
-//  2. Commit the participant in prepared. A durable record with nothing behind
-//     it is deliberately reachable — it is the state the interval exists to
-//     make discoverable.
+//  2. Commit the participant in prepared. A committed record with nothing
+//     behind it is deliberately reachable — it is the state the interval
+//     exists to make discoverable.
 //  3. Create the session and fork the launcher, with the id already minted, so
 //     a failed connect registers nothing.
 //  4. The launcher enrols BEFORE it execs the real agent. Failure is closed:
@@ -244,8 +244,10 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 		}
 	}
 	if err := r.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
-		// A failure is never a verdict. The record stays non-terminal and
-		// the next pass completes what this one could not.
+		// A failure is never a verdict: the record stays non-terminal
+		// rather than claiming a state this pass did not establish. Nothing
+		// closes it afterwards — the participant it describes dies with this
+		// backend, and so does the record.
 		return errors.Join(cause, fmt.Errorf("wave: terminalize: %w", err))
 	}
 	return cause
@@ -466,36 +468,6 @@ func (r *Registrar) Cost() Stats { return r.attention.Stats() }
 // behind "a wave with no undispatched facts wakes nobody": an empty answer
 // and no armed alarm are the same statement.
 func (r *Registrar) Undispatched() []Fact { return r.attention.Open() }
-
-// Sweep terminalizes every non-terminal participant of a wave as interrupted.
-//
-// It is the second pass the compensation rule promises — "a failure is never a
-// verdict", so a compensation that could not run leaves the record open and
-// THIS completes it — and it is also what a backend restart runs, for the same
-// reason and with the same effect. One procedure, because the two situations
-// are one fact: a participant is open and the process behind it is not this
-// backend's to judge.
-//
-// It NEVER adopts. Adoption would require identifying the process found at the
-// far end as the one we spawned, and no pin exists in this tree to do that
-// with. The asymmetry is the argument: an interrupted record costs a row that
-// outlives its process by one restart, while a wrongly adopted participant
-// costs a coordinator addressing a process that is not its worker.
-func (r *Registrar) Sweep(ctx context.Context) error {
-	held, err := r.store.AllNonTerminal(ctx)
-	if err != nil {
-		return fmt.Errorf("wave: sweep: %w", err)
-	}
-	var errs []error
-	for _, p := range held {
-		if err := r.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
-			// Keep going: one record that could not be closed must not
-			// leave the rest open behind it.
-			errs = append(errs, fmt.Errorf("wave: sweep %q: %w", p.ID, err))
-		}
-	}
-	return errors.Join(errs...)
-}
 
 // ── the mailbox (nocx-dkawo.11) ───────────────────────────────────────────
 

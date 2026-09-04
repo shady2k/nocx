@@ -2,16 +2,21 @@ package wave
 
 import "context"
 
-// Store is the durable half of the record, and it is deliberately narrow: this
-// package owns the SEMANTICS of a wave and owns no rows. The rows live in the
-// encrypted content store, because ADR-0043 puts one connection on it and AD-8
-// puts one owner on a behaviour, so a second database beside it would be a
-// second owner of "what nocx durably knows".
+// Store is where a wave's participants are held, and it is deliberately
+// narrow: this package owns the SEMANTICS of a wave — the interval, the order
+// that is the rollback, the reduction of two independent facts into one state
+// — and a Store owns only what is true right now.
 //
-// Every method is a boundary that can fail, and the order Register calls them
-// in IS the rollback (see registrar.go). Nothing here is asked to be
-// transactional across methods; CommitPrepared is the one place a transaction
-// is required, and it is required inside that single call.
+// It is an interface and not the map itself so the semantics can be tested
+// against a double that fails on demand: every method is a boundary that can
+// fail, and the order Register calls them in IS the rollback (see
+// registrar.go). Nothing here is asked to be transactional across methods.
+//
+// The shipped implementation is MemoryStore, and nothing behind this interface
+// is durable. Under the 2026-08-15 D5 a participant dies with the backend that
+// spawned it, so the record's lifetime and its participants' lifetime coincide
+// by construction, and a row that outlived them would describe nothing — see
+// memory.go for the whole argument.
 type Store interface {
 	// EnsureWave records a wave and the session that coordinates it, and does
 	// nothing if it is already there. Idempotent rather than
@@ -22,24 +27,24 @@ type Store interface {
 	EnsureWave(ctx context.Context, id ID, coordinatorSession string) error
 
 	// NonTerminal lists the participants this wave holds that are not
-	// finished. It answers two questions with one row set, which is why it is
-	// not a count: step 1's reservation asks HOW MANY before anything is
-	// forked, and the startup sweep asks WHICH, so that a restart can
-	// terminalize each by name. A count beside a list would be two owners of
-	// "what is still open".
+	// finished. It is a list and not a count, because the callers ask two
+	// different questions of one answer: step 1's reservation asks HOW MANY
+	// before anything is forked, and a wait asks WHICH is still running. A
+	// count beside a list would be two owners of "what is still open".
 	NonTerminal(ctx context.Context, id ID) ([]Participant, error)
 
 	// AllNonTerminal lists every open participant across every wave. It is
-	// the sweep's question and it is deliberately not NonTerminal with a
-	// magic empty id: a restart closes what this backend can no longer
-	// judge, which is a property of the BACKEND and not of any one wave.
+	// deliberately not NonTerminal with a magic empty id: "what is this
+	// BACKEND still holding" is a property of the backend and not of any one
+	// wave, and a caller that had to enumerate the waves first could only
+	// ask about the ones it happened to know.
 	AllNonTerminal(ctx context.Context) ([]Participant, error)
 
-	// CommitPrepared writes the participant row, its wave membership and its
-	// lineage edge in ONE transaction. It is the opening end of the interval,
-	// and it happens before the spawn for the reason the vault journal is
-	// written before the provider call: a spawn that times out may still have
-	// forked, and a fork nobody recorded is permanently undiscoverable.
+	// CommitPrepared enters the participant and its wave membership. It is
+	// the opening end of the interval, and it happens before the spawn for
+	// the reason the vault journal is written before the provider call: a
+	// spawn that times out may still have forked, and a fork nobody recorded
+	// is permanently undiscoverable.
 	CommitPrepared(ctx context.Context, p Participant) error
 
 	// MarkLive moves a prepared participant to live. It is called only on the
@@ -113,10 +118,10 @@ type Store interface {
 	// message says nothing about whether it was delivered.
 	Undelivered(ctx context.Context, id ID) ([]Message, error)
 
-	// HeldBy answers D3 — a restarted coordinator asks what its SESSION
-	// holds and is told by name. It is the session and not the run, because
-	// the run that spawned the worker has ended by the time the question is
-	// asked; that is the whole situation the question exists for.
+	// HeldBy answers D3 — a coordinator asks what its SESSION holds and is
+	// told by name. It is the session and not the run, because the run that
+	// spawned the worker has ended by the time the question is asked; that
+	// is the whole situation the question exists for.
 	HeldBy(ctx context.Context, coordinatorSession string) ([]Participant, error)
 }
 

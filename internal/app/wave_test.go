@@ -79,10 +79,11 @@ func (p *recordingPTY) read() string {
 }
 
 // waveStand is the composition this file asserts: the real record, the real
-// durable store, the real session registry, the real session opener, and the
-// two adapters that carry the facts.
+// content store behind the layout chain, the real session registry, the real
+// session opener, and the two adapters that carry the facts.
 type waveStand struct {
 	db     content.ContentDB
+	waves  wave.Store
 	dir    string
 	ptys   *waveTestPTYFactory
 	tp     *transport.WSServer
@@ -114,6 +115,10 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	// The record, empty: it holds this backend's own participants and they
+	// die with it, so there is nothing to load and nothing to sweep.
+	waves := wave.NewMemoryStore()
+
 	ptys := &waveTestPTYFactory{log: logger}
 	reg := session.New(logger, ptys)
 	tp := transport.NewWSServer(logger, reg)
@@ -130,7 +135,7 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 		// reported the exit, so waiting on the registry would still leave a
 		// write racing the store's own teardown.
 		waittest.WaitFor(t, "every participant to reach a terminal state", func() bool {
-			open, err := db.Waves().AllNonTerminal(ctx)
+			open, err := waves.AllNonTerminal(ctx)
 			return err != nil || len(open) == 0
 		})
 		_ = tp.Stop(ctx)
@@ -144,7 +149,7 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 	}
 	sup := &waveSupervisor{sessions: reg, log: logger}
 	record := wave.NewRegistrar(
-		db.Waves(),
+		waves,
 		&waveSpawner{
 			layout: db.Layout(), opener: tp, sessions: reg,
 			enrolments: enrol, workspace: string(workspace.Default), log: logger,
@@ -172,11 +177,11 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 		}
 	}
 
-	if err := db.Waves().EnsureWave(ctx, "wave-1", "sess-coordinator"); err != nil {
+	if err := waves.EnsureWave(ctx, "wave-1", "sess-coordinator"); err != nil {
 		t.Fatalf("ensure wave: %v", err)
 	}
 	return &waveStand{
-		db: db, dir: dir, ptys: ptys, tp: tp, reg: reg,
+		db: db, waves: waves, dir: dir, ptys: ptys, tp: tp, reg: reg,
 		enrol: enrol, lanes: lanes, report: report, record: record,
 	}
 }
@@ -258,8 +263,9 @@ func TestAParticipantGetsAPaneASessionAndGoesLiveOnItsEnrolment(t *testing.T) {
 		t.Fatalf("the pane the session names is not in the layout chain")
 	}
 
-	// And the record is durable: a fresh reader over the same file sees it.
-	stored, err := stand.db.Waves().Participant(ctx, p.ID)
+	// And the record holds it: what the registrar returned is what a reader
+	// of the record is told afterwards.
+	stored, err := stand.waves.Participant(ctx, p.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -281,7 +287,7 @@ func TestAParticipantThatNeverEnrolsIsTerminalizedAndItsSessionClosed(t *testing
 	if !errors.Is(err, wave.ErrEnrolmentNeverArrived) {
 		t.Fatalf("register err = %v, want ErrEnrolmentNeverArrived", err)
 	}
-	stored, err := stand.db.Waves().Participant(ctx, p.ID)
+	stored, err := stand.waves.Participant(ctx, p.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -306,7 +312,7 @@ func TestTheRealSessionExitReachesTheRecord(t *testing.T) {
 			t.Fatalf("close session: %v", err)
 		}
 		waittest.WaitFor(t, "the exit to reach the record", func() bool {
-			stored, err := stand.db.Waves().Participant(ctx, p.ID)
+			stored, err := stand.waves.Participant(ctx, p.ID)
 			return err == nil && stored.State == wave.StateAbandoned
 		})
 	})
@@ -330,7 +336,7 @@ func TestTheRealSessionExitReachesTheRecord(t *testing.T) {
 			t.Fatalf("close session: %v", err)
 		}
 		waittest.WaitFor(t, "the conjunction to complete", func() bool {
-			stored, perr := stand.db.Waves().Participant(ctx, p.ID)
+			stored, perr := stand.waves.Participant(ctx, p.ID)
 			return perr == nil && stored.State == wave.StateCompleted
 		})
 	})
@@ -355,24 +361,6 @@ func TestAFreshCoordinatorIsToldWhatItsSessionHolds(t *testing.T) {
 	}
 }
 
-// A restart closes what this backend can no longer judge, and never adopts.
-func TestTheStartupSweepInterruptsWhatTheBackendCannotJudge(t *testing.T) {
-	ctx := context.Background()
-	stand := newWaveStand(t)
-	p := stand.registerWithEnrolment(t, "outlives nothing")
-
-	if err := stand.record.Sweep(ctx); err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	stored, err := stand.db.Waves().Participant(ctx, p.ID)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if stored.State != wave.StateInterrupted {
-		t.Fatalf("state = %q, want %q", stored.State, wave.StateInterrupted)
-	}
-}
-
 // An enrolment for a session no wave is waiting on is the ORDINARY case — a
 // person running an agent in their own tab — and must not be mistaken for a
 // participant.
@@ -394,7 +382,7 @@ func TestADeclarationOverTheChannelReachesTheRecord(t *testing.T) {
 	if err := stand.report.Report("lane-participant", true, "read it"); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	stored, err := stand.db.Waves().Participant(ctx, p.ID)
+	stored, err := stand.waves.Participant(ctx, p.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -413,7 +401,7 @@ func TestADeclarationOverTheChannelReachesTheRecord(t *testing.T) {
 		t.Fatalf("close session: %v", err)
 	}
 	waittest.WaitFor(t, "the conjunction to complete", func() bool {
-		got, perr := stand.db.Waves().Participant(ctx, p.ID)
+		got, perr := stand.waves.Participant(ctx, p.ID)
 		return perr == nil && got.State == wave.StateCompleted
 	})
 }
@@ -487,7 +475,7 @@ func TestOneCoordinatorStartsOneWorkerAndIsToldWhatItCameTo(t *testing.T) {
 	if reportErr := stand.report.Report("lane-participant", true, "read it; nothing to change"); reportErr != nil {
 		t.Fatalf("report: %v", reportErr)
 	}
-	after, err := stand.db.Waves().Participant(ctx, worker.ID)
+	after, err := stand.waves.Participant(ctx, worker.ID)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -501,7 +489,7 @@ func TestOneCoordinatorStartsOneWorkerAndIsToldWhatItCameTo(t *testing.T) {
 		t.Fatalf("close the worker's session: %v", closeErr)
 	}
 	waittest.WaitFor(t, "the worker to complete", func() bool {
-		got, perr := stand.db.Waves().Participant(ctx, worker.ID)
+		got, perr := stand.waves.Participant(ctx, worker.ID)
 		return perr == nil && got.State == wave.StateCompleted
 	})
 

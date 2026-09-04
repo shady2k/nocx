@@ -153,41 +153,8 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
-	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild},
-	{from: 16, to: 17, apply: migrateWaveRecordTables16to17},
-	{from: 17, to: 18, apply: migrateWaveMailbox17to18, schemaDigest: "17eebbf640b7f9ad1a67dd156fc4844adb7d036c6bec2ef2682b0b1af475eef5"},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 }
-
-// migrateWaveRecordTables16to17 carries a database across the edge that added
-// the wave record (nocx-dkawo.2): waves, wave_participants, its open index,
-// wave_delegations and wave_delegation_effects.
-//
-// It does nothing, and that is the whole of the edge rather than an omission.
-// Open applies schemaV1 immediately after this walk and every statement of it
-// is IF NOT EXISTS, so a new TABLE and a new INDEX arrive by themselves; a
-// step that wrote them again would be a second copy of the same DDL, which is
-// the duplicate-owner defect this file's header refuses. A rung exists for
-// what IF NOT EXISTS cannot express — a new column in an existing table, a
-// changed CHECK, a reshaped index, a backfill — and this edge adds none of
-// those: nothing that existed at 16 is touched.
-//
-// The rung is still required, and required to be here. It is what carries the
-// schemaV1 digest forward, so the gate that refuses a changed schema with no
-// migration keeps refusing; and it is what makes a database stamped 16 open
-// at all, since the protocol has exactly three rows and "no step for this
-// edge" is the refusal row.
-func migrateWaveRecordTables16to17(context.Context, *sql.Tx) error { return nil }
-
-// migrateWaveMailbox17to18 carries a database across the edge that added the
-// mailbox (nocx-dkawo.11): wave_messages, its ordering index and wave_cursors.
-//
-// It does nothing, for migrateWaveRecordTables16to17's reason and no other:
-// the edge adds two TABLEs and one INDEX and touches nothing that existed at
-// 17, and every statement of schemaV1 is IF NOT EXISTS, so they arrive by
-// themselves. The rung exists because the protocol has exactly three rows and
-// "no step for this edge" is the refusal row — and because it is what carries
-// the schemaV1 digest forward.
-func migrateWaveMailbox17to18(context.Context, *sql.Tx) error { return nil }
 
 // validateLadder validates the shipped ladder against the current schema.
 func validateLadder(ladder []migrationStep) error {

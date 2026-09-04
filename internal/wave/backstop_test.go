@@ -558,11 +558,11 @@ func TestARefusedAdmissionEntersNothingAndWakesNobody(t *testing.T) {
 		}
 	})
 
-	t.Run("a fact against a record the sweep already closed", func(t *testing.T) {
+	t.Run("a fact against a record that is already closed", func(t *testing.T) {
 		h := newHarness(t)
 		p := mustRegister(t, h)
-		if err := h.reg.Sweep(ctx); err != nil {
-			t.Fatalf("sweep: %v", err)
+		if err := h.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
+			t.Fatalf("terminalize: %v", err)
 		}
 		if _, err := h.reg.Declared(ctx, p.ID, testLiveness(), Declaration{OK: true}); err == nil {
 			t.Fatalf("a fact was admitted against an interrupted record")

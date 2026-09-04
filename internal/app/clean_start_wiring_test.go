@@ -16,7 +16,6 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/settings"
-	"github.com/shady2k/nocx/internal/wave"
 )
 
 // clearWindowProbe is a ContentDB whose layout seam records whether the sweep
@@ -29,12 +28,6 @@ type clearWindowProbe struct {
 
 func (p *clearWindowProbe) Layout() content.LayoutRepository { return p.layout }
 
-// Waves: these fakes never register a participant. A wave store that
-// refuses is the honest stand-in — a nil one would panic at the first
-// call and a no-op one would pretend a registration succeeded.
-func (p *clearWindowProbe) Waves() wave.Store {
-	return content.NewStub(log.NewSlogAdapter(nil)).Waves()
-}
 func (p *clearWindowProbe) APIRuns() content.APIRunRepository              { return nil }
 func (p *clearWindowProbe) SessionOutput() content.SessionOutputRepository { return nil }
 

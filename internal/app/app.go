@@ -1885,10 +1885,16 @@ func New(opts ...Option) (*App, error) {
 	// and writing it out is what keeps the two sources of an inventory — held
 	// and re-adopted — visibly the same argument.
 	// THE WAVE RECORD (nocx-dkawo.2). Built here because every seam it needs
-	// exists only now: the durable rows from the content store, the pane and
-	// the session from the layout chain and the one session opener, the
-	// enrolment from the rendezvous above, and the process exit from the
-	// registry.
+	// exists only now: the pane and the session from the layout chain and the
+	// one session opener, the enrolment from the rendezvous above, and the
+	// process exit from the registry.
+	//
+	// The record itself is IN MEMORY and is minted here, empty. It holds
+	// participants of this backend's own making, and under D5 every one of
+	// them dies with this process, so the record's lifetime and its
+	// participants' lifetime are the same interval by construction — see
+	// internal/wave/memory.go. Nothing is carried across a start, and there
+	// is nothing to sweep at one.
 	//
 	// The supervisor's destination is bound AFTER the registrar, because the
 	// two need each other: a registrar cannot be constructed without a
@@ -1909,7 +1915,7 @@ func New(opts ...Option) (*App, error) {
 		&waveEscalation{raise: notifyIngress, log: logger},
 		wave.WithFactDeadline(waveFactDeadline))
 	waveRecord := wave.NewRegistrar(
-		contentDB.Waves(),
+		wave.NewMemoryStore(),
 		&waveSpawner{
 			layout: contentDB.Layout(), opener: tp, sessions: sess,
 			enrolments: waveEnrol,
@@ -1944,16 +1950,6 @@ func New(opts ...Option) (*App, error) {
 		_, err := waveRecord.Declared(ctx, id, l, d)
 		return err
 	}
-	// A restart closes what this backend can no longer judge. It never
-	// adopts: the worker died with the backend that held it, and no pin
-	// exists that could prove a process found at the far end was ours if it
-	// had not. An interrupted record costs a row that outlives its process by
-	// one start; a wrongly adopted participant costs a coordinator addressing
-	// a process that is not its worker, and the two are not symmetric.
-	if err := waveRecord.Sweep(ctx); err != nil {
-		logger.Warn("wave: the startup sweep left participants open", "error", err)
-	}
-
 	reconcileSessions(ctx, contentDB.Reconcile(),
 		helperReg.inventories(),
 		&readoptPass{registry: helperReg, routes: resolver, adopter: tp},

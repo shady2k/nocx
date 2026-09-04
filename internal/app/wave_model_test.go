@@ -277,10 +277,10 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWaveAndClosesThem(t *testing.T) {
 	// own workers here, the WORK does, which is the case the wait exists for.
 	go func() {
 		waittest.WaitFor(t, "the first worker to be live", func() bool {
-			held, herr := w.db.Waves().HeldBy(ctx, string(w.coordinator))
+			held, herr := w.waves.HeldBy(ctx, string(w.coordinator))
 			return herr == nil && len(held) >= 1 && held[0].State == wave.StateLive
 		})
-		held, _ := w.db.Waves().HeldBy(ctx, string(w.coordinator))
+		held, _ := w.waves.HeldBy(ctx, string(w.coordinator))
 		_ = w.reg.Close(session.ID(held[0].Liveness.SessionID))
 	}()
 
@@ -305,7 +305,7 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWaveAndClosesThem(t *testing.T) {
 	}
 
 	// THREE WORKERS EXIST, and the test never registered one.
-	held, err := w.db.Waves().HeldBy(ctx, string(w.coordinator))
+	held, err := w.waves.HeldBy(ctx, string(w.coordinator))
 	if err != nil {
 		t.Fatalf("held by: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestAModelSpawnsThreeWorkersWaitsOnTheWaveAndClosesThem(t *testing.T) {
 	}
 	for _, p := range held {
 		waittest.WaitFor(t, "every worker to reach a terminal state", func() bool {
-			stored, serr := w.db.Waves().Participant(ctx, p.ID)
+			stored, serr := w.waves.Participant(ctx, p.ID)
 			return serr == nil && stored.State.Terminal()
 		})
 	}

@@ -119,10 +119,11 @@ const (
 	// StateAbandoned is a process exit with no declaration. Terminal, and
 	// named so that it can never be misread as a completion.
 	StateAbandoned State = "abandoned"
-	// StateInterrupted is what the startup sweep writes over any
-	// non-terminal participant after a backend restart. Not adopted: the
-	// worker is gone with the backend that held it, and we could not prove a
-	// process found at the far end was ours if it were not.
+	// StateInterrupted is what a compensation writes over a participant
+	// nothing established — a registration that failed after the record was
+	// committed, whose launcher has been killed. It is never an adoption of
+	// something found running: we could not prove a process at the far end
+	// was ours if it were not.
 	StateInterrupted State = "interrupted"
 )
 
@@ -337,12 +338,6 @@ var (
 	// what stops a late fact from a replaced attempt overwriting a current
 	// one.
 	ErrStaleEvidence = errors.New("wave: evidence names another incarnation")
-	// ErrRecordUnavailable means the durable half of the record is not
-	// there — the encrypted store never opened. It is a REFUSAL and never a
-	// degrade: a wave nobody can record is a wave nobody supervises, and
-	// accepting a registration into nowhere is how an unaccounted agent gets
-	// created by a bad start rather than by a bug.
-	ErrRecordUnavailable = errors.New("wave: the record is unavailable")
 	// ErrTerminal means a fact arrived about a participant whose record is
 	// already closed. It is a refusal and not a failure: a late fact from a
 	// process the record has already accounted for must not reopen it.

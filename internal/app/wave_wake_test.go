@@ -111,7 +111,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 	watch.Watch(string(coordinator), wakeAgent)
 
 	waveID := wave.ID("wave-wake")
-	if waveErr := stand.db.Waves().EnsureWave(ctx, waveID, string(coordinator)); waveErr != nil {
+	if waveErr := stand.waves.EnsureWave(ctx, waveID, string(coordinator)); waveErr != nil {
 		t.Fatalf("ensure wave: %v", waveErr)
 	}
 
@@ -706,7 +706,7 @@ func finishWorker(t *testing.T, w *wakeStand, p wave.Participant) {
 		t.Fatalf("close %s: %v", p.ID, err)
 	}
 	waittest.WaitFor(t, "the worker's exit to reach the record", func() bool {
-		stored, err := w.db.Waves().Participant(ctx, p.ID)
+		stored, err := w.waves.Participant(ctx, p.ID)
 		return err == nil && stored.State == wave.StateCompleted
 	})
 }
@@ -816,10 +816,10 @@ func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing
 	}
 	for _, p := range workers[1:] {
 		waittest.WaitFor(t, "the closed worker's exit to reach the record", func() bool {
-			stored, err := w.db.Waves().Participant(ctx, p.ID)
+			stored, err := w.waves.Participant(ctx, p.ID)
 			return err == nil && stored.State.Terminal()
 		})
-		stored, err := w.db.Waves().Participant(ctx, p.ID)
+		stored, err := w.waves.Participant(ctx, p.ID)
 		if err != nil {
 			t.Fatalf("read back: %v", err)
 		}

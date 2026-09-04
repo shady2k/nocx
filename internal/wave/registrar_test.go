@@ -999,11 +999,11 @@ func TestStateNamesDoNotDriftFromTheWire(t *testing.T) {
 	}
 }
 
-// A compensation that itself fails leaves the record NON-TERMINAL on purpose,
-// and the next pass completes exactly what the first one could not. Writing a
-// terminal state the compensation did not establish is the one thing it may
-// never do.
-func TestACompensationThatFailsLeavesTheRecordForTheNextPass(t *testing.T) {
+// A compensation that itself fails leaves the record NON-TERMINAL on purpose.
+// Writing a terminal state the compensation did not establish is the one
+// thing it may never do — a record that says "interrupted" is a claim that
+// the launcher was killed, and this pass could not make that claim.
+func TestACompensationThatFailsWritesNoVerdict(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	h.spawn.failOn = 1                 // force the compensation path
@@ -1020,42 +1020,9 @@ func TestACompensationThatFailsLeavesTheRecordForTheNextPass(t *testing.T) {
 	if got.State.Terminal() {
 		t.Fatalf("state = %q: a compensation that failed wrote a terminal state it did not establish", got.State)
 	}
-
-	// The second pass, with the fault healed, completes it.
-	h.store.setFault("terminalize", 0)
-	if err := h.reg.Sweep(ctx); err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	got, _ = h.store.read(t, p.ID)
-	if got.State != StateInterrupted {
-		t.Fatalf("after the second pass state = %q, want %q", got.State, StateInterrupted)
-	}
 }
 
-// The startup sweep terminalizes every non-terminal participant after a
-// backend restart. It never adopts: the worker is gone with the backend that
-// held it, and we could not prove a process found at the far end was ours if
-// it were not.
-func TestTheSweepTerminalizesAndNeverAdopts(t *testing.T) {
-	ctx := context.Background()
-	h := newHarness(t)
-	p, err := h.register(ctx)
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if err := h.reg.Sweep(ctx); err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	got, _ := h.store.read(t, p.ID)
-	if got.State != StateInterrupted {
-		t.Fatalf("state = %q, want %q", got.State, StateInterrupted)
-	}
-	if got.State == StateLive {
-		t.Fatalf("the sweep adopted a participant")
-	}
-}
-
-// A fact about a participant the sweep already closed must not reopen it.
+// A fact about a participant something already closed must not reopen it.
 func TestALateFactAgainstAnInterruptedRecordIsRefused(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
@@ -1063,8 +1030,8 @@ func TestALateFactAgainstAnInterruptedRecordIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := h.reg.Sweep(ctx); err != nil {
-		t.Fatalf("sweep: %v", err)
+	if err := h.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
+		t.Fatalf("terminalize: %v", err)
 	}
 	if _, err := h.reg.Exited(ctx, p.ID, testLiveness(), Exit{Cause: "exited"}); !errors.Is(err, ErrTerminal) {
 		t.Fatalf("late exit err = %v, want ErrTerminal", err)

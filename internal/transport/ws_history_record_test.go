@@ -21,7 +21,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/wave"
 )
 
 // fakeRecordHistoryDB is a real-behaving in-memory ContentDB over the LEDGER
@@ -57,12 +56,6 @@ func (f *fakeRecordHistoryDB) Close() error                     { return nil }
 func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository { return f }
 func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository { return nil }
 
-// Waves: these fakes never register a participant. A wave store that
-// refuses is the honest stand-in — a nil one would panic at the first
-// call and a no-op one would pretend a registration succeeded.
-func (f *fakeRecordHistoryDB) Waves() wave.Store {
-	return content.NewStub(log.NewSlogAdapter(nil)).Waves()
-}
 func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeRecordHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 

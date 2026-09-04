@@ -9,7 +9,7 @@
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  * - secret-text-field.tsx: a focused value-field action that reports its UTF-16 selection
  */
-import { For, Show, Switch, Match, createSignal, type JSX } from 'solid-js'
+import { For, Show, Switch, Match, createSignal, createUniqueId, type JSX } from 'solid-js'
 import { Field } from './field'
 import { IconButton } from './icon-button'
 import { mirrorControlledValue } from './controlled-value'
@@ -200,7 +200,28 @@ export interface TextFieldProps {
 }
 
 export function TextField(props: TextFieldProps) {
-  const inputId = () => props.id ?? ''
+  /**
+   * The id this field falls back to when the caller named none.
+   *
+   * THE KIT GENERATES ONE RATHER THAN REFUSING TO RENDER, and the choice is
+   * between two wrongs. A field given a `label` and no `id` used to draw
+   * `<label for="">` around an input with no id, which binds the label to
+   * nothing and announces the control as UNNAMED — worse than a bare input,
+   * because the visible text tells a sighted person the name is there. That is
+   * always a defect and never a caller's intention, so it is the component's
+   * to answer. Throwing would answer it too, and it would answer it by
+   * blanking the page a person was using: a screen that does not draw is a
+   * bigger failure than a field that does not announce, and it would arrive at
+   * the caller who is least able to fix it — the surface, mid-render. So the
+   * kit fills the gap, and an id the caller DID name still wins, because a
+   * surface that focuses its own field by id (`createFormValidation`'s
+   * `controlId`) must keep pointing at the same element.
+   *
+   * `createUniqueId` and not a counter: two fields wearing one label are two
+   * controls, and a repeated id would bind one label to both.
+   */
+  const generatedId = createUniqueId()
+  const inputId = () => props.id ?? generatedId
   const descriptionId = () => (props.description ? `${inputId()}__desc` : undefined)
   const errorId = () => (props.error ? `${inputId()}__error` : undefined)
   const ariaDescribedBy = () => [descriptionId(), errorId()].filter(Boolean).join(' ') || undefined
@@ -280,7 +301,7 @@ export function TextField(props: TextFieldProps) {
   const inputElement = () => (
     <input
       class="ui-text-field__input"
-      id={inputId() || undefined}
+      id={inputId()}
       type={props.type ?? 'text'}
       placeholder={props.placeholder ?? ''}
       min={props.min !== undefined ? String(props.min) : undefined}
@@ -321,7 +342,7 @@ export function TextField(props: TextFieldProps) {
   const textareaElement = () => (
     <textarea
       class="ui-text-field__input"
-      id={inputId() || undefined}
+      id={inputId()}
       placeholder={props.placeholder ?? ''}
       disabled={props.disabled === true}
       required={props.required === true}

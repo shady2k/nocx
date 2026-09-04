@@ -126,6 +126,46 @@ describe('TextField', () => {
     expect(label.getAttribute('for')).toBe('host')
   })
 
+  /**
+   * A LABEL WITHOUT AN ID IS ALWAYS WRONG, so the kit answers it rather than
+   * asking every caller to remember.
+   *
+   * The `for`/`id` pair was derived from `id` alone: a caller that passed a
+   * label and no id got `<label for="">` bound to an input with no id at all,
+   * which announces the control as UNNAMED — worse than the bare input,
+   * because the visible text says a name is there. It was three callers on the
+   * day it was found, one of them the box a command is typed into to become a
+   * permission, and nothing in the component could ever have made it right.
+   */
+  it('names the input when the caller gave a label and no id', () => {
+    subject({ label: 'The command' })
+    const input = screen.getByLabelText('The command')
+    expect(input.getAttribute('class')).toBe('ui-text-field__input')
+  })
+
+  // Two fields wearing the same label are two controls, and a generated id
+  // that repeated would bind one label to both — the same unnamed control by
+  // another route.
+  it('gives two id-less fields ids of their own', () => {
+    render(() => (
+      <>
+        <TextField label="The command" value="a" />
+        <TextField label="The command" value="b" />
+      </>
+    ))
+    const [first, second] = screen.getAllByLabelText('The command')
+    expect(first.id).not.toBe('')
+    expect(first.id).not.toBe(second.id)
+  })
+
+  // A caller that names its own id still owns it: `createFormValidation`
+  // focuses a field by the id the surface chose, and a kit that overrode it
+  // would leave the submit gate pointing at nothing.
+  it('never overrides an id the caller gave', () => {
+    subject({ id: 'host', label: 'Host' })
+    expect(screen.getByLabelText('Host').id).toBe('host')
+  })
+
   it('is focusable via tab', () => {
     subject()
     const input = screen.getByRole('textbox')

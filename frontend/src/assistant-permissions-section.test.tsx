@@ -865,6 +865,33 @@ async function readCommand(host: HTMLElement, command: string): Promise<void> {
 }
 
 describe('assistant permissions: + Allow a command…', () => {
+  /**
+   * The box a command is typed into is the one on this page whose contents
+   * become a permission, and it had no accessible name at all: the panels drew
+   * `<TextField label="The command">` with no `id`, so the kit's `<label for>`
+   * and the input's `id` were both empty and the label was bound to nothing.
+   * A reader announced an unnamed text field; `getByLabel` reached only the
+   * action group whose aria-label happens to contain those words.
+   *
+   * Both panels are asserted because both are surfaces a person types a
+   * command into, and the assertion resolves to the INPUT — a label that
+   * matches a group around it is exactly the state this test exists to refuse.
+   */
+  it('names the command box on both writing panels', async () => {
+    const { client } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    for (const opener of [/Allow a command/, /Write a refusal/]) {
+      const p = await openPanel(container, opener)
+      const field = within(p).getByLabelText('The command')
+      expect(field.tagName, `panel ${String(opener)}`).toBe('INPUT')
+      expect(field.getAttribute('class')).toBe('ui-text-field__input')
+      fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
+      await settle()
+    }
+  })
+
   it('has the two ways to add an answer, and neither is a matrix', async () => {
     const { client } = fakeClient([view(matrixWith({}))])
     const container = mount(client)

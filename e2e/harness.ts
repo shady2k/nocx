@@ -1228,16 +1228,12 @@ export async function readCommandForPermission(
     .locator('.nocx-dialog__panel')
     .filter({ has: page.locator(`[data-permissions-panel="${mode}"]`) })
   await baseExpect(panel).toBeVisible({ timeout: 15_000 })
-  // BY ROLE, AND NOT BY LABEL, and that is a finding rather than a taste.
-  // The field is drawn as `<TextField label="The command">` with no `id`, and
-  // the kit derives both `<label for>` and the input's `id` from that prop
-  // (ui/text-field.tsx `inputId`), so both come out empty and the label is
-  // associated with nothing: `getByLabel('The command')` matches only the
-  // action group whose aria-label CONTAINS those words, and the exact form
-  // matches nothing at all. The control has no accessible name — filed as
-  // task 12's (nocx-fl0o3) to fix on the page, not here. The panel holds one
-  // textbox, so the role is unambiguous and is what a person clicks.
-  await panel.getByRole('textbox').fill(command)
+  // By its label, exactly: the kit mints an id for a field given a label and
+  // no id (nocx-4yjwk.9), so `The command` now names the input itself. The
+  // exact form is what makes that an assertion — `+ Allow a command…`'s action
+  // group is called "Read the command", and a substring match would be
+  // satisfied by the group whether or not the field has a name of its own.
+  await panel.getByLabel('The command', { exact: true }).fill(command)
   await panel.getByRole('button', { name: 'Read this command', exact: true }).click()
   return panel
 }

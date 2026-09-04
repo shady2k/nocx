@@ -137,39 +137,6 @@ who calls it_ — and it beat the index on every one of those questions we measu
 > answers. Do not reintroduce an index, or any hook in front of a file read, without
 > measuring against that baseline.
 
-**`repowise` is installed, and it is NOT a replacement for `grep`.** It was measured against
-that baseline on 2026-09-04 (`nocx-14sbw`) and kept for one layer only. Five real questions,
-keyed run: two right, one partial, one honest miss, and one confidently wrong. `grep`
-answered all five in under 0.1 s each. So:
-
-- **Ask `grep` first, always.** `get_answer` and `search_codebase` lose on our questions and
-  cost seconds to minutes apiece.
-- **What it gives that `grep` cannot is history.** `get_risk` / `repowise risk`: hotspot
-  scores, defect profiles, bus factor, and CO-CHANGE PARTNERS WITH SUPPORT COUNTS — including
-  pairs with no import and no structural link, which no search can find. Verified against
-  `git log`. That is why it is here.
-- **Never take its prose as fact about the tree.** It repeats our own comments, stale ones
-  included: asked whether a write path was wired, it answered from a comment that had been
-  wrong since the wiring landed (`nocx-n5gr2`). Its line numbers drift by ten or twenty.
-  Confirm anything it claims about code by reading the code.
-- **The web Chat at `repowise serve` is broken** — its Next.js proxy on the UI port stalls
-  the SSE stream the moment the agent calls a tool, so any real question hangs forever while
-  the backend on the API port answers the same request fine. Use the MCP tools.
-
-**In a worktree it needs two commands, and one hazard needs watching.** The MCP registration
-is user-scope and path-less, so it resolves whichever repo you are in — do not pin a path
-into it, or every worktree silently answers about `main`, stale on exactly the files you are
-there to change. The agent read-hooks follow the repo path already. What does not come free:
-
-```bash
-repowise init -y        # seeds from the base checkout: ~1m47s, $0, and 359 MB of its own
-repowise hook install   # post-commit sync; per worktree
-```
-
-**Do not `git add -A` in a worktree whose branch predates this.** `.repowise/` and
-`.claude/CLAUDE.md` are ignored on `main` only; on an older branch they show up untracked,
-and `.repowise/.env` holds an API key.
-
 ## How we work
 
 1. Take the next task with the queue command in [What to work on next](#what-to-work-on-next).

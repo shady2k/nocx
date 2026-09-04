@@ -17,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -477,6 +478,171 @@ func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, func(
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
 		{Dir: filepath.Join(configDir, "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}, storage.NewDocumentStore(configDir), skill.WithFetcher(apifetch.New(routes, nil)))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	conn := connectWS(t, ws)
+	return conn, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
+}
+
+func TestSkillsFile_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "skills.file.schema.json")
+	// The three shapes a viewer has to render: the file, and the two facts
+	// about a file whose bytes it will not be shown.
+	for _, tc := range []struct {
+		name   string
+		result skill.FileResult
+	}{
+		{
+			name: "readable",
+			result: skill.FileResult{
+				Name: "deploy", Path: "SKILL.md", Provenance: skill.ProvenanceAuthored,
+				Text: "---\nname: deploy\n---\nbody\n", MaxBytes: skill.MaxReadBytes,
+			},
+		},
+		{
+			name: "not text",
+			result: skill.FileResult{
+				Name: "deploy", Path: "diagram.png", Provenance: skill.ProvenanceBuiltin,
+				Refusal: skill.FileRefusalNotText, MaxBytes: skill.MaxReadBytes,
+			},
+		},
+		{
+			name: "too large",
+			result: skill.FileResult{
+				Name: "deploy", Path: "dump.log", Provenance: skill.ProvenanceInstalled,
+				Refusal: skill.FileRefusalTooLarge, MaxBytes: skill.MaxReadBytes,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateJSON(t, schema, raw, "skills.file DTO")
+		})
+	}
+}
+
+// The real result, off the real socket: the shipped handler answers with one
+// file of one discovered skill, for a skill the person wrote and for one we
+// ship, and states the two refusals as answers rather than red boxes.
+func TestSkillsFile_OverTheWireConformsToContract(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+	schema := loadSchema(t, "skills.file.schema.json")
+
+	for _, tc := range []struct {
+		name    string
+		skill   string
+		path    string
+		refusal skill.FileRefusal
+		want    string
+	}{
+		{name: "authored", skill: "deploy", path: "SKILL.md", want: "Run make release."},
+		{name: "a reference file", skill: "deploy", path: "references/hosts.md", want: "prod is eu-1"},
+		{name: "builtin", skill: "skill-authoring", path: "SKILL.md", want: "Writing a skill"},
+		{name: "not text", skill: "deploy", path: "diagram.png", refusal: skill.FileRefusalNotText},
+		{name: "too large", skill: "deploy", path: "dump.log", refusal: skill.FileRefusalTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := jsonrpcCall(t, conn, "skills.file", map[string]any{"name": tc.skill, "path": tc.path})
+			var env rpcEnvelope
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error != nil {
+				t.Fatalf("unexpected error: %+v", env.Error)
+			}
+			validateJSON(t, schema, env.Result, "skills.file wire")
+
+			var got skill.FileResult
+			if err := json.Unmarshal(env.Result, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Refusal != tc.refusal {
+				t.Fatalf("refusal = %q, want %q", got.Refusal, tc.refusal)
+			}
+			if got.Path != tc.path {
+				t.Errorf("path = %q, want %q", got.Path, tc.path)
+			}
+			if tc.refusal == skill.FileRefusalNone && !strings.Contains(got.Text, tc.want) {
+				t.Errorf("text = %q, want it to contain %q", got.Text, tc.want)
+			}
+			if tc.refusal != skill.FileRefusalNone && got.Text != "" {
+				t.Errorf("text = %q, want nothing alongside a refusal", got.Text)
+			}
+			if got.MaxBytes != skill.MaxReadBytes {
+				t.Errorf("maxBytes = %d, want the read budget", got.MaxBytes)
+			}
+		})
+	}
+}
+
+// Containment over the socket is the store's, unchanged: a traversal and a
+// symlink out of the skill are refusals of the REQUEST, and they come back as
+// errors because there is no file inside the skill to describe.
+func TestSkillsFile_EscapesAndAbsencesAreErrors(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "traversal", path: "../../etc/passwd"},
+		{name: "absolute", path: "/etc/passwd"},
+		{name: "symlink out", path: "link.md"},
+		{name: "gone", path: "references/gone.md"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := jsonrpcCall(t, conn, "skills.file", map[string]any{"name": "deploy", "path": tc.path})
+			var env rpcEnvelope
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error == nil {
+				t.Fatalf("want a refusal, got result %s", env.Result)
+			}
+		})
+	}
+}
+
+// skillsFileConnection is the shipped store over an authored root and the
+// BUILTIN root, because the read path answers for any provenance: reading is
+// not writing, and the person may read what the assistant reads.
+func skillsFileConnection(t *testing.T) (*websocket.Conn, func()) {
+	t.Helper()
+	configDir := t.TempDir()
+	skillDir := filepath.Join(configDir, "skills", "deploy")
+	if err := os.MkdirAll(filepath.Join(skillDir, "references"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(rel string, data []byte) {
+		if err := os.WriteFile(filepath.Join(skillDir, rel), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("SKILL.md", []byte("---\nname: deploy\ndescription: deploy\n---\nRun make release.\n"))
+	write(filepath.Join("references", "hosts.md"), []byte("prod is eu-1"))
+	write("diagram.png", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe})
+	write("dump.log", []byte(strings.Repeat("x", skill.MaxReadBytes+1)))
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(skillDir, "link.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{
+		{Dir: filepath.Join(configDir, "skills"), Provenance: skill.ProvenanceAuthored},
+		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
+		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
+	}, storage.NewDocumentStore(configDir))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {

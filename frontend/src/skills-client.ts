@@ -1,5 +1,6 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
+import type { SkillsFile } from './generated/skills.file'
 import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsPreview } from './generated/skills.preview'
@@ -23,6 +24,26 @@ export class SkillsClient {
 
   approve(name: string): Promise<SkillsApprove> {
     return this.dispatcher.call<SkillsApprove>('skills.approve', { name })
+  }
+
+  // One file of one discovered skill, for any provenance including builtin:
+  // reading is not writing, and the person may read what the assistant reads.
+  //
+  // The path is relative to the skill's own directory and is sent AS THE
+  // PERSON'S REQUEST, never resolved here: whether it stays inside that
+  // directory is settled once, by the backend, through the same containment
+  // the assistant's read tool goes through. A renderer that cleaned or joined
+  // the path first would be a second answer to that question, agreeing with
+  // the first everywhere anybody looked.
+  //
+  // A file that is not text and a file larger than the read budget come back
+  // as a RESOLVED result carrying `refusal`, not as a rejection — they are
+  // true sentences about a file that exists, and the caller needs its path,
+  // provenance and `maxBytes` to say them. Only a refusal of the request
+  // itself (the file is gone, the path leaves the skill, no such skill)
+  // rejects.
+  file(name: string, path: string): Promise<SkillsFile> {
+    return this.dispatcher.call<SkillsFile>('skills.file', { name, path })
   }
 
   // Reading, never writing: the backend fetches the document at this address,

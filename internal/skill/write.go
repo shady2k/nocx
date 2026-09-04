@@ -195,6 +195,16 @@ func (s *Store) Read(name, relPath string) (Content, error) {
 	return Read(s.roots, name, relPath)
 }
 
+// File is the person's read path over the same roots and the same
+// containment (file.go). It is a method here, beside Read, so a caller cannot
+// reach one of them with a different root order than the other.
+func (s *Store) File(name, relPath string) (FileResult, error) {
+	if s == nil {
+		return FileResult{}, errUnavailable
+	}
+	return File(s.roots, name, relPath)
+}
+
 // Create writes a new managed skill. An empty leftover directory is completed;
 // a directory containing SKILL.md is an existing name and is refused.
 func (s *Store) Create(name, description, body string) error {

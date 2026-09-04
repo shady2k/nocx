@@ -23,6 +23,11 @@ type skillSettingsSource interface {
 	// have changed on the way back — which is why the params carry the
 	// address and nothing else.
 	Install(ctx context.Context, url string) (skill.InstallResult, error)
+	// File is the person's read path for one file of one discovered skill.
+	// It takes no context because it reaches no network and no ctx-aware
+	// seam: it is a bounded read of a local file the store has already
+	// resolved.
+	File(name, path string) (skill.FileResult, error)
 }
 
 type skillSetEnabledParams struct {
@@ -40,6 +45,15 @@ type skillRemoveParams struct {
 // naming the SAME address, and a second shape would invite a second field.
 type skillURLParams struct {
 	URL string `json:"url"`
+}
+
+// skillFileParams names one file of one skill. The path is relative to the
+// skill's own directory; whether it stays there is the store's question and
+// not this struct's, because containment has one owner (internal/skill's
+// locate) and a bound checked twice is a bound that can disagree with itself.
+type skillFileParams struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type skillSettingsHandlers struct {
@@ -114,6 +128,25 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(installed))
+	case "skills.file":
+		var p skillFileParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" || p.Path == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		// Only the refusals of the REQUEST arrive here — the file is gone,
+		// the path leaves the skill, no root holds that name — and each is
+		// already the store's own sentence, so it travels as the message.
+		// The two refusals that describe a file which exists (it is not
+		// text; it is larger than the read budget) are carried in the
+		// RESULT instead, and the reasoning for that split is in
+		// internal/skill/file.go where the decision is made.
+		file, err := h.source.File(p.Name, p.Path)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(file))
 	case "skills.approve":
 		var p skillRemoveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
@@ -174,6 +207,30 @@ func validateSkillURLRaw(raw json.RawMessage) string {
 	}
 	if p.URL == "" {
 		return "url is required"
+	}
+	return ""
+}
+
+// validateSkillFileRaw bounds the wire request before the store is asked. The
+// path bound is generous because a skill may nest reference material, and it
+// is a bound on the WIRE only: what the path may point at is decided once, in
+// internal/skill.
+func validateSkillFileRaw(raw json.RawMessage) string {
+	var p skillFileParams
+	if msg := decodeObject(raw, &p, "name", "path"); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("name", p.Name, 128); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("path", p.Path, 1024); msg != "" {
+		return msg
+	}
+	if p.Name == "" {
+		return "name is required"
+	}
+	if p.Path == "" {
+		return "path is required"
 	}
 	return ""
 }

@@ -6159,8 +6159,13 @@ func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
 }
 
-// The policy.set result's conformance: {ok: true}, asserted off the real
-// socket after a set the validator accepted.
+// The policy.set result's conformance, asserted off the real socket after a
+// set the validator accepted. It used to answer {ok: true}; it now answers
+// what the write did to the work already running (nocx-4yjwk.8), and the three
+// branches of that — the question, the future-only apply and the stop — are
+// driven against real live runs in
+// TestPolicySetRuns_OverTheWireConformsToContract. This one keeps the plain
+// case, where no run is in flight at all.
 func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "policy.set.schema.json")
 	h, _ := newPolicyHarness(t)

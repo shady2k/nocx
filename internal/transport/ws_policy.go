@@ -14,19 +14,29 @@ package transport
 // effect goes — are an invalid params error. There is no second vocabulary in
 // which a tool name could be expressed.
 //
-// The two RULE methods carry one thing the others do not: WHEN the write takes
-// effect for the runs already in flight (policyRunsMode, nocx-r4fh8). A run's
+// EVERY WRITING METHOD CARRIES ONE THING THE READING ONES DO NOT: WHEN the
+// write takes effect for the runs already in flight (policyRunsMode,
+// nocx-r4fh8 for the two rule methods, nocx-4yjwk.8 for the matrix). A run's
 // grant is minted from the whole policy when the run starts and is immutable
-// for the run, so a rule taken back here does not reach a run using it — which
-// is correct, and was silent. The default timing writes nothing when live runs
-// would be left behind and answers with how many; the person then chooses to
-// leave them running or to stop them. runsUnreachedByRuleWrite is where that
-// count is computed and where the reading of "using it" is written down.
+// for the run, so an answer taken back here does not reach a run using it —
+// which is correct, and was silent. The default timing writes nothing when live
+// runs would be left behind and answers with how many; the person then chooses
+// to leave them running or to stop them.
+//
+// There is ONE vocabulary for that timing and one set of words for its two
+// answers: policyRunsMode, policyWriteRuns and settleRuns are shared by the
+// matrix write and the rule writes, because "what happens to the work already
+// running" is one question however the answer was expressed. What is NOT
+// shared is which runs a write leaves behind — a rule names a selector and a
+// row does not — and the two derivations sit side by side at the bottom of
+// this file, runsUnreachedByRuleWrite and runsUnreachedByRowWrite, each
+// carrying the reading of "using it" it had to choose.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
@@ -79,14 +89,24 @@ func (p policyResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(w)
 }
 
-// policySetParams is the policy.set params: the matrix under "policy".
+// policySetParams is the policy.set params: the matrix under "policy", and
+// WHEN it takes effect for the work already running.
 type policySetParams struct {
 	Policy json.RawMessage `json:"policy"`
+	Runs   policyRunsMode  `json:"runs,omitempty"`
 }
 
-// policySetResult acknowledges a persisted policy.
+// policySetResult is what a matrix write says about the work already running,
+// and nothing else.
+//
+// It used to be `{ok: true}`, which was a constant dressed as a fact: the
+// method answers an error when it fails, so the acknowledgement carried no
+// information at all. `applied` says the one thing `ok` was standing in for
+// and says it truthfully, because a matrix write can now legitimately land
+// nothing and answer with a question instead — exactly as the rule writes do,
+// in the same field with the same meaning.
 type policySetResult struct {
-	OK bool `json:"ok"`
+	policyWriteRuns
 }
 
 // validatePolicySetRaw is the policy.set params validator: the envelope must
@@ -107,7 +127,7 @@ func validatePolicySetRaw(raw json.RawMessage) string {
 	if _, err := content.ParseEffectPolicy(p.Policy); err != nil {
 		return "policy: " + err.Error()
 	}
-	return ""
+	return validatePolicyRunsMode(p.Runs)
 }
 
 // policySetNamesRules is the refusal that makes policy.set a MATRIX write and
@@ -376,24 +396,30 @@ func (m policyRunsMode) orAsk() policyRunsMode {
 	return m
 }
 
-// policyRuleWriteRuns is what every rule write says about the work already
-// running: whether the write landed at all, how many live runs it does not
-// reach, and — when the person chose to stop them — what actually happened to
-// those runs.
+// policyWriteRuns is what EVERY policy write says about the work already
+// running — a rule written, a rule forgotten, a matrix row moved: whether the
+// write landed at all, how many live runs it does not reach, and — when the
+// person chose to stop them — what actually happened to those runs.
+//
+// One shape and one set of field names for all three, because a person reading
+// "2 answers are still using this" has learned one sentence and not three. WHICH
+// runs a write leaves behind is derived per gesture; what the answer MEANS is
+// not, and is stated once, here.
 //
 // StoppedRuns and FinishedBeforeStop are two halves of one true sentence, and
 // neither is a failure. A run can reach a terminal state on its own between
 // the count and the stop; reporting it as stopped would credit this gesture
 // with an ending it did not cause, and a person who is told "3 stopped" when
 // one finished by itself has been told something false about their own work.
-type policyRuleWriteRuns struct {
+type policyWriteRuns struct {
 	// Applied says the write landed. It is false only in the ask mode with
 	// live runs left behind: the store is untouched and the person has a
 	// question to answer.
 	Applied bool `json:"applied"`
 	// AffectedRuns is how many live runs would go on deciding under the old
 	// answer — counted at the moment of the call, over the runs' own grants.
-	// See runsUnreachedByRuleWrite for what "using it" was taken to mean.
+	// See runsUnreachedByRuleWrite and runsUnreachedByRowWrite for what
+	// "using it" was taken to mean for each kind of write.
 	AffectedRuns int `json:"affectedRuns"`
 	// StoppedRuns is how many of those this call terminalized. Zero in every
 	// mode but stop.
@@ -414,7 +440,7 @@ type policySetRuleResult struct {
 	// reason.
 	ID    string `json:"id"`
 	Added bool   `json:"added"`
-	policyRuleWriteRuns
+	policyWriteRuns
 }
 
 // policyForgetRuleResult says whether a rule was there to remove. An id
@@ -426,7 +452,7 @@ type policyForgetRuleResult struct {
 	// difference matters — one means "already as you wanted", the other
 	// means "you have a question to answer first".
 	Removed bool `json:"removed"`
-	policyRuleWriteRuns
+	policyWriteRuns
 }
 
 // validatePolicySetRuleRaw checks the envelope and the shape of the one rule.
@@ -505,8 +531,19 @@ type policyHandlers struct {
 // therefore a second set of half-terminal states.
 type liveRunRegistry interface {
 	// RunsUnreachedByRuleWrite reports the live runs whose grant would
-	// decide differently once this write lands, ascending by run id.
+	// decide differently once this rule write lands, ascending by run id.
 	RunsUnreachedByRuleWrite(w content.RuleWrite) []int64
+	// RunsUnreachedByRowWrite is the same question for a MATRIX write, and
+	// it is a second method rather than a widened one because the answer is
+	// derived differently: a rule write is compared against a frozen grant
+	// in place, while a row write has to mint each run's authority again
+	// from the document the write leaves behind. Both end in the same
+	// place — ascending run ids the write does not reach — and both are
+	// answered by the one owner of the run registry. This one also names
+	// the ROWS that moved for those runs, from the same walk, because the
+	// sentence a stopped run records has to name the change the count was
+	// taken over and the document's own rows are not always it.
+	RunsUnreachedByRowWrite(after content.EffectPolicy) ([]int64, []content.Effect)
 	// StopRunsForRevokedAnswer terminalizes those runs with the sentence a
 	// person will read, and reports which it stopped and which had already
 	// ended by the time it got there.
@@ -521,8 +558,13 @@ func (s *WSServer) policySpecs() []methodSpec {
 			h := policyHandlers{store: s.agentPolicy, live: s.liveEffects, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyGet(ctx, req) }
 		}),
+		// policy.set carries the run registry for the reason the two rule
+		// methods do, and it had been the odd one out: a row is an answer a
+		// run is deciding under just as much as a rule is, and moving one
+		// used to reach the store in silence while a run started thirty
+		// seconds ago went on under the old row (nocx-4yjwk.8).
 		regResponder(s.lane, "policy.set", params(validatePolicySetRaw), func(r Responder) handlerFunc {
-			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySet(ctx, req) }
 		}),
 		// The two rule methods, and the only two that carry the run
@@ -578,8 +620,23 @@ func (h policyHandlers) handlePolicyGet(ctx context.Context, req jsonrpcRequest)
 	}))
 }
 
-// handlePolicySet persists a validated policy. The next ask run's grant is
-// minted from it — no restart, the run mint reads the store live.
+// handlePolicySet persists a validated matrix, and says what that does to the
+// work already running. The next ask run's grant is minted from it — no
+// restart, the run mint reads the store live.
+//
+// The order is the one settleRuns states and it is the same order for a row as
+// for a rule: the policy write first, the stopping second. A row write reached
+// the store in silence until nocx-4yjwk.8, which is the defect that bead
+// records — a person moves "read and inspect" to No specifically to stop
+// something, and a run started thirty seconds ago goes on reading.
+//
+// The document the count is taken against is built the way the store builds
+// it: the stored document with the seven rows the write states over it. What
+// is NOT done here is writing that merged document back — the store merges
+// under its own lock, and handing it a document read a microsecond earlier is
+// exactly how a person's standing answers were deleted once already
+// (nocx-39bly). So the merge is read-only, for the question, and SetPolicy
+// still receives the rows-only matrix.
 func (h policyHandlers) handlePolicySet(ctx context.Context, req jsonrpcRequest) {
 	if !h.wired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.set not available"})
@@ -594,16 +651,56 @@ func (h policyHandlers) handlePolicySet(ctx context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.set: " + policySetNamesRules})
 		return
 	}
-	policy, err := content.ParseEffectPolicy(p.Policy)
+	matrix, err := content.ParseEffectPolicy(p.Policy)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.set: " + err.Error()})
 		return
 	}
-	if err := h.store.SetPolicy(policy); err != nil {
+	after := h.store.Policy().WithRowWrite(matrix)
+	affected, moved := h.runsUnreachedByRowWrite(after)
+	mode := p.Runs.orAsk()
+	if mode == runsAsk && len(affected) > 0 {
+		_ = h.r.TryResult(req.ID, mustMarshal(policySetResult{
+			policyWriteRuns: policyWriteRuns{AffectedRuns: len(affected)},
+		}))
+		return
+	}
+	if err := h.store.SetPolicy(matrix); err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "policy.set: " + err.Error()})
 		return
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(policySetResult{OK: true}))
+	_ = h.r.TryResult(req.ID, mustMarshal(policySetResult{
+		policyWriteRuns: h.settleRuns(ctx, mode, affected,
+			"an answer this run was using was changed: "+rowWriteSentence(after, moved)),
+	}))
+}
+
+// rowWriteSentence names the rows a matrix write moved, and what they say now.
+//
+// `moved` comes from the SAME walk the count came from, so the sentence a
+// stopped run records cannot name a different change from the one the person
+// was asked about — and it is the rows that moved FOR THOSE RUNS rather than
+// for the document, which are not always the same rows (see
+// RunsUnreachedByRowWrite).
+//
+// It names rows by the wire's own key — "observe is now refuse" — and not by
+// the product's words for the lattice. Those words have one owner and it is
+// the renderer (frontend/src/effect-labels.ts, which says so in its first
+// paragraph); a second table here would be the second vocabulary for one
+// concept that AGENTS.md spends a section on. The row's key is the name the
+// wire, the ledger and this file already share.
+func rowWriteSentence(after content.EffectPolicy, moved []content.Effect) string {
+	parts := make([]string, 0, len(moved))
+	for _, e := range moved {
+		parts = append(parts, string(e)+" is now "+string(after.DecisionFor(e)))
+	}
+	if len(parts) == 0 {
+		// Reachable only when nothing was left behind, in which case no run
+		// is stopped and nobody reads this. It is still a sentence rather
+		// than a dangling colon.
+		return "the matrix was saved as it stood"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // handlePolicyExplain answers what the stored policy decides about one
@@ -757,7 +854,7 @@ func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequ
 	mode := p.Runs.orAsk()
 	if mode == runsAsk && len(affected) > 0 {
 		_ = h.r.TryResult(req.ID, mustMarshal(policySetRuleResult{
-			policyRuleWriteRuns: policyRuleWriteRuns{AffectedRuns: len(affected)},
+			policyWriteRuns: policyWriteRuns{AffectedRuns: len(affected)},
 		}))
 		return
 	}
@@ -777,7 +874,7 @@ func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequ
 	_ = h.r.TryResult(req.ID, mustMarshal(policySetRuleResult{
 		ID:    stored.ID,
 		Added: p.Rule.ID == "",
-		policyRuleWriteRuns: h.settleRuns(ctx, mode, affected,
+		policyWriteRuns: h.settleRuns(ctx, mode, affected,
 			"a standing answer this run was using was changed: "+stored.Label()),
 	}))
 }
@@ -815,7 +912,7 @@ func (h policyHandlers) handlePolicyForgetRule(ctx context.Context, req jsonrpcR
 	mode := p.Runs.orAsk()
 	if mode == runsAsk && len(affected) > 0 {
 		_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{
-			policyRuleWriteRuns: policyRuleWriteRuns{AffectedRuns: len(affected)},
+			policyWriteRuns: policyWriteRuns{AffectedRuns: len(affected)},
 		}))
 		return
 	}
@@ -826,12 +923,12 @@ func (h policyHandlers) handlePolicyForgetRule(ctx context.Context, req jsonrpcR
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{
 		Removed: removed,
-		policyRuleWriteRuns: h.settleRuns(ctx, mode, affected,
+		policyWriteRuns: h.settleRuns(ctx, mode, affected,
 			"a standing answer this run was using was taken back: "+forgotten),
 	}))
 }
 
-// ── the runs a rule write leaves behind (nocx-r4fh8) ──────────────────────
+// ── the runs a policy write leaves behind (nocx-r4fh8, nocx-4yjwk.8) ──────
 
 // runsUnreachedByRuleWrite counts the live runs a rule write does not reach,
 // and THIS COMMENT IS THE CHOICE OF READING, because the count is the part of
@@ -875,6 +972,53 @@ func (h policyHandlers) runsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
 	return h.runs.RunsUnreachedByRuleWrite(w)
 }
 
+// runsUnreachedByRowWrite counts the live runs a MATRIX write does not reach,
+// and this comment is that count's choice of reading — the same duty the rule
+// count above discharges, discharged again because the answer is not the same
+// one (nocx-4yjwk.8).
+//
+// The cheap reading is rejected here for the reason it is rejected there: a
+// count of the registry wearing a permission's clothes is a number a person
+// learns within a day means "how many runs exist", and a number nobody trusts
+// is worse than silence. What replaces it is the precise question — WHICH LIVE
+// RUNS WOULD DECIDE DIFFERENTLY ONCE THE WRITE LANDS — asked of each run's own
+// authority, and content/rowwrite.go is where the derivation and its argument
+// are written down.
+//
+// WHAT IT COSTS TO ASK IT THIS WAY. A rule write is compared against a frozen
+// grant in place; a row write cannot be, because a run's rows have had the
+// session overlay resolved into them and the run fence folded into them. So
+// each live run's authority is MINTED AGAIN from the document the write leaves
+// behind, through runGrantFrom — the same mint the real run crossed — and the
+// two are compared row by row. That is one mint per live run, over frozen
+// values, on a gesture a person makes by hand.
+//
+// AND HERE IS THE PART THAT MUST BE SAID OUT LOUD, because the bead that
+// bought this asked for it. THE ANSWER IS EXACT AND IT IS NOT NARROW. A rule
+// names a selector, so its count is bounded to a handful of command lines and
+// a person forgetting an answer about `df` is told about the runs using `df`.
+// A row names no selector: it governs every call that classifies as its
+// effect, so a write that really moves a row really does reach every live run
+// whose authority still states the old one — and on an ordinary afternoon,
+// where every live run was minted from the policy being edited, that is all of
+// them. The number is not the registry's size wearing a permission's clothes;
+// it is the truth, which on that afternoon happens to equal it.
+//
+// What it correctly counts OUT is therefore the whole of its precision, and it
+// is not nothing: a run carrying no grant, a run whose session overlay already
+// answers that effect, a run whose fence had already refused it, a run minted
+// after somebody else made the same change, and every write that states what
+// the rows already say. The settings page carries the same sentence for the
+// person, because a count they cannot interpret is the failure this feature
+// exists to avoid — and a count dressed as narrower than it is would be a
+// worse one than the cheap reading, not a better.
+func (h policyHandlers) runsUnreachedByRowWrite(after content.EffectPolicy) ([]int64, []content.Effect) {
+	if h.runs == nil {
+		return nil, nil
+	}
+	return h.runs.RunsUnreachedByRowWrite(after)
+}
+
 // settleRuns performs the run half of the gesture, AFTER the policy write has
 // already landed, and answers what happened.
 //
@@ -902,8 +1046,8 @@ func (h policyHandlers) runsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
 // this returns say which runs are in it.
 func (h policyHandlers) settleRuns(
 	ctx context.Context, mode policyRunsMode, affected []int64, sentence string,
-) policyRuleWriteRuns {
-	out := policyRuleWriteRuns{Applied: true, AffectedRuns: len(affected)}
+) policyWriteRuns {
+	out := policyWriteRuns{Applied: true, AffectedRuns: len(affected)}
 	if mode != runsStop || len(affected) == 0 || h.runs == nil {
 		return out
 	}

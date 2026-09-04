@@ -98,7 +98,6 @@ func TestPolicySet_PersistsAndTheRunMintSeesIt(t *testing.T) {
 	})
 	var envelope struct {
 		Error *jsonrpcErrorObj `json:"error"`
-		OK    bool             `json:"ok"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatalf("policy.set %s: %v", raw, err)

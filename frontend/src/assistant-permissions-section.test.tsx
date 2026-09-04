@@ -133,9 +133,10 @@ function mount(client: PolicyClient): HTMLElement {
 interface FakeOpts {
   setError?: Error
   setRuleError?: Error
-  /** How many runs already in flight the backend says a rule write does not
-   *  reach. Above zero, the write does NOT land and the page must raise the
-   *  question — which is the whole of nocx-r4fh8 on this side. */
+  /** How many runs already in flight the backend says a write does not reach
+   *  — a standing answer's or a row's. Above zero, the write does NOT land and
+   *  the page must raise the question, which is the whole of nocx-r4fh8 and,
+   *  for the matrix, nocx-4yjwk.8 on this side. */
   affectedRuns?: number
   /** What a stop actually did, when the page asks for one. */
   stopped?: { stoppedRuns: number; finishedBeforeStop: number }
@@ -165,13 +166,12 @@ function fakeClient(reads: PolicyView[], opts: FakeOpts = {}) {
     n++
     return Promise.resolve(answer)
   })
-  const set = opts.setError
-    ? vi.spyOn(client, 'set').mockRejectedValue(opts.setError)
-    : vi.spyOn(client, 'set').mockResolvedValue({ ok: true })
-  // Both rule methods answer the WHOLE declared shape, including what the
-  // write did to the work already running: a fake that omitted those fields
-  // would be a fake of a wire that does not exist, and the page's question
-  // would be tested against it rather than against the contract.
+  // ALL THREE writing methods answer the WHOLE declared shape, including what
+  // the write did to the work already running: a fake that omitted those
+  // fields would be a fake of a wire that does not exist, and the page's
+  // question would be tested against it rather than against the contract.
+  // policy.set is one of the three now — it used to answer `{ok: true}` and
+  // say nothing at all about the runs a moved row left behind (nocx-4yjwk.8).
   const affected = opts.affectedRuns ?? 0
   const runsOf = (runs?: RunsTiming) => {
     if (affected > 0 && (runs === undefined || runs === 'ask')) {
@@ -183,6 +183,9 @@ function fakeClient(reads: PolicyView[], opts: FakeOpts = {}) {
         : { stoppedRuns: 0, finishedBeforeStop: 0 }
     return { applied: true, affectedRuns: affected, ...stop }
   }
+  const set = opts.setError
+    ? vi.spyOn(client, 'set').mockRejectedValue(opts.setError)
+    : vi.spyOn(client, 'set').mockImplementation((_policy, runs) => Promise.resolve(runsOf(runs)))
   const setRule = opts.setRuleError
     ? vi.spyOn(client, 'setRule').mockRejectedValue(opts.setRuleError)
     : vi
@@ -819,6 +822,123 @@ describe('assistant permissions: the work already running', () => {
     expect(question.textContent).toContain('1 answer the assistant is writing right now')
     within(question).getByRole('button', { name: 'Stop it' })
     expect(setRule).toHaveBeenCalledTimes(1)
+  })
+
+  // ── a ROW is an answer too, and moving one used to be silent ───────────
+  //
+  // nocx-4yjwk.8. Forgetting a standing answer had a time and a choice;
+  // moving one of the seven rows went through `policy.set`, which carried no
+  // timing at all — so a person who moved "read and inspect" to No
+  // specifically to stop something watched a run started thirty seconds ago go
+  // on reading. These assert the SAME block, the SAME two buttons and the SAME
+  // words, because one vocabulary is the point: a second dialog with its own
+  // wording would be a second account of what happens to the work already
+  // running.
+
+  /** The row for one kind of work, in whichever list it is currently in. */
+  function rowFor(container: HTMLElement, effect: EffectKey): HTMLElement {
+    const el = container.querySelector<HTMLElement>(`[data-answer="row:${effect}"]`)
+    expect(el, `no row for ${effect}`).not.toBeNull()
+    return el!
+  }
+
+  it('says how many answers in flight are still under the old ROW, and writes nothing yet', async () => {
+    const { client, set } = fakeClient([view(matrixWith({}))], { affectedRuns: 2 })
+    const container = mount(client)
+    await loaded(container)
+
+    const row = rowFor(container, 'mutate-destructive')
+    fireEvent.click(within(row).getByRole('button', { name: /^Allowed/ }))
+
+    // The question lands on the PAGE, because a row answered on the row has no
+    // dialog to join — and it is the same block with the same two answers.
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-permissions-runs]')).not.toBeNull(),
+    )
+    const question = container.querySelector('[data-permissions-runs]') as HTMLElement
+    expect(question.dataset.permissionsRuns).toBe('2')
+    expect(question.textContent).toContain('2 answers the assistant is writing right now')
+    expect(question.textContent).toContain('Nothing has changed yet')
+    within(question).getByRole('button', { name: 'Leave them running' })
+    within(question).getByRole('button', { name: 'Stop them' })
+
+    // And what the number MEANS for a row, which is not what it means for a
+    // standing answer: a row covers a whole kind of work, so this really is
+    // every piece of work still holding the old answer.
+    expect(question.textContent).toContain('covers everything of its kind')
+
+    // The write did NOT happen: the only call was the one that asked.
+    expect(set).toHaveBeenCalledTimes(1)
+    expect(set.mock.calls[0][1]).toBe('ask')
+  })
+
+  it('asks nothing when no answer in flight is under the old ROW, and just applies', async () => {
+    const { client, set } = fakeClient([view(matrixWith({}))], { affectedRuns: 0 })
+    const container = mount(client)
+    await loaded(container)
+
+    fireEvent.click(
+      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
+    )
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(container.querySelector('[data-permissions-runs]')).toBeNull()
+    expect(set).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the running work alone when that is the answer to a ROW', async () => {
+    const { client, set } = fakeClient([view(matrixWith({}))], { affectedRuns: 2 })
+    const container = mount(client)
+    await loaded(container)
+
+    fireEvent.click(
+      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
+    )
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-permissions-runs]')).not.toBeNull(),
+    )
+    const question = container.querySelector('[data-permissions-runs]') as HTMLElement
+    fireEvent.click(within(question).getByRole('button', { name: 'Leave them running' }))
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(2))
+    // The SAME matrix, repeated with the timing the person chose — not one
+    // rebuilt from a store that has moved under the question.
+    expect(set.mock.calls[1][0]).toEqual(set.mock.calls[0][0])
+    expect(set.mock.calls[1][1]).toBe('future')
+    expect(
+      toasts()
+        .map((t) => t.message)
+        .join(' '),
+    ).not.toContain('Stopped')
+  })
+
+  it('stops them when that is the answer to a ROW, and says what it actually stopped', async () => {
+    const { client, set } = fakeClient([view(matrixWith({}))], {
+      affectedRuns: 3,
+      stopped: { stoppedRuns: 2, finishedBeforeStop: 1 },
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    fireEvent.click(
+      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
+    )
+    await vi.waitFor(() =>
+      expect(container.querySelector('[data-permissions-runs]')).not.toBeNull(),
+    )
+    const question = container.querySelector('[data-permissions-runs]') as HTMLElement
+    fireEvent.click(within(question).getByRole('button', { name: 'Stop them' }))
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(2))
+    expect(set.mock.calls[1][1]).toBe('stop')
+    await vi.waitFor(() =>
+      expect(
+        toasts()
+          .map((t) => t.message)
+          .join(' '),
+      ).toContain('Stopped 2 answers; 1 had already finished on its own.'),
+    )
   })
 })
 

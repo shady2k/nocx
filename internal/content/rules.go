@@ -503,6 +503,19 @@ var latticeEffects = []Effect{
 	EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
 }
 
+// LatticeEffects returns the ADR-0020 effect lattice in the lattice's own
+// order — a copy, so a caller cannot reorder the one list.
+//
+// It is exported for the same reason the predicate below is, one step further
+// on: a caller that has to put a SET of effects into a stable order has to
+// know that order, and the only alternatives are a second spelling of the
+// seven or a sentence whose row names come out in a different order on every
+// call. internal/transport orders the rows one matrix write moved with it,
+// before naming them to a person.
+func LatticeEffects() []Effect {
+	return append([]Effect(nil), latticeEffects...)
+}
+
 // LatticeEffect reports membership of the ADR-0020 effect lattice — the
 // closed seven the matrix has a row for. It is exported because the wire asks
 // the same question this package's own gate does: policy.explain must refuse

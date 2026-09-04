@@ -154,7 +154,8 @@ type migrationStep struct {
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
 	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild},
-	{from: 16, to: 17, apply: migrateWaveRecordTables16to17, schemaDigest: "079214912069b019c8225fde48c1072e4f073c21dcf65cc19242bdc37b305512"},
+	{from: 16, to: 17, apply: migrateWaveRecordTables16to17},
+	{from: 17, to: 18, apply: migrateWaveMailbox17to18, schemaDigest: "17eebbf640b7f9ad1a67dd156fc4844adb7d036c6bec2ef2682b0b1af475eef5"},
 }
 
 // migrateWaveRecordTables16to17 carries a database across the edge that added
@@ -176,6 +177,17 @@ var schemaLadder = []migrationStep{
 // at all, since the protocol has exactly three rows and "no step for this
 // edge" is the refusal row.
 func migrateWaveRecordTables16to17(context.Context, *sql.Tx) error { return nil }
+
+// migrateWaveMailbox17to18 carries a database across the edge that added the
+// mailbox (nocx-dkawo.11): wave_messages, its ordering index and wave_cursors.
+//
+// It does nothing, for migrateWaveRecordTables16to17's reason and no other:
+// the edge adds two TABLEs and one INDEX and touches nothing that existed at
+// 17, and every statement of schemaV1 is IF NOT EXISTS, so they arrive by
+// themselves. The rung exists because the protocol has exactly three rows and
+// "no step for this edge" is the refusal row — and because it is what carries
+// the schemaV1 digest forward.
+func migrateWaveMailbox17to18(context.Context, *sql.Tx) error { return nil }
 
 // validateLadder validates the shipped ladder against the current schema.
 func validateLadder(ladder []migrationStep) error {

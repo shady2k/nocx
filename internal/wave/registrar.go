@@ -486,3 +486,138 @@ func (r *Registrar) Sweep(ctx context.Context) error {
 	}
 	return errors.Join(errs...)
 }
+
+// ── the mailbox (nocx-dkawo.11) ───────────────────────────────────────────
+
+// Say commits one message into a participant's mailbox.
+//
+// The sender is stamped by the caller's authenticated identity and never
+// carried in the call, because a sender a caller could name is a sender a
+// caller could forge. What is checked is MEMBERSHIP and nothing else: both
+// ends must be in the wave. A delegation is deliberately not consulted —
+// membership makes a participant addressable and delegation makes it
+// controllable, and a human takeover that suspends control must not also stop
+// the coordinator writing to its own worker.
+func (r *Registrar) Say(ctx context.Context, wave ID, from, to ReaderID, body string) (Message, error) {
+	switch {
+	case body == "":
+		return Message{}, ErrEmptyMessage
+	case len(body) > MaxMessageBytes:
+		return Message{}, fmt.Errorf("wave: %d bytes exceeds %d: %w",
+			len(body), MaxMessageBytes, ErrMessageTooLarge)
+	}
+	if err := r.member(ctx, wave, to); err != nil {
+		return Message{}, fmt.Errorf("wave: recipient %q: %w", to, err)
+	}
+	if err := r.member(ctx, wave, from); err != nil {
+		return Message{}, fmt.Errorf("wave: sender %q: %w", from, err)
+	}
+	return r.store.Commit(ctx, Message{
+		Wave: wave, Recipient: to, Sender: from,
+		Body: body, CommittedAt: r.now(),
+	})
+}
+
+// member reports whether an id may take part in this wave's mail.
+//
+// Two ways in, because the wave has two kinds of node and they are named
+// differently on purpose: a worker is its PARTICIPANT id, which outlives every
+// run it makes, and a coordinator is its SESSION (AD-7), which is what makes a
+// restarted coordinator the same reader — the property D3 already rests on.
+func (r *Registrar) member(ctx context.Context, wave ID, who ReaderID) error {
+	coordinator, err := r.store.CoordinatorSession(ctx, wave)
+	if err != nil {
+		return fmt.Errorf("wave: %w", err)
+	}
+	if ReaderID(coordinator) == who {
+		return nil
+	}
+	p, err := r.store.Participant(ctx, ParticipantID(who))
+	if err != nil {
+		if errors.Is(err, ErrNoSuchParticipant) {
+			return ErrNotAMember
+		}
+		return err
+	}
+	if p.Wave != wave {
+		return ErrNotAMember
+	}
+	return nil
+}
+
+// Inbox hands a reader the next page of a mailbox and advances ITS OWN
+// fetched mark, and nobody else's.
+//
+// This is the whole of "a read takes nothing": the messages stay where they
+// are, and what moved is one row belonging to one reader. A second reader
+// asking the same question is answered the same way from its own position.
+func (r *Registrar) Inbox(ctx context.Context, mailbox, reader ReaderID, limit int) (Fetch, error) {
+	if limit <= 0 || limit > MaxFetch {
+		limit = MaxFetch
+	}
+	cur, err := r.store.Cursor(ctx, mailbox, reader)
+	if err != nil {
+		return Fetch{}, fmt.Errorf("wave: cursor: %w", err)
+	}
+	// One more than the page, so "is there more" is answered by what the
+	// store returned rather than by a second count that could disagree with
+	// it between the two reads.
+	page, err := r.store.Since(ctx, mailbox, cur.Fetched, limit+1)
+	if err != nil {
+		return Fetch{}, fmt.Errorf("wave: read mailbox: %w", err)
+	}
+	out := Fetch{Cursor: cur}
+	if len(page) > limit {
+		out.More = true
+		page = page[:limit]
+	}
+	out.Messages = page
+	if len(page) == 0 {
+		return out, nil
+	}
+	cur.Fetched = page[len(page)-1].Seq
+	cur.UpdatedAt = r.now()
+	if err := r.store.AdvanceCursor(ctx, cur); err != nil {
+		// The messages were handed out and the mark did not move. Say so
+		// rather than returning them: a reader that believed it had a
+		// position it does not have would acknowledge past mail it never
+		// saw, and losing a fetch costs one repeat while losing a message
+		// costs the wave.
+		return Fetch{}, fmt.Errorf("wave: advance cursor: %w", err)
+	}
+	out.Cursor = cur
+	return out, nil
+}
+
+// Acknowledge records that a reader finished committing the effects of
+// everything through a sequence.
+//
+// It is the mark that makes a retry safe. "Read consumes nothing" prevents
+// loss and does not prevent duplication: a reader handed a message twice
+// would spawn twice, and this is what tells the record it need not be.
+//
+// It never moves backwards, and it never moves past what was fetched — an
+// acknowledgement of mail nobody was handed is a claim about something that
+// did not happen.
+func (r *Registrar) Acknowledge(ctx context.Context, mailbox, reader ReaderID, through int64) error {
+	cur, err := r.store.Cursor(ctx, mailbox, reader)
+	if err != nil {
+		return fmt.Errorf("wave: cursor: %w", err)
+	}
+	if through > cur.Fetched {
+		return fmt.Errorf("wave: cannot acknowledge %d of mailbox %q: only %d has been fetched",
+			through, mailbox, cur.Fetched)
+	}
+	if through <= cur.Acted {
+		return nil
+	}
+	cur.Acted = through
+	cur.UpdatedAt = r.now()
+	return r.store.AdvanceCursor(ctx, cur)
+}
+
+// Undelivered is what a wave's mailboxes hold that their own recipients have
+// not taken. It is reported as itself and never as a delivery.
+func (r *Registrar) Undelivered(ctx context.Context, wave ID) ([]Message, error) {
+	return r.store.Undelivered(ctx, wave)
+}

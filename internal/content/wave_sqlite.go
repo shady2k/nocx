@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/shady2k/nocx/internal/wave"
 )
 
@@ -383,4 +385,162 @@ func prefixed(columns, alias string) string {
 		parts[i] = alias + "." + strings.TrimSpace(part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ── the mailbox (nocx-dkawo.11) ───────────────────────────────────────────
+
+// Commit writes one message and mints its position in that mailbox.
+//
+// The sequence is minted INSIDE the transaction, from the mailbox's own
+// current maximum, because two coordinators writing to one worker at the same
+// moment must not be given the same number — the unique index on
+// (recipient, seq) is the second fence and this is the first.
+func (s *sqliteContent) Commit(ctx context.Context, m wave.Message) (wave.Message, error) {
+	id, idErr := uuid.NewV7()
+	if idErr != nil {
+		return wave.Message{}, fmt.Errorf("content: mint a message id: %w", idErr)
+	}
+	m.ID = wave.MessageID(id.String())
+	err := s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("content: commit message: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		var next int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(seq), 0) + 1 FROM wave_messages WHERE recipient = ?`,
+			string(m.Recipient)).Scan(&next); err != nil {
+			return fmt.Errorf("content: next message seq: %w", err)
+		}
+		m.Seq = next
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO wave_messages (id, wave_id, recipient, sender, seq, body, committed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			string(m.ID), string(m.Wave), string(m.Recipient), string(m.Sender),
+			m.Seq, m.Body, m.CommittedAt.UnixMilli()); err != nil {
+			return fmt.Errorf("content: commit message: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("content: commit message: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return wave.Message{}, err
+	}
+	return m, nil
+}
+
+// Since reads a page of one mailbox and MODIFIES NOTHING. That is the whole
+// property: two readers get the same rows, and neither read is a take.
+func (s *sqliteContent) Since(ctx context.Context, mailbox wave.ReaderID, after int64, limit int) ([]wave.Message, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, wave_id, recipient, sender, seq, body, committed_at
+		   FROM wave_messages WHERE recipient = ? AND seq > ?
+		  ORDER BY seq LIMIT ?`, string(mailbox), after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("content: read mailbox %q: %w", mailbox, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []wave.Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("content: read mailbox %q: %w", mailbox, err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("content: read mailbox %q: %w", mailbox, err)
+	}
+	return out, nil
+}
+
+// Cursor reads one reader's position. A reader that has never looked gets a
+// ZERO cursor rather than an error: "I have seen nothing" is the ordinary
+// starting state of every reader that ever existed, and an error there would
+// make the first read of every mailbox a failure path.
+func (s *sqliteContent) Cursor(ctx context.Context, mailbox, reader wave.ReaderID) (wave.Cursor, error) {
+	out := wave.Cursor{Mailbox: mailbox, Reader: reader}
+	var updated int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT fetched_to, acted_to, updated_at FROM wave_cursors WHERE mailbox = ? AND reader = ?`,
+		string(mailbox), string(reader)).Scan(&out.Fetched, &out.Acted, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return wave.Cursor{}, fmt.Errorf("content: cursor %q/%q: %w", mailbox, reader, err)
+	}
+	out.UpdatedAt = time.UnixMilli(updated).UTC()
+	return out, nil
+}
+
+// AdvanceCursor moves a reader's marks and never moves either backwards.
+//
+// The MAX in the upsert is the fence, and it is here rather than in the
+// caller because the caller reads and writes in two steps: a second reader
+// for the same (mailbox, reader) — a retry, a reconnect — could interleave
+// between them, and a cursor going backwards hands out a message that was
+// already acted on, which is the duplicated-effect failure §7.2 names.
+func (s *sqliteContent) AdvanceCursor(ctx context.Context, c wave.Cursor) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO wave_cursors (mailbox, reader, fetched_to, acted_to, updated_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(mailbox, reader) DO UPDATE SET
+			   fetched_to = MAX(fetched_to, excluded.fetched_to),
+			   acted_to   = MAX(acted_to,   excluded.acted_to),
+			   updated_at = excluded.updated_at`,
+			string(c.Mailbox), string(c.Reader), c.Fetched, c.Acted, c.UpdatedAt.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("content: advance cursor %q/%q: %w", c.Mailbox, c.Reader, err)
+		}
+		return nil
+	})
+}
+
+// Undelivered lists what a wave's mailboxes hold that their OWN RECIPIENTS
+// have not fetched.
+//
+// The join is on the recipient's own cursor and on no other reader's, because
+// a message is delivered when the participant it was addressed to has taken
+// it — not when somebody has looked. A LEFT JOIN, because a mailbox nobody
+// has ever read has no cursor row at all, and that mailbox is exactly where
+// undelivered mail piles up.
+func (s *sqliteContent) Undelivered(ctx context.Context, id wave.ID) ([]wave.Message, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.id, m.wave_id, m.recipient, m.sender, m.seq, m.body, m.committed_at
+		   FROM wave_messages m
+		   LEFT JOIN wave_cursors c
+		     ON c.mailbox = m.recipient AND c.reader = m.recipient
+		  WHERE m.wave_id = ? AND m.seq > COALESCE(c.fetched_to, 0)
+		  ORDER BY m.recipient, m.seq`, string(id))
+	if err != nil {
+		return nil, fmt.Errorf("content: undelivered mail of wave %q: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []wave.Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("content: undelivered mail of wave %q: %w", id, err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("content: undelivered mail of wave %q: %w", id, err)
+	}
+	return out, nil
+}
+
+func scanMessage(row scanner) (wave.Message, error) {
+	var m wave.Message
+	var committed int64
+	if err := row.Scan(&m.ID, &m.Wave, &m.Recipient, &m.Sender, &m.Seq, &m.Body, &committed); err != nil {
+		return wave.Message{}, err
+	}
+	m.CommittedAt = time.UnixMilli(committed).UTC()
+	return m, nil
 }

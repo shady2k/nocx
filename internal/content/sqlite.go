@@ -473,7 +473,7 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
 // by folding the `api_run*` tables in and retiring the private counter they
 // used to carry (nocx-lmb6v.5).
-const schemaVersion = 17
+const schemaVersion = 18
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -917,6 +917,52 @@ CREATE TABLE IF NOT EXISTS wave_delegation_effects (
   effect         TEXT NOT NULL CHECK (effect IN
                  ('observe','receive-events','send-input','close','delegate-further')),
   PRIMARY KEY (participant_id, effect)
+) STRICT;
+
+-- THE MAILBOX, and it is not a queue. A read takes nothing: a message is a
+-- row that stays where it is, and what moves is a cursor. There is one cursor
+-- per (mailbox, reader), which is what lets two readers read the same mailbox
+-- without either taking the other's mail — the seventeen-minute failure this
+-- design was written from.
+CREATE TABLE IF NOT EXISTS wave_messages (
+  id           TEXT PRIMARY KEY,
+  wave_id      TEXT NOT NULL REFERENCES waves(id) ON DELETE CASCADE,
+  -- The mailbox this message sits in. A worker is named by its participant
+  -- id and a coordinator by its session, so this is not a foreign key onto
+  -- wave_participants: half the legal values are sessions.
+  recipient    TEXT NOT NULL,
+  -- Stamped by the backend from the authenticated caller. A sender a caller
+  -- could name is a sender a caller could forge.
+  sender       TEXT NOT NULL,
+  -- Position in THIS mailbox, minted by the store. A sequence a caller chose
+  -- could collide, and the order of a mailbox is the only thing a cursor can
+  -- point at.
+  seq          INTEGER NOT NULL,
+  body         TEXT NOT NULL,
+  committed_at INTEGER NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS wave_messages_order ON wave_messages(recipient, seq);
+
+CREATE TABLE IF NOT EXISTS wave_cursors (
+  mailbox    TEXT NOT NULL,
+  reader     TEXT NOT NULL,
+  -- TWO MARKS, because D8 keeps two of its four acknowledgements here and
+  -- they answer different questions. fetched_to is what this reader has been
+  -- handed; it advances on the fetch, which is the only one of the four the
+  -- backend can witness as it happens. acted_to is what the reader SAID it
+  -- finished committing the effects of, and only the reader knows that.
+  -- Without the second, "read consumes nothing" prevents loss and does not
+  -- prevent a retry spawning the same worker twice.
+  --
+  -- There is deliberately no column for D8's third acknowledgement,
+  -- "present in the model's context": nothing outside the model can witness
+  -- it, and a column claiming it would be the self-matching sentinel this
+  -- whole design is written against.
+  fetched_to INTEGER NOT NULL DEFAULT 0,
+  acted_to   INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (mailbox, reader)
 ) STRICT;
 
 -- AN ARTIFACT BELONGS TO ITS BLOCK (ADR-0040). entry_id is the OWNER: it is

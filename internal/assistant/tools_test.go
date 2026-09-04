@@ -141,7 +141,7 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 	// wave.holdings is here for the same reason session.wait is: it is an
 	// observe tool over the session this grant already named, and asking
 	// what your own session is responsible for reaches nothing else.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say"}
 	if !reflect.DeepEqual(got, wantSession) {
 		t.Fatalf("session grant declared tools %v, want exactly %v", got, wantSession)
 	}

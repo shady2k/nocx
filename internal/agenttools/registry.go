@@ -742,6 +742,29 @@ var declarations = []Declaration{
 		Params:           "wave.spawn.schema.json",
 		Narrow:           narrowWave,
 	},
+	{
+		Name:        "wave.say",
+		Description: "Leave a message in one of your workers' mailboxes. It does not interrupt the worker: the message waits until the worker looks for it, so use this for what a worker will need next rather than for something that must happen now. You can only write to workers your own session started.",
+		// OBSERVE, and this is worth stating because SEND-INPUT looks like
+		// the obvious answer and is the wrong one. Send-input is TYPING into
+		// a pane, and it is what a human takeover suspends; leaving a
+		// message in a mailbox reaches nobody's keyboard, cannot answer a
+		// modal, and must go on working while a person is helping their own
+		// worker past a prompt. What it needs is membership, which every
+		// coordinator has over its own wave.
+		Effect:       []content.Effect{content.EffectObserve},
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// The session, for wave.holdings' reason: the sender is the run's own
+		// session and the model has no way to name another.
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "wave.say.schema.json",
+		Narrow:           narrowWave,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

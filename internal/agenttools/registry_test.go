@@ -444,9 +444,15 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// the seventh member of the closed lattice already names, so a
 		// `spawn` effect would be an eighth expressing the same thing.
 		"wave.spawn": {content.EffectDelegate},
+		// OBSERVE and not SEND-INPUT, and the distinction is load-bearing.
+		// Send-input is typing into a pane and is what a human takeover
+		// suspends; leaving a message in a mailbox reaches nobody's
+		// keyboard, cannot answer a modal, and must go on working while a
+		// person helps their own worker past a prompt.
+		"wave.say": {content.EffectObserve},
 	}
-	if len(declarations) != 24 {
-		t.Fatalf("declaration count = %d, want 24", len(declarations))
+	if len(declarations) != 25 {
+		t.Fatalf("declaration count = %d, want 25", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -564,6 +570,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
 		"wave.holdings.schema.json":    waveHoldingsSchema,
+		"wave.say.schema.json":         waveSaySchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
@@ -615,7 +622,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// wave.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -713,6 +720,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
 		"wave.holdings.schema.json":    waveHoldingsSchema,
+		"wave.say.schema.json":         waveSaySchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
@@ -1381,12 +1389,25 @@ const waveHoldingsSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": [],
-  "properties": {},
+  "properties": {"acknowledge": {"type": "integer"}},
   "$defs": {"result": {
     "type": "object",
     "additionalProperties": false,
     "required": ["participants"],
     "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const waveSaySchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker", "message"],
+  "properties": {"worker": {"type": "string"}, "message": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "seq"],
+    "properties": {"id": {"type": "string"}, "seq": {"type": "integer"}}
   }}
 }`
 

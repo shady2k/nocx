@@ -684,6 +684,16 @@ A wave participant produces two facts at the end of its work, and they are indep
 what it **declared** it produced, and its **process exit**. The exit is the backend's own,
 because nocx owns the PTY. This pair is the declaration.
 
+> **Nothing in the product sends one yet, as of 2026-09-04.** The receiving half is
+> complete — the kernel arm, the codec, the publisher seam and the wave record behind it —
+> and `internal/shellintegration/scripts/nocx.bash` sends `agent_enrol` and
+> `agent_withdraw` and nothing else. So every worker terminalizes as `abandoned` rather
+> than `completed`, because only one of the two facts ever arrives. `nocx-dkawo.12` owns
+> it. The fix is not the shell inferring a declaration from the agent's exit status, which
+> would collapse two facts `D9` makes independent and restore exactly the sentinel §16.1
+> refuses; it is the launcher's tool surface (§7.1 and `D5` of the orchestration design),
+> which is unbuilt.
+
 ### 16.1 Why it rides this channel, and why it is not `agent_withdraw`
 
 It rides this channel for §15.1's reason unchanged: a second socket would be a second

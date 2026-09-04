@@ -82,3 +82,23 @@ func (w *waveStub) CoordinatorSession(context.Context, wave.ID) (string, error) 
 func (w *waveStub) HeldBy(context.Context, string) ([]wave.Participant, error) {
 	return nil, w.errNoRecord("read holdings")
 }
+
+func (w *waveStub) Commit(context.Context, wave.Message) (wave.Message, error) {
+	return wave.Message{}, w.errNoRecord("commit a message")
+}
+
+func (w *waveStub) Since(context.Context, wave.ReaderID, int64, int) ([]wave.Message, error) {
+	return nil, w.errNoRecord("read a mailbox")
+}
+
+func (w *waveStub) Cursor(context.Context, wave.ReaderID, wave.ReaderID) (wave.Cursor, error) {
+	return wave.Cursor{}, w.errNoRecord("read a cursor")
+}
+
+func (w *waveStub) AdvanceCursor(context.Context, wave.Cursor) error {
+	return w.errNoRecord("advance a cursor")
+}
+
+func (w *waveStub) Undelivered(context.Context, wave.ID) ([]wave.Message, error) {
+	return nil, w.errNoRecord("list undelivered mail")
+}

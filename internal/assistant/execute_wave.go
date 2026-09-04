@@ -31,6 +31,19 @@ import (
 type WaveRecord interface {
 	Register(ctx context.Context, req wave.RegisterRequest) (wave.Participant, error)
 	HeldBy(ctx context.Context, coordinatorSession string) ([]wave.Participant, error)
+	// Say commits one message into a participant's mailbox. The sender is
+	// passed in and never taken from the arguments: a sender a model could
+	// name is a sender a model could forge.
+	Say(ctx context.Context, id wave.ID, from, to wave.ReaderID, body string) (wave.Message, error)
+	// Inbox hands this reader its next page and advances its own cursor.
+	Inbox(ctx context.Context, mailbox, reader wave.ReaderID, limit int) (wave.Fetch, error)
+	// Undelivered is what this wave's mailboxes hold that their recipients
+	// have not taken.
+	Undelivered(ctx context.Context, id wave.ID) ([]wave.Message, error)
+	// Acknowledge records that this reader finished committing the effects
+	// of everything through a sequence. It is what stops a retry of one
+	// response committing the same spawn twice.
+	Acknowledge(ctx context.Context, mailbox, reader wave.ReaderID, through int64) error
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -59,8 +72,48 @@ type waveParticipantResult struct {
 	NeedsJudgement bool `json:"needsJudgement,omitempty"`
 }
 
+// waveMailResult is one message the coordinator is handed. It carries the
+// sender and the body and nothing else: a message is CONTENT, and a shape
+// with an id or a cursor in it would invite the model to think it had
+// something to acknowledge, which is a mark the backend advanced for it.
+type waveMailResult struct {
+	From    string `json:"from"`
+	Message string `json:"message"`
+}
+
 type waveHoldingsResult struct {
-	Participants []waveParticipantResult `json:"participants"`
+	// Mail rides this call, which is D7: mail rides our own calls rather
+	// than being pushed through a hook onto the result of any tool the model
+	// happens to have called. The coordinator asks what it holds and is told
+	// what was said to it in the same breath, because those are one question
+	// — "what has happened since I last looked".
+	Mail []waveMailResult `json:"mail,omitempty"`
+	// Cursor is where this reader has been read up to. It travels with the
+	// mail because §7.2 requires the reader to acknowledge a position
+	// TOGETHER WITH the effects it commits from that response: a reader
+	// handed messages and no position could only acknowledge by guessing.
+	Cursor          int64                   `json:"cursor,omitempty"`
+	UndeliveredMail int                     `json:"undeliveredMail,omitempty"`
+	Participants    []waveParticipantResult `json:"participants"`
+}
+
+type waveHoldingsParams struct {
+	// Acknowledge is the cursor from an earlier answer, sent back once the
+	// coordinator has finished committing that answer's effects. It is
+	// SEPARATE from the fetch on purpose: D8 keeps the four
+	// acknowledgements apart, and a fetch that also claimed the fourth
+	// would be the record asserting something only the reader can know.
+	Acknowledge int64 `json:"acknowledge,omitempty"`
+}
+
+type waveSayParams struct {
+	Worker  string `json:"worker"`
+	Message string `json:"message"`
+}
+
+type waveSayResult struct {
+	ID  string `json:"id"`
+	Seq int64  `json:"seq"`
 }
 
 type waveSpawnParams struct {
@@ -93,13 +146,19 @@ func waveCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.Wa
 // It asks the session and not the run, because the run that spawned the worker
 // has ended by the time this question matters — that is the entire situation it
 // exists for. An empty list is an honest and ordinary answer.
-func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, _ json.RawMessage, seams toolSeams) (string, error) {
+func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
 	coordinator, err := waveCoordinatorFrom(cap, "wave.holdings")
 	if err != nil {
 		return "", err
 	}
 	if seams.waves == nil {
 		return "", errors.New("wave.holdings: this backend keeps no wave record")
+	}
+	var p waveHoldingsParams
+	if len(args) > 0 {
+		if argErr := json.Unmarshal(args, &p); argErr != nil {
+			return "", fmt.Errorf("wave.holdings: %w", argErr)
+		}
 	}
 	// Read what is owed BEFORE the fetch, because the fetch is what clears
 	// it. The other order would answer this question with the record's state
@@ -123,9 +182,100 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, _ json.
 		}
 		out.Participants = append(out.Participants, row)
 	}
+	// The coordinator's own mailbox is named by its session, which is what
+	// makes a RESTARTED coordinator the same reader — the property D3
+	// already rests on. Asking is what hands the mail over: the cursor
+	// advances on the fetch, and the response says so by carrying what was
+	// handed and nothing about what remains behind it.
+	box := wave.ReaderID(coordinator.Session())
+	// Acknowledge BEFORE fetching. The mark being sent back is about the
+	// PREVIOUS answer, and doing it after would let this call's own page
+	// slide under an acknowledgement the coordinator made about mail it has
+	// not seen yet.
+	if p.Acknowledge > 0 {
+		if ackErr := seams.waves.Acknowledge(ctx, box, box, p.Acknowledge); ackErr != nil {
+			return "", fmt.Errorf("wave.holdings: acknowledge: %w", ackErr)
+		}
+	}
+	fetched, err := seams.waves.Inbox(ctx, box, box, 0)
+	if err != nil {
+		return "", fmt.Errorf("wave.holdings: mail: %w", err)
+	}
+	for _, m := range fetched.Messages {
+		out.Mail = append(out.Mail, waveMailResult{From: string(m.Sender), Message: m.Body})
+	}
+	out.Cursor = fetched.Cursor.Fetched
+	// And what the coordinator itself has said that nobody took. A worker
+	// that never looks is a worker that never got the instruction, and this
+	// is the only place that difference is visible.
+	unread, err := seams.waves.Undelivered(ctx, waveOf(coordinator, held))
+	if err != nil {
+		return "", fmt.Errorf("wave.holdings: undelivered mail: %w", err)
+	}
+	for _, m := range unread {
+		if m.Sender == box {
+			out.UndeliveredMail++
+		}
+	}
+
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("wave.holdings: result: %w", err)
+	}
+	return string(raw), nil
+}
+
+// waveOf names the wave a coordinator's holdings belong to.
+//
+// It is read off the participants rather than assumed to equal the session,
+// even though a coordinator's first spawn does default the wave id to its
+// session: the record permits a named wave, and a helper that assumed the
+// default would be right until the day somebody used the field.
+func waveOf(c *agenttools.WaveCoordinator, held []wave.Participant) wave.ID {
+	for _, p := range held {
+		if p.Wave != "" {
+			return p.Wave
+		}
+	}
+	return wave.ID(c.Session())
+}
+
+// executeWaveSay leaves a message in a worker's mailbox.
+//
+// It does not interrupt and does not make anybody read. That is the whole
+// difference from typing into a pane: §7.3 says the coordinator-to-worker
+// direction is a wait for the worker's next call, and this is that wait made
+// addressable rather than pretended away.
+func executeWaveSay(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := waveCoordinatorFrom(cap, "wave.say")
+	if err != nil {
+		return "", err
+	}
+	if seams.waves == nil {
+		return "", errors.New("wave.say: this backend keeps no wave record")
+	}
+	var p waveSayParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("wave.say: %w", argErr)
+	}
+	if p.Worker == "" || p.Message == "" {
+		return "", errors.New("wave.say: a message needs a worker to leave it for and something to say")
+	}
+	// The wave is read from what this session holds, so a worker in somebody
+	// else's wave is refused by membership rather than by a check here: one
+	// owner of "may these two exchange mail", and it is the record's.
+	held, err := seams.waves.HeldBy(ctx, coordinator.Session())
+	if err != nil {
+		return "", fmt.Errorf("wave.say: %w", err)
+	}
+	m, err := seams.waves.Say(ctx, waveOf(coordinator, held),
+		wave.ReaderID(coordinator.Session()), wave.ReaderID(p.Worker), p.Message)
+	if err != nil {
+		return "", fmt.Errorf("wave.say: %w", err)
+	}
+	raw, err := json.Marshal(waveSayResult{ID: string(m.ID), Seq: m.Seq})
+	if err != nil {
+		return "", fmt.Errorf("wave.say: result: %w", err)
 	}
 	return string(raw), nil
 }

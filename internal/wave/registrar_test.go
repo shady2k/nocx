@@ -26,15 +26,23 @@ type memStore struct {
 	failOn map[string]int
 	counts map[string]int
 	ops    []string
+	// The mailbox, as rows rather than as queues: messages stay where they
+	// are and cursors move, which is the property the real store has and the
+	// one a double that popped from a slice would quietly not have.
+	mail    map[ReaderID][]Message
+	cursors map[[2]ReaderID]Cursor
+	minted  int
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		waves:  map[ID]string{},
-		parts:  map[ParticipantID]Participant{},
-		dels:   map[ParticipantID]Delegation{},
-		failOn: map[string]int{},
-		counts: map[string]int{},
+		waves:   map[ID]string{},
+		parts:   map[ParticipantID]Participant{},
+		dels:    map[ParticipantID]Delegation{},
+		failOn:  map[string]int{},
+		counts:  map[string]int{},
+		mail:    map[ReaderID][]Message{},
+		cursors: map[[2]ReaderID]Cursor{},
 	}
 }
 
@@ -218,6 +226,90 @@ func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant
 		return Participant{}, ErrNoSuchParticipant
 	}
 	return p, nil
+}
+
+func (m *memStore) Commit(_ context.Context, msg Message) (Message, error) {
+	if err := m.hit("commit"); err != nil {
+		return Message{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.minted++
+	msg.ID = MessageID(fmt.Sprintf("m-%d", m.minted))
+	msg.Seq = int64(len(m.mail[msg.Recipient]) + 1)
+	m.mail[msg.Recipient] = append(m.mail[msg.Recipient], msg)
+	return msg, nil
+}
+
+func (m *memStore) Since(_ context.Context, mailbox ReaderID, after int64, limit int) ([]Message, error) {
+	if err := m.hit("since"); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Message
+	for _, msg := range m.mail[mailbox] {
+		if msg.Seq <= after {
+			continue
+		}
+		out = append(out, msg)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) Cursor(_ context.Context, mailbox, reader ReaderID) (Cursor, error) {
+	if err := m.hit("cursor"); err != nil {
+		return Cursor{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.cursors[[2]ReaderID{mailbox, reader}]
+	if !ok {
+		return Cursor{Mailbox: mailbox, Reader: reader}, nil
+	}
+	return c, nil
+}
+
+func (m *memStore) AdvanceCursor(_ context.Context, c Cursor) error {
+	if err := m.hit("advancecursor"); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := [2]ReaderID{c.Mailbox, c.Reader}
+	// MAX, like the real store: a cursor that went backwards would hand out
+	// a message the reader has already acted on.
+	if had, ok := m.cursors[key]; ok {
+		if had.Fetched > c.Fetched {
+			c.Fetched = had.Fetched
+		}
+		if had.Acted > c.Acted {
+			c.Acted = had.Acted
+		}
+	}
+	m.cursors[key] = c
+	return nil
+}
+
+func (m *memStore) Undelivered(_ context.Context, id ID) ([]Message, error) {
+	if err := m.hit("undelivered"); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Message
+	for mailbox, msgs := range m.mail {
+		fetched := m.cursors[[2]ReaderID{mailbox, mailbox}].Fetched
+		for _, msg := range msgs {
+			if msg.Wave == id && msg.Seq > fetched {
+				out = append(out, msg)
+			}
+		}
+	}
+	return out, nil
 }
 
 func (m *memStore) CoordinatorSession(_ context.Context, id ID) (string, error) {

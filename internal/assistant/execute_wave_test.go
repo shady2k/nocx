@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -25,6 +26,11 @@ type fakeWaveRecord struct {
 	heldErr    error
 	heldFor    []string
 	owed       []wave.Fact
+	mail       map[wave.ReaderID][]wave.Message
+	sent       []wave.Message
+	unread     []wave.Message
+	fetchedBy  []wave.ReaderID
+	acked      []int64
 	// readOrder records which of the two reads happened first, because the
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
@@ -43,6 +49,52 @@ func (f *fakeWaveRecord) HeldBy(_ context.Context, coordinatorSession string) ([
 	f.heldFor = append(f.heldFor, coordinatorSession)
 	f.readOrder = append(f.readOrder, "heldby")
 	return f.held, f.heldErr
+}
+
+func (f *fakeWaveRecord) Say(_ context.Context, id wave.ID, from, to wave.ReaderID, body string) (wave.Message, error) {
+	m := wave.Message{
+		ID:   wave.MessageID(fmt.Sprintf("m-%d", len(f.sent)+1)),
+		Wave: id, Sender: from, Recipient: to, Body: body,
+		Seq: int64(len(f.sent) + 1),
+	}
+	f.sent = append(f.sent, m)
+	return m, nil
+}
+
+// Inbox hands over what the mailbox holds and REMEMBERS WHO ASKED, because
+// the coordinator's mailbox is named by its session and a carrier that
+// fetched under the wrong name would look identical in the result.
+func (f *fakeWaveRecord) Inbox(_ context.Context, mailbox, reader wave.ReaderID, _ int) (wave.Fetch, error) {
+	f.fetchedBy = append(f.fetchedBy, reader)
+	msgs := f.mail[mailbox]
+	if f.mail != nil {
+		// Handing over is what advances a cursor, and this double stands in
+		// for that: a second call must not return the same page again, or a
+		// test could not tell "asking is what hands them over" from "asking
+		// shows them".
+		f.mail[mailbox] = nil
+	}
+	// The cursor comes back WITH the page, as the real registrar's does. A
+	// double that returned messages and a zero position would let a carrier
+	// that never reported one look correct here and be useless in the
+	// product, where the position is the only thing a reader can acknowledge.
+	out := wave.Fetch{Messages: msgs, Cursor: wave.Cursor{Mailbox: mailbox, Reader: reader}}
+	for i := range out.Messages {
+		if out.Messages[i].Seq == 0 {
+			out.Messages[i].Seq = int64(i + 1)
+		}
+		out.Cursor.Fetched = out.Messages[i].Seq
+	}
+	return out, nil
+}
+
+func (f *fakeWaveRecord) Undelivered(context.Context, wave.ID) ([]wave.Message, error) {
+	return f.unread, nil
+}
+
+func (f *fakeWaveRecord) Acknowledge(_ context.Context, _, _ wave.ReaderID, through int64) error {
+	f.acked = append(f.acked, through)
+	return nil
 }
 
 func (f *fakeWaveRecord) Undispatched() []wave.Fact {
@@ -315,12 +367,19 @@ func TestWaveHoldingsResultConformsToItsContract(t *testing.T) {
 	rec := &fakeWaveRecord{
 		held: []wave.Participant{
 			{
-				ID: "p-1", State: wave.StateCompleted, Task: "read AGENTS.md",
+				ID: "p-1", Wave: "wave-1", State: wave.StateCompleted, Task: "read AGENTS.md",
 				Declared: &wave.Declaration{OK: true, Summary: "read it"},
 			},
-			{ID: "p-2", State: wave.StateLive, Task: "still working"},
+			{ID: "p-2", Wave: "wave-1", State: wave.StateLive, Task: "still working"},
 		},
 		owed: []wave.Fact{{Participant: "p-1", Kind: wave.FactDeclared}},
+		// Mail and undelivered mail both present, so additionalProperties:
+		// false is validating the shape it is actually asked about rather
+		// than a result that happens to omit the new fields.
+		mail: map[wave.ReaderID][]wave.Message{
+			"sess-coordinator": {{Sender: "p-1", Body: "the file moved"}},
+		},
+		unread: []wave.Message{{Sender: "sess-coordinator", Recipient: "p-2", Body: "wait for p-1"}},
 	}
 	raw, err := executeWaveHoldings(context.Background(),
 		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
@@ -356,5 +415,224 @@ func TestWaveHoldingsResultConformsToItsContract(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"needsJudgement":true`) {
 		t.Fatalf("the result names nothing as new, so the schema check proved nothing: %s", raw)
+	}
+	if !strings.Contains(raw, `"mail"`) || !strings.Contains(raw, `"undeliveredMail"`) {
+		t.Fatalf("the result carries no mail, so the schema check proved nothing about it: %s", raw)
+	}
+}
+
+// A9 has one exception here and it is worth pinning rather than assuming:
+// wave.say NAMES A WORKER, because the recipient is an ADDRESS and not one of
+// the holder's own resources. What it must not name is the sender or the
+// session, which are the holder's own and live inside the capability.
+func TestWaveSayNamesAnAddressAndNeverTheSender(t *testing.T) {
+	//nolint:gosec // a literal path to a contract in the tree
+	raw, err := os.ReadFile("../../contracts/tools/wave.say.schema.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema struct {
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	if schema.AdditionalProperties {
+		t.Fatalf("wave.say admits additional properties, so it bounds nothing")
+	}
+	if _, ok := schema.Properties["worker"]; !ok {
+		t.Fatalf("wave.say cannot address anybody")
+	}
+	for prop := range schema.Properties {
+		switch strings.ToLower(prop) {
+		case "sender", "from", "session", "as", "participant":
+			t.Fatalf("wave.say takes %q; who is speaking is the run's, not the model's", prop)
+		}
+	}
+}
+
+// ── the mailbox's carriers (nocx-dkawo.11) ────────────────────────────────
+
+// MAIL RIDES OUR OWN CALLS (D7). The coordinator asks what it holds and is
+// told what was said to it in the same breath, because those are one question
+// — what has happened since I last looked — and because a hook that pushed
+// mail onto the result of whatever tool the model happened to call is the
+// alternative D7 names and rejects.
+func TestHoldingsCarriesTheCoordinatorsMail(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{{ID: "p-1", Wave: "wave-1", State: wave.StateLive, Task: "read it"}},
+		mail: map[wave.ReaderID][]wave.Message{
+			"sess-coordinator": {
+				{Sender: "p-1", Body: "the file is not where you said"},
+			},
+		},
+	}
+	raw, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings: %v", err)
+	}
+	var got waveHoldingsResult
+	if decErr := json.Unmarshal([]byte(raw), &got); decErr != nil {
+		t.Fatalf("unmarshal: %v", decErr)
+	}
+	if len(got.Mail) != 1 || got.Mail[0].From != "p-1" {
+		t.Fatalf("mail = %+v, want the worker's one message", got.Mail)
+	}
+	if got.Mail[0].Message != "the file is not where you said" {
+		t.Fatalf("message = %q", got.Mail[0].Message)
+	}
+	// The coordinator's mailbox is named by its SESSION, which is what makes
+	// a restarted coordinator the same reader. A carrier that fetched under
+	// any other name would look identical in this result and be wrong.
+	if len(rec.fetchedBy) != 1 || rec.fetchedBy[0] != "sess-coordinator" {
+		t.Fatalf("fetched by %v, want the coordinator's own session", rec.fetchedBy)
+	}
+
+	// Asking is what hands it over, so a second ask does not show it again.
+	raw, err = executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings again: %v", err)
+	}
+	got = waveHoldingsResult{}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Mail) != 0 {
+		t.Fatalf("mail was handed over twice: %+v", got.Mail)
+	}
+}
+
+// What the coordinator SAID and nobody took is visible, and it is counted
+// separately from what was said to it. A worker that never looks is a worker
+// that never got the instruction, and this is the only place that difference
+// shows.
+func TestHoldingsCountsWhatTheCoordinatorSaidAndNobodyTook(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{{ID: "p-1", Wave: "wave-1", State: wave.StateLive}},
+		unread: []wave.Message{
+			{Sender: "sess-coordinator", Recipient: "p-1", Body: "start with AGENTS.md"},
+			// Somebody else's undelivered mail is not the coordinator's
+			// count: it says nothing about whether IT was heard.
+			{Sender: "p-2", Recipient: "p-1", Body: "not mine"},
+		},
+	}
+	raw, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings: %v", err)
+	}
+	var got waveHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.UndeliveredMail != 1 {
+		t.Fatalf("undeliveredMail = %d, want 1", got.UndeliveredMail)
+	}
+}
+
+// wave.say writes as the RUN'S OWN SESSION and never as anything the model
+// named. A sender a caller could choose is a sender a caller could forge.
+func TestSayWritesAsTheRunsOwnSessionAndIntoItsOwnWave(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{{ID: "p-1", Wave: "wave-7", State: wave.StateLive}},
+	}
+	raw, err := executeWaveSay(context.Background(),
+		testCoordinator("sess-coordinator"),
+		json.RawMessage(`{"worker":"p-1","message":"start with AGENTS.md"}`),
+		waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.say: %v", err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(rec.sent))
+	}
+	m := rec.sent[0]
+	if m.Sender != "sess-coordinator" {
+		t.Fatalf("sender = %q, want the run's own session", m.Sender)
+	}
+	if m.Recipient != "p-1" || m.Body != "start with AGENTS.md" {
+		t.Fatalf("message = %+v", m)
+	}
+	// The wave is read off what the session holds rather than assumed to
+	// equal the session id, because the record permits a named wave.
+	if m.Wave != "wave-7" {
+		t.Fatalf("wave = %q, want the one this session's worker is in", m.Wave)
+	}
+	var out waveSayResult
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Seq != 1 || out.ID == "" {
+		t.Fatalf("result = %+v", out)
+	}
+}
+
+// Both halves refuse what they cannot do, and say what was missing.
+func TestSayRefusesAnEmptyMessageAndAnUnnamedWorker(t *testing.T) {
+	for _, args := range []string{
+		`{"worker":"","message":"hello"}`,
+		`{"worker":"p-1","message":""}`,
+	} {
+		rec := &fakeWaveRecord{held: []wave.Participant{{ID: "p-1", Wave: "w"}}}
+		if _, err := executeWaveSay(context.Background(),
+			testCoordinator("sess-coordinator"), json.RawMessage(args), waveSeams(rec)); err == nil {
+			t.Fatalf("wave.say(%s) was accepted", args)
+		}
+		if len(rec.sent) != 0 {
+			t.Fatalf("wave.say(%s) wrote something anyway", args)
+		}
+	}
+}
+
+// A backend with no record refuses rather than pretending to have written.
+func TestSayRefusesWhenThereIsNoRecord(t *testing.T) {
+	if _, err := executeWaveSay(context.Background(),
+		testCoordinator("sess-coordinator"),
+		json.RawMessage(`{"worker":"p-1","message":"hi"}`),
+		toolSeams{}); err == nil {
+		t.Fatalf("wave.say without a record was accepted")
+	}
+}
+
+// THE FOUR ACKNOWLEDGEMENTS ARE NEVER MERGED (D8). A fetch is not a claim
+// that the coordinator acted; the coordinator says that separately, on a
+// later call, about a cursor it was handed — which is §7.2's "acknowledges
+// the cursor together with the effects it commits from that response".
+func TestHoldingsAcknowledgesOnlyWhatTheCoordinatorSendsBack(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{{ID: "p-1", Wave: "wave-1", State: wave.StateLive}},
+		mail: map[wave.ReaderID][]wave.Message{
+			"sess-coordinator": {{Sender: "p-1", Body: "please spawn a second worker"}},
+		},
+	}
+	// A fetch with no acknowledgement acknowledges nothing.
+	raw, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings: %v", err)
+	}
+	if len(rec.acked) != 0 {
+		t.Fatalf("a fetch acknowledged %v on its own", rec.acked)
+	}
+	var got waveHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cursor == 0 {
+		t.Fatalf("the coordinator was handed mail and no position to acknowledge: %s", raw)
+	}
+
+	// And the position it sends back is the one it was given.
+	if _, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"),
+		json.RawMessage(fmt.Sprintf(`{"acknowledge":%d}`, got.Cursor)),
+		waveSeams(rec)); err != nil {
+		t.Fatalf("wave.holdings with an acknowledgement: %v", err)
+	}
+	if len(rec.acked) != 1 || rec.acked[0] != got.Cursor {
+		t.Fatalf("acknowledged %v, want %d", rec.acked, got.Cursor)
 	}
 }

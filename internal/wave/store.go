@@ -77,6 +77,35 @@ type Store interface {
 	// is needed.
 	CoordinatorSession(ctx context.Context, id ID) (string, error)
 
+	// Commit writes one message into a mailbox and stamps its Seq, which is
+	// the store's to mint: a sequence a caller chose could collide, and the
+	// order of a mailbox is the only thing a cursor can point at.
+	Commit(ctx context.Context, m Message) (Message, error)
+
+	// Since reads a page of one mailbox strictly after a sequence. It TAKES
+	// NOTHING — no row is modified, no cursor moves — which is what lets two
+	// readers read the same mailbox without either losing a message. limit
+	// bounds the page; a caller is told separately whether more remains.
+	Since(ctx context.Context, mailbox ReaderID, after int64, limit int) ([]Message, error)
+
+	// Cursor reads one reader's position in one mailbox. A reader that has
+	// never looked has a zero cursor, which is a position and not an error:
+	// "I have seen nothing" is the ordinary starting state.
+	Cursor(ctx context.Context, mailbox, reader ReaderID) (Cursor, error)
+
+	// AdvanceCursor moves a reader's marks. It never moves either mark
+	// BACKWARDS, because a cursor going backwards would hand out a message a
+	// reader has already acted on, which is the duplicated-effect failure
+	// §7.2 names.
+	AdvanceCursor(ctx context.Context, c Cursor) error
+
+	// Undelivered lists what a wave's mailboxes hold that their own
+	// recipients have not fetched. It is the read behind
+	// "committed-not-fetched is reported as itself and never as delivered",
+	// and it asks the RECIPIENT's cursor: another reader having seen a
+	// message says nothing about whether it was delivered.
+	Undelivered(ctx context.Context, id ID) ([]Message, error)
+
 	// HeldBy answers D3 — a restarted coordinator asks what its SESSION
 	// holds and is told by name. It is the session and not the run, because
 	// the run that spawned the worker has ended by the time the question is

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/wave.say.schema.json",
+  "title": "WaveSayParams",
+  "description": "Parameters for the wave.say agent tool: leave a message in one of your workers' mailboxes. It does not interrupt the worker and does not make it read: the message waits until the worker looks. You cannot say anything to a worker that is not yours, and you cannot say it as anyone but yourself — who is speaking is decided by the run you are in, not by anything you write here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker", "message"],
+  "properties": {
+    "worker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The worker's id, exactly as wave.spawn returned it or wave.holdings listed it. A worker your session does not hold is refused."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "description": "What to say. Plain text the worker will read; it carries no authority and nothing it says can change what the worker is allowed to do."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WaveSayResult",
+      "description": "What the record now holds. Committed is not read: the message is in the mailbox, and whether the worker has taken it is a separate fact you can see in wave.holdings.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "seq"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The message's id."
+        },
+        "seq": {
+          "type": "integer",
+          "description": "Its position in that worker's mailbox. Positions only ever increase, so a later message has a larger one."
+        }
+      }
+    }
+  }
+}

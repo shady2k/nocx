@@ -6,7 +6,8 @@
 // without loss — a hint the refreshable outbound queue discards costs one
 // refetch rather than a row nobody ever learns about (nocx-sb3f). The store
 // cannot derive the new state from a hint (there is no occurrence in it), so
-// every applied hint is a refetch.
+// every applied hint is a refetch. What makes "one refetch" true rather than
+// merely intended is the chase below: read `hinted` before believing it.
 import { createMemo, createSignal } from 'solid-js'
 import type { Dispatcher } from '../dispatcher'
 import type { Dropped, NotifyFeedRead } from '../generated/notify.feed.read'
@@ -56,10 +57,26 @@ export function createFeedStore(
   let revision = -1
   // One in-flight refetch at a time. Under a flood the hints are exactly what
   // arrives in bulk, and one round trip per hint would turn a noisy pane into
-  // a noisy socket. The window this leaves is deliberate and bounded: a hint
-  // for a mutation the in-flight read did not see is dropped, and the next
-  // mutation's hint — every mutation raises one — refetches it.
+  // a noisy socket.
   let inFlight: Promise<void> | null = null
+  // The highest revision any hint has ANNOUNCED, which is not the highest we
+  // have read: a hint arriving under an in-flight read cannot start a second
+  // one, so the read it is coalesced into may answer from before the mutation
+  // it announced. Remembering the number is what lets the settled read notice
+  // that and chase it (nocx-dl1o0).
+  //
+  // This used to be dropped outright, on the argument that the window was
+  // "deliberate and bounded" because the next mutation's hint would refetch
+  // it. That bound is a mutation, not a duration — on a quiet feed the next
+  // one may never come, and the row the user was just told about then never
+  // appears. Coalescing is kept, because that is what the flood argument
+  // actually buys; the loss is not. A burst still costs one extra round trip
+  // and not one per hint.
+  //
+  // It bounds only what THIS store coalesced. A hint the refreshable outbound
+  // queue discards never reaches here and is still lost — that is nocx-sb3f,
+  // and it is a different door to the same silence.
+  let hinted = -1
 
   const apply = (snap: NotifyFeedRead) => {
     // A snapshot older than what we already hold is a reordered response, not
@@ -71,20 +88,36 @@ export function createFeedStore(
     setDropped(snap.dropped)
   }
 
-  const refetch = (): Promise<void> => {
-    if (inFlight) return inFlight
-    inFlight = client
+  /** One read. Resolves true when a snapshot was applied — the chase below
+   *  turns on that, because a read that FAILED must not be retried in a
+   *  tight loop while the hint it could not satisfy still stands. */
+  const readOnce = (): Promise<boolean> =>
+    client
       .read()
-      .then(apply)
+      .then((snap) => {
+        apply(snap)
+        return true
+      })
       .catch(() => {
         // A failed read leaves the last snapshot on screen. The next hint
         // retries; a bell that blanks itself on a transient error is worse
         // than one that is briefly stale — it says "nothing happened" when
         // what it means is "I could not look".
+        return false
       })
-      .finally(() => {
-        inFlight = null
+
+  const refetch = (): Promise<void> => {
+    if (inFlight) return inFlight
+    // Read until the snapshot carries every revision a hint announced. It
+    // terminates: each pass applies the server's current revision, so a pass
+    // repeats only if a hint arrived under it, which is one more mutation.
+    const chase = (): Promise<void> =>
+      readOnce().then((applied) => {
+        if (applied && hinted > revision) return chase()
       })
+    inFlight = chase().finally(() => {
+      inFlight = null
+    })
     return inFlight
   }
 
@@ -93,6 +126,7 @@ export function createFeedStore(
     // At or below our own revision is a late duplicate. Refetching on it would
     // turn one dropped-and-resent hint into an endless refetch loop.
     if (typeof hint?.revision !== 'number' || hint.revision <= revision) return
+    if (hint.revision > hinted) hinted = hint.revision
     void refetch()
   })
 
@@ -103,6 +137,10 @@ export function createFeedStore(
   // window.
   const unsubscribeConnect = dispatcher.onConnect(() => {
     revision = -1
+    // And the pending hint goes with it: it is a number in the OLD backend's
+    // numbering, so against a restarted one it is above every snapshot that
+    // will ever arrive, and the chase above would never terminate.
+    hinted = -1
     void refetch()
   })
 

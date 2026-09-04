@@ -154,6 +154,30 @@ export function Prompt(props: PromptProps) {
       ref={element}
       class="ui-prompt-overlay"
       data-placement={props.placement ?? 'floating'}
+      /*
+       * Which prompt this is, on the element that swallows the click.
+       *
+       * The overlay is the scrim: it covers the whole host and it is what a
+       * pointer hits, so when a prompt is open over something a test was
+       * driving, this div is the obstacle Playwright names — and it named it
+       * only as `<div class="ui-prompt-overlay" data-placement="top-sheet">`,
+       * which five product surfaces render identically (vault setup and
+       * unlock, the key passphrase, the connection password, the agent
+       * approval). The accessible name sits on the `<section>` inside, where
+       * an interception message never reaches. nocx-6wgcw was one such click,
+       * reproducible once per 44-minute containerised run, and the trace could
+       * not say which prompt had been in the way.
+       *
+       * The value is `ariaLabel` and nothing else, so the name a screen reader
+       * announces and the name a trace prints cannot drift apart; the
+       * alternative — a `data-name` prop each caller passes — is a second
+       * string to keep in step with the first, and the callers already pass
+       * this one. Blank means the prompt genuinely has no name yet, and the
+       * attribute is then absent rather than empty: `data-prompt=""` in a
+       * trace reads as a prompt called "", while its absence says truthfully
+       * that the dialog under it is unlabelled too, which is its own defect.
+       */
+      data-prompt={props.ariaLabel || undefined}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) props.onClose()
       }}

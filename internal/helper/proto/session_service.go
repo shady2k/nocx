@@ -192,7 +192,34 @@ type SpawnParams struct {
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.
 	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+	// IdempotencyKey is the caller's name for the SPAWN, not for the session
+	// (L7 of the local-helper design). The helper mints the session id, so the
+	// coordinator cannot record what it is about to get — but it can record
+	// what it is about to ask for, and this is that record: a pane's claim is
+	// written durably with this key BEFORE the spawn, and a spawn repeated
+	// with the same key answers with the session the first one made rather
+	// than forking a second shell.
+	//
+	// That is what lets the claim precede the first irreversible effect, which
+	// is the wave record's own rule and was bought by the same failure: a
+	// coordinator that dies between the helper's spawn and the durable binding
+	// leaves a live PTY no pane claims, and — with the daemon lifecycle
+	// unimplemented — the helper holds it forever.
+	//
+	// It is OPTIONAL and empty is legitimate: a caller that minted no claim
+	// gets no promise, which is what every level-1 caller has always had. It
+	// is opaque to the helper, which stores it and compares it and never
+	// parses it, and it is never a name a person typed — the helper owns no
+	// policy and persists no human-authored name (D3).
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
+
+// MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
+// entry per live key for the life of the session it names, so the bound is
+// what keeps a caller's bookkeeping from becoming the helper's memory
+// footprint. It is stated here, next to the field, because the contract
+// declares it and an unenforced bound in a schema is theatre.
+const MaxIdempotencyKey = 128
 
 // LifecycleLaunch carries the coordinator-minted authenticated channel
 // bootstrap to the helper. Addressing is public; Capability and Recovery are

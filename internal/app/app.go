@@ -44,7 +44,9 @@ import (
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
+	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -126,6 +128,13 @@ type App struct {
 	// sessions inventory. Kept here so the composition root's ownership is
 	// explicit; the registry itself remains private to app.
 	helperRegistry *helperRegistry
+	// helperArtifacts is where the helper binaries come from. It is held
+	// rather than reached for because THIS MACHINE is one of the hosts they
+	// are installed on (L1): the remote path takes it through the registry,
+	// and Start installs the local generation from the same source, so one
+	// artifact source answers "which build" for every host including this
+	// one.
+	helperArtifacts deploy.ArtifactSource
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -357,6 +366,18 @@ type optionSet struct {
 	// with keystoreReal, and logged, so a keychain prompt during a run can
 	// be traced to the test that asked for it.
 	keystoreReason string
+	// noLocalHelper suppresses the local helper install at Start. Test-only,
+	// and for the same reason WithLogFilePath is: the install writes four
+	// megabytes into ~/.nocx/helper, and storagetest.Isolate does not move
+	// HOME, so a test that has not asked for it would be installing into the
+	// developer's real home once per Start.
+	noLocalHelper bool
+	// helperArtifacts is where Start installs the local generation from when
+	// a caller names it. Test-only: a test that opts the install back IN
+	// supplies bytes of its own, so it never depends on `make helpers` having
+	// run and never writes four megabytes to prove a two-line wiring. nil
+	// means the embedded artifacts, which is production.
+	helperArtifacts deploy.ArtifactSource
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
@@ -1970,6 +1991,7 @@ func New(opts ...Option) (*App, error) {
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
 		helperRegistry:   helperReg,
+		helperArtifacts:  localHelperArtifacts(o),
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
@@ -2721,11 +2743,66 @@ func (a *App) Start(ctx context.Context) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		a.Logger.Warn("shellintegration: could not determine home dir", "error", err)
-	} else if err := a.ShellIntegration.EnsureInstalled(home); err != nil {
-		a.Logger.Warn("shellintegration: install failed", "error", err)
+	} else {
+		if ierr := a.ShellIntegration.EnsureInstalled(home); ierr != nil {
+			a.Logger.Warn("shellintegration: install failed", "error", ierr)
+		}
+		a.installLocalHelper(ctx, home)
 	}
 
 	return a.Transport.Start(ctx)
+}
+
+// localHelperArtifacts is the artifact source Start installs the local
+// generation from: the embedded binaries, unless a test said it may not write
+// one into the home it is running under.
+func localHelperArtifacts(opt optionSet) deploy.ArtifactSource {
+	if opt.noLocalHelper {
+		return nil
+	}
+	if opt.helperArtifacts != nil {
+		return opt.helperArtifacts
+	}
+	return helperartifacts.DefaultSource
+}
+
+// installLocalHelper is step 6 of the local-helper design's start order: the
+// current generation is installed if it is absent. This machine is an entry in
+// the helper inventory like any other (L1), so it gets the same installer the
+// remote path gets, from the same embedded artifact, keyed by the same content
+// hash — the filesystem is simply the transport (L2). No consent is asked and
+// none is owed: the binary arrives with the app, under the account already
+// running it, and asking a person for permission to run part of the program
+// they just started is theatre (L3, ADR-0057).
+//
+// It installs and it does not START anything: a daemon is begun by the first
+// caller that reaches for the endpoint, and nothing reaches for it until local
+// panes are opened through the helper (nocx-ie23r.3).
+//
+// A failure is a warning and not a refused start, because nothing in the
+// product depends on this yet. That is not the soft degrade AGENTS.md forbids:
+// there is no surface today offering something this install would have to
+// deliver. When there is one, the refusal belongs AT THE ACT — a person trying
+// to open a pane is told what failed, why and what to do (L4) — and that
+// surface is nocx-ie23r.3's, not a startup toast about a daemon nobody asked
+// for.
+//
+// It costs 34 ms on a cold home and 3 ms on a warm one, measured on Linux with
+// the 4.2 MB artifact this build embeds — the warm cost being the verification
+// read the completeness check makes. That answers §6's second open question:
+// first-run latency is not felt, so the install stays here rather than moving
+// in front of the window.
+func (a *App) installLocalHelper(ctx context.Context, home string) {
+	if a.helperArtifacts == nil {
+		return
+	}
+	installed, err := helperlocal.Install(ctx, a.helperArtifacts, home)
+	if err != nil {
+		a.Logger.Warn("helper: the local generation is not installed", "error", err)
+		return
+	}
+	a.Logger.Info("helper: the local generation is installed",
+		"generation", string(installed.Generation), "binary", installed.Binary)
 }
 
 func (a *App) Shutdown(ctx context.Context) {

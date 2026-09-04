@@ -3,6 +3,8 @@ package app
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/helper/deploy"
 )
 
 // newTestApp builds the composition root the way a test must build it: with
@@ -22,6 +24,15 @@ import (
 // one that genuinely needs the real store passes WithRealSystemKeystore with
 // its reason.
 //
+// The local helper install is dropped for the same class of reason, and it is
+// the same class of state the keystore is NOT: it is a directory, so it would
+// be isolatable — but storagetest.Isolate deliberately leaves HOME where it
+// is, and ~/.nocx/helper is resolved from HOME. So a test that called Start
+// would write four megabytes into the developer's real home, once per
+// generation, with nothing to remove it (nothing retires a generation yet).
+// A test that wants the install exercised says so — withLocalHelperArtifacts
+// below, and local_helper_install_test.go is what says it.
+//
 // Profile isolation is deliberately NOT done here. storagetest.Isolate owns
 // that boundary and a second owner would be a second truth (AD-8); a test
 // that forgets it is already refused by storage.NewAppPaths, by name.
@@ -36,6 +47,7 @@ func newTestApp(t *testing.T, opts ...Option) (*App, error) {
 	t.Helper()
 	defaults := []Option{
 		withoutSystemKeystore(),
+		withoutLocalHelperInstall(),
 		WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")),
 	}
 	return New(append(defaults, opts...)...)
@@ -56,4 +68,33 @@ func newTestApp(t *testing.T, opts ...Option) (*App, error) {
 // tests can reach it.
 func withoutSystemKeystore() Option {
 	return func(o *optionSet) { o.keystore = keystoreAbsent }
+}
+
+// withoutLocalHelperInstall drops the local helper install from Start.
+//
+// In the TEST BINARY for the same reason withoutSystemKeystore is: nothing in
+// production says it, and a production Option nobody calls is dead code the
+// ratchet is right to report. A shipped binary installs the generation it is
+// going to reach for; a composition root that opted out would be a product
+// with no local helper and no way to say so.
+func withoutLocalHelperInstall() Option {
+	return func(o *optionSet) { o.noLocalHelper = true }
+}
+
+// withLocalHelperArtifacts puts the local install back and points it at bytes
+// the caller owns. It is what "a test that wants the install exercised says so"
+// means in code: newTestApp's defaults run first and the caller's options
+// after, so this clears the blanket opt-out above.
+//
+// The artifact is the caller's rather than the embedded one for two reasons,
+// and neither is convenience. `make helpers` has not necessarily run — the
+// embedded source answers ErrArtifactsNotBuilt on a fresh checkout, and a
+// wiring test that passes only on a machine that built the helpers is not a
+// gate. And the wiring is what is under test, not the artifact: a few bytes
+// prove the same call reached the same installer as four megabytes do.
+func withLocalHelperArtifacts(src deploy.ArtifactSource) Option {
+	return func(o *optionSet) {
+		o.noLocalHelper = false
+		o.helperArtifacts = src
+	}
 }

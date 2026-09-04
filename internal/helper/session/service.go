@@ -59,6 +59,7 @@ var (
 	ErrBudget        = errors.New("session: the helper's aggregate window budget is exhausted")
 	ErrSpawn         = errors.New("session: the shell could not be started")
 	ErrSignal        = errors.New("session: signal is invalid or unavailable")
+	ErrBadKey        = errors.New("session: the idempotency key is longer than the protocol allows")
 )
 
 // Limits are the helper's bounds on output windows: D8 asks for all three,
@@ -163,7 +164,13 @@ type Service struct {
 
 	mu       sync.Mutex
 	sessions map[string]*hostSession
-	budget   int64
+	// keys are the live idempotency claims (L7), one entry per key that a
+	// spawn is holding or has resolved. It is guarded by the same mutex as
+	// sessions BECAUSE the two are one fact: `keys[k].session != ""` implies
+	// `sessions[keys[k].session]` exists, and the only way to keep that true
+	// is to change both under one lock.
+	keys   map[string]*keyClaim
+	budget int64
 	// sinks are the connections currently bound, and there may be SEVERAL:
 	// D12 is same-UID trust, so any nocx under that account may connect, and
 	// the helper's accept loop serves them all at once. It is deliberately a
@@ -203,6 +210,7 @@ func New(opts Options) *Service {
 		now:        opts.Now,
 		newID:      opts.NewID,
 		sessions:   make(map[string]*hostSession),
+		keys:       make(map[string]*keyClaim),
 		sinks:      make(map[Sink]struct{}),
 	}
 	if s.log == nil {
@@ -259,6 +267,11 @@ func (s *Service) Close() {
 	s.mu.Lock()
 	live := s.live()
 	s.sessions = make(map[string]*hostSession)
+	// Every claim goes with the rows it named: a key outliving the inventory
+	// it points into would answer a retry with a session that no longer
+	// exists. In-flight claims are released by their own spawn, which either
+	// resolves into the new map or removes itself from it.
+	s.keys = make(map[string]*keyClaim)
 	s.budget = 0
 	s.sinks = make(map[Sink]struct{})
 	s.mu.Unlock()
@@ -334,7 +347,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
 	case errors.Is(err, ErrNotAttached), errors.Is(err, ErrBadSubscriber),
-		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind):
+		errors.Is(err, ErrAckAhead), errors.Is(err, ErrAckBehind), errors.Is(err, ErrBadKey):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrNoWriter), errors.Is(err, ErrNotTheWriter), errors.Is(err, ErrStaleLease):
 		return proto.ErrCodeWriteRefused, nil
@@ -355,7 +368,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.spawn(p)
+		return s.spawn(ctx, p)
 	case proto.OpSessions:
 		var p proto.SessionsParams
 		if err := decode(params, &p); err != nil {
@@ -466,7 +479,34 @@ func decode(raw json.RawMessage, into any) error {
 //  4. start the output pump and the exit watcher. Both are attached to a
 //     session that already exists, so a process that exits between step 3 and
 //     step 4 is still observed: the watcher sees an already-closed Done.
-func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
+//
+// Before all four, and only when the caller minted one, comes the idempotency
+// claim (L7) — see claimKey. It is FIRST because the whole point of it is to
+// precede the first irreversible effect, and the budget reservation in step 1
+// is already one: a repeat that reserved a second window before discovering it
+// was a repeat would refuse itself at the budget on a helper with one session
+// left in it.
+func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnResult, error) {
+	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
+			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
+	}
+	claim, existing, err := s.claimKey(ctx, p.IdempotencyKey)
+	if err != nil {
+		return proto.SpawnResult{}, err
+	}
+	if existing != nil {
+		return proto.SpawnResult{Entry: existing.entry(s.inspector)}, nil
+	}
+	// From here the claim is HELD: every return below either resolves it onto
+	// a registered session or releases it, and there is no path between them.
+	spawned := false
+	defer func() {
+		if !spawned {
+			s.releaseKey(claim)
+		}
+	}()
+
 	bound := s.clamp(p.WindowBytes)
 	reserved := bound
 	if p.Lifecycle != nil {
@@ -530,6 +570,7 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 		id:              proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
 		raw:             raw,
 		workspace:       p.Workspace,
+		key:             p.IdempotencyKey,
 		startedAt:       s.now(),
 		proc:            proc,
 		win:             newWindow(bound),
@@ -557,6 +598,11 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	s.mu.Lock()
 
 	s.sessions[hs.id.Session] = hs
+	// The claim resolves onto the row in the SAME critical section that adds
+	// it, so no reader can ever see a resolved claim naming a session the
+	// inventory does not hold.
+	s.resolveKeyLocked(claim, hs.id.Session)
+	spawned = true
 	s.mu.Unlock()
 	go hs.pump()
 	if lifecycleCarrier != nil {
@@ -569,9 +615,122 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
 }
 
+// keyClaim is one live idempotency claim (L7). It is a pointer held by the
+// spawn that took it, so a claim that has been replaced in the map — released
+// and re-taken by a later spawn — can never be resolved or released by the
+// first one: identity is the check, never the key string.
+type keyClaim struct {
+	// key is empty for a caller that minted none. A claim with no key is a
+	// claim on nothing: it is never in the map, and resolving or releasing it
+	// does nothing, which is what keeps the keyless path free of branches.
+	key string
+	// done closes when the spawn holding this claim finished, either way. A
+	// repeat that arrives mid-flight waits on it rather than forking.
+	done chan struct{}
+	// session is the row this claim resolved onto, set under s.mu exactly
+	// once. Empty means the claim is still in flight.
+	session string
+}
+
+// claimKey takes the caller's idempotency claim, or answers with the session
+// that already holds it.
+//
+// THE INTERVAL, BOTH ENDS NAMED: a key names its session from BEFORE the fork
+// — the claim is registered here, under the same mutex the inventory is
+// guarded by, and the spawner is not called until it is held — until the row
+// it named LEAVES THE INVENTORY, which is closeSession or Close and nothing
+// else. Between those two moments exactly one session in this generation
+// answers to that key, and a spawn repeated with it returns that session's
+// entry rather than forking a second shell. A spawn that fails releases its
+// claim at the failure, so the key is reusable immediately and a pane is never
+// wedged by an attempt that produced nothing.
+//
+// The end is the ROW and not the process, deliberately: a session whose shell
+// has exited keeps its row and its exit status until somebody closes it (D5
+// makes that row the answer reconciliation reads), so the key must go on
+// naming it. Forking a fresh shell over a row whose exit status nobody has
+// read yet would be the coordinator losing the thing it came back for.
+//
+// Three answers: a claim to hold (existing nil), an existing session to return
+// (existing non-nil), or the caller's context ending while another spawn holds
+// the same key.
+func (s *Service) claimKey(ctx context.Context, key string) (claim *keyClaim, existing *hostSession, err error) {
+	if key == "" {
+		// No claim was minted, so there is nothing to hold and nothing to
+		// promise: two keyless spawns are two sessions, as they always were.
+		return &keyClaim{done: make(chan struct{})}, nil, nil
+	}
+	for {
+		s.mu.Lock()
+		held, ok := s.keys[key]
+		if !ok {
+			c := &keyClaim{key: key, done: make(chan struct{})}
+			s.keys[key] = c
+			s.mu.Unlock()
+			return c, nil, nil
+		}
+		if held.session != "" {
+			// Resolved. The invariant that both maps are written under this
+			// one mutex is what makes the lookup total rather than hopeful.
+			hs, live := s.sessions[held.session]
+			s.mu.Unlock()
+			if live {
+				return nil, hs, nil
+			}
+			// Unreachable while the invariant holds; treated as a released
+			// claim rather than trusted, because a claim pointing at nothing
+			// must never be an answer.
+			s.mu.Lock()
+			if s.keys[key] == held {
+				delete(s.keys, key)
+			}
+			s.mu.Unlock()
+			continue
+		}
+		// In flight. Waiting is what makes the claim precede the fork for a
+		// CONCURRENT repeat too — the case the whole mechanism exists for,
+		// since a coordinator's retry can race its own first attempt over a
+		// second connection.
+		s.mu.Unlock()
+		select {
+		case <-held.done:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+// resolveKeyLocked binds a held claim to the row that was just registered. The
+// caller holds s.mu.
+func (s *Service) resolveKeyLocked(c *keyClaim, session string) {
+	if c.key != "" {
+		c.session = session
+	}
+	close(c.done)
+}
+
+// releaseKey gives a claim back after a spawn that produced no row. It is
+// idempotent by construction — the deferred release runs only when the spawn
+// did not resolve — and it removes the map entry only if this claim is still
+// the one in it.
+func (s *Service) releaseKey(c *keyClaim) {
+	if c.key != "" {
+		s.mu.Lock()
+		if s.keys[c.key] == c {
+			delete(s.keys, c.key)
+		}
+		s.mu.Unlock()
+	}
+	close(c.done)
+}
+
 // closeSession ends the PTY first, then removes its inventory row and releases
 // the reserved window budget. The row is present until this operation starts
 // and absent after it returns; a disconnect alone never reaches this path.
+//
+// It is also the closing end of the idempotency interval: the claim goes with
+// the row, in the same critical section, so the next spawn carrying that key
+// forks a new session instead of being handed one that no longer exists.
 func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	hs, err := s.find(p.Session)
 	if err != nil {
@@ -582,6 +741,11 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 	s.mu.Lock()
 	if current, ok := s.sessions[p.Session.Session]; ok && current == hs {
 		delete(s.sessions, p.Session.Session)
+		if hs.key != "" {
+			if claim, held := s.keys[hs.key]; held && claim.session == p.Session.Session {
+				delete(s.keys, hs.key)
+			}
+		}
 		s.budget -= hs.launch.WindowBytes + hs.lifecycleBudget
 	}
 	s.mu.Unlock()

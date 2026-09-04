@@ -16,7 +16,20 @@ import (
 // enough wherever the test is about the document rather than the bytes.
 const aDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-const aSourceRow = `{"url":"https://example.com/skills/downloaded/SKILL.md","installedAt":"2026-09-03T12:00:00Z"}`
+// aSourceRow is a whole source row as this build writes one: the address, the
+// time, and the digest of what that address served. It deliberately carries a
+// DIFFERENT digest from aDigest, because the two are different facts — one is
+// what nocx adopted onto disk, the other is what the address gave — and a
+// fixture that made them equal would let a test pass that confused them.
+const aServedDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+const aSourceRow = `{"url":"https://example.com/skills/downloaded/SKILL.md","installedAt":"2026-09-03T12:00:00Z",` +
+	`"digest":"` + aServedDigest + `"}`
+
+// aVersionTwoSourceRow is what a document written before the digest existed
+// holds. Every rung of this module is purely additive, so it still reads —
+// and it reads as "nothing was recorded", never as "it did not match".
+const aVersionTwoSourceRow = `{"url":"https://example.com/skills/downloaded/SKILL.md","installedAt":"2026-09-03T12:00:00Z"}`
 
 func writeDocument(t *testing.T, configDir, contents string) {
 	t.Helper()
@@ -124,6 +137,27 @@ func TestSourcesAreReadAsStrictlyAsDigests(t *testing.T) {
 		{name: "a scheme that is not fetchable", sources: `{"downloaded":{"url":"file:///etc/passwd","installedAt":"2026-09-03T12:00:00Z"}}`, wantErr: true},
 		{name: "an installedAt that is not RFC3339", sources: `{"downloaded":{"url":"https://example.com/SKILL.md","installedAt":"yesterday"}}`, wantErr: true},
 		{name: "an absent installedAt", sources: `{"downloaded":{"url":"https://example.com/SKILL.md"}}`, wantErr: true},
+		// The digest of what the address served (nocx-ojfuc.3). Absent is a
+		// row written before the field existed and is READ, because the rung
+		// that carried the document forward converted nothing; a value of the
+		// wrong shape is one nothing could ever compare against, and is
+		// refused exactly as a bad adopted digest is.
+		{name: "an absent served digest", sources: `{"downloaded":` + aVersionTwoSourceRow + `}`},
+		{
+			name:    "a served digest that is not hexadecimal",
+			sources: `{"downloaded":{"url":"https://example.com/SKILL.md","installedAt":"2026-09-03T12:00:00Z","digest":"` + strings.Repeat("z", 64) + `"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "a served digest of the wrong length",
+			sources: `{"downloaded":{"url":"https://example.com/SKILL.md","installedAt":"2026-09-03T12:00:00Z","digest":"abcdef"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "a served digest carrying a prefix",
+			sources: `{"downloaded":{"url":"https://example.com/SKILL.md","installedAt":"2026-09-03T12:00:00Z","digest":"sha256:` + aServedDigest + `"}}`,
+			wantErr: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			configDir := t.TempDir()
@@ -317,6 +351,40 @@ func TestListCarriesTheRecordedSourceOfAnInstalledSkill(t *testing.T) {
 	}
 	if downloaded.Source.InstalledAt != "2026-09-03T12:00:00Z" {
 		t.Errorf("Source.InstalledAt = %q, want the recorded time", downloaded.Source.InstalledAt)
+	}
+	if downloaded.Source.Digest != aServedDigest {
+		t.Errorf("Source.Digest = %q, want the digest recorded for what the address served", downloaded.Source.Digest)
+	}
+}
+
+// TestListCarriesAVersionTwoSourceWithNoRecordedDigest is the other reading of
+// the same field, and the one that keeps the product honest about what it
+// knows. A source row written before the digest existed still names an address
+// and a time, so the row still says where the bytes came from — it simply does
+// not claim to know what that address served. Absent is not empty and not zero;
+// it is "nothing was recorded", and the page draws no row for it.
+func TestListCarriesAVersionTwoSourceWithNoRecordedDigest(t *testing.T) {
+	configDir := t.TempDir()
+	writeExistingSkill(t, filepath.Join(configDir, "installed-skills"), "downloaded", "name: downloaded\ndescription: theirs", "body")
+	writeDocument(t, configDir, `{"schemaVersion":2,"disabled":[],"digests":{},"sources":{"downloaded":`+aVersionTwoSourceRow+`}}`)
+
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+	result, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want a pre-digest source row to load", result.DocumentError)
+	}
+	downloaded := listed(t, result, "downloaded")
+	if downloaded.Source == nil {
+		t.Fatal("Source is absent: a row with no digest is still a row saying where the bytes came from")
+	}
+	if downloaded.Source.URL == "" || downloaded.Source.InstalledAt == "" {
+		t.Errorf("Source = %+v, want the address and the time it did record", *downloaded.Source)
+	}
+	if downloaded.Source.Digest != "" {
+		t.Errorf("Source.Digest = %q, want empty: nothing was recorded, and a value here would be invented", downloaded.Source.Digest)
 	}
 }
 

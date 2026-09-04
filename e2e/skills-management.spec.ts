@@ -21,9 +21,12 @@
  * absence the deletion is about: nowhere on this page a source address can be
  * typed, under any name.
  *
- * THE FIXTURE IS A SKILL ON DISK, in the installed root, with a source
- * recorded for it and a digest that does NOT match its bytes. Three things
- * follow from that one choice and each is deliberate:
+ * THE FIXTURE IS A SKILL ON DISK, in the installed root, with a whole source
+ * record for it — address, time and the digest of what that address served —
+ * and an ADOPTED digest that does NOT match its bytes. The two digests are
+ * different values on purpose: one says what the address gave, the other what
+ * nocx took onto disk, and only the second is what change detection compares.
+ * Three things follow from that one choice and each is deliberate:
  *
  *   - `installed` provenance and a recorded source are what make the row's
  *     second evidence line exist at all, and that line is what this page is
@@ -89,6 +92,12 @@ const NOTES_FILE = 'references/notes.md'
 const SKILL_BODY = `Acknowledge the page, then read ${NOTES_FILE} (${nonce}).`
 const NOTES_BODY = `# Notes\n\nThe pager rota lives in the runbook (${nonce}).\n`
 const SKILL_URL = `https://example.invalid/skills/pager-drill/SKILL.md`
+/** What that address served, as an install records it — the digest the
+ *  approval question showed. Deliberately a different value from the adopted
+ *  digest below: one is what nocx took onto disk, the other is what the
+ *  address gave, and a fixture that made them equal could not tell a surface
+ *  confusing the two from one that does not. */
+const SOURCE_DIGEST = 'b'.repeat(64)
 const SKILL_DOCUMENT = [
   '---',
   `name: ${SKILL_NAME}`,
@@ -133,14 +142,23 @@ test.beforeAll(async () => {
     join(config, 'skills.json'),
     JSON.stringify(
       {
-        schemaVersion: 3,
+        schemaVersion: 4,
         disabled: [],
         enabled: [],
         // 64 hex characters and no prefix: internal/skill reads this map as
         // strictly as it writes it, and a digest of another shape is a
         // refusal to read the whole document rather than one bad row.
         digests: { [SKILL_NAME]: '0'.repeat(64) },
-        sources: { [SKILL_NAME]: { url: SKILL_URL, installedAt: '2026-09-04T12:00:00Z' } },
+        // The whole record of what the install resolved to (nocx-ojfuc.3):
+        // the address, when the bytes were taken, and what that address
+        // served. The row reads the first; the card reads all three.
+        sources: {
+          [SKILL_NAME]: {
+            url: SKILL_URL,
+            installedAt: '2026-09-04T12:00:00Z',
+            digest: SOURCE_DIGEST,
+          },
+        },
       },
       null,
       2,
@@ -222,10 +240,12 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await expect(row.locator('.ui-badge').first()).toHaveText('installed')
     await expect(row.locator('.ui-record-row__meta-text')).toHaveText(SKILL_DESCRIPTION)
     // Both lines of the record's own evidence: the file Delete removes, and
-    // the address the bytes came from. Settings is the only place either can
-    // be read.
+    // where the bytes came from. Settings is the only place either can be
+    // read. The second is a SENTENCE (nocx-ojfuc.3) — a bare address under a
+    // bare path leaves the reader to work out what the second line is a claim
+    // about — with the address verbatim inside it.
     await expect(row.locator('.ui-record-row__detail')).toContainText(SKILL_NAME)
-    await expect(row.locator('.ui-record-row__detail')).toContainText(SKILL_URL)
+    await expect(row.locator('.ui-record-row__detail')).toContainText(`Installed from ${SKILL_URL}`)
 
     // ── AND NOWHERE TO PASTE AN ADDRESS ────────────────────────────────────
     // The deletion this whole bead is, asserted as an absence over the WHOLE
@@ -268,7 +288,22 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // being open over the row that carries them. Addressed by the list's own
     // accessible name: the card draws a second fact list over the file below,
     // and "the card states the source" is a claim about the first of them.
-    await expect(card.getByLabel('Where this skill lives')).toContainText(SKILL_URL)
+    const record = card.getByLabel('Where this skill lives')
+    await expect(record).toContainText(SKILL_URL)
+    // AND THE REST OF WHAT RESOLVED (nocx-ojfuc.3): when the bytes were taken
+    // and what that address served. Both were recorded and readable only by
+    // opening skills.json by hand until now. The date is not asserted
+    // verbatim — it is drawn in the reader's own locale — but its row is,
+    // because a record missing its "when" is the half that rots first.
+    await expect(record).toContainText('Taken on')
+    await expect(record).toContainText(SOURCE_DIGEST)
+    // The digest carries its qualification on its own row: a hash of bytes a
+    // stranger served is change detection, never a vouch for them.
+    await expect(record).toContainText('not a verdict')
+    // And nothing about HOW it was found. The search, the page the model read
+    // and the links it followed are deliberately recorded nowhere, so no
+    // surface can imply they were.
+    await expect(record).not.toContainText('Found via')
     // Every file it carries, in the manifest's own order.
     await expect(card.locator('.ui-record-row__title')).toHaveText([SKILL_FILE, NOTES_FILE], {
       timeout: 15_000,

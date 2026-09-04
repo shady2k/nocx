@@ -281,7 +281,7 @@ func (s *Store) Create(name, description, body string) error {
 	}
 	// A managed skill has no source: the assistant drafted it, so there is
 	// no address to record and nothing an update could be pinned to.
-	return s.recordApprovalDigest(name, dir, "")
+	return s.recordApprovalDigest(name, dir, nil)
 }
 
 // Update replaces an existing managed skill atomically.
@@ -317,7 +317,7 @@ func (s *Store) Update(name, description, body string) error {
 	}
 	// A managed skill has no source: the assistant drafted it, so there is
 	// no address to record and nothing an update could be pinned to.
-	return s.recordApprovalDigest(name, dir, "")
+	return s.recordApprovalDigest(name, dir, nil)
 }
 
 // Delete removes only a managed SKILL.md and leaves its now-empty directory so

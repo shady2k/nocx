@@ -32,7 +32,18 @@ func TestSkillsList_DTOConformsToContract(t *testing.T) {
 		{
 			Name: "downloaded", Description: "d", Provenance: skill.ProvenanceInstalled,
 			Path: "/installed-skills/downloaded/SKILL.md", Enabled: true, Status: skill.StatusApproved,
-			Source: &skill.Source{URL: "https://example.com/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z"},
+			Source: &skill.Source{
+				URL: "https://example.com/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z",
+				Digest: "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed",
+			},
+		},
+		{
+			// A source recorded before the served digest existed: the field
+			// is optional on the wire for exactly this row, so the contract
+			// has to accept a source object without it.
+			Name: "older", Description: "d", Provenance: skill.ProvenanceInstalled,
+			Path: "/installed-skills/older/SKILL.md", Enabled: false, Status: skill.StatusApproved,
+			Source: &skill.Source{URL: "https://example.com/older/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z"},
 		},
 	}, DocumentPath: "/skills.json"})
 	if err != nil {
@@ -78,7 +89,7 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	conn, store, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
 	url := srv.URL + "/anything/SKILL.md"
-	installThroughTheLibrary(t, store, url)
+	preview := installThroughTheLibrary(t, store, url)
 
 	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
 	var env rpcEnvelope
@@ -106,6 +117,17 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, weather.Source.InstalledAt); err != nil {
 		t.Errorf("source installedAt = %q, want an RFC3339 time: %v", weather.Source.InstalledAt, err)
+	}
+	// AND THE DIGEST THE PERSON WAS SHOWN (nocx-ojfuc.3). The value compared
+	// against is the PREVIEW's own — the number the approval question printed
+	// before anybody said yes — so this asserts that the row a year later
+	// records the same thing the question named, rather than that two pieces
+	// of the backend agree with each other.
+	if preview.Digest == "" {
+		t.Fatal("the preview reported no digest, so this assertion would be comparing two empty strings")
+	}
+	if weather.Source.Digest != preview.Digest {
+		t.Errorf("source digest = %q, want the digest the approval question showed (%q)", weather.Source.Digest, preview.Digest)
 	}
 	// The field says where the bytes came from and never what provenance a
 	// skill has: installed with nothing recorded is still installed.
@@ -278,15 +300,22 @@ func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skil
 // does: the read that remembers the digest, then the write that refuses
 // anything else. It is the shipped pair (internal/skill), reached in Go
 // because that is where the only caller of it now lives.
-func installThroughTheLibrary(t *testing.T, store *skill.Store, url string) {
+//
+// It hands back the PREVIEW, because the preview is what the person was shown
+// — its digest is the number the approval question printed — and the record
+// this install writes has to be checkable against it rather than against a
+// value a test made up.
+func installThroughTheLibrary(t *testing.T, store *skill.Store, url string) skill.PreviewResult {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := store.Preview(ctx, url); err != nil {
+	preview, err := store.Preview(ctx, url)
+	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
 	if _, err := store.Install(ctx, url); err != nil {
 		t.Fatalf("install: %v", err)
 	}
+	return preview
 }
 
 func TestSkillsFile_DTOConformsToContract(t *testing.T) {

@@ -23,27 +23,38 @@ const DocumentName = "skills.json"
 // named constant rather than a literal in Module because the migration rung
 // below has to stamp the same number, and a func referencing Module inside
 // Module's own initializer is an initialization cycle.
-const skillsSchemaVersion storage.SchemaVersion = 3
+const skillsSchemaVersion storage.SchemaVersion = 4
 
 // Module declares the skill settings document's schema version. The document
 // owns dynamic per-skill enablement, the digest recorded when the person
-// approved a skill's bytes, and — since version 2 — where an installed skill
-// came from; the global feature switch remains a normal settings declaration.
+// approved a skill's bytes, and — since version 2 — what an installed skill
+// was resolved from; the global feature switch remains a normal settings
+// declaration.
 var Module = storage.Module{
 	Name:    "skills",
 	Current: skillsSchemaVersion,
 	Migrations: []storage.Migration{
 		{From: 1, To: 2, Up: restampTo(2)},
 		{From: 2, To: 3, Up: restampTo(3)},
+		{From: 3, To: 4, Up: restampTo(4)},
 	},
 }
 
 // restampTo builds a rung that carries a document forward without converting
-// anything. Both of this module's version steps are that shape, and both are
-// PURELY ADDITIVE: version 2 is version 1 plus an optional `sources` map, and
-// version 3 is version 2 plus an optional `enabled` list, so a document
-// written before either existed simply has neither, and an absent map or list
-// reads as an empty one.
+// anything. Every one of this module's version steps is that shape, and every
+// one is PURELY ADDITIVE: version 2 is version 1 plus an optional `sources`
+// map, version 3 is version 2 plus an optional `enabled` list, and version 4
+// is version 3 plus an optional `digest` INSIDE each source row — so a
+// document written before any of them existed simply has none of them, and an
+// absent map, list or field reads as "nothing was recorded".
+//
+// The version 4 step is worth its bump even though nothing about it needs
+// converting, and the reason is the OTHER direction. encoding/json drops a
+// field it has no struct member for, and writeDocumentLocked rebuilds the
+// whole file from what it read — so a build that predates the field would not
+// merely ignore a recorded digest, it would DELETE it on the person's next
+// toggle. Migrate refuses a version above Current, which turns that silent
+// deletion into a visible refusal to read the file at all.
 //
 // The rungs still have to exist, and this is the whole reason they do.
 // storage.Module.Migrate refuses a stored version it has no migration FROM, so
@@ -99,11 +110,13 @@ type document struct {
 	Sources  map[string]Source `json:"sources,omitempty"`
 }
 
-// Source records where an installed skill came from, keyed by skill name like
-// Digests. It exists so an update can re-run the install against the URL the
-// person actually installed from; without it an update could only search for
-// the name somewhere else, and skill names are not namespaced across sources,
-// so a same-named skill elsewhere would silently reassign provenance.
+// Source is what an install RESOLVED TO, keyed by skill name like Digests:
+// the address the bytes were fetched from, the digest of what that address
+// served, and when it was taken. It exists so an update can re-run the
+// install against the URL the person actually installed from; without it an
+// update could only search for the name somewhere else, and skill names are
+// not namespaced across sources, so a same-named skill elsewhere would
+// silently reassign provenance.
 //
 // It is also what ListedSkill carries out to the settings page (nocx-qja4m.9),
 // as ONE type rather than two: the document's copy and the wire's copy are the
@@ -114,9 +127,85 @@ type document struct {
 // row is content in a file anything able to write skills.json could write — so
 // a source entry for a name the authored root holds changes nothing at all
 // about that skill, and there is a test for exactly that direction.
+//
+// # The result, never the route (nocx-ojfuc.3, design §5)
+//
+// WHAT IS DELIBERATELY NOT RECORDED HERE, so that nobody adds it later as a
+// feature: the search the model ran, the page it read, the links it followed
+// to arrive at this address, the redirects the fetch itself followed, and
+// which model or session proposed the install. None of it is written down and
+// none of it should be.
+//
+// An agent's route is not reproducible. It searched, read a page, followed a
+// link, guessed at a raw address; run the same ask tomorrow and it takes a
+// different way there, or none. A recorded route is therefore something
+// nobody can replay and no later question can be checked against — it would
+// read like evidence and function as a story. What CAN be checked a year
+// later is the result: this address served these bytes, which hashed to this,
+// at this time. That is the whole of the row.
+//
+// And the route could only ever be a MODEL ASSERTION. skills.install takes
+// one URL and nothing else, deliberately (nocx-ojfuc.1): "a field in which
+// the model can assert what the document says is a field in which it could
+// assert something the document does not". A `foundVia` or `repository`
+// parameter would be exactly such a field, and it would be shown on a page
+// whose entire job is to say where bytes came from. The three fields below
+// are all OBSERVATIONS — what this process asked for, what came back, and the
+// clock — so nothing on the Skills page is ever the model's word for itself.
+//
+// WHERE THE RESOLUTION NAMES A REPOSITORY, A PATH AND A COMMIT, THE ADDRESS
+// IS WHERE THEY ARE RECORDED. A raw address on a forge encodes all three —
+// org, repo, ref and path in-order in the URL — and URL is stored whole and
+// verbatim, so the record names them wherever the resolution did. What is
+// deliberately NOT done is parsing them out into fields of their own: that
+// needs a per-host adapter and a ref-to-commit resolution step, which is the
+// machinery this design exists to delete, and it would let a host we have not
+// taught the parser turn a genuine repository into three empty fields on the
+// page. An address nocx does not understand is still an address a person and
+// a forge both do.
 type Source struct {
-	URL         string `json:"url"`
+	// URL is the address that was FETCHED and that an update stays pinned to
+	// — the one the person approved, not whatever a redirect chain ended at.
+	// The fetch may follow up to ten hops (preview.go), and the last of them
+	// is not what anybody agreed to: pinning an update to it would let one
+	// redirect quietly move where a skill comes from, which is precisely what
+	// planInstall refuses to allow.
+	URL string `json:"url"`
+	// InstalledAt is when the bytes were taken, RFC3339 in UTC — the "when"
+	// of the record, and what makes the other two mean something a year
+	// later. An address and a digest with no date attached cannot be argued
+	// with: whatever is at that address now is simply different, with nothing
+	// saying how long it has had to become so.
 	InstalledAt string `json:"installedAt"`
+	// Digest is the sha256 over the WHOLE BUNDLE AS SERVED — the exact value
+	// the approval question showed (internal/assistant/skillinstall.go) and
+	// the exact value Install's second fetch had to match before anything was
+	// written. It is what closes the loop: the person approved this digest,
+	// and this row says that digest came from that address.
+	//
+	// IT IS NOT Digests[name], AND THE DIFFERENCE IS THE POINT. That map is
+	// the hash of the DIRECTORY nocx has adopted, which change detection
+	// compares the disk against; this is the hash of what the address served.
+	// The two are computed the same way (writeDigestPart over path and bytes)
+	// and are still different values, because a fetched SKILL.md is
+	// re-serialised through prepareSkill before it lands. They also move at
+	// different times, which is the auditable half: Approve re-records the
+	// adopted digest when a person adopts their own edits, and leaves this
+	// one alone, because an edited installed skill still arrived as whatever
+	// it arrived as. Recording only the adopted digest would mean the first
+	// Approve erased the only record of what the address gave.
+	//
+	// It is CHANGE DETECTION AND NEVER PROVENANCE, and the surfaces that draw
+	// it say so. Bytes a stranger served hash to this; nobody has vouched for
+	// them, and the first install has nothing to compare it against — a
+	// digest is worth something from the SECOND look onwards.
+	//
+	// Optional in the document, because a source row written before version 4
+	// has none, and an absent digest means exactly "nothing was recorded"
+	// rather than "it did not match". Every row this build writes has one:
+	// recordApprovalDigest takes the address and the digest together or
+	// neither, so a row cannot be half a record.
+	Digest string `json:"digest,omitempty"`
 }
 
 // ListedSkill is the settings page's complete view of a discovered skill.
@@ -328,6 +417,16 @@ func (s *Store) loadDocumentLocked() (document, error) {
 			s.docFailure = fmt.Errorf("parse %s: source installedAt for %q is not an RFC3339 time", DocumentName, name)
 			return document{}, s.docFailure
 		}
+		// The recorded digest is checked for shape exactly as the adopted
+		// digests above are, and for the same reason — but ONLY when there is
+		// one. An absent digest is a source row written before version 4 and
+		// says "nothing was recorded"; a digest of the wrong shape is a value
+		// somebody wrote that no comparison could ever use, which is a defect
+		// in the file rather than a row to read past.
+		if source.Digest != "" && (len(source.Digest) != sha256HexSize || !isHexDigest(source.Digest)) {
+			s.docFailure = fmt.Errorf("parse %s: source digest for %q is invalid", DocumentName, name)
+			return document{}, s.docFailure
+		}
 	}
 	s.docFailure = nil
 	return d, nil
@@ -520,9 +619,24 @@ func (s *Store) writeDocumentLocked(d document) error {
 	return nil
 }
 
+// acquisition is what an install resolved to, as recordApprovalDigest is
+// handed it: the address that was fetched and the digest of what that address
+// served. It travels as ONE value rather than as two string parameters so a
+// source row cannot be written half-made — there is no call shape in which a
+// caller supplies an address without the digest that came with it.
+//
+// The install time is NOT a field here, deliberately. It is minted at the
+// write below, from the clock, so no caller can assert when a skill was
+// installed — the same reason skills.install takes an address and nothing
+// else (see Source's header).
+type acquisition struct {
+	url    string
+	digest string
+}
+
 // recordApprovalDigest writes down what the person approved: the digest of the
-// bytes now on disk, and — when the skill came from an address — where they
-// came from, in ONE document write.
+// bytes now on disk, and — when the skill was acquired from an address — the
+// whole record of what that acquisition resolved to, in ONE document write.
 //
 // The two halves are not separable and there is no second call that adds the
 // source afterwards. An installed skill whose digest is recorded and whose
@@ -532,17 +646,24 @@ func (s *Store) writeDocumentLocked(d document) error {
 // reached through one writeDocumentLocked or not at all (install.go states the
 // interval this closes).
 //
-// sourceURL is empty for everything the assistant writes and for an Approve:
-// there is no address behind a managed skill, and approving an edited
-// installed skill changes its bytes rather than where it came from — so an
-// empty sourceURL LEAVES the recorded source alone rather than clearing it.
-// Forgetting a source is clearApprovalDigest's job and happens only when the
-// skill itself goes.
+// THIS IS THE ONE WRITER OF A SOURCE ROW, and there is one shape of row.
+// Nothing about the record depends on who asked for the install: the person's
+// approval arrives through the assistant's tool today and arrived through a
+// paste box before it (nocx-ojfuc.4), and both reach Store.Install, which
+// reaches here. Two writers would be two shapes within a week, which is the
+// defect this epic keeps avoiding.
 //
-// The digest is computed from the DIRECTORY, after the write, not from
+// from is nil for everything the assistant writes and for an Approve: there is
+// no address behind a managed skill, and approving an edited installed skill
+// changes its bytes rather than what it was resolved from — so a nil `from`
+// LEAVES the recorded source alone rather than clearing it. Forgetting a
+// source is clearApprovalDigest's job and happens only when the skill goes.
+//
+// The adopted digest is computed from the DIRECTORY, after the write, not from
 // whatever the caller believed it was writing. That is what makes it a record
-// of the bytes on disk rather than a record of an intention.
-func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
+// of the bytes on disk rather than a record of an intention — and it is why it
+// differs from the acquisition's own digest, which is over the bytes as served.
+func (s *Store) recordApprovalDigest(name, dir string, from *acquisition) error {
 	digest, err := hashSkillDirectory(dir)
 	if err != nil {
 		return fmt.Errorf("skill %q: hash: %w", name, err)
@@ -557,11 +678,15 @@ func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
 		d.Digests = make(map[string]string)
 	}
 	d.Digests[name] = digest
-	if sourceURL != "" {
+	if from != nil {
 		if d.Sources == nil {
 			d.Sources = make(map[string]Source)
 		}
-		d.Sources[name] = Source{URL: sourceURL, InstalledAt: time.Now().UTC().Format(time.RFC3339)}
+		d.Sources[name] = Source{
+			URL:         from.url,
+			InstalledAt: time.Now().UTC().Format(time.RFC3339),
+			Digest:      from.digest,
+		}
 	}
 	// The person's switch is left exactly as it was. An install of a name
 	// they have never turned on leaves it inert, which is the whole of design
@@ -652,9 +777,11 @@ func (s *Store) Approve(name string) error {
 	if target.Status != StatusChanged {
 		return fmt.Errorf("skill %q is not changed", name)
 	}
-	// Approving records the bytes, never the address: an edited installed
-	// skill still came from where it came from.
-	return s.recordApprovalDigest(name, target.BaseDir, "")
+	// Approving records the bytes, never the acquisition: an edited installed
+	// skill still came from where it came from, and what that address served
+	// is still what it served. So the adopted digest moves and the source row
+	// — address, time and served digest alike — does not.
+	return s.recordApprovalDigest(name, target.BaseDir, nil)
 }
 
 // Remove deletes the person-facing authored, managed or installed skill.

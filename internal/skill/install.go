@@ -181,7 +181,13 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	if err := s.writeBundle(document.Name, dir, data, files); err != nil {
 		return InstallResult{}, s.undoInstall(document.Name, dir, previous, err)
 	}
-	if err := s.recordApprovalDigest(document.Name, dir, rawURL); err != nil {
+	// The record of the acquisition, written in the same call as the adopted
+	// digest: the address that was fetched and `approved` — the digest of the
+	// bundle as served, which is the value the approval question showed and
+	// the value the second fetch above had to match. Recording it here is
+	// what makes the row auditable later: a person can re-fetch the address
+	// and hash it, and compare against what they said yes to.
+	if err := s.recordApprovalDigest(document.Name, dir, &acquisition{url: rawURL, digest: approved}); err != nil {
 		return InstallResult{}, s.undoInstall(document.Name, dir, previous, err)
 	}
 
@@ -197,8 +203,12 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// which after nocx-872jc.4 would have written "findings=0" into the
 	// durable record for exactly the install whose bundled script matched —
 	// a log that disagrees with the dialog it is the record of.
+	// The digest travels here too, and it is the SERVED one — the same value
+	// skills.json now records and the same value the approval question
+	// printed. A log line naming the address without naming what that address
+	// gave is a record of an intention rather than of a result.
 	slog.Info("skill: installed from a URL",
-		"skill", document.Name, "url", rawURL,
+		"skill", document.Name, "url", rawURL, "digest", approved,
 		"findings", len(document.Findings)+len(scanBundleFiles(files)), "files", len(files)+1)
 	return InstallResult{Name: document.Name, Provenance: ProvenanceInstalled}, nil
 }

@@ -19,7 +19,10 @@
  *   detail  the path, in the detail slot's monospace: verbatim evidence, and
  *           the answer to "which file am I looking at" that the Settings page
  *           is the only place to get — JOINED, for a skill that records one,
- *           by the address it was installed from (see `evidence` below).
+ *           by a sentence naming the address it was installed from (see
+ *           `evidence` below). The rest of that record — when the bytes were
+ *           taken, and what the address served — is read on the card, where a
+ *           record is read rather than scanned.
  *   status  shown ONLY when the bytes changed since the skill was installed.
  *           INSTALLATION, not approval (nocx-hzsxl): the digest was taken
  *           when the bytes landed, and approval only ever admitted them — it
@@ -58,6 +61,7 @@ import {
   type FileReadoutOutcome,
 } from './ui'
 import { CodeBlock, MarkerList } from './ui'
+import { formatTimestamp } from './ui/format-time'
 import { Dialog, showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import type { BadgeTone } from './ui/badge'
@@ -116,13 +120,30 @@ function provenanceTone(provenance: Skill['provenance']): BadgeTone {
  *   installed root by hand has no source, and a blank second line reads as a
  *   row that lost something.
  *
- * `source.installedAt` travels on the wire because the recorded source is one
- * fact and half of it would be a wire that has to be asked twice; it is not
- * drawn here, because when a skill was fetched is not evidence about the
- * bytes, and a third string would compete with the two that are.
+ * THE SECOND LINE IS A SENTENCE, NOT A BARE ADDRESS (nocx-ojfuc.3). It used
+ * to be the URL alone, on the argument that the slot holds the record's own
+ * words rather than the composite's prose about them. That argument is right
+ * about the VALUE and wrong about the line: two monospace strings under a
+ * title, one a path and one an address, leave the reader to work out which is
+ * which and what the second one is a claim ABOUT — installed from, checked
+ * against, offered by. Three words in front of it settle that, and the
+ * address is still verbatim inside the sentence, which is the part that has
+ * to be. It reads as something to act on: this is where these bytes came
+ * from, and it is a place you can go and look.
+ *
+ * The words come FIRST because the slot is one nowrap line that ellipsises: a
+ * long address loses its tail either way, and what must survive the cut is
+ * what the line is saying. `Installed from` is also the card's own name for
+ * this fact, so the row and the card call it one thing.
+ *
+ * `source.installedAt` and `source.digest` travel on the wire because the
+ * recorded source is ONE fact and half of it would be a wire that has to be
+ * asked twice. They are not on this line: a row is scanned, and the whole
+ * record — when it was taken, and what the address served — is read on the
+ * card, which is where a person goes when the scan raises a question.
  */
 const evidence = (skill: Skill): readonly string[] =>
-  skill.source ? [skill.path, skill.source.url] : [skill.path]
+  skill.source ? [skill.path, `Installed from ${skill.source.url}`] : [skill.path]
 
 /**
  * The one file every skill has, and the file the card opens on.
@@ -347,17 +368,50 @@ export function SkillsSection(props: SkillsSectionProps) {
   const cardTitle = (): string => `\u201c${cardName() ?? ''}\u201d`
 
   /** Where the skill lives, and — when a stranger's document put it there —
-   *  where its bytes came from.
+   *  THE WHOLE RECORD of what that acquisition resolved to (nocx-ojfuc.3):
+   *  the address, when the bytes were taken, and what the address served.
    *
-   *  Two facts and not four. The provenance and the file are drawn by the
-   *  readout below, over the bytes they are true of; repeating them here
-   *  would be the card reporting one fact twice, which is how the two come to
-   *  disagree. The address is here because it is the one thing the person
-   *  deciding about a skill cannot read off anything else on this card, and
-   *  the modal covers the row that carries it. */
+   *  The provenance and the file are NOT repeated here: they are drawn by the
+   *  readout below, over the bytes they are true of, and a card reporting one
+   *  fact twice is how the two come to disagree. What is here is what a
+   *  person deciding about a skill cannot read off anything else — the row
+   *  carries the address, because that is what a scan asks, and the modal
+   *  covers the row while it is open; the other two were recorded and
+   *  readable only by opening skills.json by hand, which is the exact defect
+   *  that put the source on the wire in the first place.
+   *
+   *  WHAT IS NOT HERE, and is not missing either: how the skill was found.
+   *  The search, the page the model read, the links it followed are not
+   *  recorded anywhere (internal/skill/store_doc.go says why at length), so
+   *  there is nothing to draw and no row that would quietly imply there was.
+   *
+   *  The digest carries its qualification ON its row rather than in a
+   *  paragraph underneath, which is what `note` is for: a caveat two elements
+   *  away is a caveat free to end up describing the wrong value. And the
+   *  qualification is the honest one — a hash of bytes a stranger served is
+   *  change detection, not a vouch. A row is drawn only for a digest that was
+   *  recorded: a source predating the field has none, and an empty value
+   *  would read as a skill whose bytes hashed to nothing. */
   const cardFacts = (skill: Skill): Fact[] => {
     const facts: Fact[] = [{ name: 'Where it is', value: skill.path }]
-    if (skill.source) facts.push({ name: 'Installed from', value: skill.source.url })
+    const source = skill.source
+    if (source) {
+      facts.push({ name: 'Installed from', value: source.url })
+      // An unparseable time draws no row rather than an empty one. The
+      // backend refuses a source row whose installedAt is not RFC3339, so
+      // this cannot arrive from the product — but a fact whose value is the
+      // empty string is a row asserting nothing, and the list's contract is
+      // that every fact given is a row.
+      const takenOn = formatTimestamp(Date.parse(source.installedAt))
+      if (takenOn) facts.push({ name: 'Taken on', value: takenOn })
+      if (source.digest) {
+        facts.push({
+          name: 'What that address served',
+          value: source.digest,
+          note: 'A sha256 of the bytes as they arrived, not a verdict on them.',
+        })
+      }
+    }
     return facts
   }
 

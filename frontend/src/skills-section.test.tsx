@@ -279,9 +279,13 @@ describe('SkillsSection', () => {
     // BOTH, in that order: the file Delete acts on, and the address the bytes
     // came from. Either alone leaves a question the page is the only place to
     // ask — see the judgement in skills-section.tsx.
+    // The second line is a SENTENCE and not a bare address (nocx-ojfuc.3): a
+    // person reading two monospace strings should not have to work out what
+    // the second one is a claim about. The address is still verbatim inside
+    // it, which is the part that has to be.
     expect(evidenceIn(rowFor(container, 'weather')!)).toEqual([
       '/tmp/nocx/installed-skills/weather/SKILL.md',
-      'https://example.com/weather/SKILL.md',
+      'Installed from https://example.com/weather/SKILL.md',
     ])
     // And nothing borrows it: a skill the person wrote has no source, and a
     // row that showed one would be claiming a stranger wrote their bytes.
@@ -552,6 +556,11 @@ const INSTALLED: SkillsList = {
       source: {
         url: 'https://example.com/weather/SKILL.md',
         installedAt: '2026-09-03T12:00:00Z',
+        // What that address served, as the install recorded it. A different
+        // value from anything else in this file on purpose: it is not the
+        // hash of what is on disk, and a fixture that reused one would let a
+        // test pass that confused the two.
+        digest: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00',
       },
     },
   ],
@@ -708,8 +717,114 @@ const fileRows = (panel: HTMLElement): string[] =>
     (title) => title.textContent?.trim() ?? '',
   )
 
+/** The card's named facts about the record, by the name a person reads on
+ *  each row. The value cell carries any qualifying note inside it, so the
+ *  assertions below use `toContain` rather than equality where a note is
+ *  expected — a caveat lives ON the row it qualifies (FactList). */
+const recordFactsIn = (panel: HTMLElement): Record<string, string> => {
+  const list = panel.querySelector('[aria-label="Where this skill lives"]')
+  const facts: Record<string, string> = {}
+  for (const row of Array.from(list?.querySelectorAll('.ui-fact-list__row') ?? [])) {
+    const name = row.querySelector('.ui-fact-list__name')?.textContent?.trim() ?? ''
+    facts[name] = row.querySelector('.ui-fact-list__value')?.textContent?.trim() ?? ''
+  }
+  return facts
+}
+
+/** A card client that answers the two reads opening a card makes. The card's
+ *  file list and bytes are not what these tests are about; the record above
+ *  them is. */
+const cardClient = (list: SkillsList) =>
+  fakeClient({
+    list: vi.fn().mockResolvedValue(list),
+    files: vi.fn().mockResolvedValue(BUNDLE),
+    file: vi.fn().mockResolvedValue({
+      ...BUILTIN_FILE,
+      name: 'weather',
+      provenance: 'installed',
+      text: '---\nname: weather\n---\n\nAsk the station.\n',
+    }),
+  })
+
 describe('SkillsSection — the skill’s card (nocx-0bsa4.3)', () => {
   afterEach(cleanup)
+
+  /** WHAT RESOLVED, WHERE A RECORD IS READ (nocx-ojfuc.3).
+   *
+   *  The row is scanned and carries the address; the card is read and carries
+   *  the whole record — the address, when the bytes were taken, and what that
+   *  address served. Before this the last two were recorded and readable only
+   *  by opening skills.json by hand, which is the same defect that put the
+   *  source on the wire in the first place. */
+  it('reads the whole record of what an installed skill resolved to', async () => {
+    const container = await openCardOf(cardClient(INSTALLED), 'weather')
+    const facts = recordFactsIn(reader(container)!)
+
+    expect(facts['Where it is']).toBe('/tmp/nocx/installed-skills/weather/SKILL.md')
+    expect(facts['Installed from']).toBe('https://example.com/weather/SKILL.md')
+    // The moment, in the reader's own locale — a record is read months later,
+    // where "312 d ago" is the form that makes them do arithmetic.
+    expect(facts['Taken on']).toBe(new Date('2026-09-03T12:00:00Z').toLocaleString())
+    // The digest, with its qualification ON its row: a hash of bytes a
+    // stranger served is change detection and never a vouch for them.
+    expect(facts['What that address served']).toContain(
+      'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00',
+    )
+    expect(facts['What that address served']).toContain('not a verdict')
+
+    // AND NOTHING ABOUT HOW IT WAS FOUND. The search, the page the model
+    // read and the links it followed are not recorded anywhere, so there is
+    // no row here implying they were — an agent's route is not reproducible,
+    // and a record of one would read like evidence and function as a story.
+    const panel = reader(container)!
+    expect(panel.textContent).not.toContain('Found via')
+    expect(panel.textContent).not.toContain('Searched')
+    expect(panel.textContent).not.toContain('Repository')
+  })
+
+  it('says nothing about a digest for a source recorded before one was', async () => {
+    // The row a purely additive schema step leaves behind: an address and a
+    // time, and no claim about what that address served. Absent is "nothing
+    // was recorded" and must not render as an empty value or a zero hash.
+    const older: SkillsList = {
+      ...INSTALLED,
+      skills: INSTALLED.skills.map((skill) =>
+        skill.name === 'weather'
+          ? {
+              ...skill,
+              source: {
+                url: 'https://example.com/weather/SKILL.md',
+                installedAt: '2026-09-03T12:00:00Z',
+              },
+            }
+          : skill,
+      ),
+    }
+    const container = await openCardOf(cardClient(older), 'weather')
+    const facts = recordFactsIn(reader(container)!)
+
+    expect(facts['Installed from']).toBe('https://example.com/weather/SKILL.md')
+    expect(facts['Taken on']).toBe(new Date('2026-09-03T12:00:00Z').toLocaleString())
+    expect('What that address served' in facts).toBe(false)
+  })
+
+  it('draws no part of the record for a skill nothing was recorded about', async () => {
+    // A directory somebody moved into the installed root by hand: installed
+    // provenance, no source row. The card still says where the file is —
+    // which is the fact every skill has — and says nothing false about the
+    // rest by saying nothing at all.
+    const byHand: SkillsList = {
+      ...INSTALLED,
+      skills: INSTALLED.skills.map((skill) =>
+        skill.name === 'weather' ? { ...skill, source: undefined } : skill,
+      ),
+    }
+    const container = await openCardOf(cardClient(byHand), 'weather')
+    const facts = recordFactsIn(reader(container)!)
+
+    expect(facts['Where it is']).toBe('/tmp/nocx/installed-skills/weather/SKILL.md')
+    expect(Object.keys(facts)).toEqual(['Where it is'])
+  })
 
   it('names every file an installed skill carries, and opens any of them without leaving the page', async () => {
     const files = vi.fn().mockResolvedValue(BUNDLE)

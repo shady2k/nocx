@@ -215,6 +215,14 @@ func TestInstall_WritesTheDocumentAndRecordsTheDigestAndTheSourceTogether(t *tes
 	if _, parseErr := time.Parse(time.RFC3339, source.InstalledAt); parseErr != nil {
 		t.Errorf("installedAt = %q, want RFC3339: %v", source.InstalledAt, parseErr)
 	}
+	// AND WHAT THAT ADDRESS SERVED (nocx-ojfuc.3). The third field of the
+	// record is the digest of the bundle AS FETCHED, which is the exact value
+	// the approval question showed and the exact value the second fetch had
+	// to match — so the row says "this address gave these bytes" and a person
+	// can check it later by fetching the address again.
+	if source.Digest != digestOfBundle(wholeBundle(installableDocument, nil)) {
+		t.Errorf("source digest = %q, want the digest of the bundle that was served", source.Digest)
+	}
 
 	// The digest is over what was WRITTEN, not over what was fetched. If it
 	// were over the fetched bytes it would not match the re-serialised file
@@ -230,6 +238,13 @@ func TestInstall_WritesTheDocumentAndRecordsTheDigestAndTheSourceTogether(t *tes
 	}
 	if digest == digestOfBundle(wholeBundle(installableDocument, nil)) {
 		t.Error("the recorded digest is the digest of the FETCHED bundle, not of the written files")
+	}
+	// The two digests are therefore DIFFERENT VALUES on purpose, and this is
+	// what makes recording both worth doing: one says what nocx adopted, the
+	// other says what the address gave. A build that made them one field
+	// would have to choose which question to stop answering.
+	if digest == source.Digest {
+		t.Error("the adopted digest and the served digest are equal; one of them is not measuring what it claims")
 	}
 
 	assertInertThenUsable(t, stand.store, "deploy")
@@ -714,5 +729,160 @@ func TestInstall_IsUnavailableWithoutTheSeamsItNeeds(t *testing.T) {
 	if _, err := noRoot.Install(context.Background(), "https://example.com/SKILL.md"); err == nil ||
 		!strings.Contains(err.Error(), "no installed skill root") {
 		t.Errorf("without an installed root: %v", err)
+	}
+}
+
+// --- what resolved, read back after a restart ------------------------------
+
+// TestInstall_RecordsWhatResolvedAndSurvivesARestart is the bead's first
+// criterion end to end (nocx-ojfuc.3): the row records the resolved file
+// address, the digest and when — and it records them ON DISK, so a store that
+// has never seen the install can still answer the question.
+//
+// A fresh Store over the same profile directory is what "restart" means here:
+// it shares no memory with the one that installed, so every fact it reports
+// came out of skills.json. Asserting against the installing store would prove
+// only that a struct kept what it was handed.
+func TestInstall_RecordsWhatResolvedAndSurvivesARestart(t *testing.T) {
+	stand := newInstallStand(t, installableDocument)
+	if _, err := stand.readThenInstall(t); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	fresh := NewStore(OSFileSystem{}, installedRoots(t, stand.configDir), storage.NewDocumentStore(stand.configDir))
+	result, err := fresh.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want a version %d document to load", result.DocumentError, skillsSchemaVersion)
+	}
+	row := listed(t, result, "deploy")
+	if row.Source == nil {
+		t.Fatal("Source is absent after a restart: the record never reached the disk")
+	}
+	if row.Source.URL != stand.server.url {
+		t.Errorf("Source.URL = %q, want the address that was fetched %q", row.Source.URL, stand.server.url)
+	}
+	if _, parseErr := time.Parse(time.RFC3339, row.Source.InstalledAt); parseErr != nil {
+		t.Errorf("Source.InstalledAt = %q, want RFC3339: %v", row.Source.InstalledAt, parseErr)
+	}
+	if row.Source.Digest != digestOfBundle(wholeBundle(installableDocument, nil)) {
+		t.Errorf("Source.Digest = %q, want the digest of what the address served", row.Source.Digest)
+	}
+	// And the row still answers the questions it answered before, because a
+	// record with a new field is still one record: the file it is in, and
+	// whether the bytes under it are the ones nocx adopted.
+	if row.Provenance != ProvenanceInstalled || row.Status != StatusApproved {
+		t.Errorf("row = %+v, want installed and approved", row)
+	}
+	if row.Path == "" {
+		t.Error("Path is empty: the row lost the fact every row carries")
+	}
+}
+
+// TestApprove_AdoptsTheNewBytesAndLeavesWhatResolvedAlone is the divergence
+// the second digest exists for.
+//
+// A person edits an installed skill and re-approves it. What nocx has adopted
+// has changed and the adopted digest moves to say so. What the ADDRESS served
+// has not changed — nobody re-fetched anything — so the acquisition record is
+// left exactly as it was, address, time and served digest alike. If the two
+// shared one field, this Approve would erase the only record of what was
+// downloaded, which is the state design §5 asks to be auditable a year later.
+func TestApprove_AdoptsTheNewBytesAndLeavesWhatResolvedAlone(t *testing.T) {
+	stand := newInstallStand(t, installableDocument)
+	if _, err := stand.readThenInstall(t); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	beforeDigest, beforeSource, ok := stand.recordedFor(t, "deploy")
+	if !ok {
+		t.Fatal("no source was recorded by the install")
+	}
+
+	// The person's editor, on the file the install wrote.
+	path := filepath.Join(stand.configDir, "installed-skills", "deploy", "SKILL.md")
+	body, readErr := os.ReadFile(path) //nolint:gosec // test-owned temp dir
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if writeErr := os.WriteFile(path, append(body, []byte("And check the logs.\n")...), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if listing, err := stand.store.List(); err != nil {
+		t.Fatalf("List: %v", err)
+	} else if listed(t, listing, "deploy").Status != StatusChanged {
+		t.Fatal("the edit was not noticed, so this test is not exercising an approval of changed bytes")
+	}
+
+	if err := stand.store.Approve("deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	afterDigest, afterSource, stillRecorded := stand.recordedFor(t, "deploy")
+	if afterDigest == beforeDigest {
+		t.Error("the adopted digest did not move, so the approval adopted nothing")
+	}
+	if !stillRecorded {
+		t.Fatal("Approve cleared the source: an edited installed skill still came from where it came from")
+	}
+	if afterSource != beforeSource {
+		t.Errorf("source = %+v, want it untouched by an approval %+v", afterSource, beforeSource)
+	}
+	if afterSource.Digest != digestOfBundle(wholeBundle(installableDocument, nil)) {
+		t.Errorf("source digest = %q, want still the digest of what the address served", afterSource.Digest)
+	}
+}
+
+// TestApprove_ReportsAHashThatCannotBeTaken is AGENTS.md rule 3 for the call
+// this bead's change routes through: recordApprovalDigest reads the skill's
+// directory to hash it before it writes anything, and that read can fail —
+// a permission changed underneath it is the ordinary way. The record must
+// then not be written AT ALL, neither half: a document whose adopted digest
+// moved while its source did not would be claiming the person adopted bytes
+// nothing ever hashed.
+//
+// The error is asserted to name the HASH, because a refusal for some other
+// reason — the skill no longer discoverable, say — would leave the document
+// untouched too, and this test would pass while exercising nothing.
+func TestApprove_ReportsAHashThatCannotBeTaken(t *testing.T) {
+	stand := newInstallStand(t, installableDocument)
+	if _, err := stand.readThenInstall(t); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dir := filepath.Join(stand.configDir, "installed-skills", "deploy")
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: deploy\ndescription: Deploy the service\n---\nedited\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeSource, _ := stand.recordedFor(t, "deploy")
+
+	// The failure: the walk cannot list the directory. An unreadable skill
+	// directory is the ordinary shape of it — a permission changed underneath,
+	// a removable volume gone — and it is the one an ordinary test process can
+	// actually produce.
+	if err := os.Chmod(dir, 0o300); err != nil { //nolint:gosec // a directory the test makes unreadable on purpose
+		t.Skipf("this filesystem cannot make a directory unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // restoring a test-owned temp directory
+	if _, readErr := os.ReadDir(dir); readErr == nil {
+		// root ignores the mode bits, so there is no failure to inject here
+		// and the assertion below would be about nothing.
+		t.Skip("this process can read a directory it has no permission for; nothing to fail")
+	}
+
+	err := stand.store.Approve("deploy")
+	if err == nil {
+		t.Fatal("Approve succeeded over a directory it could not read")
+	}
+	if !strings.Contains(err.Error(), "hash") {
+		t.Errorf("Approve error = %v, want the failure to name the hash it could not take", err)
+	}
+	_ = os.Chmod(dir, 0o700) //nolint:gosec // restoring a test-owned temp directory
+	after, afterSource, _ := stand.recordedFor(t, "deploy")
+	if after != before {
+		t.Errorf("adopted digest = %q, want it untouched by a failed hash (was %q)", after, before)
+	}
+	if afterSource != beforeSource {
+		t.Errorf("source = %+v, want it untouched by a failed hash (was %+v)", afterSource, beforeSource)
 	}
 }

@@ -147,9 +147,12 @@ describe('PolicyClient.get', () => {
   })
 })
 
+/** What a matrix write answers when it reaches every live run. */
+const BLANK_SET = { applied: true, affectedRuns: 0, stoppedRuns: 0, finishedBeforeStop: 0 }
+
 describe('PolicyClient.set', () => {
   it('sends the matrix as it stands', async () => {
-    const { dispatcher, calls } = fakeDispatcher([{ ok: true }])
+    const { dispatcher, calls } = fakeDispatcher([BLANK_SET])
     const matrix = blankPolicy()
     matrix.observe = { decision: 'permit', scopes: [{ kind: 'path', id: '/workspace' }] }
 
@@ -159,13 +162,49 @@ describe('PolicyClient.set', () => {
     expect(calls[0]?.params).toEqual({ policy: matrix })
   })
 
+  it('omits the timing when none was stated, so the backend asks first', async () => {
+    // Absent is "ask" on the backend, and the backend's default is the safe
+    // end: a matrix write that quietly applied would leave a person believing
+    // they had stopped something they had not (nocx-4yjwk.8).
+    const { dispatcher, calls } = fakeDispatcher([BLANK_SET])
+
+    await new PolicyClient(dispatcher).set(blankPolicy())
+
+    expect('runs' in (calls[0]?.params as object)).toBe(false)
+  })
+
+  it('carries the timing when the person has chosen one, in the words a rule write uses', async () => {
+    const { dispatcher, calls } = fakeDispatcher([BLANK_SET, BLANK_SET])
+
+    await new PolicyClient(dispatcher).set(blankPolicy(), 'future')
+    await new PolicyClient(dispatcher).set(blankPolicy(), 'stop')
+
+    expect((calls[0]?.params as { runs: string }).runs).toBe('future')
+    expect((calls[1]?.params as { runs: string }).runs).toBe('stop')
+  })
+
+  it('answers what the write did to the work already running', async () => {
+    // The same four fields, with the same names, that a rule write answers
+    // with: one question about the work already running, one vocabulary.
+    const { dispatcher } = fakeDispatcher([
+      { applied: true, affectedRuns: 3, stoppedRuns: 2, finishedBeforeStop: 1 },
+    ])
+
+    await expect(new PolicyClient(dispatcher).set(blankPolicy(), 'stop')).resolves.toEqual({
+      applied: true,
+      affectedRuns: 3,
+      stoppedRuns: 2,
+      finishedBeforeStop: 1,
+    })
+  })
+
   it('sends no rules key at all — a matrix save cannot delete a standing answer', async () => {
     // This is the regression, at the renderer's end. A matrix-only save used
     // to send the whole document, and the guard that saved us read "absent
     // means nothing to say" — which holds only while nothing sends the key.
     // `rules: []` is what serialising an empty list produces, it is not
     // absent, and it deleted every rule a person had approved (nocx-39bly).
-    const { dispatcher, calls } = fakeDispatcher([{ ok: true }])
+    const { dispatcher, calls } = fakeDispatcher([BLANK_SET])
 
     await new PolicyClient(dispatcher).set(blankPolicy())
 

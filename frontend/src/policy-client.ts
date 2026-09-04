@@ -178,7 +178,8 @@ export type PolicyClassification = PolicyClassify
 export type PolicyCommandFeature = Feature
 
 /**
- * WHEN a rule write takes effect for the work already running.
+ * WHEN a policy write takes effect for the work already running — a standing
+ * answer written or forgotten, and a matrix row moved.
  *
  * It exists because a run's authority is minted when the run starts and is
  * immutable for the run: an answer taken back here does not reach a run
@@ -202,12 +203,16 @@ export type PolicyCommandFeature = Feature
 export type RunsTiming = 'ask' | 'future' | 'stop'
 
 /**
- * What a rule write says about the work already running — the fields both
- * `policy.setRule` and `policy.forgetRule` answer with. Structural, because
- * the two generated result types declare them independently and a surface
- * that handles both needs one name for the shape.
+ * What a policy write says about the work already running — the fields
+ * `policy.set`, `policy.setRule` and `policy.forgetRule` all answer with.
+ * Structural, because the three generated result types declare them
+ * independently and a surface that handles all three needs one name for the
+ * shape.
+ *
+ * One name and one meaning is the point. A person who has read "2 answers are
+ * still using this" once has read it for every kind of answer there is.
  */
-export interface RuleWriteRuns {
+export interface PolicyWriteRuns {
   applied: boolean
   affectedRuns: number
   stoppedRuns: number
@@ -260,9 +265,17 @@ export class PolicyClient {
    * the whole document went over the wire and the page's copy of it was
    * always a little stale. The prompt writes rules while this page is open;
    * a page that cannot say anything about rules cannot delete one.
+   *
+   * `runs` is WHEN it takes effect for the work already running — see
+   * `RunsTiming`. Left out, the backend asks first. A row is an answer a run
+   * is deciding under exactly as a standing answer is, and moving one used to
+   * reach the store in silence (nocx-4yjwk.8).
    */
-  set(policy: PolicyMatrix): Promise<PolicySet> {
-    return this.dispatcher.call<PolicySet>('policy.set', { policy })
+  set(policy: PolicyMatrix, runs?: RunsTiming): Promise<PolicySet> {
+    return this.dispatcher.call<PolicySet>('policy.set', {
+      policy,
+      ...(runs ? { runs } : {}),
+    })
   }
 
   /**

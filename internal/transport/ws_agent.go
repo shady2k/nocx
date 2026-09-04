@@ -2994,7 +2994,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	}
 }
 
-// ── the runs a revoked answer left behind (nocx-r4fh8) ────────────────────
+// ── the runs a revoked answer left behind (nocx-r4fh8, nocx-4yjwk.8) ──────
 
 // RunsUnreachedByRuleWrite reports the LIVE runs whose grant would decide
 // differently once one rule write lands — the runs a change or a forget does
@@ -3030,6 +3030,84 @@ func (s *WSServer) RunsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// RunsUnreachedByRowWrite reports the LIVE runs whose authority would decide
+// differently once ONE matrix write lands — the runs a moved effect row does
+// not reach (nocx-4yjwk.8).
+//
+// It is RunsUnreachedByRuleWrite's twin and shares everything it can: the same
+// registry, the same "no grant, nothing to decide" answer, the same ascending
+// ids, the same snapshot discipline. What it cannot share is the question put
+// to each run, because a row write has no selector to probe — see
+// content/rowwrite.go, which is where that derivation is written down.
+//
+// It answers with the ROWS as well as the runs, and they come out of the same
+// walk on purpose: the sentence a stopped run records must name the change the
+// count was taken over. Those are not always the rows the DOCUMENT moved — the
+// approval prompt writes a row too (GlobalPolicyStore.SetRowDecision), so a
+// person can save a matrix that moves nothing in the document while a run
+// started before that prompt is still deciding under the old row. The rows a
+// person is told about are therefore the rows that moved for the runs, unioned
+// over them and put back into the lattice's order.
+//
+// The one thing it does that the rule twin does not is MINT AGAIN. A run's
+// rows have had the session overlay resolved into them and the run fence
+// folded into them, so the only comparable "after" is that same run's
+// authority minted from the document the write leaves behind. runGrantFrom is
+// the mint both this and the real run cross.
+//
+// The registry is snapshotted under its lock and the minting happens after it
+// is released, which is the one place this differs from the rule twin's
+// evaluate-under-the-lock. The mint reads the session policy store and the
+// settings store; taking their locks under pendingRunsMu would be a lock order
+// this file is the only place to state, and the snapshot is still what makes
+// the set of runs one that coexisted.
+func (s *WSServer) RunsUnreachedByRowWrite(after content.EffectPolicy) ([]int64, []content.Effect) {
+	type held struct {
+		id      int64
+		session string
+		policy  content.EffectPolicy
+	}
+	var runs []held
+	s.pendingRunsMu.Lock()
+	for id, rc := range s.pendingRuns {
+		if rc.grant == nil {
+			// No grant, so no tool and no decision for a row to move. The
+			// honest answer rather than the conservative one, for the
+			// reason the rule twin gives.
+			continue
+		}
+		runs = append(runs, held{id: id, session: string(rc.sessionID), policy: rc.grant.Policy})
+	}
+	s.pendingRunsMu.Unlock()
+
+	var out []int64
+	movedSet := map[content.Effect]bool{}
+	for _, run := range runs {
+		next := s.runGrantFrom(after, run.session)
+		if next == nil {
+			// The server has no policy store, so nothing here was minted
+			// from one and no write can move it.
+			continue
+		}
+		moved := run.policy.RowsMovedByRowWrite(next.Policy)
+		if len(moved) == 0 {
+			continue
+		}
+		out = append(out, run.id)
+		for _, e := range moved {
+			movedSet[e] = true
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	var movedRows []content.Effect
+	for _, e := range content.LatticeEffects() {
+		if movedSet[e] {
+			movedRows = append(movedRows, e)
+		}
+	}
+	return out, movedRows
 }
 
 // StopRunsForRevokedAnswer terminalizes the named runs because a person took

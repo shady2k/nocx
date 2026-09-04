@@ -118,7 +118,7 @@ import {
   type PolicyRule,
   type PolicyRuleWrite,
   type PolicyView,
-  type RuleWriteRuns,
+  type PolicyWriteRuns,
   type RunsTiming,
 } from './policy-client'
 import type { Scope } from './generated/policy.get'
@@ -390,21 +390,30 @@ interface Panel {
 }
 
 /**
- * ONE write to a standing answer, held so it can be repeated with the timing
- * the person picks (nocx-r4fh8).
+ * ONE write to an answer, held so it can be repeated with the timing the
+ * person picks (nocx-r4fh8 for a standing answer, nocx-4yjwk.8 for a row).
  *
- * Every rule gesture on this page becomes one of these, because every one of
- * them can leave live work behind: forgetting an answer, changing it, and
- * writing a new refusal all change what a run started thirty seconds ago is
- * still deciding under. It is DATA rather than a closure so that repeating a
- * gesture is repeating the same object, not re-running a callback whose
- * captured state may have moved.
+ * EVERY writing gesture on this page becomes one of these, because every one
+ * of them can leave live work behind: forgetting a standing answer, changing
+ * one, writing a new refusal, and moving one of the seven rows all change what
+ * a run started thirty seconds ago is still deciding under. The row was the
+ * one that did it in silence — it goes through `policy.set`, which used to
+ * carry no timing at all.
+ *
+ * It is DATA rather than a closure so that repeating a gesture is repeating
+ * the same object, not re-running a callback whose captured state may have
+ * moved. The row variant holds the WHOLE matrix for that reason: the write is
+ * a matrix write, and rebuilding it from the store on the repeat would send a
+ * document that had moved under the question.
  */
-type RuleGesture = { kind: 'forget'; id: string } | { kind: 'write'; rule: PolicyRuleWrite }
+type PolicyGesture =
+  | { kind: 'forget'; id: string }
+  | { kind: 'write'; rule: PolicyRuleWrite }
+  | { kind: 'row'; matrix: PolicyMatrix }
 
 /**
- * A rule write the backend would not apply yet, and why: it does not reach the
- * work already running, and the person has not said what should happen to it.
+ * A write the backend would not apply yet, and why: it does not reach the work
+ * already running, and the person has not said what should happen to it.
  *
  * `count` is the backend's, and only the backend's. Which runs are still
  * deciding under an answer is a question about each run's own frozen grant —
@@ -412,7 +421,7 @@ type RuleGesture = { kind: 'forget'; id: string } | { kind: 'write'; rule: Polic
  * here would be a second answer to drift from the enforcement's.
  */
 interface RunsQuestion {
-  gesture: RuleGesture
+  gesture: PolicyGesture
   count: number
   /** What to close once the person has answered — the panel that raised it. */
   after: () => void
@@ -430,7 +439,7 @@ function messageOf(e: unknown): string {
  * between the count and the stop, and saying "stopped 3" when one of them
  * finished by itself tells a person something untrue about their own work.
  */
-function stoppedSentence(res: RuleWriteRuns): string {
+function stoppedSentence(res: PolicyWriteRuns): string {
   const stopped = res.stoppedRuns === 1 ? 'Stopped 1 answer' : `Stopped ${res.stoppedRuns} answers`
   if (res.finishedBeforeStop === 0)
     return `${stopped} that ${res.stoppedRuns === 1 ? 'was' : 'were'} using it.`
@@ -549,67 +558,53 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   })
 
   /**
-   * Run one MATRIX write and adopt what a fresh read answers. A rule write
-   * goes through `runGesture` instead, which has a question to ask.
+   * One row of the matrix, changed; every other row and every standing answer
+   * travels back exactly as it was read.
    *
-   * The re-read is the point: `policy.set` acknowledges, it does not echo the
-   * document back, so trusting the payload we just sent is exactly the "page
-   * shows a permission the store did not take" state this surface exists to
-   * remove. A write the store turns down raises the danger toast and re-reads
-   * too — there is no draft to keep, so the page simply goes back to showing
-   * what is there.
-   *
-   * It takes the write ALREADY IN FLIGHT rather than a thunk: a thunk closing
-   * over `props.client` is reactivity read outside a tracked scope, which the
-   * lint rule flags honestly (solid/reactivity). Every caller is an event
-   * handler, so starting the call there is where it belongs anyway.
+   * It goes through `runGesture` like every other write on this page, and that
+   * is the whole of nocx-4yjwk.8 here: a row is an answer a run is deciding
+   * under, so moving one asks the same question about the work already running
+   * that forgetting a standing answer asks — in the same words, from the same
+   * block, with the same two answers.
    */
-  async function write(gesture: Promise<unknown>): Promise<void> {
-    setBusy(true)
-    try {
-      await gesture
-      await read()
-    } catch (e) {
-      showToast({ message: `That change was not saved: ${messageOf(e)}`, level: 'danger' })
-      await read()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  /** One row of the matrix, changed; every other row and every standing answer
-   *  travels back exactly as it was read. */
-  function writeRow(effect: EffectKey, next: PolicyRow): Promise<void> {
+  function writeRow(
+    effect: EffectKey,
+    next: PolicyRow,
+    after: () => void = () => {},
+  ): Promise<void> {
     const m = matrix()
     if (!m) return Promise.resolve()
-    return write(props.client.set({ ...m, [effect]: next }))
+    return runGesture({ kind: 'row', matrix: { ...m, [effect]: next } }, 'ask', after)
   }
 
   /**
-   * Run ONE rule gesture, and RAISE THE QUESTION when the backend says the
-   * write does not reach the work already running.
+   * Run ONE writing gesture — a standing answer or a row — and RAISE THE
+   * QUESTION when the backend says the write does not reach the work already
+   * running.
    *
-   * This is the whole of nocx-r4fh8 on this side. A run's authority is minted
-   * when it starts and is fixed for the run, so an answer taken back here
-   * never reaches a run already using it — correct, and silent, which is the
-   * defect: a person acts specifically to stop something and is told nothing
-   * while it goes on. So the default timing writes NOTHING when live runs
-   * would be left behind, answers with how many, and this raises that as a
-   * question with two answers. Repeating the same gesture with the timing they
-   * chose is what applies it.
+   * This is the whole of nocx-r4fh8 and nocx-4yjwk.8 on this side. A run's
+   * authority is minted when it starts and is fixed for the run, so an answer
+   * changed here never reaches a run already using it — correct, and silent,
+   * which is the defect: a person acts specifically to stop something and is
+   * told nothing while it goes on. So the default timing writes NOTHING when
+   * live runs would be left behind, answers with how many, and this raises
+   * that as a question with two answers. Repeating the same gesture with the
+   * timing they chose is what applies it.
    *
-   * The re-read after every outcome is `write`'s reason, unchanged: the
-   * methods acknowledge rather than echo the document, so the page adopts what
-   * a fresh read says and can never show a permission the store did not take —
-   * including after a write that deliberately did not happen.
+   * EVERY write goes through here, including a matrix write, and that is the
+   * point rather than tidiness: a row that had its own path would be a second
+   * account of what happens to the work already running, and the second
+   * account is the one that would go on being silent.
+   *
+   * The re-read after every outcome: the methods acknowledge rather than echo
+   * the document, so the page adopts what a fresh read says and can never show
+   * a permission the store did not take — including after a write that
+   * deliberately did not happen.
    */
-  async function runGesture(g: RuleGesture, runs: RunsTiming, after: () => void): Promise<void> {
+  async function runGesture(g: PolicyGesture, runs: RunsTiming, after: () => void): Promise<void> {
     setBusy(true)
     try {
-      const res: RuleWriteRuns =
-        g.kind === 'forget'
-          ? await props.client.forgetRule(g.id, runs)
-          : await props.client.setRule(g.rule, runs)
+      const res: PolicyWriteRuns = await callFor(g, runs)
       await read()
       if (!res.applied) {
         setRunsQuestion({ gesture: g, count: res.affectedRuns, after })
@@ -625,6 +620,23 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       after()
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * The one call each gesture is. Split out because `runGesture` is about the
+   * TIMING and would otherwise carry a three-way branch in the middle of it;
+   * the three methods differ only in what they name, never in what the answer
+   * means.
+   */
+  function callFor(g: PolicyGesture, runs: RunsTiming): Promise<PolicyWriteRuns> {
+    switch (g.kind) {
+      case 'forget':
+        return props.client.forgetRule(g.id, runs)
+      case 'write':
+        return props.client.setRule(g.rule, runs)
+      case 'row':
+        return props.client.set(g.matrix, runs)
     }
   }
 
@@ -1266,6 +1278,21 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                   an answer, so this reaches everything it starts from now on either way — you are
                   choosing what happens to the {q.count === 1 ? 'one' : q.count} in progress.
                 </Caption>
+                {/* WHAT THE NUMBER MEANS, and it is not the same sentence for
+                    the two kinds of answer. A standing answer names a command,
+                    so its count is the runs still deciding about THAT command.
+                    A row names a whole class of thing the assistant does, so
+                    its count is every run whose permissions still say the old
+                    thing — which on an ordinary afternoon is all of them. That
+                    is the truth rather than a rounding of it, and a person who
+                    is not told would read a big number as the page counting
+                    runs instead of counting answers. */}
+                <Show when={q.gesture.kind === 'row'}>
+                  <Caption>
+                    This answer covers everything of its kind, not one command, so this is every
+                    piece of work whose permissions still say what you have just changed.
+                  </Caption>
+                </Show>
                 <ActionGroup ariaLabel="What happens to the work already running">
                   <Button
                     variant="default"
@@ -1493,6 +1520,13 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             {ALLOW_A_COMMAND}
           </Button>
         </ActionGroup>
+        {/* The question JOINS the gesture that raised it, and a row answered
+            ON THE ROW has no dialog to join — a row whose panel would carry
+            nothing does not open one (nocx-6szvl), so its answer buttons live
+            in the list. It lands here, and only here: a dialog is open exactly
+            when the gesture was made inside one, and two copies of a block
+            with one id is two places for one question. */}
+        <Show when={panel() === null && writer() === null}>{runsQuestionBlock()}</Show>
       </Show>
 
       <Show when={writer()} keyed>
@@ -1536,11 +1570,12 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                         void runGesture({ kind: 'forget', id: on.rule.id }, 'ask', closePanel)
                         return
                       }
-                      // A ROW is written with policy.set, which carries no
-                      // timing: the run question is the one-rule seam's, and a
-                      // row write is a different object with a different owner
-                      // (nocx-r4fh8 scopes it to setRule/forgetRule).
-                      void writeRow(on.effect, { decision: 'ask', scopes: [] }).then(closePanel)
+                      // A ROW moved back to its default is the same gesture
+                      // as forgetting a standing answer, and carries the same
+                      // question about the work already running — the panel
+                      // closes once the write has actually landed, never
+                      // while the question is still open (nocx-4yjwk.8).
+                      void writeRow(on.effect, { decision: 'ask', scopes: [] }, closePanel)
                     }}
                   >
                     Forget it

@@ -34,12 +34,13 @@
  * NOTHING HERE WAITS ON A DURATION. Every wait is on an observable state: a
  * dialog, a directory on disk, a row in the tree, a run in the list.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   openImportDestination,

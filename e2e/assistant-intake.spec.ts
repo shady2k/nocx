@@ -6,13 +6,14 @@
  * fetched, a bare paragraph becomes a note, and an unclear command gets one
  * question without a tool-result follow-up.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
+  standalone as base,
   answerPermission,
   bindEndpoint,
   createAiEndpoint,

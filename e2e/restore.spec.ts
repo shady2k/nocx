@@ -17,11 +17,12 @@
  * start" is half of what nocx-l21ib promises and the half nobody would
  * notice breaking.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   VaultBackend,
   bindEndpoint,

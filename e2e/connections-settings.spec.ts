@@ -7,7 +7,14 @@
  * registration). Without it the Connect button dispatches a no-op and the
  * tab assertion fails.
  */
-import { appReadyForInput, test, expect, settingsReady, type Page } from './harness'
+import {
+  appReadyForInput,
+  test,
+  expect,
+  settingsReady,
+  SHARED_VAULT_PASSPHRASE,
+  type Page,
+} from './harness'
 
 const PROFILE_NAME = 'Test SSH'
 
@@ -162,8 +169,8 @@ test.describe('Connections inside Settings', () => {
     // project order (nocx-8rda).
     const setup = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })
     if (await setup.isVisible().catch(() => false)) {
-      await page.locator('#vault-setup-passphrase').fill('master-passphrase-7')
-      await page.locator('#vault-setup-confirm').fill('master-passphrase-7')
+      await page.locator('#vault-setup-passphrase').fill(SHARED_VAULT_PASSPHRASE)
+      await page.locator('#vault-setup-confirm').fill(SHARED_VAULT_PASSPHRASE)
       await setup.getByRole('button', { name: /Set Up/i }).click()
       await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
         timeout: 10_000,

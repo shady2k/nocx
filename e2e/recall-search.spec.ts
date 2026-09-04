@@ -34,11 +34,17 @@
  * Drives the real frontend against cmd/nocx-server with NO Secret Service
  * for the backend and fresh XDG directories.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { appReadyForInput, VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import {
+  standalone as base,
+  appReadyForInput,
+  VaultBackend,
+  bindEndpoint,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which

@@ -46,11 +46,12 @@
  * (restore.spec.ts learned this the hard way, and `storedWith` below is that
  * lesson).
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

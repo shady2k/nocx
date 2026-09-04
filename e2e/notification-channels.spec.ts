@@ -1,9 +1,16 @@
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { VaultBackend, bindEndpoint, promptReady, settingsReady, resolveBackend } from './harness'
+import {
+  standalone as base,
+  VaultBackend,
+  bindEndpoint,
+  promptReady,
+  settingsReady,
+  resolveBackend,
+} from './harness'
 import { readStand } from './stand'
 
 /**

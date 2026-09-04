@@ -24,11 +24,12 @@
  * or a fixture file. The shell's wait loops are gates opened by this spec, not
  * elapsed-time assertions.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

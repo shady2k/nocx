@@ -44,11 +44,12 @@
  * answer's `completed` chip — the run reached a terminal state, so the call
  * has happened and the answer is whole — and only then is the order read.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

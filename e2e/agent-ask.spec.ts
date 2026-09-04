@@ -68,11 +68,12 @@
  * app's" — a dev stand starts with no endpoint and the check must create
  * what it needs through the surface a user uses).
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

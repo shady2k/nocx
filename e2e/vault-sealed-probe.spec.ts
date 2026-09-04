@@ -21,11 +21,17 @@
  * Secret Service (VaultBackend, `true`), so the passphrase journey is the
  * real one and the endpoint never leaks into the shared stand.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, appReadyForInput, bindEndpoint, settingsReady } from './harness'
+import {
+  standalone as base,
+  VaultBackend,
+  appReadyForInput,
+  bindEndpoint,
+  settingsReady,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { fieldChip } from './secret-field'

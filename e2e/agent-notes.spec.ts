@@ -8,11 +8,12 @@
  * user-facing panel. The fake's follow-up answer is derived from the tool
  * result, so a missing operation cannot be hidden by a fixed model answer.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   bindEndpoint,
   createAiEndpoint,

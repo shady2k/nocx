@@ -53,7 +53,8 @@
         "skills.read",
         "skills.create",
         "skills.update",
-        "skills.delete"
+        "skills.delete",
+        "skills.install"
       ]
     },
     "callId": {
@@ -114,7 +115,7 @@
       }
     },
     "finding": {
-      "description": "Skill write only: the first static scan finding in the proposed body, naming the file it was found in \u2014 always SKILL.md here, because that is the only file skills.create and skills.update write. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.",
+      "description": "Skill write only: the first static scan finding in the bytes being proposed, naming the file it was found in. For skills.create and skills.update that file is always SKILL.md, because that is the only file they write; for skills.install it is any file of the fetched bundle, because the finding comes from the document and the support files nocx read before the question was put. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.",
       "type": ["object", "null"],
       "additionalProperties": false,
       "required": ["path", "patternId", "line", "lineNumber"],

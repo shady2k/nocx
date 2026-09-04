@@ -439,9 +439,10 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.create":    {content.EffectMutateReversible},
 		"skills.update":    {content.EffectMutateReversible},
 		"skills.delete":    {content.EffectMutateReversible},
+		"skills.install":   {content.EffectMutateReversible, content.EffectCrossBoundary},
 	}
-	if len(declarations) != 22 {
-		t.Fatalf("declaration count = %d, want 22", len(declarations))
+	if len(declarations) != 23 {
+		t.Fatalf("declaration count = %d, want 23", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -558,6 +559,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
+		"skills.install.schema.json":   skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -702,6 +704,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
+		"skills.install.schema.json":   skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

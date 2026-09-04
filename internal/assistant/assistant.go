@@ -32,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
@@ -210,6 +211,17 @@ type SkillLibrary interface {
 	Create(name, description, body string) error
 	Update(name, description, body string) error
 	Delete(name string) error
+	// Preview and Install are the two halves of adopting a skill published
+	// at an address, and they are on THIS interface rather than one of their
+	// own for the reason the writes are: one owner, so a composition root
+	// cannot offer an install whose preview came from somewhere else. The
+	// pair is not two ways to do one thing — Preview fetches and writes
+	// nothing, Install re-fetches and refuses unless the bytes are the ones
+	// Preview showed. What joins them is a digest the store keeps on the
+	// server, which is why neither method takes anything but an address:
+	// there is no field in which a caller could assert what the bytes were.
+	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
+	Install(ctx context.Context, url string) (skill.InstallResult, error)
 }
 
 // AskParams is one ask's model call: the resolved endpoint's facts plus the

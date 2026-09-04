@@ -43,6 +43,17 @@ func (s *skillsWriteLibrary) Delete(name string) error {
 	return nil
 }
 
+// Refusing rather than recording: this fake is the WRITE seam, and an
+// install that answered here would let a test about skills.create pass
+// while silently exercising a fetch path nobody wired.
+func (s *skillsWriteLibrary) Preview(context.Context, string) (skill.PreviewResult, error) {
+	return skill.PreviewResult{}, errors.New("not used")
+}
+
+func (s *skillsWriteLibrary) Install(context.Context, string) (skill.InstallResult, error) {
+	return skill.InstallResult{}, errors.New("not used")
+}
+
 func skillsWriteTestCapability(name string) *agenttools.SkillWriteScope {
 	return agenttools.NewSkillWriteScope([]agenttools.ResourceRef{{
 		Kind: content.ResourceContent,

@@ -45,6 +45,17 @@ func (s *skillsReadSource) Delete(string) error {
 	return errors.New("not used")
 }
 
+// The install pair REFUSES rather than answering emptily. A fake that
+// resolves a fetch nobody wired is a fake that can make an install look
+// like it worked in a test about something else.
+func (s *skillsReadSource) Preview(context.Context, string) (skill.PreviewResult, error) {
+	return skill.PreviewResult{}, errors.New("not used")
+}
+
+func (s *skillsReadSource) Install(context.Context, string) (skill.InstallResult, error) {
+	return skill.InstallResult{}, errors.New("not used")
+}
+
 func skillsReadTestCapability() *agenttools.ContentScope {
 	return agenttools.NewContentScope([]agenttools.ResourceRef{{
 		Kind: content.ResourceContent,

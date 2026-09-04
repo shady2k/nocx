@@ -70,6 +70,7 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"skills.create":    executeSkillsCreate,
 	"skills.update":    executeSkillsUpdate,
 	"skills.delete":    executeSkillsDelete,
+	"skills.install":   executeSkillsInstall,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is
@@ -669,6 +670,78 @@ func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.C
 		return "", fmt.Errorf("%s: %w", tool, err)
 	}
 	return marshalResult(result)
+}
+
+// skillInstallResult is what the model is told an approved install produced.
+//
+// It is four small fields and deliberately not the manifest, the digest or
+// the body. Those are what the PERSON was shown before they answered — the
+// tool's own bound is 8 KiB and a bundle's manifest has no bound of its own,
+// so a result that carried it would be a window onto the fetched document
+// dressed as a receipt. What the model needs from here is: it worked, this is
+// the name that landed, and it is OFF.
+type skillInstallResult struct {
+	Status     string `json:"status"`
+	Name       string `json:"name"`
+	Provenance string `json:"provenance"`
+	// Enabled is always false and its contract says `const: false`, which is
+	// how "inert on arrival" stops being a claim about this executor and
+	// becomes a property the result checker enforces on every call
+	// (nocx-0bsa4). This tool writes a skill; there is no code path here by
+	// which it could turn one on, and the field is what says so to the model
+	// — which would otherwise report a successful install as a capability it
+	// now has.
+	Enabled bool `json:"enabled"`
+}
+
+// executeSkillsInstall adopts the document the person has just been shown.
+//
+// THE SECOND HALF OF A TWO-STEP, and the first half already happened: the
+// kernel resolved this call before the question was put (kernel.go's
+// resolveSkillInstall), which is what let the person be asked about a skill
+// rather than about an address. The store remembers, ON THE SERVER, a digest
+// of the bundle it showed; Install re-fetches and refuses unless the bytes
+// are still those. So this executor passes the URL and nothing else — there
+// is no argument here in which anything could assert what the document said,
+// and that absence is the whole of what makes the comparison worth making.
+//
+// There is no second fetch path, no second digest and no second manifest:
+// internal/skill owns all three and this reaches them through the one seam.
+func executeSkillsInstall(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, ok := cap.(*agenttools.SkillInstallScope)
+	if !ok {
+		return "", fmt.Errorf("skills.install: capability is %T, not *agenttools.SkillInstallScope", cap)
+	}
+	var params struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("skills.install: args: %w", err)
+	}
+	if !scope.AllowsSource(params.URL) {
+		return "", fmt.Errorf("skills.install: %q is outside this run's grant", params.URL)
+	}
+	// The write half of the call, asked separately from the read half. The
+	// gate decided this call on its worst class, which is the fetch; this is
+	// where the class that governs the WRITE gets its say, and it is asked
+	// before anything is fetched a second time rather than after.
+	if !scope.AllowsInstall() {
+		return "", errors.New("skills.install: this run may not write a skill, so the document was not fetched again and nothing was installed")
+	}
+	library := seams.skills
+	if library == nil {
+		return "", errors.New("skills.install: no skill library is wired for this run")
+	}
+	installed, err := library.Install(ctx, params.URL)
+	if err != nil {
+		return "", fmt.Errorf("skills.install: %w", err)
+	}
+	return marshalResult(skillInstallResult{
+		Status:     "installed",
+		Name:       installed.Name,
+		Provenance: string(installed.Provenance),
+		Enabled:    false,
+	})
 }
 
 func skillWriteScope(cap agenttools.Capability, tool string) (*agenttools.SkillWriteScope, error) {

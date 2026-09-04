@@ -688,6 +688,59 @@ var declarations = []Declaration{
 		Params:           "skills.delete.schema.json",
 		Narrow:           narrowSkillsWrite,
 	},
+	{
+		Name:        "skills.install",
+		Description: "Adopt a skill somebody has published at a web address: give the address and nocx fetches the document, reads what it says it is, fetches the files it names and shows the person all of it before anything is written. Reach for this when the person points you at a skill to add — a refusal is an answer, and what does land is switched OFF until they turn it on, so do not treat an install as a skill you can then use.",
+		// TWO CLASSES, AND THEY ARE BOTH REACHED — this is a CONJUNCTION,
+		// not the alternation ADR-0053 describes. session.run declares a set
+		// because `lsblk` and `rm -rf` are alternatives that share a carrier
+		// and exactly one of them happens; here the fetch AND the write both
+		// happen on every successful call, so nothing selects between them.
+		//
+		// Declaring the set anyway is still right, and better than either
+		// singleton. `mutate-reversible` alone would hide that the model
+		// chooses an address off this machine and nocx goes and reads it;
+		// `cross-boundary` alone would hide that bytes from there land on
+		// the person's disk. WorstEffect makes the DECISION on
+		// cross-boundary (the lattice's higher row), which is the strict
+		// reading of a conjunction and the one we want: the person's answer
+		// for the harsher of the two acts governs the pair.
+		//
+		// Where the current gate is weaker than the conjunction deserves is
+		// stated rather than hidden. Registry.ForGrant offers a tool when
+		// ANY declared class is not refused, and the policy decides on the
+		// worst class alone — so a policy that refuses reversible mutation
+		// while permitting cross-boundary would still offer this row and
+		// still ask about it. That gap is closed at the ENFORCEMENT layer
+		// instead, which ADR-0028 decision 4 makes the real one:
+		// narrowSkillsInstall builds the capability from BOTH rows, and a
+		// refused mutate-reversible row yields a capability that cannot
+		// install anything. Closing it at offer time as well would need a
+		// declaration to say "every class, not any", which is a new
+		// mechanism and belongs in an amendment to ADR-0053 rather than in
+		// this row.
+		Effect: []content.Effect{
+			content.EffectMutateReversible,
+			content.EffectCrossBoundary,
+		},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		// Longer than fetch.url's minute, because the executor's half of
+		// this call re-acquires the WHOLE bundle — the document plus up to
+		// maxBundleFiles support files — where fetch.url's minute covers one
+		// request. The same bound is applied to the resolution that happens
+		// before the person is asked (internal/assistant/kernel.go), so the
+		// declared deadline governs both halves of the call rather than only
+		// the half that runs after the answer.
+		Deadline:         120 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceDestination, content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillInstallResources("url"),
+		Executes:         InGo,
+		Params:           "skills.install.schema.json",
+		Narrow:           narrowSkillsInstall,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

@@ -47,6 +47,7 @@ export interface AgentApprovalRequested {
     | 'skills.create'
     | 'skills.update'
     | 'skills.delete'
+    | 'skills.install'
   /**
    * The model's call id for the proposed call — part of the binding.
    */
@@ -96,7 +97,7 @@ export interface AgentApprovalRequested {
     id: string
   } | null
   /**
-   * Skill write only: the first static scan finding in the proposed body, naming the file it was found in — always SKILL.md here, because that is the only file skills.create and skills.update write. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
+   * Skill write only: the first static scan finding in the bytes being proposed, naming the file it was found in. For skills.create and skills.update that file is always SKILL.md, because that is the only file they write; for skills.install it is any file of the fetched bundle, because the finding comes from the document and the support files nocx read before the question was put. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
    */
   finding?: {
     path: string

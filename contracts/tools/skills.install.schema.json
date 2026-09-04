@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/skills.install.schema.json",
+  "title": "SkillsInstallParams",
+  "description": "Adopt the skill published at one address. The address is the whole of the call: nocx fetches the document itself, reads what it says it is, fetches every support file it names, and shows the person all of that before anything is written. There is no field in which the caller can assert what the document says, deliberately — the person approves the bytes nocx read, not a description of them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The complete http:// or https:// address of the SKILL.md document to adopt. It must be the address that answers with the document itself, not a page that links to it; a redirect off that address's origin is refused rather than followed."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "SkillsInstallResult",
+      "description": "What the person's approval produced. `enabled` is always false: a skill installed from outside this machine arrives switched OFF and only the person turns it on, so a successful install does not mean the skill is in use — say so rather than acting as though it were available.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "name", "provenance", "enabled"],
+      "properties": {
+        "status": { "const": "installed" },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The name the document's own frontmatter carried. It is never derived from the address."
+        },
+        "provenance": {
+          "const": "installed",
+          "description": "The root the bytes landed in, which is the only thing that decides how nocx treats them."
+        },
+        "enabled": {
+          "const": false,
+          "description": "Always false. This tool writes a skill; it has no way to turn one on."
+        }
+      }
+    }
+  }
+}

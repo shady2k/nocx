@@ -362,7 +362,7 @@ func TestPolicyForgetRule_StopEndsTheRunsUsingItAndSparesTheOthers(t *testing.T)
 	}
 
 	// The terminal state AND the reason, off the durable record.
-	waitForRunTermination(t, h, using.EntryID, content.RunCancelled, content.TermUserKilled)
+	waitForRunTermination(t, h, using.EntryID, content.RunCancelled, content.TermAnswerRevoked)
 
 	// The bystander is untouched: it was never deciding under the answer.
 	if !h.isLive(bystander.RunID) {
@@ -380,12 +380,69 @@ func TestPolicyForgetRule_TheStoppedRunSaysWhichAnswerWasTakenBack(t *testing.T)
 	if got := forgetRuleRuns(t, h, rule.ID, "stop"); got.StoppedRuns != 1 {
 		t.Fatalf("forget stop = %+v, want 1 stopped", got)
 	}
-	entry := waitForRunTermination(t, h, using.EntryID, content.RunCancelled, content.TermUserKilled)
+	entry := waitForRunTermination(t, h, using.EntryID, content.RunCancelled, content.TermAnswerRevoked)
 	if entry == "" {
 		t.Fatal("the stopped run recorded no sentence")
 	}
 	if !containsAll(entry, "taken back", "df -h") {
 		t.Fatalf("the stopped run's sentence = %q, want it to name the answer that was taken back", entry)
+	}
+}
+
+// A REVOKED-ANSWER STOP HAS ITS OWN REASON, AND A PERSON'S STOP STILL HAS
+// user-killed (nocx-4yjwk.7).
+//
+// The two are genuinely different facts. One is a decision about a PERMISSION
+// whose consequence this run happened to be; the other is a decision about
+// THIS RUN. They used to land the same string, not because anybody judged them
+// the same but because the honest name did not exist: the durable vocabulary
+// is closed by a CHECK constraint on `executions.termination_reason`, so a new
+// value could not be recorded at all until the CHECK was widened by a rung on
+// the migration ladder.
+//
+// So this asserts the DIFFERENCE rather than the value alone. A test that only
+// read `answer-revoked` back would still pass on the day somebody made
+// agent.cancel write it too, which would put the vocabulary exactly back where
+// it started while looking green.
+//
+// The reason is METADATA and the sentence is the words: the assertion below
+// keeps both, because a machine-readable reason that replaced the sentence
+// would have taken away the only part a person reads.
+func TestPolicyForgetRule_ARevokedAnswerStopIsToldApartFromAPersonStoppingOneRun(t *testing.T) {
+	h := newRevokeHarness(t)
+	rule := h.seedPermit("df", "-h")
+	revoked := h.startHeldRun("revoked")
+	stopped := h.startHeldRun("stopped-by-hand")
+
+	// One run is ended by the person pressing Stop on it.
+	cancelRunOverWire(t, h, stopped.RunID)
+	waitForRunTermination(t, h, stopped.EntryID, content.RunCancelled, content.TermUserKilled)
+
+	// The other is ended because the answer it was running under was taken
+	// back. Same terminal state, different reason — which is the whole point.
+	if got := forgetRuleRuns(t, h, rule.ID, "stop"); got.StoppedRuns != 1 {
+		t.Fatalf("forget stop = %+v, want 1 stopped", got)
+	}
+	sentence := waitForRunTermination(t, h, revoked.EntryID, content.RunCancelled, content.TermAnswerRevoked)
+	if !containsAll(sentence, "taken back", "df -h") {
+		t.Fatalf("the revoked run's sentence = %q, want it to still name the answer that was taken back — "+
+			"the reason is machine-readable metadata, never a replacement for the words a person reads", sentence)
+	}
+}
+
+// cancelRunOverWire is the person pressing Stop on one run, through the method
+// the button calls.
+func cancelRunOverWire(t *testing.T, h *revokeHarness, runID int64) {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "agent.cancel", map[string]any{"runId": runID})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("agent.cancel %s: %v", raw, err)
+	}
+	if env.Error != nil {
+		t.Fatalf("agent.cancel: %+v", env.Error)
 	}
 }
 

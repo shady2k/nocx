@@ -2992,14 +2992,21 @@ func (s *WSServer) RunsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
 // terminalize writes the terminal close. A second way to end a run would be a
 // second set of half-terminal states, so there is no second way.
 //
-// THE REASON IS TermUserKilled, and it is a person's stop: the person chose
-// this ending, for a cause that is stated in the run's own sentence — which
-// answer was taken back, by name. A reason of its own would be better and is
-// not available: the durable vocabulary is closed by a CHECK constraint on
-// executions.termination_reason, so a new value ends the run with no durable
-// ending at all (the close fails, is logged, and the startup sweep repairs it
-// as interrupted). content.TerminationReason's declaration records what
-// widening it would take.
+// THE REASON IS TermAnswerRevoked, AND IT IS NOT TermUserKilled (nocx-4yjwk.7).
+// The two are different facts: user-killed is a decision about THIS RUN — the
+// Stop button on this answer — and answer-revoked is a decision about a
+// PERMISSION, of which this run happened to be a consequence. A history query
+// can now tell them apart instead of reading every revocation as somebody
+// pressing Stop.
+//
+// It used to be TermUserKilled, and not because anybody judged them the same:
+// the durable vocabulary is closed by a CHECK constraint on
+// executions.termination_reason, so until that CHECK was widened by a rung on
+// the migration ladder the honest name could not be recorded at all.
+//
+// THE REASON IS METADATA AND THE SENTENCE IS THE WORDS. `answer-revoked` cannot
+// say "df -h", so the sentence still names WHICH answer was taken back, and it
+// is the part a person actually reads. The reason never replaces it.
 //
 // THE TWO OUTCOMES ARE BOTH REPORTED, and neither is a failure. A run that is
 // gone from the registry, or one beginCancel refuses, has already reached a
@@ -3033,8 +3040,8 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 		runCtx := log.WithTraceID(ctx, runTrace(id))
 		rc.control.cancelRunLeases()
 		rc.control.cancelContext()
-		rc.control.finishCancel(content.RunCancelled, content.TermUserKilled, sentence, true)
-		h.terminalize(runCtx, rc, content.RunCancelled, content.TermUserKilled, sentence, r)
+		rc.control.finishCancel(content.RunCancelled, content.TermAnswerRevoked, sentence, true)
+		h.terminalize(runCtx, rc, content.RunCancelled, content.TermAnswerRevoked, sentence, r)
 		stopped = append(stopped, id)
 	}
 	return stopped, alreadyFinished

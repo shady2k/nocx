@@ -267,6 +267,23 @@ type AskParams struct {
 	// reached: nothing is expanded, every expansion is marked NOT ASKED with
 	// its reason, and the run is otherwise unaffected.
 	Expansions ExpansionSource
+	// Scripts reads the whole of a file a proposed command NAMES, so an
+	// approval question about `bash deploy.sh` carries deploy.sh itself
+	// (nocx-872jc.3). It READS and never executes; which file to read comes
+	// from the command parser's own resource report, never from a second
+	// tokenizing of the command line.
+	//
+	// Nil is the honest shape wherever no provider can reach the machine the
+	// command would run on: nothing is read, the question says so in words,
+	// and the run is otherwise unaffected.
+	Scripts ScriptSource
+	// Cwd is where this run was asked from. It is the run's own cwd — the
+	// one the question carried and the ledger recorded with it — and it is
+	// carried for exactly one purpose: resolving the relative path in
+	// `bash deploy.sh` before that file is read for the approval question.
+	// Empty means a relative path cannot be resolved, and the question says
+	// that rather than guessing a directory.
+	Cwd string
 	// NoteOperation and SnippetOperation are the existing guard-bound domain
 	// operations used by the Notes and Snippets panels. The assistant carries
 	// them as seams; it never owns a service or a second store implementation.

@@ -1372,3 +1372,213 @@ describe('AgentApprovalPrompt — a multi-line argument is a block, not a row (n
     expect(order[1]).toContain('curl -X POST https://x/')
   })
 })
+
+/**
+ * The script a command names, drawn beside it (nocx-872jc.3).
+ *
+ * `bash deploy.sh` is eleven characters and the whole of its meaning is in a
+ * file this window said nothing about, so approving it was approving a NAME.
+ * What a user can do that they could not before: read deploy.sh in the window
+ * that is asking them about it, see every file the command names rather than
+ * the first of them, and be told in a true sentence when a file could not be
+ * read — never an empty box, and never a silence that reads as an all-clear.
+ *
+ * It is drawn through FileReadout, the kit component the Skills page reads a
+ * skill file through, so the sentences for "not text", "too large" and "could
+ * not be read" have ONE author. These tests assert what is on screen, not
+ * which component drew it — except where the point IS the component, which is
+ * the sentence a refusal renders as.
+ */
+describe('AgentApprovalPrompt — the script a command names (nocx-872jc.3)', () => {
+  afterEach(cleanup)
+
+  const SCRIPT_BODY = '#!/bin/sh\nrm -rf /srv/app\n'
+
+  const SCRIPT_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'run',
+    effect: 'delegate',
+    arguments: '{"command":"bash deploy.sh"}',
+    resource: null,
+    scripts: [
+      {
+        path: 'deploy.sh',
+        verb: 'execute',
+        text: SCRIPT_BODY,
+        refusal: '',
+        maxBytes: 65536,
+        reason: '',
+      },
+    ],
+  }
+
+  function readouts(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll<HTMLElement>('.ui-file-readout'))
+  }
+
+  it('shows the whole of the file the command names', () => {
+    const { container } = renderPrompt({ ask: SCRIPT_ASK })
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent,
+    )
+    // BESIDE, never instead: the verbatim command is still the block above.
+    expect(blocks).toContain('bash deploy.sh')
+    expect(blocks).toContain(SCRIPT_BODY)
+  })
+
+  it('names the file and what the command does with it', () => {
+    const { container } = renderPrompt({ ask: SCRIPT_ASK })
+    const readout = readouts(container)[0]
+    expect(readout).toBeTruthy()
+    expect(readout.textContent).toContain('deploy.sh')
+    expect(readout.textContent).toContain('runs this file as a script')
+  })
+
+  it('says the bytes are a reading and not what is sent', () => {
+    const { container } = renderPrompt({ ask: SCRIPT_ASK })
+    expect(container.textContent).toContain('This is a reading, not what is sent')
+    expect(container.textContent).toContain(
+      'a file can change between this question and the moment it runs',
+    )
+  })
+
+  it('distinguishes a sourced file from an executed one, because they are not the same act', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SCRIPT_ASK,
+        arguments: '{"command":"source env.sh"}',
+        scripts: [
+          {
+            path: 'env.sh',
+            verb: 'source',
+            text: 'export TOKEN=x\n',
+            refusal: '',
+            maxBytes: 65536,
+            reason: '',
+          },
+        ],
+      },
+    })
+    expect(readouts(container)[0].textContent).toContain('reads this file into the shell itself')
+  })
+
+  it('draws every file the command names, never the first of two', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SCRIPT_ASK,
+        arguments: '{"command":"bash a.sh && bash b.sh"}',
+        scripts: [
+          {
+            path: 'a.sh',
+            verb: 'execute',
+            text: 'echo a\n',
+            refusal: '',
+            maxBytes: 65536,
+            reason: '',
+          },
+          {
+            path: 'b.sh',
+            verb: 'execute',
+            text: 'echo b\n',
+            refusal: '',
+            maxBytes: 65536,
+            reason: '',
+          },
+        ],
+      },
+    })
+    expect(readouts(container)).toHaveLength(2)
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent,
+    )
+    expect(blocks).toContain('echo a\n')
+    expect(blocks).toContain('echo b\n')
+  })
+
+  it('draws NOTHING when the proposal names no file', () => {
+    const { container } = renderPrompt({
+      ask: { ...POLICY_ASK, tool: 'run', arguments: '{"command":"df -h"}' },
+    })
+    expect(readouts(container)).toHaveLength(0)
+    expect(container.textContent).not.toContain('This is a reading, not what is sent')
+  })
+
+  it('says why a file could not be read, in the backend’s own sentence', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SCRIPT_ASK,
+        scripts: [
+          {
+            path: 'deploy.sh',
+            verb: 'execute',
+            text: '',
+            refusal: 'unreadable',
+            maxBytes: 65536,
+            reason: 'there is no file at /srv/app/deploy.sh on that machine, so nothing was read',
+          },
+        ],
+      },
+    })
+    const readout = readouts(container)[0]
+    expect(readout.dataset.state).toBe('unreadable')
+    expect(readout.textContent).toContain('This file could not be read')
+    expect(readout.textContent).toContain('there is no file at /srv/app/deploy.sh')
+    // No bytes, and therefore no block pretending to be the file.
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent,
+    )
+    expect(blocks).not.toContain('')
+  })
+
+  it('says a file is not text rather than showing an empty viewer', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SCRIPT_ASK,
+        scripts: [
+          {
+            path: 'blob.sh',
+            verb: 'execute',
+            text: '',
+            refusal: 'not-text',
+            maxBytes: 65536,
+            reason: '',
+          },
+        ],
+      },
+    })
+    const readout = readouts(container)[0]
+    expect(readout.dataset.state).toBe('not-text')
+    expect(readout.textContent).toContain('This file is not text')
+  })
+
+  it('names the budget an over-large file was measured against', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SCRIPT_ASK,
+        scripts: [
+          {
+            path: 'big.sh',
+            verb: 'execute',
+            text: '',
+            refusal: 'too-large',
+            maxBytes: 65536,
+            reason: '',
+          },
+        ],
+      },
+    })
+    const readout = readouts(container)[0]
+    expect(readout.dataset.state).toBe('too-large')
+    expect(readout.textContent).toContain('larger than the read budget')
+    // The budget travelled so the sentence could NAME it — in the units a
+    // person reads sizes in, which is FileReadout's own formatting.
+    expect(readout.textContent).toContain('65.5 kB')
+  })
+
+  it('leaves the two answers exactly as they were — a reading decides nothing', () => {
+    const { decisions, onDecide } = recordDecisions()
+    const ui = renderPrompt({ ask: SCRIPT_ASK, onDecide })
+    fireEvent.click(ui.getByText('Allow once'))
+    expect(decisions).toEqual([[true, 'once']])
+  })
+})

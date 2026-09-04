@@ -471,6 +471,15 @@ type agentApprovalRequested struct {
 	// state — the surface must never present "we refuse to ask" and "we
 	// could not ask" as the same fact. Absent for non-command proposals.
 	Expansion *assistant.ExpansionFacts `json:"expansion,omitempty"`
+	// Scripts is the whole of every file the proposed command NAMES, read
+	// at the moment the question was asked (nocx-872jc.3). Same kind of
+	// thing as Expansion and carried for the same reason: `bash deploy.sh`
+	// is a name, and approving a name is not approving an act. It is a
+	// READING — the string in Arguments is what is sent, byte for byte, and
+	// the file can change before it runs. Absent whenever the parse named
+	// no file to execute or source, so a proposal with no script draws no
+	// empty affordance.
+	Scripts []assistant.ScriptReading `json:"scripts,omitempty"`
 }
 
 type agentApprovalStanding struct {
@@ -592,6 +601,11 @@ type agentHandlers struct {
 	// today, and why the honest refusal is the product's own outcome rather
 	// than a stub.
 	expansions assistant.ExpansionSource
+	// scripts reads the whole of a file a proposed command names, so the
+	// approval question can carry the script and not only its name
+	// (nocx-872jc.3). The server implements it; see ws_script.go for what
+	// it can and cannot reach.
+	scripts assistant.ScriptSource
 	// knownMaterial is the egress gate's vault comparison (design §7.1,
 	// assistant.KnownMaterial) — the seam that answers "does this tool
 	// result contain a value the vault holds", in the backend, nothing
@@ -1409,15 +1423,21 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:              secret,
-		BaseURL:          rc.endpoint.BaseURL,
-		Model:            rc.model,
-		Headers:          headers,
-		Messages:         msgs,
-		Grant:            rc.grant,
-		AttemptLedger:    h.attemptLedger,
-		Requester:        h.requester,
-		Expansions:       h.expansions,
+		Key:           secret,
+		BaseURL:       rc.endpoint.BaseURL,
+		Model:         rc.model,
+		Headers:       headers,
+		Messages:      msgs,
+		Grant:         rc.grant,
+		AttemptLedger: h.attemptLedger,
+		Requester:     h.requester,
+		Expansions:    h.expansions,
+		Scripts:       h.scripts,
+		// The run's OWN cwd — the directory this question carried and the
+		// ledger recorded with it — so `bash deploy.sh` in the approval
+		// window resolves against where the run was asked from and not
+		// against a directory the backend picked (nocx-872jc.3).
+		Cwd:              rc.promptFacts.Cwd,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
@@ -1696,6 +1716,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 		n.Expansion = ap.Expansion
+		n.Scripts = ap.Scripts
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -2612,7 +2633,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
-			requester: s, expansions: s, knownMaterial: s.agentKnownMaterial,
+			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,

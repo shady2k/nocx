@@ -249,6 +249,19 @@ type ApprovalRequest struct {
 	// shell could be asked at all — that fact and its reason. Absent for
 	// every non-command proposal.
 	Expansion *ExpansionFacts `json:"expansion,omitempty"`
+	// Scripts is the whole of every file the command NAMES, read now
+	// (nocx-872jc.3). It sits beside the verbatim command for the same
+	// reason Expansion does and with the same disclaimer: it is a READING,
+	// the string in Arguments is what runs, and the file can change between
+	// this question and that run. Absent for a proposal whose parse named
+	// no file to execute or source — which is every non-command proposal
+	// and most command ones.
+	//
+	// It is NOT on the Approval record, and that asymmetry is deliberate.
+	// ExpansionValues are there because they are re-read and compared before
+	// the call runs; a script is advisory only, so binding one would change
+	// what approving means (see internal/assistant/script.go).
+	Scripts []ScriptReading `json:"scripts,omitempty"`
 }
 
 // ApprovalClassifier is the classifier gate's fact carried with an approval
@@ -749,6 +762,25 @@ func (m *effectKernel) bindApprovalExpansions(ctx context.Context, ap *Approval,
 	}
 }
 
+// bindApprovalScripts puts the whole of every file the command names into the
+// question the person is shown (nocx-872jc.3).
+//
+// ONE HALF, not both, and that is the difference between this and
+// bindApprovalExpansions. The expansion goes on the Approval record too
+// because it is re-read and compared before the call runs; a script reading
+// is advisory, nothing compares it to anything later, and putting it on the
+// record would be the first half of a fence this bead did not ask for.
+//
+// It asks the INVOCATION which files the command names, never the raw string:
+// internal/content's parser already owns that question and a second answer to
+// it could disagree with the one the policy gate just used.
+func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalRequest, invocation content.Invocation) {
+	if req == nil {
+		return
+	}
+	req.Scripts = ScriptReadingsFor(ctx, m.runSeams.scripts, m.runCtx.Session, m.runSeams.cwd, invocation)
+}
+
 // ── the ask and the latch ─────────────────────────────────────────────────
 
 // escalate suspends the run BEFORE next — the call that is asking has not
@@ -781,6 +813,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	// After the ledger record and before the latch: the person is shown the
 	// values, and the SAME values are what the record binds.
 	m.bindApprovalExpansions(ctx, &ap, req, decl, rawArgs)
+	m.bindApprovalScripts(ctx, req, invocation)
 	tripLatch(ctx, &ApprovalRequestedError{Request: req})
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -815,6 +848,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	m.bindApprovalExpansions(ctx, &ap, ask, decl, rawArgs)
+	m.bindApprovalScripts(ctx, ask, invocation)
 	if m.approvals != nil {
 		ap.EntryID = entryID
 		m.approvals.Request(ap)

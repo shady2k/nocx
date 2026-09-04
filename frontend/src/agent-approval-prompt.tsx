@@ -104,6 +104,15 @@
  * defence rather than a backstop — layer 2 (a drafting step kept untainted)
  * does not apply at all when a stranger wrote the body.
  *
+ * AND THE SCRIPT A COMMAND NAMES IS SHOWN (nocx-872jc.3). `bash deploy.sh` is
+ * eleven characters and the whole of its meaning is in a file this window said
+ * nothing about, so approving it was approving a NAME. The file's current
+ * contents are drawn beside the command, through the SAME viewer the Skills
+ * page reads a skill file through, and labelled as what they are: a reading,
+ * not the thing being approved. It changes nothing about the binding — what is
+ * sent is byte for byte what it was — and it is not a scan: the bytes go to
+ * the person, and reading them is theirs to do.
+ *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
  * will. It does NOT promise the domain is untouched: a permitted sibling
@@ -117,10 +126,12 @@ import {
   Button,
   CodeBlock,
   FactList,
+  FileReadout,
   Prompt,
   Stack,
   StatusCard,
   type Fact,
+  type FileReadoutOutcome,
   type StatusCardTone,
 } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
@@ -134,6 +145,50 @@ type ApprovalScope = AgentApprove['scope']
 /** What the command's variables read as, as the backend derived it. */
 type ExpansionFacts = NonNullable<NonNullable<AgentApprovalRequested['expansion']>>
 type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
+
+/** One file the proposed command names, read as the question was asked. */
+type ScriptReading = NonNullable<AgentApprovalRequested['scripts']>[number]
+
+/**
+ * What the command DOES with the file, in a person's words (nocx-872jc.3).
+ *
+ * The two verbs are not the same act and the difference is the kind a person
+ * deciding is owed: `bash x.sh` starts a subprocess that ends, while
+ * `source x.sh` runs the file in the shell the person is sitting in, so
+ * everything it sets outlives it. The parser already distinguishes them —
+ * internal/content routes source to the privilege-change effect row for
+ * exactly this reason — and this is where that distinction reaches a reader.
+ */
+const SCRIPT_VERB_WORDS: Record<ScriptReading['verb'], string> = {
+  execute: 'the command runs this file as a script',
+  source: 'the command reads this file into the shell itself, so what it sets outlives it',
+}
+
+/**
+ * One reading, as FileReadout's own four-way answer to "what is on screen".
+ *
+ * The mapping is a `switch` over the wire's closed union with no default, so
+ * a fifth refusal fails this return type rather than rendering as a viewer
+ * quietly showing nothing. And the wire's vocabulary is deliberately the
+ * kit's: three of the four values are `skills.file`'s, spelled the same
+ * because they are the same sentences about the same facts, and FileReadout
+ * is the one place those sentences are written.
+ */
+const scriptOutcome = (reading: ScriptReading): FileReadoutOutcome => {
+  switch (reading.refusal) {
+    case '':
+      return { kind: 'text', text: reading.text }
+    case 'not-text':
+      return { kind: 'not-text' }
+    case 'too-large':
+      return { kind: 'too-large', maxBytes: reading.maxBytes }
+    case 'unreadable':
+      // The backend's own sentence, verbatim. A fallback of ours here would
+      // be a second author of "why this file is not on screen", and the two
+      // would disagree the first day a new refusal arrived.
+      return { kind: 'unreadable', message: reading.reason }
+  }
+}
 
 /**
  * What a live shell said a program word IS (nocx-4h0m7.5). nocx does not read
@@ -460,6 +515,15 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     if (!facts || facts.command === '' || facts.command === proposedCommand()) return null
     return facts.command
   }
+
+  /**
+   * Every file the command names, read now (nocx-872jc.3). Empty is the
+   * ordinary case and draws NOTHING — not a heading, not an empty viewer:
+   * an affordance beside a command that names no file would read as "we
+   * looked and there was nothing to show", which is a claim, and a command
+   * that names none is not a command anything was looked for in.
+   */
+  const scripts = (): readonly ScriptReading[] => ask().scripts ?? []
 
   /**
    * The arguments the window has ALREADY stated, which are therefore not
@@ -801,6 +865,43 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             </CodeBlock>
           )}
         </For>
+        {/*
+          The file the command NAMES, after the facts, because a person reads
+          it once they have decided what the command IS (nocx-872jc.3). The
+          lead is said ONCE above the whole set rather than on each file: it
+          is one sentence about what these bytes are, and repeating it per
+          file would turn a disclaimer into a lecture.
+
+          It is the same viewer the Skills page reads a SKILL.md through, and
+          that is the point of the epic it belongs to — one capability in
+          three places, not three viewers. Nothing is scanned here, so no
+          `marks`: running the skill scanner over an arbitrary shell script
+          would be a new advisory surface on every command approval, and an
+          empty findings affordance would read as an all-clear nobody gave.
+        */}
+        <Show when={scripts().length > 0}>
+          <p>
+            And what those files hold right now. This is a reading, not what is sent — the command
+            above is what runs, exactly as written, and a file can change between this question and
+            the moment it runs.
+          </p>
+          <For each={scripts()}>
+            {(reading) => (
+              <FileReadout
+                // The path is the one the COMMAND wrote, which is the one
+                // on the line above; `verb` says what the command does with
+                // it, which is not the same act for `bash` and for `source`.
+                // Mono keys, like every other row in this window.
+                facts={[
+                  { name: 'path', value: reading.path },
+                  { name: 'verb', value: SCRIPT_VERB_WORDS[reading.verb] },
+                ]}
+                ariaLabel={`What ${reading.path} holds right now`}
+                outcome={scriptOutcome(reading)}
+              />
+            )}
+          </For>
+        </Show>
         {/*
           The scan's finding sits AFTER the facts, which is where the body it
           is about has just been stated, and it is a StatusCard rather than a

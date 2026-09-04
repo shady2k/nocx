@@ -171,6 +171,35 @@ export interface AgentApprovalRequested {
     }[]
   } | null
   /**
+   * Command proposals only (nocx-872jc.3): the whole of every file the proposed command NAMES, read at the moment the question was asked. `bash deploy.sh` is eleven characters whose meaning lives somewhere else, so a person shown only the command was approving a NAME rather than an act. Carried BESIDE the verbatim string and never instead of it, exactly as `expansion` is (nocx-4h0m7.5 settled that shape; nocx-y47mi SETTLED 1 — the verbatim command in `arguments` is what runs, byte for byte). It is a READING and not a promise: these are the file's contents NOW, nothing here is bound into the approval, and the file can change between this question and the run — the surface says so in its own words. Which files are named comes from the command parser's own resource report (the entries whose verb is execute or source), never from a second tokenizing of the command line, so the window can never show a file the policy gate did not see. ABSENT — not an empty array — whenever the parse named no such file, so a proposal with no script draws no empty affordance. EVERY named file is here or the field would lie by omission: `bash a.sh && bash b.sh` carries two, because showing the first of two looks complete while being half the act. Nothing is scanned: the bytes go to the person and reading them is theirs to do.
+   */
+  scripts?: {
+    /**
+     * The path THE COMMAND WROTE, verbatim — `deploy.sh`, not the absolute path it resolved to. It is what the person is reading on the command line above, and a second name for the same subject in the one place the two must obviously be the same thing would be this window's own ambiguity.
+     */
+    path: string
+    /**
+     * How the command names the file, in the parser's own vocabulary. `execute` is `bash x.sh`, `sh ./x.sh`, `./x.sh`; `source` is `source x.sh` and `. x.sh`, which changes the shell itself rather than running a subprocess — a difference a person deciding is owed.
+     */
+    verb: 'execute' | 'source'
+    /**
+     * The file verbatim. `""` with an empty refusal is an EMPTY FILE, which is a true thing to show; empty whenever refusal is set, because half a refused file is neither the file nor a refusal.
+     */
+    text: string
+    /**
+     * Why the bytes are not shown. Empty means nothing was refused and `text` is the file. The first three are skills.file's own values, spelled the same because they are the same sentences about the same facts and one viewer draws both. `unreadable` is this notification's own: skills.file answers a REQUEST and can fail it, while a question has nowhere to put an error, so "there was no file to read" must arrive as a fact inside the question or not at all. Never null.
+     */
+    refusal: '' | 'not-text' | 'too-large' | 'unreadable'
+    /**
+     * The read budget, in bytes, a too-large refusal was measured against. It travels so the viewer's sentence can name the limit rather than keeping a second copy of the number. The head of an over-budget file is deliberately not sent: a person who read the first 64 KiB of a script would believe they had read the script.
+     */
+    maxBytes: number
+    /**
+     * Why an unreadable file was not read, in the words the person reads — no session, no provider for that machine, a relative path with no directory to resolve it against, a file that is gone, permission refused, the read budget spent. Empty for every other refusal. It travels rather than being composed on the surface for the reason expansion.reason does: these differ in ways that matter to whoever is deciding, and a renderer writing one of its own would put our guess in front of them instead of what happened.
+     */
+    reason: string
+  }[]
+  /**
    * Egress only: what was found and where. Facts, never the material.
    */
   findings?: {

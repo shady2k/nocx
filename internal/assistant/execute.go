@@ -100,6 +100,18 @@ type toolSeams struct {
 	// product's honest answer wherever our integration is not deployed:
 	// expand nothing, mark every variable unresolved, say so.
 	expansions ExpansionSource
+	// scripts reads the whole of a file a proposed command NAMES, so the
+	// approval question shows `deploy.sh` and not only the words
+	// `bash deploy.sh` (nocx-872jc.3). Nil is the ordinary shape for every
+	// caller that is not the transport, and the honest answer wherever
+	// nothing can reach the machine: nothing is read and the window says so.
+	scripts ScriptSource
+	// cwd is where this run was asked from — the directory the question
+	// carried and the ledger recorded with it. It is here because it is the
+	// only thing that turns `deploy.sh` into a path, and a reading resolved
+	// against a guessed directory would show the WRONG file, which is the
+	// one failure on this surface a person cannot see.
+	cwd string
 }
 
 type noteSearchRow struct {

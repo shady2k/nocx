@@ -34,6 +34,7 @@ import {
   Button,
   Checkbox,
   EmptyState,
+  FactList,
   FileReadout,
   RecordRow,
   Section,
@@ -48,6 +49,7 @@ import type { BadgeTone } from './ui/badge'
 import { classifyPastedSource } from './api/api-paths'
 import { SkillsInstallDialog } from './skills-install-dialog'
 import type { SkillsFile } from './generated/skills.file'
+import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsPreview } from './generated/skills.preview'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
@@ -109,12 +111,14 @@ const evidence = (skill: Skill): readonly string[] =>
   skill.source ? [skill.path, skill.source.url] : [skill.path]
 
 /**
- * The one file every skill has, and the ONLY file this page asks for.
+ * The one file every skill has, and the file the card opens on.
  *
- * `internal/skill` writes exactly one file per skill, so there is nothing to
- * list and no picker to draw: a control that is empty on every row the product
- * can produce is not a feature. Support files arrive with a later epic, and
- * `skills.file` already takes a path for them.
+ * A skill may now carry `references/` and `scripts/` too (nocx-0bsa4.1), and
+ * `skills.files` is what names them; this constant stays because the document
+ * is what the person opened the card FOR, so it is read straight away rather
+ * than waited for behind the manifest. The contract guarantees it is also the
+ * manifest's first entry, so the two can be asked for at once without the
+ * card ever showing a file nobody chose.
  *
  * It is a path RELATIVE to the skill's own directory, which is why it is not
  * `skill.path` — the row's path is absolute for a skill on disk and is not a
@@ -127,17 +131,36 @@ const evidence = (skill: Skill): readonly string[] =>
 const SKILL_FILE = 'SKILL.md'
 
 /**
- * What the reader is holding: one skill, and how far its file has got.
+ * What the reader is holding: one PATH, and how far its bytes have got.
  *
- * The SKILL travels in every member rather than being a signal beside them,
- * so the facts on screen and the bytes on screen cannot come from two
- * different rows — which is the state a person would reach by opening one
- * skill, closing it and opening another while the first read was still out.
+ * The skill used to travel in every member so the facts and the bytes on
+ * screen could not come from two different rows. It travels differently now
+ * and for a stronger reason: the card reads the skill out of the LIST, live,
+ * so the switch on it moves when a toggle lands and the sentences beside it
+ * follow the same refresh every other reader of that list follows. A copy
+ * captured when the card opened would be a second, staler answer to what the
+ * skill's state is — and the switch is exactly the control that must not
+ * show one. Which skill an answer belongs to is settled by `fileGeneration`,
+ * which every open, every close and every file change bumps.
  */
 type FileAsk =
-  | { kind: 'reading'; skill: Skill }
-  | { kind: 'read'; skill: Skill; result: SkillsFile }
-  | { kind: 'unreadable'; skill: Skill; message: string }
+  | { kind: 'reading'; path: string }
+  | { kind: 'read'; path: string; result: SkillsFile }
+  | { kind: 'unreadable'; path: string; message: string }
+
+/**
+ * What the card knows about the skill's manifest — the list of files it is
+ * made of, which is the whole point of design §8 and which nothing on the
+ * wire could answer before `skills.files`.
+ *
+ * A refusal is DRAWN and never thrown: the card is still a card, the switch
+ * on it is still the person's, and a manifest that could not be read is one
+ * true sentence among the others rather than a reason to show nothing.
+ */
+type Manifest =
+  | { kind: 'reading' }
+  | { kind: 'read'; result: SkillsFiles }
+  | { kind: 'unreadable'; message: string }
 
 export function SkillsSection(props: SkillsSectionProps) {
   const [state, setState] = createSignal<SkillsState>({ kind: 'loading' })
@@ -251,60 +274,150 @@ export function SkillsSection(props: SkillsSectionProps) {
     }
   }
 
-  /* ── Reading a skill's SKILL.md (nocx-872jc.2) ─────────────────────────
+  /* ── The skill's card (nocx-872jc.2, nocx-0bsa4.3) ─────────────────────
      Reading writes nothing, so it refreshes nothing and touches neither
      `busy` (which disables the controls that CHANGE a row) nor the list.
-     The ask's state lives here for the install ask's reason: the call is the
-     surface's, the reader draws what it is handed. */
+     The ask's state lives here for the install ask's reason: the calls are
+     the surface's, the card draws what it is handed.
+
+     WHICH SKILL is a NAME, and the skill itself is read back out of the
+     list. That is what keeps the switch on the card and the switch on the
+     row one control over one fact: a toggle from either refreshes the list,
+     and both read the result. A card holding its own copy of the skill would
+     go on showing the state the list had when it opened. */
+  const [cardName, setCardName] = createSignal<string | null>(null)
   const [fileAsk, setFileAsk] = createSignal<FileAsk | null>(null)
+  const [manifest, setManifest] = createSignal<Manifest | null>(null)
+
+  /** The skill the card is about, live from the list. Null once it is gone —
+   *  a card left open over a Delete closes rather than describing a skill
+   *  that is not there. */
+  const cardSkill = (): Skill | null =>
+    readySkills().find((skill) => skill.name === cardName()) ?? null
 
   /** Which read the answer on screen belongs to. A person who opens one
    *  skill, closes it and opens another has two reads in flight against one
    *  panel, and without this the slower one wins by arriving last — the same
-   *  race `SkillsStore.refresh` counts for the list. */
+   *  race `SkillsStore.refresh` counts for the list. It counts the manifest
+   *  too, because both asks belong to the same open card and a manifest
+   *  arriving for the skill before last is the same defect in the list. */
   let fileGeneration = 0
 
-  async function readFile(skill: Skill): Promise<void> {
+  /** Opening the card asks for both halves at once: the document the person
+   *  came for, and the manifest of everything else the skill carries. The
+   *  contract puts SKILL.md first in that manifest, so reading it before the
+   *  list arrives can never show a file the person did not choose — and
+   *  waiting for the list first would leave the card blank for one round
+   *  trip on the ordinary skill, which carries exactly that one file. */
+  function openCard(skill: Skill): void {
     const generation = ++fileGeneration
-    setFileAsk({ kind: 'reading', skill })
+    setCardName(skill.name)
+    setManifest({ kind: 'reading' })
+    void readFile(skill.name, SKILL_FILE, generation)
+    void readManifest(skill.name, generation)
+  }
+
+  async function readManifest(name: string, generation: number): Promise<void> {
     try {
-      const result = await props.store.file(skill.name, SKILL_FILE)
+      const result = await props.store.files(name)
       if (generation !== fileGeneration) return
-      setFileAsk({ kind: 'read', skill, result })
+      setManifest({ kind: 'read', result })
     } catch (err) {
       if (generation !== fileGeneration) return
-      setFileAsk({ kind: 'unreadable', skill, message: refusalSentence(err) })
+      setManifest({ kind: 'unreadable', message: refusalSentence(err) })
     }
   }
 
-  /** Closing ABANDONS the read in flight as well as the one on screen: a
-   *  panel that reopened itself because bytes arrived after it was dismissed
-   *  would be the surface deciding to show something nobody asked for. */
-  const closeFile = (): void => {
-    fileGeneration++
-    setFileAsk(null)
+  /** Opening another file of the SAME skill bumps the generation too, so the
+   *  bytes of the file that was open cannot land after the ones the person
+   *  just asked for. The manifest is re-read with it rather than kept,
+   *  because the generation it was fetched under is the one being abandoned;
+   *  it is one local call and the alternative is a second counter that has to
+   *  stay in step with this one. */
+  function openFile(name: string, path: string): void {
+    const generation = ++fileGeneration
+    void readFile(name, path, generation)
+    void readManifest(name, generation)
   }
 
-  const fileTitle = (): string => {
-    const ask = fileAsk()
-    return ask ? `“${ask.skill.name}” · ${SKILL_FILE}` : SKILL_FILE
+  async function readFile(name: string, path: string, generation: number): Promise<void> {
+    setFileAsk({ kind: 'reading', path })
+    try {
+      const result = await props.store.file(name, path)
+      if (generation !== fileGeneration) return
+      setFileAsk({ kind: 'read', path, result })
+    } catch (err) {
+      if (generation !== fileGeneration) return
+      setFileAsk({ kind: 'unreadable', path, message: refusalSentence(err) })
+    }
+  }
+
+  /** Closing ABANDONS the reads in flight as well as the ones on screen: a
+   *  panel that reopened itself because bytes arrived after it was dismissed
+   *  would be the surface deciding to show something nobody asked for. */
+  const closeCard = (): void => {
+    fileGeneration++
+    setCardName(null)
+    setFileAsk(null)
+    setManifest(null)
+  }
+
+  const cardTitle = (): string => `\u201c${cardName() ?? ''}\u201d`
+
+  /** Where the skill lives, and — when a stranger's document put it there —
+   *  where its bytes came from.
+   *
+   *  Two facts and not four. The provenance and the file are drawn by the
+   *  readout below, over the bytes they are true of; repeating them here
+   *  would be the card reporting one fact twice, which is how the two come to
+   *  disagree. The address is here because it is the one thing the person
+   *  deciding about a skill cannot read off anything else on this card, and
+   *  the modal covers the row that carries it. */
+  const cardFacts = (skill: Skill): Fact[] => {
+    const facts: Fact[] = [{ name: 'Where it is', value: skill.path }]
+    if (skill.source) facts.push({ name: 'Installed from', value: skill.source.url })
+    return facts
+  }
+
+  /** The paths the card lists. Empty until the manifest lands, and empty for
+   *  a manifest that could not be read — the sentence for that is drawn
+   *  separately, because a card with no list and a card with a refused list
+   *  are two different things and must not look alike. */
+  const manifestPaths = (): readonly string[] => {
+    const held = manifest()
+    return held?.kind === 'read' ? held.result.files : []
+  }
+
+  /** THE CUT, said in the person's words. A card that quietly showed the
+   *  first N files of a longer directory would be asserting a manifest it had
+   *  not read — the soft degrade AGENTS.md refuses. The cap travels on the
+   *  wire so this sentence names the number the backend actually applied. */
+  const manifestCut = (): string => {
+    const held = manifest()
+    if (held?.kind !== 'read' || !held.result.truncated) return ''
+    return `The list stops at the first ${held.result.maxFiles} files, and this skill carries more files than that. They are still on disk, still in a backup, and still readable — this card just does not name them.`
+  }
+
+  const manifestRefusal = (): string => {
+    const held = manifest()
+    return held?.kind === 'unreadable' ? held.message : ''
   }
 
   /** Which file is on screen, said in words beside it.
    *
    *  The RESOLVED values win where there are any: `skills.file` answers with
    *  the skill as root precedence resolved it and the path as it resolved it,
-   *  which is what the bytes actually came from — the row's copy is what was
+   *  which is what the bytes actually came from — the request is what was
    *  asked for. They differ exactly when two roots hold the same name, and
    *  that is the moment a reader most needs to know which one they got. A
    *  read that never arrived has no resolved anything, so it falls back to
-   *  the row, which is still true about the request. */
-  const fileFacts = (ask: FileAsk): Fact[] => {
+   *  what was asked, which is still true about the request. */
+  const fileFacts = (skill: Skill, ask: FileAsk): Fact[] => {
     const resolved = ask.kind === 'read' ? ask.result : null
     return [
-      { name: 'Skill', value: resolved?.name ?? ask.skill.name },
-      { name: 'File', value: resolved?.path ?? SKILL_FILE },
-      { name: 'Provenance', value: resolved?.provenance ?? ask.skill.provenance },
+      { name: 'Skill', value: resolved?.name ?? skill.name },
+      { name: 'File', value: resolved?.path ?? ask.path },
+      { name: 'Provenance', value: resolved?.provenance ?? skill.provenance },
     ]
   }
 
@@ -324,6 +437,17 @@ export function SkillsSection(props: SkillsSectionProps) {
         return { kind: 'too-large', maxBytes: ask.result.maxBytes }
     }
   }
+
+  /** Why a skill that is switched off is off, in one sentence that is true of
+   *  every skill it is drawn for. An installed skill ARRIVED off and the rest
+   *  were switched off by the person, and the wire cannot tell a skill that
+   *  arrived off from one the person turned off later — so the second
+   *  sentence is conditioned on the only thing that is always true of the
+   *  installed root, which is how a skill from it starts. */
+  const offSentence = (skill: Skill): string =>
+    skill.provenance === 'installed'
+      ? 'The assistant is not offered it. A skill installed from outside this machine arrives off, so this look happens before it can act; turn it on above when you have taken it.'
+      : 'The assistant is not offered it. Turn it on above when you want it back in play.'
 
   onMount(() => {
     const unsubscribe = props.store.subscribe(setState)
@@ -413,51 +537,150 @@ export function SkillsSection(props: SkillsSectionProps) {
         onRead={() => void readSkill()}
         onInstall={() => void installSkill()}
       />
-      {/* THE READER. Mounted beside the install ask and for the same reason:
-          the kit's Dialog owns opening and closing, and a surface that
-          unmounted the component instead would be deciding that a second
-          time. It stays a Dialog rather than a workspace tab because reading
-          a skill must not cost the page a person is on — and because
+      {/* THE CARD (nocx-0bsa4.3). Mounted beside the install ask and for
+          the same reason: the kit's Dialog owns opening and closing, and a
+          surface that unmounted the component instead would be deciding that
+          a second time. It stays a Dialog rather than a workspace tab because
+          reading a skill must not cost the page a person is on — and because
           `src/file-viewer/` reads through a live binding on some machine,
           which a builtin skill, whose bytes are inside the binary, does not
-          have. */}
+          have.
+
+          It is where design §8 is paid for: an installed skill lands inert
+          precisely so the person can come here, see what it is made of with
+          any file readable, and turn it on themselves. So the switch is on
+          this card, beside the bytes it is a decision about, and NOT on the
+          install ask's success — two clicks in one flow is a reflex inside a
+          week, and a reflex is not a look.
+
+          THE SWITCH IS ALSO STILL ON THE ROW, and that is one control and
+          not two: both call `toggle`, which is the store's one write, and
+          both read `cardSkill()`/the list, which is the store's one answer.
+          The row's is how a person turns a library on and off by scanning;
+          this one is the same decision taken where the evidence is. What may
+          never be duplicated is the STATE, and there is exactly one of it. */}
       <Dialog
-        open={fileAsk() !== null}
-        title={fileTitle()}
+        open={cardSkill() !== null}
+        title={cardTitle()}
         /* `lg` for the install ask's reason: a file is on screen, and `md`
            would set a skill's instructions in a column narrower than the
            editor that wrote them. */
         size="lg"
-        onClose={closeFile}
+        onClose={closeCard}
         footer={
-          <Button variant="default" onClick={closeFile}>
+          <Button variant="default" onClick={closeCard}>
             Close
           </Button>
         }
       >
-        <Show when={fileAsk()}>
-          {(ask) => (
-            <Show
-              when={fileOutcome(ask())}
-              /* The bytes are on their way, which is a fourth true sentence
-                 about the same file — said in the page's own words for a
-                 wait, the ones the list above already uses. */
-              fallback={
+        <Show when={cardSkill()}>
+          {(skill) => (
+            <>
+              <FactList facts={cardFacts(skill())} ariaLabel="Where this skill lives" />
+              {/* The decision, in the kit's own switch — the same component
+                  the row uses, because it is the same setting. Its label says
+                  what "on" MEANS rather than repeating the word enabled: what
+                  a person is deciding is whether the assistant is offered
+                  this skill at all. */}
+              <Checkbox
+                variant="switch"
+                label="Offer this skill to the assistant"
+                checked={skill().enabled}
+                disabled={busy() === skill().name}
+                onChange={(enabled) => void toggle(skill(), enabled)}
+              />
+              {/* THE TWO KINDS OF OFF, and they are drawn as two different
+                  sentences because they send the person to two different
+                  controls. Off-and-approved is the switch's business and
+                  nothing has happened to the bytes; changed is the bytes'
+                  business and the switch cannot fix it — which is why the
+                  second one says the skill is out of play WHATEVER the switch
+                  says, and carries the one action that ends the state. */}
+              <Show when={!skill().enabled}>
                 <StatusCard
-                  tone="neutral"
-                  title="Reading this skill"
-                  description={`Reading ${SKILL_FILE} of “${ask().skill.name}”.`}
+                  tone="warning"
+                  title="This skill is off"
+                  description={offSentence(skill())}
                 />
-              }
-            >
-              {(outcome) => (
-                <FileReadout
-                  facts={fileFacts(ask())}
-                  ariaLabel={`${SKILL_FILE} of “${ask().skill.name}”, verbatim`}
-                  outcome={outcome()}
+              </Show>
+              <Show when={skill().status === 'changed'}>
+                <StatusCard
+                  tone="danger"
+                  title="The bytes under this skill have changed"
+                  description="They are no longer the bytes recorded for it, so the assistant is not offered it whatever the switch says. Read what is here now, and re-approve it if you want it back."
+                  action={
+                    <Button
+                      size="sm"
+                      disabled={busy() === skill().name}
+                      onClick={() => void approve(skill())}
+                    >
+                      Re-approve
+                    </Button>
+                  }
                 />
-              )}
-            </Show>
+              </Show>
+              {/* WHAT IT CARRIES. Drawn only when there is something to pick
+                  between: a skill of one file gets the file, not a list
+                  control with one row in it. The rows are the kit's record
+                  rows and the record's own NAME is the control (RecordRow's
+                  `onActivate`), so opening a file needs no invented button
+                  and no second label. */}
+              <Show when={manifestPaths().length > 1}>
+                <Stack divided dense>
+                  <For each={manifestPaths()}>
+                    {(path) => (
+                      <RecordRow
+                        title={path}
+                        density="dense"
+                        selected={fileAsk()?.path === path}
+                        actions={undefined}
+                        onActivate={() => openFile(skill().name, path)}
+                      />
+                    )}
+                  </For>
+                </Stack>
+              </Show>
+              <Show when={manifestCut()}>
+                <StatusCard
+                  tone="warning"
+                  title="This list is not the whole skill"
+                  description={manifestCut()}
+                />
+              </Show>
+              <Show when={manifestRefusal()}>
+                <StatusCard
+                  tone="danger"
+                  title="What this skill carries could not be listed"
+                  description={manifestRefusal()}
+                />
+              </Show>
+              <Show when={fileAsk()}>
+                {(ask) => (
+                  <Show
+                    when={fileOutcome(ask())}
+                    /* The bytes are on their way, which is a fourth true
+                       sentence about the same file — said in the page's own
+                       words for a wait, the ones the list above already
+                       uses. */
+                    fallback={
+                      <StatusCard
+                        tone="neutral"
+                        title="Reading this skill"
+                        description={`Reading ${ask().path} of \u201c${skill().name}\u201d.`}
+                      />
+                    }
+                  >
+                    {(outcome) => (
+                      <FileReadout
+                        facts={fileFacts(skill(), ask())}
+                        ariaLabel={`${ask().path} of \u201c${skill().name}\u201d, verbatim`}
+                        outcome={outcome()}
+                      />
+                    )}
+                  </Show>
+                )}
+              </Show>
+            </>
           )}
         </Show>
       </Dialog>
@@ -535,9 +758,13 @@ export function SkillsSection(props: SkillsSectionProps) {
                           that `busy` does not disable, for the same reason:
                           `busy` marks a row whose STATE is mid-change, and a
                           person is entitled to read the file while a toggle
-                          is in flight. */}
-                      <Button size="sm" onClick={() => void readFile(skill)}>
-                        Read
+                          is in flight.
+
+                          It says OPEN and no longer Read: what it opens is
+                          the skill's card, and reading a file is one of the
+                          things on it rather than all of it. */}
+                      <Button size="sm" onClick={() => openCard(skill)}>
+                        Open
                       </Button>
                       {/* Only when the bytes moved. A permanent Re-approve
                             would invite re-approving a skill nobody changed,

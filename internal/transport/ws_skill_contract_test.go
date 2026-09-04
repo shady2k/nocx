@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -637,6 +638,87 @@ func TestSkillsFile_OverTheWireConformsToContract(t *testing.T) {
 				t.Errorf("maxBytes = %d, want the read budget", got.MaxBytes)
 			}
 		})
+	}
+}
+
+// The real manifest, off the real socket: what one skill is MADE OF, which is
+// the list design §8 has the person read before they turn a skill on. The
+// authored fixture carries a reference file and a symlink out of the skill,
+// so the two things this list must get right — the support file is named, the
+// symlink is not — are both asserted against a directory the shipped store
+// walked rather than against a fixture this test wrote into a struct.
+func TestSkillsFiles_OverTheWireConformsToContract(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+	schema := loadSchema(t, "skills.files.schema.json")
+
+	for _, tc := range []struct {
+		name       string
+		skill      string
+		provenance skill.Provenance
+		want       []string
+	}{
+		{
+			name: "a bundle", skill: "deploy", provenance: skill.ProvenanceAuthored,
+			// SKILL.md leads and the rest are sorted; the symlink `link.md`
+			// is absent because its bytes live outside the skill and the read
+			// path refuses it, so a row for it could only fail to open.
+			want: []string{"SKILL.md", "diagram.png", "dump.log", "references/hosts.md"},
+		},
+		{
+			name: "one file", skill: "skill-authoring", provenance: skill.ProvenanceBuiltin,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := jsonrpcCall(t, conn, "skills.files", map[string]any{"name": tc.skill})
+			var env rpcEnvelope
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error != nil {
+				t.Fatalf("unexpected error: %+v", env.Error)
+			}
+			validateJSON(t, schema, env.Result, "skills.files wire")
+
+			var got skill.FilesResult
+			if err := json.Unmarshal(env.Result, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != tc.skill || got.Provenance != tc.provenance {
+				t.Fatalf("got %+v, want the skill it resolved named", got)
+			}
+			if got.Truncated || got.MaxFiles != skill.MaxSkillFiles {
+				t.Errorf("truncated = %v, maxFiles = %d; want an uncut list naming the cap", got.Truncated, got.MaxFiles)
+			}
+			if len(got.Files) == 0 || got.Files[0] != "SKILL.md" {
+				t.Fatalf("files = %v, want the document the person came for first", got.Files)
+			}
+			if tc.want != nil && !slices.Equal(got.Files, tc.want) {
+				t.Fatalf("files = %v, want %v", got.Files, tc.want)
+			}
+			for _, path := range got.Files {
+				if path == "link.md" {
+					t.Fatalf("files = %v, want the symlink left out", got.Files)
+				}
+			}
+		})
+	}
+}
+
+// A name no root holds has nothing to describe, so it refuses the request
+// rather than answering with an empty manifest — the same split skills.file
+// makes for a file that is gone.
+func TestSkillsFiles_AnUnknownSkillIsAnError(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+
+	resp := jsonrpcCall(t, conn, "skills.files", map[string]any{"name": "absent"})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == nil {
+		t.Fatalf("want a refusal, got result %s", env.Result)
 	}
 }
 

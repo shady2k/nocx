@@ -1,5 +1,6 @@
 import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
 import type { SkillsFile } from './generated/skills.file'
+import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsPreview } from './generated/skills.preview'
 
@@ -13,6 +14,7 @@ export interface SkillsClientLike {
   preview(url: string): Promise<SkillsPreview>
   install(url: string): Promise<SkillsInstall>
   file(name: string, path: string): Promise<SkillsFile>
+  files(name: string): Promise<SkillsFiles>
 }
 
 export type SkillsState =
@@ -97,6 +99,14 @@ export class SkillsStore {
   // that can be pointed at different backends.
   file(name: string, path: string): Promise<SkillsFile> {
     return this.client.file(name, path)
+  }
+
+  // Listing what a skill carries refreshes nothing either, for `file`'s
+  // reason: skills.files writes nothing, so a list that changed after one
+  // would be a list that changed for a reason nobody can name. It is a
+  // passthrough so the page keeps ONE collaborator for skills.
+  files(name: string): Promise<SkillsFiles> {
+    return this.client.files(name)
   }
 
   // Installing goes through the store because the list is now different, and

@@ -465,6 +465,18 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	// recording it on a toggle would let flipping the switch quietly adopt
 	// bytes the person never read — turning the one control that is supposed
 	// to be cheap into the one that admits a stranger's edit.
+	//
+	// Asked again when the card was built (nocx-0bsa4.3), because the card is
+	// where the person now READS a skill and the switch sits on it, so
+	// "enabling records what they reviewed" looked right. It is not, and the
+	// case that settles it is the one where it would make a difference. In
+	// the ordinary case there is nothing to record: install already wrote the
+	// digest of exactly the bytes the card is showing, and if one had moved
+	// since, both the row and the card would say `changed`. So the only state
+	// where a re-record changes anything is the CHANGED one — and that is
+	// precisely the state where adopting silently is worst. Approve is the
+	// control that adopts bytes, it appears only when there are bytes to
+	// adopt, and the switch stays a switch.
 	if provenance.inertOnArrival() {
 		on := nameSet(d.Enabled)
 		if enabled {

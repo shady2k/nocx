@@ -167,3 +167,31 @@ describe('SkillsClient.file', () => {
     )
   })
 })
+
+describe('SkillsClient.files', () => {
+  it('sends the skill and nothing else, and answers with the manifest as it is on disk', async () => {
+    const answer = {
+      name: 'weather',
+      provenance: 'installed',
+      files: ['SKILL.md', 'references/stations.md', 'scripts/fetch.sh'],
+      truncated: false,
+      maxFiles: 256,
+    }
+    const { dispatcher, calls } = fakeDispatcher([answer])
+
+    const got = await new SkillsClient(dispatcher).files('weather')
+
+    // One name and no path: this asks what the skill IS MADE OF, and the
+    // paths are the answer rather than part of the question.
+    expect(calls).toEqual([{ method: 'skills.files', params: { name: 'weather' } }])
+    // Every file, script included — which is what design §8 has the person
+    // read before they turn the skill on.
+    expect(got.files).toContain('scripts/fetch.sh')
+    expect(got.truncated).toBe(false)
+  })
+
+  it('lets a refusal through as it was written', async () => {
+    const { dispatcher } = fakeDispatcher([new Error('skill "absent" was not found')])
+    await expect(new SkillsClient(dispatcher).files('absent')).rejects.toThrow('was not found')
+  })
+})

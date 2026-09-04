@@ -214,6 +214,17 @@ func (s *Store) File(name, relPath string) (FileResult, error) {
 	return File(s.roots, name, relPath)
 }
 
+// Files is the manifest of one skill for the person deciding about it, over
+// the same roots and the same resolution File uses (files.go). It is a method
+// here beside File and Read for their reason: a caller must not be able to
+// reach one of them with a different root order than the other.
+func (s *Store) Files(name string) (FilesResult, error) {
+	if s == nil {
+		return FilesResult{}, errUnavailable
+	}
+	return Files(s.roots, name)
+}
+
 // Create writes a new managed skill. An empty leftover directory is completed;
 // a directory containing SKILL.md is an existing name and is refused.
 func (s *Store) Create(name, description, body string) error {

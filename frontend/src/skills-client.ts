@@ -1,6 +1,7 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
 import type { SkillsFile } from './generated/skills.file'
+import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsPreview } from './generated/skills.preview'
@@ -44,6 +45,19 @@ export class SkillsClient {
   // rejects.
   file(name: string, path: string): Promise<SkillsFile> {
     return this.dispatcher.call<SkillsFile>('skills.file', { name, path })
+  }
+
+  // What the skill is MADE OF, so the card can list it and point `file` at
+  // any of it. It is a method of its own rather than a field on `list`
+  // because a directory walk per row on every refresh — and the list
+  // refreshes after every toggle, delete and approve — would be paid to fill
+  // a field one open card reads.
+  //
+  // It answers for a skill that is switched OFF, which is the case it exists
+  // for: an installed skill lands inert precisely so the person can open it
+  // and see what it carries before turning it on.
+  files(name: string): Promise<SkillsFiles> {
+    return this.dispatcher.call<SkillsFiles>('skills.files', { name })
   }
 
   // Reading, never writing: the backend fetches the document at this address,

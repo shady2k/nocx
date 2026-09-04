@@ -28,6 +28,12 @@ type skillSettingsSource interface {
 	// seam: it is a bounded read of a local file the store has already
 	// resolved.
 	File(name, path string) (skill.FileResult, error)
+	// Files is what that read path can be pointed AT: every file the skill
+	// carries, as they are on disk now. Nothing else on the wire answers it
+	// — skills.list answers with skills and skills.preview.files is
+	// pre-install — so the card that design §8 requires could not be drawn
+	// without it.
+	Files(name string) (skill.FilesResult, error)
 }
 
 type skillSetEnabledParams struct {
@@ -147,6 +153,24 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(file))
+	case "skills.files":
+		var p skillRemoveParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		// A name no root holds, and an unreadable directory, are the store's
+		// own sentences about a request there is nothing to describe for, so
+		// each travels as the message. The one degrade that is NOT an error
+		// is the cut: the list stops at the cap and the result says so, for
+		// the reason file.go gives for its two carried refusals — a viewer
+		// handed an error has no count and no cap to name.
+		files, err := h.source.Files(p.Name)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(files))
 	case "skills.approve":
 		var p skillRemoveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
@@ -190,6 +214,14 @@ func validateSkillRemoveRaw(raw json.RawMessage) string {
 }
 
 func validateSkillApproveRaw(raw json.RawMessage) string {
+	return validateSkillRemoveRaw(raw)
+}
+
+// validateSkillFilesRaw is the name-only params shape a third time. It is a
+// call through rather than a copy for validateSkillURLRaw's reason: three
+// contracts declaring one field is one answer to what a skill-name param is,
+// and three copies of the bound would agree until somebody widened one.
+func validateSkillFilesRaw(raw json.RawMessage) string {
 	return validateSkillRemoveRaw(raw)
 }
 

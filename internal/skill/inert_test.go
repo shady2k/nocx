@@ -78,6 +78,66 @@ func TestAnInstalledSkillIsInertUntilThePersonTurnsItOn(t *testing.T) {
 	}
 }
 
+// THE SWITCH DOES NOT ADOPT BYTES, and this is where that is pinned
+// (nocx-0bsa4.3). The card is now where the person reads a skill, so it was
+// worth asking again whether turning one on should record the digest of what
+// they were looking at. It must not, and the reason is the case below: in the
+// ordinary case there is nothing to record — the install already wrote the
+// digest of exactly these bytes, and if a byte had moved since, the row and
+// the card would both say `changed`. The ONLY case where recording on a
+// toggle would change anything is that one, and there it would convert the
+// cheapest control in the product into a silent adoption of an edit nobody
+// read. Approve is the control that adopts bytes, it is drawn only when there
+// are bytes to adopt, and this test is what stops the switch quietly becoming
+// a second one.
+func TestTurningTheSwitchDoesNotAdoptChangedBytes(t *testing.T) {
+	configDir := t.TempDir()
+	roots := installedRoots(t, configDir)
+	store := NewStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))
+	installSkillFor(t, store, configDir, "deploy", "installed body")
+	if err := store.SetEnabled("deploy", true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+
+	path := filepath.Join(configDir, "installed-skills", "deploy", "SKILL.md")
+	original, err := os.ReadFile(path) //nolint:gosec // a path this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append([]byte{}, original...), " edited by somebody\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(t, mustList(t, store), "deploy").Status; got != StatusChanged {
+		t.Fatalf("status = %q, want changed: this test is not exercising what it claims", got)
+	}
+
+	// The switch, both ways, which is the cheapest thing a person can do to a
+	// skill and the likeliest thing they will do to one that has stopped
+	// working.
+	if err := store.SetEnabled("deploy", false); err != nil {
+		t.Fatalf("SetEnabled off: %v", err)
+	}
+	if err := store.SetEnabled("deploy", true); err != nil {
+		t.Fatalf("SetEnabled on: %v", err)
+	}
+
+	if got := listed(t, mustList(t, store), "deploy").Status; got != StatusChanged {
+		t.Fatalf("status = %q, want changed still: flipping the switch adopted bytes nobody read", got)
+	}
+	if _, offered := indexed(store.Index(), "deploy"); offered {
+		t.Fatal("the changed skill is offered to the assistant again after a toggle")
+	}
+
+	// And Approve — the control that IS about the bytes — still ends the
+	// state, so the paired success is here beside the refusal.
+	if err := store.Approve("deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if got := listed(t, mustList(t, store), "deploy").Status; got != StatusApproved {
+		t.Fatalf("status = %q, want approved after the person adopted the bytes", got)
+	}
+}
+
 func TestAuthoredAndManagedSkillsAreLiveOnArrival(t *testing.T) {
 	configDir := t.TempDir()
 	roots := installedRoots(t, configDir)

@@ -38,6 +38,7 @@ function fakeClient(installed: string[]) {
     preview: vi.fn(),
     install,
     file: vi.fn(),
+    files: vi.fn(),
   }
   return { client, order, install }
 }

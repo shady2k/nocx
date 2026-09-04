@@ -323,6 +323,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"skills.file": {
 			[]byte(`{"name":"deploy","path":"references/hosts.md"}`),
 		},
+		"skills.files": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"skills.list": {
 			[]byte(`{}`),
 		},

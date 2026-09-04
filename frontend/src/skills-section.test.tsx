@@ -6,6 +6,7 @@ import { SkillsStore, type SkillsClientLike } from './skills-store'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsPreview } from './generated/skills.preview'
 import type { SkillsFile } from './generated/skills.file'
+import type { SkillsFiles } from './generated/skills.files'
 
 const confirmAnswer = true
 // Only `showConfirm` is faked — the rest of the module is the real thing,
@@ -55,6 +56,29 @@ const BUILTIN_FILE: SkillsFile = {
   maxBytes: 65536,
 }
 
+/**
+ * What a skill is MADE OF, which is the list the card draws (nocx-0bsa4.3).
+ * The builtin carries one file, so its card has nothing to pick between; the
+ * installed bundle carries a reference and a script, which is the case design
+ * §8 exists for — executable text a person can look at before the skill can
+ * act.
+ */
+const ONE_FILE: SkillsFiles = {
+  name: 'skill-authoring',
+  provenance: 'builtin',
+  files: ['SKILL.md'],
+  truncated: false,
+  maxFiles: 256,
+}
+
+const BUNDLE: SkillsFiles = {
+  name: 'weather',
+  provenance: 'installed',
+  files: ['SKILL.md', 'references/stations.md', 'scripts/fetch.sh'],
+  truncated: false,
+  maxFiles: 256,
+}
+
 const SKILLS: SkillsList = {
   documentPath: '/tmp/nocx/skills.json',
   skills: [
@@ -92,6 +116,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     }),
     install: vi.fn().mockResolvedValue({ name: 'deploy', provenance: 'installed' }),
     file: vi.fn().mockResolvedValue(BUILTIN_FILE),
+    files: vi.fn().mockResolvedValue(ONE_FILE),
     ...overrides,
   }
 }
@@ -165,10 +190,10 @@ describe('SkillsSection', () => {
     // which is why this asserts the two rows against each other rather than
     // counting the buttons on the page.
     expect(actionIn(builtin, 'Delete')).toBeUndefined()
-    // Read is the one thing every row offers, builtin included, so the
+    // Open is the one thing every row offers, builtin included, so the
     // absence of Delete is asserted against what IS there rather than
-    // against an empty row (nocx-872jc.2).
-    expect(actionIn(builtin, 'Read')).toBeTruthy()
+    // against an empty row (nocx-872jc.2, nocx-0bsa4.3).
+    expect(actionIn(builtin, 'Open')).toBeTruthy()
     expect(builtin.querySelectorAll('button')).toHaveLength(1)
     const del = actionIn(deploy, 'Delete')
     expect(del).toBeTruthy()
@@ -611,14 +636,14 @@ describe('SkillsSection — installing a skill by its URL (nocx-qja4m.6)', () =>
  */
 const reader = (container: HTMLElement): HTMLDialogElement | undefined =>
   Array.from(container.querySelectorAll('dialog')).find((dialog) =>
-    dialog.querySelector('.nocx-dialog__title')?.textContent?.includes('SKILL.md'),
+    dialog.querySelector('.nocx-dialog__title')?.textContent?.includes('\u201c'),
   )
 
-async function readFileOf(client: SkillsClientLike, name: string): Promise<HTMLElement> {
+async function openCardOf(client: SkillsClientLike, name: string): Promise<HTMLElement> {
   const store = new SkillsStore(client)
   const { container } = render(() => <SkillsSection store={store} />)
   await waitFor(() => expect(container.textContent).toContain('Deploy the service'))
-  fireEvent.click(actionIn(rowFor(container, name)!, 'Read')!)
+  fireEvent.click(actionIn(rowFor(container, name)!, 'Open')!)
   await waitFor(() => expect(reader(container)?.open).toBe(true))
   return container
 }
@@ -628,7 +653,7 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
 
   it('opens a builtin skill’s SKILL.md and shows it whole, without leaving the page', async () => {
     const file = vi.fn().mockResolvedValue(BUILTIN_FILE)
-    const container = await readFileOf(fakeClient({ file }), 'skill-authoring')
+    const container = await openCardOf(fakeClient({ file }), 'skill-authoring')
 
     // The request is the skill's NAME and a path inside the skill's own
     // directory. A builtin's bytes are in the binary, so the path the row
@@ -644,9 +669,14 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
     expect(panel.textContent).toContain('skill-authoring')
     expect(panel.textContent).toContain('builtin')
 
-    // READ-ONLY: nothing here takes an edit.
-    expect(panel.querySelector('textarea')).toBeNull()
-    expect(panel.querySelector('input')).toBeNull()
+    // READ-ONLY: the file takes no edit. Scoped to the readout rather than
+    // to the whole panel, because the card around it carries the one control
+    // that IS a decision — the enable switch (nocx-0bsa4.3) — and a bare
+    // `input` query over the dialog would now be asserting that the switch
+    // is absent, which is the opposite of what this surface is for.
+    const readout = panel.querySelector('.ui-file-readout')!
+    expect(readout.querySelector('textarea')).toBeNull()
+    expect(readout.querySelector('input')).toBeNull()
 
     // …and the page is still the page underneath it.
     expect(rowFor(container, 'deploy')).toBeTruthy()
@@ -663,7 +693,7 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
       text: '',
       refusal: 'not-text',
     })
-    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const container = await openCardOf(fakeClient({ file }), 'deploy')
     const panel = reader(container)!
 
     expect(panel.textContent).toContain('not text')
@@ -682,7 +712,7 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
       refusal: 'too-large',
       maxBytes: 65536,
     })
-    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const container = await openCardOf(fakeClient({ file }), 'deploy')
     const panel = reader(container)!
 
     // The limit travels on the wire so the sentence can name it; a viewer
@@ -695,7 +725,7 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
   it('draws a read the backend refused outright, in the backend’s own sentence', async () => {
     const refusal = 'skill "deploy" path "SKILL.md": no such file or directory'
     const file = vi.fn().mockRejectedValue(new Error(refusal))
-    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const container = await openCardOf(fakeClient({ file }), 'deploy')
     const panel = reader(container)!
 
     // A rejection, not a result: there is no file to describe, so the reader
@@ -705,5 +735,187 @@ describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => 
     // Drawn, not thrown: the ask is still on screen and still closable.
     expect(panel.open).toBe(true)
     expect(buttonNamed(panel, 'Close')).toBeTruthy()
+  })
+})
+
+/**
+ * The skill's card (nocx-0bsa4.3) — where design §8 is paid for.
+ *
+ * An installed skill lands inert precisely so the person can come here, see
+ * what it is made of, and turn it on themselves. So these tests start where
+ * a person starts — at the row — and assert what a person can DO: read every
+ * file the skill carries including the script, tell the two kinds of "off"
+ * apart, and flip the switch beside the bytes it is a decision about.
+ *
+ * The switch is asserted INSIDE the card and never by counting switches on
+ * the page: the row keeps its own, which is how a person turns a skill on
+ * without opening anything, and the card's is the same decision taken beside
+ * the evidence.
+ */
+const cardSwitch = (panel: HTMLElement): HTMLInputElement | null =>
+  panel.querySelector<HTMLInputElement>('[role="switch"]')
+
+/** The file rows of the card, by the path a person reads on each. */
+const fileRows = (panel: HTMLElement): string[] =>
+  Array.from(panel.querySelectorAll('.ui-record-row__title')).map(
+    (title) => title.textContent?.trim() ?? '',
+  )
+
+describe('SkillsSection — the skill’s card (nocx-0bsa4.3)', () => {
+  afterEach(cleanup)
+
+  it('names every file an installed skill carries, and opens any of them without leaving the page', async () => {
+    const files = vi.fn().mockResolvedValue(BUNDLE)
+    const file = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ...BUILTIN_FILE,
+        name: 'weather',
+        provenance: 'installed',
+        text: '---\nname: weather\n---\n\nAsk the station.\n',
+      })
+      .mockResolvedValueOnce({
+        ...BUILTIN_FILE,
+        name: 'weather',
+        provenance: 'installed',
+        path: 'scripts/fetch.sh',
+        text: '#!/bin/sh\ncurl -s "$1"\n',
+      })
+    const container = await openCardOf(
+      fakeClient({ list: vi.fn().mockResolvedValue(INSTALLED), files, file }),
+      'weather',
+    )
+    const panel = reader(container)!
+
+    // EVERY file, script included. This is the whole of what buys the right
+    // to carry executable text: the person sees it before the skill can act.
+    await waitFor(() => expect(fileRows(panel)).toEqual(BUNDLE.files))
+    expect(files).toHaveBeenCalledWith('weather')
+
+    // The document the person came for is open already — nothing is asked of
+    // them to see the one file every skill has.
+    await waitFor(() => expect(codeBlocks(panel).join('')).toContain('Ask the station.'))
+
+    // …and the script opens in the same place, on the same page.
+    fireEvent.click(buttonNamed(panel, 'scripts/fetch.sh')!)
+    await waitFor(() => expect(file).toHaveBeenCalledWith('weather', 'scripts/fetch.sh'))
+    await waitFor(() => expect(codeBlocks(panel).join('')).toContain('curl -s'))
+    expect(rowFor(container, 'deploy')).toBeTruthy()
+  })
+
+  it('shows a skill of one file as that file, with no list to pick from', async () => {
+    const container = await openCardOf(fakeClient(), 'skill-authoring')
+    const panel = reader(container)!
+
+    await waitFor(() => expect(codeBlocks(panel)).toContain(BUILTIN_FILE.text))
+    // Not a picker with one row in it: there is nothing to choose between, so
+    // the card shows the file rather than a control for reaching it.
+    expect(fileRows(panel)).toEqual([])
+  })
+
+  it('carries the switch that enables the skill, beside what the decision is about', async () => {
+    const setEnabled = vi.fn().mockResolvedValue({ name: 'weather', enabled: true })
+    const container = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(INSTALLED),
+        files: vi.fn().mockResolvedValue(BUNDLE),
+        setEnabled,
+      }),
+      'weather',
+    )
+    const panel = reader(container)!
+
+    const toggle = cardSwitch(panel)
+    expect(toggle).toBeTruthy()
+    expect(toggle!.checked).toBe(false)
+    fireEvent.click(toggle!)
+    await waitFor(() => expect(setEnabled).toHaveBeenCalledWith('weather', true))
+  })
+
+  it('says a skill nobody has turned on differently from one whose bytes changed', async () => {
+    const inert = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(INSTALLED),
+        files: vi.fn().mockResolvedValue(BUNDLE),
+      }),
+      'weather',
+    )
+    const inertPanel = reader(inert)!
+    await waitFor(() => expect(inertPanel.textContent).toContain('This skill is off'))
+    // Nothing has happened to the bytes: the card must not say they moved.
+    expect(inertPanel.textContent).not.toContain('changed')
+    cleanup()
+
+    const changedList: SkillsList = {
+      ...INSTALLED,
+      skills: INSTALLED.skills.map((skill) =>
+        skill.name === 'weather' ? { ...skill, enabled: true, status: 'changed' as const } : skill,
+      ),
+    }
+    const changed = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(changedList),
+        files: vi.fn().mockResolvedValue(BUNDLE),
+      }),
+      'weather',
+    )
+    const changedPanel = reader(changed)!
+    await waitFor(() => expect(changedPanel.textContent).toContain('changed'))
+    // The switch is ON — this is not the "nobody turned it on" state, and a
+    // card that said so would send the person to the wrong control.
+    expect(cardSwitch(changedPanel)!.checked).toBe(true)
+    expect(changedPanel.textContent).not.toContain('This skill is off')
+  })
+
+  it('asks nothing of the person: no confirmation, no signature, just the look', async () => {
+    const container = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(INSTALLED),
+        files: vi.fn().mockResolvedValue(BUNDLE),
+      }),
+      'weather',
+    )
+    const panel = reader(container)!
+    await waitFor(() => expect(fileRows(panel)).toEqual(BUNDLE.files))
+
+    // The card offers a look; it does not extract a signature. The only
+    // checkbox on it is the switch itself.
+    const boxes = Array.from(panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+    expect(boxes).toHaveLength(1)
+    expect(boxes[0].getAttribute('role')).toBe('switch')
+    expect(panel.textContent).not.toContain('I have')
+  })
+
+  it('says so when the manifest was cut, rather than showing a short list as the whole skill', async () => {
+    const cut: SkillsFiles = {
+      ...BUNDLE,
+      files: ['SKILL.md', 'references/stations.md'],
+      truncated: true,
+      maxFiles: 2,
+    }
+    const container = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(INSTALLED),
+        files: vi.fn().mockResolvedValue(cut),
+      }),
+      'weather',
+    )
+    const panel = reader(container)!
+    await waitFor(() => expect(panel.textContent).toContain('2'))
+    expect(panel.textContent?.toLowerCase()).toContain('more file')
+  })
+
+  it('keeps a refused listing in the card, in the backend’s own sentence', async () => {
+    const refusal = 'skill "weather" was not found'
+    const container = await openCardOf(
+      fakeClient({
+        list: vi.fn().mockResolvedValue(INSTALLED),
+        files: vi.fn().mockRejectedValue(new Error(refusal)),
+      }),
+      'weather',
+    )
+    const panel = reader(container)!
+    await waitFor(() => expect(panel.textContent).toContain(refusal))
+    expect(panel.open).toBe(true)
   })
 })

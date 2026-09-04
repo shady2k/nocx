@@ -177,37 +177,24 @@ func snapshotRoot(root string) ([]SnapshotTree, error) {
 		treeRoot := filepath.Join(root, entry.Name())
 		var tree SnapshotTree
 		tree.Name = entry.Name()
-		err := filepath.WalkDir(treeRoot, func(path string, item fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if item.Type()&os.ModeSymlink != 0 {
-				if item.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if item.IsDir() {
-				return nil
-			}
-			if !item.Type().IsRegular() {
-				return nil
-			}
-			rel, err := filepath.Rel(treeRoot, path)
-			if err != nil {
-				return err
-			}
-			bytes, err := os.ReadFile(path) //nolint:gosec // path is beneath a configured skill root
-			if err != nil {
-				return err
-			}
-			tree.Files = append(tree.Files, SnapshotFile{Path: filepath.ToSlash(rel), Bytes: string(bytes)})
-			return nil
-		})
+		// WHICH files a skill is made of is skillFilePaths' answer, here and
+		// on the card (files.go). This walked with its own copy of the rules
+		// until the card needed the same list, and two walks over one
+		// directory are two answers to "what is this skill made of" that
+		// agree until one of them is changed. What stays here is the only
+		// part that differs: a backup wants the BYTES, so it joins each path
+		// back onto the directory and reads it.
+		paths, err := skillFilePaths(Root{Dir: root}, entry.Name())
 		if err != nil {
 			return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
 		}
-		sort.Slice(tree.Files, func(i, j int) bool { return tree.Files[i].Path < tree.Files[j].Path })
+		for _, rel := range paths {
+			bytes, err := os.ReadFile(filepath.Join(treeRoot, filepath.FromSlash(rel))) //nolint:gosec // path is beneath a configured skill root
+			if err != nil {
+				return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
+			}
+			tree.Files = append(tree.Files, SnapshotFile{Path: rel, Bytes: string(bytes)})
+		}
 		trees = append(trees, tree)
 	}
 	sort.Slice(trees, func(i, j int) bool { return trees[i].Name < trees[j].Name })

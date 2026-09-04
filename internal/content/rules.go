@@ -423,7 +423,7 @@ func validateInvocationRules(rules []InvocationRule) error {
 		if !rule.Decision.valid() {
 			return fmt.Errorf("rule %d: decision %q is not permit, ask or refuse", i, rule.Decision)
 		}
-		if rule.GrantedUnder != "" && !latticeEffect(rule.GrantedUnder) {
+		if rule.GrantedUnder != "" && !LatticeEffect(rule.GrantedUnder) {
 			return fmt.Errorf("rule %d: grantedUnder %q is not an effect class", i, rule.GrantedUnder)
 		}
 		set := 0
@@ -480,7 +480,13 @@ func validateInvocationRules(rules []InvocationRule) error {
 	return nil
 }
 
-func latticeEffect(e Effect) bool {
+// LatticeEffect reports membership of the ADR-0020 effect lattice — the
+// closed seven the matrix has a row for. It is exported because the wire asks
+// the same question this package's own gate does: policy.explain must refuse
+// an effect outside the lattice rather than explain the ask an absent row
+// would decide, and a second list of the seven in the transport would be a
+// second answer to drift from this one.
+func LatticeEffect(e Effect) bool {
 	switch e {
 	case EffectObserve, EffectMutateReversible, EffectMutateDestructive,
 		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate:

@@ -31,6 +31,16 @@ import (
 // by the `readPrograms` default at the bottom of the switch — not
 // `Disqualified`. An audit that reads `Disqualified` as the guard is reading
 // the wrong field.
+// CanonicalInvocation is the parser above, for the one caller outside this
+// package that has to ask the SAME question a run asks: policy.explain, which
+// explains what the policy decides about a command line a person is looking
+// at. It is deliberately the same function and not a second reading — an
+// explanation derived from a different parse would explain a decision nobody
+// took, which is the whole failure the trace exists to prevent.
+func CanonicalInvocation(command string) content.Invocation {
+	return parseCanonicalInvocation(command)
+}
+
 func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
 	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}

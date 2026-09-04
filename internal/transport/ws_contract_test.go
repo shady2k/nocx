@@ -6246,6 +6246,63 @@ func TestPolicyForgetRule_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// The policy.explain result off the REAL socket. Every shape of it is driven,
+// because the optional halves are exactly where a handler and a schema drift:
+// a permitted call (no cause, no resource), a call whose resource fell outside
+// the row's own scopes (both present), and a refusing row (whose trace says the
+// rules were never read). A payload this test built would prove the struct is
+// well-formed; only the socket proves the handler sends it.
+func TestPolicyExplain_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.explain.schema.json")
+	h, store := newPolicyHarness(t)
+
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	p.Rules = []content.InvocationRule{{
+		ID:               "df-answered",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision:         content.DecisionPermit,
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion,
+	}}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	for name, params := range map[string]map[string]any{
+		"permitted":        {"command": "df -h", "effect": "observe"},
+		"out of row scope": {"command": "cat /etc/hosts", "effect": "observe"},
+		"refusing row":     {"command": "rm -rf /workspace/x", "effect": "mutate-destructive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			validateJSON(t, schema, policyExplainResultBytes(t, h, params),
+				"policy.explain "+name+" (real socket)")
+		})
+	}
+}
+
+// policyExplainResultBytes drives policy.explain and hands back the raw result
+// bytes, so what is asserted is what the socket carried.
+func policyExplainResultBytes(t *testing.T, h *askHarness, params map[string]any) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.explain", params)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.explain: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
 // policyRuleResultBytes drives policy.setRule and hands back the raw result
 // bytes, so the schema validates what the socket carried rather than a
 // re-marshalled decode of it.

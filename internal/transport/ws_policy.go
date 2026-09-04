@@ -1,9 +1,9 @@
 package transport
 
-// policy.get / policy.set / policy.setRule / policy.forgetRule — the ONE
-// global agent policy (ADR-0020 §7 as amended 2026-08-16, accepted), ON THE
-// WIRE because the settings surface edits it: the matrix the run grants are
-// minted from (runGrantFor). The result shape is declared once in
+// policy.get / policy.set / policy.setRule / policy.forgetRule /
+// policy.explain — the ONE global agent policy (ADR-0020 §7 as amended
+// 2026-08-16, accepted), ON THE WIRE because the settings surface edits it:
+// the matrix the run grants are minted from (runGrantFor). The result shape is declared once in
 // contracts/policy.get.schema.json, generated into the renderer, and the Go
 // side is validated against it (DTO + over the socket, ws_contract_test.go).
 //
@@ -116,6 +116,78 @@ func policyDocumentNamesRules(policy json.RawMessage) bool {
 	return named
 }
 
+// policyExplainParams is the policy.explain params: one command line and the
+// effect the call classified as.
+//
+// The effect is the CALLER's, not this handler's to derive, and that is
+// deliberate: the effect a call classifies as depends on the tool's declared
+// reachable set, which the approval prompt was told (agent.approvalRequested
+// carries it) and which this method has no run to ask. Deriving a second
+// answer here would explain a decision nobody took.
+type policyExplainParams struct {
+	Command string         `json:"command"`
+	Effect  content.Effect `json:"effect"`
+}
+
+// policyExplainResult is what the policy decides about that command, and HOW
+// it got there — the steps the evaluator took, in the order it took them.
+//
+// The trace is the point. The Verdict alone cannot say whether a person's
+// standing rule lost or was never read, and a page that worked it out from the
+// policy document would be a second implementation of the precedence order in
+// TypeScript: the two would agree everywhere anyone looked and disagree
+// somewhere nobody did. So the evaluator records its own steps and this method
+// carries them; nothing on this side derives one.
+type policyExplainResult struct {
+	Effect   content.Effect          `json:"effect"`
+	Decision content.Decision        `json:"decision"`
+	Cause    content.OutOfScopeCause `json:"cause,omitempty"`
+	Resource *content.GrantScope     `json:"resource,omitempty"`
+	Trace    []content.TraceStep     `json:"trace"`
+}
+
+// MarshalJSON sends an empty trace as [] rather than null, for the reason
+// policyResult does: "never a null" belongs to the shape rather than to every
+// place that builds one. A sealed trace always has at least one step, so this
+// guards the shape and not a case the evaluator produces.
+func (r policyExplainResult) MarshalJSON() ([]byte, error) {
+	type wire policyExplainResult // no MarshalJSON of its own: the recursion break
+	w := wire(r)
+	if w.Trace == nil {
+		w.Trace = []content.TraceStep{}
+	}
+	return json.Marshal(w)
+}
+
+// policyCommandBound is how long a command line policy.explain will read. It
+// is generous rather than tight: the thing being explained is a command a
+// person is looking at, and truncating one would explain a different command.
+const policyCommandBound = 4096
+
+// validatePolicyExplainRaw checks the envelope, the command's bound and that
+// the effect is one the matrix HAS A ROW FOR. The last is the one that
+// matters: an effect outside the lattice has no row, so the evaluator would
+// answer with the ask an absent row decides, and the caller would read that as
+// a policy decision rather than as a typo. content.LatticeEffect is the same
+// predicate content's own rule gate uses — there is no second list of the
+// seven here.
+func validatePolicyExplainRaw(raw json.RawMessage) string {
+	var p policyExplainParams
+	if msg := decodeObject(raw, &p, "command", "effect"); msg != "" {
+		return msg
+	}
+	if p.Command == "" {
+		return "command is required"
+	}
+	if msg := boundedRunes("command", p.Command, policyCommandBound); msg != "" {
+		return msg
+	}
+	if !content.LatticeEffect(p.Effect) {
+		return "effect must name an effect class the matrix has a row for"
+	}
+	return ""
+}
+
 // policyRuleParams is the wire form of ONE invocation rule a caller writes:
 // what the rule SAYS, and nothing about where it came from.
 //
@@ -222,6 +294,10 @@ func (s *WSServer) policySpecs() []methodSpec {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyForgetRule(ctx, req) }
 		}),
+		regResponder(s.lane, "policy.explain", params(validatePolicyExplainRaw), func(r Responder) handlerFunc {
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyExplain(ctx, req) }
+		}),
 	}
 }
 
@@ -265,6 +341,43 @@ func (h policyHandlers) handlePolicySet(ctx context.Context, req jsonrpcRequest)
 		return
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(policySetResult{OK: true}))
+}
+
+// handlePolicyExplain answers what the stored policy decides about one
+// command, and every step it took to decide it.
+//
+// Two things it deliberately does NOT do. It does not parse the command a
+// second way — assistant.CanonicalInvocation is the parser a run uses, so the
+// explanation is of the same reading the enforcement had. And it does not walk
+// the policy itself: content.ExplainInvocation records the steps as it takes
+// them, and this handler only carries them. The moment either of those became
+// a local reimplementation, the page would be explaining a decision the
+// evaluator did not make.
+func (h policyHandlers) handlePolicyExplain(ctx context.Context, req jsonrpcRequest) {
+	if !h.wired {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.explain not available"})
+		return
+	}
+	var p policyExplainParams
+	if msg := decodeObject(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.explain: " + msg})
+		return
+	}
+	verdict := h.store.Policy().ExplainInvocation(p.Effect, assistant.CanonicalInvocation(p.Command))
+	result := policyExplainResult{
+		Effect:   p.Effect,
+		Decision: verdict.Decision,
+		Cause:    verdict.Cause,
+		Trace:    verdict.Trace,
+	}
+	if verdict.Cause != "" {
+		// The resource is the one that fell outside, and it rides along
+		// only with the cause that names it: a verdict the resource layer
+		// answered "inside" has no resource to point at.
+		resource := verdict.Resource
+		result.Resource = &resource
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(result))
 }
 
 // handlePolicySetRule writes ONE rule and leaves the rest of the document

@@ -8,22 +8,21 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// CommandEffect derives the effect of one run command from its text and the
-// tool's reachable effect set. It is a PURE function of those facts: no
-// registry lookup, settings read, shell invocation, or runtime state.
-//
-// The parser deliberately does not pretend to be the person's shell. An alias
-// or shell function can make `ls` mean something else in their rc files, which
-// nocx does not read. A lowered call therefore becomes `observe`, whose
-// default policy is still "Ask every time"; a mistaken alias classification
-// loses only the blanket grant, not the chance to ask.
-//
-// The class is derived from the structural resource report. A report with only
-// resolved resources selects its mapped member; writes, deletes, network
-// access and unresolved parts select the set's worst member.
-// CommandInvocation is the parser result shared by effect classification and
-// invocation-rule policy. The parser is deliberately owned here: policy
-// consumers receive this result instead of tokenizing the command again.
+// CanonicalInvocation is parseCanonicalInvocation below, for the callers
+// outside this package that have to ask the SAME question a run asks about a
+// command line a person is looking at: policy.explain, which says what the
+// policy decides about it, and policy.classify, which reads one nobody has
+// run. It is deliberately the same function and not a second reading — an
+// explanation derived from a different parse would explain a decision nobody
+// took, which is the whole failure the trace exists to prevent.
+func CanonicalInvocation(command string) content.Invocation {
+	return parseCanonicalInvocation(command)
+}
+
+// parseCanonicalInvocation produces the content.Invocation shared by effect
+// classification and invocation-rule policy. The parser is deliberately owned
+// here: policy consumers receive this result instead of tokenizing the command
+// again.
 //
 // The invariant is `Disqualified ⇒ non-empty Unresolved`. Its CONVERSE has
 // never held: `Disqualified` is false for a path-prefixed program that a bare
@@ -31,16 +30,6 @@ import (
 // by the `readPrograms` default at the bottom of the switch — not
 // `Disqualified`. An audit that reads `Disqualified` as the guard is reading
 // the wrong field.
-// CanonicalInvocation is the parser above, for the one caller outside this
-// package that has to ask the SAME question a run asks: policy.explain, which
-// explains what the policy decides about a command line a person is looking
-// at. It is deliberately the same function and not a second reading — an
-// explanation derived from a different parse would explain a decision nobody
-// took, which is the whole failure the trace exists to prevent.
-func CanonicalInvocation(command string) content.Invocation {
-	return parseCanonicalInvocation(command)
-}
-
 func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
 	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}
@@ -102,6 +91,19 @@ func commandSelection(inv content.Invocation, declared []content.Effect) content
 	return inv.Resources.SelectEffect(declared)
 }
 
+// commandEffect derives the effect of one run command from its text and the
+// tool's reachable effect set. It is a PURE function of those facts: no
+// registry lookup, settings read, shell invocation, or runtime state.
+//
+// The parser deliberately does not pretend to be the person's shell. An alias
+// or shell function can make `ls` mean something else in their rc files, which
+// nocx does not read. A lowered call therefore becomes `observe`, whose
+// default policy is still "Ask every time"; a mistaken alias classification
+// loses only the blanket grant, not the chance to ask.
+//
+// The class is derived from the structural resource report. A report with only
+// resolved resources selects its mapped member; writes, deletes, network
+// access and unresolved parts select the set's worst member.
 func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
 	return commandSelection(inv, declared).Effect
 }

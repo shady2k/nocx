@@ -42,11 +42,12 @@
  * Nothing here sleeps and nothing waits out a clock (AGENTS.md: "a test may
  * not depend on timing").
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

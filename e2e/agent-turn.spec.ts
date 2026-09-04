@@ -52,11 +52,12 @@
  * NOTHING HERE WAITS OUT A DURATION. Every wait is a poll on an observable
  * state change — the turn's `completed` chip, a store row — never a sleep.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

@@ -8,12 +8,13 @@
  * answer derived from a local page fixture. The fake model only says the page
  * marker when the real fetch result reached its second request.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { createServer, type Server } from 'node:http'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   VaultBackend,
   bindEndpoint,
   createAiEndpoint,

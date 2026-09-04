@@ -22,13 +22,20 @@
  * One serial test: the second open MUST observe state the first open
  * installed, not an independent fixture.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, appReadyForInput, bindEndpoint, documentDir, settingsReady } from './harness'
+import {
+  standalone as base,
+  VaultBackend,
+  appReadyForInput,
+  bindEndpoint,
+  documentDir,
+  settingsReady,
+} from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which

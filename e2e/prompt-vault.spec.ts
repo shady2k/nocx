@@ -29,11 +29,12 @@
  * is asserted rather than assumed — a panel that interrupts composition is
  * the defect the round existed to remove.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   VaultBackend,
   appReadyForInput,
   bindEndpoint,

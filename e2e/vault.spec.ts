@@ -12,12 +12,13 @@
  * Case 3 requires gnome-keyring via nix-shell; it is skipped when the
  * daemon is unavailable and the reason is marked in the test name.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   VaultBackend,
   appReadyForInput,
   bindEndpoint,

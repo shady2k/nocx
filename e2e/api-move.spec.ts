@@ -38,12 +38,13 @@
  * row in the tree, a dialog gone, a file on disk. A spec that needs a slow
  * machine to pass is broken on a fast one too.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   collectionsDir,

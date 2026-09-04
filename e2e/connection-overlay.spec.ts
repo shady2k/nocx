@@ -38,13 +38,14 @@
  * No duration is used as an assertion. Every wait below observes a DOM state,
  * visibility, prompt readiness, or backend recording state.
  */
-import { test as base, expect, type Browser, type Page } from '@playwright/test'
+import { expect, type Browser, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BASE_URL } from './base-url'
 import {
+  standalone as base,
   VaultBackend,
   bindResolvableEndpoint,
   clickIntoEditor,

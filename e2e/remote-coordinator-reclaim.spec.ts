@@ -94,13 +94,14 @@
  *    collapses into exactly the markerless layout nocx-k6p18.31 used to
  *    produce, editor and all.
  */
-import { test as base, expect, type Browser, type Page } from '@playwright/test'
+import { expect, type Browser, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { BASE_URL } from './base-url'
 import {
+  standalone as base,
   bindEndpoint,
   clickIntoEditor,
   openControlPlane,

@@ -78,11 +78,12 @@
  * endpoint it configures never leaks into the shard's shared stand and the
  * fresh-dev-stand state (no endpoint, no vault) is real here.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   answerPermission,
   appReadyForInput,
   bindEndpoint,

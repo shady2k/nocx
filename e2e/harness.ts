@@ -1,10 +1,25 @@
 import { test as base, expect as baseExpect, type Locator, type Page } from '@playwright/test'
 
 import { BASE_URL } from './base-url'
+import { reportStandingModals } from './modal-report'
 import { readStand } from './stand'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
+
+/**
+ * The one passphrase the SHARED stand's vault is ever set up with.
+ *
+ * A constant rather than a literal in each spec, because `resetStand` has to
+ * be able to unlock what a spec set up (see the vault paragraph there): two
+ * spellings of this would agree until the day one of them changed, and the
+ * symptom would be a top-sheet unlock prompt over somebody else's surface.
+ *
+ * Specs that bring their own backend own their own passphrase and must NOT
+ * use this — theirs is disposable with the backend, and several of them are
+ * about what a particular passphrase does.
+ */
+export const SHARED_VAULT_PASSPHRASE = 'master-passphrase-7'
 
 /**
  * Wait until the startup/reconnect overlay has left the top layer.
@@ -230,7 +245,7 @@ export const test = base.extend<object, { appReady: void }>({
     { scope: 'worker', auto: true, timeout: 120_000 },
   ],
 
-  page: async ({ page }, use) => {
+  page: async ({ page }, use, info) => {
     // BEFORE the test, not after it. A teardown answers for the test that has
     // just run and is skipped when that test dies badly; a setup answers for
     // the test that is about to run, which is the one whose result depends on
@@ -239,6 +254,36 @@ export const test = base.extend<object, { appReady: void }>({
     await resetStand()
     await injectWailsShim(page)
     await use(page)
+    // …and one thing is READ afterwards, on the way out of a test that
+    // failed: whichever modal was standing over the page, by name. See
+    // modal-report.ts for why that is a report and not an assertion.
+    await reportStandingModals(page, info)
+  },
+})
+
+/**
+ * The suite's OTHER test object: no stand reset, no wails shim — and the same
+ * failure diagnostics.
+ *
+ * Forty-four specs bring their own backend (`VaultBackend`, the API fixture
+ * servers, the coordinator specs) and so must not have the shared stand reset
+ * underneath them. Every one of them said `import { test as base } from
+ * '@playwright/test'; const test = base`, which is a correct statement of "not
+ * the harness's test" and also an opt-out of anything the suite ever decides
+ * every spec should have. This is that statement with somewhere to put the
+ * second kind of thing: it is still `base`, it still resets nothing, and it
+ * cannot silently miss what the rest of the suite gets — today, the report
+ * that names the modal standing over a failed test.
+ *
+ * They import it as `standalone as base`, so `const test = base` and the files
+ * that call `base.describe` directly read exactly as they did. The alias is
+ * what keeps this a one-line change per spec rather than a rename sweep across
+ * files that also use `base` as a local for something else.
+ */
+export const standalone = base.extend<object>({
+  page: async ({ page }, use, info) => {
+    await use(page)
+    await reportStandingModals(page, info)
   },
 })
 
@@ -337,6 +382,36 @@ async function resetStand(): Promise<void> {
     const snips = (await wire.call('snippets.list', {})) as { snippets: { id: string }[] }
     for (const row of snips.snippets) {
       await wire.call('snippets.delete', { id: row.id })
+    }
+    // AND THE VAULT'S LOCK, which is the fourth piece of shared-stand state a
+    // spec inherits — and the only one no spec can be blamed for leaving,
+    // because the PRODUCT sets it and is right to (nocx-76wyh).
+    //
+    // Design D9: the vault seals when the last client leaves
+    // (internal/vault/presence.go). Every test here closes its context, and
+    // every spec that brings its own backend leaves the shared stand with no
+    // client attached for as long as it runs — which is longer than the
+    // detach window, so the shared vault seals. It stays sealed, and the next
+    // spec that touches a secret meets a sealed vault: the dispatcher's
+    // global seam raises the unlock prompt for ANY rpc that lands on one
+    // (quick-connect.tsx says so where it declines to offer its own row), and
+    // that prompt is a top-sheet at the app root, over whatever surface the
+    // spec was driving.
+    //
+    // That is nocx-76wyh, and presence.go's own header records the same
+    // signature from nocx-58q7d: "eighteen specs reported it as
+    // 'ui-prompt-overlay intercepts pointer events'". The click that fails is
+    // in the spec that inherited the lock, never in the one whose departure
+    // turned it — so no per-spec tidy-up can own this. It belongs here, where
+    // the other three shared documents are declared.
+    //
+    // UNSEALED, not sealed: a spec's first assertion describes an application
+    // whose secrets are available, and connections-settings.spec.ts's Connect
+    // walk needs them. Uninitialized is left alone — there is nothing to
+    // unlock, and the setup surface is a different flow with specs of its own.
+    const vault = (await wire.call('vault.status', {})) as { state: string }
+    if (vault.state === 'sealed') {
+      await wire.call('vault.unseal', { means: 'passphrase', secret: SHARED_VAULT_PASSPHRASE })
     }
   } finally {
     wire.close()

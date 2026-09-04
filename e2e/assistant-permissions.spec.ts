@@ -102,11 +102,12 @@
  * indistinguishable there. The wire was the only place they differed, and the
  * only check that reads the real wire is this one.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  standalone as base,
   appReadyForInput,
   bindEndpoint,
   createAiEndpoint,

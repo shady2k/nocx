@@ -11,12 +11,18 @@
  * NOTHING HERE WAITS ON A DURATION. Every wait is on an observable state: the
  * workbench, the import dialog, the imported request row, and the run outcome.
  */
-import { test as base, expect } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { appReadyForInput, bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import {
+  standalone as base,
+  appReadyForInput,
+  bindEndpoint,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import {
   startPathVariableServer,

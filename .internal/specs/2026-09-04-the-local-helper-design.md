@@ -3,7 +3,15 @@
 **Epic:** `nocx-ie23r`. **Implements:** `D11` of
 [`2026-08-31-level-1-the-helper-owns-the-host-design.md`](2026-08-31-level-1-the-helper-owns-the-host-design.md),
 whose local half was decided on 2026-08-31 and never built. Owner decisions taken
-2026-09-04.
+2026-09-04. **Decision record:** [ADR-0057](../../docs/decisions/0057-on-your-own-machine-there-is-no-tier-a-fallback.md).
+
+> **Revision 2, 2026-09-04, after an adversarial review (codex) whose findings were verified
+> against the tree.** Revision 1 was wrong in four load-bearing places and each correction is
+> marked **[R2]** where it lands. In short: `L5` claimed a rule that is already implemented;
+> §4 resurrected a start order level 1 had already superseded; §2 called AD-5 untouched when
+> the local half narrows it; and `L1`'s "one list entry more" understated the work by a wide
+> margin. A fifth finding — the crash interval between the helper's spawn and the durable
+> binding — is the hole this design did not have, and it is now §3.5.
 
 ## 0. What this is, in one sentence
 
@@ -18,7 +26,7 @@ in that pane with its output.**
 
 That is what the helper already gives a remote session and what a local one has never had,
 because the backend spawns local PTYs itself and they die with it. The end-to-end check is
-the epic's second criterion, through `cmd/nocx-server`.
+the epic's `nocx-ie23r.5`, through `cmd/nocx-server`.
 
 ## 2. What this crosses, and what those documents already decided
 
@@ -27,39 +35,77 @@ the epic's second criterion, through `cmd/nocx-server`.
   second mechanism, no 'local special case', and no code path that exists only for one of
   them." This document builds that; it decides nothing about it.
 - **`D12` (level 1)** — same-UID trust, frozen deliberately. Any nocx under that account may
-  connect. Locally this is the whole authorization model, and §4 does not add to it.
+  connect. Locally this is the whole authorization model, and `L3` does not add to it.
+  **[R2]** `D12` answers _who may connect once a helper exists_; it says nothing about
+  whether installing needs consent. `L3` is therefore a NEW decision, not a reading of `D12`.
 - **§5 (level 1)** — the endpoint is a private Unix socket, `0600`, in a `0700` directory,
-  never a loopback port, and `internal/helper/endpoint` has a test that walks the source of
-  every package on the path and asserts no TCP listener exists. Unchanged here.
-- **`D2` and `D8` (the generation-daemon lifecycle design)** — the daemon exits when its last
-  session exits; a coordinator on start lists generations, probes each endpoint, reconciles,
-  attaches and drains, then installs the current generation if absent. Step 1 already says
-  "derive and probe each endpoint" without saying the endpoints are remote. §5 below is that
-  order with the local generation in the list, not a second order.
-- **`N3` (delivery modes) and ADR-0034** — consent is required to deploy the binary, and it
-  is keyed to the machine. §4 states why that axis does not reach the local machine, and
-  adds no surface.
+  never a loopback port, and `internal/helper/endpoint` has a test walking the source of
+  every package on the path asserting no TCP listener exists
+  (`no_tcp_listener_test.go`). **[R2] and the layout is NOT what `D3` of the
+  generation-daemon design requires.** `D3` requires `~/.nocx/run/<machine>/<generation>.sock`
+  with both identifiers at least 128 bits; the tree has no `<machine>` component
+  (`endpoint.Dir`, `endpoint.go:110-117`; `deploy.installDir`) and names the socket with the
+  first 16 hex characters — 64 bits (`endpoint.go:68-76`). The truncation carries an argument
+  in the code ("this is a NAME and never a credential", confirmed by the handshake's full
+  hash) and may stand. **The missing `<machine>` namespace carries none**, and `D3` says what
+  it costs: machine B probes its own lock, finds it free because it is a different file, and
+  retires the SHARED install directory under machine A's live daemon. A home directory shared
+  over NFS between your laptop and your server is exactly that case, and this epic is what
+  makes both ends helper hosts. Filed as its own bead; this design does not fix it and must
+  not pretend the layout is settled.
+- **`D2` (generation-daemon lifecycle)** — the daemon keeps running through bridge EOF and
+  through the last detach, and exits when its last session exits, with one bounded startup
+  grace. **[R2] None of that is implemented.** There is no last-session shutdown, no grace and
+  no non-admitting drain state anywhere under `internal/helper` or `cmd/nocx-helper`; the
+  daemon runs until SIGINT/SIGTERM. Locally that is mostly benign — you want it up — but two
+  things follow and are stated rather than assumed: a generation never retires itself, so
+  `D2` is a prerequisite of retirement rather than a thing to borrow; and any argument that
+  reasons from "the daemon dies with its last session" is reasoning about a design, not about
+  this tree.
+- **`D8` (generation-daemon lifecycle)** — its start order is **superseded** and §4 uses the
+  corrected one. **[R2]** Level 1 §4 records the correction, and records that codex retracted
+  its own first answer to reach it: `Open` cannot ask, because asking needs a carrier, the
+  carrier may need the vault, and the vault needs the store. **The store opens FIRST and
+  judges nothing**; then carriers; then inventory; then each session is reconciled
+  (`internal/app/session_reconcile.go:1-12`).
+- **AD-5** — **[R2] this narrows it, and revision 1 claimed it did not.** AD-5's rule says
+  Tier A "remains the substrate wherever no helper is installed" and names local operation.
+  `L4` refuses the pane instead. That is a deliberate narrowing for one machine, recorded in
+  **ADR-0057** rather than by editing AD-5: old records stay as they were true. Level 0 is
+  not deprecated and every host that is not this one keeps Tier A.
 - **AD-8** — one owner per behaviour. `internal/pty` does not disappear and must not: the
-  helper's `session.LocalSpawner` already spawns through `pty.NewLocal` (`spawn_local.go:13`,
-  `:36`). What moves is the CALLER, from the backend's `localPTYFactory` into the daemon.
-- **AD-5** — Tier A (the script substrate) is untouched. A host where nothing may be
-  installed still gets blocks; that is level 0 and this document does not narrow it.
+  helper's `session.LocalSpawner` already spawns through `pty.NewLocal`
+  (`internal/helper/session/spawn_local.go:85`). What moves is the CALLER.
 
 ## 3. Decisions
 
 ### L1 — The local machine is an entry in the inventory, not a mode
 
-There is no `if local` branch in the session path. The destination resolves to a helper
-generation and a carrier; the carrier is `endpoint.Dial(ctx, dir, generation)` for this
-machine and `nocx-helper bridge <generation>` over the ssh exec lane for another. Both hand
-`client.Dial` a `HelperConn`, both perform the same hello / sentinel / hello-ok handshake,
-and both reach the same `session` service.
+The destination resolves to a helper generation and a carrier; the carrier is
+`endpoint.Dial(ctx, dir, generation)` for this machine and `nocx-helper bridge <generation>`
+over the ssh exec lane for another. Both hand `client.Dial` a `HelperConn`, both perform the
+same hello / sentinel / hello-ok handshake, and both reach the same `session` service.
 
-The alternative — a local carrier that skips the handshake because "we know who we are" —
-was rejected: the handshake is what proves the binary answering is the generation we
-installed (`D21`), and locally that is exactly as worth proving. A stale binary in
-`~/.nocx` is likelier than a stale one on a server, because your own machine is where
-builds land.
+The handshake is performed locally too, where the obvious shortcut is to skip it: the
+hello-ok is what proves the binary answering is the generation we installed (`D21`), and a
+stale binary under `~/.nocx` is likelier on the machine where builds land than on a server.
+
+**[R2] This is new code, and revision 1's "one list entry more" was false.** Every helper
+route in the tree is gated on the destination being remote, by construction and not by
+accident:
+
+- `helperRegistry.OpenHosted` returns "not mine" unless `cfg.Kind == session.KindRemote`,
+  then probes the host over ssh and resolves consent by host-key fingerprint
+  (`internal/app/helper_git.go:455-470`).
+- `sessionOpener` calls it only on the remote branch (`internal/transport/session_open.go`).
+- Cold-start re-adoption refuses any persisted binding without `Host`, `ProfileID` and
+  `HelperCommand`, resolves a saved SSH profile, rechecks remote consent, and adopts the
+  result as `KindRemote` (`internal/app/session_readopt.go:129-190`, `:348-363`).
+
+So the work is a local carrier, a local hosted-open route and a local durable binding that
+carries a generation instead of a host and a profile. The FRAME stays "an entry in the
+inventory" — that is what keeps a second mechanism out — but nothing about it is a
+one-line addition.
 
 ### L2 — Installing locally is the same installer, with the filesystem as its transport
 
@@ -71,89 +117,121 @@ serving", which is the question the content hash exists to answer once.
 
 ### L3 — No consent, and no surface that asks for one
 
+**[R2] A new decision, not an implication of `D12`.** The level-1 matrix says the helper is
+installed "by consent" and describes a person opting a host in; this excepts one machine from
+that, deliberately.
+
 The consent axis (`N3`, ADR-0034) exists for a **persistent footprint on somebody else's
-machine**; that is the trade the owner took for the script tier, and the thing being
-consented to is deploying a binary onto a host you reached over ssh. Locally there is no
-deployment: the binary arrives with the app, under the account that is already running it,
-and `D12` has already frozen the trust boundary at the Unix account. Asking a person for
-permission to run, on their own machine, a part of the program they just started is theatre,
-and a consent surface that always says yes teaches people to click through the one that
-matters.
+machine**. Locally there is no deployment: the binary arrives with the app, under the account
+that is already running it, and `D12` has frozen the trust boundary at the Unix account.
+Asking a person for permission to run, on their own machine, a part of the program they just
+started is theatre, and a consent surface that always says yes teaches people to click
+through the one that matters.
 
 ### L4 — There is no fallback, and the refusal is a product surface
 
-If the local helper cannot be installed, started or reached, nocx **does not open the pane
-by another route**. It says, in the product: what failed, why, and what to do.
+**Recorded as [ADR-0057](../../docs/decisions/0057-on-your-own-machine-there-is-no-tier-a-fallback.md)**, which
+carries the argument and the consequences. In this document, only what it means for the
+build: `internal/transport`'s `openRefusal` is the carrier and needs no new mechanism, and a
+refusal names three things — **what failed** (install, start, or handshake), **why** (the
+concrete error, not a category), and **what to do**.
 
-The distinction that makes this right, and it is not tidiness: a remote host is an
-environment we do not control, so a helper failure there must degrade to the script tier —
-that is `AD-5`'s whole purpose. The local machine is not an environment, it is an
-**installation**. A daemon that ships with the app and will not start is a broken nocx, and
-a second, differently-behaving terminal opened quietly in its place is how that breakage
-survives for a month and is then debugged from the wrong end.
+**[R2] "Three parts" is not testable as three non-empty strings**, which is what revision 1's
+assertion would have accepted. The refusal carries a structured reason and a structured
+action from closed sets — a `reason` naming the boundary that failed and an `action` naming
+what the person can do — and the sentence is rendered from them. The test asserts the fields
+over the real socket, and a new failure boundary that has no action in the set fails to
+compile rather than shipping a refusal that ends at "why".
 
-`internal/transport`'s `openRefusal` is the carrier for it and needs no new mechanism: it
-exists precisely so an answer the open path produced itself keeps its sentence instead of
-being flattened into "Internal error". Three sentences, and the third is the one usually
-missing:
+**The refusal is raised at the act, not as a nag.** A probe that fails at coordinator start is
+recorded and surfaces when a person tries to open a pane. No notification: a person who has
+not asked for a terminal has not been harmed, and a startup toast about a daemon is noise
+they cannot act on.
 
-- **what failed** — the install, the start, or the handshake;
-- **why** — the concrete error, not a category: no space on `~/.nocx`, the binary is not
-  executable, the endpoint did not answer within the sentinel budget, a different
-  generation holds the socket;
-- **what to do** — retry, reinstall, free space, or read the daemon's log at the path we
-  name. A refusal that cannot name an action is a bug in the refusal, not a fact about the
-  failure.
+### L5 — What is missing is a local inventory, not a reconciliation rule
 
-**The refusal is raised at the act, not as a nag.** A probe that fails at coordinator start
-is recorded and surfaces when a person tries to open a pane. It does not raise a
-notification, because a person who has not asked for a terminal has not yet been harmed and
-a startup toast about a daemon is noise they cannot act on.
+**[R2] Revision 1 claimed this epic owns "ask before you delete, and unknown is not absent".
+It does not, because that rule is already built.** `dropDeadSessions` and `closeOpenEntries`
+no longer exist — they survive only in comments. `internal/content/reconcile_sqlite.go`
+carries the three verdicts including `VerdictUnknown`, and
+`internal/app/session_reconcile.go` states the discipline in its own header: "A FAILURE IS
+NEVER A VERDICT", with a `causeFor` whose type cannot return one. That landed with
+`nocx-k6p18.5`, after `nocx-wrugm`'s description was written, which is how revision 1 read a
+description as a statement of the present.
 
-### L5 — A replacing coordinator asks before it deletes
+What this epic actually owes is the thing that makes the rule reach a local session: **an
+inventory for the local generation that can be asked, and a durable binding that says which
+pane a local session belongs to.** Today no local session is ever reconciled because none
+outlives the backend, so the local branch of every verdict is unexercised.
 
-This epic repeals the theorem `dropDeadSessions` and `closeOpenEntries` stand on — "a
-session lives inside one backend process and cannot outlive it" — because it is what first
-makes a LOCAL session outlive the backend. So the rule this document owns (lifted out of
-`nocx-wrugm`, see that bead's notes):
+The failure-path assertion is unchanged and is the one worth writing first: with the endpoint
+unreachable at start, a local session is `unknown`, its ledger rows survive, nothing is
+deleted — **and the inventory was actually attempted**, which is the half revision 1 omitted
+and which a safe default would satisfy without any local code at all.
 
-**Three answers, never two.** The generation reports the session — **live**. A reachable
-generation says it does not exist — **absent**. Nobody could be asked — **unknown**.
+**[R2] And the surface for it already exists.** `session_reconcile.go`'s co-change partners,
+with support behind them, are `frontend/src/unreconciled-notice.tsx` and
+`contracts/ledger.query.schema.json` — an unreconciled session is already something the
+product shows a person and already something the wire carries. A local `unknown` extends that
+notice; it does not get one of its own. Two surfaces for one state is the defect, whichever
+wins.
 
-**`unknown` may never collapse into `absent`.** A refused connection, a timeout, a sealed
-vault and an unreachable host are all `unknown`, and `unknown` deletes nothing. This is
-`internal/app/session_reconcile.go`'s existing discipline — "A FAILURE IS NEVER A VERDICT",
-and its `causeFor` cannot return a verdict at all, the type says so — applied to the local
-generation, which until now could not fail to answer because it was never asked.
+### L6 — `localPTYFactory` is deleted, and it is more than a PTY constructor
 
-The failure-path assertion is the one worth writing first: with the endpoint unreachable at
-start, a local pane's session is `unknown`, its ledger rows survive the start, and nothing
-is deleted. Assert it by making the endpoint unreachable, not by calling the reconciler.
+**[R2] The type spans `internal/app/app.go:2296` to `:2673`, not the `:2472-2586` revision 1
+cited**, and it is constructed at `:694`. Besides `NewPTY` it owns the shell-replacement
+watcher (`:2634`), integration status reporting (`:2660`) and bootstrap-progress plumbing
+(`:2673`). Each needs a destination — the daemon, the open path, or deletion — named in
+`nocx-ie23r.3` before that bead is taken, because "move the PTY caller" is what revision 1
+made it sound like and it is not that.
 
-### L6 — `localPTYFactory` is deleted, not bypassed
+The check that keeps the second owner gone is a source-walking test over the packages on the
+local open path, the same shape as the endpoint package's no-TCP test: `pty.NewLocal` is
+constructed in exactly one place, `internal/helper/session`. **[R2] Uniqueness is not
+reachability** — that test passes on a tree where local open is broken everywhere — so it is
+paired with `nocx-ie23r.5`'s real open through `cmd/nocx-server`, which proves the
+constructor is reached through the socket.
 
-`internal/app`'s `localPTYFactory` (`app.go:2472`–`2586`) is the second PTY owner, and after
-this it has no callers. It goes. The check that keeps it gone is the same shape as the
-endpoint package's no-TCP test: walk the source of the packages on the local open path and
-assert `pty.NewLocal` is constructed in exactly one place — `internal/helper/session`.
+### L7 — The pane's claim on a session is durable before the spawn, or the spawn is not ours
 
-A grep in a review cannot hold this; the whole point of `D11` is that a local special case
-must be impossible to reintroduce by accident, and the only thing that makes it impossible
-is a test that fails when someone does.
+**[R2] This decision is new in revision 2 and answers §3.5.**
 
-## 4. The order at start, unchanged from `D8` with one list entry more
+The helper mints the authoritative session id, so the order is necessarily: the helper
+spawns and exposes the session in its inventory; the coordinator adopts it; the coordinator
+writes the durable pane → (generation, session) binding
+(`internal/transport/session_open.go:283`, `:419`). A backend that dies between the first and
+the third leaves the daemon holding a live PTY that no pane claims, and — with `D2`
+unimplemented — holding it forever.
 
-1. List generations — **including this machine's** — derive and probe each endpoint.
-2. Reconcile the durable pane → (generation, session) map against what live generations
-   report, under `L5`, before the content store's startup sweep.
-3. Attach and begin draining each live session's window where the destination is reachable
-   without vault credentials. **Local is always in that class**: there is no ssh
+The wave record's own rule applies here word for word, and it was bought by the same shape:
+the record exists **from before the first irreversible effect**. So a pane's claim is written
+before the spawn, carrying an idempotency key the spawn also carries, and reconciliation on
+the next start resolves the three cases: a claim with a session that the inventory reports
+(adopt), a claim whose session the inventory does not have (close the claim), and a session
+the inventory reports with no claim (**close it** — it is an orphan of a spawn nobody
+recorded, and adopting it would attach an unknown process to a pane).
+
+`SpawnParams` carries no such key today; adding one is `nocx-ie23r.1`'s, because the carrier
+and the protocol are the same bead.
+
+## 4. The order at start — the CORRECTED one
+
+**[R2]** Level 1 §4 supersedes `D8`'s ordering, and this is that order with the local
+generation in the list:
+
+1. **The store opens and judges nothing.** `content.Open` performs only the sweep it already
+   performs (`closeUnanchoredEntries`), which is this process's own work and not a session
+   verdict.
+2. List generations — **including this machine's** — derive and probe each endpoint.
+3. Carriers come up. **Local is always reachable without vault credentials**: there is no ssh
    authentication to resolve, so a local session is never "pending unlock".
-4. Open the store; start the recorder; record a `Skip` for what the window lost.
-5. Install the current generation if absent; retire unheld ones; reconcile tombstones.
+4. An inventory is asked of each live generation; each session is reconciled on the store's
+   one connection (ADR-0043 untouched), under the three verdicts and `L7`'s claim rule.
+5. Attach and begin draining; record a `Skip` for what the window lost.
+6. Install the current generation if absent. **Retirement and tombstones are NOT borrowed
+   here** — `D2` is unimplemented, so nothing retires itself yet, and that is `nocx-wrugm`'s.
 
-Step 5 is where a local first run installs, and step 1's probe is what makes a second run
-cheap. Starting a daemon that is already serving is not an error and is not treated as one
+Starting a daemon that is already serving is not an error and is not treated as one
 (`cmd/nocx-helper/main.go`, `alreadyServing` → exit 0): the socket is the only authority
 present on both sides of that race.
 
@@ -161,56 +239,80 @@ present on both sides of that race.
 
 - **Level 2** — durable TABS with their ledger rows, and reaching them from another machine.
   That needs a store, a schema and a writer, which is a server: `nocx-6ojko` onward.
-- **Generation coexistence across an update** — two resident generations, retirement,
-  tombstones, uninstall naming live work. That stays `nocx-wrugm`; this document owns only
-  the reconciliation rule it needs.
+- **Generation coexistence, retirement and tombstones, and `D2`'s daemon lifecycle** —
+  `nocx-wrugm`. **[R2]** Revision 1 declared these out and then used step 5 of the old order,
+  which required them. §4 no longer does.
+- **The `<machine>` namespace and the socket-name width** — its own bead. This design names
+  the divergence and inherits it; it does not resolve it.
 - **Any change to the remote path's behaviour.**
-- **The orchestration dispatcher's move into the helper.** It rides on this and belongs to
-  the wave epic.
-- **Windows and the platforms `deploy.ErrUnsupportedPlatform` names.** A machine with no
-  helper artifact has no local helper, and what that means for `L4` is an open question
-  below rather than a decision taken quietly here.
+- **The orchestration dispatcher's move into the helper.**
+- **Platforms `deploy.ErrUnsupportedPlatform` names**, per ADR-0057's last consequence.
 
 ## 6. Open questions
 
-1. **A platform with no artifact.** `L4` says no fallback; `ErrUnsupportedPlatform` says
-   there are platforms we ship no helper for. Today that set is windows, 32-bit and the
-   BSDs — none of which the app itself targets — so the two do not yet collide. If the app
-   ever targets one, `L4` is re-argued rather than quietly excepted.
-2. **What the daemon's log path is, and whether the refusal may name it.** `L4`'s third
-   sentence promises an action; if the log is not somewhere a person can reach, the promise
-   is empty.
-3. **First-run latency.** Step 5 installs on first run: extraction plus a start plus a
-   handshake, before the first pane opens. Whether that is felt is a measurement, not an
-   assertion, and it belongs to the epic's first child.
-4. **`Skip` for a local window.** Step 4 records what the window lost while the coordinator
-   was away. Locally the coordinator being away is now the ordinary case rather than the
-   exception, so the gap's presentation is exercised far more often than it was designed for.
+1. **What the daemon's log path is, and whether the refusal may name it.** `L4`'s third part
+   promises an action; if the log is not somewhere a person can reach, the promise is empty.
+2. **First-run latency.** Step 6 installs on first run: extraction, a start and a handshake
+   before the first pane. Whether that is felt is a measurement, and it belongs to
+   `nocx-ie23r.1`.
+3. **`Skip` for a local window.** Locally the coordinator being away becomes the ordinary
+   case rather than the exception, so the gap's presentation is exercised far more often than
+   it was designed for.
+4. **[R2] Partial failure of the install sequence.** `deploy.Ensure` has a dozen boundaries —
+   artifact selection, `Lstat`, removing an incomplete tree, `Mkdir`, temp create, write,
+   sync, close, rename, directory sync, marker, verification read. Which leave a tree that
+   the next attempt may reuse, and which leave one it must remove first? The invariant is
+   owed as an interval with both ends and is not written yet; `nocx-ie23r.1` owes it.
+5. **[R2] A detached child that starts while the caller is cancelled.** `endpoint.Ensure`
+   returns on context cancellation without terminating the process it started. Is that
+   daemon under a startup grace, and how does the retry tell it from a stale socket?
+6. **[R2] Bind succeeds, then startup fails.** The listener is established before the
+   instance id is minted (`cmd/nocx-helper/main.go:105-141`), so an exit there leaves a
+   socket with nothing behind it. Which side repairs it, and how does a prober tell it from a
+   daemon that is merely slow?
 
-## 7. Assertions — each one falsifiable
+## 7. Assertions — each one falsifiable, and each one able to fail
 
-1. **A local pane's program survives its coordinator.** Start `sleep 300` in a local pane,
-   stop the backend, start it again: the process's pid is unchanged and the pane reattaches
-   to it.
-2. **No second PTY owner.** The source-walking test fails if `pty.NewLocal` is constructed
-   outside `internal/helper/session`.
-3. **A refusal names an action.** With the endpoint unreachable, opening a pane produces an
-   `openRefusal` whose message names what failed, why, and what to do — asserted as three
-   distinct pieces, not as a substring.
-4. **`unknown` deletes nothing.** With the endpoint unreachable at start, a local session's
-   ledger rows survive and the pane is not dropped.
-5. **The handshake is performed locally.** A binary at the install path whose content hash
-   does not match the generation is refused, and the refusal says so.
-6. **Starting twice changes nothing.** Two coordinators reaching for the same generation
-   produce one serving daemon and no error surface.
+**[R2] Every assertion below was strengthened. Revision 1's set could pass on a broken
+product**, which the review demonstrated case by case; the rewrites are why each now cannot.
+
+1. **A local pane's program survives its coordinator, WITH its output.** Start a program that
+   prints a numbered line, then keeps printing while the backend is gone. Stop the backend,
+   start it again. The pid is unchanged, the pane reattaches, and the lines printed before and
+   during the absence each appear exactly once in that pane, with an explicit gap only where
+   capacity was exceeded. (`sleep 300` emits nothing and would pass with replay, `Skip` and
+   the recorder all broken.)
+2. **`pty.NewLocal` has one constructor site AND local open reaches it.** The source-walking
+   test proves uniqueness; `nocx-ie23r.5`'s open through `cmd/nocx-server` proves the site is
+   reached through the socket. Neither alone is the assertion.
+3. **A refusal carries a structured reason and a structured action**, both from closed sets,
+   asserted on the real JSON-RPC error off the real socket, and the rendered sentence is
+   built from them. Three arbitrary non-empty strings do not satisfy it.
+4. **`unknown` deletes nothing, and the inventory was attempted.** With the endpoint
+   unreachable at start: the local endpoint was dialled, the original pid still runs, the
+   ledger rows survive, **no replacement shell was spawned**, and the pane presents its
+   unreconciled state. A safe default that never asks fails this.
+5. **The local handshake actually runs.** Put a responder on the expected generation's socket
+   that answers with a wrong content hash; the client rejects that response and says so. (A
+   mismatched binary at the install path hashes to a different generation and would be
+   refused before any handshake — it proves nothing about this.)
+6. **Starting twice leaves one daemon and two working clients.** One daemon pid; both clients
+   complete the handshake; both see the same inventory; neither loses the other's attachment
+   or write lease. "Changes nothing" is not an assertion.
+7. **[R2] A spawn nobody recorded does not survive.** Kill the backend between the helper's
+   spawn and the durable binding; on restart the pane is either reunited with that session
+   through its pre-spawn claim, or the session is closed — never left live and unclaimed.
 
 ## 8. What would falsify this design
 
-- **If first-run latency is felt** — if the install-and-handshake before the first pane is
-  perceptible — then step 5's placement is wrong and the install belongs before the window
-  is shown, not in the coordinator's start order.
-- **If `unknown` turns out to be the common answer locally** rather than the rare one, the
-  endpoint is less reliable than a same-machine socket should be, and the cause is a defect
-  rather than a case for a fallback.
-- **If people routinely hit `L4`'s refusal**, no fallback was the wrong trade and the
-  argument in `L4` has to be re-made against evidence rather than restated.
+- **If first-run latency is felt**, step 6's placement is wrong and the install belongs before
+  the window is shown.
+- **If `unknown` is the common local answer** rather than the rare one, a same-machine socket
+  is less reliable than it should be, and the cause is a defect rather than a case for a
+  fallback.
+- **If people routinely hit `L4`'s refusal**, ADR-0057 was the wrong trade and has to be
+  re-argued against evidence rather than restated.
+- **[R2] If `L7`'s claim cannot be written before the spawn** — because the helper's protocol
+  cannot carry an idempotency key without a change nobody will accept — then the orphan
+  interval is real and permanent, and this design needs a reaper with a policy for closing
+  sessions it cannot attribute.

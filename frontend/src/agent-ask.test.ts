@@ -664,4 +664,67 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     )
     expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
   })
+  /**
+   * What the RUN says about ITSELF (nocx-4yjwk.1, design §5.3). Repeated
+   * scope-widening asks are capped, and a run that stopped asking must say
+   * so: a bound that goes quiet and reports nothing is the soft degrade
+   * AGENTS.md forbids — the person is left to infer it from questions that
+   * never arrive.
+   */
+  it('shows the notices a settled run states about itself', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('read every file under /repo')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'completed',
+      notices: ['this run stopped asking to widen a scope after three asks'],
+    })
+
+    expect(handle.append).toHaveBeenCalledWith(
+      '— this run stopped asking to widen a scope after three asks —',
+    )
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  it('says nothing extra when a run states no notices', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('a quiet run')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', { runId, state: 'completed' })
+
+    expect(handle.append).not.toHaveBeenCalled()
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  /**
+   * Two different facts, two lines. A bound that could not be ARMED and a
+   * bound the run stopped ASKING about are not the same sentence, and a
+   * joined one would state the wrong one of them.
+   */
+  it('keeps notices and unarmed bounds as separate lines', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('a run with both')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'completed',
+      notices: ['this run stopped asking to widen a scope after three asks'],
+      unarmedBounds: [
+        'the inactivity bound is not active because shell integration is unavailable',
+      ],
+    })
+
+    const lines = (handle.append as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => c[0] as string,
+    )
+    expect(lines).toHaveLength(2)
+    expect(lines).toContain('— this run stopped asking to widen a scope after three asks —')
+    expect(lines).toContain(
+      '— the inactivity bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
+    )
+  })
 })

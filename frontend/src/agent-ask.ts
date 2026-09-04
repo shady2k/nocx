@@ -144,6 +144,7 @@ export class AgentInputTarget implements InputTarget {
       state: AgentRunState['state']
       error?: string
       droppedDeltas?: number
+      notices?: string[]
       unarmedBounds?: string[]
     },
   ): void {
@@ -169,6 +170,18 @@ export class AgentInputTarget implements InputTarget {
           ? '— part of the answer was dropped while streaming; the full answer was saved —'
           : `— ${dropped} chunks of the answer were dropped while streaming; the full answer was saved —`,
       )
+    }
+    // What the RUN says about ITSELF — today, only that it stopped asking a
+    // person to widen a scope because it hit the bound on how often one
+    // answer may ask (design §5.3). Its own line, never folded into the
+    // unarmed-bounds sentence: a bound that could not be ARMED and a bound
+    // the run stopped ASKING about are different facts, and one sentence
+    // carrying both would state the wrong one of them. A run that stopped
+    // asking and said nothing is exactly the soft degrade AGENTS.md forbids
+    // — the person would be left inferring it from questions that never come.
+    const notices = presentation.notices ?? []
+    if (notices.length > 0) {
+      run.handle.append(`— ${notices.join('; ')} —`)
     }
     const unarmed = presentation.unarmedBounds ?? []
     if (unarmed.length > 0) {

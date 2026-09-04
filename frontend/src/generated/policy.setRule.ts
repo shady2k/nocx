@@ -14,11 +14,27 @@
  */
 export interface PolicySetRule {
   /**
-   * The stored rule's identity. Ids are minted by the backend and never supplied by the renderer for a NEW rule (AD-7), so this is where a caller that sent no id learns the one it was given — and what a later policy.setRule or policy.forgetRule names the rule by.
+   * The stored rule's identity. Ids are minted by the backend and never supplied by the renderer for a NEW rule (AD-7), so this is where a caller that sent no id learns the one it was given — and what a later policy.setRule or policy.forgetRule names the rule by. EMPTY exactly when `applied` is false: nothing was written, so nothing was named, and `added` says nothing either.
    */
   id: string
   /**
-   * True when the rule was appended, false when it replaced the rule already wearing this id. A replacement keeps its position in the document, its creation time and where it came from.
+   * True when the rule was appended, false when it replaced the rule already wearing this id. A replacement keeps its position in the document, its creation time and where it came from. Meaningless when `applied` is false — nothing was written.
    */
   added: boolean
+  /**
+   * Whether the write landed in the store. False ONLY in the default "ask" timing with live runs left behind: nothing changed, and the person has a question to answer first. A write that had already landed could only be reported, and a person told "3 runs are still using the answer you just deleted" has been handed a fact instead of a choice.
+   */
+  applied: boolean
+  /**
+   * How many runs already in flight would go on deciding under the OLD answer. A run's grant is minted when the run starts and is immutable for the run (ADR-0020 decision 5), so a policy write never reaches one. This counts only the runs whose own grant would DECIDE DIFFERENTLY without the answer — not every live run, which would report six affected by an answer governing none of them and train a person to dismiss the question. It is a count at the moment of the call, never a promise about the next one.
+   */
+  affectedRuns: number
+  /**
+   * How many of those runs this call actually terminalized, through the path a person's own stop takes. Zero in every timing but "stop".
+   */
+  stoppedRuns: number
+  /**
+   * How many had already reached a terminal state by the time the stop got there. Not a failure and not counted as stopped: crediting this gesture with an ending it did not cause would make the sentence a person reads untrue.
+   */
+  finishedBeforeStop: number
 }

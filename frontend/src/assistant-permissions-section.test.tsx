@@ -27,6 +27,7 @@ import {
   type PolicyClassification,
   type PolicyRule,
   type PolicyView,
+  type RunsTiming,
 } from './policy-client'
 import { AssistantPermissionsSection } from './assistant-permissions-section'
 import { clearToasts, toasts } from './ui'
@@ -102,6 +103,12 @@ function mount(client: PolicyClient): HTMLElement {
 interface FakeOpts {
   setError?: Error
   setRuleError?: Error
+  /** How many runs already in flight the backend says a rule write does not
+   *  reach. Above zero, the write does NOT land and the page must raise the
+   *  question — which is the whole of nocx-r4fh8 on this side. */
+  affectedRuns?: number
+  /** What a stop actually did, when the page asks for one. */
+  stopped?: { stoppedRuns: number; finishedBeforeStop: number }
   explain?: PolicyExplanation
   /** What the BACKEND makes of a typed command. The renderer never derives
    *  one: it is the whole reason `+ Allow a command…` exists. */
@@ -131,10 +138,33 @@ function fakeClient(reads: PolicyView[], opts: FakeOpts = {}) {
   const set = opts.setError
     ? vi.spyOn(client, 'set').mockRejectedValue(opts.setError)
     : vi.spyOn(client, 'set').mockResolvedValue({ ok: true })
+  // Both rule methods answer the WHOLE declared shape, including what the
+  // write did to the work already running: a fake that omitted those fields
+  // would be a fake of a wire that does not exist, and the page's question
+  // would be tested against it rather than against the contract.
+  const affected = opts.affectedRuns ?? 0
+  const runsOf = (runs?: RunsTiming) => {
+    if (affected > 0 && (runs === undefined || runs === 'ask')) {
+      return { applied: false, affectedRuns: affected, stoppedRuns: 0, finishedBeforeStop: 0 }
+    }
+    const stop =
+      runs === 'stop'
+        ? (opts.stopped ?? { stoppedRuns: affected, finishedBeforeStop: 0 })
+        : { stoppedRuns: 0, finishedBeforeStop: 0 }
+    return { applied: true, affectedRuns: affected, ...stop }
+  }
   const setRule = opts.setRuleError
     ? vi.spyOn(client, 'setRule').mockRejectedValue(opts.setRuleError)
-    : vi.spyOn(client, 'setRule').mockResolvedValue({ id: 'r-df', added: false })
-  const forgetRule = vi.spyOn(client, 'forgetRule').mockResolvedValue({ removed: true })
+    : vi
+        .spyOn(client, 'setRule')
+        .mockImplementation((_rule, runs) =>
+          Promise.resolve({ id: 'r-df', added: false, ...runsOf(runs) }),
+        )
+  const forgetRule = vi
+    .spyOn(client, 'forgetRule')
+    .mockImplementation((_id, runs) =>
+      Promise.resolve({ removed: runsOf(runs).applied, ...runsOf(runs) }),
+    )
   const classify = opts.classifyError
     ? vi.spyOn(client, 'classify').mockRejectedValue(opts.classifyError)
     : vi.spyOn(client, 'classify').mockResolvedValue(opts.classify ?? READ_DF)
@@ -308,12 +338,15 @@ describe('assistant permissions: Change', () => {
     fireEvent.click(within(p).getByRole('button', { name: /^Never/ }))
 
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
-    expect(setRule).toHaveBeenCalledWith({
-      id: 'r-df',
-      selector: ANSWERED_RULE.selector,
-      decision: 'refuse',
-      grantedUnder: undefined,
-    })
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        id: 'r-df',
+        selector: ANSWERED_RULE.selector,
+        decision: 'refuse',
+        grantedUnder: undefined,
+      },
+      'ask',
+    )
     // And the page re-reads: the store is the truth, never the payload we sent.
     await vi.waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(before))
   })
@@ -374,7 +407,7 @@ describe('assistant permissions: Forget', () => {
     expect(forgetRule).not.toHaveBeenCalled()
 
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
-    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find'))
+    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find', 'ask'))
   })
 
   it('a forgotten row goes back to being asked about, everywhere', async () => {
@@ -389,6 +422,114 @@ describe('assistant permissions: Forget', () => {
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
     await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
     expect(set.mock.calls[0][0].observe).toEqual({ decision: 'ask', scopes: [] })
+  })
+})
+
+describe('assistant permissions: the work already running', () => {
+  it('says how many answers in flight are still using it, and writes nothing yet', async () => {
+    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })], {
+      affectedRuns: 3,
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /^Forget/)
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+
+    // The count, said out loud, and the two answers offered with it.
+    await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
+    const question = p.querySelector('[data-permissions-runs]') as HTMLElement
+    expect(question.dataset.permissionsRuns).toBe('3')
+    expect(question.textContent).toContain('3 answers the assistant is writing right now')
+    expect(question.textContent).toContain('Nothing has changed yet')
+    within(question).getByRole('button', { name: 'Leave them running' })
+    within(question).getByRole('button', { name: 'Stop them' })
+
+    // And the write did NOT happen: the only call was the one that asked.
+    expect(forgetRule.mock.calls).toEqual([['r-find', 'ask']])
+  })
+
+  it('asks nothing when no answer in flight is using it, and just applies', async () => {
+    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })], {
+      affectedRuns: 0,
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /^Forget/)
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+
+    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find', 'ask'))
+    // The panel closes because the gesture is finished; no question was raised
+    // and no second call was made.
+    await vi.waitFor(() => expect(container.querySelector('[data-permissions-panel]')).toBeNull())
+    expect(container.querySelector('[data-permissions-runs]')).toBeNull()
+    expect(forgetRule).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the running work alone when that is the answer', async () => {
+    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })], {
+      affectedRuns: 2,
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /^Forget/)
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+    await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
+    const question = p.querySelector('[data-permissions-runs]') as HTMLElement
+    fireEvent.click(within(question).getByRole('button', { name: 'Leave them running' }))
+
+    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledTimes(2))
+    expect(forgetRule.mock.calls[1]).toEqual(['r-find', 'future'])
+    // Nothing was stopped, so nothing is claimed to have been.
+    expect(
+      toasts()
+        .map((t) => t.message)
+        .join(' '),
+    ).not.toContain('Stopped')
+  })
+
+  it('stops them when that is the answer, and says what it actually stopped', async () => {
+    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })], {
+      affectedRuns: 3,
+      stopped: { stoppedRuns: 2, finishedBeforeStop: 1 },
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /^Forget/)
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+    await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
+    const question = p.querySelector('[data-permissions-runs]') as HTMLElement
+    fireEvent.click(within(question).getByRole('button', { name: 'Stop them' }))
+
+    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledTimes(2))
+    expect(forgetRule.mock.calls[1]).toEqual(['r-find', 'stop'])
+    // Two counts, two facts: one this gesture caused and one it did not.
+    await vi.waitFor(() =>
+      expect(
+        toasts()
+          .map((t) => t.message)
+          .join(' '),
+      ).toContain('Stopped 2 answers; 1 had already finished on its own.'),
+    )
+  })
+
+  it('raises the same question for a NEW refusal, which no answer in flight will see', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))], { affectedRuns: 1 })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Write a refusal/)
+    await readCommand(p, 'df -h')
+    fireEvent.click(within(p).getByRole('button', { name: /^Never allow df -h/ }))
+
+    await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
+    const question = p.querySelector('[data-permissions-runs]') as HTMLElement
+    expect(question.textContent).toContain('1 answer the assistant is writing right now')
+    within(question).getByRole('button', { name: 'Stop it' })
+    expect(setRule).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -411,12 +552,15 @@ describe('assistant permissions: an answer waiting to be re-read', () => {
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
     // Confirming changes NOTHING the rule says: the backend stamps the
     // reading of commands running now, and that is the whole gesture.
-    expect(setRule).toHaveBeenCalledWith({
-      id: 'r-stale',
-      selector: STALE_RULE.selector,
-      decision: 'permit',
-      grantedUnder: 'cross-boundary',
-    })
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        id: 'r-stale',
+        selector: STALE_RULE.selector,
+        decision: 'permit',
+        grantedUnder: 'cross-boundary',
+      },
+      'ask',
+    )
   })
 
   it('a healthy rule beside it is not marked inert', async () => {
@@ -640,11 +784,14 @@ describe('assistant permissions: + Allow a command…', () => {
     // The rule that went over the wire, whole. `grantedUnder` is the effect the
     // BACKEND read, and it is what stops this permit reaching the same command
     // doing something more serious.
-    expect(setRule).toHaveBeenCalledWith({
-      selector: { program: 'df' },
-      decision: 'permit',
-      grantedUnder: 'observe',
-    })
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        selector: { program: 'df' },
+        decision: 'permit',
+        grantedUnder: 'observe',
+      },
+      'ask',
+    )
     // And the page adopts the store rather than the payload it sent.
     await vi.waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(before))
   })
@@ -711,10 +858,13 @@ describe('assistant permissions: + Write a refusal', () => {
     fireEvent.click(within(p).getByRole('button', { name: /^Never allow df -h/ }))
 
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
-    expect(setRule).toHaveBeenCalledWith({
-      selector: { exact: [['df', '-h']] },
-      decision: 'refuse',
-    })
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        selector: { exact: [['df', '-h']] },
+        decision: 'refuse',
+      },
+      'ask',
+    )
   })
 
   it('writes a HasFeature refusal over the fact, never the spelling of a token', async () => {
@@ -742,10 +892,13 @@ describe('assistant permissions: + Write a refusal', () => {
     )
 
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
-    expect(setRule).toHaveBeenCalledWith({
-      selector: { hasFeature: { program: 'sort', feature: 'writes-option-named-path' } },
-      decision: 'refuse',
-    })
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        selector: { hasFeature: { program: 'sort', feature: 'writes-option-named-path' } },
+        decision: 'refuse',
+      },
+      'ask',
+    )
   })
 
   it('has no path through it that produces a permit', async () => {

@@ -2,19 +2,37 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/policy.setRule.schema.json",
   "title": "PolicySetRule",
-  "description": "Result of the policy.setRule JSON-RPC method: ONE invocation rule was written into the ONE global agent policy — added, or replaced in place — and every other rule and all seven matrix rows are untouched. A gesture that is about one rule writes one object, so a save made against a document read a minute ago cannot delete a standing answer the approval prompt wrote in between (nocx-39bly).",
+  "description": "Result of the policy.setRule JSON-RPC method: ONE invocation rule was written into the ONE global agent policy \u2014 added, or replaced in place \u2014 and every other rule and all seven matrix rows are untouched. A gesture that is about one rule writes one object, so a save made against a document read a minute ago cannot delete a standing answer the approval prompt wrote in between (nocx-39bly).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "added"],
+  "required": ["id", "added", "applied", "affectedRuns", "stoppedRuns", "finishedBeforeStop"],
   "properties": {
     "id": {
-      "description": "The stored rule's identity. Ids are minted by the backend and never supplied by the renderer for a NEW rule (AD-7), so this is where a caller that sent no id learns the one it was given — and what a later policy.setRule or policy.forgetRule names the rule by.",
-      "type": "string",
-      "minLength": 1
+      "description": "The stored rule's identity. Ids are minted by the backend and never supplied by the renderer for a NEW rule (AD-7), so this is where a caller that sent no id learns the one it was given \u2014 and what a later policy.setRule or policy.forgetRule names the rule by. EMPTY exactly when `applied` is false: nothing was written, so nothing was named, and `added` says nothing either.",
+      "type": "string"
     },
     "added": {
-      "description": "True when the rule was appended, false when it replaced the rule already wearing this id. A replacement keeps its position in the document, its creation time and where it came from.",
+      "description": "True when the rule was appended, false when it replaced the rule already wearing this id. A replacement keeps its position in the document, its creation time and where it came from. Meaningless when `applied` is false \u2014 nothing was written.",
       "type": "boolean"
+    },
+    "applied": {
+      "description": "Whether the write landed in the store. False ONLY in the default \"ask\" timing with live runs left behind: nothing changed, and the person has a question to answer first. A write that had already landed could only be reported, and a person told \"3 runs are still using the answer you just deleted\" has been handed a fact instead of a choice.",
+      "type": "boolean"
+    },
+    "affectedRuns": {
+      "description": "How many runs already in flight would go on deciding under the OLD answer. A run's grant is minted when the run starts and is immutable for the run (ADR-0020 decision 5), so a policy write never reaches one. This counts only the runs whose own grant would DECIDE DIFFERENTLY without the answer \u2014 not every live run, which would report six affected by an answer governing none of them and train a person to dismiss the question. It is a count at the moment of the call, never a promise about the next one.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "stoppedRuns": {
+      "description": "How many of those runs this call actually terminalized, through the path a person's own stop takes. Zero in every timing but \"stop\".",
+      "type": "integer",
+      "minimum": 0
+    },
+    "finishedBeforeStop": {
+      "description": "How many had already reached a terminal state by the time the stop got there. Not a failure and not counted as stopped: crediting this gesture with an ending it did not cause would make the sentence a person reads untrue.",
+      "type": "integer",
+      "minimum": 0
     }
   }
 }

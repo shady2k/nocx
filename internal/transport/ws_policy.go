@@ -13,6 +13,15 @@ package transport
 // with content.ParseEffectPolicy, and unknown keys — a tool name where an
 // effect goes — are an invalid params error. There is no second vocabulary in
 // which a tool name could be expressed.
+//
+// The two RULE methods carry one thing the others do not: WHEN the write takes
+// effect for the runs already in flight (policyRunsMode, nocx-r4fh8). A run's
+// grant is minted from the whole policy when the run starts and is immutable
+// for the run, so a rule taken back here does not reach a run using it — which
+// is correct, and was silent. The default timing writes nothing when live runs
+// would be left behind and answers with how many; the person then chooses to
+// leave them running or to stop them. runsUnreachedByRuleWrite is where that
+// count is computed and where the reading of "using it" is written down.
 
 import (
 	"context"
@@ -303,14 +312,95 @@ type policyRuleParams struct {
 	GrantedUnder content.Effect             `json:"grantedUnder,omitempty"`
 }
 
-// policySetRuleParams is the policy.setRule params: ONE rule under "rule".
+// policySetRuleParams is the policy.setRule params: ONE rule under "rule",
+// and WHEN it takes effect for the work already running.
 type policySetRuleParams struct {
 	Rule *policyRuleParams `json:"rule"`
+	Runs policyRunsMode    `json:"runs,omitempty"`
 }
 
-// policyForgetRuleParams is the policy.forgetRule params: ONE id.
+// policyForgetRuleParams is the policy.forgetRule params: ONE id, and WHEN
+// forgetting it takes effect for the work already running.
 type policyForgetRuleParams struct {
-	ID string `json:"id"`
+	ID   string         `json:"id"`
+	Runs policyRunsMode `json:"runs,omitempty"`
+}
+
+// policyRunsMode is WHEN a rule write takes effect for the runs already in
+// flight, and it exists because a grant is immutable for its run (ADR-0020
+// decision 5). A run's authority is minted when the run starts, so an answer
+// taken back on the settings page does not reach a run already using it. That
+// is correct — it is what makes a grant a grant — and the defect it left is
+// that NOBODY WAS TOLD: a person forgets an answer, believes the assistant can
+// no longer do the thing, and a run started thirty seconds ago goes on doing
+// it. Silence is worst exactly here, because the person acted specifically to
+// stop something.
+//
+// So revocation has a time and the person chooses it. The three values are one
+// question and its two answers, not three settings.
+type policyRunsMode string
+
+const (
+	// runsAsk applies the write when it reaches every live run, and when it
+	// does not, changes NOTHING and answers with how many it would leave
+	// behind. It is the default, and the default is what makes the question
+	// honest: a write that had already landed could only be reported, and a
+	// person told "3 runs are still using the answer you just deleted" has
+	// been handed a fact instead of a choice.
+	runsAsk policyRunsMode = "ask"
+	// runsFuture applies the write and leaves the running work alone. The
+	// runs in flight finish under the answer they were minted with, and the
+	// next run gets the new one.
+	runsFuture policyRunsMode = "future"
+	// runsStop applies the write and then terminalizes the runs it does not
+	// reach, through the path agent.cancel takes, with a sentence that names
+	// the answer that was taken back.
+	runsStop policyRunsMode = "stop"
+)
+
+func (m policyRunsMode) valid() bool {
+	switch m {
+	case "", runsAsk, runsFuture, runsStop:
+		return true
+	}
+	return false
+}
+
+// orAsk resolves an unstated mode. Absent is "ask" rather than "future"
+// because the safe end of this question is the one that cannot leave a person
+// believing they stopped something they did not.
+func (m policyRunsMode) orAsk() policyRunsMode {
+	if m == "" {
+		return runsAsk
+	}
+	return m
+}
+
+// policyRuleWriteRuns is what every rule write says about the work already
+// running: whether the write landed at all, how many live runs it does not
+// reach, and — when the person chose to stop them — what actually happened to
+// those runs.
+//
+// StoppedRuns and FinishedBeforeStop are two halves of one true sentence, and
+// neither is a failure. A run can reach a terminal state on its own between
+// the count and the stop; reporting it as stopped would credit this gesture
+// with an ending it did not cause, and a person who is told "3 stopped" when
+// one finished by itself has been told something false about their own work.
+type policyRuleWriteRuns struct {
+	// Applied says the write landed. It is false only in the ask mode with
+	// live runs left behind: the store is untouched and the person has a
+	// question to answer.
+	Applied bool `json:"applied"`
+	// AffectedRuns is how many live runs would go on deciding under the old
+	// answer — counted at the moment of the call, over the runs' own grants.
+	// See runsUnreachedByRuleWrite for what "using it" was taken to mean.
+	AffectedRuns int `json:"affectedRuns"`
+	// StoppedRuns is how many of those this call terminalized. Zero in every
+	// mode but stop.
+	StoppedRuns int `json:"stoppedRuns"`
+	// FinishedBeforeStop is how many had already ended by the time the stop
+	// reached them.
+	FinishedBeforeStop int `json:"finishedBeforeStop"`
 }
 
 // policySetRuleResult names the rule the store now holds. The id is the whole
@@ -319,15 +409,24 @@ type policyForgetRuleParams struct {
 // separates the two things one method does — a rule appended, or a rule
 // replaced in place.
 type policySetRuleResult struct {
+	// ID is empty exactly when Applied is false: nothing was written, so
+	// nothing was named. Added is meaningless in that case for the same
+	// reason.
 	ID    string `json:"id"`
 	Added bool   `json:"added"`
+	policyRuleWriteRuns
 }
 
 // policyForgetRuleResult says whether a rule was there to remove. An id
 // naming nothing is not an error — the rule is already gone, which is what
 // was asked for — so the answer carries the fact rather than raising it.
 type policyForgetRuleResult struct {
+	// Removed is false both when there was no such rule and when the write
+	// did not happen at all; Applied is what tells the two apart, and the
+	// difference matters — one means "already as you wanted", the other
+	// means "you have a question to answer first".
 	Removed bool `json:"removed"`
+	policyRuleWriteRuns
 }
 
 // validatePolicySetRuleRaw checks the envelope and the shape of the one rule.
@@ -349,6 +448,18 @@ func validatePolicySetRuleRaw(raw json.RawMessage) string {
 	if p.Rule.Decision == "" {
 		return "rule.decision is required"
 	}
+	return validatePolicyRunsMode(p.Runs)
+}
+
+// validatePolicyRunsMode refuses a timing nobody declared. An unknown value is
+// invalid params rather than a silent fall back to the default: "runs":"stopp"
+// falling through to ask would leave a person's runs alive after they asked
+// for them to stop, which is the one outcome this whole method exists to make
+// impossible to get by accident.
+func validatePolicyRunsMode(m policyRunsMode) string {
+	if !m.valid() {
+		return `runs must be "ask", "future" or "stop"`
+	}
 	return ""
 }
 
@@ -361,7 +472,10 @@ func validatePolicyForgetRuleRaw(raw json.RawMessage) string {
 	if p.ID == "" {
 		return "id is required"
 	}
-	return configIDRunes("id", p.ID)
+	if msg := configIDRunes("id", p.ID); msg != "" {
+		return msg
+	}
+	return validatePolicyRunsMode(p.Runs)
 }
 
 // policyHandlers serves policy.get and policy.set off one store seam, plus
@@ -371,7 +485,32 @@ type policyHandlers struct {
 	store assistant.GlobalPolicy
 	live  []content.Effect
 	wired bool
-	r     Responder
+	// runs is how a policy write reaches the work already in flight. It is
+	// an interface rather than the registry itself because this file must
+	// not learn how a run is held or how one is ended: it asks a question
+	// and states an intent, and the agent lane answers both through the one
+	// terminalization path (ws_agent.go). Nil is "no live runs", which is
+	// what a server registered without the agent methods honestly has.
+	runs liveRunRegistry
+	r    Responder
+}
+
+// liveRunRegistry is what a policy write needs to know about the runs already
+// in flight, and nothing else: which of them a write does not reach, and how
+// to end those through the path a person's own stop takes.
+//
+// *WSServer implements it — it owns the run registry — and the registration
+// below is where it is handed over. The alternative was for this file to read
+// s.pendingRuns and close a run itself, which is a second terminal path and
+// therefore a second set of half-terminal states.
+type liveRunRegistry interface {
+	// RunsUnreachedByRuleWrite reports the live runs whose grant would
+	// decide differently once this write lands, ascending by run id.
+	RunsUnreachedByRuleWrite(w content.RuleWrite) []int64
+	// StopRunsForRevokedAnswer terminalizes those runs with the sentence a
+	// person will read, and reports which it stopped and which had already
+	// ended by the time it got there.
+	StopRunsForRevokedAnswer(ctx context.Context, r Responder, ids []int64, sentence string) (stopped, alreadyFinished []int64)
 }
 
 // policySpecs registers policy.get and policy.set on the lane submission:
@@ -386,12 +525,16 @@ func (s *WSServer) policySpecs() []methodSpec {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySet(ctx, req) }
 		}),
+		// The two rule methods, and the only two that carry the run
+		// registry: a rule write is the one policy gesture a run already in
+		// flight can be left behind by, because a grant is minted from the
+		// whole policy and then frozen (ADR-0020 decision 5).
 		regResponder(s.lane, "policy.setRule", params(validatePolicySetRuleRaw), func(r Responder) handlerFunc {
-			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySetRule(ctx, req) }
 		}),
 		regResponder(s.lane, "policy.forgetRule", params(validatePolicyForgetRuleRaw), func(r Responder) handlerFunc {
-			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, runs: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyForgetRule(ctx, req) }
 		}),
 		regResponder(s.lane, "policy.explain", params(validatePolicyExplainRaw), func(r Responder) handlerFunc {
@@ -595,7 +738,7 @@ func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequ
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.setRule: " + msg})
 		return
 	}
-	stored, err := h.store.SetRule(content.InvocationRule{
+	rule := content.InvocationRule{
 		ID:           p.Rule.ID,
 		Selector:     p.Rule.Selector,
 		Decision:     p.Rule.Decision,
@@ -604,7 +747,21 @@ func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequ
 		// which is the claim the person is making by making it. Source and
 		// createdAt are the store's to default or preserve.
 		EvaluatorVersion: content.EvaluatorVersion,
-	})
+	}
+	// The SAME rule value is counted against and written, so what the person
+	// is told about and what the store ends up holding cannot differ. A count
+	// taken from a differently-stamped copy would answer about a rule nobody
+	// was going to write.
+	write := content.RuleWrite{ID: p.Rule.ID, Rule: &rule}
+	affected := h.runsUnreachedByRuleWrite(write)
+	mode := p.Runs.orAsk()
+	if mode == runsAsk && len(affected) > 0 {
+		_ = h.r.TryResult(req.ID, mustMarshal(policySetRuleResult{
+			policyRuleWriteRuns: policyRuleWriteRuns{AffectedRuns: len(affected)},
+		}))
+		return
+	}
+	stored, err := h.store.SetRule(rule)
 	switch {
 	case errors.Is(err, assistant.ErrNoSuchRule):
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.setRule: " + err.Error() +
@@ -620,6 +777,8 @@ func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequ
 	_ = h.r.TryResult(req.ID, mustMarshal(policySetRuleResult{
 		ID:    stored.ID,
 		Added: p.Rule.ID == "",
+		policyRuleWriteRuns: h.settleRuns(ctx, mode, affected,
+			"a standing answer this run was using was changed: "+stored.Label()),
 	}))
 }
 
@@ -640,10 +799,116 @@ func (h policyHandlers) handlePolicyForgetRule(ctx context.Context, req jsonrpcR
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.forgetRule: " + msg})
 		return
 	}
+	// The sentence is taken BEFORE the write, from the document that still
+	// has the rule in it: a rule already forgotten cannot say what it was,
+	// and a person reading "this run was stopped because you took back an
+	// answer" is owed the answer's name.
+	forgotten := ""
+	for _, rule := range h.store.Policy().Rules {
+		if rule.ID == p.ID {
+			forgotten = rule.Label()
+			break
+		}
+	}
+	write := content.RuleWrite{ID: p.ID}
+	affected := h.runsUnreachedByRuleWrite(write)
+	mode := p.Runs.orAsk()
+	if mode == runsAsk && len(affected) > 0 {
+		_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{
+			policyRuleWriteRuns: policyRuleWriteRuns{AffectedRuns: len(affected)},
+		}))
+		return
+	}
 	removed, err := h.store.ForgetRule(p.ID)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "policy.forgetRule: " + err.Error()})
 		return
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{Removed: removed}))
+	_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{
+		Removed: removed,
+		policyRuleWriteRuns: h.settleRuns(ctx, mode, affected,
+			"a standing answer this run was using was taken back: "+forgotten),
+	}))
+}
+
+// ── the runs a rule write leaves behind (nocx-r4fh8) ──────────────────────
+
+// runsUnreachedByRuleWrite counts the live runs a rule write does not reach,
+// and THIS COMMENT IS THE CHOICE OF READING, because the count is the part of
+// this feature a person is asked to act on and a number they cannot trust is
+// worse than no number at all.
+//
+// Every live run holds a grant minted from the whole policy as it stood when
+// the run started, and immutable for the run (ADR-0020 decision 5). So "which
+// runs use this answer" has two honest readings:
+//
+//   - EVERY LIVE RUN, because every one of their grants was minted from a
+//     policy that contained the rule. It needs nothing but a count of the
+//     registry, and it is useless: a person who forgets an answer about `df`
+//     is told that six runs are affected when the answer governs none of
+//     them, learns within a day that the number means "how many runs exist",
+//     and dismisses the question from then on. That is worse than silence,
+//     because it trains the dismissal that criterion 2 exists to prevent.
+//
+//   - ONLY THE RUNS WHOSE GRANT WOULD DECIDE DIFFERENTLY WITHOUT IT. It is
+//     precise, it is what the words mean, and it is computable: the run's own
+//     frozen policy is asked what it decides about the command lines the rule
+//     speaks about, with the rule and without it, through the SAME evaluator
+//     the run's enforcement uses (content.ChangedByRuleWrite, which is where
+//     the probe and the layers it measures are written down). A rule the run
+//     never matched, one shadowed by a stricter answer, and one whose permit
+//     was granted under an effect this policy refuses outright all decide
+//     nothing and are all correctly counted out.
+//
+// The second is what this implements. The cost is real and bounded — at most
+// two probe invocations and seven effect rows per live run, all pure
+// comparison over frozen values — and it buys a number a person can act on.
+//
+// WHAT IT DOES NOT CLAIM. It is a count at the moment of the call, not a
+// promise about the next one: a run can finish on its own a microsecond later,
+// which is why the stop path reports what it actually stopped separately from
+// what it set out to stop.
+func (h policyHandlers) runsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
+	if h.runs == nil {
+		return nil
+	}
+	return h.runs.RunsUnreachedByRuleWrite(w)
+}
+
+// settleRuns performs the run half of the gesture, AFTER the policy write has
+// already landed, and answers what happened.
+//
+// THE ORDER OF THE TWO ACTS IS THE POLICY WRITE FIRST, THEN THE STOPPING, and
+// it is a decision rather than an accident.
+//
+// A revocation is the person's primary gesture: they came to take an answer
+// back, and stopping the work is the consequence they chose for it. Writing
+// first means a failure can only ever leave them with LESS than they asked
+// for, never with destroyed work in exchange for nothing. If the store write
+// fails, this function is never reached: no run is stopped, the method answers
+// the error, and the policy and every run are exactly as they were — the
+// interval closes where it opened.
+//
+// The other order fails the other way, and that failure is a lie. Stopping
+// first and writing second can end three runs and then fail to forget the
+// answer, leaving a person who was told "stopped 3 runs" holding a permission
+// they believe they removed, with the work that would have finished under it
+// destroyed. There is no sentence that makes that outcome true.
+//
+// Between the two acts, the state is: the answer is revoked and durable, and
+// some runs are still running under the old one. That is precisely the state
+// the "leave them running" answer chooses on purpose, so a failure here lands
+// the person in a state the product already has a name for — and the counts
+// this returns say which runs are in it.
+func (h policyHandlers) settleRuns(
+	ctx context.Context, mode policyRunsMode, affected []int64, sentence string,
+) policyRuleWriteRuns {
+	out := policyRuleWriteRuns{Applied: true, AffectedRuns: len(affected)}
+	if mode != runsStop || len(affected) == 0 || h.runs == nil {
+		return out
+	}
+	stopped, finished := h.runs.StopRunsForRevokedAnswer(ctx, h.r, affected, sentence)
+	out.StoppedRuns = len(stopped)
+	out.FinishedBeforeStop = len(finished)
+	return out
 }

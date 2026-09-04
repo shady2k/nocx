@@ -11,6 +11,11 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 128
+    },
+    "runs": {
+      "description": "WHEN this write takes effect for the work already running. \"ask\" (the default) applies it when it reaches every live run and, when it does not, changes NOTHING and answers with how many it would leave behind \u2014 so revocation has a time and the person chooses it. \"future\" applies it and leaves the running work alone: those runs finish under the answer they were minted with, and the next run gets the new one. \"stop\" applies it and then terminalizes the runs it does not reach, through the path a person's own stop takes, with a sentence naming the answer. The write always happens BEFORE the stopping: a failure can then only leave a person with less than they asked for, never with destroyed work in exchange for a revocation that did not land.",
+      "type": "string",
+      "enum": ["ask", "future", "stop"]
     }
   }
 }

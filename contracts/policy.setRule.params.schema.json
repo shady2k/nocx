@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/policy.setRule.params.schema.json",
   "title": "PolicySetRuleParams",
-  "description": "Params for policy.setRule: ONE invocation rule. The rule carries what it SAYS and nothing about where it came from — createdAt, source and evaluatorVersion are facts the store records about the write, not claims a caller may make, and a renderer that could set them could dress a rule it wrote as one a person answered.",
+  "description": "Params for policy.setRule: ONE invocation rule. The rule carries what it SAYS and nothing about where it came from \u2014 createdAt, source and evaluatorVersion are facts the store records about the write, not claims a caller may make, and a renderer that could set them could dress a rule it wrote as one a person answered.",
   "type": "object",
   "additionalProperties": false,
   "required": ["rule"],
@@ -78,6 +78,11 @@
           ]
         }
       }
+    },
+    "runs": {
+      "description": "WHEN this write takes effect for the work already running. \"ask\" (the default) applies it when it reaches every live run and, when it does not, changes NOTHING and answers with how many it would leave behind \u2014 so revocation has a time and the person chooses it. \"future\" applies it and leaves the running work alone: those runs finish under the answer they were minted with, and the next run gets the new one. \"stop\" applies it and then terminalizes the runs it does not reach, through the path a person's own stop takes, with a sentence naming the answer. The write always happens BEFORE the stopping: a failure can then only leave a person with less than they asked for, never with destroyed work in exchange for a revocation that did not land.",
+      "type": "string",
+      "enum": ["ask", "future", "stop"]
     }
   }
 }

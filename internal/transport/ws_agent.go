@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2875,10 +2876,15 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
 	}
-	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
-		// clientID is the CONNECTION identity, deliberately: it binds ask
-		// idempotency to the connection (a reconnect mints a new one), never
-		// to a renderer-minted tab.
+	// buildFor is every dependency an agent handler has EXCEPT the two that
+	// only a connection can supply. It is split out because the run-stopping
+	// path has a caller that is not on the agent lane: policy.setRule and
+	// policy.forgetRule stop the runs a revoked answer left behind
+	// (stopRunsForRevokedAnswer), and they must terminalize through the same
+	// handler agent.cancel does. A second, partially-filled agentHandlers
+	// built beside this one would degrade silently the day terminalize learns
+	// to read another field.
+	buildFor := func(r Responder) agentHandlers {
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
@@ -2889,8 +2895,24 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
 			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
-			log: s.log, state: state, clientID: connectionID(w), r: r,
+			log: s.log, r: r,
 		}
+	}
+	// The registration is the composition root's own hand-off point for the
+	// revocation path: this is where the agent handler's dependencies are
+	// assembled, so it is where the policy handlers are given the ONE way to
+	// terminalize a run. Reading pendingRuns from ws_policy.go and closing a
+	// run there would be a second terminal path, which is a second set of
+	// half-terminal states.
+	s.agentTerminalizer = buildFor
+	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
+		// clientID is the CONNECTION identity, deliberately: it binds ask
+		// idempotency to the connection (a reconnect mints a new one), never
+		// to a renderer-minted tab.
+		h := buildFor(r)
+		h.state = state
+		h.clientID = connectionID(w)
+		return h
 	}
 	return []methodSpec{
 		reg(contentSub, "agent.ask", params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -2910,6 +2932,102 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 	}
+}
+
+// ── the runs a revoked answer left behind (nocx-r4fh8) ────────────────────
+
+// RunsUnreachedByRuleWrite reports the LIVE runs whose grant would decide
+// differently once one rule write lands — the runs a change or a forget does
+// not reach.
+//
+// A run's grant is minted when the run starts and is immutable for the run
+// (ADR-0020 decision 5), so a policy write never reaches one. This asks each
+// live run's OWN frozen policy the question, through
+// content.ChangedByRuleWrite; the reading of "using it" that produces, and the
+// reading it rejects, are written down at the count in ws_policy.go.
+//
+// It is a method on the server because the server owns the run registry. It
+// takes the registry's lock for the length of the walk and evaluates under it:
+// the walk is seven decisions over at most two probe invocations per run, all
+// of it pure comparison over frozen values, and holding the lock is what makes
+// the answer a snapshot rather than a set that never coexisted.
+func (s *WSServer) RunsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
+	s.pendingRunsMu.Lock()
+	defer s.pendingRunsMu.Unlock()
+	var out []int64
+	for id, rc := range s.pendingRuns {
+		if rc.grant == nil {
+			// The run carries no grant, so it executes no tools and there
+			// is no decision for a rule to change. Not affected, and it is
+			// the honest answer rather than a conservative one: telling a
+			// person a run is affected when nothing it can do is governed
+			// is the imprecise reading this design rejected.
+			continue
+		}
+		if rc.grant.Policy.ChangedByRuleWrite(w) {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// StopRunsForRevokedAnswer terminalizes the named runs because a person took
+// back an answer they were running under, and reports which it actually
+// stopped and which had already finished.
+//
+// It goes through handleCancel's path and adds nothing to it: the run is taken
+// out of the registry under pendingRunsMu, beginCancel claims it, the run
+// leases and the context are cancelled, finishCancel records the outcome and
+// terminalize writes the terminal close. A second way to end a run would be a
+// second set of half-terminal states, so there is no second way.
+//
+// THE REASON IS TermUserKilled, and it is a person's stop: the person chose
+// this ending, for a cause that is stated in the run's own sentence — which
+// answer was taken back, by name. A reason of its own would be better and is
+// not available: the durable vocabulary is closed by a CHECK constraint on
+// executions.termination_reason, so a new value ends the run with no durable
+// ending at all (the close fails, is logged, and the startup sweep repairs it
+// as interrupted). content.TerminationReason's declaration records what
+// widening it would take.
+//
+// THE TWO OUTCOMES ARE BOTH REPORTED, and neither is a failure. A run that is
+// gone from the registry, or one beginCancel refuses, has already reached a
+// terminal state between the count and this call — the person asked for it to
+// stop and it has stopped, for its own reasons — and saying "stopped 3" when
+// one of them finished by itself would be a sentence that is not true. What
+// this cannot report is a terminal LEDGER write that fails: terminalize logs
+// it and the startup sweep repairs the run as interrupted, exactly as it does
+// for agent.cancel, and the run is cancelled from the engine's and the
+// person's point of view either way. That degrade is agent.cancel's, unchanged
+// and shared, rather than a second reporting channel invented here.
+func (s *WSServer) StopRunsForRevokedAnswer(
+	ctx context.Context, r Responder, ids []int64, sentence string,
+) (stopped, alreadyFinished []int64) {
+	if s.agentTerminalizer == nil {
+		// No agent methods are registered on this server, so no run in this
+		// list can be live. Every id is reported as already finished rather
+		// than as stopped: the caller's sentence must not claim a stop that
+		// nothing performed.
+		return nil, append([]int64(nil), ids...)
+	}
+	h := s.agentTerminalizer(r)
+	for _, id := range ids {
+		s.pendingRunsMu.Lock()
+		rc, ok := s.pendingRuns[id]
+		s.pendingRunsMu.Unlock()
+		if !ok || rc.control == nil || !rc.control.beginCancel() {
+			alreadyFinished = append(alreadyFinished, id)
+			continue
+		}
+		runCtx := log.WithTraceID(ctx, runTrace(id))
+		rc.control.cancelRunLeases()
+		rc.control.cancelContext()
+		rc.control.finishCancel(content.RunCancelled, content.TermUserKilled, sentence, true)
+		h.terminalize(runCtx, rc, content.RunCancelled, content.TermUserKilled, sentence, r)
+		stopped = append(stopped, id)
+	}
+	return stopped, alreadyFinished
 }
 
 // runTrace is the id of one agent exchange — the run — as every log line

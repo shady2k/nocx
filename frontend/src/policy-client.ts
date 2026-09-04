@@ -177,6 +177,43 @@ export type PolicyClassification = PolicyClassify
  *  of a token. Naming it here is what lets a surface hold one. */
 export type PolicyCommandFeature = Feature
 
+/**
+ * WHEN a rule write takes effect for the work already running.
+ *
+ * It exists because a run's authority is minted when the run starts and is
+ * immutable for the run: an answer taken back here does not reach a run
+ * already using it. That is correct, and the defect it left is that nobody was
+ * told — a person forgets an answer, believes the assistant can no longer do
+ * the thing, and a run started thirty seconds ago goes on doing it.
+ *
+ * So revocation has a time and the person picks it:
+ *
+ * - `'ask'` (the backend's default when the key is absent) applies the write
+ *   if it reaches every live run, and otherwise changes NOTHING and answers
+ *   with `affectedRuns`. That is what makes the question a choice rather than
+ *   a notification about something already done.
+ * - `'future'` applies it and leaves the running work alone.
+ * - `'stop'` applies it and then ends those runs, naming the answer.
+ *
+ * Not an enum the renderer may extend: the backend refuses a value outside
+ * these three, because a misspelling that quietly became `'ask'` would leave a
+ * person's runs alive after they asked for them to stop.
+ */
+export type RunsTiming = 'ask' | 'future' | 'stop'
+
+/**
+ * What a rule write says about the work already running — the fields both
+ * `policy.setRule` and `policy.forgetRule` answer with. Structural, because
+ * the two generated result types declare them independently and a surface
+ * that handles both needs one name for the shape.
+ */
+export interface RuleWriteRuns {
+  applied: boolean
+  affectedRuns: number
+  stoppedRuns: number
+  finishedBeforeStop: number
+}
+
 /** A fresh all-ask matrix — what the backend serves when nothing is set. */
 export function blankPolicy(): PolicyMatrix {
   const m = {} as PolicyMatrix
@@ -233,9 +270,15 @@ export class PolicyClient {
    * else in the policy — the other rules, all seven rows — is untouched,
    * because the backend edits the document it holds rather than the copy
    * this page read.
+   *
+   * `runs` is WHEN it takes effect for the work already running — see
+   * `RunsTiming`. Left out, the backend asks first.
    */
-  setRule(rule: PolicyRuleWrite): Promise<PolicySetRule> {
-    return this.dispatcher.call<PolicySetRule>('policy.setRule', { rule })
+  setRule(rule: PolicyRuleWrite, runs?: RunsTiming): Promise<PolicySetRule> {
+    return this.dispatcher.call<PolicySetRule>('policy.setRule', {
+      rule,
+      ...(runs ? { runs } : {}),
+    })
   }
 
   /**
@@ -280,8 +323,14 @@ export class PolicyClient {
    * Forget ONE rule by id. An id naming no rule RESOLVES with
    * `removed: false` rather than rejecting: the rule is already not there,
    * which is what forgetting asked for.
+   *
+   * `runs` is WHEN it takes effect for the work already running — see
+   * `RunsTiming`. Left out, the backend asks first.
    */
-  forgetRule(id: string): Promise<PolicyForgetRule> {
-    return this.dispatcher.call<PolicyForgetRule>('policy.forgetRule', { id })
+  forgetRule(id: string, runs?: RunsTiming): Promise<PolicyForgetRule> {
+    return this.dispatcher.call<PolicyForgetRule>('policy.forgetRule', {
+      id,
+      ...(runs ? { runs } : {}),
+    })
   }
 }

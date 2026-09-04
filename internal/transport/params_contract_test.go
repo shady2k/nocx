@@ -252,6 +252,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"command":"df -h","effect":"observe"}`),
 			[]byte(`{"command":"rm -rf /tmp/x","effect":"mutate-destructive"}`),
 		},
+		"policy.classify": {
+			[]byte(`{"command":"df -h"}`),
+			[]byte(`{"command":"sort -o /tmp/out /tmp/in"}`),
+		},
 		"ports.pause": {
 			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
 		},

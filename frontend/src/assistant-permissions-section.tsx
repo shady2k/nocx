@@ -24,7 +24,9 @@
  *                            questions they are
  *                            -> Answer this now
  *
- * FOUR RULES ARE BUILT IN RATHER THAN ASSERTED IN PROSE.
+ *   + Write a refusal        + Allow a command…
+ *
+ * FIVE RULES ARE BUILT IN RATHER THAN ASSERTED IN PROSE.
  *
  * - **The store decides.** There is no Save button and no draft: every gesture
  *   writes ONE object and the page adopts what a fresh read answers. It can
@@ -49,6 +51,18 @@
  *   they arrived and derives none of them;
  *   `policy-explain-is-not-reimplemented.test.ts` is what keeps that a rule
  *   rather than an intention.
+ * - **A PERMIT IS WIDENED FROM A COMMAND THAT WAS READ, NEVER FROM ONE THAT
+ *   WAS TYPED** (nocx-fl0o3). The two controls at the foot of the page are not
+ *   mirror images, and the asymmetry is the design. A REFUSAL may be written
+ *   over any command the backend can resolve: the worst a wrong one does is
+ *   stop something. A PERMIT may not be typed at all — a person entering
+ *   `find` has no way to know that `find . -delete` is the same word — so the
+ *   only route to one is: type a command, have `policy.classify` READ it (it is
+ *   never run), be shown what the resulting answer would and would not cover,
+ *   and only then save a rule carrying the effect that reading found. That
+ *   effect rides in `grantedUnder`, where `content.EvaluateInvocation` checks
+ *   it against what a CALL classified as, so the permit does not follow the
+ *   same word into something more serious.
  *
  * THE VOCABULARY. Three words are absent by construction — "effect class",
  * "resource scope" and the wire's word for a hard no — and no control names a
@@ -71,6 +85,7 @@ import { createMemo, createSignal, For, onMount, Show } from 'solid-js'
 import {
   EFFECT_KEYS,
   type EffectKey,
+  type PolicyClassification,
   type PolicyClient,
   type PolicyExplanation,
   type PolicyExplanationStep,
@@ -93,6 +108,7 @@ import {
   RecordRow,
   Section,
   Stack,
+  TextField,
   showToast,
   type BadgeTone,
   type Fact,
@@ -205,18 +221,41 @@ function offDefault(row: PolicyRow): boolean {
   return !(row.decision === 'ask' && row.scopes.length === 0)
 }
 
-/** What a standing answer covers, as a person would say it.
+/** What a selector covers, as a person would say it.
  *
  *  `exact` is the command line the prompt showed them; `program` and
  *  `hasFeature` are the two loose shapes, and both read as "any … command"
- *  because that is exactly what they mean. */
-function ruleSubject(rule: PolicyRule): string {
-  const sel = rule.selector
+ *  because that is exactly what they mean.
+ *
+ *  It takes a SELECTOR and not a rule because the writing surfaces below name
+ *  a rule that does not exist yet — the offer a person is about to accept has
+ *  to read in the same words as the answer it becomes, or they cannot tell
+ *  that the button did what it said. */
+function selectorSubject(sel: PolicyRule['selector']): string {
   if (sel.hasFeature) {
     return `any ${sel.hasFeature.program} command that ${FEATURE_WORDS[sel.hasFeature.feature]}`
   }
   if (sel.program) return `any ${sel.program} command`
   return (sel.exact ?? []).map((command) => command.join(' ')).join(' ; ')
+}
+
+/** The rule form of a canonical parse the backend answered with.
+ *
+ *  The contract says a reading carries no commands at all when it was refused,
+ *  and an `exact` selector must name at least one — so this is where the two
+ *  meet, and it answers null rather than letting a caller assert past it. */
+function exactSelector(
+  commands: PolicyClassification['commands'],
+): NonNullable<PolicyRule['selector']['exact']> | null {
+  const [first, ...rest] = commands
+  return first === undefined ? null : [first, ...rest]
+}
+
+/** What a standing answer covers. One derivation with the offer above, so an
+ *  answer cannot be named one way while it is being made and another once it
+ *  is in the list. */
+function ruleSubject(rule: PolicyRule): string {
+  return selectorSubject(rule.selector)
 }
 
 /**
@@ -276,6 +315,23 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    *  while it is in flight, and cleared when the panel opens — a stale trace
    *  under a fresh question would explain the wrong call. */
   const [explanation, setExplanation] = createSignal<PolicyExplanation | null>(null)
+  /** Which writing panel is open, or null. They are two controls and not one
+   *  panel with a three-way select, because what may be written from nothing
+   *  differs between the two answers: a select would offer a permit wherever
+   *  it offered a refusal — see `commandWriter` below. */
+  const [writer, setWriter] = createSignal<'allow' | 'refuse' | null>(null)
+  /** The command a person has typed into the writing panel. */
+  const [typed, setTyped] = createSignal('')
+  /**
+   * What the BACKEND made of that command, and null until it has been asked.
+   *
+   * This signal is the whole safety property of the widening surface. Nothing
+   * a person types produces a permit; a permit is offered only while this
+   * holds a reading, it names the command word that reading answered with, and
+   * it is bound to the effect that reading found. Editing the box clears it,
+   * because a reading belongs to the text it was taken from.
+   */
+  const [reading, setReading] = createSignal<PolicyClassification | null>(null)
 
   async function read(): Promise<void> {
     try {
@@ -402,6 +458,100 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    */
   function review(rule: PolicyRule): Promise<void> {
     return writeRule(rule, rule.decision)
+  }
+
+  function openWriter(mode: 'allow' | 'refuse'): void {
+    setWriter(mode)
+    setTyped('')
+    setReading(null)
+  }
+
+  function closeWriter(): void {
+    setWriter(null)
+    setTyped('')
+    setReading(null)
+  }
+
+  /**
+   * Have the BACKEND read the typed command.
+   *
+   * It is read and never run: `policy.classify` parses and classifies, and the
+   * transport asserts directly that a command with a side effect leaves no
+   * trace. That is the property the whole gesture stands on — asking "may I
+   * allow this?" must not be a way of doing it.
+   *
+   * The reading is cleared first for the Why panel's reason: an answer to the
+   * previous question shown under a new one is an answer about the wrong
+   * command.
+   */
+  function readTyped(): void {
+    const command = typed().trim()
+    if (command === '') return
+    setReading(null)
+    setBusy(true)
+    void props.client
+      .classify(command)
+      .then(setReading)
+      .catch((e: unknown) => {
+        showToast({ message: `That command could not be read: ${messageOf(e)}`, level: 'danger' })
+      })
+      .finally(() => setBusy(false))
+  }
+
+  /**
+   * Save the widened answer the reading justifies.
+   *
+   * `grantedUnder` carries the effect THE BACKEND FOUND, and that is the whole
+   * of the safety argument: the evaluator checks it against the effect a CALL
+   * classified as, so this permit reaches `df` while it keeps reading and does
+   * not reach it doing something the reading never saw. Nothing here derives
+   * it, and there is no control through which a person could state it.
+   */
+  function saveWidened(r: PolicyClassification): void {
+    if (!r.eligible || r.effect === undefined) return
+    void write(
+      props.client.setRule({
+        selector: { program: r.program },
+        decision: 'permit',
+        grantedUnder: r.effect,
+      }),
+    ).then(closeWriter)
+  }
+
+  /** Stop exactly the command that was read. */
+  function saveExactRefusal(r: PolicyClassification): void {
+    const exact = exactSelector(r.commands)
+    if (!r.eligible || exact === null) return
+    void write(props.client.setRule({ selector: { exact }, decision: 'refuse' })).then(closeWriter)
+  }
+
+  /** Stop every command of that word carrying the FACT the classifier
+   *  recorded. It matches the fact and never the spelling of the token that
+   *  carried it — `-o`, `--output`, `--output=file` and an attached short
+   *  option are one fact written four ways, and a rule over token text is
+   *  evaded by the first of them the parser normalizes differently. */
+  function saveFeatureRefusal(
+    r: PolicyClassification,
+    feature: PolicyClassification['features'][number],
+  ): void {
+    if (!r.eligible) return
+    void write(
+      props.client.setRule({
+        selector: { hasFeature: { program: r.program, feature } },
+        decision: 'refuse',
+      }),
+    ).then(closeWriter)
+  }
+
+  /** What each answer a person has NOT given would still be asked about — the
+   *  live rows other than the one a widening permit is bound to. It is a set
+   *  difference over the backend's own list and not a ranking: which effect is
+   *  worse than which is the evaluator's business, and this only has to name
+   *  the ones this permit does not reach. */
+  function otherLiveEffects(effect: EffectKey): string {
+    const others = live().filter((k) => k !== effect)
+    if (others.length === 0) return 'Anything else it might do'
+    return others.map((k) => EFFECT_LABEL[k]).join(', ')
   }
 
   /** What an answer is called, wherever it is named — the list, a button's
@@ -758,6 +908,157 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     )
   }
 
+  /**
+   * THE WRITING PANEL, and the asymmetry that shapes it.
+   *
+   * Both answers begin the same way — a command, typed, and READ by the
+   * backend — and that is not symmetry for its own sake. A refusal could
+   * safely be written from typed text alone, because the worst a wrong one
+   * does is stop something; it goes through the reading anyway because a rule
+   * only matches a command the parser can resolve, so a refusal written over
+   * text nobody read would be a permission a person believes they have
+   * removed and has not. That is the soft degrade this page exists to keep
+   * off the surface.
+   *
+   * A PERMIT has no such option. `find` is a read-shaped word and
+   * `find . -delete` is the same word deleting; a person typing it has made a
+   * claim they have no way to check. So the permit button does not exist until
+   * a reading does, it names the command word THAT READING answered with, and
+   * it is bound to the effect the reading found.
+   */
+  function commandWriter(mode: 'allow' | 'refuse') {
+    return (
+      <Stack>
+        <Caption>
+          {mode === 'allow'
+            ? 'Type a command you would rather not be asked about. nocx reads it — it is never run — and shows what allowing it would cover before anything is saved.'
+            : 'Type a command the assistant should not run on its own. nocx reads it — it is never run — so the answer covers what the command does rather than the way it was typed.'}
+        </Caption>
+        <TextField
+          label="The command"
+          value={typed()}
+          placeholder="df -h"
+          disabled={busy()}
+          error={readingRefusal()}
+          onInput={(value) => {
+            setTyped(value)
+            // A reading belongs to the text it was taken from. The moment that
+            // text changes, the offer built on it stops being an offer about
+            // this command — and the permit button goes with it.
+            setReading(null)
+          }}
+          onCommit={() => readTyped()}
+        />
+        <ActionGroup ariaLabel="Read the command">
+          <Button
+            variant="default"
+            disabled={busy() || typed().trim() === ''}
+            onClick={() => readTyped()}
+          >
+            Read this command
+          </Button>
+        </ActionGroup>
+        <Show when={reading()}>{(r) => (mode === 'allow' ? allowOffer(r) : refusalOffer(r))}</Show>
+      </Stack>
+    )
+  }
+
+  /** Why the backend would not let a rule be written over this command, in its
+   *  own words, on the box the command was typed into. Undefined while there
+   *  is nothing to say — a message under an empty field is a complaint about
+   *  something nobody did yet. */
+  function readingRefusal(): string | undefined {
+    const r = reading()
+    if (r === null || r.eligible) return undefined
+    return r.reason
+  }
+
+  /** What allowing this command would, and would NOT, cover.
+   *
+   *  The second half is the point and not decoration. A `program` answer
+   *  speaks about every command of that word, including ones nobody has run —
+   *  which is exactly how a person learns that allowing `find` is a sentence
+   *  about `find . -delete` as well. What keeps it safe is the binding to the
+   *  effect the reading found, and this says so before anything is saved. */
+  function allowOffer(r: () => PolicyClassification) {
+    // BOTH halves of the reading, or nothing: the backend said a rule may be
+    // written over this command AND it found the effect such a rule has to be
+    // bound to. A permit with neither is the document the gate refuses, and a
+    // permit with only the first is the one it should.
+    return (
+      <Show when={r().eligible && r().effect}>
+        {(effect) => (
+          <>
+            <FactList
+              ariaLabel="What allowing this command would cover"
+              facts={[
+                {
+                  name: 'It would allow',
+                  value: coverage(selectorSubject({ program: r().program })),
+                  note: `Every ${r().program} command, including ones you have not run — while it does no more than ${EFFECT_LABEL[effect()]}.`,
+                },
+                {
+                  name: 'It would not allow',
+                  value: `a ${r().program} command that does anything more`,
+                  note: `${otherLiveEffects(effect())} — those are still asked about, exactly as now. So is a command with a wrapper, more than one command in it, or a shell feature: none of them is within reach of a standing answer.`,
+                },
+              ]}
+            />
+            <ActionGroup ariaLabel="Save this answer">
+              <Button variant="primary" disabled={busy()} onClick={() => saveWidened(r())}>
+                {`Allow ${selectorSubject({ program: r().program })}`}
+              </Button>
+            </ActionGroup>
+          </>
+        )}
+      </Show>
+    )
+  }
+
+  /** What this answer would stop: the command as it was read, and — when the
+   *  classifier recorded one — the whole class of commands carrying the same
+   *  fact. Both are offered because they are different sentences, and a person
+   *  choosing between them is choosing how far the answer reaches. */
+  function refusalOffer(r: () => PolicyClassification) {
+    return (
+      <Show when={r().eligible && exactSelector(r().commands)}>
+        {(exact) => (
+          <>
+            <FactList
+              ariaLabel="What this answer would stop"
+              facts={[
+                {
+                  name: 'nocx read this as',
+                  value:
+                    r().effect === undefined
+                      ? 'a command it could not place'
+                      : EFFECT_LABEL[r().effect!],
+                  note: 'It was read, not run.',
+                },
+              ]}
+            />
+            <ActionGroup ariaLabel="Save this answer">
+              <Button variant="primary" disabled={busy()} onClick={() => saveExactRefusal(r())}>
+                {`Never allow ${selectorSubject({ exact: exact() })}`}
+              </Button>
+              <For each={r().features}>
+                {(feature) => (
+                  <Button
+                    variant="default"
+                    disabled={busy()}
+                    onClick={() => saveFeatureRefusal(r(), feature)}
+                  >
+                    {`Never allow ${selectorSubject({ hasFeature: { program: r().program, feature } })}`}
+                  </Button>
+                )}
+              </For>
+            </ActionGroup>
+          </>
+        )}
+      </Show>
+    )
+  }
+
   function panelTitle(p: Panel): string {
     const subject = subjectOf(p.on)
     if (p.mode === 'why') return `Why ${subject}`
@@ -801,6 +1102,36 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             </div>
           </Show>
         </Section>
+        {/* The two ways to add an answer from nothing, and they are not
+            mirror images. A refusal may be written over any command the parser
+            can resolve; a permit may only be widened from a command the
+            backend has READ, which is why one button says "allow a command"
+            and neither says "add a rule". */}
+        <ActionGroup ariaLabel="Add an answer">
+          <Button variant="default" disabled={busy()} onClick={() => openWriter('refuse')}>
+            + Write a refusal
+          </Button>
+          <Button variant="default" disabled={busy()} onClick={() => openWriter('allow')}>
+            + Allow a command…
+          </Button>
+        </ActionGroup>
+      </Show>
+
+      <Show when={writer()} keyed>
+        {(mode) => (
+          <Dialog
+            open
+            onClose={closeWriter}
+            title={mode === 'allow' ? 'Allow a command' : 'Write a refusal'}
+            footer={
+              <Button variant="default" onClick={closeWriter}>
+                Cancel
+              </Button>
+            }
+          >
+            <div data-permissions-panel={mode}>{commandWriter(mode)}</div>
+          </Dialog>
+        )}
       </Show>
 
       <Show when={panel()} keyed>

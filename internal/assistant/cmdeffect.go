@@ -106,6 +106,27 @@ func commandEffect(inv content.Invocation, declared []content.Effect) content.Ef
 	return commandSelection(inv, declared).Effect
 }
 
+// ClassifyInvocation is commandEffect above, for the one caller outside this
+// package that has to ask the SAME question a run asks about a command NOBODY
+// HAS RUN: policy.classify, which reads a command line a person typed so that a
+// widening permit can be minted from a classification rather than from a word.
+//
+// It is deliberately the same function and not a second reading, for
+// CanonicalInvocation's reason one step further on. The parser answers what the
+// command IS; this answers which row governs it, and the permit the page then
+// writes carries that answer in GrantedUnder — where the evaluator checks it
+// against the effect the CALL classified as. Two readings would mint a permit
+// under one account of the command and enforce it under another, which is the
+// exact failure GrantedUnder exists to prevent.
+//
+// declared is the tool declaration table's answer and never a caller's opinion:
+// the effect a call classifies as is bounded by what a tool can reach at all,
+// and a set invented at the call site would classify against a machine that
+// does not exist.
+func ClassifyInvocation(inv content.Invocation, declared []content.Effect) content.Effect {
+	return commandEffect(inv, declared)
+}
+
 type readProgramRule struct {
 	disqualifies func([]string) bool
 }

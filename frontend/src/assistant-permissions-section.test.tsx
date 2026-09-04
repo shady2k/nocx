@@ -24,6 +24,7 @@ import {
   type EffectKey,
   type PolicyExplanation,
   type PolicyMatrix,
+  type PolicyClassification,
   type PolicyRule,
   type PolicyView,
 } from './policy-client'
@@ -102,6 +103,20 @@ interface FakeOpts {
   setError?: Error
   setRuleError?: Error
   explain?: PolicyExplanation
+  /** What the BACKEND makes of a typed command. The renderer never derives
+   *  one: it is the whole reason `+ Allow a command…` exists. */
+  classify?: PolicyClassification
+  classifyError?: Error
+}
+
+/** The reading of `df -h` a real backend answers with. */
+const READ_DF: PolicyClassification = {
+  program: 'df',
+  commands: [['df', '-h']],
+  effect: 'observe',
+  features: [],
+  eligible: true,
+  reason: '',
 }
 
 /** A client whose reads answer `reads` in order (the last one repeating). */
@@ -120,6 +135,9 @@ function fakeClient(reads: PolicyView[], opts: FakeOpts = {}) {
     ? vi.spyOn(client, 'setRule').mockRejectedValue(opts.setRuleError)
     : vi.spyOn(client, 'setRule').mockResolvedValue({ id: 'r-df', added: false })
   const forgetRule = vi.spyOn(client, 'forgetRule').mockResolvedValue({ removed: true })
+  const classify = opts.classifyError
+    ? vi.spyOn(client, 'classify').mockRejectedValue(opts.classifyError)
+    : vi.spyOn(client, 'classify').mockResolvedValue(opts.classify ?? READ_DF)
   const explain = vi.spyOn(client, 'explain').mockResolvedValue(
     opts.explain ?? {
       effect: 'observe',
@@ -127,7 +145,7 @@ function fakeClient(reads: PolicyView[], opts: FakeOpts = {}) {
       trace: [{ kind: 'effect-row', effect: 'observe', decision: 'ask' }],
     },
   )
-  return { client, get, set, setRule, forgetRule, explain }
+  return { client, get, set, setRule, forgetRule, explain, classify }
 }
 
 async function loaded(container: HTMLElement): Promise<void> {
@@ -537,5 +555,348 @@ describe('assistant permissions: a refused write', () => {
     await vi.waitFor(() => {
       expect(container.textContent).toContain('backend is gone')
     })
+  })
+})
+
+/**
+ * WIDENING FROM A CLASSIFIED WITNESS (nocx-fl0o3).
+ *
+ * The asymmetry below is the design and not a precaution. A REFUSAL may be
+ * written from typed text, because the worst a wrong one does is stop
+ * something. A PERMIT may not: a person typing `find` into a box does not know
+ * that `find . -delete` is the same word, so the only route to one is to have
+ * the backend READ a command, be shown what the resulting rule would and would
+ * not reach, and only then save a rule carrying the effect that reading found.
+ *
+ * Every test here drives that through the control a person clicks, and the
+ * last one sweeps the whole surface rather than the buttons anyone remembered.
+ */
+
+/** Let the page's promises settle — a classification arrives asynchronously,
+ *  and the controls it unlocks do not exist until it has. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+/** Type into the one command box of an open panel. */
+function typeCommand(host: HTMLElement, command: string): void {
+  const field = host.querySelector<HTMLInputElement>('input[type="text"], textarea')
+  expect(field, 'the panel has no box to type a command into').not.toBeNull()
+  fireEvent.input(field!, { target: { value: command } })
+}
+
+/** Type a command and have the backend read it — the two gestures that must
+ *  happen before any permit can exist. */
+async function readCommand(host: HTMLElement, command: string): Promise<void> {
+  typeCommand(host, command)
+  fireEvent.click(within(host).getByRole('button', { name: /^Read this command/ }))
+  await settle()
+}
+
+describe('assistant permissions: + Allow a command…', () => {
+  it('has the two ways to add an answer, and neither is a matrix', async () => {
+    const { client } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    expect(within(container).getByRole('button', { name: /Allow a command/ })).toBeTruthy()
+    expect(within(container).getByRole('button', { name: /Write a refusal/ })).toBeTruthy()
+  })
+
+  it('reads the command and shows what the rule would and would not match, saving nothing', async () => {
+    const { client, classify, setRule } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Allow a command/)
+    await readCommand(p, 'df -h')
+
+    expect(classify).toHaveBeenCalledWith('df -h')
+    // NOTHING is saved by reading. The preview exists so a person can change
+    // their mind after seeing what they were about to widen.
+    expect(setRule).not.toHaveBeenCalled()
+
+    const text = p.textContent ?? ''
+    // What it WOULD cover: every df command, not the one that was typed.
+    expect(text).toContain('any df command')
+    expect(text).toContain('read and inspect')
+    // What it would NOT: the same word doing something the reading never saw.
+    // This is the half that teaches a person that `find` covers `find . -delete`.
+    expect(text.toLowerCase()).toContain('would not allow')
+    expect(text).toContain('make changes that cannot be undone')
+  })
+
+  it('saves a Program rule carrying the effect the reading found, and only then', async () => {
+    const { client, setRule, get } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+    const before = get.mock.calls.length
+
+    const p = await openPanel(container, /Allow a command/)
+    await readCommand(p, 'df -h')
+    fireEvent.click(within(p).getByRole('button', { name: /^Allow any df command/ }))
+
+    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
+    // The rule that went over the wire, whole. `grantedUnder` is the effect the
+    // BACKEND read, and it is what stops this permit reaching the same command
+    // doing something more serious.
+    expect(setRule).toHaveBeenCalledWith({
+      selector: { program: 'df' },
+      decision: 'permit',
+      grantedUnder: 'observe',
+    })
+    // And the page adopts the store rather than the payload it sent.
+    await vi.waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(before))
+  })
+
+  it('offers nothing to save until the backend has read something', async () => {
+    const { client } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Allow a command/)
+    typeCommand(p, 'find')
+    await settle()
+
+    // Typed, unread: there is no permit to click, whatever the word says.
+    expect(within(p).queryByRole('button', { name: /^Allow any/ })).toBeNull()
+  })
+
+  it('says why a command cannot be allowed in advance, in the backend’s words', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))], {
+      classify: {
+        program: '',
+        commands: [],
+        features: [],
+        eligible: false,
+        reason: 'the command uses an indirect wrapper or shell feature',
+      },
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Allow a command/)
+    await readCommand(p, 'sudo df -h')
+
+    expect(p.textContent).toContain('indirect wrapper')
+    // Refused, and refused loudly: no save, and nothing to save with.
+    expect(within(p).queryByRole('button', { name: /^Allow any/ })).toBeNull()
+    expect(setRule).not.toHaveBeenCalled()
+  })
+
+  it('says so when the backend cannot be asked, rather than going quiet', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))], {
+      classifyError: new Error('the backend is gone'),
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Allow a command/)
+    await readCommand(p, 'df -h')
+
+    await vi.waitFor(() => expect(toasts().some((t) => t.level === 'danger')).toBe(true))
+    expect(within(p).queryByRole('button', { name: /^Allow any/ })).toBeNull()
+    expect(setRule).not.toHaveBeenCalled()
+  })
+})
+
+describe('assistant permissions: + Write a refusal', () => {
+  it('writes an Exact refusal over the command that was read', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Write a refusal/)
+    await readCommand(p, 'df -h')
+    fireEvent.click(within(p).getByRole('button', { name: /^Never allow df -h/ }))
+
+    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
+    expect(setRule).toHaveBeenCalledWith({
+      selector: { exact: [['df', '-h']] },
+      decision: 'refuse',
+    })
+  })
+
+  it('writes a HasFeature refusal over the fact, never the spelling of a token', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))], {
+      classify: {
+        program: 'sort',
+        commands: [['sort', '-o', '/tmp/out', '/tmp/in']],
+        effect: 'mutate-reversible',
+        features: ['writes-option-named-path'],
+        eligible: true,
+        reason: '',
+      },
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Write a refusal/)
+    await readCommand(p, 'sort -o /tmp/out /tmp/in')
+    // The offer is made in words, over the FACT the classifier recorded:
+    // `-o`, `--output` and `--output=file` are one fact written three ways.
+    fireEvent.click(
+      within(p).getByRole('button', {
+        name: /^Never allow any sort command that writes a file to a path named by one of its own options/,
+      }),
+    )
+
+    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
+    expect(setRule).toHaveBeenCalledWith({
+      selector: { hasFeature: { program: 'sort', feature: 'writes-option-named-path' } },
+      decision: 'refuse',
+    })
+  })
+
+  it('has no path through it that produces a permit', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))], {
+      classify: {
+        program: 'sort',
+        commands: [['sort', '-o', '/tmp/out', '/tmp/in']],
+        effect: 'mutate-reversible',
+        features: ['writes-option-named-path'],
+        eligible: true,
+        reason: '',
+      },
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /Write a refusal/)
+    await readCommand(p, 'sort -o /tmp/out /tmp/in')
+
+    // Every button this panel offers once the command has been read, not the
+    // one this test remembered. Reading again is skipped for the reason the
+    // sweep below skips it: an edit or a re-read discards the offer, and this
+    // is about what the offer can save.
+    for (const button of Array.from(p.querySelectorAll<HTMLButtonElement>('button'))) {
+      if (
+        button.disabled ||
+        /^(Read this command|Close|Cancel|Close dialog)$/i.test(
+          (button.getAttribute('aria-label') ?? button.textContent ?? '').trim(),
+        )
+      ) {
+        continue
+      }
+      fireEvent.click(button)
+      await settle()
+    }
+
+    expect(setRule.mock.calls.length).toBeGreaterThan(0)
+    for (const [rule] of setRule.mock.calls) {
+      expect(rule.decision, `${JSON.stringify(rule)} came out of the refusal flow`).toBe('refuse')
+      expect(rule.grantedUnder).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * Click EVERY control the page offers, and every control in whatever it opens,
+ * with a command typed into every box on the way.
+ *
+ * A test that checked the one button somebody remembered would pass a page
+ * that grew a second route to a permit next week. This walks the surface.
+ */
+/** A control's accessible name, which is what a person reads. */
+function nameOf(button: HTMLButtonElement): string {
+  return (button.getAttribute('aria-label') ?? button.textContent ?? '').trim()
+}
+
+/** A control that only closes what is open. Clicking one is not a gesture the
+ *  sweep is interested in, and the dialog's own X is one of them — clicking it
+ *  first would end every walk on its first step. */
+function dismisses(button: HTMLButtonElement): boolean {
+  return /^(close|cancel|close dialog)$/i.test(nameOf(button))
+}
+
+async function sweepEveryGesture(container: HTMLElement, typed: string): Promise<number> {
+  let clicked = 0
+  const pageButtons = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+  for (const opener of pageButtons) {
+    if (opener.disabled) continue
+    fireEvent.click(opener)
+    clicked++
+    await settle()
+    const used = new Set<string>()
+    // Three rounds: a box is filled, the reading it unlocks arrives, and the
+    // controls that appear only afterwards are clicked in the round after that.
+    for (let round = 0; round < 3; round++) {
+      const open = document.querySelector<HTMLElement>('[data-permissions-panel]')
+      if (!open) break
+      const dialog = open.closest<HTMLElement>('[role="dialog"], dialog') ?? open
+      for (const field of Array.from(
+        dialog.querySelectorAll<HTMLInputElement>('input[type="text"], textarea'),
+      )) {
+        // Only what is not already typed. Re-typing the same text is still an
+        // edit, and an edit discards the reading it was taken from — which is
+        // the property under test, not something to fight.
+        if (field.value === typed) continue
+        fireEvent.input(field, { target: { value: typed } })
+      }
+      for (const button of Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))) {
+        if (button.disabled || dismisses(button)) continue
+        // Once each. A control that has already been used is not clicked
+        // again, because re-reading a command discards the offer built on it
+        // and this sweep would then never reach the control that saves.
+        const label = nameOf(button)
+        if (used.has(label)) continue
+        used.add(label)
+        fireEvent.click(button)
+        clicked++
+        await settle()
+      }
+    }
+    const stillOpen = document.querySelector<HTMLElement>('[data-permissions-panel]')
+    if (stillOpen) {
+      const dialog = stillOpen.closest<HTMLElement>('[role="dialog"], dialog') ?? stillOpen
+      const close = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(dismisses)
+      if (close) fireEvent.click(close)
+      await settle()
+    }
+  }
+  return clicked
+}
+
+describe('assistant permissions: a permit is never typed from nothing', () => {
+  it('mints no standing permit anywhere on the page when the backend reads nothing', async () => {
+    // An EMPTY policy: no standing answer to change, no row off its default. So
+    // any rule that came out of this sweep was made from typed text alone.
+    const { client, setRule, classify } = fakeClient([view(matrixWith({}))], {
+      classifyError: new Error('the backend will not read that'),
+    })
+    const container = mount(client)
+    await loaded(container)
+
+    const clicked = await sweepEveryGesture(container, 'find')
+
+    // The guard on the guard: a sweep that clicked nothing passes for ever.
+    expect(clicked).toBeGreaterThan(3)
+    expect(classify).toHaveBeenCalled()
+    for (const [rule] of setRule.mock.calls) {
+      expect(rule.decision, `${JSON.stringify(rule)} was minted without a reading`).not.toBe(
+        'permit',
+      )
+    }
+  })
+
+  it('mints a permit only over what the backend read, and bound to what it found', async () => {
+    const { client, setRule } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    await sweepEveryGesture(container, 'df -h')
+
+    const permits = setRule.mock.calls.map(([rule]) => rule).filter((r) => r.decision === 'permit')
+    expect(permits.length).toBeGreaterThan(0)
+    for (const permit of permits) {
+      // Every one names the command word the READING answered with, and is
+      // bound to the effect that reading found. Nothing here was typed: the
+      // person typed `df -h`, and what the rule carries came back over the wire.
+      expect(permit.selector).toEqual({ program: READ_DF.program })
+      expect(permit.grantedUnder).toBe(READ_DF.effect)
+    }
+    // A row answer is a different object and is deliberately not caught here:
+    // it answers a question the page NAMED, over no command at all, and
+    // travels by policy.set. What may never be typed is a rule over a command.
   })
 })

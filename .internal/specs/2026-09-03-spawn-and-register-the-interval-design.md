@@ -83,6 +83,29 @@ is what the helper epic is for — this decision is repealed with it, and a part
 session-class record with a carry-over set. That is stated here so the next author does not have
 to derive it.
 
+> **Amendment, 2026-09-04 (`nocx-dkawo.15`).** The DECISION above stands and is now fully
+> implemented; what needs correcting is the paragraph before it, beginning "But the record IS
+> durable while the process is not, so the sixth cut is real". That premise had already been
+> refuted two bullets above it — under `D5` a participant dies with the backend — and it reasons
+> by analogy with the `executions` rows, which are durable for a reason a participant does not
+> share: they are HISTORY, read back to tell a person what once ran, while a participant row is
+> a claim about a process that is supposed to still be there. It was read as a mandate, and it
+> became the wave-record plan's "`internal/content` owns the durable rows": six tables, an index
+> and two ladder rungs.
+>
+> **The record is in memory** (`internal/wave.MemoryStore`), held for the life of the backend and
+> no longer. **The sixth cut therefore does not arise**: the process that owns the PTYs exits when
+> its last session exits, so the record's lifetime and its participants' lifetime coincide by
+> construction, and there is no crash that can leave a record saying `live` for a process that no
+> longer exists — the record went with it. **The startup terminalizer this section prescribed is
+> gone too**, along with `Registrar.Sweep`: an in-memory record starts empty, so a sweep at start
+> has nothing to close.
+>
+> What is unchanged: ordering is still the rollback within the lifetime, and the repeal clause
+> above is still where durability gets decided if `D5` ever goes. Everything the rows enforced in
+> `WHERE` clauses and `CHECK` constraints is a method on the store now, with its argument written
+> where it is enforced.
+
 ## 3. The interval
 
 > **A participant record exists from before the first irreversible spawn effect, until either the

@@ -111,9 +111,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 	watch.Watch(string(coordinator), wakeAgent)
 
 	waveID := wave.ID("wave-wake")
-	if waveErr := stand.waves.EnsureWave(ctx, waveID, string(coordinator)); waveErr != nil {
-		t.Fatalf("ensure wave: %v", waveErr)
-	}
+	stand.ensureWave(t, waveID, string(coordinator))
 
 	//nolint:gosec // The path is two joined literals naming a corpus in the tree.
 	header, chunks, err := agentcapture.Read(

@@ -82,22 +82,33 @@ func (p *recordingPTY) read() string {
 // content store behind the layout chain, the real session registry, the real
 // session opener, and the two adapters that carry the facts.
 type waveStand struct {
-	db     content.ContentDB
-	waves  wave.Store
-	dir    string
-	ptys   *waveTestPTYFactory
-	tp     *transport.WSServer
-	reg    *session.Reg
-	enrol  *waveEnrolments
-	lanes  *sessionRegistry
-	report *waveReporter
-	record *wave.Registrar
+	db    content.ContentDB
+	waves wave.Store
+	// waveIDs is every wave this stand opened. The record answers "what is
+	// still open" per WAVE — there is no record-wide read, because nothing
+	// in the product asks that question — so teardown has to know which
+	// waves it made. ensureWave is the one place a wave is opened, which is
+	// what keeps the list from drifting from the record.
+	waveIDs []wave.ID
+	dir     string
+	ptys    *waveTestPTYFactory
+	tp      *transport.WSServer
+	reg     *session.Reg
+	enrol   *waveEnrolments
+	lanes   *sessionRegistry
+	report  *waveReporter
+	record  *wave.Registrar
+	mu      sync.Mutex
 }
 
 func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 	t.Helper()
 	ctx := context.Background()
 	logger := log.NewSlogAdapter(nil)
+
+	// Declared before the cleanup below, which reads the waves it opened;
+	// the fields are filled in at the end of this function.
+	stand := &waveStand{}
 
 	dir := t.TempDir()
 	key := make([]byte, 32)
@@ -135,8 +146,13 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 		// reported the exit, so waiting on the registry would still leave a
 		// write racing the store's own teardown.
 		waittest.WaitFor(t, "every participant to reach a terminal state", func() bool {
-			open, err := waves.AllNonTerminal(ctx)
-			return err != nil || len(open) == 0
+			for _, id := range stand.openedWaves() {
+				open, err := waves.NonTerminal(ctx, id)
+				if err == nil && len(open) > 0 {
+					return false
+				}
+			}
+			return true
 		})
 		_ = tp.Stop(ctx)
 	})
@@ -177,13 +193,32 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 		}
 	}
 
-	if err := waves.EnsureWave(ctx, "wave-1", "sess-coordinator"); err != nil {
-		t.Fatalf("ensure wave: %v", err)
-	}
-	return &waveStand{
+	*stand = waveStand{
 		db: db, waves: waves, dir: dir, ptys: ptys, tp: tp, reg: reg,
 		enrol: enrol, lanes: lanes, report: report, record: record,
 	}
+	stand.ensureWave(t, "wave-1", "sess-coordinator")
+	return stand
+}
+
+// ensureWave opens a wave and remembers it, so teardown can ask that wave
+// whether everything in it has settled.
+func (w *waveStand) ensureWave(t *testing.T, id wave.ID, coordinatorSession string) {
+	t.Helper()
+	if err := w.waves.EnsureWave(context.Background(), id, coordinatorSession); err != nil {
+		t.Fatalf("ensure wave %q: %v", id, err)
+	}
+	w.mu.Lock()
+	w.waveIDs = append(w.waveIDs, id)
+	w.mu.Unlock()
+}
+
+// openedWaves is what teardown reads. Under the lock because a wave may be
+// opened from a test goroutine while the cleanup runs on the test's own.
+func (w *waveStand) openedWaves() []wave.ID {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]wave.ID(nil), w.waveIDs...)
 }
 
 // registerWithEnrolment runs a registration and supplies the enrolment the

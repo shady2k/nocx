@@ -301,27 +301,32 @@ func TestOnlyOpenParticipantsAreListed(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
-		name string
-		list func() ([]Participant, error)
-	}{
-		{"per wave", func() ([]Participant, error) { return s.NonTerminal(ctx, testWave) }},
-		{"across every wave", func() ([]Participant, error) { return s.AllNonTerminal(ctx) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.list()
-			if err != nil {
-				t.Fatalf("list: %v", err)
-			}
-			if len(got) != 2 {
-				t.Fatalf("listed %d participants, want the 2 that are open: %v", len(got), got)
-			}
-			for _, p := range got {
-				if p.State.Terminal() {
-					t.Fatalf("terminal participant %q listed as open", p.ID)
-				}
-			}
-		})
+	// And an open participant of ANOTHER wave is not this wave's: the
+	// reservation counts what one coordinator started, so a second wave's
+	// worker counting against it would refuse a spawn nobody had made.
+	if err := s.EnsureWave(ctx, "wave-2", "sess-another-coordinator"); err != nil {
+		t.Fatalf("ensure the other wave: %v", err)
+	}
+	elsewhere := newParticipant("p-someone-elses")
+	elsewhere.Wave = ID("wave-2")
+	if err := s.CommitPrepared(ctx, elsewhere); err != nil {
+		t.Fatalf("commit elsewhere: %v", err)
+	}
+
+	got, err := s.NonTerminal(ctx, testWave)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("listed %d participants, want the 2 of this wave that are open: %v", len(got), got)
+	}
+	for _, p := range got {
+		if p.State.Terminal() {
+			t.Fatalf("terminal participant %q listed as open", p.ID)
+		}
+		if p.Wave != testWave {
+			t.Fatalf("participant %q of wave %q listed under %q", p.ID, p.Wave, testWave)
+		}
 	}
 }
 
@@ -583,8 +588,8 @@ func TestTheRecordIsSafeUnderConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := s.AllNonTerminal(ctx); err != nil {
-				t.Errorf("all non terminal: %v", err)
+			if _, err := s.NonTerminal(ctx, testWave); err != nil {
+				t.Errorf("non terminal: %v", err)
 			}
 			if _, err := s.HeldBy(ctx, coordSession); err != nil {
 				t.Errorf("held by: %v", err)

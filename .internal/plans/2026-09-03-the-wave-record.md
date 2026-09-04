@@ -51,10 +51,24 @@ fail-closed direction: a coordinator reading it learns "gone, and it never told 
 - **`internal/wave`** owns the SEMANTICS: the state machine of §1, the register-and-spawn ordering
   of the spawn design §4, the conjunction rule, the participant/membership split (`A1`). It
   imports no transport and no assistant package.
-- **`internal/content`** owns the DURABLE ROWS, because ADR-0043 says one connection to the
+- ~~**`internal/content`** owns the DURABLE ROWS, because ADR-0043 says one connection to the
   encrypted store and AD-8 says one owner per behaviour. `wave` depends on a narrow store
   interface; `content` satisfies it. New tables ride the ladder (ADR-0055): `schemaVersion`
-  16 → 17.
+  16 → 17.~~ **REVERSED 2026-09-04 by `nocx-dkawo.15`.** This bullet is what put six tables, an
+  index and two ladder rungs into the encrypted store, and it should never have been written:
+  the spawn design's §2 had already decided "no journal", and this reasoned from the one
+  sentence in it that its own paragraph had refuted. The rows bought nothing. The process that
+  owns the PTYs exits when its last session exits, so under `D5` a participant dies with the
+  backend and the record's lifetime and its participants' lifetime coincide BY CONSTRUCTION —
+  which is why the startup sweep terminalized every open participant as `interrupted` and
+  adopted none. A record that outlives what it describes cannot be read: everything in it is a
+  claim about a process, and the only honest thing to say about every one of them after a
+  restart is that it is gone. `internal/wave` owns the rows as well as the semantics now
+  (`wave.MemoryStore`, behind the same narrow `wave.Store` interface, which is unchanged);
+  `internal/content` is back at `schemaVersion` 16, its version on `main`. If `D5` is ever
+  repealed — workers surviving the backend, which is what the helper epic is for — a participant
+  becomes a session-class record with a carry-over set, and THAT is where durability gets
+  decided; it is not decided here by keeping rows nobody can interpret.
 - **`internal/app`** is the composition root and already holds the enrolment seam
   (`paneenrol.go`, wired at `app.go:1349`), which is spawn-design step 4's arrival point.
 - **`internal/lifecycle`** carries the participant's declaration, because `KindAgentEnrol` /
@@ -78,9 +92,11 @@ assertion read through a freshly reopened store.
 - `wave.Registrar.Register` implementing the spawn design §4 steps 1–6 **in that order**, where
   the order IS the rollback: reserve → commit `prepared` → create session/spawn → enrolment →
   delegation → `live` **then** attach supervision.
-- `content` gains `waves`, `wave_participants`, `wave_delegations`; ladder step 17; the
+- ~~`content` gains `waves`, `wave_participants`, `wave_delegations`; ladder step 17; the
   `closeUnanchoredEntries` sweep extended to terminalize non-terminal participants as
-  `interrupted` on `Open` (spawn design C6).
+  `interrupted` on `Open` (spawn design C6).~~ **Reversed 2026-09-04 by `nocx-dkawo.15`** — see
+  the amended §2 bullet. The rows and the rungs are deleted, and the startup terminalizer with
+  them: an in-memory record starts empty, so there is nothing to close at a start.
 - Wiring: constructed in `app.go` beside `paneGrid`.
 
 ### S2 — supervision: two facts, and neither alone

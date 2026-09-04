@@ -33,13 +33,6 @@ type Store interface {
 	// count beside a list would be two owners of "what is still open".
 	NonTerminal(ctx context.Context, id ID) ([]Participant, error)
 
-	// AllNonTerminal lists every open participant across every wave. It is
-	// deliberately not NonTerminal with a magic empty id: "what is this
-	// BACKEND still holding" is a property of the backend and not of any one
-	// wave, and a caller that had to enumerate the waves first could only
-	// ask about the ones it happened to know.
-	AllNonTerminal(ctx context.Context) ([]Participant, error)
-
 	// CommitPrepared enters the participant and its wave membership. It is
 	// the opening end of the interval, and it happens before the spawn for
 	// the reason the vault journal is written before the provider call: a

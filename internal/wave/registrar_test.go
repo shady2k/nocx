@@ -97,27 +97,6 @@ func (m *memStore) EnsureWave(_ context.Context, id ID, coord string) error {
 	return nil
 }
 
-func (m *memStore) AllNonTerminal(ctx context.Context) ([]Participant, error) {
-	if err := m.hit("allnonterminal"); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	var ids []ID
-	for id := range m.waves {
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
-	var out []Participant
-	for _, id := range ids {
-		got, err := m.nonTerminal(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, got...)
-	}
-	return out, nil
-}
-
 func (m *memStore) NonTerminal(ctx context.Context, id ID) ([]Participant, error) {
 	if err := m.hit("nonterminal"); err != nil {
 		return nil, err

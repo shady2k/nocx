@@ -226,12 +226,6 @@ func (s *MemoryStore) NonTerminal(_ context.Context, id ID) ([]Participant, erro
 	}), nil
 }
 
-func (s *MemoryStore) AllNonTerminal(_ context.Context) ([]Participant, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.selectParticipants(func(p Participant) bool { return !p.State.Terminal() }), nil
-}
-
 // HeldBy answers D3 through the WAVE and never through the delegation, and
 // the difference is the point. A delegation is revocable and suspendable;
 // membership is not. A coordinator that has just restarted must be told about

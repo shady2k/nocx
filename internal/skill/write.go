@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -253,7 +254,7 @@ func (s *Store) Create(name, description, body string) error {
 	if err := s.fs.MkdirAll(dir, managedSkillDirMode); err != nil {
 		return fmt.Errorf("skill %q: create directory: %w", name, err)
 	}
-	if err := s.atomicWrite(dir, target, data); err != nil {
+	if err := s.atomicWrite(target, data); err != nil {
 		return err
 	}
 	// A managed skill has no source: the assistant drafted it, so there is
@@ -289,7 +290,7 @@ func (s *Store) Update(name, description, body string) error {
 	if err := s.checkExistingPath(s.managedDir, dir, target, true); err != nil {
 		return err
 	}
-	if err := s.atomicWrite(dir, target, data); err != nil {
+	if err := s.atomicWrite(target, data); err != nil {
 		return err
 	}
 	// A managed skill has no source: the assistant drafted it, so there is
@@ -482,8 +483,16 @@ func (s *Store) checkExistingPath(rootDir, dir, target string, requireRegular bo
 	return nil
 }
 
-func (s *Store) atomicWrite(dir, target string, data []byte) error {
-	tmp := filepath.Join(dir, "SKILL.md.tmp-"+strconv.FormatUint(s.seq.Add(1), 10))
+// atomicWrite lands one file. It derives the directory from the target rather
+// than taking it, which it used to: with a bundle the two are no longer the
+// same for every write — a support file's directory is the skill's directory
+// plus one component — and a caller passing the skill directory while writing
+// into `references/` would put the temporary file somewhere the rename then
+// crosses out of. There is one answer to where the temporary bytes go, and it
+// is beside the file they are about to become.
+func (s *Store) atomicWrite(target string, data []byte) error {
+	dir := filepath.Dir(target)
+	tmp := filepath.Join(dir, filepath.Base(target)+".tmp-"+strconv.FormatUint(s.seq.Add(1), 10))
 	file, err := s.fs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, managedSkillFileMode)
 	if err != nil {
 		return fmt.Errorf("open temporary skill file: %w", err)
@@ -517,6 +526,182 @@ func (s *Store) atomicWrite(dir, target string, data []byte) error {
 		return fmt.Errorf("sync skill directory: %w", err)
 	}
 	return nil
+}
+
+// writeBundle lands a whole skill: its SKILL.md and every support file the
+// document named, and then removes anything under the directory the new
+// bundle does NOT name.
+//
+// The prune is the half that is easy to leave out and cannot be. An update
+// that only wrote the new files would leave the previous bundle's leftovers
+// on disk, and hashSkillDirectory hashes the DIRECTORY — so the digest
+// recorded afterwards would cover those leftovers too, and the skill would
+// read as `approved` while containing a file the person was never shown. What
+// lands is the bundle, or the digest is a record of something else.
+//
+// Pruning is safe here because an installed skill the person has edited is
+// `changed`, and planInstall refuses to update one — so everything under an
+// updatable installed skill's directory is bytes this product wrote from one
+// bundle.
+//
+// NO EXECUTE BIT ON ANYTHING, scripts/ included. `bash setup.sh` runs a
+// script that is not executable; only `./setup.sh` needs the bit, and no
+// skill body has to be written the second way. Granting the bit would hand a
+// downloaded file a capability the shipped skill does not need, at the moment
+// design §8 has it land inert precisely so nothing it carries can act before
+// the person has looked. If a future skill genuinely requires `./`, that is a
+// decision to take deliberately and not a mode to widen in passing.
+func (s *Store) writeBundle(name, dir string, document []byte, files []bundleFile) error {
+	keep := map[string]struct{}{"SKILL.md": {}}
+	if err := s.atomicWrite(filepath.Join(dir, "SKILL.md"), document); err != nil {
+		return err
+	}
+	for _, file := range files {
+		target := filepath.Join(dir, filepath.FromSlash(file.Path))
+		if err := s.fs.MkdirAll(filepath.Dir(target), managedSkillDirMode); err != nil {
+			return fmt.Errorf("skill %q: create directory for %q: %w", name, file.Path, err)
+		}
+		if err := s.atomicWrite(target, []byte(file.Text)); err != nil {
+			return fmt.Errorf("skill %q: write %q: %w", name, file.Path, err)
+		}
+		keep[file.Path] = struct{}{}
+	}
+	return s.pruneSkillDirectory(name, dir, keep)
+}
+
+// pruneSkillDirectory removes every regular file under dir whose slash-relative
+// path is not in keep.
+//
+// The DIRECTORIES it empties are left behind, exactly as Delete and undoWrite
+// leave one, and for the same reason stated there: a directory holds no bytes,
+// hashSkillDirectory hashes files, and removing a directory we may not have
+// created is a larger claim than this operation justifies.
+func (s *Store) pruneSkillDirectory(name, dir string, keep map[string]struct{}) error {
+	// The PATHS and not the bytes: a prune has no use for contents, and
+	// reading a directory into memory in order to delete it would also mean
+	// refusing to delete anything we could not read. It removes non-regular
+	// entries too — os.Remove takes a symlink off without following it, and
+	// an entry under an installed skill that this product did not write is
+	// exactly what a prune is for.
+	present, err := skillDirectoryEntries(dir)
+	if err != nil {
+		return fmt.Errorf("skill %q: read the directory before pruning it: %w", name, err)
+	}
+	for _, rel := range present {
+		if _, wanted := keep[rel]; wanted {
+			continue
+		}
+		if err := s.fs.Remove(filepath.Join(dir, filepath.FromSlash(rel))); err != nil {
+			return fmt.Errorf("skill %q: remove %q, which the skill no longer carries: %w", name, rel, err)
+		}
+	}
+	return nil
+}
+
+// skillDirectoryEntries lists every non-directory entry under base by its
+// slash-relative path. An absent directory lists nothing rather than failing.
+func skillDirectoryEntries(base string) ([]string, error) {
+	entries := make([]string, 0, 8)
+	err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+		entries = append(entries, filepath.ToSlash(rel))
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// snapshotSkillDirectory reads every file under base, keyed by its
+// slash-relative path. An absent directory is an empty snapshot rather than an
+// error: that is what a fresh install starts from.
+//
+// It refuses anything that is not a regular file. A symlink under an installed
+// skill is not something this product put there, and restoring one would be
+// re-creating a link into somewhere else on the person's disk on the strength
+// of having found it — which is a larger claim than an undo is entitled to.
+//
+// It is bounded by the same ceiling the bundle is, so a directory somebody
+// filled cannot be pulled into memory by an install that was only going to
+// replace two files.
+func snapshotSkillDirectory(base string) (map[string][]byte, error) {
+	snapshot := make(map[string][]byte)
+	var total int
+	err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", path)
+		}
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+		data, readErr := os.ReadFile(path) //nolint:gosec // path is beneath a contained skill directory
+		if readErr != nil {
+			return readErr
+		}
+		total += len(data)
+		if total > maxBundleBytes+maxSkillFileBytes {
+			return fmt.Errorf("%s holds more than a skill bundle may", base)
+		}
+		snapshot[filepath.ToSlash(rel)] = data
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return snapshot, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+// restoreSkillDirectory puts dir back exactly as snapshot found it: every
+// recorded file rewritten, every file that is not in the snapshot removed.
+//
+// An EMPTY snapshot is the fresh-install case and this then removes everything
+// the install wrote, which is why there is one function and not two.
+func (s *Store) restoreSkillDirectory(dir string, snapshot map[string][]byte) error {
+	present, err := skillDirectoryEntries(dir)
+	if err != nil {
+		return err
+	}
+	for _, rel := range present {
+		if _, recorded := snapshot[rel]; recorded {
+			continue
+		}
+		if err := s.fs.Remove(filepath.Join(dir, filepath.FromSlash(rel))); err != nil {
+			return err
+		}
+	}
+	for rel, data := range snapshot {
+		target := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := s.fs.MkdirAll(filepath.Dir(target), managedSkillDirMode); err != nil {
+			return err
+		}
+		if err := s.atomicWrite(target, data); err != nil {
+			return err
+		}
+	}
+	return s.fs.Sync(dir)
 }
 
 func prepareSkill(rawName, description, body string) (string, []byte, error) {

@@ -228,8 +228,8 @@ func TestInstall_WritesTheDocumentAndRecordsTheDigestAndTheSourceTogether(t *tes
 	if digest != onDisk {
 		t.Errorf("recorded digest = %q, want the hash of what is on disk %q", digest, onDisk)
 	}
-	if digest == digestOfDocument(installableDocument) {
-		t.Error("the recorded digest is the digest of the FETCHED document, not of the written file")
+	if digest == digestOfBundle(installableDocument, nil) {
+		t.Error("the recorded digest is the digest of the FETCHED bundle, not of the written files")
 	}
 
 	assertInertThenUsable(t, stand.store, "deploy")
@@ -318,8 +318,13 @@ func TestInstall_RefusesADocumentThatChangedSinceItWasRead(t *testing.T) {
 		t.Fatal("want a refusal when the document changed between reading and approving")
 	}
 	assertUnchanged()
-	if !strings.Contains(err.Error(), "no longer the one you read") {
-		t.Errorf("refusal = %q, want it to say the document changed", err)
+	// The sentence names WHAT WAS READ rather than "the document", because
+	// the comparison is over the whole bundle now: a support file swapped
+	// after the read refuses through this same branch, and a message that
+	// said "the document" would be telling the person to look at the file
+	// that did not change.
+	if !strings.Contains(err.Error(), "no longer what you read") {
+		t.Errorf("refusal = %q, want it to say what was read has changed", err)
 	}
 	if _, present := stand.installed(t, "deploy"); present {
 		t.Fatal("a document the person never read was written to disk")

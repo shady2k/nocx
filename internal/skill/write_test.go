@@ -20,17 +20,33 @@ type fakeFS struct {
 	// install_test reaches the one arm of the install interval that cannot
 	// be closed by code.
 	failRemove error
-	mkdirCalls int
+	// failWriteUnder makes only the writes whose path contains this fragment
+	// fail. A bundle is several writes and the interesting failure is the
+	// THIRD one — failWrite above fails the first and never reaches the case
+	// where some of the bundle has already landed.
+	failWriteUnder string
+	// failMkdirUnder does the same for the directory a support file needs.
+	failMkdirUnder string
+	mkdirCalls     int
 }
 
 func (f *fakeFS) MkdirAll(path string, perm os.FileMode) error {
 	f.mkdirCalls++
+	if f.failMkdirUnder != "" && strings.Contains(filepath.ToSlash(path), f.failMkdirUnder) {
+		return errors.New("permission denied")
+	}
 	return f.inner.MkdirAll(path, perm)
 }
 
 func (f *fakeFS) OpenFile(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
 	file, err := f.inner.OpenFile(name, flag, perm)
-	if err != nil || f.failWrite == nil {
+	if err != nil {
+		return file, err
+	}
+	if f.failWriteUnder != "" && strings.Contains(filepath.ToSlash(name), f.failWriteUnder) {
+		return &failingWriteCloser{WriteCloser: file, err: errWriteFailed}, nil
+	}
+	if f.failWrite == nil {
 		return file, err
 	}
 	return &failingWriteCloser{WriteCloser: file, err: f.failWrite}, nil

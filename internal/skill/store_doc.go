@@ -710,6 +710,32 @@ func (s *Store) removeDiscovered(found discovered) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || linkCount(info) > 1 {
 		return fmt.Errorf("skill %q: SKILL.md is not a removable regular file", found.Name)
 	}
+	// THE REST OF THE BUNDLE GOES FIRST, for an installed skill. Until a
+	// skill could carry support files, removing SKILL.md removed the skill
+	// whole; now an installed skill's directory may hold references/ and
+	// scripts/ that this product wrote from one document, and leaving them
+	// behind would leave a downloaded script on the person's disk after they
+	// deleted the skill that brought it (design §8 is exactly about not
+	// carrying executable text further than the person agreed).
+	//
+	// INSTALLED ONLY. An authored skill's directory is the person's own and
+	// may hold anything they put beside it; a managed one is written by the
+	// assistant and has never held more than its SKILL.md. Neither invites a
+	// recursive delete, and provenance is the root, so this cannot be
+	// redirected by a file's content.
+	//
+	// BEFORE the SKILL.md and not after, which is the whole of the ordering
+	// argument. A prune that failed after SKILL.md was gone would leave the
+	// skill undiscoverable with its digest still recorded and its support
+	// files still on disk — a state nothing in the product names. Failing
+	// first leaves the skill discoverable with some of its files missing,
+	// which is `changed`: Settings shows it, the assistant is not offered it,
+	// and Remove can simply be pressed again.
+	if found.Provenance == ProvenanceInstalled {
+		if err := s.pruneSkillDirectory(found.Name, dir, map[string]struct{}{"SKILL.md": {}}); err != nil {
+			return err
+		}
+	}
 	if err := s.fs.Remove(target); err != nil {
 		return fmt.Errorf("skill %q: delete: %w", found.Name, err)
 	}

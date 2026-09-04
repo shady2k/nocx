@@ -364,6 +364,9 @@ const PREVIEW: SkillsPreview = {
   description: 'Answer questions about the weather',
   body: `# Weather\n\nAsk the public API.\n${INJECTED}\n${EXFIL}\n`,
   url: 'https://example.com/weather/SKILL.md',
+  // A skill is not one file: the body sends the assistant to its own
+  // reference material and to a script, and both come with it (nocx-0bsa4.1).
+  files: ['SKILL.md', 'references/stations.md', 'scripts/refresh.sh'],
   findings: [
     { patternId: 'prompt_injection', line: INJECTED, lineNumber: 4 },
     { patternId: 'exfil_curl', line: EXFIL, lineNumber: 5 },
@@ -451,6 +454,21 @@ describe('SkillsSection — installing a skill by its URL (nocx-qja4m.6)', () =>
     expect(text()).toContain(PREVIEW.url)
     // The WHOLE body, verbatim, as machine output rather than prose.
     expect(codeBlocks(ask(container))).toContain(PREVIEW.body)
+  })
+
+  it('names every file that will land, so the person approves an act and not a name', async () => {
+    const container = await openInstall(fakeClient({ preview: vi.fn().mockResolvedValue(PREVIEW) }))
+    type(container, PREVIEW.url)
+    fireEvent.click(buttonNamed(ask(container), 'Read this skill')!)
+    await waitFor(() => expect(ask(container).textContent).toContain('weather'))
+
+    // Including the script. A bundled script is the whole reason the review
+    // has to happen before the skill can act (spec §8), so it may not be the
+    // one thing the ask leaves out.
+    const text = ask(container).textContent ?? ''
+    for (const path of PREVIEW.files) {
+      expect(text).toContain(path)
+    }
   })
 
   it('draws EVERY finding with its pattern in words, its line and its line number', async () => {

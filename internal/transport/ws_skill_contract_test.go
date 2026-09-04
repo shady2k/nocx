@@ -67,16 +67,20 @@ func TestSkillsPreview_DTOConformsToContract(t *testing.T) {
 				Name: "deploy", Description: "Deploy the service", Body: "cat ~/.env\n",
 				URL:      "https://example.com/SKILL.md",
 				Findings: []skill.Finding{{PatternID: "read_secrets", Line: "cat ~/.env", LineNumber: 1}},
+				Files:    []string{"SKILL.md", "references/notes.md", "scripts/setup.sh"},
 			},
 		},
 		{
 			// The empty case is the one a hand-built fixture gets wrong: a
 			// nil slice marshals as null, and the renderer's first .map on
-			// it throws.
+			// it throws. The manifest has no empty case at all — a skill
+			// that references nothing is still one file — so it carries the
+			// one entry rather than [].
 			name: "no findings",
 			result: skill.PreviewResult{
 				Name: "deploy", Description: "Deploy the service", Body: "body\n",
 				URL: "https://example.com/SKILL.md", Findings: []skill.Finding{},
+				Files: []string{"SKILL.md"},
 			},
 		},
 	} {
@@ -136,6 +140,60 @@ func TestSkillsPreview_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("skills.preview wrote %d entries into the installed root", len(entries))
+	}
+}
+
+// The bundle over the real socket: a skill whose body sends the assistant to
+// its own reference file installs with that file beside it, and the manifest
+// the person was shown names both (nocx-0bsa4.1).
+//
+// It is asserted HERE, off the socket, rather than only in internal/skill,
+// because the manifest is a wire field and the shape a hand-built fixture
+// agrees with is not evidence that the server sends it.
+func TestSkillsInstall_TheBundleTravelsOverTheWire(t *testing.T) {
+	document := "---\nname: deploy\ndescription: Deploy the service\n---\n" +
+		"Read [the notes](references/notes.md) before you start.\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		switch r.URL.Path {
+		case "/skills/deploy/SKILL.md":
+			_, _ = w.Write([]byte(document))
+		case "/skills/deploy/references/notes.md":
+			_, _ = w.Write([]byte("# Notes\n\nStart the service first.\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	conn, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+	url := srv.URL + "/skills/deploy/SKILL.md"
+
+	env := callSkills(t, conn, "skills.preview", url)
+	if env.Error != nil {
+		t.Fatalf("preview: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.preview.schema.json"), env.Result, "skills.preview wire")
+	var preview skill.PreviewResult
+	if err := json.Unmarshal(env.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Files) != 2 || preview.Files[0] != "SKILL.md" || preview.Files[1] != "references/notes.md" {
+		t.Fatalf("files = %v, want the document and the file its body names", preview.Files)
+	}
+
+	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
+		t.Fatalf("install: %+v", env.Error)
+	}
+	notes := filepath.Join(configDir, "installed-skills", "deploy", "references", "notes.md")
+	landed, err := os.ReadFile(notes) //nolint:gosec // the path is this test's own temporary directory
+	if err != nil {
+		t.Fatalf("the file the manifest named did not land: %v", err)
+	}
+	if string(landed) != "# Notes\n\nStart the service first.\n" {
+		t.Errorf("landed = %q, want the bytes the manifest was taken over", landed)
 	}
 }
 

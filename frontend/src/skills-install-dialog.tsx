@@ -39,6 +39,13 @@
  * pattern come from `scan-pattern-words.ts`, which the approval prompt reads
  * too — one vocabulary for one scan.
  *
+ * A SKILL IS NOT ONE FILE, so the ask names every file that will land
+ * (`files`, spec §5 and §8). A body that says "read references/typescript.md"
+ * brings that file with it, `scripts/` included, and approving without being
+ * told so would be approving a name rather than an act. Paths only here: the
+ * viewer that opens each of them is one capability in three places and belongs
+ * to epic nocx-872jc, not to a fourth reader built inside this dialog.
+ *
  * READ AND INSTALL TRAVEL TOGETHER, on one connection. The backend keeps the
  * digest of the document its own preview showed and `skills.install` compares
  * against that record, so a backend that restarted between the two refuses
@@ -47,7 +54,17 @@
  * is laid out so that reading and installing are one sitting rather than two.
  */
 import { For, Show } from 'solid-js'
-import { Button, CodeBlock, FactList, StatusCard, Stack, TextField, type Fact } from './ui'
+import {
+  Button,
+  CodeBlock,
+  FactList,
+  MarkerList,
+  StatusCard,
+  Stack,
+  TextField,
+  type Fact,
+  type MarkerListItem,
+} from './ui'
 import { Dialog } from './ui/dialog'
 import { scanPatternWords } from './scan-pattern-words'
 import type { SkillsPreview } from './generated/skills.preview'
@@ -123,6 +140,17 @@ export function SkillsInstallDialog(props: SkillsInstallDialogProps) {
     ]
   }
 
+  /** THE MANIFEST: every file that will land, in the order the backend sent
+   *  them — SKILL.md first, because that is the one on screen below. A skill
+   *  is no longer one file, and a person approving `references/` and
+   *  `scripts/` they were never told about is approving a name rather than an
+   *  act (spec §5, §8). `included` because that is exactly what the tone
+   *  means: this comes with it. There is no `excluded` row — a file the
+   *  backend refused is a refusal, not a bundle with a gap in it, so it
+   *  arrives in the validation slot above and this list never renders one. */
+  const manifest = (): MarkerListItem[] =>
+    (held()?.files ?? []).map((path) => ({ text: path, tone: 'included' }))
+
   const read = (): void => {
     if (!canRead()) return
     props.onRead()
@@ -196,6 +224,11 @@ export function SkillsInstallDialog(props: SkillsInstallDialogProps) {
               }
             />
             <FactList facts={facts()} ariaLabel="What this document says it is" />
+            {/* WHAT WILL LAND, above the evidence and the body. It is placed
+                here rather than beside the body because it is a fact about
+                the skill, like its name and its description, and not a
+                reading of its contents. */}
+            <MarkerList items={manifest()} />
             {/* EVERY FINDING, ABOVE THE BODY IT IS ABOUT. Warning and never
                 danger: the scan's contract is that a finding is evidence and
                 never a refusal (internal/skill/scan.go), so a tone claiming

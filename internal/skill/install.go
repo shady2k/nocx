@@ -43,7 +43,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/shady2k/nocx/internal/profile"
 )
@@ -91,20 +90,31 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if digestOfDocument(text) != approved {
-		return InstallResult{}, errors.New(
-			"the document at that address is no longer the one you read, so nothing was installed: " +
-				"read it again and decide about the version that is there now")
-	}
 
 	// The same parse and the same scan, over the bytes about to be written.
 	// It is the SAME FUNCTION the preview ran rather than a second copy of
 	// the pipeline, which is what makes "re-runs the pipeline" true and not
-	// merely claimed; the digest above already guarantees the answers match,
-	// so what this buys is that there is only ever one answer to buy.
+	// merely claimed.
+	//
+	// It happens BEFORE the digest comparison now, because the body is what
+	// names the support files and the comparison is over the whole bundle.
+	// Parsing bytes that have not yet been shown to match is not a new
+	// exposure: the preview parsed them under the same conditions, this
+	// function reaches nothing, and NOTHING IS WRITTEN until the comparison
+	// below has passed.
 	document, err := documentPreview(text, rawURL)
 	if err != nil {
 		return InstallResult{}, err
+	}
+	files, err := s.fetchBundle(ctx, rawURL, document.Body)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if digestOfBundle(text, files) != approved {
+		return InstallResult{}, errors.New(
+			"what is at that address is no longer what you read, so nothing was installed: " +
+				"the document or one of the files it refers to has changed since — read it again and decide " +
+				"about the version that is there now")
 	}
 
 	unlock, err := s.lockName(document.Name)
@@ -141,30 +151,38 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	if err := s.checkDirectory(s.installedDir, dir); err != nil {
 		return InstallResult{}, err
 	}
-	var previous []byte
+	// The snapshot is what an undo puts back, and it is the WHOLE DIRECTORY
+	// rather than the previous SKILL.md: a bundle is several writes, and an
+	// undo that restored one file would leave the other half of a replaced
+	// bundle beside a restored document. For a fresh install it is empty,
+	// which is exactly right — undoing then means removing everything that
+	// landed.
+	var previous map[string][]byte
 	if update {
 		if err := s.checkExistingPath(s.installedDir, dir, target, true); err != nil {
 			return InstallResult{}, err
 		}
-		// Read before writing, so a failed record has something to put back.
-		// The file is bounded by the same 64 KiB ceiling everything else here
-		// is, so holding it costs nothing worth naming.
-		approvedBytes, readErr := os.ReadFile(target) //nolint:gosec // the path is derived from a validated name under a contained root
+		snapshot, readErr := snapshotSkillDirectory(dir)
 		if readErr != nil {
 			return InstallResult{}, fmt.Errorf("skill %q: read the version being replaced: %w", document.Name, readErr)
 		}
-		previous = approvedBytes
+		previous = snapshot
+	} else {
+		previous = map[string][]byte{}
 	}
 	if err := s.fs.MkdirAll(dir, managedSkillDirMode); err != nil {
 		return InstallResult{}, fmt.Errorf("skill %q: create directory: %w", document.Name, err)
 	}
-	if err := s.atomicWrite(dir, target, data); err != nil {
-		return InstallResult{}, err
+	// The interval opens on the FIRST byte writeBundle lands and closes when
+	// the record is written on the line after it, or is undone. A failure
+	// part-way through the bundle is inside the interval exactly as a failed
+	// record is, and takes the same undo — which is why the write and the
+	// record share one error path here rather than each having its own.
+	if err := s.writeBundle(document.Name, dir, data, files); err != nil {
+		return InstallResult{}, s.undoInstall(document.Name, dir, previous, err)
 	}
-	// The interval opens HERE — bytes exist on disk — and closes on the next
-	// line or is undone.
 	if err := s.recordApprovalDigest(document.Name, dir, rawURL); err != nil {
-		return InstallResult{}, s.undoInstall(document.Name, dir, target, previous, err)
+		return InstallResult{}, s.undoInstall(document.Name, dir, previous, err)
 	}
 
 	// The approval is spent: it was for one document on one occasion, not a
@@ -174,7 +192,7 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// person's machine keeps. A finding is never a refusal; it is also not
 	// something that should exist only in a dialog that has since closed.
 	slog.Info("skill: installed from a URL",
-		"skill", document.Name, "url", rawURL, "findings", len(document.Findings))
+		"skill", document.Name, "url", rawURL, "findings", len(document.Findings), "files", len(files)+1)
 	return InstallResult{Name: document.Name, Provenance: ProvenanceInstalled}, nil
 }
 
@@ -237,33 +255,33 @@ func (s *Store) planInstall(name, rawURL string) (bool, error) {
 	return true, nil
 }
 
-// undoInstall closes the interval when the record fails after the bytes have
-// landed, and returns the error the person reads either way.
+// undoInstall closes the interval when a write or the record fails after
+// bytes have landed, and returns the error the person reads either way.
 //
-// It never returns nil: recording failed, so the install failed, and the only
-// question this answers is whether the disk was left as it was found.
-func (s *Store) undoInstall(name, dir, target string, previous []byte, cause error) error {
-	if err := s.undoWrite(dir, target, previous); err != nil {
+// It never returns nil: the install failed, and the only question this
+// answers is whether the disk was left as it was found.
+//
+// WHAT IS ON DISK AFTERWARDS, enumerated because a bundle is several writes
+// and AGENTS.md asks for the partial failures by name. If file three of five
+// fails, restoreSkillDirectory removes files one and two and rewrites nothing
+// (a fresh install), or rewrites every file the previous bundle had and
+// removes every file it did not (an update) — so the next Discover sees
+// either no skill at all or the version the person approved before, and never
+// a directory holding half of each. The empty DIRECTORIES a removed bundle
+// leaves behind are not a state: discovery keys on SKILL.md, and a directory
+// without one is not a skill.
+//
+// Where the undo itself fails, the fail-closed digest is the backstop and the
+// refusal says so: the skill is `changed`, which Settings shows with an
+// Approve beside it, and the assistant is never offered it. That is the same
+// state a crash between the writes would leave, and it is the one arm of the
+// interval that cannot be closed by code, only made visible.
+func (s *Store) undoInstall(name, dir string, previous map[string][]byte, cause error) error {
+	if err := s.restoreSkillDirectory(dir, previous); err != nil {
 		return fmt.Errorf(
-			"skill %q: recording the install failed (%w), and undoing the write failed too (%v): "+
-				"the file on disk is not the one nocx has a digest for, so the skill is listed as changed and "+
+			"skill %q: the install failed (%w), and undoing what it had written failed too (%v): "+
+				"the files on disk are not the ones nocx has a digest for, so the skill is listed as changed and "+
 				"is not offered to the assistant until you approve or remove it", name, cause, err)
 	}
-	return fmt.Errorf("skill %q: recording the install failed, so nothing was installed: %w", name, cause)
-}
-
-func (s *Store) undoWrite(dir, target string, previous []byte) error {
-	if previous != nil {
-		// An update: the version the person approved goes back, through the
-		// same atomic path that replaced it.
-		return s.atomicWrite(dir, target, previous)
-	}
-	// A fresh install: the bytes go away entirely. The DIRECTORY is left
-	// behind, exactly as Delete leaves one, because a directory with no
-	// SKILL.md in it discovers nothing — and removing a directory we may not
-	// have created is a larger claim than this failure justifies.
-	if err := s.fs.Remove(target); err != nil {
-		return err
-	}
-	return s.fs.Sync(dir)
+	return fmt.Errorf("skill %q: the install failed, so nothing was installed: %w", name, cause)
 }

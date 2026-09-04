@@ -30,6 +30,12 @@ export interface SkillsPreview {
    */
   url: string
   /**
+   * Every path that will land under the skill's directory, slash-separated and relative to it, SKILL.md first and the rest sorted. This is the manifest the approval names (design §5): a skill's body sends the assistant to its own reference files, so installing SKILL.md alone would install a skill whose instructions point at nothing. The list is what the document itself names — one hop, no repository enumeration — and every entry is fetched before this result is returned, so a file that could not be fetched is a refusal rather than a shorter list. Paths only: reading each file is the viewer's job. Never null and never empty; a skill that references nothing is ["SKILL.md"].
+   *
+   * @minItems 1
+   */
+  files: [string, ...string[]]
+  /**
    * EVERY static-scan match in the body, in pattern order, never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. Never null: no matches is []. A finding is evidence and never a refusal.
    */
   findings: {

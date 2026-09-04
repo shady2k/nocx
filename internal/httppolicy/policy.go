@@ -269,6 +269,25 @@ func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error 
 		return fmt.Errorf("%s: stopped after %d redirects", t.component, t.maxRedirects)
 	}
 	if len(via) > 0 && Origin(req.URL) != Origin(via[0].URL) {
+		// SOME REQUESTS MAY NOT LEAVE THEIR ORIGIN AT ALL, and that is a
+		// stronger rule than the credential one below rather than a
+		// variation on it: what is being protected is not a secret leaving
+		// with the request but the ANSWER coming back. A caller that
+		// resolves relative paths against the address a person named — the
+		// skill bundle's support files (internal/skill/bundle.go) — is
+		// asking every hop for bytes from that one origin, so a redirect
+		// that lands anywhere else returns bytes nobody agreed to, whether
+		// or not a credential went with them.
+		//
+		// It is checked HERE, on every hop, and not by comparing the
+		// caller's URL against a response, because a caller never sees the
+		// intermediate hops: net/http follows them and hands back only the
+		// last one. A same-host check on the first request — which is what
+		// hermes's UrlSource does — passes a chain that leaves on hop two.
+		if sameOriginOnly(req.Context()) {
+			return fmt.Errorf("%s: refusing to follow a redirect from %s to %s: this request may only be answered "+
+				"by the origin it named", t.component, Origin(via[0].URL), Origin(req.URL))
+		}
 		if secretInURL(req.Context()) {
 			// The ORIGIN and never the URL: the URL is the thing carrying
 			// the credential, and this message reaches a log the person did
@@ -294,6 +313,26 @@ func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error 
 // request into every redirect hop (net/http clones the initial request's
 // context), so the names are available exactly when they are needed.
 type customHeaderNamesKey struct{}
+
+// sameOriginOnlyKey marks a request that may not be answered by any origin
+// but the one it named. Like secretInURLKey it is a bool on the context,
+// which is the one channel that survives into every redirect hop, and like it
+// nothing sets it by default: a caller opts in when the ANSWER's origin is
+// part of what it is asking for.
+type sameOriginOnlyKey struct{}
+
+// WithSameOriginOnly marks ctx as a request that must not cross an origin.
+// Set by the callers that resolve a path against an address a person named
+// and would have no way to notice that the bytes came from somewhere else.
+func WithSameOriginOnly(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sameOriginOnlyKey{}, true)
+}
+
+// sameOriginOnly reads the mark back.
+func sameOriginOnly(ctx context.Context) bool {
+	marked, _ := ctx.Value(sameOriginOnlyKey{}).(bool)
+	return marked
+}
 
 // secretInURLKey marks a request whose ADDRESS carries a credential. It is a
 // bool and never the value: the redirect rule needs to know that there is

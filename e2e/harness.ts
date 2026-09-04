@@ -1118,35 +1118,45 @@ export async function answerPermission(
   answer: PermissionAnswer,
 ): Promise<void> {
   const words = PERMISSION_WORDS[effect]
-  // An unanswered kind of work is a QUESTION and an answered one is a
-  // sentence, so the control that opens the panel has one of two labels.
-  // Which one is on screen depends on what earlier steps did, and deciding
-  // that is exactly what every caller should not have to do.
-  const open = page.locator(
-    `button[aria-label="Change ${words}"], ` +
-      `button[aria-label="Answer this now: may the assistant ${words}?"]`,
-  )
-  await baseExpect(open).toHaveCount(1, { timeout: 15_000 })
-  await open.click()
-  const panel = page
-    .locator('.nocx-dialog__panel')
-    .filter({ has: page.locator('[data-permissions-panel="change"]') })
-  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
-  await panel.getByRole('button', { name: new RegExp(`^${answer} `) }).click()
+  // THE ANSWERS ARE ON THE ROW, in whichever list the row is currently in
+  // (nocx-6szvl). There is no dialog on this path any more: a row's panel
+  // carries the places and nothing else, so a row with no place to pick does
+  // not open one, and answering it behind a dialog was a click that bought a
+  // person nothing.
+  const row = page.locator(`[data-answer="row:${effect}"]`)
+  await baseExpect(row).toHaveCount(1, { timeout: 15_000 })
+
   if (answer === 'Ask every time') {
+    // TAKING AN ANSWER BACK HAS ONE NAME, and it is Forget. It used to be
+    // Change → "Ask every time" as well, which was the same act minus the
+    // preview of what it releases; that spelling no longer exists, because
+    // "Ask every time" is the state an unanswered row is IN rather than an
+    // answer anybody gives.
+    await row.getByRole('button', { name: `Forget ${words}`, exact: true }).click()
+    const panel = page
+      .locator('.nocx-dialog__panel')
+      .filter({ has: page.locator('[data-permissions-panel="forget"]') })
+    await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+    await panel.getByRole('button', { name: 'Forget it', exact: true }).click()
     // Taking an answer back does not delete the row, it MOVES it: the kind of
     // work is back among the questions nobody has answered. Waiting on its
     // arrival there, rather than only on its absence from the answered list,
     // is what makes this a wait on the store's word and not on a repaint.
     await baseExpect(permissionAnswer(page, effect)).toHaveCount(0, { timeout: 15_000 })
     await baseExpect(permissionQuestion(page, effect)).toHaveCount(1, { timeout: 15_000 })
-  } else {
-    await baseExpect(permissionAnswer(page, effect)).toContainText(answer, { timeout: 15_000 })
+    await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
+    return
   }
-  // `exact` because the Dialog kit gives every panel a "Close dialog" icon
-  // button as well as this footer one, and a loose name matches both.
-  await panel.getByRole('button', { name: 'Close', exact: true }).click()
-  await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
+
+  // Idempotent, and it has to be: a row already at this answer offers no
+  // button for it, because a control that writes what is already written is
+  // the defect this shape was built to remove. Reporting the state a caller
+  // asked for is the honest answer; failing on the missing control would be
+  // reporting the fix as a break.
+  if ((await permissionAnswer(page, effect).filter({ hasText: answer }).count()) > 0) return
+
+  await row.getByRole('button', { name: new RegExp(`^${answer} `) }).click()
+  await baseExpect(permissionAnswer(page, effect)).toContainText(answer, { timeout: 15_000 })
 }
 
 /**

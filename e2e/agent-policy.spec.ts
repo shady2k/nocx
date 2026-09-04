@@ -57,6 +57,7 @@ import {
   bindEndpoint,
   createAiEndpoint,
   permissionAnswer,
+  permissionQuestion,
   setDefaultModel,
   settingsReady,
   VaultBackend,
@@ -361,10 +362,10 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     await expect(observeAnswer).toContainText('Allowed')
     await expect(observeAnswer).toContainText('in every session, from now on')
 
-    // ── 6. Revoking is the SAME gesture, not a second one: Change, then
-    // "Ask every time". There is no Save button — the answer writes and the
-    // page adopts what a fresh read returns — so the answer LEAVING the list
-    // is the store's word, never the draft's.
+    // ── 6. Revoking has ONE name — Forget, which previews what it releases
+    // before it is taken (nocx-6szvl). There is no Save button — the answer
+    // writes and the page adopts what a fresh read returns — so the answer
+    // LEAVING the list is the store's word, never the draft's.
     await answerPermission(page, 'observe', 'Ask every time')
     await expect(observeAnswer).toHaveCount(0, { timeout: 15_000 })
 
@@ -456,10 +457,12 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // in.
     await openSettings(page, SETTINGS_POLICY_NAV)
     // Not listed among the answers at all: a session answer never reached
-    // the global matrix, so there is nothing on this page to take back.
+    // the global matrix, so there is nothing on this page to take back. It is
+    // still an unanswered QUESTION, which is where the row belongs and what
+    // the two lists are for — asserted by the list it sits in rather than by
+    // the control that opens a dialog, because a row with no place to pick
+    // does not open one at all (nocx-6szvl).
     await expect(permissionAnswer(page, 'observe')).toHaveCount(0, { timeout: 15_000 })
-    await expect(
-      page.getByRole('button', { name: `Answer this now: may the assistant ${OBSERVE_WORDS}?` }),
-    ).toBeVisible({ timeout: 15_000 })
+    await expect(permissionQuestion(page, 'observe')).toHaveCount(1, { timeout: 15_000 })
   })
 })

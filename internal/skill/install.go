@@ -110,7 +110,7 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if digestOfBundle(text, files) != approved {
+	if digestOfBundle(wholeBundle(text, files)) != approved {
 		return InstallResult{}, errors.New(
 			"what is at that address is no longer what you read, so nothing was installed: " +
 				"the document or one of the files it refers to has changed since — read it again and decide " +

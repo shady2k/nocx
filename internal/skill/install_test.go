@@ -228,7 +228,7 @@ func TestInstall_WritesTheDocumentAndRecordsTheDigestAndTheSourceTogether(t *tes
 	if digest != onDisk {
 		t.Errorf("recorded digest = %q, want the hash of what is on disk %q", digest, onDisk)
 	}
-	if digest == digestOfBundle(installableDocument, nil) {
+	if digest == digestOfBundle(wholeBundle(installableDocument, nil)) {
 		t.Error("the recorded digest is the digest of the FETCHED bundle, not of the written files")
 	}
 

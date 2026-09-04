@@ -104,6 +104,32 @@
  * defence rather than a backstop — layer 2 (a drafting step kept untainted)
  * does not apply at all when a stranger wrote the body.
  *
+ * AND AN INSTALL IS ASKED ABOUT AS A SKILL, NOT AS AN ADDRESS
+ * (nocx-ojfuc.2). `skills.install`'s whole argument is a URL. The model was
+ * asked to install a skill from a page and RESOLVED that page to an address;
+ * what it resolved to is the thing the person is actually deciding, so a
+ * question that named only the ask would let somebody approve a page they
+ * read and receive a repository they never saw. The backend therefore sends
+ * the resolution — the fetched address, the skill's own name and description,
+ * the digest the write is bound to, and every file that will land WITH ITS
+ * BYTES — and this window draws all of it.
+ *
+ * THE DESCRIPTION IS THE PROMINENT PART, and that is not typography. It is
+ * the one part of a skill that lives in the assistant's system prompt
+ * afterwards, so it is the sentence that decides when these instructions get
+ * reached for, on every ask, forever. The window says that in those words: a
+ * person weighing a body of instructions needs to know which of its parts
+ * outlives this decision.
+ *
+ * AND THE FILES ARE READ THROUGH THE SAME VIEWER AS EVERYTHING ELSE HERE.
+ * None of them is on disk yet — that is the point of asking first — so there
+ * is nowhere to send a person to read one and nothing to request: the bytes
+ * came with the question. FileReadout draws them, marked where the scan
+ * matched, exactly as the Skills page draws an installed file and as the
+ * block below draws a named script. One capability in three places is epic
+ * nocx-872jc; a fourth reader built here would be the defect it spent itself
+ * removing.
+ *
  * AND THE SCRIPT A COMMAND NAMES IS SHOWN (nocx-872jc.3). `bash deploy.sh` is
  * eleven characters and the whole of its meaning is in a file this window said
  * nothing about, so approving it was approving a NAME. The file's current
@@ -127,11 +153,13 @@ import {
   CodeBlock,
   FactList,
   FileReadout,
+  MarkerList,
   Prompt,
   Stack,
   StatusCard,
   type Fact,
   type FileReadoutOutcome,
+  type MarkerListItem,
   type StatusCardTone,
 } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
@@ -173,8 +201,15 @@ type ApprovalScope = AgentApprove['scope']
 const COMMAND_TOOL = 'session.run' satisfies AgentApprovalRequested['tool']
 const NETWORK_TOOL = 'fetch.url' satisfies AgentApprovalRequested['tool']
 
-/** What the window keys its two by-name branches on, for the test that
- *  proves the chain from this file to the declaration table is unbroken. */
+/**
+ * What the window keys its two by-name branches on, for the test that proves
+ * the chain from this file to the declaration table is unbroken.
+ *
+ * `skills.install` is deliberately NOT a third entry. Its block is keyed on
+ * the PRESENCE of the `install` field, which the backend fills for that tool
+ * and no other, so there is no name here to go stale — the strongest form of
+ * the rule the two constants above were bought by, not an exception to it.
+ */
 export const TOOLS_THIS_WINDOW_NAMES = {
   command: COMMAND_TOOL,
   network: NETWORK_TOOL,
@@ -186,6 +221,10 @@ type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
 
 /** One file the proposed command names, read as the question was asked. */
 type ScriptReading = NonNullable<AgentApprovalRequested['scripts']>[number]
+
+/** What a skills.install proposal resolved to, and one file it would write. */
+type SkillInstall = NonNullable<AgentApprovalRequested['install']>
+type SkillInstallFile = SkillInstall['files'][number]
 
 /**
  * What the command DOES with the file, in a person's words (nocx-872jc.3).
@@ -564,6 +603,54 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const scripts = (): readonly ScriptReading[] => ask().scripts ?? []
 
   /**
+   * The skill an install proposal resolved to, or null. The FIELD is the
+   * discriminator and not the tool name: the backend fills it for
+   * `skills.install` and for nothing else, and a branch that compared names
+   * would be one more literal to go stale on a rename (see
+   * TOOLS_THIS_WINDOW_NAMES).
+   */
+  const install = (): SkillInstall | null => ask().install ?? null
+
+  /**
+   * THE MANIFEST: every file that would land, in the order the backend sent
+   * them — SKILL.md first, because it is the document the others were named
+   * by. A skill is not one file, and a person told only about SKILL.md while
+   * `references/` and `scripts/` land beside it is approving a name rather
+   * than an act (design §5, §8). `included` is exactly what the tone means:
+   * this comes with it. There is no `excluded` row and there never will be —
+   * a file the backend could not fetch refuses the whole preview, so a bundle
+   * with a gap in it never reaches a question at all.
+   *
+   * It sits above the bytes rather than instead of them: the list is a fact
+   * about the skill, like its name, and the readouts below are the reading.
+   * Both are projections of the one array, so they cannot drift apart.
+   */
+  const installManifest = (): MarkerListItem[] =>
+    (install()?.files ?? []).map((file) => ({ text: file.path, tone: 'included' }))
+
+  /**
+   * One file that would land, as the viewer's own answer to "what is on
+   * screen". Always the `text` branch, and that is a property of this path
+   * rather than a simplification: every file here was fetched whole, as
+   * UTF-8, under the per-file ceiling, before the question could exist — a
+   * file that could not be got refuses the preview and no question is asked.
+   *
+   * The findings are MARKED WHERE THEY SIT rather than quoted underneath,
+   * which is what having the bytes on the window buys: the install dialog
+   * quotes its findings because a support file's bytes are not on it at all.
+   * The words for a pattern come from `scan-pattern-words.ts`, the one owner
+   * of that vocabulary in this renderer.
+   */
+  const installFileOutcome = (file: SkillInstallFile): FileReadoutOutcome => ({
+    kind: 'text',
+    text: file.text,
+    marks: file.findings.map((finding) => ({
+      lineNumber: finding.lineNumber,
+      label: scanPatternWords(finding.patternId),
+    })),
+  })
+
+  /**
    * The arguments the window has ALREADY stated, which are therefore not
    * repeated as rows. Derived from what is actually rendered rather than
    * from the tool name: `run`'s block states `command`, and the machine and
@@ -574,6 +661,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     const keys = new Set<string>()
     if (proposedCommand() !== null) keys.add('command')
     if (where() !== null) keys.add('sessionId')
+    // An install's own rows state the address that was FETCHED, which is the
+    // resolved fact; the model's `url` argument is the same string arriving
+    // by a worse route. One statement, and it is the resolved one.
+    if (install() !== null) keys.add('url')
     return keys
   }
 
@@ -674,6 +765,30 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             : "the tab's directory as of now, and the shell has not confirmed it",
         })
       }
+    }
+    // WHAT THE ADDRESS RESOLVED TO, as rows of the one fact list
+    // (nocx-ojfuc.2). The name and the source are what a person checks before
+    // adopting anything; the description is not here, because a row states a
+    // value beside a name and this window owes that sentence more than a row.
+    const skill = install()
+    if (skill !== null) {
+      rows.push({ name: 'name', value: skill.name })
+      rows.push({
+        name: 'source',
+        value: skill.url,
+        note: 'the address that was fetched, and what an update would re-read',
+      })
+      rows.push({
+        name: 'digest',
+        value: skill.digest,
+        // WHAT A DIGEST IS AND IS NOT, said here because a digest presented
+        // as assurance is worse than none: it reads as provenance and is
+        // not one (design §5 — good change detection after the first
+        // install, no evidence at it). What it does buy is stated too, and
+        // it is real: the install re-fetches and refuses anything that no
+        // longer hashes to this.
+        note: 'what these bytes hash to — the install refuses anything else. It says nothing about who wrote them',
+      })
     }
     // Only the ARGUMENTS are partitioned, and only they should be. The pane's
     // rows above and the expansion's rows below are single-line by
@@ -837,9 +952,43 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <Show
             when={proposedCommand()}
             fallback={
-              <p>
-                The assistant is asking to call <strong>{ask().tool}</strong>.
-              </p>
+              <Show
+                when={install()}
+                fallback={
+                  <p>
+                    The assistant is asking to call <strong>{ask().tool}</strong>.
+                  </p>
+                }
+              >
+                {(skill) => (
+                  <>
+                    <p>
+                      The assistant read a skill at an address it resolved, and is asking to install
+                      it. What it read is below — the name, the source and every file that would
+                      land.
+                    </p>
+                    {/*
+                      THE DESCRIPTION, PROMINENT, AND WHY IT IS. It is a
+                      StatusCard rather than a row because a row states a
+                      value beside a name, and this sentence is not a value:
+                      it is the one part of a skill that lives in the
+                      assistant's system prompt after the install, so it is
+                      what decides when these instructions get reached for on
+                      every ask from now on. `neutral`, because it is a fact
+                      about the skill and not a condition — nothing here is
+                      wrong, and a tone that said otherwise would be this
+                      window making a judgement the person is here to make.
+                      The description is the TITLE so it is verbatim, the way
+                      the source address is verbatim on its row.
+                    */}
+                    <StatusCard
+                      tone="neutral"
+                      title={skill().description}
+                      description="This is what the assistant is offered on every ask once this skill is installed — the one part of a skill that lives in its system prompt, so it is the sentence that decides when these instructions get reached for."
+                    />
+                  </>
+                )}
+              </Show>
             }
           >
             {(command) => (
@@ -903,6 +1052,43 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             </CodeBlock>
           )}
         </For>
+        {/*
+          WHAT WOULD LAND, after the facts: the manifest first as a fact about
+          the skill, then the bytes of each file (nocx-ojfuc.2). The lead is
+          said ONCE above the whole set, as the script block below says its
+          own, because it is one sentence about what these bytes are.
+
+          It says the install is BOUND to them, which is a stronger claim than
+          the script block makes and a true one: the address is fetched again
+          and the whole bundle is compared against the digest on the row above,
+          so bytes that moved between this question and the answer are refused
+          rather than written. The script block's disclaimer is the opposite
+          sentence — a command's file can change before it runs — and the two
+          must not be confused, which is why neither is worded generically.
+        */}
+        <Show when={install()}>
+          {(skill) => (
+            <>
+              <p>
+                Every file this would write, and what each holds. Installing writes exactly these
+                bytes: the address is read again and anything that has changed since is refused.
+              </p>
+              <MarkerList items={installManifest()} />
+              <For each={skill().files}>
+                {(file) => (
+                  <FileReadout
+                    // The path is where the file would SIT, which is what the
+                    // manifest above names it. Mono key, like every other row
+                    // in this window.
+                    facts={[{ name: 'path', value: file.path }]}
+                    ariaLabel={`${file.path}, which installing “${skill().name}” would write`}
+                    outcome={installFileOutcome(file)}
+                  />
+                )}
+              </For>
+            </>
+          )}
+        </Show>
         {/*
           The file the command NAMES, after the facts, because a person reads
           it once they have decided what the command IS (nocx-872jc.3). The

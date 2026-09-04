@@ -900,3 +900,84 @@ func TestInstall_AFindingInASupportFileRefusesNothing(t *testing.T) {
 		t.Errorf("status = %q, want approved: the bytes are the bytes that were read", row.Status)
 	}
 }
+
+// --- what a preview hands out beside the paths -----------------------------
+
+// The manifest and the bytes are ONE list, and the digest is the same list's
+// sum (nocx-ojfuc.2). The approval question the assistant's install raises
+// carries the bytes with it, because a notification has nowhere to send a
+// person for a file that is not on disk and must not be until they answer —
+// so what is asserted here is that the three projections cannot disagree.
+func TestPreview_CarriesEveryFilesBytesBesideTheManifest(t *testing.T) {
+	stand := newBundleStand(t, bundleFiles())
+
+	got, err := stand.store.Preview(context.Background(), stand.server.url)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+
+	if len(got.Bundle) != len(got.Files) {
+		t.Fatalf("bundle = %d files, manifest = %d: a person can read fewer files than they are told will land",
+			len(got.Bundle), len(got.Files))
+	}
+	for i, file := range got.Bundle {
+		if file.Path != got.Files[i] {
+			t.Fatalf("bundle[%d] = %q, manifest[%d] = %q: two answers to what lands", i, file.Path, i, got.Files[i])
+		}
+	}
+	if got.Bundle[0].Path != "SKILL.md" {
+		t.Fatalf("bundle[0] = %q, want SKILL.md first — the file the others were named by", got.Bundle[0].Path)
+	}
+	// THE WHOLE DOCUMENT, frontmatter included, and not Body. The findings
+	// count lines from the first byte of the file they name, so a reader
+	// shown the body alone would have every SKILL.md line number off by the
+	// height of the frontmatter.
+	if got.Bundle[0].Text != bundleDocument {
+		t.Fatalf("SKILL.md text = %q, want the whole served document", got.Bundle[0].Text)
+	}
+	bytesFor := map[string]string{}
+	for _, file := range got.Bundle {
+		bytesFor[file.Path] = file.Text
+	}
+	if bytesFor["references/typescript.md"] != "# TypeScript\n\nUse strict mode.\n" {
+		t.Fatalf("references/typescript.md = %q, want the bytes that were served", bytesFor["references/typescript.md"])
+	}
+	if bytesFor["scripts/setup.sh"] != "#!/bin/sh\necho setting up\n" {
+		t.Fatalf("scripts/setup.sh = %q, want the bytes that were served", bytesFor["scripts/setup.sh"])
+	}
+	// The digest is the one the install compares against, computed over
+	// exactly the list above — not a second sum over something else.
+	if got.Digest != digestOfBundle(got.Bundle) {
+		t.Fatalf("digest = %q, want the sum of the bundle that was handed out", got.Digest)
+	}
+	if got.Digest == "" {
+		t.Fatal("the preview carries no digest, so the question can name none")
+	}
+}
+
+// The bytes handed out are the bytes the install is bound to: change one of
+// them at the origin and the install refuses. Asserted through the digest the
+// preview published, so "what was shown" and "what may be written" are the
+// same value rather than two that happen to agree.
+func TestPreview_TheDigestItPublishesIsWhatTheInstallEnforces(t *testing.T) {
+	stand := newBundleStand(t, bundleFiles())
+
+	shown, err := stand.store.Preview(context.Background(), stand.server.url)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	stand.server.set("/skills/deploy/scripts/setup.sh", "#!/bin/sh\necho something else\n")
+
+	if _, installErr := stand.store.Install(context.Background(), stand.server.url); installErr == nil {
+		t.Fatal("the install wrote bytes that were never shown")
+	} else if !strings.Contains(installErr.Error(), "no longer what you read") {
+		t.Fatalf("install = %v, want the refusal of a bundle that moved", installErr)
+	}
+	if _, _, present := stand.landed(t, "SKILL.md"); present {
+		t.Fatal("a refused install left a skill on disk")
+	}
+	// And the value the question named is still the value of what was read.
+	if shown.Digest != digestOfBundle(shown.Bundle) {
+		t.Fatalf("digest = %q, want the sum of what was shown", shown.Digest)
+	}
+}

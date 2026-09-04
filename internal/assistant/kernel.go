@@ -238,7 +238,24 @@ type ApprovalRequest struct {
 	// is evidence about the bytes, never the body itself. The shape is
 	// skill.Finding because the scanner that produced it owns the spelling —
 	// a copy declared here would agree with it until the day it did not.
+	//
+	// A skills.install proposal fills Install instead and leaves this empty:
+	// its findings are attached to the files they matched in, where a
+	// surface can mark each on its own line (see request).
 	Finding *skill.Finding `json:"finding,omitempty"`
+	// Install is what an install proposal RESOLVED to — the address that was
+	// fetched, the skill's name and description, the digest the write is
+	// bound to, and every file that will land with its bytes
+	// (nocx-ojfuc.2). Absent for every other proposal.
+	//
+	// It is carried IN the question, like Scripts and for the same reason:
+	// none of these files is on disk yet, so there is nowhere to send a
+	// person to read one, and a notification has no way to answer a
+	// follow-up. Unlike Scripts it is not merely advisory — the digest here
+	// is the value Install refuses to write past — but nothing on this
+	// struct enforces that: the store does, from the record it kept when it
+	// showed these bytes.
+	Install *ApprovalInstall `json:"install,omitempty"`
 	// Classifier is the classifier's verdict or bounded failure fact for a
 	// skills write. It is absent for ordinary policy approvals.
 	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
@@ -889,19 +906,23 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 				req.Finding = &finding
 			}
 		}
-	case preview != nil && len(preview.Findings) > 0:
-		// skills.install's finding does NOT come out of the arguments,
-		// because its arguments are one address: it comes out of the
-		// resolution the kernel ran before this ask was built, and it may
-		// name a bundled support file rather than SKILL.md — which is why
-		// skill.Finding has always carried the path it matched in.
+	case preview != nil:
+		// AN INSTALL IS ASKED ABOUT AS A SKILL, NOT AS AN ADDRESS
+		// (nocx-ojfuc.2). Its arguments are one URL; everything a person
+		// decides on — the resolved address, the name, the description, the
+		// digest and every file that will land, with its bytes — comes out
+		// of the resolution the kernel ran before this ask was built.
 		//
-		// One finding, like the two above, and for the same reason: this
-		// field is one finding wide. The preview holds every match in the
-		// whole bundle and the surface that shows them all is the approval
-		// window's (nocx-ojfuc.2), not this row.
-		finding := preview.Findings[0]
-		req.Finding = &finding
+		// AND IT DOES NOT ALSO FILL Finding. That field is one finding
+		// wide, and nocx-ojfuc.1 filled it here as a placeholder for this
+		// bead. Now that every file travels with its own findings, marked
+		// on the line each matched, a row repeating the first of them would
+		// be a second surface owning one fact — and the loser of that pair
+		// goes on advertising what it can no longer deliver. The skill
+		// WRITE tools above keep the row: they propose one file's body,
+		// nothing carries its bytes for them, and there is nothing else on
+		// their question for a finding to be marked in.
+		req.Install = InstallFactsFor(preview)
 	}
 	return req
 }

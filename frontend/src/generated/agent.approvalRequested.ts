@@ -97,7 +97,7 @@ export interface AgentApprovalRequested {
     id: string
   } | null
   /**
-   * Skill write only: the first static scan finding in the bytes being proposed, naming the file it was found in. For skills.create and skills.update that file is always SKILL.md, because that is the only file they write; for skills.install it is any file of the fetched bundle, because the finding comes from the document and the support files nocx read before the question was put. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
+   * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
    */
   finding?: {
     path: string
@@ -222,6 +222,72 @@ export interface AgentApprovalRequested {
      */
     reason: string
   }[]
+  /**
+   * skills.install only (nocx-ojfuc.2): what the proposed address RESOLVED to. The tool's arguments are one URL, and an address is not something anybody can decide about — the model was asked to install a skill from a page, and what it resolved that page to is the thing the person is actually deciding. A question naming the ask rather than the answer would let somebody approve a page they read and receive a repository they never saw. So this carries the resolution: the address that was fetched, the name and description the document gives itself, the digest the write is bound to, and EVERY file that will land, with its bytes. Absent for every other proposal. THE BYTES ARE HERE rather than behind a request, because none of these files is on disk yet and must not be until the person answers: skills.file reads an INSTALLED skill, a notification cannot answer a follow-up, and bytes fetched a second time from a mutable server slot would not be the bytes the question was built from. It is the shape `scripts` already has for the file a command names. The size is bounded upstream and not here: internal/skill refuses a bundle over 32 files, over 512 KiB of support text or with a document over 64 KiB before any question can exist.
+   */
+  install?: {
+    /**
+     * The address that was FETCHED — the one the digest, the manifest and every byte below came from, and never a redirect target. It is sent rather than left to the surface to dig out of `arguments`, so the question states its subject once.
+     */
+    url: string
+    /**
+     * The skill's name, from the document's own frontmatter. A URL's path never names a skill.
+     */
+    name: string
+    /**
+     * The frontmatter description — the one part of a skill that lives in the assistant's system prompt after the install, so it is what decides when these instructions are reached for. Design §5 calls for it to be drawn prominently for exactly that reason.
+     */
+    description: string
+    /**
+     * The sha256 over the whole bundle — the value Install compares its second fetch against, which is what makes "what was approved is what is written" a property rather than a claim. It is CHANGE DETECTION AND NEVER PROVENANCE (design §5: good change detection after the first install, no evidence at it): bytes a stranger served hash to this, and nobody has vouched for them. A surface that dressed it as assurance would be worse than one that omitted it.
+     */
+    digest: string
+    /**
+     * Every file that will land, SKILL.md first and the rest in the manifest's own order — the SAME list skills.preview names, never a shorter one: a person approving a manifest they were shown half of is approving a name rather than an act. There is no `excluded` counterpart and there never will be: a file that could not be fetched refuses the whole preview, so a bundle with a gap in it never reaches a question. SKILL.md is an entry of this list rather than a case beside it.
+     *
+     * @minItems 1
+     */
+    files: [
+      {
+        /**
+         * Where the file will sit, relative to the skill's own directory and slash-separated.
+         */
+        path: string
+        /**
+         * The file verbatim. For SKILL.md that is the WHOLE served document, frontmatter included — not the body: a finding names a file and counts its lines from that file's first byte, so a surface shown the body alone would put every line number out by the height of the frontmatter. There is no refusal vocabulary beside this field, and that is a fact about this path rather than an omission: every file here was fetched whole, as UTF-8, under the per-file ceiling, before the question could exist.
+         */
+        text: string
+        /**
+         * The static-scan matches IN THIS FILE, from the scan the preview already ran over these exact bytes — so a viewer can mark each on the line it matched rather than quoting it somewhere else. Never null: no matches is [], and an empty array is not an all-clear, because the scan is a fixed set of known phrasings. Advisory throughout: a finding is evidence beside the bytes and never a refusal.
+         */
+        findings: {
+          path: string
+          patternId: string
+          line: string
+          lineNumber: number
+        }[]
+      },
+      ...{
+        /**
+         * Where the file will sit, relative to the skill's own directory and slash-separated.
+         */
+        path: string
+        /**
+         * The file verbatim. For SKILL.md that is the WHOLE served document, frontmatter included — not the body: a finding names a file and counts its lines from that file's first byte, so a surface shown the body alone would put every line number out by the height of the frontmatter. There is no refusal vocabulary beside this field, and that is a fact about this path rather than an omission: every file here was fetched whole, as UTF-8, under the per-file ceiling, before the question could exist.
+         */
+        text: string
+        /**
+         * The static-scan matches IN THIS FILE, from the scan the preview already ran over these exact bytes — so a viewer can mark each on the line it matched rather than quoting it somewhere else. Never null: no matches is [], and an empty array is not an all-clear, because the scan is a fixed set of known phrasings. Advisory throughout: a finding is evidence beside the bytes and never a refusal.
+         */
+        findings: {
+          path: string
+          patternId: string
+          line: string
+          lineNumber: number
+        }[]
+      }[],
+    ]
+  } | null
   /**
    * Egress only: what was found and where. Facts, never the material.
    */

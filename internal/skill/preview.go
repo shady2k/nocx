@@ -66,6 +66,31 @@ type PreviewResult struct {
 	// missing manifest and an empty one would be two ways to say the same
 	// thing on the wire.
 	Files []string `json:"files"`
+	// Bundle is the same manifest WITH the bytes — every file that will
+	// land, SKILL.md first, in the order Files names them. Both are
+	// projections of one list (wholeBundle), so the paths a caller lists and
+	// the paths a caller can read are the same paths by construction.
+	//
+	// IT IS NOT ON THE WIRE OF skills.preview, and that is deliberate rather
+	// than an oversight. That result's contract says paths only, because the
+	// dialog it serves shows the body and sends a person to skills.file for
+	// anything else. This field exists for the caller that has NOWHERE to
+	// send them: the assistant's install raises an approval NOTIFICATION,
+	// and a question cannot answer a follow-up request about a bundle that
+	// is not on disk yet and must not be (nocx-ojfuc.2). So the bytes travel
+	// with the question, the way the whole of a named script already travels
+	// with a command approval.
+	Bundle []BundleFile `json:"-"`
+	// Digest is the sha256 over the whole bundle — the exact value Install
+	// compares its second fetch against. It is in-process for the same
+	// reason Bundle is: the approval question names it so a person can see
+	// that what they are reading is what the install is bound to, while
+	// skills.preview's contract has no field for it and the dialog it serves
+	// never needed one.
+	//
+	// It is CHANGE DETECTION AND NEVER PROVENANCE (design §5). Bytes a
+	// stranger served hash to this; nobody has vouched for them.
+	Digest string `json:"-"`
 }
 
 // previewedDocument is what Preview last showed a person, kept on the SERVER
@@ -95,10 +120,10 @@ type previewedDocument struct {
 // let a support file be swapped between the read and the install without the
 // comparison noticing, and a bundle whose reference files changed after they
 // were shown is not the bundle that was approved.
-func (s *Store) rememberPreview(rawURL, text string, files []bundleFile) {
+func (s *Store) rememberPreview(rawURL, digest string) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	s.previewed = &previewedDocument{url: rawURL, digest: digestOfBundle(text, files)}
+	s.previewed = &previewedDocument{url: rawURL, digest: digest}
 }
 
 // approvedPreview answers with the digest of the document Preview showed for
@@ -183,7 +208,13 @@ func (s *Store) Preview(ctx context.Context, rawURL string) (PreviewResult, erro
 	if err != nil {
 		return PreviewResult{}, err
 	}
-	result.Files = bundleManifest(files)
+	// ONE LIST, THREE PROJECTIONS. The manifest the person reads, the bytes
+	// they can open and the digest the install is bound to are all taken
+	// from the same wholeBundle here, so none of the three can name a file
+	// the other two do not.
+	result.Bundle = wholeBundle(text, files)
+	result.Files = bundleManifest(result.Bundle)
+	result.Digest = digestOfBundle(result.Bundle)
 	// THE SUPPORT FILES ARE SCANNED HERE, where their bytes are, and not in
 	// documentPreview, which is pure and reaches nothing (see its Files
 	// note). This is the one place in the install path that holds a whole
@@ -194,7 +225,7 @@ func (s *Store) Preview(ctx context.Context, rawURL string) (PreviewResult, erro
 	// before the approval, which is the point of a preview.
 	result.Findings = append(result.Findings, scanBundleFiles(files)...)
 
-	s.rememberPreview(rawURL, text, files)
+	s.rememberPreview(rawURL, result.Digest)
 	return result, nil
 }
 

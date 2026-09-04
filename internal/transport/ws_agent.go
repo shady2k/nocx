@@ -480,6 +480,14 @@ type agentApprovalRequested struct {
 	// no file to execute or source, so a proposal with no script draws no
 	// empty affordance.
 	Scripts []assistant.ScriptReading `json:"scripts,omitempty"`
+	// Install is what a skills.install proposal RESOLVED to (nocx-ojfuc.2):
+	// the address that was fetched, the skill's own name and description,
+	// the digest the write is bound to, and every file that will land with
+	// its bytes. The model proposed an ADDRESS, and an address is not
+	// something anybody can decide about — this is the answer that address
+	// resolved to, which is what the person is actually being asked. Absent
+	// for every other proposal.
+	Install *assistant.ApprovalInstall `json:"install,omitempty"`
 }
 
 type agentApprovalStanding struct {
@@ -1717,6 +1725,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 		n.Expansion = ap.Expansion
 		n.Scripts = ap.Scripts
+		n.Install = ap.Install
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings

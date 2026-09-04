@@ -116,12 +116,19 @@ var supportLinkPattern = regexp.MustCompile(
 var supportTraversalPattern = regexp.MustCompile(
 	"(?m)(?:references|scripts)/(?:[^\\s)`\"'<>]*/)?\\.\\.(?:/|$)")
 
-// bundleFile is one support file as it will be written: the path relative to
-// the skill's own directory, slash-separated, and the text.
+// BundleFile is one file of a bundle as it will be written: the path relative
+// to the skill's own directory, slash-separated, and the text.
 //
 // Text and not bytes. Everything here can reach a reader, so everything here
 // is text — see the header.
-type bundleFile struct {
+//
+// It is EXPORTED because a preview now hands the whole bundle out of this
+// package (preview.go): the approval question the assistant's install raises
+// carries every file's bytes, so a person can read what will land before they
+// answer. A second struct declared out there for the same pair of strings
+// would be the second spelling of "one file of a bundle", and the two would
+// agree until the day one of them grew a field.
+type BundleFile struct {
 	Path string
 	Text string
 }
@@ -262,7 +269,7 @@ func fileShaped(clean string) bool {
 // land, and the install must write what was shown, and the only way both can
 // be true is for one function to answer what the bundle is and for the digest
 // to be taken over its whole answer.
-func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]bundleFile, error) {
+func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]BundleFile, error) {
 	rels, err := referencedSupportPaths(body)
 	if err != nil {
 		return nil, err
@@ -280,7 +287,7 @@ func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]bundleF
 		return nil, fmt.Errorf("that skill's address cannot be resolved against: %w", err)
 	}
 
-	files := make([]bundleFile, 0, len(rels))
+	files := make([]BundleFile, 0, len(rels))
 	var total int
 	for _, rel := range rels {
 		// The path is put through URL.Path rather than concatenated, so the
@@ -314,7 +321,7 @@ func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]bundleF
 				"that skill's files come to more than the %d KiB a bundle may be, so nothing was installed",
 				maxBundleBytes>>10)
 		}
-		files = append(files, bundleFile{Path: rel, Text: doc.Text})
+		files = append(files, BundleFile{Path: rel, Text: doc.Text})
 	}
 	return files, nil
 }
@@ -328,12 +335,30 @@ func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]bundleF
 // a rule that scanned `references/` and skipped `scripts/`, or the reverse,
 // would be a second opinion about which of a skill's files matter, held in
 // one place and contradicted by the manifest the person was just shown.
-func scanBundleFiles(files []bundleFile) []Finding {
+func scanBundleFiles(files []BundleFile) []Finding {
 	findings := make([]Finding, 0)
 	for _, file := range files {
 		findings = append(findings, Scan(file.Path, []byte(file.Text))...)
 	}
 	return findings
+}
+
+// wholeBundle is SKILL.md and every support file, in the order they land —
+// the document first, because it is the one the person is reading and the one
+// the others were named by.
+//
+// ONE OWNER OF THAT ORDER. It used to live in three places at once: the
+// digest wrote "SKILL.md" first, the manifest prepended it, and nothing
+// carried the document's bytes beside its support files at all. Now the
+// digest, the manifest and the bytes the approval question shows are all
+// projections of this one list, so a fourth reader cannot come to a different
+// answer about what a bundle IS or what order it is in — which matters
+// because the digest is what binds an approval to an install, and a manifest
+// that disagreed with it would name files the comparison never covered.
+func wholeBundle(document string, files []BundleFile) []BundleFile {
+	whole := make([]BundleFile, 0, len(files)+1)
+	whole = append(whole, BundleFile{Path: "SKILL.md", Text: document})
+	return append(whole, files...)
 }
 
 // digestOfBundle is the record an approval is kept as: SKILL.md and every
@@ -344,11 +369,9 @@ func scanBundleFiles(files []bundleFile) []Finding {
 // support file change between the read and the install without the comparison
 // noticing — an approval that covers only the file the person happened to be
 // looking at is not an approval of what lands.
-func digestOfBundle(document string, files []bundleFile) string {
+func digestOfBundle(whole []BundleFile) string {
 	h := sha256.New()
-	writeDigestPart(h, []byte("SKILL.md"))
-	writeDigestPart(h, []byte(document))
-	for _, file := range files {
+	for _, file := range whole {
 		writeDigestPart(h, []byte(file.Path))
 		writeDigestPart(h, []byte(file.Text))
 	}
@@ -357,10 +380,9 @@ func digestOfBundle(document string, files []bundleFile) string {
 
 // bundleManifest is what the person is shown: every path that will land,
 // SKILL.md first because it is the file they are reading.
-func bundleManifest(files []bundleFile) []string {
-	manifest := make([]string, 0, len(files)+1)
-	manifest = append(manifest, "SKILL.md")
-	for _, file := range files {
+func bundleManifest(whole []BundleFile) []string {
+	manifest := make([]string, 0, len(whole))
+	for _, file := range whole {
 		manifest = append(manifest, file.Path)
 	}
 	return manifest

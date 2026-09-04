@@ -573,7 +573,7 @@ func (s *Store) atomicWrite(target string, data []byte) error {
 // design §8 has it land inert precisely so nothing it carries can act before
 // the person has looked. If a future skill genuinely requires `./`, that is a
 // decision to take deliberately and not a mode to widen in passing.
-func (s *Store) writeBundle(name, dir string, document []byte, files []bundleFile) error {
+func (s *Store) writeBundle(name, dir string, document []byte, files []BundleFile) error {
 	keep := map[string]struct{}{"SKILL.md": {}}
 	if err := s.atomicWrite(filepath.Join(dir, "SKILL.md"), document); err != nil {
 		return err

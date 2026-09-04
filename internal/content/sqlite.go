@@ -472,8 +472,10 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // That is a decision and its argument is in schema_migrate.go under "ONE
 // COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
 // by folding the `api_run*` tables in and retiring the private counter they
-// used to carry (nocx-lmb6v.5).
-const schemaVersion = 16
+// used to carry (nocx-lmb6v.5). 17 widened the executions.termination_reason
+// CHECK so a run stopped by a revoked answer has a reason of its own
+// (nocx-4yjwk.7).
+const schemaVersion = 17
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -794,7 +796,7 @@ CREATE TABLE IF NOT EXISTS executions (
   started_at          INTEGER,
   ended_at            INTEGER,
   termination_reason  TEXT CHECK (termination_reason IN
-                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted','inactivity','output-budget')),
+                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted','inactivity','output-budget','answer-revoked')),
   executor            TEXT,                -- executor identity
   -- state is the ASSISTANT RUN state the renderer draws (design §7):
   -- prepared | streaming | awaiting_approval | completed | cancelled |

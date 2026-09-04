@@ -362,19 +362,29 @@ func TestMigratableRungWithoutHistoricalShapeIsRefused(t *testing.T) {
 	conn, closeConn := rawConn(t, path)
 	defer closeConn()
 
+	// TWO hypothetical rungs above the shipped ladder, so the version being
+	// asked about is one no pinned shape exists for. It has to be above
+	// `schemaVersion` and not equal to it: a version that IS the current one
+	// derives its shape from schemaV1 at runtime, and a version the ladder has
+	// already carried has its shape pinned — neither is the case this test is
+	// about, which is a rung added without the historical shape it migrates
+	// FROM.
 	ladder := append([]migrationStep(nil), schemaLadder...)
-	ladder = append(ladder, migrationStep{
-		from: 16,
-		to:   17,
-		apply: func(context.Context, *sql.Tx) error {
-			return nil
-		},
-	})
-	err := validateOnDiskSchemaShapeFor(context.Background(), conn, 16, 17, ladder)
+	for from := schemaVersion; from < schemaVersion+2; from++ {
+		ladder = append(ladder, migrationStep{
+			from: from,
+			to:   from + 1,
+			apply: func(context.Context, *sql.Tx) error {
+				return nil
+			},
+		})
+	}
+	unpinned := schemaVersion + 1
+	err := validateOnDiskSchemaShapeFor(context.Background(), conn, unpinned, schemaVersion+2, ladder)
 	if err == nil {
 		t.Fatal("schema-shape validation accepted a migratable rung without a historical shape")
 	}
-	if !strings.Contains(err.Error(), "no expected schema shape for migratable schema 16") {
+	if !strings.Contains(err.Error(), fmt.Sprintf("no expected schema shape for migratable schema %d", unpinned)) {
 		t.Fatalf("shape omission refusal reads %q; it must name the missing historical shape", err)
 	}
 }

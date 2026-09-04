@@ -239,24 +239,51 @@ const (
 	// more than its output budget allowed and was terminalized for it —
 	// bounded visibly, never truncated silently.
 	TermOutputBudget TerminationReason = "output-budget"
+	// TermAnswerRevoked is the person's OTHER stop (nocx-4yjwk.7): they took
+	// back a standing answer and chose to end the work that was running under
+	// it, so what decided this ending was a judgement about the PERMISSION and
+	// this run was its consequence. TermUserKilled is the judgement about the
+	// run itself — the Stop button on this answer — and the two really are
+	// different facts, which is why a history query can now tell them apart
+	// instead of reading every revocation stop as somebody pressing Stop.
+	//
+	// "answer" is the product's own word for the decision being taken back
+	// (agent.standingAnswerSaved, "Stopped 2 answers that were using it"), and
+	// the shape follows the subject-predicate names beside it — transport-gone,
+	// user-killed, agent-declined.
+	//
+	// It is METADATA and never a replacement for words: the run's sentence
+	// still names WHICH answer was taken back, because "answer-revoked" cannot
+	// say "df -h" and that is the part a person reads.
+	TermAnswerRevoked TerminationReason = "answer-revoked"
 )
 
-// THE VOCABULARY IS CLOSED BY THE DATABASE, not only by this list. The
-// `executions.termination_reason` column carries a CHECK constraint naming
-// these same strings (sqlite.go), so a reason added here and not there does
-// not fail loudly — it fails at the terminal close, which is caught, logged
-// and repaired by the startup sweep. The run ends without a durable ending.
+// THE VOCABULARY IS CLOSED BY THE DATABASE, not only by this list, so ADDING
+// A REASON IS TWO EDITS AND A RUNG. The `executions.termination_reason` column
+// carries a CHECK constraint naming these same strings (sqlite.go), and an
+// existing file's copy of that constraint can only be changed by rebuilding
+// the table — SQLite has no ALTER for a CHECK. So a new reason is:
 //
-// That is why the settings page's "also stop the runs using it" (nocx-r4fh8)
-// stops a run as TermUserKilled and says WHICH answer was taken back in the
-// run's sentence, rather than under a reason of its own. A revocation-stop and
-// a person pressing Stop on one run really are different facts — one is a
-// decision about a permission whose consequence this run was, the other is a
-// decision about this run — and telling them apart in a history query would be
-// worth a name. Giving it one means widening that CHECK, which is a rung on
-// the migration ladder (schema_migrate.go) and a rebuild of the executions
-// table: a deliverable of its own, and not one to smuggle in beside a
-// transport change.
+//  1. the constant here;
+//  2. the same string in schemaV1's executions CHECK (sqlite.go), with
+//     schemaVersion bumped;
+//  3. a rung on the migration ladder that rebuilds executions for databases
+//     that already exist (schema_migrate.go —
+//     migrateTerminationReasons16to17 is the worked example), carrying the new
+//     schemaV1 digest.
+//
+// DO ALL THREE OR THE FEATURE IS SILENTLY ABSENT. A reason declared here and
+// missing from the CHECK does not fail where it was written. It fails at the
+// terminal close of a real run: the UPDATE is refused, terminalize logs a
+// warning and returns, the run never reaches a terminal state, no
+// agent.runState is sent, and the startup sweep repairs it as `interrupted` at
+// the next start. The person watching sees an answer that streams forever.
+//
+// You will not get that far, because it is a failing test now:
+// TestEveryTerminationReasonGoCanNameTheDatabaseAccepts (content_test) reads
+// this const block with go/ast and inserts every value it finds, so a constant
+// added without step 2 goes red in the commit that adds it. It has both ends —
+// a CHECK widened without its constant fails there too.
 
 type ResourceKind string
 

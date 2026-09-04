@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -801,4 +802,82 @@ func TestPolicyExplain_RefusesAnEffectWithNoRow(t *testing.T) {
 	if envelope.Error == nil || envelope.Error.Code != -32602 {
 		t.Fatalf("an effect the matrix has no row for answered %s, want invalid params", raw)
 	}
+}
+
+// TestPolicyGet_NamesTheRulesAwaitingReview: a loose permit saved under an
+// earlier reading of commands is INERT, and the wire says which ones are.
+//
+// The renderer cannot work this out and must not try. The predicate joins
+// three facts about a rule to the reading of commands running now — a version
+// number no result carries — and a second implementation of it in TypeScript
+// would agree everywhere anyone looked and disagree somewhere nobody did,
+// while telling a person a permission works. So the answer travels, the way
+// "live" does, and the page renders it.
+//
+// The exact rule beside it is the control: it names the literal command line
+// the person was shown, its meaning does not move, and it is never waiting on
+// anybody. A test that seeded only the stale rule could not tell a correct
+// answer from a list of every rule.
+func TestPolicyGet_NamesTheRulesAwaitingReview(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{Decision: content.DecisionAsk}
+	p = p.WithRule(content.InvocationRule{
+		ID:               "df-observe",
+		Selector:         content.InvocationSelector{Program: "df"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectObserve,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	}).WithRule(content.InvocationRule{
+		ID:               "uptime-exact",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"uptime"}}},
+		Decision:         content.DecisionPermit,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	})
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	raw := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("policy.get %s: %v", raw, err)
+	}
+	if env.Error != nil {
+		t.Fatalf("policy.get error: %+v (%s)", env.Error, raw)
+	}
+	validateJSON(t, loadSchema(t, "policy.get.schema.json"), env.Result, "policy.get result (real socket)")
+
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(env.Result, &keys); err != nil {
+		t.Fatalf("result %s: %v", env.Result, err)
+	}
+	if got := string(keys["awaitingReview"]); got != `["df-observe"]` {
+		t.Fatalf("awaitingReview = %s, want [\"df-observe\"] — the loose permit alone", got)
+	}
+}
+
+// TestPolicyResult_AwaitingReviewIsNeverANull: "never a null" is a property of
+// the SHAPE, for the reason live's own test states — a DTO built without the
+// list still marshals [], so no construction site has to remember.
+func TestPolicyResult_AwaitingReviewIsNeverANull(t *testing.T) {
+	raw, err := json.Marshal(policyResult{Policy: content.EffectPolicy{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if got := string(keys["awaitingReview"]); got != "[]" {
+		t.Fatalf("awaitingReview = %s, want []", got)
+	}
+	validateJSON(t, loadSchema(t, "policy.get.schema.json"), raw, "policy.get DTO with no awaiting-review list")
 }

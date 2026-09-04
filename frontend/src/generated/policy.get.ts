@@ -14,6 +14,10 @@
  */
 export interface PolicyGet {
   /**
+   * The ids of the rules that are INERT until a person re-reads what they now mean: a loose permit saved under an earlier reading of commands (design §5.6, content.RulesNeedingConfirmation). The backend answers this for the same reason it answers 'live' — the predicate is three facts about a rule joined to the reading of commands running NOW, which is a version number no result carries and which a renderer must never compare for itself. A second implementation of it in the renderer would agree everywhere anyone looked and disagree somewhere nobody did, while telling a person their permission works. Always an array, never a null; ids in document order.
+   */
+  awaitingReview: string[]
+  /**
    * The effect classes at least one DECLARED tool carries — the registry's declaration table is the only thing that knows. A row outside this list governs nothing yet, and the surface says so rather than offering it as an equal to the rows that do. Always an array, never a null; deduplicated, in the lattice's order.
    */
   live: (

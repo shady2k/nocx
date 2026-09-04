@@ -328,10 +328,9 @@ describe('composition with Field', () => {
 
 /**
  * The commit gesture (nocx-gihi6). A field whose value is WRITTEN rather than
- * merely validated cannot write per keystroke — the Agent policy page's scope
- * field is checked by `ParseEffectPolicy`, which rejects a non-absolute path,
- * so a half-typed `/w` would be a refused write and a toast on every character
- * of `/workspace`. Blur and Enter are the same gesture ("I am done with this
+ * merely validated cannot write per keystroke — a backend that rejects a
+ * half-typed value turns down every character of `/workspace` and raises a
+ * toast apiece. Blur and Enter are the same gesture ("I am done with this
  * value") and the kit says so once, rather than every caller pairing `onBlur`
  * with a hand-rolled keydown.
  */

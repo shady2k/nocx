@@ -1,0 +1,33 @@
+/* Assistant permissions (nocx-hvb3r): the two lists of sentences a person
+   reads and takes back — what they have answered, and what nobody has
+   answered yet.
+
+   LAYOUT ONLY, and there is very little of it. The rows are the kit's
+   RecordRow inside the kit's Section, the panels are the kit's Dialog, and
+   every control in them is a kit component; the surface PLACES them and
+   paints none of them. What is left is the wrapper each row needs in order
+   to be addressable, and the numbered list a trace is read as. The matrix
+   editor this file used to describe — a three-column grid of effect label,
+   decision select and an unbounded scope column — is gone with the page. */
+
+/* One answer in a list. It exists to carry `data-answer`, which is how a row
+   is named without inventing a class per answer; RecordRow owns everything
+   inside it. */
+.st-permissions__answer {
+  display: block;
+}
+
+/* Why, as an ordered list: the steps ARE ordered, and the order is the whole
+   content of the explanation, so it is an <ol> and the numbers stay. */
+.st-permissions__trace {
+  margin: 0;
+  padding-inline-start: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.st-permissions__step {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

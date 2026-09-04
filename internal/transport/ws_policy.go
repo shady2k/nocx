@@ -36,9 +36,21 @@ import (
 // not read that table: the composition root does, and hands the answer in
 // through WithLiveEffects. A control that governs nothing must not look like
 // one that does.
+//
+// AwaitingReview is the third half of it, and it is on the wire for exactly
+// the reason Live is. A rule that is inert because it was saved under an
+// earlier reading of commands is a permission that has quietly stopped
+// working, and a page that did not say so would be the soft degrade AGENTS.md
+// forbids. Working it out needs the reading of commands running NOW — a
+// version number no result carries — joined to two facts about the rule, and
+// content.RulesNeedingConfirmation is the ONE implementation of that join. A
+// renderer that compared evaluatorVersion for itself would be a second one,
+// agreeing everywhere anyone looked and disagreeing somewhere nobody did,
+// while telling a person their permission works.
 type policyResult struct {
-	Policy content.EffectPolicy `json:"policy"`
-	Live   []content.Effect     `json:"live"`
+	Policy         content.EffectPolicy `json:"policy"`
+	Live           []content.Effect     `json:"live"`
+	AwaitingReview []string             `json:"awaitingReview"`
 }
 
 // MarshalJSON sends an unset Live as [] rather than null. The contract
@@ -51,6 +63,9 @@ func (p policyResult) MarshalJSON() ([]byte, error) {
 	w := wire(p)
 	if w.Live == nil {
 		w.Live = []content.Effect{}
+	}
+	if w.AwaitingReview == nil {
+		w.AwaitingReview = []string{}
 	}
 	return json.Marshal(w)
 }
@@ -309,9 +324,18 @@ func (h policyHandlers) handlePolicyGet(ctx context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.get not available"})
 		return
 	}
+	// ONE read of the store, and both halves of the answer taken from it.
+	// Two reads could straddle a write from the approval prompt and serve a
+	// rule list and an inert-rule list that never coexisted.
+	policy := h.store.Policy()
+	awaiting := []string{}
+	for _, rule := range policy.RulesNeedingConfirmation() {
+		awaiting = append(awaiting, rule.ID)
+	}
 	_ = h.r.TryResult(req.ID, mustMarshal(policyResult{
-		Policy: h.store.Policy(),
-		Live:   h.live,
+		Policy:         policy,
+		Live:           h.live,
+		AwaitingReview: awaiting,
 	}))
 }
 

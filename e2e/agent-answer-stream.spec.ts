@@ -25,9 +25,9 @@
  *   deleted screen reader in nocx-2ryxf.1, and a name the registry does not
  *   hold is not a failing call but a run that cannot start (policy.go's
  *   ErrMalformedModelOutput).
- * - The GATE is set to Allowed for the `observe` row through Settings →
- *   Agent policy, the surface a person uses, so the call EXECUTES rather
- *   than suspending. This spec is about what a completed call looks like;
+ * - The GATE is answered Allowed for "read and inspect" through Settings →
+ *   Assistant permissions, the surface a person uses, so the call EXECUTES
+ *   rather than suspending. This spec is about what a completed call looks like;
  *   agent-policy.spec.ts owns the asking.
  * - THE SESSION ID IS LEARNED, NEVER INVENTED, for the reason
  *   agent-tool-approval.spec.ts records at length: the policy's scope check
@@ -49,12 +49,13 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -66,7 +67,6 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const test = base
@@ -171,12 +171,7 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
     // — the zero matrix is a policy — which is agent-policy.spec.ts's
     // subject, not this file's.)
     await page.locator(SETTINGS_POLICY_NAV).click()
-    const observeRow = page.locator(OBSERVE_ROW)
-    await expect(observeRow).toBeVisible({ timeout: 15_000 })
-    await observeRow.locator('select').first().selectOption({ label: 'Allowed' })
-    await expect(observeRow.locator('.st-policy__state')).toContainText('Allowed', {
-      timeout: 15_000,
-    })
+    await answerPermission(page, 'observe', 'Allowed')
     await backToTerminal(page)
 
     // The session the question is asked in, learned from the product's own

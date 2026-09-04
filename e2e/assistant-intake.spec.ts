@@ -13,12 +13,13 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
-  VaultBackend,
+  answerPermission,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
   showSidebarView,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
@@ -30,7 +31,6 @@ const TITLE = '.nocx-tab-title'
 const ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-const MUTATE_REVERSIBLE_ROW = '.st-policy__row[data-effect="mutate-reversible"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 const PAGE_MARKER = `ASSISTANT_INTAKE_PAGE_${nonce}`
 const NOTE_TEXT = `Remember this paragraph ${nonce}.`
@@ -99,12 +99,7 @@ async function configureAssistant(
 
   if (allowMutations) {
     await page.locator(POLICY_NAV).click()
-    const row = page.locator(MUTATE_REVERSIBLE_ROW)
-    await expect(row).toBeVisible({ timeout: 10_000 })
-    await row.locator('select').first().selectOption({ label: 'Allowed' })
-    await expect(row.locator('.st-policy__state')).toContainText('Allowed', {
-      timeout: 10_000,
-    })
+    await answerPermission(page, 'mutate-reversible', 'Allowed')
   }
 
   await page.locator(TITLE).first().click()

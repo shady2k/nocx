@@ -72,7 +72,13 @@ import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, appReadyForInput, bindEndpoint, settingsReady } from './harness'
+import {
+  answerPermission,
+  appReadyForInput,
+  bindEndpoint,
+  settingsReady,
+  VaultBackend,
+} from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { fieldChip } from './secret-field'
@@ -113,7 +119,6 @@ const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 /** WHAT A SELECTION LEAVES BEHIND (nocx-wcswn). The ask entry is a gesture
  *  at the prompt (nocx-4wtlh) — the per-block Ask control and the receipt
  *  that carried its chip are both gone — and a selection now GRANTS its
@@ -553,12 +558,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // Allow the measured session.read so the model request can reach the
     // second completion without an approval sheet unrelated to this join.
     await page.locator(SETTINGS_POLICY_NAV).click()
-    const observeRow = page.locator(OBSERVE_ROW)
-    await expect(observeRow).toBeVisible({ timeout: 15_000 })
-    await observeRow.locator('select').first().selectOption({ label: 'Allowed' })
-    await expect(observeRow.locator('.st-policy__state')).toContainText('Allowed', {
-      timeout: 15_000,
-    })
+    await answerPermission(page, 'observe', 'Allowed')
     await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
 
     // ── Two finished blocks with output that cannot be confused ──────────

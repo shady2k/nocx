@@ -29,13 +29,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
   promptReady,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -50,7 +51,6 @@ const RUNNING_BLOCK = '.pane.active .cmd-block.cmd-block-running'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 
 const test = base
 const nonce = Date.now().toString(36)
@@ -454,12 +454,7 @@ async function configureAssistant(page: Page, endpointName: string): Promise<voi
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
-  const observeRow = page.locator(OBSERVE_ROW)
-  await expect(observeRow).toBeVisible({ timeout: 15_000 })
-  await observeRow.locator('select').first().selectOption({ label: 'Allowed' })
-  await expect(observeRow.locator('.st-policy__state')).toContainText('Allowed', {
-    timeout: 15_000,
-  })
+  await answerPermission(page, 'observe', 'Allowed')
 }
 
 function answerFromPinnedFrame(body: string): string[] {

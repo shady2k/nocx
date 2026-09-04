@@ -924,7 +924,7 @@ var AssistantPersonalInstructions = MustRegisterString(StringSpec{
 	Key:         "assistant.personalInstructions",
 	Section:     "Instructions",
 	Label:       "Your instructions to the assistant",
-	Description: "Standing instructions added to the end of every question you ask the assistant — how you like answers, what this machine is, anything you would otherwise repeat. They come last, so where they contradict nocx's own instructions yours win. They are not permissions: what the assistant may do is decided on the Agent policy page, and nothing written here changes it.",
+	Description: "Standing instructions added to the end of every question you ask the assistant — how you like answers, what this machine is, anything you would otherwise repeat. They come last, so where they contradict nocx's own instructions yours win. They are not permissions: what the assistant may do is decided on the Assistant permissions page, and nothing written here changes it.",
 	DataClass:   PrivateContent,
 	Default:     "",
 	Multiline:   true,

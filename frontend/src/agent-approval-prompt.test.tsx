@@ -715,7 +715,7 @@ describe('AgentApprovalPrompt', () => {
     // the same pane asks again, so naming the pane would promise a lifetime
     // the answer does not have.
     expect(text).not.toContain('in this pane')
-    expect(text).toContain('Agent policy page')
+    expect(text).toContain('Assistant permissions page')
   })
 
   it('an egress question offers two answers, and both are once', () => {

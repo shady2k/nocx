@@ -33,6 +33,7 @@ import type { PolicySet } from './generated/policy.set'
 import type { PolicySetRule } from './generated/policy.setRule'
 import type { PolicyForgetRule } from './generated/policy.forgetRule'
 import type { PolicyExplain, Step, Scope as ExplanationScope } from './generated/policy.explain'
+import type { PolicyClassify, Feature } from './generated/policy.classify'
 
 type EffectDecision = 'permit' | 'ask' | 'refuse'
 
@@ -156,6 +157,26 @@ export type PolicyExplanationStep = Step
  *  explanation alone. */
 export type PolicyExplanationResource = ExplanationScope
 
+/**
+ * The READING of one command line that has not been run: what a run would make
+ * of it, and whether a standing rule may be written over it at all.
+ *
+ * Exactly as the wire declares it, for `PolicyExplanation`'s reason one step
+ * further on. A permit over a loose selector is a claim about what a command
+ * DOES, and this page has no way to make that claim: `find` is a read-shaped
+ * word and `find . -delete` is a destructive call. So the effect a widening
+ * permit is bound to comes from here and from nowhere else — and so does the
+ * command WORD, because splitting a command line into tokens is a parser, and
+ * a parser here would be the second reading the whole design exists to
+ * prevent.
+ */
+export type PolicyClassification = PolicyClassify
+
+/** One semantic fact the classifier recorded about a command, from content's
+ *  closed vocabulary — what a narrowing rule matches instead of the spelling
+ *  of a token. Naming it here is what lets a surface hold one. */
+export type PolicyCommandFeature = Feature
+
 /** A fresh all-ask matrix — what the backend serves when nothing is set. */
 export function blankPolicy(): PolicyMatrix {
   const m = {} as PolicyMatrix
@@ -235,6 +256,24 @@ export class PolicyClient {
    */
   explain(command: string, effect: PolicyExplain['effect']): Promise<PolicyExplanation> {
     return this.dispatcher.call<PolicyExplain>('policy.explain', { command, effect })
+  }
+
+  /**
+   * READ one command line: what a run would make of it, and whether a standing
+   * rule may be written over it at all. It is never executed — the backend
+   * parses and classifies, and touches nothing.
+   *
+   * This is the only route to a widening permit, and the asymmetry is the
+   * design rather than a precaution. A refusal may be written from typed text
+   * because the worst a wrong one does is stop something; a permit may not,
+   * because a person typing a word into a box does not know what that word can
+   * do. So the effect the resulting rule carries in `grantedUnder`, and the
+   * command word its selector names, both come back from here — the renderer
+   * neither classifies nor tokenizes, and `policy-explain-is-not-reimplemented.test.ts`
+   * is what keeps that a rule rather than an intention.
+   */
+  classify(command: string): Promise<PolicyClassification> {
+    return this.dispatcher.call<PolicyClassify>('policy.classify', { command })
   }
 
   /**

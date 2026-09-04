@@ -1,7 +1,7 @@
 package transport
 
 // policy.get / policy.set / policy.setRule / policy.forgetRule /
-// policy.explain — the ONE global agent policy (ADR-0020 §7 as amended
+// policy.explain / policy.classify — the ONE global agent policy (ADR-0020 §7 as amended
 // 2026-08-16, accepted), ON THE WIRE because the settings surface edits it:
 // the matrix the run grants are minted from (runGrantFor). The result shape is declared once in
 // contracts/policy.get.schema.json, generated into the renderer, and the Go
@@ -203,6 +203,91 @@ func validatePolicyExplainRaw(raw json.RawMessage) string {
 	return ""
 }
 
+// policyClassifyParams is the policy.classify params: one command line a
+// person typed, and nothing else.
+//
+// The absence of an effect is the whole difference between this method and
+// policy.explain, and it is worth saying plainly here because the two look
+// alike. policy.explain is about a call that HAPPENED: the effect it
+// classified as is a fact the caller was told, and deriving a second one would
+// explain a decision nobody took. policy.classify is about a command NOBODY
+// HAS RUN, so there is no call to have classified anything and DERIVING the
+// effect is the entire point — it is the fact the person is being shown before
+// they widen a permission, and the fact the rule then carries in grantedUnder.
+// A caller that could state it here could state anything, which would make the
+// permit typed after all.
+type policyClassifyParams struct {
+	Command string `json:"command"`
+}
+
+// policyClassifyResult is the READING of that command: what a run would make
+// of it, and whether a standing rule may be written over it at all.
+//
+// It carries no decision. What the policy currently decides about a command is
+// policy.explain's question and this method does not answer it: the surface
+// asking here is about to CHANGE the policy, and an answer from before the
+// change would be read as an answer about after it.
+//
+// Program and Commands are the two selector shapes a rule can be written with,
+// and they come from here rather than from the caller for one reason: the
+// renderer would otherwise have to split a command line into words, which is
+// a parser, which is the second reading this whole design exists to prevent.
+type policyClassifyResult struct {
+	// Program is the command word a Program selector would name. Empty when
+	// the reading was refused.
+	Program string `json:"program"`
+	// Commands is the canonical parse an Exact selector would name — the
+	// same one content.StandingRule would save. Empty when the reading was
+	// refused.
+	Commands [][]string `json:"commands"`
+	// Effect is the row that governs this command, derived from the tool
+	// declaration table's reachable set. Absent when the reading was
+	// refused: an effect for a command the parser could not resolve is a
+	// guess, and a guess is what a permit must never be minted from.
+	Effect content.Effect `json:"effect,omitempty"`
+	// Features are the semantic facts the classifier recorded about this
+	// command, from content's closed vocabulary — what a narrowing rule may
+	// match instead of the spelling of a token. Always an array.
+	Features []string `json:"features"`
+	// Eligible reports that a standing rule may be written over this
+	// reading at all.
+	Eligible bool `json:"eligible"`
+	// Reason is why not, in content's own words, and empty when eligible. A
+	// command refused without one is a surface that stopped and did not say
+	// why, which is the silent degrade AGENTS.md forbids.
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON sends unset lists as [] rather than null, for policyResult's
+// reason: "never a null" belongs to the shape, not to every place that builds
+// one, and a refused reading builds neither list.
+func (r policyClassifyResult) MarshalJSON() ([]byte, error) {
+	type wire policyClassifyResult // no MarshalJSON of its own: the recursion break
+	w := wire(r)
+	if w.Commands == nil {
+		w.Commands = [][]string{}
+	}
+	if w.Features == nil {
+		w.Features = []string{}
+	}
+	return json.Marshal(w)
+}
+
+// validatePolicyClassifyRaw checks the envelope and the command's bound, at
+// the same bound policy.explain reads a command line to: a truncated command
+// would be a classification of a different command, and this one is about to
+// be widened into a permission.
+func validatePolicyClassifyRaw(raw json.RawMessage) string {
+	var p policyClassifyParams
+	if msg := decodeObject(raw, &p, "command"); msg != "" {
+		return msg
+	}
+	if p.Command == "" {
+		return "command is required"
+	}
+	return boundedRunes("command", p.Command, policyCommandBound)
+}
+
 // policyRuleParams is the wire form of ONE invocation rule a caller writes:
 // what the rule SAYS, and nothing about where it came from.
 //
@@ -313,6 +398,17 @@ func (s *WSServer) policySpecs() []methodSpec {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyExplain(ctx, req) }
 		}),
+		// policy.classify carries the live list for the same reason
+		// policy.get does, and uses it for a different thing: policy.get
+		// SHOWS which rows govern anything, and this DERIVES the effect a
+		// command classifies as, which is bounded by the same declared set.
+		// It is the mirror image of policy.explain above — that method
+		// deliberately does not derive an effect because the caller's is the
+		// fact; here there is no call, so deriving it is the whole point.
+		regResponder(s.lane, "policy.classify", params(validatePolicyClassifyRaw), func(r Responder) handlerFunc {
+			h := policyHandlers{store: s.agentPolicy, live: s.liveEffects, wired: s.agentPolicy != nil, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyClassify(ctx, req) }
+		}),
 	}
 }
 
@@ -402,6 +498,73 @@ func (h policyHandlers) handlePolicyExplain(ctx context.Context, req jsonrpcRequ
 		result.Resource = &resource
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(result))
+}
+
+// handlePolicyClassify READS one command line. It never runs it, and nothing
+// in this path could: the only thing that touches the text is
+// assistant.CanonicalInvocation, which is a pure parse over a string, and
+// content.StandingRule, which is a pure predicate over that parse. There is no
+// exec, no shell, no filesystem call and no session — and that is the property
+// the method exists for, asserted directly in
+// TestPolicyClassify_ReadsTheCommandAndNeverRunsIt.
+//
+// Why a reading at all: a permit written over a loose selector is a claim about
+// what a command DOES, and a person typing a word into a box has made no such
+// claim. `find` is a read-shaped word and `find . -delete` is a destructive
+// call; the only honest route to "any find command" is to have the backend read
+// a representative command, show what the resulting rule would and would not
+// reach, and then save a rule carrying the effect that reading found. This
+// method is the reading half of that gesture.
+//
+// Three things it deliberately does not do. It does not decide whether the
+// command is fit to be a rule — content.StandingRule already answers that, in
+// words, for every shape that is unfit, and a second opinion here would be a
+// second answer to drift from the first. It does not derive the effect from
+// anything but the tool declaration table's reachable set, which the
+// composition root handed in. And it answers no DECISION: what the policy
+// currently decides is policy.explain's question, and an answer from before the
+// change a caller is about to make would be read as an answer about after it.
+func (h policyHandlers) handlePolicyClassify(ctx context.Context, req jsonrpcRequest) {
+	if !h.wired {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.classify not available"})
+		return
+	}
+	var p policyClassifyParams
+	if msg := decodeObject(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.classify: " + msg})
+		return
+	}
+	inv := assistant.CanonicalInvocation(p.Command)
+	rule, why := content.StandingRule(inv)
+	if why != "" {
+		_ = h.r.TryResult(req.ID, mustMarshal(policyClassifyResult{Reason: why}))
+		return
+	}
+	effect := assistant.ClassifyInvocation(inv, h.live)
+	if !content.LatticeEffect(effect) {
+		// The declaration table reaches no class at all, so there is no row
+		// for a permit to be bound to. It is a build-time state rather than
+		// anything a person did, and it is still answered in words: a
+		// surface that offered a permit here would write a rule the gate
+		// refuses, and one that said nothing would be a control that does
+		// nothing for no stated reason.
+		_ = h.r.TryResult(req.ID, mustMarshal(policyClassifyResult{
+			Reason: "nocx has not declared anything the assistant can do, " +
+				"so there is nothing to allow in advance",
+		}))
+		return
+	}
+	// The selector halves come from the rule content.StandingRule built, not
+	// from a second walk over the parse: the exact selector a standing answer
+	// would carry IS the canonical parse, and taking it from anywhere else
+	// would be two spellings of one fact.
+	_ = h.r.TryResult(req.ID, mustMarshal(policyClassifyResult{
+		Program:  rule.Selector.Exact[0][0],
+		Commands: rule.Selector.Exact,
+		Effect:   effect,
+		Features: inv.Resources.Features,
+		Eligible: true,
+	}))
 }
 
 // handlePolicySetRule writes ONE rule and leaves the rest of the document

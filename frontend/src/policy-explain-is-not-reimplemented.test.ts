@@ -3,8 +3,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
 /**
- * THE PRECEDENCE ORDER HAS ONE IMPLEMENTATION AND IT IS THE BACKEND'S
- * EVALUATOR (nocx-8nktm, AD-8).
+ * THE PRECEDENCE ORDER AND THE READING OF COMMANDS HAVE ONE IMPLEMENTATION
+ * EACH, AND BOTH ARE THE BACKEND'S (nocx-8nktm, nocx-fl0o3, AD-8).
  *
  * `EvaluateInvocation` crosses three layers in a fixed order: the effect row
  * first, and a refusing row is final BEFORE any rule is read; then the rules,
@@ -39,6 +39,26 @@ import { join, relative, resolve } from 'node:path'
 const SRC = resolve(__dirname)
 
 /**
+ * WHAT CLASSIFICATION ADDS TO THIS RULE (nocx-fl0o3).
+ *
+ * A widening permit is a claim about what a command DOES: "any find command"
+ * is safe only while `find` keeps reading, and `find . -delete` is the same
+ * word deleting. The claim is checked by `content.EvaluateInvocation` against
+ * the effect a CALL classified as, so a permit is only ever as honest as the
+ * reading it was minted from — and there is one reading,
+ * `assistant.CanonicalInvocation` plus the classifier beside it, which
+ * `policy.classify` carries to a surface.
+ *
+ * A renderer that derived an effect, ranked the lattice, or split a command
+ * line into words would be a second reading, and its failure mode is the worst
+ * one this codebase has: it would agree with the backend on every command
+ * anybody tried, disagree on one nobody did, and MINT A PERMIT under its own
+ * account of the command while the evaluator enforced another.
+ *
+ * So the shipped renderer may hold a classification and may not produce one.
+ */
+
+/**
  * The evaluator's own vocabulary, in the shapes only a reimplementation has.
  *
  * Each is a COMPARISON or a named rank rather than a bare mention: a rule
@@ -61,6 +81,37 @@ const REIMPLEMENTED = [
   {
     what: 'the rule-staleness predicate itself',
     pattern: /\bneedsConfirmation\b/i,
+  },
+  {
+    what: 'the classifier, or the lattice ranking behind it, re-implemented here',
+    pattern:
+      /\b(commandEffect|classifyInvocation|classifyCommand|effectForCommand|effectForVerb|readPrograms|worstEffect|effectOrder|derivedCandidates)\b/i,
+  },
+  {
+    what: 'an effect ASSERTED for a widening permit rather than received from policy.classify',
+    pattern:
+      /\bgrantedUnder\s*:\s*['"](observe|mutate-reversible|mutate-destructive|privilege-change|disclose|cross-boundary|delegate)['"]/,
+  },
+]
+
+/**
+ * The modules that read and write the assistant's permissions.
+ *
+ * The ban below is scoped to them and to nothing else, deliberately. Splitting
+ * a line into words is an ordinary thing for the terminal's own completion to
+ * do — `suggest/providers.ts` and `scrollback/controller.ts` both do it, over
+ * text the person is typing INTO A SHELL, where being wrong costs a suggestion.
+ * On a permission surface the same three characters buy a command word that a
+ * rule is then written over, and being wrong costs a permit over the wrong
+ * program. Same code, different blast radius; the rule follows the radius.
+ */
+const PERMISSION_SURFACES =
+  /^(policy-client\.ts|assistant-permissions-section\.tsx|agent-approval-prompt\.tsx)$/
+
+const CLASSIFIES = [
+  {
+    what: 'a command line tokenized on a permission surface — the program word is the backend’s answer',
+    pattern: /\.split\(\s*(['"`]\s['"`]|\/\\s\+?\/[a-z]*)\s*\)/,
   },
 ]
 
@@ -129,6 +180,13 @@ function scan(): Hit[] {
           text: text.trim(),
         })
       }
+      if (PERMISSION_SURFACES.test(relative(SRC, path))) {
+        for (const { what, pattern } of CLASSIFIES) {
+          if (pattern.test(text)) {
+            hits.push({ file: relative(SRC, path), line: i + 1, what, text: text.trim() })
+          }
+        }
+      }
     })
   }
   return hits
@@ -150,7 +208,14 @@ function report(hits: Hit[]): string {
     'would do so while explaining a decision to a person, telling them their rule',
     'lost a contest it was never entered in.',
     '',
-    'Ask policy.explain (PolicyClient.explain) and render the steps it returns.',
+    'The reading of commands is the same rule one layer down: one parser and one',
+    'classifier, both in Go, carried to a surface by policy.classify. A permit is',
+    'bound to the effect THAT reading found, so a renderer that derived one would',
+    'mint a permission under its own account of a command while the evaluator',
+    'enforced another.',
+    '',
+    'Ask policy.explain (PolicyClient.explain) and render the steps it returns; ask',
+    'policy.classify (PolicyClient.classify) and render the reading it returns.',
     'Renaming the thing this caught is not the fix.',
   ].join('\n')
 }
@@ -167,5 +232,13 @@ describe('the precedence order is not reimplemented in the renderer (AD-8)', () 
     const files = sourceFiles(SRC).map((p) => relative(SRC, p))
     expect(files).toContain('policy-client.ts')
     expect(files.length).toBeGreaterThan(50)
+    // And the scoped half must reach every surface it is scoped to, or it is
+    // a rule about files nobody has.
+    const scoped = files.filter((f) => PERMISSION_SURFACES.test(f))
+    expect(scoped.sort()).toEqual([
+      'agent-approval-prompt.tsx',
+      'assistant-permissions-section.tsx',
+      'policy-client.ts',
+    ])
   })
 })

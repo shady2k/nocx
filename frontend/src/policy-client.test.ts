@@ -20,6 +20,8 @@ import {
   type PolicyExplanation,
   type PolicyExplanationStep,
   type PolicyExplanationResource,
+  type PolicyClassification,
+  type PolicyCommandFeature,
 } from './policy-client'
 import type { Dispatcher } from './dispatcher'
 
@@ -281,5 +283,69 @@ describe('PolicyClient.explain', () => {
     // two may never reach a surface as one "out of scope".
     expect(answer.cause).toBe('row-scope')
     expect(answer.resource).toEqual(outside)
+  })
+})
+
+describe('PolicyClient.classify', () => {
+  it('asks the backend to READ one command, and passes the reading through untouched', async () => {
+    // Typed as the wire declares it, so a fixture cannot describe a shape the
+    // contract does not carry.
+    const reading: PolicyClassification = {
+      program: 'df',
+      commands: [['df', '-h']],
+      effect: 'observe',
+      features: [],
+      eligible: true,
+      reason: '',
+    }
+    const { dispatcher, calls } = fakeDispatcher([reading])
+
+    const answer = await new PolicyClient(dispatcher).classify('df -h')
+
+    expect(calls[0]?.method).toBe('policy.classify')
+    // The command and NOTHING else. An effect in these params would be the
+    // renderer claiming to know what a command does, which is the one claim
+    // that makes a permit typed.
+    expect(calls[0]?.params).toEqual({ command: 'df -h' })
+    expect(answer).toEqual(reading)
+  })
+
+  it('carries a refusal with the reason, and no effect to mint a permit from', async () => {
+    const refused: PolicyClassification = {
+      program: '',
+      commands: [],
+      features: [],
+      eligible: false,
+      reason: 'the command uses an indirect wrapper or shell feature',
+    }
+    const { dispatcher } = fakeDispatcher([refused])
+
+    const answer = await new PolicyClient(dispatcher).classify('sudo df -h')
+
+    expect(answer.eligible).toBe(false)
+    expect(answer.reason).toContain('indirect wrapper')
+    // No effect at all: a permit is bound to the effect the reading found, so
+    // a refused reading must leave a surface with nothing to bind to.
+    expect(answer.effect).toBeUndefined()
+  })
+
+  it('carries the semantic facts a narrowing rule can match', async () => {
+    const feature: PolicyCommandFeature = 'writes-option-named-path'
+    const { dispatcher } = fakeDispatcher([
+      {
+        program: 'sort',
+        commands: [['sort', '-o', '/tmp/out', '/tmp/in']],
+        effect: 'mutate-reversible',
+        features: [feature],
+        eligible: true,
+        reason: '',
+      } satisfies PolicyClassification,
+    ])
+
+    const answer = await new PolicyClient(dispatcher).classify('sort -o /tmp/out /tmp/in')
+
+    // A refusal matches this FACT and never the spelling of the token that
+    // carried it, so it has to arrive as a fact.
+    expect(answer.features).toEqual(['writes-option-named-path'])
   })
 })

@@ -6285,6 +6285,68 @@ func TestPolicyExplain_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// The policy.classify result off the REAL socket. Both halves are driven,
+// because a schema and a handler drift exactly where a field is conditional:
+// an ELIGIBLE reading (program, commands and the effect a permit would be
+// bound to) and a REFUSED one (no effect at all, and the reason in words).
+// A payload this test built would prove the struct is well-formed; only the
+// socket proves the handler sends it.
+func TestPolicyClassify_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.classify.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	for name, command := range map[string]string{
+		"eligible":         "df -h",
+		"carries features": "sort -o /tmp/out /tmp/in",
+		"refused":          "sudo df -h",
+	} {
+		t.Run(name, func(t *testing.T) {
+			validateJSON(t, schema, policyClassifyResultBytes(t, h, command),
+				"policy.classify "+name+" (real socket)")
+		})
+	}
+}
+
+// policyClassifyResultBytes drives policy.classify and hands back the raw
+// result bytes, so what is asserted is what the socket carried.
+func policyClassifyResultBytes(t *testing.T, h *askHarness, command string) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.classify", map[string]any{"command": command})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.classify: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
+// TestPolicyClassifyResult_NeverSendsANullList: "never a null" is a property of
+// the SHAPE, for the reason policyResult's own test states — a refused reading
+// builds neither list, and no construction site has to remember.
+func TestPolicyClassifyResult_NeverSendsANullList(t *testing.T) {
+	raw, err := json.Marshal(policyClassifyResult{Reason: "refused"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if got := string(keys["commands"]); got != "[]" {
+		t.Fatalf("commands = %s, want []", got)
+	}
+	if got := string(keys["features"]); got != "[]" {
+		t.Fatalf("features = %s, want []", got)
+	}
+	validateJSON(t, loadSchema(t, "policy.classify.schema.json"), raw,
+		"policy.classify DTO for a refused reading")
+}
+
 // policyExplainResultBytes drives policy.explain and hands back the raw result
 // bytes, so what is asserted is what the socket carried.
 func policyExplainResultBytes(t *testing.T, h *askHarness, params map[string]any) json.RawMessage {

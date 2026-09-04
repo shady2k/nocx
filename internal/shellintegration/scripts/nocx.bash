@@ -653,7 +653,7 @@ __nocx_lc_read_agent_answer() {
         fi
         __nocx_lc_read_frame 1 || return 1
         case "$__nocx_lc_frame" in
-            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
             *) continue ;; # a stale frame (a late accept, an old grant): skip
         esac
@@ -704,6 +704,80 @@ __nocx_agent_geometry() {
     (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
 }
 
+# THE DECLARATION DROP: how a worker says what its work produced.
+#
+# The declaration is one of the two facts that may decide a wave participant's
+# state (D9), and it must come from the AGENT rather than from the shell: a
+# declaration synthesised from the agent's exit status would collapse two
+# facts the design keeps independent and make "completed" mean nothing beyond
+# "exited 0" — the self-matching sentinel the whole orchestration design was
+# written against.
+#
+# But the agent cannot send one itself. The lifecycle capability is
+# deliberately NOT exported (see __nocx_cap above, and the 2026-08-15 design's
+# D13: no bearer material in the environment), so a child process has nothing
+# to authenticate a frame with. What it can do is leave the verdict somewhere
+# the shell will look, and the shell — which holds the capability — sends it.
+#
+# The path is an ordinary environment variable and that is not a weakening: a
+# path names a rendezvous, it confers nothing, and mktemp gives it an
+# unguessable name and mode 0600 so only this user can write it. Anything in
+# the agent's own process tree can therefore declare, which is exactly the
+# principal the 2026-08-15 design's D14 already enrols and says so in the
+# approval — "allow this agent AND COMMANDS IT LAUNCHES".
+#
+# THE FORMAT IS FOR A SHELL TO PARSE AND FOR AN AGENT TO WRITE. First line
+# `ok` or `fail`; everything after it is what the agent says it produced.
+# Anything else — an empty file, a half-written one, a file some other program
+# happened to leave — is NOT a declaration and nothing is sent, so the
+# participant stays undeclared and the record calls it abandoned. Consent is
+# the presence of what we positively recognise, exactly as the enrolment
+# answer's is.
+__nocx_agent_report_path=
+__nocx_agent_report_open() {
+    __nocx_agent_report_path=
+    local __p
+    __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>/dev/null)" || return 1
+    __nocx_agent_report_path="$__p"
+    return 0
+}
+
+# Read the drop and send the declaration, if there is one. Returns without
+# sending anything when there is not, which is the ordinary case for an agent
+# that was never told about this.
+__nocx_agent_report_send() {
+    local __rid="$1" __line __verdict= __body= __first=1 __ok
+    [[ -n "$__nocx_agent_report_path" && -r "$__nocx_agent_report_path" ]] || return 0
+    while IFS= read -r __line || [[ -n "$__line" ]]; do
+        if (( __first )); then
+            __verdict="$__line"
+            __first=0
+            continue
+        fi
+        __body="$__body$__line"$'\n'
+    done < "$__nocx_agent_report_path"
+    case "$__verdict" in
+        ok) __ok=true ;;
+        fail) __ok=false ;;
+        *) return 0 ;;
+    esac
+    # Bounded here as well as by the kernel, so an agent that wrote a
+    # transcript into the drop costs one truncation rather than a frame the
+    # backend refuses whole. Keep in step with lifecycle.MaxReportSummaryBytes.
+    __body="${__body:0:4000}"
+    __nocx_lc_json_escape "$__body"
+    __nocx_lc_send agent_report ',"request":"'"$__rid"'","ok":'"$__ok"',"summary":"'"$__nocx_lc_json_escaped"'"' || return 0
+    __nocx_lc_read_agent_answer "$__rid" || return 0
+    # "No orchestration, and the pane says so" (D4) applies to a declaration
+    # that was not kept just as it applies to an enrolment that was refused:
+    # an agent that reported into nowhere must not think it was heard.
+    case "$__nocx_lc_frame" in
+        *'"recorded":true'*) : ;;
+        *) builtin printf 'nocx: what you reported was not recorded%s\n' \
+               "${__nocx_agent_reason:+ — $__nocx_agent_reason}" >&2 ;;
+    esac
+}
+
 # Run agent $1 with the pane enrolled for its lifetime.
 #
 # THE REFUSAL IS VISIBLE AND THE AGENT STILL RUNS. "Failure is closed" (D4)
@@ -732,8 +806,22 @@ __nocx_agent_run() {
         command "$__agent" "$@"
         return $?
     fi
-    command "$__agent" "$@"
+    # The drop is opened BEFORE the agent starts, or an agent that finished
+    # quickly would have had nowhere to write. A drop that could not be opened
+    # is not a refusal: the agent still runs, and the worker is simply one
+    # that cannot declare — which the record already has a name for.
+    __nocx_agent_report_open || true
+    NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
     __rc=$?
+    # The declaration goes BEFORE the withdraw, inside the interval the
+    # enrolment opened. It is the participant's own fact and the withdraw is
+    # the interval's end; sending them the other way round would report a
+    # verdict about a pane nocx had already stopped watching.
+    __nocx_agent_report_send "$__rid"
+    if [[ -n "$__nocx_agent_report_path" ]]; then
+        command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
+        __nocx_agent_report_path=
+    fi
     # The other end of the interval, and it runs whatever the agent returned —
     # a crash, an interrupt and a clean exit all close it. The answer is read
     # and discarded: nothing here can act on a failed withdrawal, and the

@@ -179,6 +179,14 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// every descendant of the shell inherits — so a shell still sourcing
 		// 43 waits for a `cap` field that no longer arrives (nocx-aqz7o).
 		"44": "59cdeeb24d397d3b2ef4c3ccdd17c6de9c4e88a329aac25f880555e36b50c2de",
+		// 45: bash and zsh carry the DECLARATION (nocx-dkawo.12). The
+		// wrapper opens a drop before the agent starts, names it in
+		// NOCX_AGENT_REPORT, and sends what the agent wrote there as
+		// agent_report — inside the enrolment's interval and before the
+		// withdraw. Every installed copy must be rewritten: a shell still
+		// sourcing 44 can enrol a worker and can never say what it produced,
+		// so every wave it takes part in terminalizes as abandoned.
+		"45": "f1ae91b06be337ea944586139c77e1261bdf7fc1d325678e65ed405e153b0b02",
 	}
 
 	h := sha256.New()

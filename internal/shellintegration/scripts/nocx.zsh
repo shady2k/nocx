@@ -448,7 +448,7 @@ __nocx_lc_read_agent_answer() {
         fi
         __nocx_lc_read_frame 1 || return 1
         case "$__nocx_lc_frame" in
-            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
             *) continue ;; # a stale frame (a late accept, an old grant): skip
         esac
@@ -494,6 +494,46 @@ __nocx_agent_geometry() {
     (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
 }
 
+# The declaration drop. See nocx.bash for the argument; the shape is the same
+# because the two scripts are two implementations of one protocol, and a
+# worker that could declare in bash and not in zsh would be a wave whose
+# completions depended on the person's login shell.
+__nocx_agent_report_path=
+__nocx_agent_report_open() {
+    __nocx_agent_report_path=
+    local __p
+    __p="$(command mktemp "${TMPDIR:-/tmp}/nocx-agent-report.XXXXXX" 2>/dev/null)" || return 1
+    __nocx_agent_report_path="$__p"
+    return 0
+}
+
+__nocx_agent_report_send() {
+    local __rid="$1" __line __verdict= __body= __first=1 __ok
+    [[ -n "$__nocx_agent_report_path" && -r "$__nocx_agent_report_path" ]] || return 0
+    while IFS= read -r __line || [[ -n "$__line" ]]; do
+        if (( __first )); then
+            __verdict="$__line"
+            __first=0
+            continue
+        fi
+        __body="$__body$__line"$'\n'
+    done < "$__nocx_agent_report_path"
+    case "$__verdict" in
+        ok) __ok=true ;;
+        fail) __ok=false ;;
+        *) return 0 ;;
+    esac
+    __body="${__body:0:4000}"
+    __nocx_lc_json_escape "$__body"
+    __nocx_lc_send agent_report ',"request":"'"$__rid"'","ok":'"$__ok"',"summary":"'"$__nocx_lc_json_escaped"'"' || return 0
+    __nocx_lc_read_agent_answer "$__rid" || return 0
+    case "$__nocx_lc_frame" in
+        *'"recorded":true'*) : ;;
+        *) builtin printf 'nocx: what you reported was not recorded%s\n' \
+               "${__nocx_agent_reason:+ — $__nocx_agent_reason}" >&2 ;;
+    esac
+}
+
 # Run agent $1 with the pane enrolled for its lifetime. The refusal is visible
 # and the agent still runs: "failure is closed" means no enrolment implies no
 # orchestration, not that a terminal declines to start the program it was asked
@@ -518,8 +558,16 @@ __nocx_agent_run() {
         command "$__agent" "$@"
         return $?
     fi
-    command "$__agent" "$@"
+    # Opened before the agent starts, and the declaration goes before the
+    # withdraw — inside the interval the enrolment opened.
+    __nocx_agent_report_open || true
+    NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
     __rc=$?
+    __nocx_agent_report_send "$__rid"
+    if [[ -n "$__nocx_agent_report_path" ]]; then
+        command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
+        __nocx_agent_report_path=
+    fi
     __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || return $__rc
     __nocx_lc_read_agent_answer "$__rid" || true
     return $__rc

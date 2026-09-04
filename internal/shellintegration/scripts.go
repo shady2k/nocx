@@ -236,7 +236,7 @@ var (
 // for. Every installed copy must be rewritten — a shell still sourcing 43
 // checks a `cap` field the kernel has stopped sending and never establishes.
 
-const version = "44"
+const version = "45"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

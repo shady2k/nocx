@@ -17,7 +17,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "description": "What this worker is for, in your own words. It is recorded, so a later wave.holdings can tell you what you started even if you have lost the context you started it from."
+      "description": "What this worker is for, in your own words. It is recorded, so a later wave.holdings can tell you what you started even if you have lost the context you started it from.\n\nTELL THE WORKER HOW TO REPORT, in this task, or it cannot: nocx will know when its process ends and will never know what it produced, and the record will say `abandoned` rather than `completed`. The instruction to include is exactly this — when you are finished, write to the file named by the NOCX_AGENT_REPORT environment variable: the first line `ok` or `fail`, and after it a few lines saying what you produced. Nothing else counts as reporting, and a worker that never writes it is not a failure — it is a worker nobody was told about."
     }
   },
   "$defs": {

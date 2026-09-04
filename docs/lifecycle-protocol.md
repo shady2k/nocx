@@ -107,7 +107,7 @@ child — and it is a separate question with a separate answer.
 | `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `reason`                                 | The verdict, and the reason when it is no. §15.                                    |
 | `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
 | `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
-| `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced. §16.                           |
+| `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced, from the drop. §16.            |
 | `agent_reported`     | kernel → shell  | `request`, `recorded`, `reason`                                          | The declaration was written to the wave record, or why not. §16.                   |
 
 `accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
@@ -684,15 +684,43 @@ A wave participant produces two facts at the end of its work, and they are indep
 what it **declared** it produced, and its **process exit**. The exit is the backend's own,
 because nocx owns the PTY. This pair is the declaration.
 
-> **Nothing in the product sends one yet, as of 2026-09-04.** The receiving half is
-> complete — the kernel arm, the codec, the publisher seam and the wave record behind it —
-> and `internal/shellintegration/scripts/nocx.bash` sends `agent_enrol` and
-> `agent_withdraw` and nothing else. So every worker terminalizes as `abandoned` rather
-> than `completed`, because only one of the two facts ever arrives. `nocx-dkawo.12` owns
-> it. The fix is not the shell inferring a declaration from the agent's exit status, which
-> would collapse two facts `D9` makes independent and restore exactly the sentinel §16.1
-> refuses; it is the launcher's tool surface (§7.1 and `D5` of the orchestration design),
-> which is unbuilt.
+### 16.0 Where a declaration comes from: the drop
+
+The declaration must come from the **agent**, and the agent cannot send one itself. The
+lifecycle capability is deliberately not exported (§3, and the 2026-08-15 design's `D13`:
+no bearer material in the environment), so a child process has nothing to authenticate a
+frame with. What it can do is leave the verdict where the shell will look, and the shell —
+which holds the capability — sends it.
+
+The agent wrapper opens a **drop** before starting the agent and passes its path in
+`NOCX_AGENT_REPORT`. A path is not bearer material: it names a rendezvous and confers
+nothing, `mktemp` gives it an unguessable name and mode 0600, and anything in the agent's
+own process tree can therefore declare — which is exactly the principal the 2026-08-15
+design's `D14` already enrols and states in the approval ("allow this agent **and commands
+it launches**").
+
+The format is for a shell to parse and for an agent to write:
+
+```
+ok                        <- or `fail`, on the first line, exactly
+what the agent produced   <- everything after it, free text
+```
+
+Anything else — an empty file, a half-written one, a file some other program left behind —
+is **not** a declaration and nothing is sent, so the participant stays undeclared and the
+record calls it `abandoned`. Consent is the presence of what the wrapper positively
+recognises, exactly as the enrolment answer's is (§15.3).
+
+The wrapper sends the declaration **inside** the interval the enrolment opened and before
+`agent_withdraw`: a verdict sent after the withdraw would report about a pane nocx had
+already stopped watching. It removes the drop afterwards. A declaration answered with
+`recorded:false` is printed in the pane, for `D4`'s reason — an agent that reported into
+nowhere must not think it was heard.
+
+**Nothing tells an agent to write one.** That is persuasion, not mechanism (§5 of the
+orchestration design), and it is why `wave.spawn`'s tool description tells a coordinator to
+put the instruction in its worker's task. An agent that never writes a drop is an ordinary
+worker that gets terminalized as `abandoned`, which is the fail-closed direction.
 
 ### 16.1 Why it rides this channel, and why it is not `agent_withdraw`
 

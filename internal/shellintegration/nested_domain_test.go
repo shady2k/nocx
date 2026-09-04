@@ -71,6 +71,11 @@ type nestedKernel struct {
 	// answer carrying no `enrolled` field at all. The wrapper must read that
 	// as "not orchestrated", say so in the pane, and still run the agent.
 	refuseEnrolment bool
+	// refuseReport makes the kernel answer a declaration with recorded:false,
+	// which is the state where the agent said something and nocx did not keep
+	// it — and the pane has to say so.
+	refuseReport bool
+	reportReason string
 	// enrolReason is the sentence a refusal carries, which is what the pane
 	// prints. Empty means the kernel refuses without one.
 	enrolReason string
@@ -169,6 +174,8 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 		k.grantLocked()
 	case "agent_enrol":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
+	case "agent_report":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentReported)
 	case "agent_withdraw":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentWithdrawn)
 	case "domain_suspended":
@@ -271,6 +278,14 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 			ans.Reason = k.enrolReason
 		}
 		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
+	case lifecycle.KindAgentReported:
+		// Recorded unless the test says otherwise, so a wrapper that ignored
+		// the answer and one that read it look different here.
+		evt = lifecycle.Event{Kind: kind, AgentReported: &lifecycle.AgentReported{
+			RequestID: lifecycle.RequestID(f.Request),
+			Recorded:  !k.refuseReport,
+			Reason:    k.reportReason,
+		}}
 	default:
 		evt = lifecycle.Event{Kind: kind, AgentWithdrawn: &lifecycle.AgentWithdrawn{
 			RequestID: lifecycle.RequestID(f.Request),

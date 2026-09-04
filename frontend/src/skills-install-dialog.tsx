@@ -6,11 +6,13 @@
  * place in the product where a person pastes an address and the backend goes
  * and gets it, and three of its decisions are kept here verbatim:
  *
- *   - THE ASK DOES NOT CLASSIFY ITS OWN INPUT. "Is this a URL" has one owner,
- *     `classifyPastedSource`, and its comment says why — a second derivation
- *     is the `ssh`-without-a-trailing-space defect in another costume. The
- *     surface asks it once and hands the answer down as `sourceIsURL`, which
- *     is what the read button is gated on.
+ *   - THE ASK DOES NOT CLASSIFY ITS OWN INPUT. What a pasted string is has
+ *     one owner, `classifyPastedSource`, which asks the kit's
+ *     `isAbsoluteHttpUrl` for the address half so that the endpoint form and
+ *     this ask cannot come to different answers about the same text; a
+ *     second derivation here would be the `ssh`-without-a-trailing-space
+ *     defect in another costume. The surface asks once and hands the answer
+ *     down as `sourceIsURL`, which is what the read button is gated on.
  *   - ONE SOURCE IS HELD, VISIBLY, AND CAN BE TAKEN BACK. Here the held
  *     source is the DOCUMENT that was read: its name, its description, its
  *     address and its bytes. A person who read the wrong skill must be able

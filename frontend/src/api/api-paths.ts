@@ -12,6 +12,8 @@
 // single path component is refused rather than sanitised); this only fills
 // the field in while nothing has been typed into it.
 
+import { isAbsoluteHttpUrl } from '../ui/validation'
+
 /** A name reduced to a file-safe stem: lower case, runs of anything else
  *  collapsed to one dash, no dash at either end. '' when nothing survives,
  *  which the callers treat as "no offer to make" rather than as a name. */
@@ -78,10 +80,24 @@ export function proposedDestination(defaultRoot: string, exportPath: string): st
  * disagree on the one that matters. The ask, the destination offer and the
  * client call all read this one answer.
  *
+ * WHICH IS WHY THE URL HALF IS NOT WORKED OUT HERE. "Is this an absolute
+ * http(s) URL" is `isAbsoluteHttpUrl` in the kit (ui/validation.ts), because
+ * the endpoint form needs the same judgement in the shape of a message and
+ * two spellings of it is the very thing this comment claims not to be. This
+ * function still owns what a pasted string IS — a URL, a document, or
+ * neither — it just no longer re-answers the part somebody else answers too.
+ * Until nocx-n1kt8 the two were a regex here and a parse there, and they
+ * split on `https://`, which the regex called an address and the field
+ * refused.
+ *
  * `unusable` is a real answer rather than an error: a person who pasted a
  * curl line gets a sentence from the ask, and no round trip is spent to
  * learn what the form already knew. Curl is not this ask's question — it has
  * its own door in the request editor.
+ *
+ * The URL is handed back VERBATIM rather than as the parser normalised it,
+ * because the address a person pasted is the one the refusal will name back
+ * to them if the fetch fails.
  */
 export type PastedSource =
   { kind: 'url'; url: string } | { kind: 'document'; document: string } | { kind: 'unusable' }
@@ -89,7 +105,7 @@ export type PastedSource =
 export function classifyPastedSource(text: string): PastedSource {
   const trimmed = text.trim()
   if (trimmed === '') return { kind: 'unusable' }
-  if (/^https?:\/\//i.test(trimmed)) return { kind: 'url', url: trimmed }
+  if (isAbsoluteHttpUrl(trimmed)) return { kind: 'url', url: trimmed }
   if (trimmed.startsWith('{') || trimmed.startsWith('['))
     return { kind: 'document', document: trimmed }
   return { kind: 'unusable' }

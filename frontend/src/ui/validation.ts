@@ -92,27 +92,62 @@ export function port(): Validator {
 }
 
 /**
+ * IS THIS AN ABSOLUTE HTTP(S) URL — the renderer's one answer, asked by two
+ * shapes that both have to exist.
+ *
+ * A form field needs a sentence to show and a paste box needs a fact to
+ * branch on, so `absoluteHttpUrl` below and `classifyPastedSource`
+ * (api/api-paths.ts) are both real call shapes; what may not exist twice is
+ * the derivation under them. It did until nocx-n1kt8: the paste box tested
+ * `/^https?:\/\//i` and this field parsed, they agreed on every address
+ * anybody typed, and they disagreed on `https://` — the scheme with nothing
+ * after it, which is exactly the state a person is in halfway through
+ * pasting. That is the `ssh`-without-a-trailing-space defect from AGENTS.md
+ * wearing a different costume, and the loser of a disagreement like that is
+ * always the surface that goes on offering what it can no longer deliver.
+ *
+ * The PARSER won rather than the regex, because `https://` names no host and
+ * so is not something either caller can act on: the field would refuse it a
+ * keystroke later anyway, and the paste box calling it a URL spends a round
+ * trip to the backend to learn what the form already knew.
+ *
+ * It lives in the kit rather than beside the paste box because the kit is
+ * what a surface may import — `api-paths.ts` importing `ui/` is the normal
+ * direction and closes no cycle, while `ui/` reaching into a pane's helper
+ * module would be the wrong one.
+ *
+ * The empty-host test stays even though every WHATWG engine we run on
+ * already throws on `https://` (measured: node, and the same rule binds
+ * WebKit and Chromium). The bead asked for this case to be decided
+ * explicitly, and a decision that is only inherited from a parser subtlety
+ * is one nobody can read off the source.
+ */
+export function isAbsoluteHttpUrl(value: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(value.trim())
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  return parsed.hostname !== ''
+}
+
+/**
  * An absolute http(s) URL — the parse-level floor for an AI endpoint's base
  * URL (design §4.5, decision 3): only "is this an absolute http(s) URL" is
  * checked here. The loopback/private policy is enforced at dial time by the
  * HTTP client (nocx-edio) — a form-time check on that is decoration, for the
  * four reasons the design records. Empty passes — compose with `required`.
+ *
+ * The error-message half of `isAbsoluteHttpUrl`, and nothing else: the
+ * judgement is made once, above, and this turns a `false` into the sentence
+ * the field shows.
  */
 export function absoluteHttpUrl(): Validator {
   return (value) => {
-    const text = value.trim()
-    if (text === '') return undefined
-    let parsed: URL
-    try {
-      parsed = new URL(text)
-    } catch {
-      return 'Must be an absolute http(s) URL'
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return 'Must be an absolute http(s) URL'
-    }
-    if (parsed.hostname === '') return 'Must be an absolute http(s) URL'
-    return undefined
+    if (value.trim() === '') return undefined
+    return isAbsoluteHttpUrl(value) ? undefined : 'Must be an absolute http(s) URL'
   }
 }
 

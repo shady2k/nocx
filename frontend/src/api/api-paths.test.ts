@@ -6,6 +6,7 @@
 // proposed nothing, because the person would have to notice and undo it.
 
 import { describe, expect, it } from 'vitest'
+import { absoluteHttpUrl } from '../ui/validation'
 import {
   classifyPastedSource,
   environmentPath,
@@ -90,6 +91,31 @@ describe('classifyPastedSource — what a pasted string IS, asked in one place',
       document: '{"info":{}}',
     })
     expect(classifyPastedSource('[]')).toEqual({ kind: 'document', document: '[]' })
+  })
+
+  it('a scheme with no host is not a URL, because nobody can fetch it', () => {
+    // `https://` is the case the two derivations of this question used to
+    // disagree about: a regex saw the scheme and called it an address, and
+    // the form field's parser did not. Calling it a URL spends a round trip
+    // to learn what the form already knew, which is what `unusable` exists
+    // to avoid.
+    expect(classifyPastedSource('https://')).toEqual({ kind: 'unusable' })
+    expect(classifyPastedSource('http://')).toEqual({ kind: 'unusable' })
+  })
+
+  it.each<[string, boolean]>([
+    ['https://', false],
+    ['http://', false],
+    ['https://h/a.json', true],
+    ['HTTP://h/a.json', true],
+    ['ftp://h', false],
+    ['not a url', false],
+  ])('answers %s exactly as the form field does, one derivation under both', (text, isURL) => {
+    // The paste box needs a fact to branch on and the field needs a
+    // sentence to show; those are two shapes of one answer, and this is the
+    // assertion that keeps them from drifting back apart.
+    expect(classifyPastedSource(text).kind === 'url').toBe(isURL)
+    expect(absoluteHttpUrl()(text) === undefined).toBe(isURL)
   })
 
   it('calls anything else unusable — including a curl line this ask never offered', () => {

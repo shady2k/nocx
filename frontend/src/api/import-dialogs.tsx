@@ -60,9 +60,11 @@ export interface PostmanImportDialogProps {
    *
    * It is the box's contents rather than the source it yielded: what the
    * text MEANS is decided once, in `classifyPastedSource`, by the level that
-   * also holds the other two entrances (api-pane.tsx). A dialog that
-   * classified its own box would be the second derivation of "is this a
-   * URL", which is the `ssh`-without-a-space defect in another costume.
+   * also holds the other two entrances (api-pane.tsx) — and the address half
+   * of that answer comes from the kit's `isAbsoluteHttpUrl`, so this box and
+   * the endpoint form judge an address by one rule. A dialog that classified
+   * its own box would be the second derivation of "is this a URL", which is
+   * the `ssh`-without-a-space defect in another costume.
    */
   pasted: string
   onPaste: (value: string) => void

@@ -104,6 +104,13 @@ func TestAgentApprove_StandingAnswer_ReceiptCarriesTheStoredRuleID(t *testing.T)
 	// and the proposal's separately as `actionEntryId`, and the contract's
 	// wording — "the ledger entry of the turn that asked" — rests on that
 	// distinction.
+	// The guard that keeps this assertion honest: two entries that happened
+	// to be equal — which is what an empty one on both sides was — would
+	// make it pass whichever the handler sent.
+	if h.entryID == "" || h.entryID == proposalEntryID {
+		t.Fatalf("turn entry %q and proposal entry %q must differ and be present, or this "+
+			"assertion cannot fail", h.entryID, proposalEntryID)
+	}
 	if got.EntryID != h.entryID {
 		t.Fatalf("receipt entryId = %q, want the TURN's entry %q — the renderer routes by that "+
 			"and drops anything else, so a receipt carrying the proposal's entry is never drawn",
@@ -416,7 +423,9 @@ func TestApplyStandingAnswer_ARowAnswerAndARuleAnswerAtOnceBothSurvive(t *testin
 
 // The DTO conformance: field tags, enum spelling, and the two fields that are
 // legitimately empty strings rather than absent — a session answer's rule id
-// and a non-command answer's rule.
+// and a non-command answer's rule. entryId is NOT one of them any more: the
+// schema requires a non-empty one, because nothing can produce an empty one
+// and a receipt built on one is invisible.
 func TestAgentStandingAnswerSaved_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.standingAnswerSaved.schema.json")
 
@@ -430,7 +439,7 @@ func TestAgentStandingAnswerSaved_DTOConformsToContract(t *testing.T) {
 			Rule: "df -h", Effect: "mutate-destructive",
 		},
 		"an effect row, which has no invocation": {
-			RunID: "7", EntryID: "", Approved: true, Scope: "always",
+			RunID: "7", EntryID: "entry-1", Approved: true, Scope: "always",
 			Effect: "disclose",
 		},
 	}
@@ -453,4 +462,50 @@ func TestAgentStandingAnswerSaved_OverTheWireConformsToContract(t *testing.T) {
 	}
 	raw := readNotification(t, h.conn, "agent.standingAnswerSaved", 5*time.Second)
 	validateJSON(t, schema, raw, "agent.standingAnswerSaved params (real socket)")
+}
+
+// ── a receipt with no turn to land on ─────────────────────────────────────
+
+// forgetTurnEntry blanks the TURN's entry on the stored run context.
+//
+// The shape cannot be reached through agent.ask — the ask id is refused
+// empty, SubmitAgentAsk answers with it, and agent.ask is refused outright
+// with no content store — so it is reached where the value lives. That is the
+// point of the test: the field the schema used to permit empty has no
+// producer, and the handler must not send a receipt built on one anyway.
+func (s *scopeHarness) forgetTurnEntry(t *testing.T) {
+	t.Helper()
+	s.ws.pendingRunsMu.Lock()
+	defer s.ws.pendingRunsMu.Unlock()
+	rc, ok := s.ws.pendingRuns[s.runID]
+	if !ok {
+		t.Fatalf("run %d is not pending — nothing to blank", s.runID)
+	}
+	rc.entryID = ""
+	s.ws.pendingRuns[s.runID] = rc
+}
+
+// A receipt with no entry is a receipt no renderer can route: the surface
+// compares it with the block's own and drops anything else, so sending one is
+// a receipt nobody can ever see — which is exactly how nocx-2019q survived
+// thirteen tasks of green tests.
+//
+// So it is not sent. The answer WAS saved, and the person is told so on the
+// response's warning, which the prompt shows (agent-approval-decision.ts): a
+// soft degrade must be visible in the product, not only in a log.
+func TestAgentApprove_StandingAnswer_WithNoTurnEntry_IsReportedAndNotSent(t *testing.T) {
+	h := suspendedCommandRun(t, askPolicyStore(t), dfCommand)
+	h.forgetTurnEntry(t)
+
+	got := h.approve(t, "always")
+	if !strings.Contains(got.Warning, "saved") || !strings.Contains(got.Warning, "Manage permissions") {
+		t.Fatalf("warning = %q, want the sentence that says the answer was saved and where to find it", got.Warning)
+	}
+	h.noReceipt(t)
+
+	// And the save itself is untouched: what failed is the receipt's route,
+	// not the write, so the rule must be in the store either way.
+	if stored := h.policy.Policy().Rules; len(stored) != 1 {
+		t.Fatalf("stored rules = %+v, want the one the answer saved", stored)
+	}
 }

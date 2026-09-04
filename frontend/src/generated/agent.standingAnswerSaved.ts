@@ -18,7 +18,7 @@ export interface AgentStandingAnswerSaved {
    */
   runId: string
   /**
-   * The ledger entry of the turn that asked, so a notification that has outlived its block is dropped rather than drawn on the wrong one — the same guard the deltas use. Empty when the proposal was never bound to an entry.
+   * The ledger entry of the TURN that asked, so a notification that has outlived its block is dropped rather than drawn on the wrong one — the same guard the deltas use, and the same constraint they carry. NEVER EMPTY, and the chain that produces a receipt has no branch where it could be: a receipt exists only where agent.approve found the run still pending; that set is filled by agent.ask alone, after the ledger transaction that recorded the turn answered with this very id (agent.ask's own entryId, also minLength 1); and agent.ask is refused outright when no content store is wired. The field once permitted an empty string, and that permission is what hid nocx-2019q: a receipt the renderer cannot route is a receipt nobody can ever see, so no schema check could object to the backend sending the wrong entry, or none. The backend now REFUSES to send a receipt without it and reports that on agent.approve's warning instead, where a person can read it.
    */
   entryId: string
   /**

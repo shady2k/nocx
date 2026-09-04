@@ -525,7 +525,22 @@ func wideningOffer(cause content.OutOfScopeCause) agentApprovalWidening {
 // that offered the answer — a sentence minted here would be a second spelling
 // of one concept, which is the duplication AD-8 exists to prevent.
 type agentStandingAnswerSaved struct {
-	RunID    string `json:"runId"`
+	RunID string `json:"runId"`
+	// EntryID is the TURN's ledger entry, and it is NEVER EMPTY. The
+	// question the schema used to leave open — "can a receipt come from a
+	// run with no entry?" — is answered by the chain that produces one, and
+	// the chain has no branch: a receipt exists only where agent.approve
+	// found the run in pendingRuns; pendingRuns is filled by handleAsk
+	// alone, after the ledger transaction returned the turn's entry
+	// (SubmitAgentAsk answers with the ask id, which validateAgentAsk
+	// refuses empty); and handleAsk itself is refused when no content store
+	// is wired. So there is no producer of an empty one.
+	//
+	// Which is why notifyStandingAnswer REFUSES to send a receipt without
+	// it rather than sending one anyway: the renderer routes by this field
+	// and drops anything that is not the block's own, so a receipt with no
+	// entry is one nobody can ever see — the exact invisibility nocx-2019q
+	// was.
 	EntryID  string `json:"entryId"`
 	Approved bool   `json:"approved"`
 	Scope    string `json:"scope"`
@@ -1995,8 +2010,14 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		}
 		// A standing NO is a standing answer: "never ask me to run this
 		// again" configured something exactly as much as "always" did, and
-		// gets its receipt in the same words for the same reason.
-		h.notifyStandingAnswer(ap, p, outcome, rc)
+		// gets its receipt in the same words for the same reason. When the
+		// receipt cannot be routed, its sentence joins the response — and
+		// never the downgrade above, which is for a save that did NOT stick
+		// and is settled before this line by construction (`saved` and
+		// `warning` are the two faces of one outcome and never both set).
+		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
+			warning = msg
+		}
 		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 			h.resumeRunDeclined(taskCtx, rc, h.r)
 		}}); rej != nil {
@@ -2052,8 +2073,12 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// question they have forgotten answering. It is sent only when the
 		// write actually happened, so a receipt can never claim a rule the
 		// store refused — that failure travels in `warning`, on the
-		// response, and is the surface's to show.
-		h.notifyStandingAnswer(ap, p, outcome, rc)
+		// response, and is the surface's to show — as is the one degrade
+		// this notification has of its own, a receipt with no turn to land
+		// on.
+		if msg := h.notifyStandingAnswer(ap, p, outcome, rc); msg != "" {
+			warning = msg
+		}
 	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
@@ -2250,6 +2275,12 @@ func refusedStandingAnswer(reason string) standingAnswerOutcome {
 // before it reaches here, and a refused write leaves `saved` false and its
 // sentence on the response instead.
 //
+// It ANSWERS with a sentence rather than sending in the one case where the
+// write stuck and the receipt cannot be routed — no turn entry — because a
+// receipt the renderer must drop is a thing the person configured and cannot
+// see, which is the soft degrade AGENTS.md forbids. The empty string means
+// there is nothing to report.
+//
 // IT IS ROUTED BY THE TURN, LIKE EVERY OTHER NOTIFICATION ABOUT A RUN, and
 // that is why `rc` is a parameter (nocx-2019q). The entry it carries used to
 // be the approvals store's — `EntryIDFor`, the PROPOSAL's ledger row, the one
@@ -2260,9 +2291,21 @@ func refusedStandingAnswer(reason string) standingAnswerOutcome {
 // receipt addressed by the proposal was silently discarded for every run that
 // had a ledger — which is every run — and nobody ever saw one. Two entries,
 // two jobs (see agentRunToolCall above); this one wants the turn's.
-func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome, rc askRunContext) {
+func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome, rc askRunContext) string {
 	if !outcome.saved {
-		return
+		return ""
+	}
+	// No turn to land on: the receipt is REFUSED rather than sent, and the
+	// person is told on the response instead. Sending it would be the soft
+	// degrade AGENTS.md forbids — the renderer would drop it, the store
+	// would still hold the rule, and the only visible trace of an answer
+	// somebody gave would be their not being asked again months later. The
+	// trace above says nothing produces this, so it is logged at ERROR: it
+	// is a broken invariant, not a condition.
+	if rc.entryID == "" {
+		h.log.Error("agent.approve: the standing answer was saved but its receipt has no turn to land on",
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
+		return receiptWithoutTurnWarning
 	}
 	effect, _ := h.approvals.EffectFor(ap)
 	_ = h.r.TryNotify("agent.standingAnswerSaved", mustMarshal(agentStandingAnswerSaved{
@@ -2274,7 +2317,14 @@ func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approvePara
 		Effect:   string(effect),
 		RuleID:   outcome.ruleID,
 	}))
+	return ""
 }
+
+// receiptWithoutTurnWarning is what a person reads when the answer stuck and
+// the receipt could not be routed. It says the true thing about what
+// happened — the answer IS saved — and names the surface that can show it,
+// because the turn no longer can.
+const receiptWithoutTurnWarning = "the answer was saved, but this turn could not be told about it — you can see and undo it in Manage permissions"
 
 // resumeRun re-drives a suspended run after the person's yes: the run
 // streams again (awaiting_approval → streaming), the Ask resumes from the

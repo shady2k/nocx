@@ -363,7 +363,15 @@ export class AgentInputTarget implements InputTarget {
       const run = this.runs.get(Number(saved.runId))
       if (!run) return
       const handle = run.handle
-      if (saved.entryId !== '' && handle.el.dataset.entryId !== saved.entryId) return
+      // Routed EXACTLY as a delta is, with no escape hatch. The empty
+      // entryId this used to wave through was the schema's invention: it
+      // promised "empty when the proposal was never bound to an entry", and
+      // nothing on the backend can produce that (contracts/, and the trace
+      // at agentStandingAnswerSaved.EntryID). A wildcard for a value nobody
+      // sends is a second reading of routing that disagrees with every
+      // sibling here, and it would draw a receipt on whatever block the run
+      // id happened to find.
+      if (handle.el.dataset.entryId !== saved.entryId) return
       this.drawStandingAnswer(handle, saved)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {

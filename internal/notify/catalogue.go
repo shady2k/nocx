@@ -400,6 +400,30 @@ func mustCatalogue() *Catalogue {
 				Trusts:      []Trust{TrustProgramRequest},
 			},
 			{
+				// The wave record's backstop (D2, nocx-dkawo.3). A worker
+				// declared or exited, the coordinator that must judge it was
+				// not reached inside the deadline, and the person is the
+				// only one left who can act.
+				//
+				// Attested, and the distinction is the whole design's: this
+				// is nocx's OWN record reducing two facts it owns — a
+				// process exit off a PTY it holds, and a declaration over an
+				// authenticated channel. Nothing on a screen took part, which
+				// is why it sits beside session.ended rather than beside
+				// pane.workFinished one row below.
+				//
+				// Both channels on by default, for the reason session.ended
+				// has them: it fires a handful of times a wave, and the only
+				// moment it matters is the one where the person is not
+				// looking at the tab.
+				Kind: KindWaveUndispatched, ID: "waveUndispatched",
+				Label: "A worker is waiting for judgement",
+				Description: "nocx's own wave record has a worker's result that its " +
+					"coordinator was not reached about.",
+				Trusts:          []Trust{TrustAttested},
+				DefaultChannels: []string{ChannelBanner, ChannelToast},
+			},
+			{
 				Kind: KindPaneWorkFinished, ID: "paneWorkFinished",
 				Label: "Work seems to have finished",
 				Description: "nocx inferred from a pane's title that its work finished. " +

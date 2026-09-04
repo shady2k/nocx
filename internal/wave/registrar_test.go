@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log"
 )
 
 var errInjected = errors.New("injected fault")
@@ -218,6 +220,19 @@ func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant
 	return p, nil
 }
 
+func (m *memStore) CoordinatorSession(_ context.Context, id ID) (string, error) {
+	if err := m.hit("coordinatorsession"); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	coord, ok := m.waves[id]
+	if !ok {
+		return "", fmt.Errorf("no such wave %q: %w", id, ErrNoSuchParticipant)
+	}
+	return coord, nil
+}
+
 func (m *memStore) HeldBy(_ context.Context, coord string) ([]Participant, error) {
 	if err := m.hit("heldby"); err != nil {
 		return nil, err
@@ -360,6 +375,12 @@ type harness struct {
 	enrol *fakeEnrolments
 	sup   *fakeSupervisor
 	reg   *Registrar
+	// The backstop is wired in every harness rather than left to default,
+	// so a test that is not about the fact set neither types anywhere nor
+	// leaves a five-minute alarm behind it.
+	wake   *fakeWaker
+	human  *fakeEscalation
+	alarms *fakeAlarms
 }
 
 const (
@@ -381,17 +402,30 @@ func testLiveness() Liveness {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
-		store: newMemStore(),
-		spawn: &fakeSpawner{live: testLiveness()},
-		enrol: &fakeEnrolments{live: testLiveness()},
-		sup:   &fakeSupervisor{},
+		store:  newMemStore(),
+		spawn:  &fakeSpawner{live: testLiveness()},
+		enrol:  &fakeEnrolments{live: testLiveness()},
+		sup:    &fakeSupervisor{},
+		wake:   &fakeWaker{out: delivered()},
+		human:  &fakeEscalation{},
+		alarms: newFakeAlarms(),
 	}
+	backstop := NewBackstop(log.NewSlogAdapter(nil), h.wake, h.human,
+		WithFactDeadline(90*time.Second))
+	// The alarm is replaced by ASSIGNMENT rather than by an option: only the
+	// deadline is a product value, so only the deadline earns an exported
+	// option. These tests are in-package, which is the whole reason the
+	// exported surface does not have to grow for them.
+	backstop.alarms = h.alarms
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
+		WithBackstop(backstop),
 		WithBound(2),
 		WithEnrolmentDeadline(50*time.Millisecond),
-		WithIDs(func() ParticipantID { return ParticipantID(fmt.Sprintf("p-%d", h.store.counts["commitprepared"]+1)) }),
-		WithClock(func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }),
 	)
+	h.reg.newID = func() ParticipantID {
+		return ParticipantID(fmt.Sprintf("p-%d", h.store.counts["commitprepared"]+1))
+	}
+	h.reg.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
 	if err := h.store.EnsureWave(context.Background(), testWave, coordSession); err != nil {
 		t.Fatalf("ensure wave: %v", err)
 	}

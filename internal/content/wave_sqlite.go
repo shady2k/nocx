@@ -232,6 +232,23 @@ func (s *sqliteContent) Participant(ctx context.Context, id wave.ParticipantID) 
 	return p, nil
 }
 
+// CoordinatorSession answers who must judge a fact about this wave. A wave
+// with no row is not an empty answer: a fact that entered against a wave the
+// store does not hold has nobody to reach, and saying so is what stops a wake
+// being addressed to the empty string.
+func (s *sqliteContent) CoordinatorSession(ctx context.Context, id wave.ID) (string, error) {
+	var out string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT coordinator_session FROM waves WHERE id = ?`, string(id)).Scan(&out)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("content: wave %q: %w", id, wave.ErrNoSuchParticipant)
+	}
+	if err != nil {
+		return "", fmt.Errorf("content: wave %q: %w", id, err)
+	}
+	return out, nil
+}
+
 func (s *sqliteContent) NonTerminal(ctx context.Context, id wave.ID) ([]wave.Participant, error) {
 	return s.queryParticipants(ctx,
 		`SELECT `+participantColumns+` FROM wave_participants

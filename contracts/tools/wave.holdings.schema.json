@@ -39,6 +39,10 @@
               "summary": {
                 "type": "string",
                 "description": "What the worker said it produced, when it said anything. Absent while it has not reported."
+              },
+              "needsJudgement": {
+                "type": "boolean",
+                "description": "True when something happened to this worker that you have not been told about until now — it reported, or its process ended. Absent means nothing is new since you last asked. Reading this list is what clears it, so what you see here you will not be shown twice."
               }
             }
           }

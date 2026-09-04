@@ -330,6 +330,13 @@ func TestCatalogueDefaultsAreExactlyTodaysTable(t *testing.T) {
 		"sessionEnded/" + notify.ChannelBanner:    true,
 		"sessionEnded/" + notify.ChannelToast:     true,
 		"transferFinished/" + notify.ChannelToast: true,
+		// The wave backstop: the coordinator was not reached about a
+		// worker's result, so the person is the only one left who can act.
+		// Both channels, for session.ended's reason — it fires a handful of
+		// times a wave and the only moment it matters is the one where
+		// nobody is looking at the tab.
+		"waveUndispatched/" + notify.ChannelBanner: true,
+		"waveUndispatched/" + notify.ChannelToast:  true,
 	}
 	got := map[string]bool{}
 	for _, p := range notify.DefaultCatalogue().Pairs() {

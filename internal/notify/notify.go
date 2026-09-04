@@ -46,6 +46,7 @@ const (
 	KindProgramNotify    Kind = "program.notify"    // OSC 9 / OSC 777 (programRequest)
 	KindBell             Kind = "bell"              // BEL (programRequest)
 	KindPaneWorkFinished Kind = "pane.workFinished" // title-transition inference (heuristic)
+	KindWaveUndispatched Kind = "wave.undispatched" // the wave record's backstop (attested)
 )
 
 // Trust is the trust class of an event, stamped by its source adapter —

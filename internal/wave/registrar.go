@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // Registrar brings a participant into existence and keeps the two terminal
@@ -56,6 +58,12 @@ type Registrar struct {
 	deadline time.Duration
 	newID    func() ParticipantID
 	now      func() time.Time
+
+	// attention is the undispatched fact set and its two routes out
+	// (nocx-dkawo.3). It is never nil: an unwired one still records every
+	// fact and says at Error that it has nothing to reach anyone with, which
+	// is the same stance the supervisor takes with an unwired destination.
+	attention *Backstop
 }
 
 // Option configures a Registrar. The two numbers are injected rather than
@@ -74,13 +82,10 @@ func WithEnrolmentDeadline(d time.Duration) Option {
 	return func(r *Registrar) { r.deadline = d }
 }
 
-// WithIDs replaces the participant id source.
-func WithIDs(f func() ParticipantID) Option { return func(r *Registrar) { r.newID = f } }
-
-// WithClock replaces the clock. Nothing in this package waits on a duration to
-// decide anything; the clock stamps facts, and a test that needs a stable
-// stamp replaces it rather than tolerating one.
-func WithClock(f func() time.Time) Option { return func(r *Registrar) { r.now = f } }
+// WithBackstop replaces the undispatched fact set. The composition root
+// supplies one wired to the pane typist and to the notification pipeline; the
+// default is wired to neither and says so.
+func WithBackstop(b *Backstop) Option { return func(r *Registrar) { r.attention = b } }
 
 // NewRegistrar wires the record to its four seams.
 func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Option) *Registrar {
@@ -93,6 +98,13 @@ func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Opt
 		deadline: defaultEnrolmentDeadline,
 		newID:    newParticipantID,
 		now:      time.Now,
+		attention: NewBackstop(
+			log.NewSlogAdapter(nil),
+			// No routes. Every fact is still recorded and every missing
+			// route names itself in the log, because a fact dropped for
+			// want of wiring is how a feature that does not exist survives
+			// a release.
+			nil, nil),
 	}
 	for _, o := range opts {
 		o(r)
@@ -231,14 +243,14 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 
 // Declared admits the participant's own terminal fact and reduces.
 func (r *Registrar) Declared(ctx context.Context, id ParticipantID, l Liveness, d Declaration) (Participant, error) {
-	return r.admit(ctx, id, l, func(ctx context.Context) (Participant, error) {
+	return r.admit(ctx, id, l, FactDeclared, func(ctx context.Context) (Participant, error) {
 		return r.store.RecordDeclaration(ctx, id, d)
 	})
 }
 
 // Exited admits the process fact and reduces.
 func (r *Registrar) Exited(ctx context.Context, id ParticipantID, l Liveness, e Exit) (Participant, error) {
-	return r.admit(ctx, id, l, func(ctx context.Context) (Participant, error) {
+	return r.admit(ctx, id, l, FactExited, func(ctx context.Context) (Participant, error) {
 		return r.store.RecordExit(ctx, id, e)
 	})
 }
@@ -249,7 +261,7 @@ func (r *Registrar) Exited(ctx context.Context, id ParticipantID, l Liveness, e 
 // current one, and it compares the FULL identity rather than an attempt
 // number, because output offsets are per-session replay coordinates and a
 // domain can be re-established under one session.
-func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, record func(context.Context) (Participant, error)) (Participant, error) {
+func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, kind FactKind, record func(context.Context) (Participant, error)) (Participant, error) {
 	cur, err := r.store.Participant(ctx, id)
 	if err != nil {
 		return Participant{}, err
@@ -271,14 +283,44 @@ func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, rec
 		return Participant{}, err
 	}
 	want := reduce(after)
-	if want == after.State {
-		return after, nil
+	if want != after.State {
+		if err := r.store.Terminalize(ctx, id, want); err != nil {
+			return after, fmt.Errorf("wave: terminalize %q: %w", want, err)
+		}
+		after.State = want
 	}
-	if err := r.store.Terminalize(ctx, id, want); err != nil {
-		return after, fmt.Errorf("wave: terminalize %q: %w", want, err)
-	}
-	after.State = want
+	// The fact needs judgement, and it enters the set AFTER the record is
+	// settled — so what the coordinator is woken about is what the record
+	// says, never what the caller believed it was about to say.
+	r.needsJudgement(ctx, after, kind)
 	return after, nil
+}
+
+// needsJudgement puts an admitted fact into the undispatched set.
+//
+// A refusal earlier in admit never reaches here, which is what it means for
+// this to be driven by the record rather than by the carrier: stale evidence
+// from a replaced incarnation and a late fact against an interrupted record
+// wake nobody, because neither changed anything anybody must judge.
+func (r *Registrar) needsJudgement(ctx context.Context, p Participant, kind FactKind) {
+	// The coordinator is read now and not when the deadline fires: by then
+	// the wave may hold nothing non-terminal.
+	coordinator, err := r.store.CoordinatorSession(ctx, p.Wave)
+	if err != nil {
+		// The fact is real and the record has it; what is missing is who to
+		// tell. Entering it with an empty coordinator would produce a wake
+		// addressed to nowhere that still escalates on time, which is the
+		// honest half of the two.
+		coordinator = ""
+	}
+	r.attention.Entered(ctx, Fact{
+		Participant:        p.ID,
+		Wave:               p.Wave,
+		CoordinatorSession: coordinator,
+		Kind:               kind,
+		State:              p.State,
+		Task:               p.Task,
+	})
 }
 
 // reduce derives the state from the FACT SET, never from the order the facts
@@ -312,8 +354,28 @@ func reduce(p Participant) State {
 // handle to present, and lineage proves provenance and confers no authority,
 // so neither is what is asked here.
 func (r *Registrar) HeldBy(ctx context.Context, coordinatorSession string) ([]Participant, error) {
-	return r.store.HeldBy(ctx, coordinatorSession)
+	held, err := r.store.HeldBy(ctx, coordinatorSession)
+	if err != nil {
+		return nil, err
+	}
+	// This IS the dispatch (D8: the cursor advances on the fetch, which is
+	// the second of four acknowledgements and the only one a backend can
+	// observe). The coordinator has now been told what its session holds, so
+	// every fact about those participants has reached it and its deadline
+	// stops. Acting on the fact is the fourth acknowledgement and is
+	// deliberately not claimed here.
+	ids := make([]ParticipantID, 0, len(held))
+	for _, p := range held {
+		ids = append(ids, p.ID)
+	}
+	r.attention.Dispatched(ids...)
+	return held, nil
 }
+
+// Undispatched is what the record still owes judgement on. It is the read
+// behind "a wave with no undispatched facts wakes nobody": an empty answer
+// and no armed alarm are the same statement.
+func (r *Registrar) Undispatched() []Fact { return r.attention.Open() }
 
 // Sweep terminalizes every non-terminal participant of a wave as interrupted.
 //

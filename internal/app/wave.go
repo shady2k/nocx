@@ -24,9 +24,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/shady2k/nocx/internal/agenttyping"
+	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/wave"
@@ -427,4 +430,137 @@ func (r *waveReporter) Report(lane lifecycle.LaneID, ok bool, summary string) er
 	r.log.Info("wave participant reported",
 		"participant", string(participant), "ok", ok)
 	return nil
+}
+
+// ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────
+//
+// internal/wave says WHO must be told and ABOUT WHAT. It says nothing about
+// whether a screen permits typing, or which surfaces a notification may
+// reach, because both of those already have owners — internal/agenttyping on
+// frames it reads itself, and internal/notify's trust and routing table. What
+// is here is the composition root's half: the two adapters, and the one fact
+// only this layer knows, which is that a coordinator's pane id and its
+// session id are the same string.
+
+// paneTypist is the app's narrow view of the typing primitive (AD-8): submit
+// text into a pane and be told what came of it. One method, because a wake is
+// one act — and deliberately NOT Type, which leaves text in an input region
+// without starting the turn the wake exists to start.
+type paneTypist interface {
+	Submit(paneID, text string) agenttyping.Result
+}
+
+// waveWaker types into the coordinator's pane.
+//
+// It reaches the SAME Typist the agent.type method reaches, and that is the
+// point of it being here: a second one would be a second answer to "may nocx
+// write into this pane", decided against a second grid. The gates are that
+// package's and are not restated — this translates an outcome and nothing
+// else.
+type waveWaker struct {
+	typist paneTypist
+	log    log.Logger
+}
+
+// Wake starts a turn the coordinator did not ask for.
+//
+// The pane id IS the session id: the enroller opens a pane's grid under the
+// session id it resolved the lane to, and the typist's Screens, Enrolment and
+// Input seams are all keyed by that same string. The composition root is
+// where that is known, which is why the translation lives here rather than in
+// the record.
+//
+// ONLY OutcomeSubmitted is a delivery. OutcomeTyped means the text reached the
+// input region and the submit key did not — the coordinator is looking at an
+// unsent line, which starts no turn — so it is reported as a refusal carrying
+// the reason the submit failed. Calling that a delivery is exactly the
+// "reported as sent" the bead refuses.
+func (w *waveWaker) Wake(_ context.Context, coordinatorSession, text string) wave.WakeOutcome {
+	if coordinatorSession == "" {
+		return wave.WakeOutcome{Reason: "this wave records no coordinator session to type into"}
+	}
+	if w.typist == nil {
+		return wave.WakeOutcome{Reason: "this backend has no way to type into a pane"}
+	}
+	res := w.typist.Submit(coordinatorSession, text)
+	switch res.Outcome {
+	case agenttyping.OutcomeSubmitted:
+		return wave.WakeOutcome{Delivered: true}
+	case agenttyping.OutcomeTyped:
+		reason := res.Reason
+		if reason == "" {
+			reason = "the text reached the coordinator's input region and the submit key did not"
+		}
+		return wave.WakeOutcome{Reason: reason}
+	default:
+		reason := res.Reason
+		if reason == "" {
+			// A refusal with no sentence would be indistinguishable from a
+			// delivery in the record, which is the one thing this outcome
+			// must never be.
+			reason = fmt.Sprintf("nocx refused to type into that pane (%s)", res.State)
+		}
+		return wave.WakeOutcome{Reason: reason}
+	}
+}
+
+// waveEscalation tells the person about a fact nobody dispatched.
+//
+// It raises an ordinary notification and decides nothing about where it goes:
+// trust and routing are internal/notify's, enforced default-deny against a
+// table the person owns (§6.1, and where this design and Trust disagree,
+// Trust wins because Trust is enforced in code).
+type waveEscalation struct {
+	raise waveNotifier
+	log   log.Logger
+}
+
+// waveNotifier is the escalation's narrow view of the notification pipeline
+// (AD-8): raise one event. Declared here rather than borrowed from the
+// transport, because a notification is internal/notify's concept and the wave
+// does not reach it through the wire.
+type waveNotifier interface {
+	Raise(ctx context.Context, ev notify.Event) notify.Outcome
+}
+
+// Escalate stamps the event and hands it to ingress.
+//
+// The SessionID is the coordinator's, because that is the pane a person
+// clicking the notification wants to be taken to: the fact is about a worker
+// and the decision is the coordinator's, and a notification that opened the
+// worker's pane would be showing the screen that is NOT waiting for anybody.
+//
+// The body says whether the coordinator was reached and why not, because
+// "your worker finished and nobody has looked at it" and "your worker
+// finished, we told the coordinator, and it has not acted in five minutes"
+// ask the person for different things.
+func (e *waveEscalation) Escalate(ctx context.Context, f wave.Fact) {
+	if e.raise == nil {
+		e.log.Error("wave: a fact went undispatched and this backend has no notification pipeline",
+			"participant", string(f.Participant), "wave", string(f.Wave))
+		return
+	}
+	body := "The coordinator was told and has not acted."
+	if !f.Wake.Delivered {
+		body = "nocx could not reach the coordinator: " + f.Wake.Reason
+	}
+	title := fmt.Sprintf("A worker is waiting: %s", f.Task)
+	if f.Task == "" {
+		title = "A worker is waiting for its coordinator"
+	}
+	e.raise.Raise(ctx, notify.Event{
+		SessionID: f.CoordinatorSession,
+		Title:     title,
+		Body:      body,
+		Kind:      notify.KindWaveUndispatched,
+		// Attested: this is nocx's own record reducing a process exit off a
+		// PTY it holds and a declaration over an authenticated channel.
+		// Nothing on a screen took part.
+		Trust: notify.TrustAttested,
+		Level: notify.LevelWarning,
+		Attribution: notify.Attribution{
+			Backend: commandnames.LocalRoute,
+			Session: f.CoordinatorSession,
+		},
+	})
 }

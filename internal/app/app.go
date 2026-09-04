@@ -404,6 +404,34 @@ func WithLogFilePath(path string) Option {
 // before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
 
+// waveFactDeadline is how long a worker's fact may sit undispatched before
+// the person is told (D2 of the 2026-08-24 orchestration mechanism design).
+//
+// It is a placeholder with both ends of the interval named, and deliberately
+// not a measured value: §10.8 says a number wrong in either direction breaks
+// the backstop — too short and a thinking coordinator is escalated past, too
+// long and the person learns late — and that it probably differs by fact
+// class, which needs the fan-out nocx-dkawo.4 brings to measure at all. Five
+// minutes is chosen to be longer than an agent turn and shorter than the
+// interval in which a person forgets they started a wave.
+const waveFactDeadline = 5 * time.Minute
+
+// waveParticipantBound is how many non-terminal participants one wave may
+// hold, and waveEnrolmentDeadline is how long a registration waits for the
+// launcher's enrolment before it is terminalized.
+//
+// Both are named here for the reason the fact deadline is: they are the
+// product's numbers, and internal/wave names the interval rather than
+// choosing its length. The bound is deliberately small for one-worker waves
+// (D15) and is one of the nine open in §10.9; the enrolment deadline has to
+// cover a shell drawing its first prompt and an agent binary starting, and
+// nothing longer, because every second past that is a registration holding a
+// record open for a launcher that is never going to arrive.
+const (
+	waveParticipantBound  = 8
+	waveEnrolmentDeadline = 30 * time.Second
+)
+
 // The bounds of that setting, as durations, because a duration is what the
 // thing IS — the seconds the registry stores are derived from these and never
 // spelled a second time.
@@ -1681,11 +1709,14 @@ func New(opts ...Option) (*App, error) {
 	// registry, which is where a pane's input queue is. A second grid or a
 	// second registry here would be a second answer to the question a
 	// keystroke is decided on.
+	// Named rather than inlined, because the wave's wake reaches THIS one
+	// (nocx-dkawo.3). A second typist would be a second answer to "may nocx
+	// write into this pane", decided against a second grid.
+	paneTyping := newPaneTypist(logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)
 	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
 		transport.WithAgentCalibration(paneCalibration),
-		transport.WithAgentTypist(newPaneTypist(
-			logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)))
+		transport.WithAgentTypist(paneTyping))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries
@@ -1866,6 +1897,17 @@ func New(opts ...Option) (*App, error) {
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
 	waveSup := &waveSupervisor{sessions: sess, log: logger}
+	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
+	// coordinator by a wake through the SAME typist agent.type reaches, the
+	// human by a deadline through the notification pipeline built above. The
+	// deadline's number is stated here because the composition root is where
+	// the product's real values live — and it is a placeholder with both ends
+	// named, not a measurement: §10.8 of the orchestration design puts that in
+	// nocx-dkawo.4, where fan-out makes the escalated fraction measurable.
+	waveBackstop := wave.NewBackstop(logger,
+		&waveWaker{typist: paneTyping, log: logger},
+		&waveEscalation{raise: notifyIngress, log: logger},
+		wave.WithFactDeadline(waveFactDeadline))
 	waveRecord := wave.NewRegistrar(
 		contentDB.Waves(),
 		&waveSpawner{
@@ -1880,6 +1922,9 @@ func New(opts ...Option) (*App, error) {
 		},
 		waveEnrol,
 		waveSup,
+		wave.WithBackstop(waveBackstop),
+		wave.WithBound(waveParticipantBound),
+		wave.WithEnrolmentDeadline(waveEnrolmentDeadline),
 	)
 	waveSup.exited = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, e wave.Exit) {
 		if _, err := waveRecord.Exited(ctx, id, l, e); err != nil {

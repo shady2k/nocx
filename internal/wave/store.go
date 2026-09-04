@@ -68,6 +68,15 @@ type Store interface {
 	// Participant reads one back.
 	Participant(ctx context.Context, id ParticipantID) (Participant, error)
 
+	// CoordinatorSession answers who must judge a fact about this wave. It
+	// is a read rather than a field on the participant because one wave has
+	// one coordinator and copying it onto every participant row would be a
+	// second place for it to be wrong. The backstop asks it at the moment a
+	// fact enters, and never when its deadline fires: by then the wave may
+	// hold nothing non-terminal, and the answer would be gone exactly when it
+	// is needed.
+	CoordinatorSession(ctx context.Context, id ID) (string, error)
+
 	// HeldBy answers D3 — a restarted coordinator asks what its SESSION
 	// holds and is told by name. It is the session and not the run, because
 	// the run that spawned the worker has ended by the time the question is

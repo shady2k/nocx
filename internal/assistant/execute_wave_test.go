@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/wave"
@@ -22,6 +24,11 @@ type fakeWaveRecord struct {
 	registerFn func(wave.RegisterRequest) (wave.Participant, error)
 	heldErr    error
 	heldFor    []string
+	owed       []wave.Fact
+	// readOrder records which of the two reads happened first, because the
+	// order is the whole correctness of the answer: the fetch is what clears
+	// the set, so asking after it always answers nothing.
+	readOrder []string
 }
 
 func (f *fakeWaveRecord) Register(_ context.Context, req wave.RegisterRequest) (wave.Participant, error) {
@@ -34,7 +41,13 @@ func (f *fakeWaveRecord) Register(_ context.Context, req wave.RegisterRequest) (
 
 func (f *fakeWaveRecord) HeldBy(_ context.Context, coordinatorSession string) ([]wave.Participant, error) {
 	f.heldFor = append(f.heldFor, coordinatorSession)
+	f.readOrder = append(f.readOrder, "heldby")
 	return f.held, f.heldErr
+}
+
+func (f *fakeWaveRecord) Undispatched() []wave.Fact {
+	f.readOrder = append(f.readOrder, "undispatched")
+	return f.owed
 }
 
 func waveSeams(rec WaveRecord) toolSeams {
@@ -248,5 +261,100 @@ func TestWaveToolsRefuseAnotherCapability(t *testing.T) {
 	if _, err := executeWaveSpawn(context.Background(), notACoordinator,
 		json.RawMessage(`{"command":"claude","task":"t"}`), waveSeams(&fakeWaveRecord{})); err == nil {
 		t.Fatalf("spawn ran on a session reader")
+	}
+}
+
+// The wake says "call wave.holdings", so holdings has to distinguish the
+// worker it was about from the ones that have not moved.
+//
+// And it has to read the set BEFORE the fetch, because the fetch is what
+// clears it (D8: the cursor advances on the fetch). The order is asserted
+// directly rather than inferred from the answer, because the wrong order
+// produces a correct-looking empty flag on every row.
+func TestHoldingsMarksWhatTheCoordinatorHasNotBeenToldAbout(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{
+			{ID: "p-new", State: wave.StateCompleted, Task: "reported"},
+			{ID: "p-old", State: wave.StateLive, Task: "still working"},
+		},
+		owed: []wave.Fact{{Participant: "p-new", Kind: wave.FactDeclared}},
+	}
+	raw, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings: %v", err)
+	}
+	var got waveHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Participants) != 2 {
+		t.Fatalf("participants = %d, want 2", len(got.Participants))
+	}
+	if !got.Participants[0].NeedsJudgement {
+		t.Fatalf("the worker that just reported is not marked as new: %+v", got.Participants[0])
+	}
+	if got.Participants[1].NeedsJudgement {
+		t.Fatalf("a worker that has not moved is marked as new: %+v", got.Participants[1])
+	}
+	if len(rec.readOrder) != 2 || rec.readOrder[0] != "undispatched" {
+		t.Fatalf("read order = %v, want the set read before the fetch that clears it", rec.readOrder)
+	}
+}
+
+// THE WIRE IS A PARTY TO THE CONTRACT (AGENTS.md rule 5), and here the wire
+// is what the model reads.
+//
+// It validates the REAL result of the real executor against the schema's own
+// result definition, not a payload the test built: a test that validated its
+// own fixture would prove the fixture is well-formed and nothing about what
+// the tool returns. additionalProperties:false plus required is what makes
+// that exact — a field the executor emits and the schema does not declare is
+// a field the model was told about by nobody.
+func TestWaveHoldingsResultConformsToItsContract(t *testing.T) {
+	rec := &fakeWaveRecord{
+		held: []wave.Participant{
+			{
+				ID: "p-1", State: wave.StateCompleted, Task: "read AGENTS.md",
+				Declared: &wave.Declaration{OK: true, Summary: "read it"},
+			},
+			{ID: "p-2", State: wave.StateLive, Task: "still working"},
+		},
+		owed: []wave.Fact{{Participant: "p-1", Kind: wave.FactDeclared}},
+	}
+	raw, err := executeWaveHoldings(context.Background(),
+		testCoordinator("sess-coordinator"), nil, waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.holdings: %v", err)
+	}
+
+	c := jsonschema.NewCompiler()
+	//nolint:gosec // a literal path to a contract in the tree
+	f, err := os.Open("../../contracts/tools/wave.holdings.schema.json")
+	if err != nil {
+		t.Fatalf("open schema: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	doc, err := jsonschema.UnmarshalJSON(f)
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	const id = "https://nocx.local/contracts/tools/wave.holdings.schema.json"
+	if addErr := c.AddResource(id, doc); addErr != nil {
+		t.Fatalf("add resource: %v", addErr)
+	}
+	schema, err := c.Compile(id + "#/$defs/result")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if err := schema.Validate(payload); err != nil {
+		t.Fatalf("wave.holdings result does not satisfy its contract: %v\npayload was:\n%s", err, raw)
+	}
+	if !strings.Contains(raw, `"needsJudgement":true`) {
+		t.Fatalf("the result names nothing as new, so the schema check proved nothing: %s", raw)
 	}
 }

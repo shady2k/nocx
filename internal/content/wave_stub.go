@@ -75,6 +75,10 @@ func (w *waveStub) Participant(context.Context, wave.ParticipantID) (wave.Partic
 	return wave.Participant{}, w.errNoRecord("read participant")
 }
 
+func (w *waveStub) CoordinatorSession(context.Context, wave.ID) (string, error) {
+	return "", w.errNoRecord("read the coordinator of a wave")
+}
+
 func (w *waveStub) HeldBy(context.Context, string) ([]wave.Participant, error) {
 	return nil, w.errNoRecord("read holdings")
 }

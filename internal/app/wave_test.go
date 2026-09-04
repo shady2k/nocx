@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,14 +23,59 @@ import (
 // the real session registry rather than a double of it: what is being asserted
 // is that a real session's exit reaches the record, and a fake session would
 // assert only that the fake was called.
-type waveTestPTYFactory struct{ log log.Logger }
+type waveTestPTYFactory struct {
+	log  log.Logger
+	mu   sync.Mutex
+	made []*recordingPTY
+}
 
-// A FRESH stub per session, not one shared: a stub is the pty, so a shared one
-// would make closing any participant's session close every other
+// last is the pty of the most recently opened session, which in these tests is
+// the one the caller just opened.
+func (f *waveTestPTYFactory) last() *recordingPTY {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.made) == 0 {
+		return nil
+	}
+	return f.made[len(f.made)-1]
+}
+
+// A FRESH pty per session, not one shared: a pty is what a session IS, so a
+// shared one would make closing any participant's session close every other
 // participant's too, and the exit assertions below would pass for the wrong
 // reason.
+//
+// It RECORDS what is written to it, because one thing the product does is
+// write into a pane a person is not looking at — the participant's first
+// command line, and the wake that starts an idle coordinator's turn — and a
+// stub that discarded them could only be asserted against by asking the code
+// what it believed it had done.
 func (f *waveTestPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error) {
-	return pty.NewStub(f.log), nil
+	p := &recordingPTY{Stub: pty.NewStub(f.log)}
+	f.mu.Lock()
+	f.made = append(f.made, p)
+	f.mu.Unlock()
+	return p, nil
+}
+
+// recordingPTY is a pty.Stub that keeps what was written to it.
+type recordingPTY struct {
+	*pty.Stub
+	mu      sync.Mutex
+	written []byte
+}
+
+func (p *recordingPTY) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	p.written = append(p.written, b...)
+	p.mu.Unlock()
+	return p.Stub.Write(b)
+}
+
+func (p *recordingPTY) read() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return string(p.written)
 }
 
 // waveStand is the composition this file asserts: the real record, the real
@@ -38,6 +84,8 @@ func (f *waveTestPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error
 type waveStand struct {
 	db     content.ContentDB
 	dir    string
+	ptys   *waveTestPTYFactory
+	tp     *transport.WSServer
 	reg    *session.Reg
 	enrol  *waveEnrolments
 	lanes  *sessionRegistry
@@ -45,7 +93,7 @@ type waveStand struct {
 	record *wave.Registrar
 }
 
-func newWaveStand(t *testing.T) *waveStand {
+func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 	t.Helper()
 	ctx := context.Background()
 	logger := log.NewSlogAdapter(nil)
@@ -66,7 +114,8 @@ func newWaveStand(t *testing.T) *waveStand {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	reg := session.New(logger, &waveTestPTYFactory{log: logger})
+	ptys := &waveTestPTYFactory{log: logger}
+	reg := session.New(logger, ptys)
 	tp := transport.NewWSServer(logger, reg)
 	// Registered AFTER the store's cleanup so it runs BEFORE it: a session
 	// torn down by the harness reports its exit on its own goroutine, and a
@@ -101,10 +150,12 @@ func newWaveStand(t *testing.T) *waveStand {
 			enrolments: enrol, workspace: string(workspace.Default), log: logger,
 		},
 		enrol, sup,
-		// Short, because every test here supplies the enrolment itself or
-		// deliberately withholds it; the number bounds the withheld case and
-		// decides nothing about the others.
-		wave.WithEnrolmentDeadline(2*time.Second),
+		append([]wave.Option{
+			// Short, because every test here supplies the enrolment itself or
+			// deliberately withholds it; the number bounds the withheld case
+			// and decides nothing about the others.
+			wave.WithEnrolmentDeadline(2 * time.Second),
+		}, opts...)...,
 	)
 	report.declare = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, d wave.Declaration) error {
 		_, err := record.Declared(ctx, id, l, d)
@@ -119,7 +170,10 @@ func newWaveStand(t *testing.T) *waveStand {
 	if err := db.Waves().EnsureWave(ctx, "wave-1", "sess-coordinator"); err != nil {
 		t.Fatalf("ensure wave: %v", err)
 	}
-	return &waveStand{db: db, dir: dir, reg: reg, enrol: enrol, lanes: lanes, report: report, record: record}
+	return &waveStand{
+		db: db, dir: dir, ptys: ptys, tp: tp, reg: reg,
+		enrol: enrol, lanes: lanes, report: report, record: record,
+	}
 }
 
 // registerWithEnrolment runs a registration and supplies the enrolment the

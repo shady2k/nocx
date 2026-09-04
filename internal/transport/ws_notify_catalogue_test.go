@@ -51,6 +51,7 @@ func TestNotifyCatalogue_OverTheWireConformsToContract(t *testing.T) {
 		{ID: "transferFinished", Kind: "transfer.finished", Label: "File transfer finished", Description: "nocx's own transfer registry recorded that an upload or a download reached its end."},
 		{ID: "programNotify", Kind: "program.notify", Label: "Program notification request", Description: "A program printed OSC 9 or OSC 777 to ask for one."},
 		{ID: "bell", Kind: "bell", Label: "Terminal bell", Description: "A program printed BEL."},
+		{ID: "waveUndispatched", Kind: "wave.undispatched", Label: "A worker is waiting for judgement", Description: "nocx's own wave record has a worker's result that its coordinator was not reached about."},
 		{ID: "paneWorkFinished", Kind: "pane.workFinished", Label: "Work seems to have finished", Description: "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine."},
 	}
 	if !reflect.DeepEqual(got.Kinds, want) {

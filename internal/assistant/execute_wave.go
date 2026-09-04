@@ -31,6 +31,11 @@ import (
 type WaveRecord interface {
 	Register(ctx context.Context, req wave.RegisterRequest) (wave.Participant, error)
 	HeldBy(ctx context.Context, coordinatorSession string) ([]wave.Participant, error)
+	// Undispatched is what the record still owes judgement on. It is read
+	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
+	// afterwards would always answer nothing, which is a truthful answer to
+	// the wrong question.
+	Undispatched() []wave.Fact
 }
 
 // waveParticipantResult is one row of what a coordinator is told. It restates
@@ -41,6 +46,13 @@ type waveParticipantResult struct {
 	State   string `json:"state"`
 	Task    string `json:"task"`
 	Summary string `json:"summary,omitempty"`
+	// NeedsJudgement marks a worker something happened to that this
+	// coordinator has not been told about. It is what makes the wake
+	// actionable: nocx types "call wave.holdings", and this is what
+	// distinguishes the worker it was about from the four that have not
+	// moved. Omitted rather than false, so a list where nothing is new reads
+	// as nothing new.
+	NeedsJudgement bool `json:"needsJudgement,omitempty"`
 }
 
 type waveHoldingsResult struct {
@@ -85,13 +97,23 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, _ json.
 	if seams.waves == nil {
 		return "", errors.New("wave.holdings: this backend keeps no wave record")
 	}
+	// Read what is owed BEFORE the fetch, because the fetch is what clears
+	// it. The other order would answer this question with the record's state
+	// after it had been answered, which is always "nothing new".
+	owed := make(map[wave.ParticipantID]bool)
+	for _, f := range seams.waves.Undispatched() {
+		owed[f.Participant] = true
+	}
 	held, err := seams.waves.HeldBy(ctx, coordinator.Session())
 	if err != nil {
 		return "", fmt.Errorf("wave.holdings: %w", err)
 	}
 	out := waveHoldingsResult{Participants: make([]waveParticipantResult, 0, len(held))}
 	for _, p := range held {
-		row := waveParticipantResult{ID: string(p.ID), State: string(p.State), Task: p.Task}
+		row := waveParticipantResult{
+			ID: string(p.ID), State: string(p.State), Task: p.Task,
+			NeedsJudgement: owed[p.ID],
+		}
 		if p.Declared != nil {
 			row.Summary = p.Declared.Summary
 		}

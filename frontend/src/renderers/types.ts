@@ -292,6 +292,19 @@ export interface TerminalRenderer {
    */
   liveContentHeight(): number | null
 
+  /**
+   * The bottom edge of the row the cursor is on, in CSS pixels, or `null`
+   * when the renderer cannot measure yet.
+   *
+   * A FACT ABOUT THE GRID, not a decision about the region. A program waiting
+   * for input parks its caret on a row that holds nothing yet, so this can
+   * exceed `liveContentHeight` by exactly the row a person is typing into
+   * (nocx-hg0dg). Whether that row must be shown depends on whether a command
+   * still owns the screen, which the renderer cannot know and the scrollback
+   * controller does.
+   */
+  liveCursorBottom(): number | null
+
   // What the renderer can say about ITSELF, for a diagnostic and for nothing
   // else (wake-report.ts). It is one method rather than several accessors so
   // that it cannot quietly become product state: nothing in the product may

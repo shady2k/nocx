@@ -1252,29 +1252,39 @@ export class XtermRenderer implements TerminalRenderer {
     const cell = this._getCellDims()
     if (!cell) return null
     const buf = t.buffer.active
-    // A ROW A PROGRAM IS WAITING FOR INPUT ON IS CONTENT, EVEN WHILE IT IS
-    // EMPTY. A full-screen-ish program draws its composer and leaves the
-    // cursor on the line you type into; until you type, that line holds
-    // nothing and the scan below — which trims trailing blanks — skips it.
-    // The live region then stops one row short of the caret and you cannot
-    // see what you are typing (nocx-hg0dg, measured in a 152x33 pane: grid
-    // 646px, box 494px, and typing one character grew the box).
-    //
-    // COLUMN 0 IS WHAT TELLS IT FROM THE OTHER BLANK ROW. After a newline a
-    // shell leaves the cursor at the start of a row nothing has been written
-    // to — the row the NEXT prompt will occupy, which the frozen block ends
-    // above and which this must not count, or the live region is one row
-    // taller than the block it becomes and the pane drops at every freeze
-    // (nocx-i4h04.1). A cursor parked PAST column 0 was put there by the
-    // program, and it only does that where it expects input.
-    const caret = buf.cursorX > 0 ? (buf.cursorY + 1) * cell.height : 0
     for (let y = t.rows - 1; y >= 0; y--) {
       const line = buf.getLine(buf.baseY + y)
       if (line && line.translateToString(true).length > 0) {
-        return Math.max((y + 1) * cell.height, caret)
+        return (y + 1) * cell.height
       }
     }
-    return Math.max(0, caret)
+    return 0
+  }
+
+  /** The bottom edge of the row the cursor is on, or null when unmeasurable.
+   *
+   *  A FACT, NOT A POLICY — which is the whole reason it is separate from
+   *  liveContentHeight. A program waiting for input parks its caret on a row
+   *  that holds nothing yet (omp's composer), so the measurement above stops
+   *  above it and you cannot see what you type (nocx-hg0dg). Whether that row
+   *  must be shown depends on whether a command still OWNS the screen, and
+   *  this renderer cannot know that: it is the running block's existence, and
+   *  the scrollback controller holds it.
+   *
+   *  Two earlier attempts decided it here and both were wrong. The cursor's
+   *  COLUMN said nothing — a freshly started program parks its caret at
+   *  column 0 of its own input line, so the symptom came back on the next
+   *  restart. The shell's OSC 133 A was worse: a nested shell, a multiplexer
+   *  or a prompt framework emits it too, a multiline prompt puts it on a
+   *  different row from the caret, and a stale mark from before a TUI started
+   *  collides with the TUI's own home row.
+   */
+  liveCursorBottom(): number | null {
+    const t = this.term
+    if (!t) return null
+    const cell = this._getCellDims()
+    if (!cell) return null
+    return (t.buffer.active.cursorY + 1) * cell.height
   }
 
   // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────

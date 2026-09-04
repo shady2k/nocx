@@ -308,7 +308,7 @@ export class ScrollbackController {
     // opens beside the prompt instead of reserving a pane-high empty window.
     // Both layers change in the same layout pass: a transition here can still
     // be half-open when a fast command freezes, creating an extra jump.
-    this.setLiveHeight(this._renderer.liveContentHeight())
+    this.setLiveHeight(this.liveBottomEdge())
     this._scrollToBottom()
   }
 
@@ -379,6 +379,43 @@ export class ScrollbackController {
    * Height changes are synchronous: animation can be only 2–4px open when a
    * fast command freezes, turning one layout change into two movements.
    */
+  /** How far down the live region must reach: the rows a command has
+   *  written, and — WHILE THE COMMAND STILL OWNS THE SCREEN — the row its
+   *  cursor is on.
+   *
+   *  A program waiting for input parks its caret on a row that holds nothing
+   *  until you type into it. omp's composer is the case that bought this: the
+   *  region stopped one row above the caret and the person could not see
+   *  their own keystrokes (nocx-hg0dg).
+   *
+   *  OWNERSHIP IS THE DISCRIMINATOR, and `runningBlock` is where it lives.
+   *  The row a SHELL moves to after a newline is the row the next prompt will
+   *  occupy; counting it makes the live region a row taller than the block it
+   *  becomes and the pane drops at every freeze (nocx-i4h04.1). The logical
+   *  freeze frees the running slot BEFORE the visual one serializes the rows
+   *  (BlockManager._logicalFreeze), so by the time that row matters the block
+   *  is already gone and the cursor stops being reserved — one boundary,
+   *  already owned, and no new state.
+   *
+   *  Two earlier attempts put this decision in the renderer and both were
+   *  wrong. The cursor's COLUMN said nothing: a freshly started program parks
+   *  its caret at column 0 of its own input line. The shell's OSC 133 A was
+   *  worse: nested shells, multiplexers and prompt frameworks emit it too, a
+   *  multiline prompt puts it on a different row from the caret, and a mark
+   *  left by the shell before a TUI started collides with the TUI's own home
+   *  row. Neither is a statement about who owns the screen.
+   *
+   *  A grid nobody has written to stays 0. The caret in the corner of a blank
+   *  screen is not a row of content, and reserving one would open the region
+   *  at a row's height between the keypress and the first byte of output. */
+  liveBottomEdge(): number | null {
+    const content = this._renderer.liveContentHeight()
+    if (content === null || content === 0) return content
+    if (this._blockManager.runningBlock === null) return content
+    const caret = this._renderer.liveCursorBottom()
+    return caret === null ? content : Math.max(content, caret)
+  }
+
   setLiveHeight(px: number | null): void {
     // The two modes where the terminal owns the pane are re-measured from the
     // scroller, and `px` — the running region's measured content — is not

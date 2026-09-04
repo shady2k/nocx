@@ -948,38 +948,26 @@ describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
     r.dispose()
   })
 
-  it('reserves the row a program parked its cursor on, mid-row and blank (nocx-hg0dg)', async () => {
-    // omp's input line. The program draws its composer, then leaves the
-    // cursor on the row you type into — which, until you type, holds
-    // nothing. translateToString(true) trims it to length 0, so the scan
-    // below skips it and the live region stops one row short: you cannot
-    // see what you are typing. Measured in the owner's own pane, 152x33:
-    // the grid stood 646px tall and the box showed 494px, and typing a
-    // single "/" made the box grow — so the box follows this measurement
-    // and is not held down by the region's ceiling.
-    //
-    // The row is kept apart from nocx-i4h04.1's — the row a shell moves to
-    // after a newline, which the NEXT prompt will occupy and the frozen
-    // block must not include — by WHERE IN THE ROW the cursor is. Column 0
-    // of a blank row is a row nothing has been written to. A cursor parked
-    // past column 0 means the program put it there, which only happens
-    // because that row is where it expects input.
+  it('reports the cursor row separately, as a fact the controller decides on (nocx-hg0dg)', async () => {
+    // liveContentHeight measures WRITTEN rows and stops there. A program
+    // waiting for input parks its caret on a row that holds nothing — omp's
+    // composer — so the two answers differ, and the difference is exactly the
+    // row you type into. Whether that row must be shown is the running
+    // block's question, not this renderer's: see
+    // ScrollbackController.setLiveHeight.
     const r = await mountRenderer()
     let markerDone: () => void
     const marker = new Promise<void>((resolve) => {
       markerDone = resolve
     })
     r.onCommandMarker(() => markerDone())
-    // Two written rows, then the cursor moved down and along — the shape a
-    // TUI leaves behind, without writing anything on the row.
     r.write('one\r\ntwo\r\n')
-    r.write('\x1b[2C')
-    r.write('\x1b]133;A\x07')
+    r.write('\x1b]133;C\x07')
     await marker
     publishDims(r, { width: 8.5, height: 20 })
 
-    // Three rows: the two written, plus the one being typed into.
-    expect(r.liveContentHeight()).toBe(60)
+    expect(r.liveContentHeight()).toBe(40)
+    expect(r.liveCursorBottom()).toBe(60)
     r.dispose()
   })
 

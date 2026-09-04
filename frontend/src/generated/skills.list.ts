@@ -25,7 +25,7 @@ export interface Skill {
   enabled: boolean
   status: 'approved' | 'changed'
   /**
-   * Where an installed skill came from, as skills.json recorded it at install time. ABSENT unless a source is recorded: never for authored, builtin or managed skills, and not for a directory somebody moved into the installed root by hand — so its presence answers where the bytes came from and never what provenance the skill has. Inlined rather than named, for skills.preview's reason: a named $def becomes a second generated export nothing consumes.
+   * Where an installed skill came from, as skills.json recorded it at install time. ABSENT unless a source is recorded: never for authored, builtin or managed skills, and not for a directory somebody moved into the installed root by hand — so its presence answers where the bytes came from and never what provenance the skill has. Inlined rather than named, for the reason every finding here is: a named $def becomes a second generated export nothing consumes.
    */
   source?: {
     url: string

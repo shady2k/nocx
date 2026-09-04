@@ -97,7 +97,7 @@ export interface AgentApprovalRequested {
     id: string
   } | null
   /**
-   * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
+   * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
    */
   finding?: {
     path: string
@@ -243,7 +243,7 @@ export interface AgentApprovalRequested {
      */
     digest: string
     /**
-     * Every file that will land, SKILL.md first and the rest in the manifest's own order — the SAME list skills.preview names, never a shorter one: a person approving a manifest they were shown half of is approving a name rather than an act. There is no `excluded` counterpart and there never will be: a file that could not be fetched refuses the whole preview, so a bundle with a gap in it never reaches a question. SKILL.md is an entry of this list rather than a case beside it.
+     * Every file that will land, SKILL.md first and the rest in the manifest's own order — the SAME list the store's bundle manifest names, never a shorter one: a person approving a manifest they were shown half of is approving a name rather than an act. There is no `excluded` counterpart and there never will be: a file that could not be fetched refuses the whole preview, so a bundle with a gap in it never reaches a question. SKILL.md is an entry of this list rather than a case beside it.
      *
      * @minItems 1
      */

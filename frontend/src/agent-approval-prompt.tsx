@@ -268,6 +268,31 @@ const classifierNotice = (
  *  kernel's reason is a bounded sentence and may arrive without one. */
 const endSentence = (text: string): string => (/[.!?…]$/.test(text) ? text : `${text}.`)
 
+/** One argument the window states as machine output rather than as a row:
+ *  the model's own key, and the value it rendered to. */
+type ArgumentBlock = { name: string; value: string }
+
+/**
+ * Whether a rendered argument value is machine text rather than a fact.
+ *
+ * A newline is the whole of the test, and it is asked of the VALUE because
+ * that is where the property lives. The reason a skill body cannot be a row
+ * is not that it is called `body`; it is that it is several lines of machine
+ * text, and a fact list states a value as one line beside its name, so the
+ * instructions a person is being asked to adopt arrive looking like a caption
+ * on `name` and `description`. FactList's own header names the carve-out this
+ * implements: a value that needs a code block is not a fact in a list, it is
+ * a CodeBlock beside one.
+ *
+ * A list of known keys was the obvious alternative and it is wrong twice
+ * over. It says nothing about the next tool's multi-line argument — the
+ * second one would read as a caption until somebody noticed and added its
+ * name here — and it would put this surface back in the business of knowing
+ * what each tool's arguments mean, which is exactly what the exhaustive loop
+ * below was built to stop doing.
+ */
+const isMachineText = (value: string): boolean => value.includes('\n')
+
 export interface AgentApprovalPromptProps {
   open: boolean
   /** The question as the backend sent it — the full binding plus the ask. */
@@ -468,14 +493,45 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
+   * The parsed arguments the window does not already state, split into the
+   * two ways it can state one: a row of the fact list, or a block beside it
+   * (nocx-m40iw). Both halves keep the model's own order and the model's own
+   * key.
+   *
+   * ONE walk and ONE partition. Two derivations — a rows function and a
+   * blocks function, each re-walking `Object.entries` and each re-applying
+   * the predicate — would be two owners of a single rule, and the first day
+   * they disagreed an argument would be stated twice or vanish from the
+   * question altogether. Exhaustiveness is what the arguments are owed, and
+   * a partition computed once is what keeps it true by construction: every
+   * argument lands in exactly one half.
+   */
+  const partitionedArguments = (): { rows: Fact[]; blocks: ArgumentBlock[] } => {
+    const rows: Fact[] = []
+    const blocks: ArgumentBlock[] = []
+    const args = parsedArguments()
+    if (args === null) return { rows, blocks }
+    const stated = statedInTheWindow()
+    for (const [key, value] of Object.entries(args)) {
+      if (stated.has(key)) continue
+      const rendered = argumentValue(key, value)
+      if (isMachineText(rendered)) blocks.push({ name: key, value: rendered })
+      else rows.push({ name: key, value: rendered })
+    }
+    return { rows, blocks }
+  }
+
+  /**
    * The facts of this call, each its own row (nocx-0mvpy.2): where it lands
    * — the pane's machine, tab and directory — then every parsed argument
    * the window does not already state, in the model's own order and under
    * the model's own names, then what the call can do.
    *
-   * Exhaustive by construction — the loop selects nothing, so nothing can be
-   * dropped. An argument this surface has never heard of is a row with the
-   * key the model used, which is the honest name for it.
+   * Exhaustive by construction — the partition above selects nothing, it only
+   * decides WHERE each argument is stated, so nothing can be dropped. An
+   * argument this surface has never heard of is a row with the key the model
+   * used, which is the honest name for it, unless its value is machine text,
+   * in which case it is a block under this list under the same key.
    */
   const facts = (): Fact[] => {
     const rows: Fact[] = []
@@ -517,14 +573,12 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         })
       }
     }
-    const args = parsedArguments()
-    if (args !== null) {
-      const stated = statedInTheWindow()
-      for (const [key, value] of Object.entries(args)) {
-        if (stated.has(key)) continue
-        rows.push({ name: key, value: argumentValue(key, value) })
-      }
-    }
+    // Only the ARGUMENTS are partitioned, and only they should be. The pane's
+    // rows above and the expansion's rows below are single-line by
+    // construction — a machine name, a tab title, a directory, one word of a
+    // command and what it resolves to — so asking them whether they are
+    // machine text would be answering a question none of them can raise.
+    rows.push(...partitionedArguments().rows)
     // What the command's variables read as (nocx-4h0m7.5), as rows of the
     // ONE fact list — the assignments the command makes to itself first,
     // because they change what every expansion below them means, then each
@@ -726,6 +780,27 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           </Show>
         </Show>
         <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
+        {/*
+          The arguments the fact list could not state, in the model's order,
+          BESIDE the rows rather than inside them (nocx-m40iw). A skill body
+          is the clearest case: it is the thing the person is actually being
+          asked to adopt, and a fact value renders it as a caption on `name`
+          and `description`. `label` is the argument's own key, the same
+          vocabulary the rows use, and `copy` is passed because a body is
+          precisely the thing somebody may want on their clipboard before
+          deciding — unlike the finding's quoted line below it.
+        */}
+        <For each={partitionedArguments().blocks}>
+          {(block) => (
+            <CodeBlock
+              copy={props.copy}
+              label={block.name}
+              ariaLabel={`The ${block.name} argument of ${ask().tool}`}
+            >
+              {block.value}
+            </CodeBlock>
+          )}
+        </For>
         {/*
           The scan's finding sits AFTER the facts, which is where the body it
           is about has just been stated, and it is a StatusCard rather than a

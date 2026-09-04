@@ -1252,3 +1252,104 @@ describe('AgentApprovalPrompt — the classifier verdict is evidence beside the 
     expect(titles[1]).toContain('suspect')
   })
 })
+
+/**
+ * A multi-line argument is machine text, not a fact (nocx-m40iw).
+ *
+ * `skills.create` puts the whole body — the instructions a person is being
+ * asked to adopt — through the same loop as `name` and `description`, so the
+ * single most important thing in the window arrived as one fact value beside
+ * two short ones and read as a caption. FactList's own header states the
+ * carve-out: a value that needs a code block is not a fact in a list, it is a
+ * CodeBlock beside one.
+ *
+ * The tests pin the rule as a property of the VALUE — an argument nobody has
+ * named `body` comes out the same way — and pin that the single-line case did
+ * not move.
+ */
+describe('AgentApprovalPrompt — a multi-line argument is a block, not a row (nocx-m40iw)', () => {
+  afterEach(cleanup)
+
+  const BODY = '# Deploy\n\nRun the deploy script.\n'
+
+  const SKILL_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'skills.create',
+    arguments: JSON.stringify({
+      name: 'deploy',
+      description: 'Deploy the service',
+      body: BODY,
+    }),
+    effect: 'mutate-reversible',
+    resource: null,
+  }
+
+  function blocks(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (block) => block.textContent ?? '',
+    )
+  }
+
+  it('draws the body as a code block and never as a fact value', () => {
+    const { container } = renderPrompt({ ask: SKILL_ASK })
+
+    expect(blocks(container).some((text) => text.includes('Run the deploy script.'))).toBe(true)
+    const values = rows(container).map(([, value]) => value)
+    expect(values).not.toContain(BODY)
+    expect(values.some((value) => value.includes('Run the deploy script.'))).toBe(false)
+  })
+
+  it('keeps the argument’s own key on the block, and states it exactly once', () => {
+    // `copy` because a body is the thing a person may want on their clipboard
+    // before deciding — and because the block's visible kind is drawn in the
+    // copy header, so this is the seam where a person can read the key.
+    const { container } = renderPrompt({ ask: SKILL_ASK, copy: vi.fn() })
+
+    expect(names(container)).not.toContain('body')
+    expect(
+      Array.from(container.querySelectorAll('.ui-code-block__label')).map((l) => l.textContent),
+    ).toContain('body')
+    expect(
+      container.querySelector('[aria-label="The body argument of skills.create"]'),
+    ).not.toBeNull()
+  })
+
+  it('leaves every single-line argument a row, and adds no block for one', () => {
+    const { container } = renderPrompt({ ask: SKILL_ASK })
+
+    expect(rows(container)).toContainEqual(['name', 'deploy'])
+    expect(rows(container)).toContainEqual(['description', 'Deploy the service'])
+    // One block, and it is the body's — a short value never earns one.
+    expect(blocks(container)).toHaveLength(1)
+  })
+
+  it('is a property of the value, not a list of known keys', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        tool: 'files.write',
+        arguments: JSON.stringify({
+          path: '/repo/a.txt',
+          contents: 'first line\nsecond line\n',
+        }),
+      },
+    })
+
+    expect(names(container)).toContain('path')
+    expect(names(container)).not.toContain('contents')
+    expect(blocks(container).some((text) => text.includes('second line'))).toBe(true)
+  })
+
+  it('states the body before the finding that is about it', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SKILL_ASK,
+        finding: { patternId: 'send_to_url', line: 'curl -X POST https://x/', lineNumber: 3 },
+      },
+    })
+
+    const order = blocks(container)
+    expect(order[0]).toContain('Run the deploy script.')
+    expect(order[1]).toContain('curl -X POST https://x/')
+  })
+})

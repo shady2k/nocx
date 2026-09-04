@@ -60,10 +60,20 @@ endif
 # unknown remote host must be — no remote glibc, no dynamic-loader
 # surprises. The artifacts are gitignored; a fresh checkout compiles with
 # only the committed .gitignore embedded, and Artifact answers
-# ErrArtifactsNotBuilt until this target has run. `helpers` is a
-# prerequisite of the RELEASE build and of nothing else: ordinary
-# `go build`, `make build` and `make dev` must work with no artifacts
-# present.
+# ErrArtifactsNotBuilt until this target has run.
+#
+# IT IS A PREREQUISITE OF EVERY TARGET THAT PRODUCES A RUNNABLE BINARY, and
+# that changed on 2026-09-04 with ADR-0057. It used to be the release build's
+# and nothing else's, on the true reasoning of the time: the artifacts served
+# the REMOTE panel, so a build without them cost a developer one button they
+# were not using. Since ADR-0057 there is no Tier A behind the local helper —
+# a local pane IS a session on this machine's daemon — so a binary built over
+# an empty artifacts directory cannot open a terminal AT ALL. It refuses every
+# pane, correctly and unusably.
+#
+# `go build ./...` still compiles with no artifacts present, and must: the
+# package embeds its own .gitignore so a bare checkout, CI's `go vet` and every
+# unit test build. Compiling is not the thing that broke.
 #
 # The e2e suite needs them too and calls this target itself, from the stand's
 # bring-up (e2e/stand.ts). It is deliberately NOT a prerequisite of ci-e2e:
@@ -106,7 +116,7 @@ build: build-server
 # desktop shell's dependency surface into a headless daemon for nothing.
 # Same -ldflags as the app, because a pair that cannot report one version is
 # the defect the update health check exists to catch.
-build-server:
+build-server: helpers
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
@@ -133,7 +143,7 @@ build-release: helpers
 # no dev CLI without a Taskfile, and replicating the watcher is not worth
 # inventing one for — the dev-web target is the iteration path for frontend
 # work, this target is for exercising the real shell.
-dev:
+dev: helpers
 	$(FRONTEND_BUILD)
 	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
 

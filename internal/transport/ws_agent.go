@@ -514,6 +514,27 @@ func wideningOffer(cause content.OutOfScopeCause) agentApprovalWidening {
 	}
 }
 
+// agentStandingAnswerSaved is the agent.standingAnswerSaved notification
+// (nocx-2019q, contracts/agent.standingAnswerSaved.schema.json): the standing
+// half of an answer reached the store, and the turn that asked the question
+// says so where it was asked.
+//
+// It carries FACTS, not a sentence. The receipt reads in the words of the
+// button the person clicked, and those words are built once, on the surface
+// that offered the answer — a sentence minted here would be a second spelling
+// of one concept, which is the duplication AD-8 exists to prevent.
+type agentStandingAnswerSaved struct {
+	RunID    string `json:"runId"`
+	EntryID  string `json:"entryId"`
+	Approved bool   `json:"approved"`
+	Scope    string `json:"scope"`
+	Rule     string `json:"rule"`
+	Effect   string `json:"effect"`
+	// RuleID is what an Undo names, and it is empty exactly where an undo
+	// by id is not expressible: a session overlay and a matrix row.
+	RuleID string `json:"ruleId"`
+}
+
 type agentApprovalStanding struct {
 	Available bool   `json:"available"`
 	Rule      string `json:"rule"`
@@ -1963,13 +1984,18 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		h.declineWidening(p, ap)
 		// The standing part is recorded only after the decline settled,
 		// so a loser can never write a row for a question it did not win.
-		warning := h.applyStandingAnswer(p, ap, rc.sessionID)
+		outcome := h.applyStandingAnswer(p, ap, rc.sessionID)
+		warning := outcome.warning
 		if warning != "" && p.Scope != approveScopeOnce {
 			// The standing write did not stick. The refusal is still
 			// this call's result, but it must not claim permanence the
 			// policy will not honour.
 			h.approvals.DowngradeDeclined(ap)
 		}
+		// A standing NO is a standing answer: "never ask me to run this
+		// again" configured something exactly as much as "always" did, and
+		// gets its receipt in the same words for the same reason.
+		h.notifyStandingAnswer(ap, p, outcome)
 		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 			h.resumeRunDeclined(taskCtx, rc, h.r)
 		}}); rej != nil {
@@ -2017,7 +2043,16 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 			return
 		}
 	} else {
-		warning = h.applyStandingAnswer(p, ap, rc.sessionID)
+		outcome := h.applyStandingAnswer(p, ap, rc.sessionID)
+		warning = outcome.warning
+		// THE RECEIPT (nocx-2019q). A standing answer that disappeared into
+		// the store with nothing on screen is a thing a person configured
+		// and cannot see: they learn about it later, by being un-asked a
+		// question they have forgotten answering. It is sent only when the
+		// write actually happened, so a receipt can never claim a rule the
+		// store refused — that failure travels in `warning`, on the
+		// response, and is the surface's to show.
+		h.notifyStandingAnswer(ap, p, outcome)
 	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
@@ -2107,9 +2142,9 @@ func (h agentHandlers) declineWidening(p approveParams, ap assistant.Approval) {
 // non-command proposals save the classified effect row. "in this session"
 // writes to the run's session overlay, "always" writes to the global policy,
 // and "once" writes nothing anywhere.
-func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
+func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) standingAnswerOutcome {
 	if p.Scope == approveScopeOnce {
-		return ""
+		return standingAnswerOutcome{}
 	}
 	invocation, _, commandInvocation := h.approvals.InvocationFor(ap)
 	d := content.DecisionRefuse
@@ -2119,40 +2154,115 @@ func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approva
 	if !commandInvocation {
 		effect, ok := h.approvals.EffectFor(ap)
 		if !ok {
-			return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+			return refusedStandingAnswer("the question named no effect class")
 		}
 		if p.Scope == approveScopeSession {
 			h.sessionPolicy.Set(sid, effect, d)
-			return ""
+			return standingAnswerOutcome{saved: true}
 		}
 		if h.globalPolicy == nil {
-			return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+			return standingAnswerOutcome{warning: noPolicyStoreWarning}
 		}
-		next := h.globalPolicy.Policy().SetRowDecision(effect, d)
-		if err := h.globalPolicy.SetPolicy(next); err != nil {
-			return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+		// Through the store's OWN locked seam, not a read, an edit on the
+		// copy and a whole-document write: the settings page and a second
+		// prompt write the same document, and whichever wrote last used to
+		// win with everything the other had said in it.
+		if err := h.globalPolicy.SetRowDecision(effect, d); err != nil {
+			return refusedStandingAnswer(err.Error())
 		}
-		return ""
+		return standingAnswerOutcome{saved: true}
 	}
 	rule, standingReason := content.StandingRule(invocation)
 	if standingReason != "" {
 		h.log.Warn("agent.approve: the standing answer was not recorded",
 			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "reason", standingReason)
-		return "the decision was applied to this call, but could not be saved as a standing answer: " + standingReason
+		return refusedStandingAnswer(standingReason)
 	}
 	rule.Decision = d
 	if p.Scope == approveScopeSession {
 		h.sessionPolicy.SetRule(sid, rule)
-		return ""
+		return standingAnswerOutcome{saved: true, rule: rule.Label()}
 	}
 	if h.globalPolicy == nil {
-		return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+		return standingAnswerOutcome{warning: noPolicyStoreWarning}
 	}
-	next := h.globalPolicy.Policy().WithRule(rule)
-	if err := h.globalPolicy.SetPolicy(next); err != nil {
-		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+	// The same locked seam, and the same reason — plus the one this path
+	// needs on top of it: the STORED rule comes back, so the id the
+	// receipt's Undo names is the id the document actually wears rather
+	// than one this side minted and hoped for (AD-7).
+	stored, err := h.globalPolicy.SetRule(rule)
+	if err != nil {
+		return refusedStandingAnswer(err.Error())
 	}
-	return ""
+	return standingAnswerOutcome{saved: true, ruleID: stored.ID, rule: stored.Label()}
+}
+
+// standingAnswerOutcome is what became of the part of an answer that outlives
+// the proposal: whether it was written, what it covers, and the sentence the
+// person is owed when it was not.
+//
+// It is one value rather than three returns because the three are one fact
+// with three faces, and a caller that could see the warning without the save
+// — or the id without either — is a caller that can draw a receipt for a rule
+// that is not in the store.
+type standingAnswerOutcome struct {
+	// warning is the sentence to show when the standing part could not be
+	// recorded. The decision itself always stood; a store problem is not
+	// the person's to pay for.
+	warning string
+	// saved says a standing answer was WRITTEN — the whole of what a
+	// receipt may be drawn on.
+	saved bool
+	// ruleID is the stored invocation rule's id, and therefore what an
+	// Undo can name exactly. Empty for the answers no id addresses: a
+	// session overlay, which dies with its session, and a matrix row,
+	// which is edited rather than removed.
+	ruleID string
+	// rule is the canonical invocation the answer covers, in the spelling
+	// the question offered it in. Empty for a non-command answer, whose
+	// coverage is the effect row.
+	rule string
+}
+
+// noPolicyStoreWarning is the one sentence for "there is nowhere to save
+// this", written once because two spellings of it would drift.
+const noPolicyStoreWarning = "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+
+// refusedStandingAnswer wraps the reason one save failed in the sentence a
+// person reads. One owner of the words: every failure path here says the same
+// thing about what DID happen — the decision stood — and differs only in why
+// the standing half did not.
+func refusedStandingAnswer(reason string) standingAnswerOutcome {
+	return standingAnswerOutcome{
+		warning: "the decision was applied to this call, but could not be saved as a standing answer: " + reason,
+	}
+}
+
+// notifyStandingAnswer tells the turn that asked that a standing answer is now
+// in the store (nocx-2019q). It carries the same facts the QUESTION carried —
+// the direction, the width and the binding — and no sentence: the words a
+// receipt shows are the words of the button that was clicked, and that surface
+// is their one owner (AD-8).
+//
+// Nothing is sent when nothing was written, which is what makes a receipt on
+// screen true: "once" saves nothing, an egress question is refused a width
+// before it reaches here, and a refused write leaves `saved` false and its
+// sentence on the response instead.
+func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome) {
+	if !outcome.saved {
+		return
+	}
+	effect, _ := h.approvals.EffectFor(ap)
+	entryID, _ := h.approvals.EntryIDFor(ap)
+	_ = h.r.TryNotify("agent.standingAnswerSaved", mustMarshal(agentStandingAnswerSaved{
+		RunID:    p.RunID,
+		EntryID:  entryID,
+		Approved: p.Approved,
+		Scope:    p.Scope,
+		Rule:     outcome.rule,
+		Effect:   string(effect),
+		RuleID:   outcome.ruleID,
+	}))
 }
 
 // resumeRun re-drives a suspended run after the person's yes: the run

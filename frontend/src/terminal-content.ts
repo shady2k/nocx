@@ -89,6 +89,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
   subscribe: () => () => {},
 }
 import { BlockReceipt } from './ui/block-receipt'
+import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
 import type { HistoryRecord } from './generated/history.record'
 import { blockOutputText, renderRecordedCommand, toolCallExpansion } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
@@ -445,6 +446,11 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
+  /** The approval receipt's second action: open Settings → Agent policy,
+   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  the one page that governs what it is about — and wired by main.tsx. */
+  onManagePermissions?: () => void
   /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
    *
    *  The coordinator outlives this window, so a pane the layout chain brings
@@ -2145,6 +2151,19 @@ export class TerminalContent extends BasePaneContent {
               this._mutateSummonAnswers(() => handle.reasoning(text))
               this.scrollback?.scrollToBottom()
             },
+            // A line the turn states about itself grows the block exactly as
+            // a delta does, so it follows for the same reason — and it is
+            // forwarded EXPLICITLY, like the two above: the spread would
+            // carry the method and lose the follow, which is the gap nobody
+            // notices until one of the four event kinds stops scrolling.
+            notice: (state: BlockNoticeState) => {
+              let drawn!: BlockNotice
+              this._mutateSummonAnswers(() => {
+                drawn = handle.notice(state)
+              })
+              this.scrollback?.scrollToBottom()
+              return drawn
+            },
             // `model` is forwarded, and it was not: this wrapper took two
             // parameters where the handle takes three, so the "answered by
             // <model>" provenance nocx-e6kn2 added could never be painted —
@@ -2187,6 +2206,9 @@ export class TerminalContent extends BasePaneContent {
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
         onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        // Where a standing answer is managed, for the receipt the turn
+        // draws when one is saved (nocx-2019q).
+        openPermissions: () => this.hooks.onManagePermissions?.(),
         // A question's editor layer: the DOCUMENT-level surfaces only. The
         // shell highlighter and the completion surface stay with the shell
         // — prose is not a command and must not be painted as one — while

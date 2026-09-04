@@ -34,6 +34,15 @@ type GlobalPolicy interface {
 	// SetPolicy validates and persists a new policy; the next mint reads
 	// it live, no restart.
 	SetPolicy(p content.EffectPolicy) error
+	// SetRowDecision writes ONE row of the matrix — read-modify-write
+	// under the store's own lock — leaving the other six rows, every
+	// row's scopes and every invocation rule exactly as they were. It is
+	// SetRule's twin and exists for the same reason: the approval prompt
+	// answers a non-command question by writing a row while another
+	// prompt is writing a rule, and a caller that read the whole policy,
+	// edited its copy and wrote it back would silently drop whichever
+	// answer landed in between.
+	SetRowDecision(e content.Effect, d content.Decision) error
 	// SetRule writes ONE invocation rule — adds it, or replaces the rule
 	// wearing its id — leaving the matrix and every other rule alone. The
 	// stored rule comes back, so a caller that supplied no id learns the
@@ -106,6 +115,24 @@ func (s *GlobalPolicyStore) SetPolicy(p content.EffectPolicy) error {
 	return nil
 }
 
+// SetRowDecision writes ONE row's decision, under the store's own lock and
+// with the same one-object discipline SetRule has: the other six rows, this
+// row's scopes and every invocation rule are whatever the store held a
+// microsecond ago, never whatever a caller read some time earlier.
+//
+// A decision outside permit/ask/refuse changes nothing — EffectPolicy's own
+// SetRowDecision returns the policy unedited for one — and the write still
+// happens, which is deliberate: the caller asked for the store to hold a row,
+// and a silent no-op that also skipped the persist would leave the document
+// and the value disagreeing about what a no-op is. The strict parse below
+// refuses anything the matrix genuinely cannot hold.
+func (s *GlobalPolicyStore) SetRowDecision(e content.Effect, d content.Decision) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.writeLocked(s.current.SetRowDecision(e, d))
+	return err
+}
+
 // SetRule writes ONE invocation rule into the stored document, read-modify-
 // write under the store's OWN lock. That is the whole point of it existing:
 // a caller that reads the policy, edits it and writes it back holds a
@@ -160,7 +187,9 @@ func (s *GlobalPolicyStore) SetRule(rule content.InvocationRule) (content.Invoca
 		rules = append(rules, rule)
 	}
 
-	next, err := s.writeRules(rules)
+	candidate := s.current
+	candidate.Rules = rules
+	next, err := s.writeLocked(candidate)
 	if err != nil {
 		return content.InvocationRule{}, err
 	}
@@ -191,29 +220,31 @@ func (s *GlobalPolicyStore) ForgetRule(id string) (bool, error) {
 	}
 	rules := append([]content.InvocationRule(nil), s.current.Rules[:at]...)
 	rules = append(rules, s.current.Rules[at+1:]...)
-	if _, err := s.writeRules(rules); err != nil {
+	candidate := s.current
+	candidate.Rules = rules
+	if _, err := s.writeLocked(candidate); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// writeRules persists the current matrix carrying exactly these rules and
-// makes it current. The caller holds the lock.
+// writeLocked persists one candidate policy and makes it current. The caller
+// holds the lock, and every one-object mutator above builds its candidate
+// from s.current so that everything it did not touch is what the store holds
+// NOW rather than what somebody read earlier.
 //
 // The candidate crosses content.ParseEffectPolicy before anything is written,
-// so a rule the gate refuses leaves both the document and the in-memory value
-// exactly as they were — the interval closes where it opened, and there is no
-// state in which the store holds a policy the parser would reject.
-func (s *GlobalPolicyStore) writeRules(rules []content.InvocationRule) (content.EffectPolicy, error) {
-	candidate := s.current
-	candidate.Rules = rules
+// so a policy the gate refuses leaves both the document and the in-memory
+// value exactly as they were — the interval closes where it opened, and there
+// is no state in which the store holds a policy the parser would reject.
+func (s *GlobalPolicyStore) writeLocked(candidate content.EffectPolicy) (content.EffectPolicy, error) {
 	raw, err := json.Marshal(candidate)
 	if err != nil {
-		return content.EffectPolicy{}, fmt.Errorf("agent policy: writing a rule: %w", err)
+		return content.EffectPolicy{}, fmt.Errorf("agent policy: writing the policy: %w", err)
 	}
 	parsed, err := content.ParseEffectPolicy(raw)
 	if err != nil {
-		return content.EffectPolicy{}, fmt.Errorf("agent policy: writing a rule: %w", err)
+		return content.EffectPolicy{}, fmt.Errorf("agent policy: writing the policy: %w", err)
 	}
 	if err := s.doc.Write(s.name, parsed); err != nil {
 		return content.EffectPolicy{}, err

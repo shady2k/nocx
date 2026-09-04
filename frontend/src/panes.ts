@@ -837,6 +837,11 @@ export class PaneManager {
    *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
    *  beside onCreateEndpoint, which the chip's other destination reuses. */
   onOpenRoles?: () => void
+  /** The approval receipt's second action: open Settings → Agent policy,
+   *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
+   *  the same reason it is beside onCreateEndpoint — a line on screen names
+   *  the one page that governs what it is about — and wired by main.tsx. */
+  onManagePermissions?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -1450,6 +1455,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         onConnectionConditionChange: (condition) =>
@@ -1557,6 +1563,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onManagePermissions: this.onManagePermissions,
       },
     )
     const descriptor: ContentDescriptor = {

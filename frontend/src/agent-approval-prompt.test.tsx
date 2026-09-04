@@ -26,7 +26,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createSignal } from 'solid-js'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
-import { AgentApprovalPrompt } from './agent-approval-prompt'
+import { AgentApprovalPrompt, standingAnswerReceipt } from './agent-approval-prompt'
+import { AgentInputTarget } from './agent-ask'
+import { recordApprovalDecision } from './agent-approval-decision'
+import { BlockManager } from './scrollback/blocks'
+import { CommandSnapshotStore } from './command-snapshot'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import { EFFECT_LABEL } from './effect-labels'
 import type { AgentApprove } from './generated/agent.approve'
@@ -1131,5 +1135,326 @@ describe('AgentApprovalPrompt — the widening answer (nocx-4yjwk.1)', () => {
         (b) => (b as HTMLButtonElement).disabled,
       ),
     ).toBe(false)
+  })
+})
+
+/**
+ * THE RECEIPT (nocx-2019q) — a standing answer says so where it was given.
+ *
+ * Driven through the BUTTON, not the callback, and through the real pieces
+ * between it and the screen: the prompt's own answer goes on a fake wire, the
+ * backend's receipt notification comes back on it, and the REAL
+ * AgentInputTarget draws into a REAL scrollback block. A test that called the
+ * receipt drawer directly would prove the drawer works and nothing about
+ * whether clicking Allow always reaches it.
+ */
+describe('AgentApprovalPrompt — the receipt a standing answer earns', () => {
+  afterEach(cleanup)
+
+  const RUN_ID = 7
+  const ENTRY_ID = 'answer-1'
+
+  /** What the backend says when the standing half was written. */
+  type Saved = {
+    runId: string
+    entryId: string
+    approved: boolean
+    scope: string
+    rule: string
+    effect: string
+    ruleId: string
+  }
+
+  /** The wire, as far as this exchange is concerned. `approve` is what the
+   *  test scripts: whether the answer is accepted, and what receipt (if any)
+   *  the backend then sends. */
+  class Wire {
+    calls: { method: string; params: unknown }[] = []
+    private subs = new Map<string, (params: unknown) => void>()
+    /** The receipt this exchange's agent.approve produces, or null. */
+    receipt: Saved | null = null
+    /** The warning agent.approve answers with — the standing half that did
+     *  not stick. */
+    warning = ''
+    forgetRuleAnswers: () => Promise<{ removed: boolean }> = () =>
+      Promise.resolve({ removed: true })
+
+    call<T = unknown>(method: string, params: unknown): Promise<T> {
+      this.calls.push({ method, params })
+      if (method === 'agent.ask') {
+        return Promise.resolve({
+          runId: RUN_ID,
+          entryId: ENTRY_ID,
+          state: 'prepared',
+          ingestSeq: 1,
+          replayed: false,
+          model: 'qwen3',
+        }) as Promise<T>
+      }
+      if (method === 'agent.approve') {
+        // The backend writes the standing answer and announces it BEFORE it
+        // answers the call, exactly as the transport does.
+        if (this.receipt) this.emit('agent.standingAnswerSaved', this.receipt)
+        return Promise.resolve({ state: 'streaming', warning: this.warning }) as Promise<T>
+      }
+      if (method === 'policy.forgetRule') {
+        return this.forgetRuleAnswers() as Promise<T>
+      }
+      return Promise.reject(new Error(`unexpected call ${method}`))
+    }
+
+    subscribe(method: string, handler: (params: unknown) => void): () => void {
+      this.subs.set(method, handler)
+      return () => this.subs.delete(method)
+    }
+
+    emit(method: string, params: unknown): void {
+      this.subs.get(method)?.(params)
+    }
+  }
+
+  /** A pane with a real scrollback and a real agent target, with one turn
+   *  open on it — the state a person is in when a question arrives. */
+  async function paneWithAnOpenTurn(wire: Wire, openPermissions?: () => void) {
+    const inner = document.createElement('div')
+    document.body.appendChild(inner)
+    const xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    const manager = new BlockManager(inner, xtermContainer, {
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    const target = new AgentInputTarget({
+      dispatcher: wire as never,
+      cancel: vi.fn(() =>
+        Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
+      ),
+      sessionId: () => 'session-a',
+      cwd: () => '/repo',
+      grants: () => [],
+      openAnswer: (question, cwd, running) => manager.addAnswerBlock(question, cwd, running),
+      onRefusal: vi.fn(),
+      openPermissions,
+    })
+    await target.submit('please read it')
+    return { inner, manager, target }
+  }
+
+  const receiptLine = (root: HTMLElement) => root.querySelector<HTMLElement>('.ui-block-notice')
+  const receiptText = (root: HTMLElement) =>
+    receiptLine(root)?.querySelector('.ui-block-notice__text')?.textContent ?? ''
+  const receiptActions = (root: HTMLElement) =>
+    Array.from(
+      receiptLine(root)?.querySelectorAll<HTMLButtonElement>(
+        '.ui-block-notice__actions .ui-button',
+      ) ?? [],
+    )
+
+  /** Click the answer whose label starts with these words. */
+  function answer(container: HTMLElement, label: string) {
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>('.ui-button')).find(
+      (b) => (b.textContent ?? '').startsWith(label),
+    )
+    if (!button) throw new Error(`no answer labelled ${label}`)
+    fireEvent.click(button)
+  }
+
+  /** Render the real prompt with the real decision path behind its buttons. */
+  function promptOver(wire: Wire, ask: AgentApprovalRequested) {
+    return render(() => (
+      <AgentApprovalPrompt
+        open
+        ask={ask}
+        busy={false}
+        onDecide={(approved, scope) => {
+          void recordApprovalDecision(ask, approved, scope, {
+            dispatcher: wire as never,
+            onWarning: () => {},
+            onError: () => {},
+          })
+        }}
+      />
+    ))
+  }
+
+  const RUN_ASK: AgentApprovalRequested = { ...STANDING_ASK, runId: String(RUN_ID) }
+
+  const SAVED: Saved = {
+    runId: String(RUN_ID),
+    entryId: ENTRY_ID,
+    approved: true,
+    scope: 'always',
+    rule: 'df -h',
+    effect: 'observe',
+    ruleId: 'rule-42',
+  }
+
+  /** Criterion 1. */
+  it('says what was saved, in the words of the button that saved it', async () => {
+    const wire = new Wire()
+    wire.receipt = SAVED
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+
+    answer(container, 'Allow always')
+    await Promise.resolve()
+
+    expect(receiptText(inner)).toBe(
+      standingAnswerReceipt(true, 'always', 'df -h', EFFECT_LABEL[RUN_ASK.effect]),
+    )
+    // The person's own words: the sentence the button carried, unaltered.
+    expect(receiptText(inner)).toContain('Allow always')
+    expect(receiptText(inner)).toContain('df -h')
+    expect(receiptText(inner)).toContain('in every session, from now on')
+    expect(receiptActions(inner).map((b) => b.textContent)).toEqual(['Undo', 'Manage permissions'])
+  })
+
+  /** Criterion 2, first half: "once" saves nothing, so it reports nothing. */
+  it('draws nothing for an answer that saved nothing', async () => {
+    const wire = new Wire()
+    wire.receipt = null
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+
+    answer(container, 'Allow once')
+    await Promise.resolve()
+
+    expect(wire.calls.some((c) => c.method === 'agent.approve')).toBe(true)
+    expect(receiptLine(inner)).toBeNull()
+  })
+
+  /** Criterion 2, second half — true for a DIFFERENT reason: an egress
+   *  question offers no width at all, so the only answer it can be given
+   *  saves nothing anywhere. */
+  it('draws nothing for an egress answer, which is never a standing one', async () => {
+    const wire = new Wire()
+    wire.receipt = null
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const egress: AgentApprovalRequested = { ...EGRESS_ASK, runId: String(RUN_ID) }
+    const { container } = promptOver(wire, egress)
+
+    // The surface offers exactly two answers here, both `once`.
+    expect(
+      Array.from(container.querySelectorAll('.ui-button')).map((b) => b.textContent),
+    ).toHaveLength(2)
+    answer(container, 'Allow once')
+    await Promise.resolve()
+
+    expect(receiptLine(inner)).toBeNull()
+  })
+
+  /** Criterion 5: a failed save must not put "Saved" on the screen. */
+  it('draws nothing when the save failed, and the warning is what is reported', async () => {
+    const wire = new Wire()
+    wire.receipt = null
+    wire.warning = 'the decision was applied to this call, but could not be saved: disk is full'
+    const warned: string[] = []
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = render(() => (
+      <AgentApprovalPrompt
+        open
+        ask={RUN_ASK}
+        busy={false}
+        onDecide={(approved, scope) => {
+          void recordApprovalDecision(RUN_ASK, approved, scope, {
+            dispatcher: wire as never,
+            onWarning: (sentence) => warned.push(sentence),
+            onError: () => {},
+          })
+        }}
+      />
+    ))
+
+    answer(container, 'Allow always')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(receiptLine(inner)).toBeNull()
+    expect(warned).toEqual([wire.warning])
+  })
+
+  /** Criterion 3: Undo forgets THAT rule, named by its id. */
+  it('undoes by id, and only that id', async () => {
+    const wire = new Wire()
+    wire.receipt = SAVED
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+    answer(container, 'Allow always')
+    await Promise.resolve()
+
+    fireEvent.click(receiptActions(inner)[0])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const forgets = wire.calls.filter((c) => c.method === 'policy.forgetRule')
+    expect(forgets).toHaveLength(1)
+    expect(forgets[0].params).toEqual({ id: 'rule-42' })
+    // Never a whole-document write: a snapshot restore would discard an
+    // answer given between the save and the undo.
+    expect(wire.calls.some((c) => c.method === 'policy.set')).toBe(false)
+    expect(receiptText(inner)).toBe('Undone — that answer is no longer saved.')
+    expect(receiptActions(inner).map((b) => b.textContent)).toEqual(['Manage permissions'])
+  })
+
+  /** Criterion 4: undoing something already gone is a success, and says so. */
+  it('reports what is true when the rule was already gone', async () => {
+    const wire = new Wire()
+    wire.receipt = SAVED
+    wire.forgetRuleAnswers = () => Promise.resolve({ removed: false })
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+    answer(container, 'Allow always')
+    await Promise.resolve()
+
+    fireEvent.click(receiptActions(inner)[0])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(receiptText(inner)).toBe('That answer was already gone.')
+    expect(receiptText(inner)).not.toContain('could not')
+    expect(receiptActions(inner).map((b) => b.textContent)).toEqual(['Manage permissions'])
+  })
+
+  it('keeps Undo offered when the undo itself failed', async () => {
+    const wire = new Wire()
+    wire.receipt = SAVED
+    wire.forgetRuleAnswers = () => Promise.reject(new Error('the transport is closed'))
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+    answer(container, 'Allow always')
+    await Promise.resolve()
+
+    fireEvent.click(receiptActions(inner)[0])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(receiptText(inner)).toContain('the transport is closed')
+    expect(receiptLine(inner)?.dataset.tone).toBe('warning')
+    expect(receiptActions(inner).map((b) => b.textContent)).toEqual(['Undo', 'Manage permissions'])
+  })
+
+  it('offers no Undo for an answer no id can name', async () => {
+    const wire = new Wire()
+    wire.receipt = { ...SAVED, scope: 'session', ruleId: '' }
+    const { inner } = await paneWithAnOpenTurn(wire, vi.fn())
+    const { container } = promptOver(wire, RUN_ASK)
+
+    answer(container, 'Allow in this session')
+    await Promise.resolve()
+
+    expect(receiptText(inner)).toContain('until this terminal session ends')
+    expect(receiptActions(inner).map((b) => b.textContent)).toEqual(['Manage permissions'])
+  })
+
+  it('opens the page that manages standing answers', async () => {
+    const wire = new Wire()
+    wire.receipt = SAVED
+    const openPermissions = vi.fn()
+    const { inner } = await paneWithAnOpenTurn(wire, openPermissions)
+    const { container } = promptOver(wire, RUN_ASK)
+    answer(container, 'Allow always')
+    await Promise.resolve()
+
+    fireEvent.click(receiptActions(inner)[1])
+    expect(openPermissions).toHaveBeenCalledTimes(1)
   })
 })

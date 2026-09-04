@@ -198,6 +198,8 @@ func (f failingPolicyStore) Policy() content.EffectPolicy {
 
 func (f failingPolicyStore) SetPolicy(content.EffectPolicy) error { return f.err }
 
+func (f failingPolicyStore) SetRowDecision(content.Effect, content.Decision) error { return f.err }
+
 func (f failingPolicyStore) SetRule(content.InvocationRule) (content.InvocationRule, error) {
 	return content.InvocationRule{}, f.err
 }

@@ -661,11 +661,17 @@ func TestEveryRuleCarriesWhereItCameFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiteralInvocationRule: %v", err)
 	}
-	if first.ID == "" || second.ID == "" {
-		t.Fatalf("ids %q and %q — a rule is identified from creation", first.ID, second.ID)
-	}
-	if first.ID == second.ID {
-		t.Fatalf("two rules share the id %q", first.ID)
+	// NEITHER carries an id, and that is the point (nocx-2019q). A rule
+	// that has not been stored has no name yet: the id is the DOCUMENT's
+	// name for it, minted on the one parse every stored policy crosses
+	// (TestADocumentsRulesAreIdentifiedAndWritten is where that is
+	// asserted). Minting here named rules that are never stored — the
+	// approval prompt builds one per question just to read its Label —
+	// and put a second mint in front of the store's, so the id a caller
+	// held was not certainly the id the document wore.
+	if first.ID != "" || second.ID != "" {
+		t.Fatalf("ids %q and %q — a rule is named by the document that stores it, not at creation",
+			first.ID, second.ID)
 	}
 	if first.Source != content.SourceAnswered {
 		t.Errorf("source = %q, want %q — a prompt's rule is answered", first.Source, content.SourceAnswered)

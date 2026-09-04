@@ -142,6 +142,44 @@ import type { AgentApprove } from './generated/agent.approve'
 /** How far an answer reaches — the wire's own vocabulary, not a second one. */
 type ApprovalScope = AgentApprove['scope']
 
+/**
+ * The two tools this window says something EXTRA about, named once each
+ * (nocx-69sew).
+ *
+ * The window is generic — every proposal renders from `effect`, the parsed
+ * arguments and the pane rows, and nothing here derives an effect from a
+ * tool name (ADR-0028 decision 4 forbids that, and the header says so). Two
+ * PRESENTATION branches are keyed on the name anyway, because they are
+ * statements only true of one tool: the command carrier gets njn8s's
+ * sentence and its verbatim block, and fetch.url gets the row saying the
+ * call leaves this machine.
+ *
+ * Those two literals are the whole of the coupling, and they used to be a
+ * silent one. `run` was renamed `session.run` in d71263ab; `if (ask().tool
+ * !== 'run')` went on compiling, went on passing ten tests written from the
+ * component, and every real command proposal fell through the branch — no
+ * lead sentence, no command block, no variable expansion. Nothing could see
+ * it: the wire type said `string`, so 'run' was as valid a comparand as any
+ * other string, and the tests carried the component's own belief.
+ *
+ * `AgentApprovalRequested['tool']` is now a union generated from the
+ * contract's enum, which a Go test holds equal to the declaration table
+ * (TestApprovalRequestedToolEnumMatchesTheTable). So `satisfies` below fails
+ * to compile the moment a name here stops being a name the backend can
+ * send, and the comparisons that read these constants fail with it — a
+ * rename cannot leave this file comparing against a dead string and a green
+ * suite.
+ */
+const COMMAND_TOOL = 'session.run' satisfies AgentApprovalRequested['tool']
+const NETWORK_TOOL = 'fetch.url' satisfies AgentApprovalRequested['tool']
+
+/** What the window keys its two by-name branches on, for the test that
+ *  proves the chain from this file to the declaration table is unbroken. */
+export const TOOLS_THIS_WINDOW_NAMES = {
+  command: COMMAND_TOOL,
+  network: NETWORK_TOOL,
+} as const
+
 /** What the command's variables read as, as the backend derived it. */
 type ExpansionFacts = NonNullable<NonNullable<AgentApprovalRequested['expansion']>>
 type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
@@ -490,7 +528,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    * put in the block — and then the command is simply one of the rows.
    */
   const proposedCommand = () => {
-    if (ask().tool !== 'run') return null
+    if (ask().tool !== COMMAND_TOOL) return null
     const command = parsedArguments()?.command
     return typeof command === 'string' && command !== '' ? command : null
   }
@@ -671,7 +709,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         })
       }
     }
-    if (ask().reason === 'policy' && ask().tool === 'fetch.url') {
+    if (ask().reason === 'policy' && ask().tool === NETWORK_TOOL) {
       rows.push({
         name: 'network',
         value: 'reaches the network from this machine',

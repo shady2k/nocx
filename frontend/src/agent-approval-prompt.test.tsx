@@ -23,9 +23,11 @@
  * covers — this call has not run, and no call after it will — and does NOT
  * claim the domain is untouched.
  */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
-import { AgentApprovalPrompt } from './agent-approval-prompt'
+import { AgentApprovalPrompt, TOOLS_THIS_WINDOW_NAMES } from './agent-approval-prompt'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import { EFFECT_LABEL } from './effect-labels'
 import type { AgentApprove } from './generated/agent.approve'
@@ -58,7 +60,7 @@ const EGRESS_ASK: AgentApprovalRequested = {
 
 const STANDING_ASK: AgentApprovalRequested = {
   ...POLICY_ASK,
-  tool: 'run',
+  tool: 'session.run',
   arguments: '{"command":"df -h"}',
   standing: { available: true, rule: 'df -h', reason: '' },
 }
@@ -117,7 +119,7 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
 
   const SESSION_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
-    tool: 'readScreen',
+    tool: 'session.read',
     arguments: `{"sessionId":"${SID}"}`,
     resource: { kind: 'session', id: SID },
   }
@@ -171,7 +173,7 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'run',
+        tool: 'session.run',
         arguments: `{"sessionId":"${SID}"}`,
         resource: { kind: 'path', id: '/tmp' },
       },
@@ -211,12 +213,130 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
  * tab are rows beneath it — a person reads where the call lands at a glance,
  * not by parsing the lead.
  */
+/**
+ * nocx-69sew — the window went dark for every real command proposal, and
+ * this file is why nothing saw it.
+ *
+ * The shell tool was renamed `run` → `session.run` in d71263ab. The
+ * component went on asking `ask().tool !== 'run'`, so for every proposal the
+ * backend actually sends, four things stopped being drawn: the lead sentence,
+ * the labelled command block (nocx-njn8s), the variable expansion nested
+ * inside it (nocx-4h0m7.5), and — because statedInTheWindow() then no longer
+ * claims `command` — the command itself fell through to the fact rows and was
+ * stated as a VALUE rather than as bytes.
+ *
+ * All ten command fixtures said `tool: 'run'`. They were written from the
+ * component, so they carried the component's belief: fixture and branch
+ * agreed, and were wrong together (AGENTS.md, testing rule 4). Every fixture
+ * in this file now carries a name the declaration table declares, which the
+ * generated wire union enforces at compile time, and these three tests are
+ * the ones that would have caught it.
+ */
+describe('AgentApprovalPrompt — the tool name is the backend\u2019s, not ours (nocx-69sew)', () => {
+  afterEach(cleanup)
+
+  /** The proposal production sends: the SHIPPED tool name, a command, a
+   *  pane, and an expansion beside the verbatim string. */
+  const SHIPPED_RUN_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'session.run',
+    effect: 'mutate-destructive',
+    arguments: `{"command":"rm -rf $HOME/x","sessionId":"${SID}"}`,
+    resource: { kind: 'session', id: SID },
+    expansion: {
+      asked: true,
+      command: 'rm -rf /home/dev/x',
+      parts: [
+        { text: '$HOME', name: 'HOME', kind: 'parameter', state: 'expanded', value: '/home/dev' },
+      ],
+    },
+  }
+
+  /**
+   * The link the compiler cannot state at runtime, and the one that closes
+   * the trap. The two names this window branches on are read from the
+   * component itself and checked against the wire contract's enum — which a
+   * Go test (TestApprovalRequestedToolEnumMatchesTheTable) holds equal to
+   * internal/agenttools' declaration table. Rename a tool there and leave
+   * this file alone: the Go test reds first, and once the contract is
+   * corrected this one reds too, before any rendering assertion is reached.
+   */
+  it('branches only on names the wire contract declares', () => {
+    const contract = JSON.parse(
+      readFileSync(
+        resolve(
+          import.meta.dirname ?? new URL('.', import.meta.url).pathname,
+          '../../contracts/agent.approvalRequested.schema.json',
+        ),
+        'utf8',
+      ),
+    ) as { properties: { tool: { enum?: string[] } } }
+    const declared = contract.properties.tool.enum
+    expect(
+      declared,
+      'the contract must ENUMERATE the tool names, or the union is a bare string again',
+    ).toBeDefined()
+    for (const [branch, name] of Object.entries(TOOLS_THIS_WINDOW_NAMES)) {
+      expect(declared, `the ${branch} branch compares against ${name}`).toContain(name)
+    }
+  })
+
+  it('draws the lead, the labelled command block and the expansion for the shipped tool', () => {
+    const { container } = renderPrompt({ ask: SHIPPED_RUN_ASK, sessionWhere: () => HERE })
+    const text = container.textContent ?? ''
+
+    // The lead sentence — dark since d71263ab.
+    expect(text).toContain('The assistant wants to run this command:')
+
+    // nocx-njn8s's deliverable: the command in its OWN labelled block,
+    // verbatim, addressed by the label rather than by position.
+    const commanded = container.querySelector('[aria-label="The command this question is about"]')
+    expect(commanded?.textContent).toBe('rm -rf $HOME/x')
+
+    // nocx-4h0m7.5's deliverable, which is nested inside that same branch:
+    // what the variables read as, beside the verbatim line and never
+    // instead of it.
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent ?? '',
+    )
+    expect(blocks).toContain('rm -rf $HOME/x')
+    expect(blocks).toContain('rm -rf /home/dev/x')
+    expect(rows(container)).toContainEqual(['$HOME', '/home/dev'])
+  })
+
+  /**
+   * The fourth consequence, and the one no other assertion covers. A
+   * one-line command is not machine text, so with the branch dark it did not
+   * even become a block further down — statedInTheWindow() stopped claiming
+   * `command`, and `df -h` was stated as the VALUE of a fact row, in the
+   * same voice as "cwd" and "effect". It is bytes the person is deciding
+   * about; it belongs in a block.
+   */
+  it('states a single-line command as bytes in a block, never as a fact row', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'session.run',
+        effect: 'mutate-reversible',
+        arguments: '{"command":"df -h"}',
+        resource: null,
+      },
+    })
+    const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
+      (b) => b.textContent ?? '',
+    )
+    expect(blocks).toContain('df -h')
+    expect(names(container)).not.toContain('command')
+    expect(rows(container).map(([, value]) => value)).not.toContain('df -h')
+  })
+})
+
 describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s, nocx-0mvpy.2)', () => {
   afterEach(cleanup)
 
   const RUN_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
-    tool: 'run',
+    tool: 'session.run',
     effect: 'mutate-destructive',
     arguments: `{"command":"df -h","sessionId":"${SID}"}`,
     resource: { kind: 'session', id: SID },
@@ -329,7 +449,7 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s, nocx-0m
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'readScreen',
+        tool: 'session.read',
         arguments: `{"sessionId":"${SID}"}`,
         resource: { kind: 'session', id: SID },
       },
@@ -433,7 +553,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
 
   const SESSION_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
-    tool: 'readScreen',
+    tool: 'session.read',
     arguments: `{"sessionId":"${SID}"}`,
     resource: { kind: 'session', id: SID },
   }
@@ -458,7 +578,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'someone.elses.tool',
+        tool: 'git.status',
         arguments: '{"target":"prod","force":true,"retries":3}',
         resource: null,
       },
@@ -469,7 +589,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       ['retries', '3'],
       ['effect', 'read and inspect'],
     ])
-    expect(container.textContent ?? '').toContain('someone.elses.tool')
+    expect(container.textContent ?? '').toContain('git.status')
   })
 
   it('keeps the verbatim blob when the arguments are not an object — that fallback stays', () => {
@@ -521,7 +641,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'run',
+        tool: 'session.run',
         effect: 'mutate-destructive',
         arguments: `{"command":"rm -rf build","sessionId":"${SID}"}`,
         resource: { kind: 'session', id: SID },
@@ -788,7 +908,7 @@ describe('AgentApprovalPrompt — standing answers name the carried rule (nocx-t
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'run',
+        tool: 'session.run',
         arguments: '{"command":"df -h"}',
         standing: { available: true, rule, reason: '' },
       },
@@ -805,7 +925,7 @@ describe('AgentApprovalPrompt — standing answers name the carried rule (nocx-t
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        tool: 'run',
+        tool: 'session.run',
         arguments: '{"command":"sudo df -h"}',
         standing: { available: false, rule: '', reason },
       },
@@ -835,7 +955,7 @@ describe('AgentApprovalPrompt — what the command’s variables read as (nocx-4
 
   const EXPANSION_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
-    tool: 'run',
+    tool: 'session.run',
     effect: 'mutate-destructive',
     arguments: '{"command":"rm -rf $HOME/x $(id -u)"}',
     resource: null,
@@ -951,7 +1071,7 @@ describe('AgentApprovalPrompt — what the command’s variables read as (nocx-4
 
   it('says nothing about expansion when the backend sent none', () => {
     const { container } = renderPrompt({
-      ask: { ...POLICY_ASK, tool: 'run', arguments: '{"command":"df -h"}' },
+      ask: { ...POLICY_ASK, tool: 'session.run', arguments: '{"command":"df -h"}' },
     })
     expect(container.querySelectorAll('.ui-code-block')).toHaveLength(1)
     expect(names(container)).not.toContain('$HOME')
@@ -1341,7 +1461,7 @@ describe('AgentApprovalPrompt — a multi-line argument is a block, not a row (n
     const { container } = renderPrompt({
       ask: {
         ...SKILL_ASK,
-        tool: 'files.write',
+        tool: 'files.create',
         arguments: JSON.stringify({
           path: '/repo/a.txt',
           contents: 'first line\nsecond line\n',
@@ -1396,7 +1516,7 @@ describe('AgentApprovalPrompt — the script a command names (nocx-872jc.3)', ()
 
   const SCRIPT_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
-    tool: 'run',
+    tool: 'session.run',
     effect: 'delegate',
     arguments: '{"command":"bash deploy.sh"}',
     resource: null,
@@ -1497,7 +1617,7 @@ describe('AgentApprovalPrompt — the script a command names (nocx-872jc.3)', ()
 
   it('draws NOTHING when the proposal names no file', () => {
     const { container } = renderPrompt({
-      ask: { ...POLICY_ASK, tool: 'run', arguments: '{"command":"df -h"}' },
+      ask: { ...POLICY_ASK, tool: 'session.run', arguments: '{"command":"df -h"}' },
     })
     expect(readouts(container)).toHaveLength(0)
     expect(container.textContent).not.toContain('This is a reading, not what is sent')

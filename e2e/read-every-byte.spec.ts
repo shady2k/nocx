@@ -49,20 +49,26 @@
  * file. So what is NOT proven here is the cwd-relative arm of
  * `absoluteScriptPath`; `internal/transport/ws_script_test.go` owns that.
  *
- * A DEFECT FOUND WHILE WRITING THIS, AND DELIBERATELY NOT ASSERTED AGAINST.
- * `agent-approval-prompt.tsx` gates its command-proposal presentation on
- * `ask().tool !== 'run'`, and the tool has been called `session.run` since
+ * A DEFECT FOUND WHILE WRITING THIS, SINCE FIXED (nocx-69sew).
+ * `agent-approval-prompt.tsx` gated its command-proposal presentation on
+ * `ask().tool !== 'run'`, and the tool had been called `session.run` since
  * d71263ab — whose message says "the renderer never branched on it", which is
- * the one place it did. So in the shipped product a command proposal loses the
+ * the one place it did. So in the shipped product a command proposal lost the
  * sentence "The assistant wants to run this command", the command's own
  * labelled block, and the variable expansion beside it (nocx-njn8s,
- * nocx-4h0m7.5); the command survives only as a fact row, because
- * `statedInTheWindow()` no longer claims it. The frontend unit tests pass
- * `tool: 'run'` and so cannot see any of that. It is NOT this epic's
- * deliverable — the `scripts` reading renders outside that gate, which is why
- * the reading below is whole — and this file asserts the criterion rather than
- * the neighbouring feature, so it does not go red for a defect it did not
- * come to check. Whoever fixes that owns the check that watches it.
+ * nocx-4h0m7.5); the command survived only as a fact row, because
+ * `statedInTheWindow()` no longer claimed it. The frontend unit tests all
+ * passed `tool: 'run'` and so could not see any of it.
+ *
+ * It is fixed, and the name is no longer a bare string on either side:
+ * `contracts/agent.approvalRequested.schema.json` ENUMERATES the declaration
+ * table's tool names, so the generated renderer type is a union and a
+ * comparison against a name no tool declares is a compile error, while
+ * `TestApprovalRequestedToolEnumMatchesTheTable` holds that enum equal to
+ * `internal/agenttools`. This spec did not change and did not need to: it
+ * addresses the command by its bytes, so it passed before the fix and passes
+ * after it — which is the one thing it can say about that window, and the
+ * reason the unit tests in `agent-approval-prompt.test.tsx` own the rest.
  *
  * WHAT WOULD MAKE THIS LIE. Two things, and both are guarded. A comparison
  * against an element that is not there passes by measuring nothing, so every

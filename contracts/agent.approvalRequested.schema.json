@@ -28,9 +28,33 @@
       "minimum": 1
     },
     "tool": {
-      "description": "The tool the model proposed calling.",
+      "description": "The tool the model proposed calling — one of the names internal/agenttools' declaration table declares, and nothing else. The set is CLOSED on purpose (nocx-69sew): the renderer keys two sentences on this value (the command block for the command carrier, the network row for fetch.url), and while it was a bare string a rename in the table — `run` became `session.run` — left the renderer comparing against a dead literal, which no test and no schema could see. Enumerated here, the generated renderer type is a union, so a comparison against a name the table no longer declares is a compile error rather than a branch that is quietly never taken; TestApprovalRequestedToolEnumMatchesTheTable is the other end, and fails the moment the table and this list disagree. Only a declared tool can reach this notification: the two names that are not declarations — the unknown-tool anchor and tools.search — are answered inside WrapInvokableToolCall and never reach the kernel that escalates.",
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "enum": [
+        "files.read",
+        "fetch.url",
+        "session.list",
+        "session.read",
+        "session.run",
+        "session.wait",
+        "files.edit",
+        "files.create",
+        "git.status",
+        "notes.search",
+        "notes.create",
+        "notes.update",
+        "notes.delete",
+        "snippets.list",
+        "snippets.create",
+        "snippets.update",
+        "snippets.delete",
+        "snippets.reorder",
+        "skills.read",
+        "skills.create",
+        "skills.update",
+        "skills.delete"
+      ]
     },
     "callId": {
       "description": "The model's call id for the proposed call — part of the binding.",

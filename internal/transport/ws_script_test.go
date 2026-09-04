@@ -211,7 +211,7 @@ func TestReadScript_WithNoProviderFactorySaysSo(t *testing.T) {
 func scriptSuspension(readings *[]assistant.ScriptReading) func(runID string) error {
 	return func(runID string) error {
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
-			RunID: runID, Attempt: 1, Tool: "run", CallID: "call_1",
+			RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 			Arguments: `{"command":"bash deploy.sh","sessionId":"s"}`,
 			ArgHash:   "hash-a",
 			Effect:    content.EffectDelegate,
@@ -252,7 +252,7 @@ func TestAgentApprovalRequested_ScriptsDTOConformsToContract(t *testing.T) {
 	}
 	for name, readings := range cases {
 		dto := agentApprovalRequested{
-			RunID: "7", Attempt: 1, Tool: "run", CallID: "call_1",
+			RunID: "7", Attempt: 1, Tool: "session.run", CallID: "call_1",
 			ArgHash: "hash-a", Arguments: `{"command":"bash deploy.sh"}`,
 			Reason: "policy", Effect: "delegate",
 			Standing: agentApprovalStanding{Available: true, Rule: "bash deploy.sh"},

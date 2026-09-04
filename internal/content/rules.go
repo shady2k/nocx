@@ -3,6 +3,7 @@ package content
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -27,6 +28,47 @@ type Invocation struct {
 // in internal/assistant records these constants rather than its own spelling
 // of them, so there is one name per fact and not two.
 const FeatureWritesOptionNamedPath = "writes-option-named-path"
+
+// EvaluatorVersion is the READING of commands the rules in this package are
+// evaluated under. A widened rule is a claim about what a command does, and a
+// permit agreed to under one reading was agreed to on an account of the
+// command that a later reading can falsify — so a rule records the version it
+// was saved under and goes inert when the two differ (design §5.6).
+//
+// It lives HERE and not in internal/assistant for the reason the feature
+// vocabulary does: internal/assistant imports internal/content, so a content
+// evaluator comparing against an assistant constant would be an import cycle.
+// content owns the rules and owns their evaluation, so it owns the version
+// those rules were evaluated under; the classifier aliases this name rather
+// than declaring a second one.
+//
+// It is 2: the reading changed once, when a path named by an option VALUE
+// became a written resource rather than a skipped token (nocx-3j47q).
+const EvaluatorVersion = 2
+
+// RuleSource is where a rule came from, and it is a closed set of two. A rule
+// a person answered into being and a rule an operator wrote by hand are
+// different objects with different trust, and a page that lets you take an
+// answer back cannot say what it is taking back without this.
+type RuleSource string
+
+const (
+	// SourceAnswered: minted from a person's answer to a prompt, over the
+	// exact command line they were shown.
+	SourceAnswered RuleSource = "answered"
+	// SourceWritten: written into the policy document. A document IS
+	// written, so this is what an unstated source parses as.
+	SourceWritten RuleSource = "written"
+)
+
+func (s RuleSource) valid() bool {
+	switch s {
+	case SourceAnswered, SourceWritten:
+		return true
+	default:
+		return false
+	}
+}
 
 var knownInvocationFeatures = map[string]struct{}{
 	FeatureWritesOptionNamedPath: {},
@@ -76,11 +118,57 @@ type FeatureRef struct {
 // program was reading from reaching the same program deleting. The guard
 // itself cannot live in Matches, which is not told what the call classified
 // as; it lives in the rule loop in EvaluateInvocation.
+//
+// The last three fields are PROVENANCE (design §5.6): a rule is an object a
+// person can take back, so it records when it came into being, where it came
+// from, and the reading of commands it was agreed to under. EvaluatorVersion
+// has teeth — see needsConfirmation below and the second guard in
+// EvaluateInvocation — while CreatedAt and Source are what the page says the
+// rule IS. A rule that states no version states an UNKNOWN one, which is not
+// the current one.
 type InvocationRule struct {
-	ID           string             `json:"id"`
-	Selector     InvocationSelector `json:"selector"`
-	Decision     Decision           `json:"decision"`
-	GrantedUnder Effect             `json:"grantedUnder,omitempty"`
+	ID               string             `json:"id"`
+	Selector         InvocationSelector `json:"selector"`
+	Decision         Decision           `json:"decision"`
+	GrantedUnder     Effect             `json:"grantedUnder,omitempty"`
+	CreatedAt        time.Time          `json:"createdAt"`
+	Source           RuleSource         `json:"source"`
+	EvaluatorVersion int                `json:"evaluatorVersion"`
+}
+
+// needsConfirmation reports that this rule is inert because it was saved
+// under a different reading of commands than the one running now.
+//
+// Only a LOOSE selector is in that danger. A Program or HasFeature rule
+// speaks about command lines nobody was shown, so what it covers is whatever
+// the classifier makes of them; an Exact rule names the literal command line
+// the person read, and its meaning does not move when the classifier learns
+// to see more.
+func (r InvocationRule) needsConfirmation() bool {
+	if r.Selector.Program == "" && r.Selector.HasFeature == nil {
+		return false
+	}
+	return r.EvaluatorVersion != EvaluatorVersion
+}
+
+// normalizeInvocationRules applies the defaults a DOCUMENT's rules get, and
+// only a document's: an operator must be able to hand-write a policy file
+// without inventing ids, so a rule with none is minted one here and it
+// becomes stable the next time the document is saved. A rule with no source
+// is written, because a document is. A rule with no createdAt keeps the zero
+// time — a creation time is a fact, and one nobody recorded is not invented.
+//
+// The version is deliberately NOT defaulted: an unstated reading is unknown,
+// and unknown is not current.
+func normalizeInvocationRules(rules []InvocationRule) {
+	for i := range rules {
+		if rules[i].ID == "" {
+			rules[i].ID = mintID()
+		}
+		if rules[i].Source == "" {
+			rules[i].Source = SourceWritten
+		}
+	}
 }
 
 // LiteralInvocationRule builds a standing rule from a person's exact command
@@ -107,8 +195,14 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 		)
 	}
 	rule := InvocationRule{
-		Selector: InvocationSelector{Exact: inv.Commands},
-		Decision: decision,
+		// The id is minted by the backend and never supplied by the
+		// renderer (AD-7), by the package's one existing mint.
+		ID:               mintID(),
+		Selector:         InvocationSelector{Exact: inv.Commands},
+		Decision:         decision,
+		CreatedAt:        time.Now(),
+		Source:           SourceAnswered,
+		EvaluatorVersion: EvaluatorVersion,
 	}
 	if err := validateInvocationRules([]InvocationRule{rule}); err != nil {
 		return InvocationRule{}, err
@@ -298,7 +392,23 @@ func tokenPatternMatches(pattern, token string) bool {
 // it is a document that does not parse (ParseEffectPolicy, and WithRule,
 // which drops what this rejects).
 func validateInvocationRules(rules []InvocationRule) error {
+	// An id is what a page takes a rule back by, so two rules may not wear
+	// one. An EMPTY id is not a collision: it is a rule that has not been
+	// through a document yet (WithRule, a literal built in a test), and the
+	// parse path mints one before it reaches here.
+	seen := make(map[string]int, len(rules))
 	for i, rule := range rules {
+		if rule.ID != "" {
+			if first, dup := seen[rule.ID]; dup {
+				return fmt.Errorf(
+					"rule %d: id %q is already used by rule %d; a rule is taken back by its id",
+					i, rule.ID, first)
+			}
+			seen[rule.ID] = i
+		}
+		if rule.Source != "" && !rule.Source.valid() {
+			return fmt.Errorf("rule %d: source %q is not answered or written", i, rule.Source)
+		}
 		if !rule.Decision.valid() {
 			return fmt.Errorf("rule %d: decision %q is not permit, ask or refuse", i, rule.Decision)
 		}

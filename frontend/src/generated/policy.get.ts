@@ -144,10 +144,64 @@ export interface Row6 {
    */
   scopes: Scope[]
 }
+/**
+ * One standing answer over the canonical command invocation, with the provenance that makes it an object a person can take back (design §5.6). A rule NEVER names a tool (ADR-0028 decision 4): it names a command word in a parsed invocation, which is a different thing.
+ */
 export interface Rule {
   /**
-   * @minItems 1
+   * The rule's stable identity, minted by the backend and never supplied by the renderer (AD-7). It is what a page changes, confirms or forgets the rule by.
    */
-  pattern: [[string, ...string[]], ...[string, ...string[]][]]
+  id: string
+  /**
+   * WHICH invocations the rule speaks about, and nothing about what it decides: exactly one of the three is set. 'exact' names a fixed command line positionally and is the only form a person's answer to a prompt can save; 'program' covers every argument list of one command word and may only permit while bound to the effect it was granted under; 'hasFeature' matches a semantic fact the CLASSIFIER recorded and may never permit.
+   */
+  selector: {
+    /**
+     * A fixed number of subcommands and a fixed number of tokens in each, matched positionally. A '*' in a token matches any contents of that one token and never spans a token boundary or a shell separator.
+     *
+     * @minItems 1
+     */
+    exact?: [[string, ...string[]], ...[string, ...string[]][]]
+    /**
+     * One command word, carrying ANY arguments.
+     */
+    program?: string
+    /**
+     * One command word carrying one feature of the classifier's CLOSED vocabulary. Both halves are required: a feature alone would speak for every program that can carry it.
+     */
+    hasFeature?: {
+      program: string
+      /**
+       * The closed feature vocabulary content owns. 'writes-option-named-path': the command writes a file to a path named by one of its own options rather than by an operand or a shell redirection.
+       */
+      feature: 'writes-option-named-path'
+    }
+  }
+  /**
+   * What the rule decides for the invocations its selector covers. Among overlapping matching rules the most restrictive wins, and a rule is an exception to the EFFECT layer alone — never to a refusing row, and never past the resource layer.
+   */
   decision: 'permit' | 'ask' | 'refuse'
+  /**
+   * The effect class a widening permit was granted for, checked against the effect the CALL classified as. Absent on a rule that does not widen. It is what stops a permit written while a program was reading from reaching the same program deleting.
+   */
+  grantedUnder?:
+    | 'observe'
+    | 'mutate-reversible'
+    | 'mutate-destructive'
+    | 'privilege-change'
+    | 'disclose'
+    | 'cross-boundary'
+    | 'delegate'
+  /**
+   * When the rule came into being, RFC 3339. The zero time ('0001-01-01T00:00:00Z') means a document stated none and none was invented.
+   */
+  createdAt: string
+  /**
+   * Where the rule came from: 'answered' — minted from a person's answer to a prompt, over the exact command line they were shown; 'written' — written into the policy document, which is what an unstated source parses as. The two are different objects with different trust and a page must be able to tell them apart.
+   */
+  source: 'answered' | 'written'
+  /**
+   * The reading of commands the rule was saved under. A rule with a LOOSE selector (program or hasFeature) whose version is not the current one does not apply: it was agreed to on an account of what the command does that no longer holds, and it is shown as needing confirmation until a person re-confirms it. An exact rule is unaffected — it names the literal command line the person was shown.
+   */
+  evaluatorVersion: number
 }

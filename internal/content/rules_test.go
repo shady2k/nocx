@@ -1,8 +1,11 @@
 package content_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 )
@@ -411,10 +414,11 @@ func TestAProgramPermitCoversEveryArgumentUnderOneEffectAndNoOther(t *testing.T)
 		MutateDestructive: content.EffectRow{Decision: content.DecisionAsk},
 	}
 	df := askEverything.WithRule(content.InvocationRule{
-		ID:           "df-observe",
-		Selector:     content.InvocationSelector{Program: "df"},
-		Decision:     content.DecisionPermit,
-		GrantedUnder: content.EffectObserve,
+		ID:               "df-observe",
+		Selector:         content.InvocationSelector{Program: "df"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectObserve,
+		EvaluatorVersion: content.EvaluatorVersion,
 	})
 	for _, command := range [][]string{
 		{"df"},
@@ -429,10 +433,11 @@ func TestAProgramPermitCoversEveryArgumentUnderOneEffectAndNoOther(t *testing.T)
 	}
 
 	find := askEverything.WithRule(content.InvocationRule{
-		ID:           "find-observe",
-		Selector:     content.InvocationSelector{Program: "find"},
-		Decision:     content.DecisionPermit,
-		GrantedUnder: content.EffectObserve,
+		ID:               "find-observe",
+		Selector:         content.InvocationSelector{Program: "find"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectObserve,
+		EvaluatorVersion: content.EvaluatorVersion,
 	})
 	deleting := content.Invocation{Commands: [][]string{{"find", ".", "-delete"}}, Parsed: true}
 	if got := find.DecisionForInvocation(content.EffectMutateDestructive, deleting); got != content.DecisionAsk {
@@ -463,16 +468,18 @@ func TestAFeatureRefusalBeatsAProgramPermitForTheSameCall(t *testing.T) {
 		Observe:       content.EffectRow{Decision: content.DecisionAsk},
 		CrossBoundary: content.EffectRow{Decision: content.DecisionAsk},
 	}.WithRule(content.InvocationRule{
-		ID:           "curl-observe",
-		Selector:     content.InvocationSelector{Program: "curl"},
-		Decision:     content.DecisionPermit,
-		GrantedUnder: content.EffectCrossBoundary,
+		ID:               "curl-observe",
+		Selector:         content.InvocationSelector{Program: "curl"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectCrossBoundary,
+		EvaluatorVersion: content.EvaluatorVersion,
 	}).WithRule(content.InvocationRule{
 		ID: "curl-writes",
 		Selector: content.InvocationSelector{
 			HasFeature: &content.FeatureRef{Program: "curl", Feature: content.FeatureWritesOptionNamedPath},
 		},
-		Decision: content.DecisionRefuse,
+		Decision:         content.DecisionRefuse,
+		EvaluatorVersion: content.EvaluatorVersion,
 	})
 
 	writing := content.Invocation{
@@ -507,7 +514,8 @@ func TestADisqualifiedInvocationBypassesEveryRuleIncludingARefusal(t *testing.T)
 		Selector: content.InvocationSelector{
 			HasFeature: &content.FeatureRef{Program: "curl", Feature: content.FeatureWritesOptionNamedPath},
 		},
-		Decision: content.DecisionRefuse,
+		Decision:         content.DecisionRefuse,
+		EvaluatorVersion: content.EvaluatorVersion,
 	})
 	disqualified := content.Invocation{
 		Commands:     [][]string{{"curl", "-o", "/tmp/x", "https://y"}},
@@ -544,5 +552,197 @@ func TestOnlyAnExactSelectorCanBeSavedFromAPrompt(t *testing.T) {
 	}
 	if len(rule.Selector.Exact) != 1 {
 		t.Fatalf("standing rule exact = %#v, want the one command shown", rule.Selector.Exact)
+	}
+}
+
+// A rule's provenance is what makes it an object a page can take back: where
+// it came from, when, and — the part that has teeth — the reading of commands
+// it was agreed to under. Task 1 changed that reading, so a Program permit
+// saved before it was agreed to on a false account of what the command does.
+func TestAWidenedRuleSavedUnderAnOlderReadingIsInertUntilConfirmed(t *testing.T) {
+	askEverything := content.EffectPolicy{
+		Observe:          content.EffectRow{Decision: content.DecisionAsk},
+		MutateReversible: content.EffectRow{Decision: content.DecisionAsk},
+	}
+	stale := content.InvocationRule{
+		ID:               "df-observe",
+		Selector:         content.InvocationSelector{Program: "df"},
+		Decision:         content.DecisionPermit,
+		GrantedUnder:     content.EffectObserve,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	}
+	// An exact rule names a literal command line the person was shown, so its
+	// meaning does not move when the classifier learns to see more: it is not
+	// in this danger and is never skipped for its version.
+	exact := content.InvocationRule{
+		ID:               "uptime-exact",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"uptime"}}},
+		Decision:         content.DecisionPermit,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	}
+	policy := askEverything.WithRule(stale).WithRule(exact)
+
+	df := content.Invocation{Commands: [][]string{{"df", "-h"}}, Parsed: true}
+	if got := policy.DecisionForInvocation(content.EffectObserve, df); got != content.DecisionAsk {
+		t.Errorf("df -h = %q, want the row's ask — a widened rule saved under an older reading of commands still applied", got)
+	}
+	up := content.Invocation{Commands: [][]string{{"uptime"}}, Parsed: true}
+	if got := policy.DecisionForInvocation(content.EffectObserve, up); got != content.DecisionPermit {
+		t.Errorf("uptime = %q, want permit — an exact rule names the command line it was shown and does not go stale", got)
+	}
+
+	needing := policy.RulesNeedingConfirmation()
+	if len(needing) != 1 || needing[0].ID != "df-observe" {
+		t.Fatalf("RulesNeedingConfirmation() = %+v, want the one stale program rule", needing)
+	}
+
+	confirmed, ok := policy.ConfirmRule("df-observe")
+	if !ok {
+		t.Fatal("ConfirmRule reported no such rule")
+	}
+	if got := confirmed.DecisionForInvocation(content.EffectObserve, df); got != content.DecisionPermit {
+		t.Errorf("df -h after confirming = %q, want permit", got)
+	}
+	if got := confirmed.RulesNeedingConfirmation(); len(got) != 0 {
+		t.Errorf("RulesNeedingConfirmation() after confirming = %+v, want none", got)
+	}
+	want := stale
+	want.EvaluatorVersion = content.EvaluatorVersion
+	if got := confirmed.Rules[0]; !reflect.DeepEqual(got, want) {
+		t.Errorf("confirmed rule = %+v, want %+v — confirming rewrites the version and NOTHING else", got, want)
+	}
+	// EffectPolicy is a value everywhere else and stays one: the policy the
+	// caller held is not confirmed behind its back.
+	if got := policy.Rules[0].EvaluatorVersion; got != content.EvaluatorVersion-1 {
+		t.Errorf("the original policy's rule version = %d, want it untouched at %d", got, content.EvaluatorVersion-1)
+	}
+
+	if same, ok := policy.ConfirmRule("no-such-rule"); ok || !reflect.DeepEqual(same.Rules, policy.Rules) {
+		t.Errorf("ConfirmRule on an unknown id = (%+v, %v), want the policy unchanged and false", same.Rules, ok)
+	}
+}
+
+// A MISSING evaluator version is UNKNOWN, and unknown is not current: an
+// operator-written document that says nothing about the reading it was
+// written under behaves exactly like one saved under an older reading.
+func TestAWidenedRuleWithNoEvaluatorVersionIsInert(t *testing.T) {
+	doc := `{
+		"observe": {"decision": "ask", "scopes": []},
+		"rules": [{"id": "r1", "selector": {"program": "df"}, "decision": "permit", "grantedUnder": "observe"}]
+	}`
+	p, err := content.ParseEffectPolicy([]byte(doc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	df := content.Invocation{Commands: [][]string{{"df", "-h"}}, Parsed: true}
+	if got := p.DecisionForInvocation(content.EffectObserve, df); got != content.DecisionAsk {
+		t.Errorf("df -h = %q, want the row's ask — an unstated reading is unknown, not current", got)
+	}
+	needing := p.RulesNeedingConfirmation()
+	if len(needing) != 1 || needing[0].ID != "r1" {
+		t.Fatalf("RulesNeedingConfirmation() = %+v, want the one rule that says nothing about its reading", needing)
+	}
+}
+
+// Where a rule came from is a fact about the rule, not about the page showing
+// it: a rule a person answered into being and a rule an operator wrote by hand
+// are different objects with different trust.
+func TestEveryRuleCarriesWhereItCameFrom(t *testing.T) {
+	inv := content.Invocation{Commands: [][]string{{"df", "-h"}}, Parsed: true}
+	first, err := content.LiteralInvocationRule(inv, content.DecisionPermit)
+	if err != nil {
+		t.Fatalf("LiteralInvocationRule: %v", err)
+	}
+	second, err := content.LiteralInvocationRule(inv, content.DecisionPermit)
+	if err != nil {
+		t.Fatalf("LiteralInvocationRule: %v", err)
+	}
+	if first.ID == "" || second.ID == "" {
+		t.Fatalf("ids %q and %q — a rule is identified from creation", first.ID, second.ID)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("two rules share the id %q", first.ID)
+	}
+	if first.Source != content.SourceAnswered {
+		t.Errorf("source = %q, want %q — a prompt's rule is answered", first.Source, content.SourceAnswered)
+	}
+	if first.EvaluatorVersion != content.EvaluatorVersion {
+		t.Errorf("evaluatorVersion = %d, want the current %d", first.EvaluatorVersion, content.EvaluatorVersion)
+	}
+	if first.CreatedAt.IsZero() {
+		t.Error("createdAt is the zero time on a rule that was just created")
+	}
+}
+
+// A document IS written, and an operator must be able to hand-write one
+// without inventing ids: the id is minted on parse and becomes stable the
+// next time the document is saved.
+func TestADocumentsRulesAreIdentifiedAndWritten(t *testing.T) {
+	doc := `{
+		"observe": {"decision": "ask", "scopes": []},
+		"rules": [{"selector": {"exact": [["df", "-h"]]}, "decision": "permit"}]
+	}`
+	p, err := content.ParseEffectPolicy([]byte(doc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(p.Rules) != 1 {
+		t.Fatalf("parsed %d rules, want 1", len(p.Rules))
+	}
+	rule := p.Rules[0]
+	if rule.ID == "" {
+		t.Fatal("a rule with no id parsed without being given one")
+	}
+	if rule.Source != content.SourceWritten {
+		t.Errorf("source = %q, want %q — a document is written", rule.Source, content.SourceWritten)
+	}
+	if !rule.CreatedAt.IsZero() {
+		t.Errorf("createdAt = %v, want the zero time — a creation time is not invented", rule.CreatedAt)
+	}
+	// The minted id survives the round trip a save is.
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), rule.ID) {
+		t.Fatalf("re-marshalled policy %s does not carry the minted id %q", raw, rule.ID)
+	}
+	back, err := content.ParseEffectPolicy(raw)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if got := back.Rules[0].ID; got != rule.ID {
+		t.Errorf("id after a save = %q, want the stable %q", got, rule.ID)
+	}
+}
+
+// An id is what a page takes a rule back by, so two rules may not share one:
+// a document that does is unparseable, and the error names the id.
+func TestADocumentWhoseRulesShareAnIDDoesNotParse(t *testing.T) {
+	doc := `{
+		"observe": {"decision": "ask", "scopes": []},
+		"rules": [
+			{"id": "dup", "selector": {"exact": [["df", "-h"]]}, "decision": "permit"},
+			{"id": "dup", "selector": {"exact": [["uptime"]]}, "decision": "permit"}
+		]
+	}`
+	_, err := content.ParseEffectPolicy([]byte(doc))
+	if err == nil {
+		t.Fatal("a document with two rules under one id parsed")
+	}
+	if !strings.Contains(err.Error(), "dup") {
+		t.Errorf("error %q does not name the duplicated id", err)
+	}
+
+	bad := `{
+		"observe": {"decision": "ask", "scopes": []},
+		"rules": [{"id": "r1", "selector": {"exact": [["df"]]}, "decision": "permit", "source": "invented"}]
+	}`
+	if _, err := content.ParseEffectPolicy([]byte(bad)); err == nil {
+		t.Fatal("a rule claiming a source outside the two constants parsed")
 	}
 }

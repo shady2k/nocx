@@ -497,6 +497,14 @@ func isExecutablePath(program string) bool {
 // name rather than two spellings that agree until they do not.
 const featureWritesOptionNamedPath = content.FeatureWritesOptionNamedPath
 
+// EvaluatorVersion is the reading of commands THIS file implements, and it is
+// content's constant rather than a second one: content owns the rules and
+// their evaluation, so it owns the version they were saved under, and a
+// constant declared here could not be compared against by content at all
+// (this package imports content, never the other way round). One fact, one
+// name.
+const EvaluatorVersion = content.EvaluatorVersion
+
 // resourceOperands returns the operands of an invocation, skipping options and
 // the values they consume. A skipped option value that is a path the command
 // WRITES is not silently dropped: it is appended to the report through the

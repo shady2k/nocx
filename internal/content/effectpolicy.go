@@ -280,6 +280,21 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 		if !rule.Matches(inv) {
 			continue
 		}
+		if rule.needsConfirmation() {
+			// The SECOND of this loop's two guards, and the other one
+			// is below. This rule's selector is loose, so what it
+			// covers is whatever the classifier makes of a command
+			// line nobody was shown — and it was saved while the
+			// classifier read commands differently. It was therefore
+			// agreed to on an account of the command that no longer
+			// holds, and it stays inert until a person reads what it
+			// now means and says so (RulesNeedingConfirmation,
+			// ConfirmRule). An EXACT rule is never skipped here: it
+			// names the literal command line the person was shown,
+			// and that does not move when the classifier learns to
+			// see more.
+			continue
+		}
 		if rule.Decision == DecisionPermit && rule.GrantedUnder != "" && rule.GrantedUnder != e {
 			// The permit was granted while this command did something
 			// milder. It does not reach this call. This is the whole
@@ -527,6 +542,45 @@ func (p EffectPolicy) WithRule(rule InvocationRule) EffectPolicy {
 	}
 	p.Rules = append(append([]InvocationRule(nil), p.Rules...), rule)
 	return p
+}
+
+// RulesNeedingConfirmation returns every rule that is inert because it was
+// saved under a different reading of commands, in document order. Skipping is
+// not silent: a rule that no longer applies and says nothing about it is a
+// permission that quietly stopped working, which is how a person learns to
+// distrust the page rather than the rule.
+func (p EffectPolicy) RulesNeedingConfirmation() []InvocationRule {
+	var stale []InvocationRule
+	for _, rule := range p.Rules {
+		if rule.needsConfirmation() {
+			stale = append(stale, rule)
+		}
+	}
+	return stale
+}
+
+// ConfirmRule rewrites one rule's EvaluatorVersion to the current one and
+// NOTHING else, returning the new policy. An unknown id returns p unchanged
+// and false.
+//
+// It is deliberately NOT a re-grant. It says "I have read what this now means
+// and I still mean it": the selector, the decision and the effect the permit
+// was granted under are untouched, and widening any of them is a different
+// gesture with a different question attached to it.
+func (p EffectPolicy) ConfirmRule(id string) (EffectPolicy, bool) {
+	if id == "" {
+		return p, false
+	}
+	for i, rule := range p.Rules {
+		if rule.ID != id {
+			continue
+		}
+		rules := append([]InvocationRule(nil), p.Rules...)
+		rules[i].EvaluatorVersion = EvaluatorVersion
+		p.Rules = rules
+		return p, true
+	}
+	return p, false
 }
 
 // RowScopes returns the effective scopes of ONE effect's row — the resource
@@ -794,6 +848,10 @@ func ParseEffectPolicy(b []byte) (EffectPolicy, error) {
 	if err := dec.Decode(&p); err != nil {
 		return p, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
 	}
+	// A document's rules get their defaults BEFORE the gate sees them: the
+	// minted id is what the duplicate check is over, and an unstated source
+	// is written rather than absent.
+	normalizeInvocationRules(p.Rules)
 	if err := validateInvocationRules(p.Rules); err != nil {
 		return EffectPolicy{}, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
 	}

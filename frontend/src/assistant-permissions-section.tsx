@@ -26,7 +26,7 @@
  *
  *   + Write a refusal        + Allow a command…
  *
- * FIVE RULES ARE BUILT IN RATHER THAN ASSERTED IN PROSE.
+ * SIX RULES ARE BUILT IN RATHER THAN ASSERTED IN PROSE.
  *
  * - **The store decides.** There is no Save button and no draft: every gesture
  *   writes ONE object and the page adopts what a fresh read answers. It can
@@ -64,6 +64,20 @@
  *   it against what a CALL classified as, so the permit does not follow the
  *   same word into something more serious.
  *
+ * - **REVOCATION HAS A TIME, AND THE PERSON CHOOSES IT** (nocx-r4fh8). What
+ *   the assistant may do is fixed when it starts writing an answer, so taking
+ *   a permission back does not reach an answer already being written. That is
+ *   correct — it is what makes the permission a grant rather than a setting
+ *   read afresh mid-call — and being silent about it is not: a person forgets
+ *   an answer, believes the assistant can no longer do the thing, and
+ *   something started thirty seconds ago goes on doing it. So a rule write
+ *   that would leave live work behind writes NOTHING, says how many, and
+ *   offers the two answers — leave them running, or stop them. The count is
+ *   the backend's for `live`'s reason one step further: which answers in
+ *   flight are still deciding under a permission is a question about each
+ *   one's own frozen authority, and this page has neither the registry nor the
+ *   evaluator to ask it.
+ *
  * THE VOCABULARY. Three words are absent by construction — "effect class",
  * "resource scope" and the wire's word for a hard no — and no control names a
  * tool. What a person says instead: an ANSWER (Allowed, Ask every time,
@@ -92,7 +106,10 @@ import {
   type PolicyMatrix,
   type PolicyRow,
   type PolicyRule,
+  type PolicyRuleWrite,
   type PolicyView,
+  type RuleWriteRuns,
+  type RunsTiming,
 } from './policy-client'
 import type { Scope } from './generated/policy.get'
 import { EFFECT_LABEL } from './effect-labels'
@@ -296,8 +313,56 @@ interface Panel {
   on: Answer
 }
 
+/**
+ * ONE write to a standing answer, held so it can be repeated with the timing
+ * the person picks (nocx-r4fh8).
+ *
+ * Every rule gesture on this page becomes one of these, because every one of
+ * them can leave live work behind: forgetting an answer, changing it, and
+ * writing a new refusal all change what a run started thirty seconds ago is
+ * still deciding under. It is DATA rather than a closure so that repeating a
+ * gesture is repeating the same object, not re-running a callback whose
+ * captured state may have moved.
+ */
+type RuleGesture = { kind: 'forget'; id: string } | { kind: 'write'; rule: PolicyRuleWrite }
+
+/**
+ * A rule write the backend would not apply yet, and why: it does not reach the
+ * work already running, and the person has not said what should happen to it.
+ *
+ * `count` is the backend's, and only the backend's. Which runs are still
+ * deciding under an answer is a question about each run's own frozen grant —
+ * the renderer has no run registry and no evaluator, and a number worked out
+ * here would be a second answer to drift from the enforcement's.
+ */
+interface RunsQuestion {
+  gesture: RuleGesture
+  count: number
+  /** What to close once the person has answered — the panel that raised it. */
+  after: () => void
+}
+
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+/**
+ * What a stop actually did, in one sentence.
+ *
+ * The two counts are reported separately because they are two different facts
+ * and only one of them is this gesture's doing: a run can reach its own ending
+ * between the count and the stop, and saying "stopped 3" when one of them
+ * finished by itself tells a person something untrue about their own work.
+ */
+function stoppedSentence(res: RuleWriteRuns): string {
+  const stopped = res.stoppedRuns === 1 ? 'Stopped 1 answer' : `Stopped ${res.stoppedRuns} answers`
+  if (res.finishedBeforeStop === 0)
+    return `${stopped} that ${res.stoppedRuns === 1 ? 'was' : 'were'} using it.`
+  const already =
+    res.finishedBeforeStop === 1
+      ? '1 had already finished on its own'
+      : `${res.finishedBeforeStop} had already finished on their own`
+  return `${stopped}; ${already}.`
 }
 
 export interface AssistantPermissionsSectionProps {
@@ -332,6 +397,15 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    * because a reading belongs to the text it was taken from.
    */
   const [reading, setReading] = createSignal<PolicyClassification | null>(null)
+  /**
+   * The question a rule write raised about the work already running, or null.
+   *
+   * It is ONE signal for the whole page rather than one per panel: only one
+   * gesture can be in flight at a time (every control is disabled while `busy`
+   * is set), and a second copy would be a second place for a stale count to
+   * survive a panel closing.
+   */
+  const [runsQuestion, setRunsQuestion] = createSignal<RunsQuestion | null>(null)
 
   async function read(): Promise<void> {
     try {
@@ -399,14 +473,15 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   })
 
   /**
-   * Run one write and adopt what a fresh read answers.
+   * Run one MATRIX write and adopt what a fresh read answers. A rule write
+   * goes through `runGesture` instead, which has a question to ask.
    *
-   * The re-read is the point: `policy.set` and `policy.setRule` acknowledge,
-   * they do not echo the document back, so trusting the payload we just sent
-   * is exactly the "page shows a permission the store did not take" state this
-   * surface exists to remove. A write the store turns down raises the danger
-   * toast and re-reads too — there is no draft to keep, so the page simply
-   * goes back to showing what is there.
+   * The re-read is the point: `policy.set` acknowledges, it does not echo the
+   * document back, so trusting the payload we just sent is exactly the "page
+   * shows a permission the store did not take" state this surface exists to
+   * remove. A write the store turns down raises the danger toast and re-reads
+   * too — there is no draft to keep, so the page simply goes back to showing
+   * what is there.
    *
    * It takes the write ALREADY IN FLIGHT rather than a thunk: a thunk closing
    * over `props.client` is reactivity read outside a tracked scope, which the
@@ -434,16 +509,71 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     return write(props.client.set({ ...m, [effect]: next }))
   }
 
+  /**
+   * Run ONE rule gesture, and RAISE THE QUESTION when the backend says the
+   * write does not reach the work already running.
+   *
+   * This is the whole of nocx-r4fh8 on this side. A run's authority is minted
+   * when it starts and is fixed for the run, so an answer taken back here
+   * never reaches a run already using it — correct, and silent, which is the
+   * defect: a person acts specifically to stop something and is told nothing
+   * while it goes on. So the default timing writes NOTHING when live runs
+   * would be left behind, answers with how many, and this raises that as a
+   * question with two answers. Repeating the same gesture with the timing they
+   * chose is what applies it.
+   *
+   * The re-read after every outcome is `write`'s reason, unchanged: the
+   * methods acknowledge rather than echo the document, so the page adopts what
+   * a fresh read says and can never show a permission the store did not take —
+   * including after a write that deliberately did not happen.
+   */
+  async function runGesture(g: RuleGesture, runs: RunsTiming, after: () => void): Promise<void> {
+    setBusy(true)
+    try {
+      const res: RuleWriteRuns =
+        g.kind === 'forget'
+          ? await props.client.forgetRule(g.id, runs)
+          : await props.client.setRule(g.rule, runs)
+      await read()
+      if (!res.applied) {
+        setRunsQuestion({ gesture: g, count: res.affectedRuns, after })
+        return
+      }
+      if (runs === 'stop') showToast({ message: stoppedSentence(res), level: 'info' })
+      setRunsQuestion(null)
+      after()
+    } catch (e) {
+      showToast({ message: `That change was not saved: ${messageOf(e)}`, level: 'danger' })
+      await read()
+      setRunsQuestion(null)
+      after()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Answer the open question with a timing, repeating the gesture it holds. */
+  function answerRunsQuestion(runs: RunsTiming): void {
+    const q = runsQuestion()
+    if (!q) return
+    void runGesture(q.gesture, runs, q.after)
+  }
+
   /** One standing answer, changed. `id` names the rule that already exists, so
    *  this replaces it in place rather than writing a second one. */
   function writeRule(rule: PolicyRule, decision: Decision): Promise<void> {
-    return write(
-      props.client.setRule({
-        id: rule.id,
-        selector: rule.selector,
-        decision,
-        grantedUnder: rule.grantedUnder,
-      }),
+    return runGesture(
+      {
+        kind: 'write',
+        rule: {
+          id: rule.id,
+          selector: rule.selector,
+          decision,
+          grantedUnder: rule.grantedUnder,
+        },
+      },
+      'ask',
+      () => {},
     )
   }
 
@@ -467,6 +597,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   }
 
   function closeWriter(): void {
+    setRunsQuestion(null)
     setWriter(null)
     setTyped('')
     setReading(null)
@@ -509,20 +640,25 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    */
   function saveWidened(r: PolicyClassification): void {
     if (!r.eligible || r.effect === undefined) return
-    void write(
-      props.client.setRule({
-        selector: { program: r.program },
-        decision: 'permit',
-        grantedUnder: r.effect,
-      }),
-    ).then(closeWriter)
+    void runGesture(
+      {
+        kind: 'write',
+        rule: { selector: { program: r.program }, decision: 'permit', grantedUnder: r.effect },
+      },
+      'ask',
+      closeWriter,
+    )
   }
 
   /** Stop exactly the command that was read. */
   function saveExactRefusal(r: PolicyClassification): void {
     const exact = exactSelector(r.commands)
     if (!r.eligible || exact === null) return
-    void write(props.client.setRule({ selector: { exact }, decision: 'refuse' })).then(closeWriter)
+    void runGesture(
+      { kind: 'write', rule: { selector: { exact }, decision: 'refuse' } },
+      'ask',
+      closeWriter,
+    )
   }
 
   /** Stop every command of that word carrying the FACT the classifier
@@ -535,12 +671,14 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     feature: PolicyClassification['features'][number],
   ): void {
     if (!r.eligible) return
-    void write(
-      props.client.setRule({
-        selector: { hasFeature: { program: r.program, feature } },
-        decision: 'refuse',
-      }),
-    ).then(closeWriter)
+    void runGesture(
+      {
+        kind: 'write',
+        rule: { selector: { hasFeature: { program: r.program, feature } }, decision: 'refuse' },
+      },
+      'ask',
+      closeWriter,
+    )
   }
 
   /** What each answer a person has NOT given would still be asked about — the
@@ -617,6 +755,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   }
 
   function closePanel(): void {
+    setRunsQuestion(null)
     setPanel(null)
     setExplanation(null)
   }
@@ -909,6 +1048,66 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   }
 
   /**
+   * WHAT HAPPENS TO THE WORK ALREADY RUNNING — the question this feature
+   * exists to ask out loud (nocx-r4fh8).
+   *
+   * It JOINS the panel that raised it rather than opening a second dialog with
+   * its own words: a person who clicked Forget is in the middle of one
+   * gesture, and the question is the rest of that gesture, not a new one.
+   *
+   * Two things it is careful about. Nothing has changed yet, and it says so —
+   * a question that arrived after the write would be a notification wearing a
+   * question's clothes. And the count is the backend's: which runs are still
+   * deciding under an answer is a question about each run's own frozen grant,
+   * and a number worked out here would be a second answer to the one the
+   * enforcement gives.
+   */
+  function runsQuestionBlock() {
+    return (
+      <Show when={runsQuestion()} keyed>
+        {(q) => (
+          <Section id="permissions-runs-question" title="The work already running" dense>
+            <div data-permissions-runs={q.count}>
+              <Stack>
+                <FactList
+                  facts={[
+                    {
+                      name: 'Still using this',
+                      value: `${q.count} ${q.count === 1 ? 'answer' : 'answers'} the assistant is writing right now`,
+                    },
+                  ]}
+                  ariaLabel="What is still using this answer"
+                />
+                <Caption>
+                  Nothing has changed yet. What the assistant may do is fixed when it starts writing
+                  an answer, so this reaches everything it starts from now on either way — you are
+                  choosing what happens to the {q.count === 1 ? 'one' : q.count} in progress.
+                </Caption>
+                <ActionGroup ariaLabel="What happens to the work already running">
+                  <Button
+                    variant="default"
+                    disabled={busy()}
+                    onClick={() => answerRunsQuestion('future')}
+                  >
+                    Leave them running
+                  </Button>
+                  <Button
+                    variant="danger"
+                    disabled={busy()}
+                    onClick={() => answerRunsQuestion('stop')}
+                  >
+                    {q.count === 1 ? 'Stop it' : 'Stop them'}
+                  </Button>
+                </ActionGroup>
+              </Stack>
+            </div>
+          </Section>
+        )}
+      </Show>
+    )
+  }
+
+  /**
    * THE WRITING PANEL, and the asymmetry that shapes it.
    *
    * Both answers begin the same way — a command, typed, and READ by the
@@ -1129,7 +1328,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               </Button>
             }
           >
-            <div data-permissions-panel={mode}>{commandWriter(mode)}</div>
+            <div data-permissions-panel={mode}>
+              {commandWriter(mode)}
+              {runsQuestionBlock()}
+            </div>
           </Dialog>
         )}
       </Show>
@@ -1145,17 +1347,21 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 <Button variant="default" onClick={closePanel}>
                   {p.mode === 'forget' ? 'Cancel' : 'Close'}
                 </Button>
-                <Show when={p.mode === 'forget'}>
+                <Show when={p.mode === 'forget' && runsQuestion() === null}>
                   <Button
                     variant="danger"
                     disabled={busy()}
                     onClick={() => {
                       const on = p.on
-                      const done =
-                        on.kind === 'rule'
-                          ? write(props.client.forgetRule(on.rule.id))
-                          : writeRow(on.effect, { decision: 'ask', scopes: [] })
-                      void done.then(closePanel)
+                      if (on.kind === 'rule') {
+                        void runGesture({ kind: 'forget', id: on.rule.id }, 'ask', closePanel)
+                        return
+                      }
+                      // A ROW is written with policy.set, which carries no
+                      // timing: the run question is the one-rule seam's, and a
+                      // row write is a different object with a different owner
+                      // (nocx-r4fh8 scopes it to setRule/forgetRule).
+                      void writeRow(on.effect, { decision: 'ask', scopes: [] }).then(closePanel)
                     }}
                   >
                     Forget it
@@ -1168,6 +1374,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
               <Show when={p.mode === 'why'}>{whyPanel(p.on)}</Show>
               <Show when={p.mode === 'change'}>{changePanel(p.on)}</Show>
               <Show when={p.mode === 'forget'}>{forgetPanel(p.on)}</Show>
+              {runsQuestionBlock()}
             </div>
           </Dialog>
         )}

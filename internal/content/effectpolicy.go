@@ -691,10 +691,7 @@ func (p EffectPolicy) rows() []EffectRow {
 // decision a person can answer, not an absence.
 func (p EffectPolicy) PermittedEffects() []Effect {
 	var out []Effect
-	for _, e := range []Effect{
-		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
-		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
-	} {
+	for _, e := range latticeEffects {
 		if p.DecisionFor(e) != DecisionRefuse {
 			out = append(out, e)
 		}
@@ -858,10 +855,7 @@ func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy, session Session
 	out.floor = floor
 	out.Rules = append([]InvocationRule(nil), out.Rules...)
 	out.Rules = append(out.Rules, session.Rules...)
-	for _, e := range []Effect{
-		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
-		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
-	} {
+	for _, e := range latticeEffects {
 		d, ok := session.Decisions[e]
 		if !ok || !d.valid() {
 			continue

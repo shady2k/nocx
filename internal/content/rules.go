@@ -493,6 +493,16 @@ func validateInvocationRules(rules []InvocationRule) error {
 	return nil
 }
 
+// latticeEffects is the ADR-0020 effect lattice, in the lattice's own order:
+// the closed seven the matrix has a row for. It is written down ONCE — every
+// loop over "each effect class" reads it, and the exported predicate below
+// answers membership of it — because a second spelling of the seven is a
+// second list to forget to extend.
+var latticeEffects = []Effect{
+	EffectObserve, EffectMutateReversible, EffectMutateDestructive,
+	EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
+}
+
 // LatticeEffect reports membership of the ADR-0020 effect lattice — the
 // closed seven the matrix has a row for. It is exported because the wire asks
 // the same question this package's own gate does: policy.explain must refuse

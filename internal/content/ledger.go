@@ -241,6 +241,23 @@ const (
 	TermOutputBudget TerminationReason = "output-budget"
 )
 
+// THE VOCABULARY IS CLOSED BY THE DATABASE, not only by this list. The
+// `executions.termination_reason` column carries a CHECK constraint naming
+// these same strings (sqlite.go), so a reason added here and not there does
+// not fail loudly — it fails at the terminal close, which is caught, logged
+// and repaired by the startup sweep. The run ends without a durable ending.
+//
+// That is why the settings page's "also stop the runs using it" (nocx-r4fh8)
+// stops a run as TermUserKilled and says WHICH answer was taken back in the
+// run's sentence, rather than under a reason of its own. A revocation-stop and
+// a person pressing Stop on one run really are different facts — one is a
+// decision about a permission whose consequence this run was, the other is a
+// decision about this run — and telling them apart in a history query would be
+// worth a name. Giving it one means widening that CHECK, which is a rung on
+// the migration ladder (schema_migrate.go) and a rebuild of the executions
+// table: a deliverable of its own, and not one to smuggle in beside a
+// transport change.
+
 type ResourceKind string
 
 const (

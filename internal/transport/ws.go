@@ -466,6 +466,13 @@ type WSServer struct {
 	// the run terminalizes or the process restarts.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu sync.Mutex
+	// agentTerminalizer builds the agent handler a NON-agent caller needs in
+	// order to end a run through the one terminalization path (nocx-r4fh8:
+	// the settings page's "also stop the runs using it"). It is set by
+	// agentSpecs, which is where those dependencies are assembled, and it is
+	// nil until then — a server registered without the agent methods has no
+	// runs to stop and answers so rather than pretending it stopped none.
+	agentTerminalizer func(Responder) agentHandlers
 	// agentProbeSub runs endpoints.probe probes off the read loop: a
 	// streaming probe can take tens of seconds and must never freeze the
 	// socket that feeds every other tab. It is a bounded QUEUE, not the

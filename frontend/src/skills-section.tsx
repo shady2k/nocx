@@ -330,44 +330,62 @@ export function SkillsSection(props: SkillsSectionProps) {
                       ? { tone: 'error', text: 'Changed since approval' }
                       : undefined
                   }
+                  /* Enabling a skill is the record's STATE, not an action on
+                     it, and the kit's state cell is where the row keeps it
+                     (nocx-xa0cq). It used to be the first child of the action
+                     group below, where the group's own contents decided its
+                     position: a builtin row has no buttons at all, an authored
+                     one has Delete, a changed one has Re-approve and Delete —
+                     so the same switch stood in three places down a list that
+                     is read by scanning. */
+                  state={
+                    <Checkbox
+                      variant="switch"
+                      checked={skill.enabled}
+                      disabled={busy() === skill.name}
+                      ariaLabel={`${skill.name} enabled`}
+                      onChange={(enabled) => void toggle(skill, enabled)}
+                    />
+                  }
+                  /* The group is drawn only when the row has an action to
+                     put in it. With the switch out of it a builtin approved
+                     row has none, and a named `role="group"` around nothing
+                     announces a boundary with nothing on the other side of it
+                     — the very thing ActionGroup's own doc calls worse than no
+                     group at all. */
                   actions={
-                    <ActionGroup ariaLabel={`${skill.name} actions`}>
-                      <Checkbox
-                        variant="switch"
-                        checked={skill.enabled}
-                        disabled={busy() === skill.name}
-                        ariaLabel={`${skill.name} enabled`}
-                        onChange={(enabled) => void toggle(skill, enabled)}
-                      />
-                      {/* Only when the bytes moved. A permanent Re-approve
-                          would invite re-approving a skill nobody changed,
-                          which is a person clicking past the one prompt that
-                          is load-bearing. */}
-                      <Show when={skill.status === 'changed'}>
-                        <Button
-                          size="sm"
-                          disabled={busy() === skill.name}
-                          onClick={() => void approve(skill)}
-                        >
-                          Re-approve
-                        </Button>
-                      </Show>
-                      {/* A builtin ships inside the binary, so there is
-                          nothing on disk to delete and no button to explain
-                          away. The sentence that used to say so sat in the
-                          row's body as loose text on every builtin row; the
-                          absence says it once and says it everywhere. */}
-                      <Show when={skill.provenance !== 'builtin'}>
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={busy() === skill.name}
-                          onClick={() => void remove(skill)}
-                        >
-                          Delete
-                        </Button>
-                      </Show>
-                    </ActionGroup>
+                    <Show when={skill.status === 'changed' || skill.provenance !== 'builtin'}>
+                      <ActionGroup ariaLabel={`${skill.name} actions`}>
+                        {/* Only when the bytes moved. A permanent Re-approve
+                            would invite re-approving a skill nobody changed,
+                            which is a person clicking past the one prompt that
+                            is load-bearing. */}
+                        <Show when={skill.status === 'changed'}>
+                          <Button
+                            size="sm"
+                            disabled={busy() === skill.name}
+                            onClick={() => void approve(skill)}
+                          >
+                            Re-approve
+                          </Button>
+                        </Show>
+                        {/* A builtin ships inside the binary, so there is
+                            nothing on disk to delete and no button to explain
+                            away. The sentence that used to say so sat in the
+                            row's body as loose text on every builtin row; the
+                            absence says it once and says it everywhere. */}
+                        <Show when={skill.provenance !== 'builtin'}>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            disabled={busy() === skill.name}
+                            onClick={() => void remove(skill)}
+                          >
+                            Delete
+                          </Button>
+                        </Show>
+                      </ActionGroup>
+                    </Show>
                   }
                 />
               )}

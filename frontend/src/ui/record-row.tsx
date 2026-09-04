@@ -35,6 +35,26 @@
  *           — the alternative was a second row grammar beside this one, which
  *           is exactly what this composite exists to prevent.
  *
+ *   state   the control that carries the record's own state — the switch that
+ *           enables a skill, and nothing that ACTS on the record. It is a slot
+ *           rather than a typed value because a state control is a control and
+ *           the kit does not know which one; what the kit owns is its PLACE,
+ *           which is a cell of its own at the row's trailing edge (nocx-xa0cq).
+ *           A row's state and a row's actions are two kinds of thing, and this
+ *           is the geometry saying so.
+ *
+ * Why the state cannot simply live in `actions`, given that it is a control
+ * like the others: `actions` is free-form on purpose, so its contents decide
+ * each other's positions and the kit can reserve nothing inside it. The Skills
+ * list put its enable switch first in the group and the switch then sat at
+ * three different distances from the row's edge — no buttons, Delete, or
+ * Re-approve and Delete — down a list a person reads by scanning. Reordering
+ * to put the switch last is the cheap alternative and it is refused: a control
+ * is anchored to the edge only for as long as it is last, so the next
+ * conditional button hands the raggedness to whatever now precedes it, which
+ * on that page is the destructive one. A ragged switch is a poor thing; a
+ * Delete that moves between rows is a worse one.
+ *
  * `actions` stays free-form (a row's controls are the surface's decision).
  * The genuinely free-form `info` slot on CollectionRow survives for rows
  * this composite does not describe — Secrets' glyph + two-line body rows,
@@ -74,7 +94,7 @@
  * expanding is not opening, and a click that did both would make expansion
  * unreachable with a mouse.
  */
-import { For, Show, type JSX } from 'solid-js'
+import { For, Show, children, type JSX } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
 import { CollectionRow } from './collection-view'
 import { ChevronDownIcon } from './icons'
@@ -96,6 +116,17 @@ export interface RecordRowProps {
    *  free-form body — see the header. */
   detail?: string | readonly string[]
   actions: JSX.Element
+  /** The control carrying the record's own state, in a cell of its own at the
+   *  row's trailing edge — see the header for why it is not an action.
+   *
+   *  Three states, the disclosure's three: the prop ABSENT means this list has
+   *  no row state at all and no cell is drawn, because a column reserved for a
+   *  control none of a list's rows can offer holds width open on every one of
+   *  them for nothing; anything PASSED draws the cell, including `null` for a
+   *  row that has no state control beside rows that do — that row's buttons
+   *  must stop where its neighbours' do, or the raggedness has only moved from
+   *  the switch to the actions. */
+  state?: JSX.Element
   /** Whether this row discloses anything. Absent means the row is not part of
    *  a disclosing list and reserves no width; `false` is a leaf beside rows
    *  that do expand, and holds the disclosure's width so titles align. */
@@ -140,9 +171,27 @@ export function RecordRow(props: RecordRowProps) {
     if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
   }
 
+  /** Resolved once and read twice — whether the cell exists, and what goes in
+   *  it. A props slot is a getter, so reading it twice would build the
+   *  caller's control twice and mount the second copy only. */
+  const state = children(() => props.state)
+
   return (
     <CollectionRow
-      actions={props.actions}
+      // The state cell sits INSIDE CollectionRow's actions region rather than
+      // beside it, because that region is the one an activatable row excludes
+      // from its whole-row click: a switch that opened the record it toggles
+      // would be the disclosure's bug over again. It goes after the caller's
+      // actions so the row's right edge, and not the width of the buttons, is
+      // what decides where it sits.
+      actions={
+        <>
+          {props.actions}
+          <Show when={state() !== undefined}>
+            <span class="ui-record-row__state">{state()}</span>
+          </Show>
+        </>
+      }
       onActivate={props.onActivate}
       // The name below is the control (nocx-5xwub), so the row keeps the
       // click and hands the keyboard to it.

@@ -218,3 +218,34 @@
   margin-top: var(--space-1);
   min-width: 0;
 }
+
+/* ── The row's state cell (nocx-xa0cq) ───────────────────────────────────
+   A row's STATE and a row's ACTIONS are two kinds of thing, and this cell is
+   the geometry saying so. It hangs off the trailing edge of the row's action
+   region, after whatever the surface put there, so the control's place is the
+   row's right edge rather than the sum of the buttons that happen to precede
+   it. The Skills list drew its enable switch first inside a free-form action
+   group and had three row shapes — no buttons, Delete, Re-approve and Delete
+   — so one switch stood in three places down a list a person scans.
+
+   Reordering inside the group was the cheap alternative and record-row.tsx
+   says why it is refused: last is an anchor only until something else is
+   added after it, and then the destructive button is the one that moves.
+
+   It is RecordRow's part and carries its name, but it is NOT a descendant of
+   `.ui-record-row`: that element fills CollectionRow's `info` slot, and this
+   cell has to sit in the actions region on the other side of the row. Nothing
+   here may be written as `.ui-record-row .ui-record-row__state` — it would
+   match nothing.
+
+   One switch's width, held whether or not the cell has anything in it, so a
+   row with no state control stops its buttons where its neighbours' stop.
+   Content hangs from the right, so a control narrower than the column keeps
+   the same anchor as the ones beside it. */
+.ui-record-row__state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: var(--control-width-switch);
+}

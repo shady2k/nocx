@@ -267,6 +267,50 @@ describe('SkillsSection', () => {
     expect(evidenceIn(row)).toEqual(['/tmp/nocx/installed-skills/byhand/SKILL.md'])
   })
 
+  it('puts every row\u2019s enable switch in the same place, whatever buttons the row carries', async () => {
+    // The page\u2019s three row shapes in one list: a builtin (nothing to
+    // delete, so no buttons at all), an authored skill (Delete), and a changed
+    // one (Re-approve and Delete). The switch used to be the first child of
+    // the action group, so its position was whatever the buttons after it
+    // happened to be \u2014 three shapes, three positions, down a list a person
+    // reads by scanning (nocx-xa0cq).
+    //
+    // Read STRUCTURALLY and not in pixels: jsdom lays nothing out, so every
+    // getBoundingClientRect answers zeros and a coordinate assertion would
+    // pass on the ragged page too. What holds the column is that the switch is
+    // in the row\u2019s state cell, at the trailing edge, and never among the
+    // actions \u2014 which is what is read here.
+    const shapes: SkillsList = {
+      ...SKILLS,
+      skills: [
+        SKILLS.skills[1],
+        SKILLS.skills[0],
+        { ...SKILLS.skills[0], name: 'managed', provenance: 'managed', status: 'changed' },
+      ],
+    }
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(shapes) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+    await waitFor(() => expect(rowFor(container, 'managed')).toBeTruthy())
+
+    // The shapes are asserted first, so a page that stopped drawing the
+    // buttons could not make this test pass by having nothing to misalign.
+    expect(actionIn(rowFor(container, 'skill-authoring')!, 'Delete')).toBeUndefined()
+    expect(actionIn(rowFor(container, 'deploy')!, 'Delete')).toBeTruthy()
+    expect(actionIn(rowFor(container, 'managed')!, 'Re-approve')).toBeTruthy()
+    expect(actionIn(rowFor(container, 'managed')!, 'Delete')).toBeTruthy()
+
+    for (const name of ['skill-authoring', 'deploy', 'managed']) {
+      const row = rowFor(container, name)!
+      const cell = row.querySelector('.ui-record-row__state')
+      expect(cell, `${name} draws its switch in the row\u2019s state cell`).not.toBeNull()
+      expect(cell?.querySelector('[role="switch"]')).not.toBeNull()
+      expect(row.querySelector('.ui-action-group [role="switch"]')).toBeNull()
+      // Last in the row\u2019s trailing region: the cell hangs off the row\u2019s
+      // right edge, so nothing a particular row happens to offer can move it.
+      expect(row.querySelector('.ui-collection-row__actions')?.lastElementChild).toBe(cell)
+    }
+  })
+
   it('shows a corrupt document as an actionable failure with its path', async () => {
     const result: SkillsList = {
       skills: [],

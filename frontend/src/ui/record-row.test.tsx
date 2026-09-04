@@ -327,3 +327,57 @@ describe('RecordRow — the disclosure (nocx-ctl6q task 3)', () => {
     )
   })
 })
+
+describe("RecordRow — the row's state has a cell of its own (nocx-xa0cq)", () => {
+  // Everything here is read STRUCTURALLY rather than in pixels, because jsdom
+  // lays nothing out: `getBoundingClientRect` answers zeros for every element,
+  // so a coordinate assertion would pass just as happily on the ragged row it
+  // is meant to catch. What actually holds the column is where the control
+  // sits — the row's own state cell, at the trailing edge, outside the actions
+  // whose contents decide each other's positions — and that is what is read.
+  it("holds the state control at the row's trailing edge, outside the actions", () => {
+    const { container } = render(() => (
+      <RecordRow
+        title="deploy"
+        state={<input type="checkbox" role="switch" aria-label="deploy enabled" />}
+        actions={<button type="button">Delete</button>}
+      />
+    ))
+
+    const cell = container.querySelector('.ui-record-row__state')
+    expect(cell).not.toBeNull()
+    expect(cell?.querySelector('[role="switch"]')).not.toBeNull()
+
+    // The caller's actions are not in the cell, and the cell is the last
+    // thing in the row's trailing region — so its place is the row's right
+    // edge and not the width of whatever buttons precede it.
+    const trailing = container.querySelector('.ui-collection-row__actions')!
+    expect(cell?.querySelector('button')).toBeNull()
+    expect(trailing.lastElementChild).toBe(cell)
+    expect(trailing.querySelector('button')?.textContent).toBe('Delete')
+  })
+
+  it('reserves nothing on a row whose list has no state control', () => {
+    // The disclosure's absent case, on the other end of the row: a column
+    // reserved for a control none of a list's rows can offer would hold width
+    // open on every one of them for nothing.
+    const { container } = render(() => (
+      <RecordRow title="provider" actions={<button type="button">Edit</button>} />
+    ))
+    expect(container.querySelector('.ui-record-row__state')).toBeNull()
+  })
+
+  it('reserves the empty cell on a row that has no state control beside rows that do', () => {
+    // `expandable={false}`'s reason, mirrored: a row in a list that DOES have
+    // state controls holds the column open even when it has nothing to put in
+    // it, or its own actions run to the edge the others stop short of and the
+    // raggedness has only moved to the buttons.
+    const { container } = render(() => (
+      <RecordRow title="builtin" state={null} actions={<button type="button">Edit</button>} />
+    ))
+    const cell = container.querySelector('.ui-record-row__state')
+    expect(cell).not.toBeNull()
+    expect(cell?.childElementCount).toBe(0)
+    expect(container.querySelector('.ui-collection-row__actions')!.lastElementChild).toBe(cell)
+  })
+})

@@ -2,8 +2,6 @@ import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.lis
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsAudit } from './generated/skills.audit'
-import type { SkillsInstall } from './generated/skills.install'
-import type { SkillsPreview } from './generated/skills.preview'
 
 export type Skill = GeneratedSkill
 
@@ -12,8 +10,6 @@ export interface SkillsClientLike {
   setEnabled(name: string, enabled: boolean): Promise<unknown>
   remove(name: string): Promise<unknown>
   approve(name: string): Promise<unknown>
-  preview(url: string): Promise<SkillsPreview>
-  install(url: string): Promise<SkillsInstall>
   file(name: string, path: string): Promise<SkillsFile>
   files(name: string): Promise<SkillsFiles>
   audit(name: string): Promise<SkillsAudit>
@@ -80,25 +76,12 @@ export class SkillsStore {
     await this.refresh()
   }
 
-  // Reading REFRESHES NOTHING, deliberately: skills.preview writes nothing,
-  // so a list that changed after one would be a list that changed for a
-  // reason nobody can name. It is a passthrough rather than a call the
-  // surface makes on a client of its own, and that is what makes the pair
-  // answerable: skills.install compares against a digest the SERVER kept
-  // from its own preview, so the two calls have to reach one backend over
-  // one connection. Handing the surface a store for the write and a client
-  // for the read would be two collaborators that can differ.
-  preview(url: string): Promise<SkillsPreview> {
-    return this.client.preview(url)
-  }
-
-  // Reading one file REFRESHES NOTHING either, and for the same reason
-  // `preview` does not: skills.file writes nothing, so a list that changed
-  // after a read would be a list that changed for a reason nobody can name.
-  // It is a passthrough rather than a call the surface makes on a client of
-  // its own, so that the page has ONE collaborator for skills — a surface
-  // holding a store for the writes and a client for the reads is two things
-  // that can be pointed at different backends.
+  // Reading one file REFRESHES NOTHING: skills.file writes nothing, so a
+  // list that changed after a read would be a list that changed for a reason
+  // nobody can name. It is a passthrough rather than a call the surface makes
+  // on a client of its own, so that the page has ONE collaborator for skills
+  // — a surface holding a store for the writes and a client for the reads is
+  // two things that can be pointed at different backends.
   file(name: string, path: string): Promise<SkillsFile> {
     return this.client.file(name, path)
   }
@@ -119,16 +102,5 @@ export class SkillsStore {
   // suggest the reading had moved something.
   audit(name: string): Promise<SkillsAudit> {
     return this.client.audit(name)
-  }
-
-  // Installing goes through the store because the list is now different, and
-  // the caller still gets what was installed so the dialog can name it. The
-  // refresh is awaited BEFORE the result is returned, so a caller that closes
-  // its dialog on this promise cannot close it over a list that has not
-  // caught up.
-  async install(url: string): Promise<SkillsInstall> {
-    const installed = await this.client.install(url)
-    await this.refresh()
-    return installed
   }
 }

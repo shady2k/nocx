@@ -24,11 +24,12 @@
  * short of the whole product where "the window shows this file" is a
  * question that can be asked.
  *
- * THE FIXTURE IS A SKILL ON DISK, not an install. `skill-install-url.spec.ts`
- * already watches the install path whole, and repeating it here would make
- * this spec fail for that epic's reasons; what this one needs is only a
- * discovered skill with MORE THAN ONE FILE, which the authored root
- * (`<config>/skills/<name>/`) gives for the cost of two writes. It is written
+ * THE FIXTURE IS A SKILL ON DISK, and it is an AUTHORED one.
+ * `skills-management.spec.ts` watches the installed row and everything a
+ * person can do to it, and repeating that here would make this spec fail for
+ * that bead's reasons; what this one needs is only a discovered skill with
+ * MORE THAN ONE FILE, which the authored root (`<config>/skills/<name>/`)
+ * gives for the cost of two writes. It is written
  * AFTER the backend starts because `skill.Discover` walks the roots per call,
  * and into this backend's disposable home — `documentDir(backend.isolatedHome)`
  * — so nothing here can reach a real profile.

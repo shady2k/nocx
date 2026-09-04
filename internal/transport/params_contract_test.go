@@ -341,12 +341,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"skills.approve": {
 			[]byte(`{"name":"deploy"}`),
 		},
-		"skills.preview": {
-			[]byte(`{"url":"https://example.com/skills/deploy/SKILL.md"}`),
-		},
-		"skills.install": {
-			[]byte(`{"url":"https://example.com/skills/deploy/SKILL.md"}`),
-		},
 		"shell.commandNames": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},

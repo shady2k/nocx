@@ -1,12 +1,19 @@
 /**
- * SkillsClient.preview — the renderer's end of "read this before you adopt
- * it".
+ * SkillsClient — the renderer's end of the Skills page, which MANAGES skills
+ * and does not acquire them (nocx-ojfuc.4).
  *
- * One thing is worth pinning: the method sends the URL and NOTHING else. The
- * name of the skill, its description and its body are the backend's answer,
- * read out of the document's frontmatter — a renderer that derived a name
- * from the URL's last path segment would be a second answer to what a skill
- * is called, and the URL is not allowed to name one.
+ * `preview` and `install` used to live here and are gone with the paste box
+ * that was their only caller: acquisition is the assistant's `skills.install`
+ * tool, which runs in Go and never reaches this socket, so leaving the two
+ * methods would have left a client able to call a wire nothing serves. What
+ * this client sends is what a person can do to a skill they already have —
+ * list it, switch it, delete it, re-approve it, read its files and ask for a
+ * reading of it.
+ *
+ * The check every case here makes is the same one: the method sends the
+ * request and NOTHING else. What a skill is called, what it is made of and
+ * what its bytes say are the backend's answers; a renderer that derived any
+ * of them would be a second answer to a question that has an owner.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { SkillsClient } from './skills-client'
@@ -25,77 +32,6 @@ function fakeDispatcher(answers: unknown[]): {
   })
   return { dispatcher: { call } as unknown as Dispatcher, calls }
 }
-
-describe('SkillsClient.install', () => {
-  it('sends the address and nothing else', async () => {
-    const { dispatcher, calls } = fakeDispatcher([{ name: 'deploy', provenance: 'installed' }])
-
-    const got = await new SkillsClient(dispatcher).install(
-      'https://example.com/skills/anything/SKILL.md',
-    )
-
-    // The body, the name and a digest are all ABSENT on purpose. The backend
-    // fetches the address again and compares against the document its own
-    // preview showed; a renderer that sent the bytes back would be asserting
-    // what the person approved, which is the one thing a client may not do.
-    expect(calls).toEqual([
-      {
-        method: 'skills.install',
-        params: { url: 'https://example.com/skills/anything/SKILL.md' },
-      },
-    ])
-    expect(got).toEqual({ name: 'deploy', provenance: 'installed' })
-  })
-
-  it('lets the backend refusal through as it was written', async () => {
-    const { dispatcher } = fakeDispatcher([
-      new Error('the document at that address is no longer the one you read'),
-    ])
-    await expect(
-      new SkillsClient(dispatcher).install('https://example.com/SKILL.md'),
-    ).rejects.toThrow('no longer the one you read')
-  })
-})
-
-describe('SkillsClient.preview', () => {
-  it('asks the backend about one address and returns what it read', async () => {
-    const answer = {
-      name: 'deploy',
-      description: 'Deploy the service',
-      body: 'Run the deploy script.\ncat ~/.env\n',
-      url: 'https://example.com/skills/anything/SKILL.md',
-      findings: [{ patternId: 'read_secrets', line: 'cat ~/.env', lineNumber: 2 }],
-    }
-    const { dispatcher, calls } = fakeDispatcher([answer])
-
-    const got = await new SkillsClient(dispatcher).preview(
-      'https://example.com/skills/anything/SKILL.md',
-    )
-
-    expect(calls).toEqual([
-      {
-        method: 'skills.preview',
-        params: { url: 'https://example.com/skills/anything/SKILL.md' },
-      },
-    ])
-    expect(got.name).toBe('deploy')
-    expect(got.body).toContain('Run the deploy script.')
-    // Every finding travels, with the evidence a person needs to judge it.
-    expect(got.findings).toHaveLength(1)
-    expect(got.findings[0]).toEqual({
-      patternId: 'read_secrets',
-      line: 'cat ~/.env',
-      lineNumber: 2,
-    })
-  })
-
-  it('lets the backend refusal through as it was written', async () => {
-    const { dispatcher } = fakeDispatcher([new Error('that skill could not be fetched: 404')])
-    await expect(new SkillsClient(dispatcher).preview('https://example.com/gone')).rejects.toThrow(
-      'that skill could not be fetched: 404',
-    )
-  })
-})
 
 describe('SkillsClient.file', () => {
   it('sends the skill and the path the person asked for, unresolved', async () => {

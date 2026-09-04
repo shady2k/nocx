@@ -27,6 +27,20 @@
  *           more for the person's click than the click was. Enabled state
  *           is not a status here — the switch beside it already says so, and
  *           a row that reports one fact twice is how the two come to disagree.
+ *
+ * THIS PAGE MANAGES SKILLS AND DOES NOT ACQUIRE THEM (nocx-ojfuc.4, policy
+ * design §5). The list, the switch, deletion, the changed-bytes status, the
+ * card, the file viewer and the audit have no conversational substitute and
+ * live here. Acquisition does: the assistant searches, follows a page to a
+ * repository and calls `skills.install`, and the person decides in the
+ * approval window — which names the RESOLVED source, the description, the
+ * digest and every file that would land, with its bytes. The paste box that
+ * used to sit in this Section's heading slot asked a person to go and find a
+ * raw address by hand, which is exactly the labour the assistant removes; two
+ * surfaces owning one input is the defect AGENTS.md names most often, and the
+ * one that goes is the one with a substitute. There is deliberately no field
+ * on this page a source address can be typed into, and nothing here calls
+ * `skills.preview`.
  */
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 import {
@@ -47,13 +61,10 @@ import { CodeBlock, MarkerList } from './ui'
 import { Dialog, showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import type { BadgeTone } from './ui/badge'
-import { classifyPastedSource } from './api/api-paths'
-import { SkillsInstallDialog } from './skills-install-dialog'
 import { scanPatternWords } from './scan-pattern-words'
 import type { SkillsAudit } from './generated/skills.audit'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
-import type { SkillsPreview } from './generated/skills.preview'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
 export interface SkillsSectionProps {
@@ -204,119 +215,19 @@ export function SkillsSection(props: SkillsSectionProps) {
   const [state, setState] = createSignal<SkillsState>({ kind: 'loading' })
   const [busy, setBusy] = createSignal<string | null>(null)
 
-  /* ── Installing a skill by its URL (nocx-qja4m.6) ──────────────────────
-     The ask's state lives here rather than inside the dialog, the way the
-     API pane owns the Postman ask's: the calls are the surface's, the
-     dialog draws what it is handed, and a component that fetched on its own
-     would be a second place the list can change from. */
-  const [installOpen, setInstallOpen] = createSignal(false)
-  const [installUrl, setInstallUrl] = createSignal('')
-  const [installPreview, setInstallPreview] = createSignal<SkillsPreview | null>(null)
-  const [installRefusal, setInstallRefusal] = createSignal('')
-  const [installBusy, setInstallBusy] = createSignal(false)
-
-  /** What the typed text IS — asked once, of the module that owns the
-   *  question for the whole product. A regex here would be the second
-   *  derivation of "is this a URL", which is the `ssh`-without-a-space
-   *  defect in another costume (api-paths.ts says so itself). */
-  const installSource = () => classifyPastedSource(installUrl())
-  const installIsURL = () => installSource().kind === 'url'
-
-  /** Why the typed text is not an address, or ''. Ours to say and free to
-   *  say: a call that could only be refused is a round trip spent to learn
-   *  what the form already knew. Silent while the box is empty — an ask
-   *  does not open complaining about a field nobody has filled in. */
-  const installUrlRefusal = (): string =>
-    installUrl().trim() !== '' && !installIsURL()
-      ? 'A skill is fetched from an http:// or https:// address'
-      : ''
-
-  const openInstall = (): void => {
-    setInstallUrl('')
-    setInstallPreview(null)
-    setInstallRefusal('')
-    setInstallOpen(true)
-  }
-
-  const closeInstall = (): void => {
-    setInstallOpen(false)
-    setInstallUrl('')
-    setInstallPreview(null)
-    setInstallRefusal('')
-  }
-
-  /** Editing the address DROPS the document that was read, because an
-   *  address that is no longer the one that was fetched cannot describe the
-   *  bytes on screen. That is what keeps "exactly one source is held" a fact
-   *  rather than a rule in a comment. */
-  const changeInstallUrl = (value: string): void => {
-    setInstallUrl(value)
-    setInstallRefusal('')
-    const held = installPreview()
-    if (held && held.url !== value.trim()) setInstallPreview(null)
-  }
-
-  const forgetInstallSource = (): void => {
-    setInstallPreview(null)
-    setInstallUrl('')
-    setInstallRefusal('')
-  }
-
-  /** The message a refusal left, verbatim. Each of `skills.preview`'s and
-   *  `skills.install`'s refusals already names the step that refused; a
-   *  sentence of our own here would put our guess in front of the person
-   *  instead of what happened. */
+  /** The message a refusal left, verbatim. Each refusal from the store
+   *  already names the step that refused; a sentence of our own here would
+   *  put our guess in front of the person instead of what happened. */
   const refusalSentence = (err: unknown): string =>
     err instanceof Error ? err.message : String(err)
-
-  async function readSkill(): Promise<void> {
-    const source = installSource()
-    if (source.kind !== 'url' || installBusy()) return
-    setInstallRefusal('')
-    setInstallBusy(true)
-    try {
-      setInstallPreview(await props.store.preview(source.url))
-    } catch (err) {
-      setInstallPreview(null)
-      setInstallRefusal(refusalSentence(err))
-    } finally {
-      setInstallBusy(false)
-    }
-  }
-
-  /** The address that was READ is what gets installed — never the current
-   *  contents of the box. The backend fetches it a second time and compares
-   *  against the digest its own preview kept, so the two calls have to name
-   *  one document; taking the address from the field would let an edit
-   *  between reading and approving change what was approved. */
-  async function installSkill(): Promise<void> {
-    const held = installPreview()
-    if (!held || installBusy()) return
-    setInstallRefusal('')
-    setInstallBusy(true)
-    try {
-      const installed = await props.store.install(held.url)
-      closeInstall()
-      // The toast names the state the skill actually lands in, because the
-      // row alone does not: an installed skill arrives OFF (nocx-0bsa4.2),
-      // and a person told only "Installed" would go and ask the assistant to
-      // use it, get nothing, and conclude the install failed.
-      showToast({
-        level: 'success',
-        message: `Installed “${installed.name}” — it is off until you turn it on`,
-      })
-    } catch (err) {
-      setInstallRefusal(refusalSentence(err))
-    } finally {
-      setInstallBusy(false)
-    }
-  }
 
   /* ── The skill's card (nocx-872jc.2, nocx-0bsa4.3) ─────────────────────
      Reading writes nothing, so it refreshes nothing and touches neither
      `busy` (which disables the controls that CHANGE a row) nor the list.
-     The ask's state lives here for the install ask's reason: the calls are
-     the surface's, the card draws what it is handed.
+     The ask's state lives in the SURFACE rather than inside the card, the
+     way the API pane owns the Postman ask's: the calls are the surface's,
+     the card draws what it is handed, and a component that fetched on its
+     own would be a second place the list can change from.
 
      WHICH SKILL is a NAME, and the skill itself is read back out of the
      list. That is what keeps the switch on the card and the switch on the
@@ -540,9 +451,9 @@ export function SkillsSection(props: SkillsSectionProps) {
   /** WHAT WENT INTO THE READING, as a stance per file: read, or not read and
    *  why. It is the kit's MarkerList because that is the component for
    *  exactly this vocabulary — this is included, this is not, and here is the
-   *  caveat — and the install ask already states its manifest with it, so a
-   *  person meets one grammar for "what is in and what is out" in both
-   *  places. */
+   *  caveat — and the approval window states an install's manifest with it
+   *  too, so a person meets one grammar for "what is in and what is out"
+   *  wherever they meet the question. */
   const auditManifest = (result: SkillsAudit) => [
     ...result.read.map((path) => ({ text: path, tone: 'included' as const })),
     ...result.omitted.map((omission) => ({
@@ -637,42 +548,12 @@ export function SkillsSection(props: SkillsSectionProps) {
        list, and the list draws its own separators. Two nested divided stacks
        put the dense rhythm on the whole list as one child and again on every
        row inside it. */
-    <Section
-      title="Discovered skills"
-      /* ABOVE THE LIST, in the kit's own heading slot (spec §9). It belongs
-         to the GROUP rather than to any row in it, which is what that slot
-         is for, and it is on screen from the state the page opens in —
-         including while the list is still loading and while the document
-         cannot be read at all, because neither is a reason a person cannot
-         install a skill. */
-      actions={
-        <Button variant="primary" onClick={openInstall}>
-          Install from a URL
-        </Button>
-      }
-    >
-      {/* THE ASK ITSELF. Mounted with the list rather than conditionally
-          rendered, the way the API pane mounts the Postman ask: the kit's
-          Dialog owns opening and closing, and a surface that unmounted the
-          component instead would be deciding that a second time. */}
-      <SkillsInstallDialog
-        open={installOpen()}
-        url={installUrl()}
-        onUrl={changeInstallUrl}
-        sourceIsURL={installIsURL()}
-        urlRefusal={installUrlRefusal()}
-        refusal={installRefusal()}
-        preview={installPreview()}
-        onForget={forgetInstallSource}
-        busy={installBusy()}
-        onCancel={closeInstall}
-        onRead={() => void readSkill()}
-        onInstall={() => void installSkill()}
-      />
-      {/* THE CARD (nocx-0bsa4.3). Mounted beside the install ask and for
-          the same reason: the kit's Dialog owns opening and closing, and a
-          surface that unmounted the component instead would be deciding that
-          a second time. It stays a Dialog rather than a workspace tab because
+    <Section title="Discovered skills">
+      {/* THE CARD (nocx-0bsa4.3). Mounted with the list rather than
+          conditionally rendered, the way the API pane mounts the Postman ask:
+          the kit's Dialog owns opening and closing, and a surface that
+          unmounted the component instead would be deciding that a second
+          time. It stays a Dialog rather than a workspace tab because
           reading a skill must not cost the page a person is on — and because
           `src/file-viewer/` reads through a live binding on some machine,
           which a builtin skill, whose bytes are inside the binary, does not
@@ -682,8 +563,8 @@ export function SkillsSection(props: SkillsSectionProps) {
           precisely so the person can come here, see what it is made of with
           any file readable, and turn it on themselves. So the switch is on
           this card, beside the bytes it is a decision about, and NOT on the
-          install ask's success — two clicks in one flow is a reflex inside a
-          week, and a reflex is not a look.
+          approval that admitted the bytes — two clicks in one flow is a
+          reflex inside a week, and a reflex is not a look.
 
           THE SWITCH IS ALSO STILL ON THE ROW, and that is one control and
           not two: both call `toggle`, which is the store's one write, and
@@ -694,8 +575,8 @@ export function SkillsSection(props: SkillsSectionProps) {
       <Dialog
         open={cardSkill() !== null}
         title={cardTitle()}
-        /* `lg` for the install ask's reason: a file is on screen, and `md`
-           would set a skill's instructions in a column narrower than the
+        /* `lg` because a file is on screen: `md` is the confirm/edit width
+           and would set a skill's instructions in a column narrower than the
            editor that wrote them. */
         size="lg"
         onClose={closeCard}

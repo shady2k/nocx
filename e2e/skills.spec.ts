@@ -28,12 +28,13 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -47,7 +48,6 @@ const NEW_TAB = '[aria-label="New tab"]'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 
 const ENDPOINT_NAME = `E2E Skills ${nonce}`
@@ -107,12 +107,7 @@ async function configureAssistant(page: Page): Promise<void> {
   // policy page so pane B can demonstrate the read and answer without opening
   // a second approval prompt; skills.create still always asks by contract.
   await page.locator(SETTINGS_POLICY_NAV).click()
-  const observeRow = page.locator(OBSERVE_ROW)
-  await expect(observeRow).toBeVisible({ timeout: 10_000 })
-  await observeRow.locator('select').first().selectOption({ label: 'Allowed' })
-  await expect(observeRow.locator('.st-policy__state')).toContainText('Allowed', {
-    timeout: 10_000,
-  })
+  await answerPermission(page, 'observe', 'Allowed')
 
   await page.locator(TITLE).first().click()
   await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })

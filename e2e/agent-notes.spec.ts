@@ -13,12 +13,13 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  VaultBackend,
+  answerPermission,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
   showSidebarView,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -31,7 +32,6 @@ const NOTE_BODY = `${NOTE_TITLE}\nassistant-note-${nonce}`
 const QUESTION = `Create a note for me, ${nonce}.`
 const INPUT = '.pane.active .nocx-editor-input'
 const TITLE = '.nocx-tab-title'
-const MUTATE_REVERSIBLE_ROW = '.st-policy__row[data-effect="mutate-reversible"]'
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -73,10 +73,7 @@ async function configureAssistant(page: Page): Promise<void> {
   await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
 
   await page.locator('.ui-grouped-nav__item[data-item="policy"]').click()
-  const row = page.locator(MUTATE_REVERSIBLE_ROW)
-  await expect(row).toBeVisible({ timeout: 10_000 })
-  await row.locator('select').first().selectOption({ label: 'Allowed' })
-  await expect(row.locator('.st-policy__state')).toContainText('Allowed', { timeout: 10_000 })
+  await answerPermission(page, 'mutate-reversible', 'Allowed')
 
   await page.locator(TITLE).first().click()
   await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })

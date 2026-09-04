@@ -837,7 +837,8 @@ export class PaneManager {
    *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
    *  beside onCreateEndpoint, which the chip's other destination reuses. */
   onOpenRoles?: () => void
-  /** The approval receipt's second action: open Settings → Agent policy,
+  /** The approval receipt's second action: open Settings → Assistant
+   *  permissions,
    *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
    *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */

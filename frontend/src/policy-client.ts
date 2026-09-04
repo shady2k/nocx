@@ -1,5 +1,5 @@
 /**
- * Agent policy client — the ONE global policy (ADR-0020 §7 as amended
+ * Assistant permissions client — the ONE global policy (ADR-0020 §7 as amended
  * 2026-08-16, accepted): the matrix the backend mints every agent run's
  * grant from.
  *
@@ -89,6 +89,19 @@ export interface PolicyView {
    *  row outside this list governs nothing yet, and the page says so rather
    *  than offering it as an equal to the rows that do. */
   live: EffectKey[]
+  /** The ids of the standing answers that are INERT: a loose permit saved
+   *  under an earlier reading of commands, which grants nothing until a
+   *  person has re-read what it now means and said so (design §5.6).
+   *
+   *  THE BACKEND'S ANSWER AND ONLY THE BACKEND'S, for the reason `live` is.
+   *  The predicate joins three facts about a rule to the reading of commands
+   *  running now — a version number no result carries — and
+   *  `content.RulesNeedingConfirmation` is its one implementation. A second
+   *  one here would agree everywhere anyone looked and disagree somewhere
+   *  nobody did, while telling a person a permission works; a rule that
+   *  quietly stopped working and says nothing about it is the soft degrade
+   *  AGENTS.md forbids. Always an array. */
+  awaitingReview: string[]
   /** The standing answers over command invocations, in document order, with
    *  the provenance that makes each one an object a person can take back:
    *  when it came into being, whether they ANSWERED it at a prompt or it was
@@ -172,6 +185,7 @@ export class PolicyClient {
     return this.dispatcher.call<PolicyGet>('policy.get', {}).then((r) => ({
       matrix: toMatrix(r.policy),
       live: r.live,
+      awaitingReview: r.awaitingReview,
       // The wire omits an empty rules array (`omitempty` on the Go side), and
       // a surface must not have to tell absent from empty to draw a list.
       rules: r.policy.rules ?? [],

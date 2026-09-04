@@ -228,8 +228,14 @@ const SCOPES: ReadonlyArray<{ scope: ApprovalScope; label: string }> = [
  * the backend's exact canonical invocation; a non-command answer covers the
  * effect row already sent on the wire. The surface never derives an effect
  * from arguments or the tool name.
+ *
+ * EXPORTED because the Assistant permissions page lists the answers this
+ * prompt saved (nocx-hvb3r), and the sentence a person is shown on the page
+ * must be character for character the one they agreed to here. Two builders
+ * for one sentence would drift apart on the day one of them was reworded,
+ * and the page would then describe an answer the person never gave.
  */
-const approvalScopeCoverage = (
+export const approvalScopeCoverage = (
   scope: ApprovalScope,
   standing: AgentApprovalRequested['standing'],
   effectLabel: string,
@@ -802,7 +808,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             An answer in this session lasts until this terminal session ends; restarting the shell
             starts a new one and the question comes back. An answer of always is a standing answer
             for {ask().standing.rule || effectLabel()}, in every session, from now on, which you can
-            change on the Agent policy page.
+            change on the Assistant permissions page.
           </p>
         </Show>
       </Stack>

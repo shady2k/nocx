@@ -102,12 +102,14 @@ export interface TextFieldProps {
    * Fires when the person is FINISHED with the value: when focus leaves, and
    * on Enter in a single-line field.
    *
-   * For a field whose value is WRITTEN rather than merely validated. The
-   * Agent policy page's scope field is checked by `ParseEffectPolicy`, which
-   * rejects a non-absolute path, so writing per keystroke would be a refused
-   * write and a toast on every character of `/workspace`. Blur and Enter are
-   * one gesture — "done" — and naming it here keeps every caller from pairing
-   * `onBlur` with a hand-rolled keydown of its own.
+   * For a field whose value is WRITTEN rather than merely validated — one
+   * whose backend rejects a half-typed value, so writing per keystroke would
+   * be a turned-down write and a toast on every character of `/workspace`.
+   * (The case this was built for was the agent policy matrix's scope field,
+   * which nocx-hvb3r deleted along with the page; the gesture it named
+   * outlived it.) Blur and Enter are one gesture — "done" — and naming it
+   * here keeps every caller from pairing `onBlur` with a hand-rolled keydown
+   * of its own.
    *
    * Enter does NOT commit a `multiline` field: there it inserts a newline,
    * and only blur means done.

@@ -83,12 +83,13 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -128,7 +129,7 @@ const ALLOWED_EFFECTS = [
   'mutate-destructive',
   'cross-boundary',
   'delegate',
-]
+] as const
 
 const test = base
 const nonce = Date.now().toString(36)
@@ -212,12 +213,9 @@ async function configureAssistant(page: Page): Promise<void> {
   await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
   for (const effect of ALLOWED_EFFECTS) {
-    const row = page.locator(`.st-policy__row[data-effect="${effect}"]`)
-    await expect(row).toBeVisible({ timeout: 15_000 })
-    await row.locator('select').first().selectOption({ label: 'Allowed' })
-    // The row's own state sentence, which is the store's answer re-adopted
-    // after the write — not the draft this test just typed.
-    await expect(row.locator('.st-policy__state')).toContainText('Allowed', { timeout: 15_000 })
+    // answerPermission waits on the LISTED answer, which is the store's own
+    // word for what it took — not the draft this test just clicked.
+    await answerPermission(page, effect, 'Allowed')
   }
   await backToTerminal(page)
 }

@@ -9,7 +9,7 @@
  *
  *   A person asks the assistant about a failed build. The assistant asks to
  *   read the screen; they answer Allow always. They ask a second question in
- *   the same pane and are NOT asked again. Settings → Agent policy shows the
+ *   the same pane and are NOT asked again. Settings → Assistant permissions shows the
  *   standing decision; they revoke it; the next question asks again.
  *
  * The second test is the other half of the spec's interval — an answer given
@@ -23,7 +23,7 @@
  *   `delta.tool_calls` frame naming `session.read`. `session.read` is declared
  *   with `Effect: observe` and `ResourceArg: "sessionId"`
  *   (internal/agenttools/registry.go), so the escalation is a POLICY ask
- *   over the `observe` row — which is the row Settings → Agent policy draws
+ *   over the `observe` row — which is the row Settings → Assistant permissions lists
  *   as "Read and inspect" and the prompt says as "read and inspect"
  *   (frontend/src/effect-labels.ts, one owner of both).
  * - The SESSION ID IS LEARNED, NEVER INVENTED, for the reason
@@ -52,12 +52,14 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  answerPermission,
   appReadyForInput,
-  VaultBackend,
   bindEndpoint,
   createAiEndpoint,
+  permissionAnswer,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -78,8 +80,8 @@ const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
  *  dialogs too, and "no dialog is open" is not the claim being made — "the
  *  person was not asked to approve" is. */
 const APPROVAL_TITLE = 'This action needs your approval'
-/** The row of the matrix `session.read` is classified under. */
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
+/** The words the page names what `session.read` is classified under by. */
+const OBSERVE_WORDS = 'read and inspect'
 
 const test = base
 
@@ -298,7 +300,7 @@ const ENDPOINT_NAME = `E2E Policy ${nonce}`
 test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4ab)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
-  test('Allow always stops the question, and the Agent policy page brings it back', async ({
+  test('Allow always stops the question, and Assistant permissions brings it back', async ({
     page,
   }) => {
     const asks = recordAskSessions(page)
@@ -347,25 +349,24 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     await answerFinished(page, 'And if I fix the type?')
     await expect(approvalPrompt(page)).toHaveCount(0)
 
-    // ── 5. The page shows the standing decision, in the same words the
-    // question used. Asserted on the row's STATE line, never on the row: a
-    // row's text contains every option of its select, so "the row mentions
-    // Allowed" is true whatever the row is set to.
+    // ── 5. The page shows the standing answer, as a SENTENCE, in the same
+    // words the question used. It is listed under "What you have answered"
+    // and nowhere else: the page lists answers rather than drawing a field
+    // per row, so the answer being present is itself the assertion — there
+    // is no always-drawn control whose text mentions every option.
     await openSettings(page, SETTINGS_POLICY_NAV)
-    const observeRow = page.locator(OBSERVE_ROW)
-    await expect(observeRow).toBeVisible({ timeout: 15_000 })
-    await expect(observeRow.locator('select').first()).toHaveValue('permit')
-    await expect(observeRow.locator('.st-policy__state')).toContainText(
-      'Read and inspect — Allowed',
-    )
+    const observeAnswer = permissionAnswer(page, 'observe')
+    await expect(observeAnswer).toBeVisible({ timeout: 15_000 })
+    await expect(observeAnswer).toContainText(OBSERVE_WORDS)
+    await expect(observeAnswer).toContainText('Allowed')
+    await expect(observeAnswer).toContainText('in every session, from now on')
 
-    // ── 6. Revoking is the SAME control, not a second one. There is no Save
-    // button: the select writes, and the page adopts what a fresh read
-    // answers — so the state line going away is the store's answer, never
-    // the draft's.
-    await observeRow.locator('select').first().selectOption({ label: 'Ask every time' })
-    await expect(observeRow.locator('.st-policy__state')).toHaveCount(0, { timeout: 15_000 })
-    await expect(observeRow.locator('select').first()).toHaveValue('ask')
+    // ── 6. Revoking is the SAME gesture, not a second one: Change, then
+    // "Ask every time". There is no Save button — the answer writes and the
+    // page adopts what a fresh read returns — so the answer LEAVING the list
+    // is the store's word, never the draft's.
+    await answerPermission(page, 'observe', 'Ask every time')
+    await expect(observeAnswer).toHaveCount(0, { timeout: 15_000 })
 
     // ── 7. And the question comes back on the next one.
     await backToTerminal(page)
@@ -454,9 +455,11 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // "always" would look identical from inside the session they were given
     // in.
     await openSettings(page, SETTINGS_POLICY_NAV)
-    const observeRow = page.locator(OBSERVE_ROW)
-    await expect(observeRow).toBeVisible({ timeout: 15_000 })
-    await expect(observeRow.locator('select').first()).toHaveValue('ask')
-    await expect(observeRow.locator('.st-policy__state')).toHaveCount(0)
+    // Not listed among the answers at all: a session answer never reached
+    // the global matrix, so there is nothing on this page to take back.
+    await expect(permissionAnswer(page, 'observe')).toHaveCount(0, { timeout: 15_000 })
+    await expect(
+      page.getByRole('button', { name: `Answer this now: may the assistant ${OBSERVE_WORDS}?` }),
+    ).toBeVisible({ timeout: 15_000 })
   })
 })

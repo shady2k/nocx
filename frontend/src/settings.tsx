@@ -32,7 +32,7 @@ import { SkillsSection } from './skills-section'
 import type { SkillsStore } from './skills-store'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
-import { AgentPolicySection } from './agent-policy-section'
+import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
@@ -642,19 +642,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const policyPage: SettingsPage = {
       kind: 'component',
       id: 'policy',
-      title: 'Agent policy',
+      title: 'Assistant permissions',
       groupId: 'assistant',
       scrollMode: 'page',
       renderContent: () => (
         <Show
           when={props.policyClient}
           fallback={
-            <PageSection title="Agent policy">
-              The agent policy is not available in this window.
+            <PageSection title="Assistant permissions">
+              Your assistant permissions are not available in this window.
             </PageSection>
           }
         >
-          <AgentPolicySection client={props.policyClient!} />
+          <AssistantPermissionsSection client={props.policyClient!} />
         </Show>
       ),
     }

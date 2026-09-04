@@ -27,7 +27,7 @@
  *   followed by the answer written from its output for the agent command.
  * - THE GATE for the scripted `echo` run is `observe`, and the declaration
  *   also reaches `mutate-destructive`; both rows are set to Allowed through
- *   Settings → Agent policy, the surface a person uses, so the proposal
+ *   Settings → Assistant permissions, the surface a person uses, so the proposal
  *   EXECUTES rather than suspending. agent-tool-approval.spec.ts owns the
  *   asking; this file needs the command to have actually run.
  * - THE SESSION ID IS LEARNED, NEVER INVENTED (AD-7): the policy's scope
@@ -51,14 +51,15 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  VaultBackend,
+  answerPermission,
+  appReadyForInput,
   bindEndpoint,
   clickIntoEditor,
-  appReadyForInput,
   createAiEndpoint,
   promptReady,
   setDefaultModel,
   settingsReady,
+  VaultBackend,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -70,9 +71,7 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-/** `echo` resolves to observe; `session.run` can also reach mutate-destructive. */
-const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
-const DESTRUCTIVE_ROW = '.st-policy__row[data-effect="mutate-destructive"]'
+/* `echo` resolves to observe; `session.run` can also reach mutate-destructive. */
 const APPROVAL_TITLE = 'This action needs your approval'
 const RESTORED = '.pane.active .cmd-block[data-restored="true"]'
 
@@ -294,13 +293,8 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await setDefaultModel(page, endpointName, 'e2e-model')
 
     await page.locator(SETTINGS_POLICY_NAV).click()
-    for (const row of [OBSERVE_ROW, DESTRUCTIVE_ROW]) {
-      const policyRow = page.locator(row)
-      await expect(policyRow).toBeVisible({ timeout: 15_000 })
-      await policyRow.locator('select').first().selectOption({ label: 'Allowed' })
-      await expect(policyRow.locator('.st-policy__state')).toContainText('Allowed', {
-        timeout: 15_000,
-      })
+    for (const effect of ['observe', 'mutate-destructive'] as const) {
+      await answerPermission(page, effect, 'Allowed')
     }
     await backToTerminal(page)
 

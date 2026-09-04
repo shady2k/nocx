@@ -1055,3 +1055,78 @@ export async function openImportDestination(ask: Locator, page: Page): Promise<L
   await baseExpect(field).toBeVisible()
   return field
 }
+
+/**
+ * The words Settings -> Assistant permissions names one kind of work by.
+ *
+ * They are the product's own, from `frontend/src/effect-labels.ts`, which is
+ * their ONE owner: the approval prompt asks in them and the permissions page
+ * answers in them, so a spec that invented its own would be asserting a
+ * wording nothing ships. Restated here rather than imported because the e2e
+ * suite drives the built app and does not link the renderer's modules; if
+ * they drift, `answerPermission` stops finding a control and says so.
+ */
+const PERMISSION_WORDS = {
+  observe: 'read and inspect',
+  'mutate-reversible': 'make changes that can be undone',
+  'mutate-destructive': 'make changes that cannot be undone',
+  'privilege-change': 'gain more privilege',
+  disclose: 'send information out',
+  'cross-boundary': 'reach another host',
+  delegate: 'hand work to another agent',
+} as const
+
+export type PermissionEffect = keyof typeof PERMISSION_WORDS
+export type PermissionAnswer = 'Allowed' | 'Ask every time' | 'Never'
+
+/**
+ * The listed answer for one kind of work, on Settings -> Assistant
+ * permissions.
+ *
+ * Present only once somebody has answered it — the page lists answers, not
+ * fields — which is what makes its ABSENCE the assertable thing after a
+ * revocation. The old matrix could not say that: every row was drawn always,
+ * so a spec had to read a state line beside it.
+ */
+export function permissionAnswer(page: Page, effect: PermissionEffect): Locator {
+  return page.locator(`[data-answer="row:${effect}"]`)
+}
+
+/**
+ * Answer, or re-answer, one kind of work. The Assistant permissions page must
+ * already be open.
+ *
+ * There is no Save button and no draft: the panel's answer writes at once and
+ * the page adopts what a fresh read returns, so this waits on the LISTED
+ * answer rather than on the control it clicked. That is the store's own word
+ * for what it took.
+ */
+export async function answerPermission(
+  page: Page,
+  effect: PermissionEffect,
+  answer: PermissionAnswer,
+): Promise<void> {
+  const words = PERMISSION_WORDS[effect]
+  // An unanswered kind of work is a QUESTION and an answered one is a
+  // sentence, so the control that opens the panel has one of two labels.
+  // Which one is on screen depends on what earlier steps did, and deciding
+  // that is exactly what every caller should not have to do.
+  const open = page.locator(
+    `button[aria-label="Change ${words}"], ` +
+      `button[aria-label="Answer this now: may the assistant ${words}?"]`,
+  )
+  await baseExpect(open).toHaveCount(1, { timeout: 15_000 })
+  await open.click()
+  const panel = page
+    .locator('.nocx-dialog__panel')
+    .filter({ has: page.locator('[data-permissions-panel="change"]') })
+  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+  await panel.getByRole('button', { name: new RegExp(`^${answer} `) }).click()
+  if (answer === 'Ask every time') {
+    await baseExpect(permissionAnswer(page, effect)).toHaveCount(0, { timeout: 15_000 })
+  } else {
+    await baseExpect(permissionAnswer(page, effect)).toContainText(answer, { timeout: 15_000 })
+  }
+  await panel.getByRole('button', { name: 'Close' }).click()
+  await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
+}

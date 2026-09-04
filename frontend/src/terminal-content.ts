@@ -446,7 +446,8 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
-  /** The approval receipt's second action: open Settings → Agent policy,
+  /** The approval receipt's second action: open Settings → Assistant
+   *  permissions,
    *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
    *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */

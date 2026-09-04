@@ -18,11 +18,11 @@
 //
 // # The local/remote seam is the operation, not the process (spec D16)
 //
-// Repo and RepoFactory are the whole seam: local spawns git here, the relay
-// (a later build target, nocx-if6) sends named operations to a helper there,
-// and nothing above these interfaces knows which. The alternative — a
-// process-shaped Runner.Run(argv, stdin, out) interface — would make the
-// relay emulate a local process: process groups, pipes, an exit status, an
+// Repo and RepoFactory are the whole seam: local spawns git here, the helper
+// client sends named operations to the deployed helper there, and nothing
+// above these interfaces knows which. The alternative — a process-shaped
+// Runner.Run(argv, stdin, out) interface — would make the helper client
+// emulate a local process: process groups, pipes, an exit status, an
 // INT→TERM→KILL escalation, all protocol obligations over a WebSocket that
 // has none of those things. The seam is therefore a closed set of named
 // operations, the same shape the file manager's Provider has.
@@ -32,7 +32,7 @@
 // apply to every value these interfaces return: does it describe what the
 // user is being shown, or how a local pipe was cut? The second kind stays in
 // local. The domain states (Completeness, the diff states, the commit
-// outcome) are declared here, machine-independently, so the relay can report
+// outcome) are declared here, machine-independently, so the helper can report
 // them too; local maps its private execution record (a "cut" child) to those
 // states before anything crosses Repo.
 //
@@ -53,7 +53,8 @@ import (
 )
 
 // Repo is one repository on one machine. It is the whole local/remote seam:
-// local spawns git here, relay sends operations to the helper there, and
+// local spawns git here, the helper client sends operations to the deployed
+// helper there, and
 // nothing above this interface knows which. ctx is the entire cancellation
 // contract — each implementation honours it with the mechanism its channel
 // has, and neither imposes the other's.
@@ -101,8 +102,8 @@ type Repo interface {
 // implementations.
 //
 // local: probe capability, run rev-parse, build a Repo on the answer.
-// relay: send one open operation to the helper and build a client Repo on its
-// answer. One round trip, not three.
+// helper: send one open operation to the deployed helper and build a client
+// Repo on its answer. One round trip, not three.
 type RepoFactory interface {
 	Open(ctx context.Context, cwd string) (Repo, OpenOutcome, error)
 }
@@ -128,9 +129,9 @@ const (
 	// OpenGitTooOld — below the version floor; the result carries what it found.
 	OpenGitTooOld OpenState = "gitTooOld"
 	// OpenConsentRequired — the session is an SSH session whose machine has
-	// no relay-tier answer (remote-helper design D8): the user has not yet
+	// no helper-tier answer (remote-helper design D8): the user has not yet
 	// accepted the helper for this host. The panel offers the consent flow;
-	// accepting raises the machine to the relay tier and the next git.open
+	// accepting raises the machine to the helper tier and the next git.open
 	// proceeds. Produced by the composition layer from the consent
 	// decision, before the factory is invoked — the producer of a state
 	// owns declaring it, so the state lives here with its siblings.
@@ -348,7 +349,7 @@ type HeadMessage struct {
 // Refs are the decorations git attaches to the commit — branch names, tags,
 // and HEAD when the commit is HEAD — in git's own order, with git's
 // decoration prefixes ("HEAD -> ", "tag: ") stripped: the wire carries what
-// the panel shows, and the decoration grammar is git vocabulary the relay
+// the panel shows, and the decoration grammar is git vocabulary the helper
 // would otherwise have to reproduce. Refs is never nil — an empty set
 // marshals as [], not null.
 type LogEntry struct {

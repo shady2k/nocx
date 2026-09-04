@@ -811,7 +811,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	// The resolved destination mode rides the same path (nocx-mlm7):
 	// without this the profile's effective desiredMode dies here and every
-	// profile — raw or relay included — would integrate at open. A field
+	// profile — raw or helper included — would integrate at open. A field
 	// that is carried and discarded is worse than one that is missing.
 	if cfg.DesiredMode != "" {
 		opts = append(opts, ssh.WithDesiredMode(cfg.DesiredMode))

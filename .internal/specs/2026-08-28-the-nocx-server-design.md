@@ -5,7 +5,7 @@
 - **Status:** design, approved by the owner 2026-08-28; adversarially reviewed against
   the code with codex over two rounds (§11)
 - **Related:** `.internal/specs/2026-08-13-remote-helper-design.md` (the thin role's
-  protocol, already built), `nocx-if6` phase B (the relay this supersedes in approach),
+  protocol, already built), `nocx-if6` phase B (the remote binary this supersedes in approach),
   `nocx-457v` (the remote-helper epic, all children closed)
 
 ## 1. In one sentence

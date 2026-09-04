@@ -39,7 +39,7 @@ const (
 // what the user wants nocx to do with this destination, resolved by the
 // existing cascade (profile → group → global → hardcoded default). It
 // replaces the old auto|ask|off launch policy outright (N1): raw adds
-// nothing, script runs the shell tiers we ship, relay deploys the Tier-B
+// nothing, script runs the shell tiers we ship, helper deploys the Tier-B
 // binary.
 //
 // The fourth value is auto, and it is the hardcoded default (ADR-0033). It
@@ -50,17 +50,17 @@ const (
 // would have meant never offering the helper on any connection nobody had
 // hand-edited. auto wraps and installs the scripts exactly as script does
 // (N3 — automatic, unasked); what it additionally permits is the ask for
-// the relay binary, and only where a surface has actually reached for it
+// the helper binary, and only where a surface has actually reached for it
 // (D8's requested condition). There is deliberately no `ask` mode: asking
 // is what auto does when no answer is stored for that host key, and making
 // it a mode would re-collapse the axes §3.5 separated.
 type DesiredMode string
 
 const (
-	DesiredAuto   DesiredMode = "auto"   // not answered: scripts as N3, the relay may be offered
+	DesiredAuto   DesiredMode = "auto"   // not answered: scripts as N3, the helper may be offered
 	DesiredRaw    DesiredMode = "raw"    // nothing added: no rewrite, no remote write
 	DesiredScript DesiredMode = "script" // the shell tiers we ship — no compiled artifact
-	DesiredRelay  DesiredMode = "relay"  // Tier B, a deployed binary — consent-gated
+	DesiredHelper DesiredMode = "helper" // Tier B, a deployed binary — consent-gated
 )
 
 // DeliversScripts reports whether m publishes the shell bundle and
@@ -80,27 +80,28 @@ const (
 // and another in the reporter.
 //
 // raw is the ONLY answer that means "nothing", and an unrecognised value
-// joins it by failing closed. Every other mode integrates, relay included:
+// joins it by failing closed. Every other mode integrates, helper included:
 // the tiers are additive, not alternative (§5.2 — "declining a deployed
 // binary must not also decline shell scripts — different risks", and the
 // inverse holds for the same reason).
 //
-// relay refused for an epic after it stopped being true (nocx-7k8ma). The
-// refusal was written when `relay` named the Tier-B carrier of §3.4 — a
-// binary that would own the PTY and deliver integration itself — so
-// refusing the script carrier for it was coherent. That carrier is still
-// designed-for-not-built (D15, nocx-if6 phase B), while the mode was put
-// to work meaning "allow the remote helper", which owns no PTY and
-// delivers no markers. Between those two facts a user who picked the most
-// capable mode on the axis got the least capable delivery: helper, no
-// blocks, and nothing in the product saying why.
+// helper — spelled `relay` until 2026-08-31 — refused for an epic after
+// it stopped being true (nocx-7k8ma). The refusal was written when the
+// value named the Tier-B carrier of §3.4 — a binary that would own the
+// PTY and deliver integration itself — so refusing the script carrier for
+// it was coherent. That carrier is still designed-for-not-built (D15),
+// while the mode was put to work meaning "allow the remote binary", which
+// owns no PTY and delivers no markers. Between those two facts a user who
+// picked the most capable mode on the axis got the least capable
+// delivery: the binary, no blocks, and nothing in the product saying
+// why.
 //
 // If the Tier-B carrier ever does deliver integration itself, this stays
 // true — the mode still integrates, by another carrier — and which carrier
 // ran is the observed-delivery axis's question, not this one's.
 func (m DesiredMode) DeliversScripts() bool {
 	switch m {
-	case "", DesiredAuto, DesiredScript, DesiredRelay:
+	case "", DesiredAuto, DesiredScript, DesiredHelper:
 		return true
 	default:
 		return false
@@ -113,30 +114,30 @@ func (m DesiredMode) DeliversScripts() bool {
 // user choice never becomes a silent no-op.
 func validDesiredMode(v DesiredMode) bool {
 	switch v {
-	case DesiredAuto, DesiredRaw, DesiredScript, DesiredRelay:
+	case DesiredAuto, DesiredRaw, DesiredScript, DesiredHelper:
 		return true
 	default:
 		return false
 	}
 }
 
-// RelayConsent is the THIRD of the three delivery axes (spec §3.5): whether
-// the user has consented to nocx deploying the relay binary on this
+// HelperConsent is the THIRD of the three delivery axes (spec §3.5): whether
+// the user has consented to nocx deploying the helper binary on this
 // destination. Persisted per destination and NEVER inherited — a group
-// cannot express consent, and script mode never reads it. Relay mode without
+// cannot express consent, and script mode never reads it. Helper mode without
 // consent=granted behaves as raw.
-type RelayConsent string
+type HelperConsent string
 
 const (
-	ConsentUnknown RelayConsent = "unknown"
-	ConsentGranted RelayConsent = "granted"
-	ConsentDenied  RelayConsent = "denied"
+	ConsentUnknown HelperConsent = "unknown"
+	ConsentGranted HelperConsent = "granted"
+	ConsentDenied  HelperConsent = "denied"
 )
 
-// validRelayConsent reports whether v is a value this build recognises.
+// validHelperConsent reports whether v is a value this build recognises.
 // An unrecognised stored value falls back to unknown at resolution so it
 // never reaches the wire dressed as a real choice.
-func validRelayConsent(v RelayConsent) bool {
+func validHelperConsent(v HelperConsent) bool {
 	switch v {
 	case ConsentUnknown, ConsentGranted, ConsentDenied:
 		return true
@@ -271,7 +272,7 @@ type SSHProfileOptions struct {
 	JumpHost          string            `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
 	AgentForward      bool              `json:"agentForward,omitempty"`
 	DesiredMode       DesiredMode       `json:"desiredMode,omitempty"`
-	RelayConsent      RelayConsent      `json:"relayConsent,omitempty"`
+	HelperConsent     HelperConsent     `json:"helperConsent,omitempty"`
 	PortDiscovery     PortDiscoveryMode `json:"portDiscovery,omitempty"`
 	Forwards          []ForwardSpec     `json:"forwards,omitempty"`
 	CanBeJumpServer   bool              `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
@@ -306,7 +307,7 @@ type StoredSSHProfileOptions struct {
 	JumpHost             *string               `json:"jumpHost,omitempty"`
 	AgentForward         *bool                 `json:"agentForward,omitempty"`
 	DesiredMode          *DesiredMode          `json:"desiredMode,omitempty"`
-	RelayConsent         *RelayConsent         `json:"relayConsent,omitempty"`
+	HelperConsent        *HelperConsent        `json:"helperConsent,omitempty"`
 	PortDiscovery        *PortDiscoveryMode    `json:"portDiscovery,omitempty"`
 	Forwards             *[]ForwardSpec        `json:"forwards,omitempty"` // nil = unset; &[] = explicitly none (omitempty drops an empty slice)
 	CanBeJumpServer      *bool                 `json:"canBeJumpServer,omitempty"`
@@ -360,8 +361,8 @@ func (s StoredSSHProfileOptions) ToDense() SSHProfileOptions {
 	if s.DesiredMode != nil {
 		o.DesiredMode = *s.DesiredMode
 	}
-	if s.RelayConsent != nil {
-		o.RelayConsent = *s.RelayConsent
+	if s.HelperConsent != nil {
+		o.HelperConsent = *s.HelperConsent
 	}
 	if s.PortDiscovery != nil {
 		o.PortDiscovery = *s.PortDiscovery
@@ -431,9 +432,9 @@ func StoredOptionsFromDense(o SSHProfileOptions) StoredSSHProfileOptions {
 		v := o.DesiredMode
 		s.DesiredMode = &v
 	}
-	if o.RelayConsent != "" {
-		v := o.RelayConsent
-		s.RelayConsent = &v
+	if o.HelperConsent != "" {
+		v := o.HelperConsent
+		s.HelperConsent = &v
 	}
 	if o.PortDiscovery != "" {
 		v := o.PortDiscovery
@@ -476,7 +477,7 @@ func storedOptsToSparse(o StoredSSHProfileOptions) SparseSSHOptions {
 	s.ReadyTimeout = o.ReadyTimeout
 	s.AgentForward = o.AgentForward
 	s.DesiredMode = o.DesiredMode
-	// RelayConsent is deliberately NOT mapped into the sparse layer: consent
+	// HelperConsent is deliberately NOT mapped into the sparse layer: consent
 	// is per-destination (spec §3.5), never inherited — merging consents
 	// across cascade layers would invent an owner that does not exist. It
 	// rides profile storage exactly like Forwards.
@@ -643,7 +644,7 @@ func hardcodedDefaults() SparseSSHOptions {
 	beh := BehaviorAuto
 	// auto, not script: silence must be distinguishable from an answer
 	// (ADR-0033). Both install the scripts; only auto may be offered the
-	// relay.
+	// helper.
 	mode := DesiredAuto
 	pd := PortDiscoveryAuto
 	return SparseSSHOptions{
@@ -865,7 +866,7 @@ func ResolveEffectiveProfile(
 		source["desiredMode"] = FieldSourceDefault
 	}
 
-	// RelayConsent never enters the cascade, so the same unrecognised-value
+	// HelperConsent never enters the cascade, so the same unrecognised-value
 	// rule applies to the profile's own stored options: an unknown consent
 	// falls back to unknown rather than reaching the wire dressed as a real
 	// choice. Normalised on `result` (below) so the effective profile and
@@ -881,9 +882,9 @@ func ResolveEffectiveProfile(
 	}
 
 	result := profile
-	if result.Options.RelayConsent != nil && !validRelayConsent(*result.Options.RelayConsent) {
+	if result.Options.HelperConsent != nil && !validHelperConsent(*result.Options.HelperConsent) {
 		c := ConsentUnknown
-		result.Options.RelayConsent = &c
+		result.Options.HelperConsent = &c
 	}
 	resolvedOpts := sparseToOptions(acc)
 
@@ -1233,9 +1234,9 @@ type FieldSourceDTO struct {
 
 // EffectiveProfileDTO is the per-profile wire representation.
 type EffectiveProfileDTO struct {
-	ID           string                       `json:"id"`
-	Fields       map[string]EffectiveFieldDTO `json:"fields"`
-	RelayConsent RelayConsent                 `json:"relayConsent"`
+	ID            string                       `json:"id"`
+	Fields        map[string]EffectiveFieldDTO `json:"fields"`
+	HelperConsent HelperConsent                `json:"helperConsent"`
 }
 
 // EffectiveBatchResponse is the response to profiles.effective.
@@ -1279,10 +1280,10 @@ func ToEffectiveDTO(eff EffectiveProfile, groupByID map[string]ProfileGroup) Eff
 	addField("behaviorOnSessionEnd", string(eff.Profile.BehaviorOnSessionEnd), eff.Source["behaviorOnSessionEnd"])
 
 	consent := ConsentUnknown
-	if eff.Profile.Options.RelayConsent != nil {
-		consent = *eff.Profile.Options.RelayConsent
+	if eff.Profile.Options.HelperConsent != nil {
+		consent = *eff.Profile.Options.HelperConsent
 	}
-	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields, RelayConsent: consent}
+	return EffectiveProfileDTO{ID: eff.Profile.ID, Fields: fields, HelperConsent: consent}
 }
 
 // parseFieldSource converts an internal FieldSource string into the closed-enum
@@ -1334,7 +1335,7 @@ const (
 	patchJumpHost             patchPath = "options.jumpHost"
 	patchAgentForward         patchPath = "options.agentForward"
 	patchDesiredMode          patchPath = "options.desiredMode"
-	patchRelayConsent         patchPath = "options.relayConsent"
+	patchHelperConsent        patchPath = "options.helperConsent"
 	patchPortDiscovery        patchPath = "options.portDiscovery"
 	patchForwards             patchPath = "options.forwards"
 	patchCanBeJumpServer      patchPath = "options.canBeJumpServer"
@@ -1365,7 +1366,7 @@ func allowedPatchPaths() map[patchPath]bool {
 		patchJumpHost:             true,
 		patchAgentForward:         true,
 		patchDesiredMode:          true,
-		patchRelayConsent:         true,
+		patchHelperConsent:        true,
 		patchPortDiscovery:        true,
 		patchForwards:             true,
 		patchCanBeJumpServer:      true,
@@ -1417,10 +1418,10 @@ func ApplyPatchSet(opts *StoredSSHProfileOptions, path string, value any) bool {
 		v := toString(value)
 		mode := DesiredMode(v)
 		opts.DesiredMode = &mode
-	case patchRelayConsent:
+	case patchHelperConsent:
 		v := toString(value)
-		c := RelayConsent(v)
-		opts.RelayConsent = &c
+		c := HelperConsent(v)
+		opts.HelperConsent = &c
 	case patchPortDiscovery:
 		v := toString(value)
 		pd := PortDiscoveryMode(v)
@@ -1473,8 +1474,8 @@ func ApplyPatchUnset(opts *StoredSSHProfileOptions, path string) bool {
 		opts.AgentForward = nil
 	case patchDesiredMode:
 		opts.DesiredMode = nil
-	case patchRelayConsent:
-		opts.RelayConsent = nil
+	case patchHelperConsent:
+		opts.HelperConsent = nil
 	case patchPortDiscovery:
 		opts.PortDiscovery = nil
 	case patchForwards:

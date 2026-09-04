@@ -470,12 +470,12 @@ type ConnectConfig struct {
 	// prompt. Nil means no channel.
 	RemoteLifecycle RemoteLifecycle
 
-	// DesiredMode is the resolved destination mode (auto|raw|script|relay,
+	// DesiredMode is the resolved destination mode (auto|raw|script|helper,
 	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate,
 	// read through profile.DesiredMode.DeliversScripts: auto (the default —
 	// ADR-0033), script, and empty (the direct-host default) publish the
 	// bundle and integrate; raw publishes nothing and opens a plain shell;
-	// relay does not integrate either, which is nocx-7k8ma. The transport
+	// helper does not integrate either, which is nocx-7k8ma. The transport
 	// also carries it verbatim to the open ack so the renderer sees the
 	// AXIS value — every mode must stay distinguishable from every other
 	// even where two of them gate integration the same way.
@@ -700,9 +700,9 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// WithDesiredMode sets the resolved destination mode (raw|script|relay,
+// WithDesiredMode sets the resolved destination mode (raw|script|helper,
 // nocx-mlm7), the open-time gate shellStartCommand consults: script (or
-// empty — the pre-mode default) publishes and integrates; raw and relay
+// empty — the pre-mode default) publishes and integrates; raw and helper
 // open a plain shell and publish nothing.
 func WithDesiredMode(mode string) ConnectOption {
 	return func(c *ConnectConfig) { c.DesiredMode = mode }

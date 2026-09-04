@@ -1898,7 +1898,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	for name, mode := range map[string]string{
 		"script": "script",
 		"raw":    "raw",
-		"relay":  "relay",
+		"helper": "helper",
 	} {
 		raw, err := json.Marshal(openResult{
 			SessionID:     "0123456789abcdef0123456789abcdef",

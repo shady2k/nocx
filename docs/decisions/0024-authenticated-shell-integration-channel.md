@@ -21,6 +21,10 @@
 - **Related:** `nocx-u7uh` (the epic that implements it), `nocx-mu8s` (the defect that
   found it), `AD-8`.
 
+> **Naming, 2026-08-31:** `relay` below is the historical name of the third
+> delivery mode and of the deployed remote binary; both are now called the
+> **helper**. The argument is left exactly as it was written (`nocx-0xq2s`).
+
 ## Context
 
 `nocx` reads the prompt/command lifecycle out of the byte stream as OSC 133

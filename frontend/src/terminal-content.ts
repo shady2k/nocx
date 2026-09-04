@@ -1013,13 +1013,13 @@ export class TerminalContent extends BasePaneContent {
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
   /** The resolved destination mode from the open ack
-   *  (auto|raw|script|relay): the connection-scope default the capability
+   *  (auto|raw|script|helper): the connection-scope default the capability
    *  control starts from. auto is the initial value because it is what an
    *  unanswered destination resolves to everywhere else (ADR-0033) — the
    *  ack is authoritative and arrives shortly, and a placeholder that
    *  disagreed with the cascade's default is the two-defaults defect that
    *  ADR closed on the backend. raw refuses every rewrite and remote
-   *  write; relay allows the Tier-B binary. */
+   *  write; helper allows the Tier-B binary. */
   private _policy: DesiredMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,

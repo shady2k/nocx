@@ -173,7 +173,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	// prompt (ADR-0024 decision 9).
 	//
 	// The desired mode is part of the gate for the same reason it gates
-	// shellStartCommand (nocx-tr2n): raw and relay integrate nothing, so
+	// shellStartCommand (nocx-tr2n): raw and helper integrate nothing, so
 	// their start command is a plain shell that will never dial the
 	// forwarded port. Establishing anyway allocated a remote listener and
 	// a domain that openShell closed unused on the next statement — free
@@ -728,8 +728,8 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     as-is and no launcher or installer is consulted (spec §4.2).
 //  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
 //     nothing and opens a plain shell; auto (the default), script and
-//     relay — or empty, the direct-host default — publish and integrate.
-//     The tiers are additive: relay allows the deployed binary and never
+//     helper — or empty, the direct-host default — publish and integrate.
+//     The tiers are additive: helper allows the deployed binary and never
 //     withholds the scripts (§5.2, nocx-7k8ma).
 //  3. In script mode the bundle is published over SFTP through the
 //     RemoteInstaller, CONCURRENTLY with the loader (design §6.1 step 2,
@@ -764,7 +764,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		return resolved.remoteCommand, ReasonRemoteCommand, nil
 	}
 
-	// raw publishes nothing and integrates nothing (N1, §3.1). relay is
+	// raw publishes nothing and integrates nothing (N1, §3.1). helper is
 	// NOT inert: the tiers are additive, so allowing the deployed binary
 	// never withholds the scripts (§5.2, nocx-7k8ma). Unknown modes fail
 	// closed.

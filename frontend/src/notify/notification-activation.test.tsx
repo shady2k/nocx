@@ -192,7 +192,7 @@ describe('a notification row and the tab it came from', () => {
 
   it('a backend id that is not this machine never resolves', async () => {
     const { manager, opened } = await twoTabsFirstLost()
-    expect(manager.findBySession('relay-7', opened[0].sessionId)).toBeUndefined()
+    expect(manager.findBySession('helper-7', opened[0].sessionId)).toBeUndefined()
     expect(manager.findBySession('local', '')).toBeUndefined()
   })
 })

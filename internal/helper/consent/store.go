@@ -1,4 +1,4 @@
-// Package consent is the per-machine relay-tier consent for the remote
+// Package consent is the per-machine helper-tier consent for the remote
 // helper (remote-helper design D8; the 2026-08-10 footprint-consent design
 // §3.2, §3.3, §5.3).
 //
@@ -22,7 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-// Answer is the stored relay-tier answer for one machine.
+// Answer is the stored helper-tier answer for one machine.
 type Answer string
 
 const (
@@ -46,7 +46,7 @@ type answerDocument struct {
 
 const answerDocumentVersion = 1
 
-// Store persists per-machine relay-tier answers as one atomic JSON document
+// Store persists per-machine helper-tier answers as one atomic JSON document
 // (the InstalledFactStore shape): load-once, fail-closed, temp-file+fsync
 // writes. A missing, corrupt, unreadable or future-versioned document reads
 // as "no answers" — a torn file never grants anything, and an unwritable
@@ -94,7 +94,7 @@ func (s *Store) Lookup(fingerprint string) (Answer, bool) {
 var ErrEmptyFingerprint = errors.New("helper consent: refusing a grant under an empty host fingerprint")
 
 // Grant records that the machine identified by the remote host's public-key
-// fingerprint has been raised to the relay tier (D8): the user accepted the
+// fingerprint has been raised to the helper tier (D8): the user accepted the
 // helper for this host from the git panel's consent prompt. Consent is per
 // machine — keyed by the host key, never the session, the tab or the
 // account (consent design §3.2) — and the answer persists for the next

@@ -5,6 +5,11 @@
 this revises. Owner decisions taken 2026-08-05; §1 carries the reasoning, §10 the work
 packages this decomposes into.
 
+**Amended 2026-08-31 (`nocx-0xq2s`):** the third mode named `relay` in N1 and §3.4 is
+called **`helper`** throughout — the wire enum, the profile field, the connection form and
+the code. The mode is unchanged; only its name is. Where this document quotes code as it
+stood in August 2026 the old spelling is left in the quotation.
+
 ## 0. What a user can do that they could not before
 
 Type `ssh pi@192.168.0.93` by hand and get command blocks on the far host from its first
@@ -44,14 +49,14 @@ owner has taken the opposite trade for the script tier, and that is decision N3.
 
 ## 2. Decisions
 
-| #      | Decision                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **N1** | **Three destination modes, and they are not the old policy enum.** `raw` (nothing added), `script` (the shell tiers we ship — no compiled artifact), `relay` (Tier B, a deployed binary). This **replaces** `ShellIntegrationPolicy = auto \| ask \| off` outright. nocx is greenfield: there is no migration, no compatibility value and no import of an old setting. Three axes, never collapsed (§3.5). |
-| **N2** | **The rewritten line is visible, and that is the product.** No `stty -echo`, no renderer-side echo suppression, no `ssh` shell function. ADR-0004 §1 (fail-open) and its rejection of echo suppression stand. The claim is "we do not hide the mechanism", not "every executed byte is on screen": the launcher payload itself is behind `$(cat …)` and later behind `~/.nocx/launch`.                     |
-| **N3** | **Script mode wraps and installs automatically, without asking.** Consent is required only to deploy the relay binary. This overrides ADR-0004 §2's 2026-08-04 extension for script delivery, replaces D1 and D2 of the 2026-08-03 design, and amends AD-5 (§8).                                                                                                                                           |
-| **N4** | **No remote rc file is ever created or modified, on any supported path.** Script mode publishes a versioned bundle under `~/.nocx/` and activates it from the ssh command line. The rc-gate half of `internal/shellintegration/install_remote.go` is retired, not fixed.                                                                                                                                   |
-| **N5** | **An environment transition is proven by an identified readiness passport, never by an unnamed marker.** Entry counts only on `passport → clean tagged A → B` carrying the environment id nocx minted for that attempt.                                                                                                                                                                                    |
-| **N6** | **One running block in the UI; two lifecycle records in the model.** The `ssh` block freezes on entry with no exit code, while a **dormant environment-transition record** keeps the ledger entry open until the local D delivers the real status. `entered` is a lifecycle state, never a `CommandStatus` (§5.3).                                                                                         |
+| #      | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **N1** | **Three destination modes, and they are not the old policy enum.** `raw` (nothing added), `script` (the shell tiers we ship — no compiled artifact), `helper` (Tier B, a deployed binary; named `relay` until 2026-08-31). This **replaces** `ShellIntegrationPolicy = auto \| ask \| off` outright. nocx is greenfield: there is no migration, no compatibility value and no import of an old setting. Three axes, never collapsed (§3.5). |
+| **N2** | **The rewritten line is visible, and that is the product.** No `stty -echo`, no renderer-side echo suppression, no `ssh` shell function. ADR-0004 §1 (fail-open) and its rejection of echo suppression stand. The claim is "we do not hide the mechanism", not "every executed byte is on screen": the launcher payload itself is behind `$(cat …)` and later behind `~/.nocx/launch`.                                                      |
+| **N3** | **Script mode wraps and installs automatically, without asking.** Consent is required only to deploy the helper binary. This overrides ADR-0004 §2's 2026-08-04 extension for script delivery, replaces D1 and D2 of the 2026-08-03 design, and amends AD-5 (§8).                                                                                                                                                                           |
+| **N4** | **No remote rc file is ever created or modified, on any supported path.** Script mode publishes a versioned bundle under `~/.nocx/` and activates it from the ssh command line. The rc-gate half of `internal/shellintegration/install_remote.go` is retired, not fixed.                                                                                                                                                                    |
+| **N5** | **An environment transition is proven by an identified readiness passport, never by an unnamed marker.** Entry counts only on `passport → clean tagged A → B` carrying the environment id nocx minted for that attempt.                                                                                                                                                                                                                     |
+| **N6** | **One running block in the UI; two lifecycle records in the model.** The `ssh` block freezes on entry with no exit code, while a **dormant environment-transition record** keeps the ledger entry open until the local D delivers the real status. `entered` is a lifecycle state, never a `CommandStatus` (§5.3).                                                                                                                          |
 
 ## 3. Delivery
 
@@ -137,7 +142,7 @@ if [ -s '<path>' ]; then ssh -t <flags> <dest> "$(cat '<path>'; rm -f '<path>')"
 > `ssh pi@host`" below is unaffected and still binding:** the rc gate,
 > `SendEnv`/`SetEnv`, and `Match exec` + `RemoteCommand` are rejected for the
 > reasons given, and a byte-for-byte clean line still requires either
-> unconditional integration of the whole remote account or the relay. An `ssh` that fails with
+> unconditional integration of the whole remote account or the helper. An `ssh` that fails with
 > `127` is still a bug in this design and never a user-visible outcome — the
 > fallback is written as `if`, never as `exec A || exec B`, which the multiplex
 > spike measured dead-exiting with exactly that status.
@@ -167,9 +172,9 @@ server's `AcceptEnv` and are already rejected as a carrier. `Match exec` + `Remo
 in the local ssh config cannot tell `ssh host` from `ssh host somecommand`, and OpenSSH then
 refuses with _"Cannot execute command-line and remote command"_. A byte-for-byte clean line
 therefore requires either unconditional integration of the whole remote account or the
-relay. It is bought in §3.4, not here.
+helper. It is bought in §3.4, not here.
 
-### 3.4 relay
+### 3.4 helper
 
 A deployed binary, Warp's shape. Explicit consent per host. Out of scope, owned by
 `nocx-if6` phase B; named here only so the seam it lands in is decided now rather than
@@ -177,11 +182,11 @@ forked into later.
 
 ### 3.5 Three axes, never one enum
 
-| axis                  | values                                                        | owner                                                                  |
-| --------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **desired mode**      | `raw` \| `script` \| `relay`                                  | the profile / group / global default, resolved by the existing cascade |
-| **observed delivery** | `none` \| `bootstrap-script` \| `installed-script` \| `relay` | the renderer, from what actually happened this session                 |
-| **relay consent**     | `unknown` \| `granted` \| `denied`                            | persisted per destination; script mode never consults it               |
+| axis                  | values                                                         | owner                                                                  |
+| --------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **desired mode**      | `raw` \| `script` \| `helper`                                  | the profile / group / global default, resolved by the existing cascade |
+| **observed delivery** | `none` \| `bootstrap-script` \| `installed-script` \| `helper` | the renderer, from what actually happened this session                 |
+| **helper consent**    | `unknown` \| `granted` \| `denied`                             | persisted per destination; script mode never consults it               |
 
 `frontend/src/capability.ts` currently declares `Delivery = 'launcher' | 'in-band' | 'relay'`
 — a carrier, which is a fourth thing again. It is replaced by the observed-delivery axis
@@ -350,7 +355,7 @@ than opening the remote block. Warp puts it in its own block because its server 
 remote session; the only way to draw that boundary here is OpenSSH's `LocalCommand`, which
 needs either the user's `~/.ssh/config` or a flag on a line that will not exist once the
 host is installed. The banner is genuinely output of the `ssh` command, so this is honest
-rather than merely cheaper. Revisit when the relay lands.
+rather than merely cheaper. Revisit when the helper lands.
 
 Two presentation defects fixed with this: the `ssh` block currently carries the **remote**
 host chip, because `submit()` applies the environment entry before `ledger.open` and
@@ -366,7 +371,7 @@ block needs its own visual state, not a null code.
 | banner printed before `password:`            | banner, host-key prompt and 2FA all belong to the local `ssh` block                                                                                                                                           |
 | POSIX tier's orphan `D;0` before its first A | untagged, and in any case not the expected passport: closes nothing, pops nothing                                                                                                                             |
 | `ssh -t host tmux attach`                    | classified as a remote command, so never rewritten; markers from an integrated tmux carry no expected id and create no transition                                                                             |
-| nested `ssh` host2 → host3                   | **`environmentDepth > 0 ⇒ raw`** in this epic. No rewrite is built inside a remote environment, so a local staged path can never be read by a remote shell. Depth > 1 is the relay's problem                  |
+| nested `ssh` host2 → host3                   | **`environmentDepth > 0 ⇒ raw`** in this epic. No rewrite is built inside a remote environment, so a local staged path can never be read by a remote shell. Depth > 1 is the helper's problem                 |
 | `sudo -i` on the remote                      | a raw child shell; no passport, no transition. Automatic detection is `nocx-eepi`, not this epic                                                                                                              |
 | connection lost / timeout                    | the running remote command becomes `interrupted`/`unknown` with reason `transition-lost` — AD-6 means we cannot know it was the network; the `ssh` transition record takes the local D's code (typically 255) |
 | `Ctrl-D` with no running remote block        | the local D still restores the parent environment and the editor                                                                                                                                              |
@@ -435,7 +440,7 @@ Deliberately, in the texts themselves — not as exceptions in a brief:
 - **ADR-0004 §2**'s 2026-08-04 extension requires consent once per destination and permits
   automatic integration only as an informed opt-in, "never as the default". N3 supersedes
   that **for script delivery**: Enter authorises execution, the script footprint is
-  automatic product behaviour, and the relay stays consent-gated. §7 of ADR-0004 (fail-open,
+  automatic product behaviour, and the helper stays consent-gated. §7 of ADR-0004 (fail-open,
   no echo suppression, no termios inference) is untouched — that is what N2 buys.
 - **ADR-0006** describes remote enhanced mode as explicitly negotiated and deferred, and
   requires a static opt-in for marker-only prompts. Ownership now requires the passport plus
@@ -475,7 +480,7 @@ than by a separate worker:
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **P1**  | new files in `internal/shellintegration/` (publisher, manifest, fs seam) + tests                                                                                   | —              | the §7 installation assertions hold against an injectable filesystem                                                                                                                            |
 | **P2**  | `scripts/nocx.{bash,zsh,posix}`, `scripts.go`, `scripts_version_test.go`, `renderers/xterm.ts`, new protocol module + tests                                        | —              | passport and tagged markers parse per §5.2; untagged/malformed/stale change nothing; the three real shells emit them                                                                            |
-| **P3**  | `internal/profile/profile.go` + resolver, `frontend/src/capability.ts`, `connections.tsx`, `contracts/open`, `contracts/profiles.effective` + generated TS + tests | —              | the three axes of §3.5 exist, default is `script`, `raw` refuses everything, relay needs consent. No migration (greenfield)                                                                     |
+| **P3**  | `internal/profile/profile.go` + resolver, `frontend/src/capability.ts`, `connections.tsx`, `contracts/open`, `contracts/profiles.effective` + generated TS + tests | —              | the three axes of §3.5 exist, default is `script`, `raw` refuses everything, helper needs consent. No migration (greenfield)                                                                    |
 | **P4**  | `frontend/src/ssh-transition.ts` + tests                                                                                                                           | —              | a typed plan preserves every accepted option; operators, remote commands and unknown grammar refuse; the wrapper consumes the staged file exactly once (`nocx-x99j`, `nocx-2wtc` renderer half) |
 | **P5**  | `frontend/src/command-ledger.ts`, `scrollback/blocks.ts` + tests                                                                                                   | —              | one running block in the UI, one dormant transition record, `entered` painted as neither success nor failure, exactly one completion at the local D                                             |
 | **P6**  | `launcher*.go` + tests                                                                                                                                             | P1, P2         | full launcher publishes then emits the passport; the compact carrier fails open to a native shell with no passport; read-only `$HOME` leaves no installed fact                                  |
@@ -492,7 +497,7 @@ P7 and P9 are sequential — both converge on the submit path and the RPC result
 
 ## 11. Out of scope
 
-The relay binary (`nocx-if6` phase B) beyond naming its seam; Warp's separate MOTD block;
+The helper binary (`nocx-if6` phase B) beyond naming its seam; Warp's separate MOTD block;
 an `ssh` shell function; renderer-side echo suppression; automatic detection of `sudo -i` or
 a container (`nocx-eepi`); nested bootstrap at depth > 0; and any change to how the local
 shell is _delivered_ at spawn — its wire protocol does change (§5.2), its delivery does not.

@@ -2821,7 +2821,7 @@ describe('portDiscovery', () => {
   })
 })
 
-// ── desiredMode + relayConsent (spec §3.5, nocx-mlm7) ────────────────────
+// ── desiredMode + helperConsent (spec §3.5, nocx-mlm7) ───────────────────
 
 describe('desiredMode', () => {
   it('saves an explicit mode choice on the profile through the patch route', async () => {
@@ -2833,7 +2833,7 @@ describe('desiredMode', () => {
     const label = container.querySelector('label[for="desired-mode"]')
     expect(label, 'Delivery mode field not found').toBeTruthy()
     const select = label!.closest('.ui-field')?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(select, { target: { value: 'relay' } })
+    fireEvent.change(select, { target: { value: 'helper' } })
 
     const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
@@ -2843,7 +2843,7 @@ describe('desiredMode', () => {
       expect(patchSpy).toHaveBeenCalled()
     })
     const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
-    expect(params.set?.['options.desiredMode']).toBe('relay')
+    expect(params.set?.['options.desiredMode']).toBe('helper')
   })
 
   it('the group defaults editor offers desiredMode as an inheritable default', async () => {
@@ -2868,7 +2868,7 @@ describe('desiredMode', () => {
     expect(sent[0].defaults?.['desiredMode']).toBe('raw')
   })
 
-  it('a relay selection makes the consent state visible, and a grant saves per profile', async () => {
+  it('a helper selection makes the consent state visible, and a grant saves per profile', async () => {
     const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
@@ -2878,12 +2878,12 @@ describe('desiredMode', () => {
     const modeSelect = modeLabel!
       .closest('.ui-field')
       ?.querySelector('.ui-select') as HTMLSelectElement
-    fireEvent.change(modeSelect, { target: { value: 'relay' } })
+    fireEvent.change(modeSelect, { target: { value: 'helper' } })
 
-    // The consent control appears only for a relay selection — never
-    // silently pretending the relay is granted.
-    const consentLabel = container.querySelector('label[for="relay-consent"]')
-    expect(consentLabel, 'Relay consent field must appear for a relay selection').toBeTruthy()
+    // The consent control appears only for a helper selection — never
+    // silently pretending the helper is granted.
+    const consentLabel = container.querySelector('label[for="helper-consent"]')
+    expect(consentLabel, 'Helper consent field must appear for a helper selection').toBeTruthy()
     const consentSelect = consentLabel!
       .closest('.ui-field')
       ?.querySelector('.ui-select') as HTMLSelectElement
@@ -2898,8 +2898,8 @@ describe('desiredMode', () => {
       expect(patchSpy).toHaveBeenCalled()
     })
     const params = patchSpy.mock.calls[0][0] as { set?: Record<string, unknown> }
-    expect(params.set?.['options.desiredMode']).toBe('relay')
-    expect(params.set?.['options.relayConsent']).toBe('granted')
+    expect(params.set?.['options.desiredMode']).toBe('helper')
+    expect(params.set?.['options.helperConsent']).toBe('granted')
   })
 })
 

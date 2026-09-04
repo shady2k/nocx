@@ -681,7 +681,7 @@ func TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory(t *testing.T) {
 }
 
 // TestGitOpen_ConsentRequiredIsAResultState is D8 on the wire: an SSH
-// session whose machine has no relay-tier answer gets the consentRequired
+// session whose machine has no helper-tier answer gets the consentRequired
 // RESULT state — the panel's offer — and nothing is opened and nothing is
 // written.
 func TestGitOpen_ConsentRequiredIsAResultState(t *testing.T) {
@@ -696,7 +696,7 @@ func TestGitOpen_ConsentRequiredIsAResultState(t *testing.T) {
 	ws := NewWSServer(logger, reg,
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
-		// The machine has no relay-tier answer: the selection answers
+		// The machine has no helper-tier answer: the selection answers
 		// consentRequired, never a factory.
 		WithGitHelperFactory(func(session.Session) GitOpenSelection {
 			return GitOpenSelection{ConsentRequired: true}

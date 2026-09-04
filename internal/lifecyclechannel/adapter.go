@@ -10,7 +10,7 @@
 // region to Kernel.NotifyGap, and reports loss to Kernel.TransportLost. It
 // has no CurrentDomain accessor and assumes nothing about how many domains a
 // transport carries — the kernel's registry is the authority (the future
-// relay is a third adapter, not a protocol rewrite). The shell owns the
+// helper is a third adapter, not a protocol rewrite). The shell owns the
 // event stream; the adapter never synthesizes an event.
 //
 // The descriptor is deliberately not private: bash's {var} redirection is

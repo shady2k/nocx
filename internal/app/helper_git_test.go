@@ -1052,7 +1052,7 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 }
 
 // TestHelperSelectionConsentRequiredWritesNothing is D8's zero-write
-// invariant at the selection: a machine with no relay-tier answer gets the
+// invariant at the selection: a machine with no helper-tier answer gets the
 // ask — and not a byte is written to the host. No install lease is
 // acquired, no platform probe is even needed to decide that.
 func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
@@ -1150,7 +1150,7 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	if selection.Refusal == nil {
 		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")
 	}
-	if !strings.Contains(selection.Refusal.Message, "Relay") {
+	if !strings.Contains(selection.Refusal.Message, "Helper") {
 		t.Errorf("refusal = %q, want it to name a mode that DOES offer the helper — "+
 			"a refusal the user cannot act on is the dead end this bead exists to remove",
 			selection.Refusal.Message)

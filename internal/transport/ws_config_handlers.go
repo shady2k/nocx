@@ -91,7 +91,7 @@ const (
 	// whether a handle resolves; this is the wire bound before resolution.
 	maxSecretRowRunes = 128
 	// maxEnumRunes bounds the closed-set option fields (auth, desiredMode,
-	// relayConsent, portDiscovery, behaviorOnSessionEnd) and the profile
+	// helperConsent, portDiscovery, behaviorOnSessionEnd) and the profile
 	// type. Their value sets are short literals. An unrecognised value is
 	// deliberately NOT refused here — resolution falls back to the default
 	// for a stored value (nocx-mlm7) — so this is a wire bound, not a
@@ -275,7 +275,7 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 	if msg := boundedOptionalRunes("options.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
 		return msg
 	}
-	if msg := boundedOptionalRunes("options.relayConsent", o.RelayConsent, maxEnumRunes); msg != "" {
+	if msg := boundedOptionalRunes("options.helperConsent", o.HelperConsent, maxEnumRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedOptionalRunes("options.portDiscovery", o.PortDiscovery, maxEnumRunes); msg != "" {
@@ -442,7 +442,7 @@ func validatePatchRaw(raw json.RawMessage) string {
 					return msg
 				}
 			}
-		case "options.auth", "options.desiredMode", "options.relayConsent",
+		case "options.auth", "options.desiredMode", "options.helperConsent",
 			"options.portDiscovery", "options.behaviorOnSessionEnd":
 			if s, ok := v.(string); ok {
 				if msg := boundedRunes(path, s, maxEnumRunes); msg != "" {

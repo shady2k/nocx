@@ -63,15 +63,15 @@ export interface SSHProfileOptions {
   jumpPassword?: string // Jump server password
   jumpAuthMode?: AuthMode // Jump server auth mode
   agentForward?: boolean
-  /** Desired destination mode (raw|script|relay, nocx-mlm7): the
+  /** Desired destination mode (raw|script|helper, nocx-mlm7): the
    *  connection-scope default the tab's capability control starts from.
    *  script (the default — N3) wraps and installs automatically; raw adds
-   *  nothing; relay is consent-gated. */
-  desiredMode?: 'raw' | 'script' | 'relay'
-  /** Relay consent for this destination (unknown|granted|denied, spec
+   *  nothing; helper is consent-gated. */
+  desiredMode?: 'raw' | 'script' | 'helper'
+  /** Helper consent for this destination (unknown|granted|denied, spec
    *  §3.5). Persisted per destination, never inherited; script mode never
-   *  reads it. Relay without granted behaves as raw. */
-  relayConsent?: 'unknown' | 'granted' | 'denied'
+   *  reads it. Helper without granted behaves as raw. */
+  helperConsent?: 'unknown' | 'granted' | 'denied'
   canBeJumpServer?: boolean // Whether this profile can be used as a jump server
   portDiscovery?: 'auto' | 'ask' | 'off'
   /** Stored forwards, opened when the connection comes up (spec §8, D5). */

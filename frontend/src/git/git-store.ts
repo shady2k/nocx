@@ -188,7 +188,7 @@ export interface GitStore {
    *  binding is gone (also the Retry for a failed open). */
   refresh(): void
   /** The consent prompt's Accept (remote-helper design D8): raise the
-   *  session's machine to the relay tier and re-open — the fresh git.open
+   *  session's machine to the helper tier and re-open — the fresh git.open
    *  proceeds past consentRequired. */
   grantConsent(): void
   /** True while a mutation is in flight — the controls that would issue
@@ -846,7 +846,7 @@ export function createGitStore(
   }
 
   /** The consent prompt's Accept (remote-helper design D8): raise the
-   *  session's machine to the relay tier, then re-open — the fresh
+   *  session's machine to the helper tier, then re-open — the fresh
    *  git.open consults the selection again and now proceeds past
    *  consentRequired. A failed accept is shown inline, never swallowed. */
   function grantConsent(): void {

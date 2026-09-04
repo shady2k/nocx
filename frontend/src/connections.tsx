@@ -72,7 +72,7 @@ import { log } from './log'
 import { showToast } from './ui/toast'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 import type { InventoryEntry, VaultClient } from './vault-client'
-import type { DesiredMode, RelayConsent } from './capability'
+import type { DesiredMode, HelperConsent } from './capability'
 
 // ── Provenance helpers ───────────────────────────────────────────────────────
 
@@ -208,19 +208,19 @@ const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
  *  honest labels: auto is the default and means "not answered" — the scripts
  *  install automatically (N3) and the helper is OFFERED when something needs
  *  it (D8, ADR-0033); script is that answer given explicitly, so the helper
- *  is never offered; raw adds nothing; relay allows the Tier-B binary
+ *  is never offered; raw adds nothing; helper allows the Tier-B binary
  *  outright. auto leads because it is what an unedited connection already
  *  is — the list starts where the user starts. */
 const DESIRED_MODES: { value: DesiredMode; label: string }[] = [
   { value: 'auto', label: 'Auto — install scripts, ask before the helper' },
   { value: 'script', label: 'Script — scripts only, never the helper' },
   { value: 'raw', label: 'Raw — no integration' },
-  { value: 'relay', label: 'Relay — allow the helper' },
+  { value: 'helper', label: 'Helper — deploy the nocx binary' },
 ]
 
-/** The closed relay-consent states (spec §3.5), in display order. Consent
+/** The closed helper-consent states (spec §3.5), in display order. Consent
  *  is per destination and never inherited; script mode never reads it. */
-const RELAY_CONSENTS: { value: RelayConsent; label: string }[] = [
+const HELPER_CONSENTS: { value: HelperConsent; label: string }[] = [
   { value: 'unknown', label: 'Unknown — not asked' },
   { value: 'granted', label: 'Granted' },
   { value: 'denied', label: 'Denied' },
@@ -2633,19 +2633,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       />
                     </div>
                   </Field>
-                  <Show when={fvStr('desiredMode') === 'relay'}>
-                    <Field for="relay-consent" label="Relay consent">
+                  <Show when={fvStr('desiredMode') === 'helper'}>
+                    <Field for="helper-consent" label="Helper consent">
                       <div class="cm-field-row">
                         <Select
-                          value={fvStr('relayConsent') || 'unknown'}
-                          onChange={(v) => setOption('relayConsent', v || undefined)}
-                          options={RELAY_CONSENTS.map((m) => ({ value: m.value, label: m.label }))}
+                          value={fvStr('helperConsent') || 'unknown'}
+                          onChange={(v) => setOption('helperConsent', v || undefined)}
+                          options={HELPER_CONSENTS.map((m) => ({ value: m.value, label: m.label }))}
                           placeholder="&mdash; Unknown &mdash;"
                         />
                       </div>
                       <p class="cm-hint">
-                        The relay deploys a binary on the destination; that needs explicit consent
-                        per host, and a relay selection without granted consent behaves as raw.
+                        The helper is a binary nocx deploys on the destination; that needs explicit
+                        consent per host, and a Helper selection without granted consent behaves as
+                        raw.
                       </p>
                     </Field>
                   </Show>

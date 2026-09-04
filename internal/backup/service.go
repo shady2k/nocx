@@ -650,7 +650,7 @@ func profileToBackup(p profile.SSHProfile) BackupProfile {
 		JumpHost:          strVal(p.Options.JumpHost),
 		AgentForward:      boolVal(p.Options.AgentForward),
 		DesiredMode:       desiredVal(p.Options.DesiredMode),
-		RelayConsent:      consentVal(p.Options.RelayConsent),
+		HelperConsent:     consentVal(p.Options.HelperConsent),
 		PortDiscovery:     discoveryVal(p.Options.PortDiscovery),
 		CanBeJumpServer:   boolVal(p.Options.CanBeJumpServer),
 	}
@@ -725,7 +725,7 @@ func desiredVal(p *profile.DesiredMode) profile.DesiredMode {
 	return *p
 }
 
-func consentVal(p *profile.RelayConsent) profile.RelayConsent {
+func consentVal(p *profile.HelperConsent) profile.HelperConsent {
 	if p == nil {
 		return ""
 	}
@@ -774,7 +774,7 @@ func optDesired(v profile.DesiredMode) *profile.DesiredMode {
 	return &v
 }
 
-func optConsent(v profile.RelayConsent) *profile.RelayConsent {
+func optConsent(v profile.HelperConsent) *profile.HelperConsent {
 	if v == "" {
 		return nil
 	}
@@ -1505,7 +1505,7 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			JumpHost:             optStr(bp.Options.JumpHost),
 			AgentForward:         optBool(bp.Options.AgentForward),
 			DesiredMode:          optDesired(bp.Options.DesiredMode),
-			RelayConsent:         optConsent(bp.Options.RelayConsent),
+			HelperConsent:        optConsent(bp.Options.HelperConsent),
 			PortDiscovery:        optDiscovery(bp.Options.PortDiscovery),
 			Forwards:             optForwards(bp.Options.Forwards),
 			CanBeJumpServer:      optBool(bp.Options.CanBeJumpServer),
@@ -1564,7 +1564,7 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.Options.ReadyTimeout = optInt(bp.Options.ReadyTimeout)
 	mp.Options.JumpHost = optStr(bp.Options.JumpHost)
 	mp.Options.DesiredMode = optDesired(bp.Options.DesiredMode)
-	mp.Options.RelayConsent = optConsent(bp.Options.RelayConsent)
+	mp.Options.HelperConsent = optConsent(bp.Options.HelperConsent)
 	mp.Options.PortDiscovery = optDiscovery(bp.Options.PortDiscovery)
 	mp.Options.Forwards = optForwards(bp.Options.Forwards)
 	mp.Options.AgentForward = optBool(bp.Options.AgentForward)
@@ -1649,7 +1649,7 @@ func profileEqual(bp BackupProfile, cp profile.SSHProfile) bool {
 		bp.Options.JumpHost != strVal(cp.Options.JumpHost) ||
 		bp.Options.AgentForward != boolVal(cp.Options.AgentForward) ||
 		bp.Options.DesiredMode != desiredVal(cp.Options.DesiredMode) ||
-		bp.Options.RelayConsent != consentVal(cp.Options.RelayConsent) ||
+		bp.Options.HelperConsent != consentVal(cp.Options.HelperConsent) ||
 		bp.Options.PortDiscovery != discoveryVal(cp.Options.PortDiscovery) ||
 		bp.Options.CanBeJumpServer != boolVal(cp.Options.CanBeJumpServer) ||
 		!forwardValuesEqual(bp.Options.Forwards, cp.Options.Forwards) {

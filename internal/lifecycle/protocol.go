@@ -5,7 +5,7 @@ import "time"
 // Identifiers are opaque strings. Nothing in this package ever obtains them
 // from a singleton: lane, domain, epoch and transport travel in every envelope
 // and are passed to every call, which is the property that keeps the future
-// relay a third adapter instead of a protocol rewrite (ADR-0024 decision 2).
+// helper a third adapter instead of a protocol rewrite (ADR-0024 decision 2).
 type (
 	LaneID      string
 	DomainID    string

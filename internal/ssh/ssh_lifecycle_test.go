@@ -137,7 +137,7 @@ func TestConnect_LifecycleRefusalStaysConventional(t *testing.T) {
 // closes unused. Every session asks for integration now, so this is a raw
 // tab's cost per open, not a path nothing takes.
 //
-// relay used to be in this table and moved to the positive one (nocx-7k8ma):
+// helper used to be in this table and moved to the positive one (nocx-7k8ma):
 // it integrates, so it needs the channel. raw is now the only mode here,
 // which is the point — it is the only answer that means "nothing".
 func TestConnect_LifecycleRawMode_NeverEstablished(t *testing.T) {
@@ -174,12 +174,12 @@ func TestConnect_LifecycleRawMode_NeverEstablished(t *testing.T) {
 
 // TestConnect_LifecycleScriptMode_Established is the paired positive: the
 // mode gate must not swallow the integrating destinations it was added
-// beside. auto (the default), script, relay and the empty direct-host
+// beside. auto (the default), script, helper and the empty direct-host
 // default all establish — every mode but raw, because the tiers are
-// additive and relay allows the binary without withholding the scripts
+// additive and helper allows the binary without withholding the scripts
 // (§5.2, nocx-7k8ma).
 func TestConnect_LifecycleScriptMode_Established(t *testing.T) {
-	for _, mode := range []string{"auto", "script", "relay", ""} {
+	for _, mode := range []string{"auto", "script", "helper", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			srv := startTestSSHServer(t)
 			defer srv.close()

@@ -677,7 +677,7 @@ func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
 		{name: "auto", mode: profile.Ptr(profile.DesiredAuto), wantMode: "auto"},
 		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantMode: "script"},
 		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantMode: "raw"},
-		{name: "relay", mode: profile.Ptr(profile.DesiredRelay), wantMode: "relay"},
+		{name: "helper", mode: profile.Ptr(profile.DesiredHelper), wantMode: "helper"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

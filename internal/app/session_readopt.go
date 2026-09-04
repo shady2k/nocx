@@ -174,7 +174,7 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		if resolver.Resolve(Machine{
 			Fingerprint: p.Fingerprint,
 			Mode:        profile.DesiredMode(cfg.DesiredMode),
-		}) != DesiredRelay {
+		}) != DesiredHelper {
 			return nil, fmt.Errorf(
 				"this machine no longer consents to the nocx helper, so %s was not asked about its sessions", p.Host)
 		}

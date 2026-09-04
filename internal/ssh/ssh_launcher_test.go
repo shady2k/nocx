@@ -153,7 +153,7 @@ func (f *fakeLauncher) lastCall() (ShellKind, LaunchOptions) {
 
 // recordInstaller is the RemoteInstaller double for the desired-mode
 // matrix (nocx-mlm7). It records every call so a test can assert the
-// publish happens under script and never under raw/relay, and can be told
+// publish happens under script and never under raw/helper, and can be told
 // to fail the publish so a test can prove the command does not depend on
 // the outcome.
 type recordInstaller struct {
@@ -408,18 +408,19 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	}
 }
 
-// TestConnect_DesiredModeRelay_IntegratesLikeScript: relay publishes the
+// TestConnect_DesiredModeHelper_IntegratesLikeScript: helper publishes the
 // bundle and integrates, exactly as script and auto do. The tiers are
 // additive, not alternative (§5.2): allowing the deployed binary never
 // withholds the shell scripts, any more than declining it would.
 //
 // This test asserted the opposite until nocx-7k8ma, and was right when it
-// was written: `relay` then named the Tier-B carrier of §3.4, which would
+// was written: the mode — then spelled `relay` — named the Tier-B carrier
+// of §3.4, which would
 // have delivered integration itself. That carrier is still unbuilt (D15),
 // the mode meanwhile came to mean "allow the remote helper", and the helper
 // owns no PTY and emits no markers — so the old assertion had become a
 // guarantee that the most capable mode delivered the least.
-func TestConnect_DesiredModeRelay_IntegratesLikeScript(t *testing.T) {
+func TestConnect_DesiredModeHelper_IntegratesLikeScript(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
@@ -430,13 +431,13 @@ func TestConnect_DesiredModeRelay_IntegratesLikeScript(t *testing.T) {
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
 		WithRemoteLauncher(launcher),
 		WithRemoteInstaller(installer),
-		WithDesiredMode("relay"),
+		WithDesiredMode("helper"),
 	)
 
 	assertUsable(t, srv, ch)
 
 	if n := launcher.callCount(); n == 0 {
-		t.Fatal("launcher never consulted under relay — the session opened a plain shell, " +
+		t.Fatal("launcher never consulted under helper — the session opened a plain shell, " +
 			"so a user who allowed the helper silently lost their blocks")
 	}
 	// The publish runs CONCURRENTLY with the loader, so "did it publish" is
@@ -444,8 +445,8 @@ func TestConnect_DesiredModeRelay_IntegratesLikeScript(t *testing.T) {
 	// counter at a moment of this test's choosing.
 	installer.waitPublished(t)
 	if h, p := installer.counts(); h == 0 || p == 0 {
-		t.Fatalf("installer not consulted under relay (home=%d publish=%d), want both — "+
-			"the bundle must publish for relay exactly as it does for script",
+		t.Fatalf("installer not consulted under helper (home=%d publish=%d), want both — "+
+			"the bundle must publish for helper exactly as it does for script",
 			h, p)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {

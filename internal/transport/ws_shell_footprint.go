@@ -133,7 +133,7 @@ type footprintHandlers struct {
 	// footprint without connecting. When nil, the helpers list is empty —
 	// nothing is claimed installed that cannot be shown.
 	helperInstalls *consent.InstallStore
-	// consent is the per-machine relay-tier answer store (remote-helper
+	// consent is the per-machine helper-tier answer store (remote-helper
 	// design D8): the write half shell.footprint.consent persists grants
 	// through. When nil, the method refuses — the consent prompt is never
 	// offered by a server that cannot record the answer.
@@ -159,7 +159,7 @@ func WithHelperInstallStore(store *consent.InstallStore) WSServerOption {
 	return func(s *WSServer) { s.helperInstalls = store }
 }
 
-// WithHelperConsentStore attaches the per-machine relay-tier answer store
+// WithHelperConsentStore attaches the per-machine helper-tier answer store
 // behind shell.footprint.consent (remote-helper design D8): the accept
 // RPC the git panel's consent prompt calls. Without it the method refuses
 // — an accept offered but not persistable would fail at click time, which
@@ -170,13 +170,13 @@ func WithHelperConsentStore(store *consent.Store) WSServerOption {
 
 // shellFootprintConsentResult is the result of shell.footprint.consent,
 // matching contracts/shell.footprint.consent.schema.json exactly: the
-// machine has been raised to the relay tier (D8).
+// machine has been raised to the helper tier (D8).
 type shellFootprintConsentResult struct {
 	State string `json:"state"`
 }
 
 // handleConsent serves shell.footprint.consent: the git panel's Accept —
-// raise the session's machine to the relay tier (D8). The machine is
+// raise the session's machine to the helper tier (D8). The machine is
 // resolved from the SESSION the requesting connection owns (connState,
 // D15) and keyed by its host public-key fingerprint — never a
 // client-supplied fingerprint, never a session the caller does not own.

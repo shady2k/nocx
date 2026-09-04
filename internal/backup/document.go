@@ -166,7 +166,7 @@ type BackupSSHOptions struct {
 	JumpHost          string                    `json:"jumpHost,omitempty"`
 	AgentForward      bool                      `json:"agentForward,omitempty"`
 	DesiredMode       profile.DesiredMode       `json:"desiredMode,omitempty"`
-	RelayConsent      profile.RelayConsent      `json:"relayConsent,omitempty"`
+	HelperConsent     profile.HelperConsent     `json:"helperConsent,omitempty"`
 	PortDiscovery     profile.PortDiscoveryMode `json:"portDiscovery,omitempty"`
 	Forwards          []profile.ForwardSpec     `json:"forwards,omitempty"`
 	CanBeJumpServer   bool                      `json:"canBeJumpServer,omitempty"`

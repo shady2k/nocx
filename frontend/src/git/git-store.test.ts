@@ -691,7 +691,7 @@ describe('polling is coalesced by repository identity (D23)', () => {
 // ── The consent prompt (remote-helper design D8) ─────────────────────────
 
 describe('the consent prompt', () => {
-  it('Accept raises the machine to the relay tier and re-opens: the fresh git.open proceeds past consentRequired', async () => {
+  it('Accept raises the machine to the helper tier and re-opens: the fresh git.open proceeds past consentRequired', async () => {
     const open = vi
       .fn()
       .mockResolvedValueOnce({ state: 'consentRequired' })

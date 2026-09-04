@@ -155,7 +155,7 @@ func TestModelScenario(t *testing.T) {
 	st = mustState(t, k, L)
 	assertState(t, st, LifecyclePromptReady, hA2.Domain, "", []DomainID{hA2.Domain})
 
-	// 12. Two lanes multiplexed through one fake relay-like transport.
+	// 12. Two lanes multiplexed through one fake helper-like transport.
 	k2, _, _ := newTestKernel()
 	rp := &fakePort{}
 	if bindErr := k2.BindTransport("R", rp); bindErr != nil {
@@ -171,7 +171,7 @@ func TestModelScenario(t *testing.T) {
 	}
 	mustIngest(t, k2, "R", env("L1", hX, 1, helloEvt("bash")))
 	mustIngest(t, k2, "R", env("L2", hY, 1, helloEvt("bash")))
-	// The relay multiplexes: each envelope names its lane and domain; the
+	// The helper multiplexes: each envelope names its lane and domain; the
 	// kernel keeps the two lanes' domains strictly apart.
 	if _, ingestErr := k2.Ingest("R", env("L1", hY, 2, startEvt(nil, "ls"))); !errors.Is(ingestErr, ErrWrongLane) {
 		t.Fatalf("cross-lane event must be rejected, got %v", ingestErr)
@@ -196,8 +196,8 @@ func TestModelScenario(t *testing.T) {
 	stY := mustState(t, k2, "L2")
 	assertState(t, stY, LifecyclePromptReady, hY.Domain, "", []DomainID{hY.Domain})
 	mustIngest(t, k2, "R", env("L1", hX, 4, promptReadyEvt()))
-	// A nested domain on L1 over the same relay transport, while L2 stays
-	// put — the relay carries several domains across two lanes.
+	// A nested domain on L1 over the same helper transport, while L2 stays
+	// put — the helper carries several domains across two lanes.
 	mustIngest(t, k2, "R", env("L1", hX, 5, suspendEvt()))
 	hXc, err := k2.RequestDomain("L1", &hX.Domain, "R")
 	if err != nil {
@@ -209,14 +209,14 @@ func TestModelScenario(t *testing.T) {
 	// L2 unaffected by L1's nesting.
 	stY = mustState(t, k2, "L2")
 	assertState(t, stY, LifecyclePromptReady, hY.Domain, "", []DomainID{hY.Domain})
-	// Transport loss takes every lane bound to the relay down with it.
+	// Transport loss takes every lane bound to the helper down with it.
 	if bindErr := k2.TransportLost("R"); bindErr != nil {
 		t.Fatal(bindErr)
 	}
 	for _, lane := range []LaneID{"L1", "L2"} {
 		st := mustState(t, k2, lane)
 		if st.Lifecycle != LifecycleLost {
-			t.Fatalf("lane %s must be lost with the relay, got %+v", lane, st)
+			t.Fatalf("lane %s must be lost with the helper, got %+v", lane, st)
 		}
 	}
 }

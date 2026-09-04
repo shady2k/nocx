@@ -431,7 +431,7 @@ position, and the contradiction is filed as `nocx-cdy3v`.
   to be caught.
 - **A sidecar supervisor**, and any per-participant helper process (§8).
 - **Restricting the harness's own subagent tool** (D11).
-- **The relay, durable sessions and reattach** — `nocx-1p1h4`, blocked behind the helper reaching
+- **Helper-hosted durable sessions and reattach** — `nocx-1p1h4`, blocked behind the helper reaching
   `main`.
 - **Worktree creation as one call** — `nocx-kdccc`.
 - **Durable output capture** — `nocx-22k1c` — and **session-owned size** — `nocx-eidfb`. This

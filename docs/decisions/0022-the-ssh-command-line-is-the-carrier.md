@@ -15,6 +15,10 @@
   the full spike report
   ([`.internal/reports/nocx-mlm7-spike-multiplex.md`](../../.internal/reports/nocx-mlm7-spike-multiplex.md))
 
+> **Naming, 2026-08-31:** `relay` below is the historical name of the third
+> delivery mode and of the deployed remote binary; both are now called the
+> **helper**. The argument is left exactly as it was written (`nocx-0xq2s`).
+
 ## Context
 
 When a user types `ssh user@host` by hand, that connection belongs to their shell. nocx has

@@ -98,7 +98,7 @@
         "desiredMode": {
           "type": "string"
         },
-        "relayConsent": {
+        "helperConsent": {
           "type": "string"
         },
         "portDiscovery": {

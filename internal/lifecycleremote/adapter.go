@@ -15,7 +15,7 @@
 // Kernel.TransportLost. It has no CurrentDomain accessor and assumes nothing
 // about how many domains its transport carries: outbound routing is keyed by
 // the envelope's own domain (the kernel's registry is the authority — the
-// future relay is a third adapter, not a protocol rewrite).
+// helper is a third adapter, not a protocol rewrite).
 //
 // The port is not the authenticator; the capability is. Any local user on
 // the remote host can open the forwarded socket, so candidate connections

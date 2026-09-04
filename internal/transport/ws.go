@@ -378,7 +378,7 @@ type WSServer struct {
 	// empty helpers list — nothing is claimed installed that cannot be
 	// shown.
 	helperInstalls *consent.InstallStore
-	// helperConsent is the per-machine relay-tier answer store
+	// helperConsent is the per-machine helper-tier answer store
 	// (remote-helper design D8): the write half shell.footprint.consent
 	// persists grants through. Wired through WithHelperConsentStore; when
 	// nil, the method refuses — the consent prompt is never offered by a
@@ -1314,7 +1314,7 @@ type GitOpenRefusal struct {
 // answers them.
 type GitOpenSelection struct {
 	Factory git.RepoFactory
-	// ConsentRequired — the session's machine has no relay-tier answer;
+	// ConsentRequired — the session's machine has no helper-tier answer;
 	// git.open must answer the consentRequired state and the panel offers
 	// the consent flow. Set means Factory is nil.
 	ConsentRequired bool
@@ -2985,7 +2985,7 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper:
 		return remote.DesiredMode
 	default:
 		return string(profile.DefaultDesiredMode())

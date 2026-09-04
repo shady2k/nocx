@@ -686,7 +686,7 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * string the notify feed stamps into every occurrence's backendId. It is
  * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
  * because that constant answers a different question — which target the
- * ports methods scope to — and one of the two will change when the relay
+ * ports methods scope to — and one of the two will change when the helper
  * lands.
  *
  * Exported because the composition root needs it too: a session.focus push
@@ -2462,7 +2462,7 @@ export class PaneManager {
    * on this machine, so the only pair that can match carries
    * internal/commandnames.LocalRoute's value — and an argument that is
    * accepted and dropped silently stops meaning anything by the time the
-   * relay lands and a second backend's sessions start arriving with ids of
+   * helper lands and a second backend's sessions start arriving with ids of
    * their own.
    *
    * The session comes from the content's own capability, so PaneManager never

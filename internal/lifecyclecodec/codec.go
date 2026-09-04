@@ -2,7 +2,7 @@
 // big-endian length prefix holding the JSON byte count, then the JSON
 // (docs/lifecycle-protocol.md §6). It is the framing half of every lifecycle
 // adapter — the local descriptor channel, the future forwarded-port channel
-// and the relay share it, so the wire contract lives here once.
+// and the helper share it, so the wire contract lives here once.
 //
 // The codec frames; it does not authenticate and does not interpret. A frame
 // that maps to an envelope is delivered even when the kernel will reject it

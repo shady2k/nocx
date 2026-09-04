@@ -382,7 +382,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// desiredMode still rides it and carries the RESOLVED destination mode
 	// (nocx-mlm7): the connection-scope default the tab's capability control
 	// starts from — script wraps and installs automatically, raw adds
-	// nothing, relay is consent-gated. It is the mode, never proof
+	// nothing, helper is consent-gated. It is the mode, never proof
 	// integration succeeded.
 	// parent rides the ack as the edge the REGISTRY recorded, read back off
 	// the session rather than echoed from the params: the two agree only

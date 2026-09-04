@@ -87,7 +87,7 @@ type Attribution struct {
 	// the same vocabulary internal/commandnames.LocalRoute already uses for
 	// the same idea. nocx-if6 phase A makes session identity
 	// (backendId, sessionId); carrying it from the first commit is what stops
-	// every feed row needing a retrofit when the relay lands.
+	// every feed row needing a retrofit when the helper lands.
 	Backend string
 
 	// Tab keeps the old word on purpose (nocx-ehkvy). Everything else that
@@ -130,7 +130,7 @@ type Event struct {
 
 	// At is stamped by nocx at ingress, which is the first nocx-owned stage
 	// (ingress.go). It was the router's job until the feed arrived; the stamp
-	// moved so that a relay replaying a buffered batch keeps its own instants
+	// moved so that a helper replaying a buffered batch keeps its own instants
 	// instead of having them rewritten to the moment it reconnected.
 	At time.Time
 }

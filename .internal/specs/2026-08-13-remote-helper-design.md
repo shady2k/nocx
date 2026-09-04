@@ -2,9 +2,9 @@
 
 - **Date:** 2026-08-13
 - **Beads:** `nocx-6zcr` (this session), `nocx-1gsp` (the deliverable it re-answers),
-  `nocx-if6` (the epic that owns the relay), `nocx-fihs` (the local Git panel, closed scope)
+  `nocx-if6` (the epic that owns the helper), `nocx-fihs` (the local Git panel, closed scope)
 - **Supersedes:** D3 of [the git-manager design](2026-08-06-git-manager-design.md) (2026-08-06)
-  — the deferral of the remote case to the relay, not its rejection of `DiscoveryConn.Exec`,
+  — the deferral of the remote case to the helper, not its rejection of `DiscoveryConn.Exec`,
   which stands. That document is amended in the same commit; this line is not the amendment.
 - **Status:** design, approved 2026-08-13; stress-tested (see the results section)
 
@@ -34,11 +34,11 @@ what they already decided, **before** it says what to build.
 | **AD-9**, ring + offset acks       | The bounded per-session output ring with offset acks **is** lease/replay semantics                                                                                                                                | The frame header carries `seq`/`ack` from day one so the later `session` service can use them without a wire break. Nothing reads them now                                                                                       |
 | **ADR-0020**, the lane             | Auxiliary work runs on its own pooled lease, never the tab's                                                                                                                                                      | The helper holds its own pooled reference, like `DiscoveryConn` and `TunnelConn` do                                                                                                                                              |
 | **ADR-0024**, authenticated lane   | The lifecycle rides a transport that is not the tty; an `IntegrationDomain` is "one authenticated shell **or helper** instance"; Tier B is "the **lighter** of the two remote binaries the architecture reserves" | The helper is that lighter binary. It does **not** reuse the `-R` transport — see D4 in full                                                                                                                                     |
-| **git spec D3**                    | Local only; the remote case waits for the relay, and `DiscoveryConn.Exec` was rejected by name                                                                                                                    | **Amended.** The rejection of `DiscoveryConn.Exec` stands (§3, D0); what changes is that the remote case no longer waits for the _relay_                                                                                         |
+| **git spec D3**                    | Local only; the remote case waits for the Tier-B binary, and `DiscoveryConn.Exec` was rejected by name                                                                                                            | **Amended.** The rejection of `DiscoveryConn.Exec` stands (§3, D0); what changes is that the remote case no longer waits — the helper this document designs is that binary                                                       |
 | **git spec D16**                   | The seam is named operations, never `Run(argv, stdin, out) → exit`                                                                                                                                                | **Upheld and hardened into a rule with no exception** — see D3 in full, and the measured price orca paid for keeping one exception                                                                                               |
 | **git spec D8 / D9**               | Paths and messages ride stdin, never argv; results are bounded on the machine doing the work                                                                                                                      | Both become satisfiable for the first time: the helper has real stdin and applies the bounds where the work happens                                                                                                              |
 | **git spec D18**                   | A mutation is never cancelled                                                                                                                                                                                     | Carried across the wire unchanged: `cancel` is refused for mutation operations, not merely unimplemented                                                                                                                         |
-| **Footprint consent** (2026-08-10) | Consent is per machine; `DesiredMode` is `raw`/`script`/`relay`; an explicit choice is the consent; the footprint screen lists and uninstalls                                                                     | The helper is the artifact of the `relay` tier. It is **not** smuggled in as "small enough to be zero-install"                                                                                                                   |
+| **Footprint consent** (2026-08-10) | Consent is per machine; `DesiredMode` is `raw`/`script`/`helper`; an explicit choice is the consent; the footprint screen lists and uninstalls                                                                    | The helper is the artifact of that tier, which now carries its name. It is **not** smuggled in as "small enough to be zero-install"                                                                                              |
 | **architecture.md:203**            | "Tier-B remote helper — cross-compiled Go binary augmenting the remote shell, **feeding** the reserved `metadata` msg-type"                                                                                       | **Restated, deliberately.** Ours augments no shell and is not a one-way feed; it is a request/response operation host. Same weight class, different mandate, and the entry is rewritten rather than stretched                    |
 
 ## 3. Decisions
@@ -53,7 +53,7 @@ what they already decided, **before** it says what to build.
 | D5  | **The sentinel separates "our helper started" from "something started", and that is all it claims.** A sentinel line on stdout, written only after the `hello` frame is accepted; the `hello-ok` frame echoes a nonce we minted and reports the helper's own content hash. A compromised remote host is **outside the threat model**, stated in §7                                                                                                                                                                                                                                                                                                      | Claiming the sentinel authenticates the peer. It does not and cannot: whoever owns that machine can run a modified helper that says anything, and the user already trusts it with their repositories and keys. What the sentinel does defend is the ordinary case — a `ForceCommand` wrapper, an rc file that prints, a missing binary, a server that accepted the request and did something else                                                                                      |
 | D6  | **A version or content-hash mismatch triggers exactly one automatic reinstall**; only a mismatch after that reinstall is the terminal `helperVersionMismatch`. The distinct exit code stays, and non-retryable applies to the reconnect loop, not to installing the right thing once                                                                                                                                                                                                                                                                                                                                                                    | Treating every mismatch as terminal. With the artifact bundled (D20) and directories keyed per version (D7), the reachable case is not "an incompatible peer" but "the file at our path is not our binary" — an interrupted SFTP upload, which is ordinary. Terminal-on-first-sight leaves the panel dead on that host until the user finds an uninstall button                                                                                                                        |
 | D7  | **Install is an immutable directory keyed by `version + goos-goarch + content-hash`**, written to a temporary name and renamed atomically, complete only when it carries an `.install-complete` marker; a directory without the marker is removed, never used                                                                                                                                                                                                                                                                                                                                                                                           | Keying on version and hash alone. One `$HOME` shared across machines of different architectures — NFS, or the same account on an arm64 and an amd64 box — would resolve to one directory name holding the wrong binary. And overwriting one path lets a running helper serve new clients off replaced code. This is orca's `relay-0.1.0+8de1d39fd7c1` layout, plus the platform its own deploy path carries separately                                                                 |
-| D8  | **Consent is asked when the user reaches for the feature, not when a connection is made.** `git.open` answers `consentRequired`; the panel offers it; accepting raises that machine to the `relay` tier. `auto` resolves to `relay` only when a surface on that connection has asked for the helper — not merely because a binary exists for the platform                                                                                                                                                                                                                                                                                               | Letting the existing `auto` ladder decide. Its first arm is "a suitable binary exists for that platform", written as forward structure before one did (`2026-08-10` design §3.1); the day we ship a helper that arm becomes true everywhere, and every user is asked, on every new machine, about a feature they never reached for. A machine at an explicit `script` is **not** silently upgraded either — `script` is an answer, not a gap                                           |
+| D8  | **Consent is asked when the user reaches for the feature, not when a connection is made.** `git.open` answers `consentRequired`; the panel offers it; accepting raises that machine to the `helper` tier. `auto` resolves to `helper` only when a surface on that connection has asked for the helper — not merely because a binary exists for the platform                                                                                                                                                                                                                                                                                             | Letting the existing `auto` ladder decide. Its first arm is "a suitable binary exists for that platform", written as forward structure before one did (`2026-08-10` design §3.1); the day we ship a helper that arm becomes true everywhere, and every user is asked, on every new machine, about a feature they never reached for. A machine at an explicit `script` is **not** silently upgraded either — `script` is an answer, not a gap                                           |
 | D9  | **The helper applies the bounds and reports the domain outcome** (`complete`/`capped`/`cut`), and only the retained records cross the wire                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Bounding in the backend's reader. It is the reason this design exists rather than an SSH-exec-per-operation one: counting `Total` exactly requires consuming the whole porcelain stream, and a local reader can only do that by dragging it across the network                                                                                                                                                                                                                         |
 | D10 | **Cancellation is an operation on the protocol, not a channel close.** The helper cancels with the process-group escalation `internal/git/local` already has                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Closing the channel to stop the work. `local.go:132` escalates INT → TERM → KILL **against the group** precisely because `git diff` spawns a textconv filter that holds the pipe open. An SSH channel close makes no such promise about descendants                                                                                                                                                                                                                                    |
 | D11 | **Mutations are never cancelled** (git D18), and a `cancel` naming a mutation is **refused**, not ignored                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Silently dropping it. A refusal is a fact the caller can act on; a no-op looks like success                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -118,7 +118,7 @@ authenticator; the capability is"); nothing outside our SSH channel can write to
 helper's stdin, so that entire mechanism is unnecessary rather than reimplemented. A
 forwarded listener depends on the server's `AllowTcpForwarding` and `PermitListen`, a refusal
 class we would inherit for no gain. And ADR-0024's own "Revisit when" warns that the
-forwarded-port transport becomes **unnecessary** once the relay lands and is "the right
+forwarded-port transport becomes **unnecessary** once the helper lands and is "the right
 answer today and the disposable one later" — worth heeding before building a second consumer
 of it.
 
@@ -154,11 +154,11 @@ Three things are reserved now because they are free now and expensive later:
    `unknownService` today; when phase B arrives it is a registration, not a protocol change.
 3. **The helper's lifetime is not defined as "one channel".** This deliverable ties them
    together — the helper exits on stdin EOF — but nothing in the protocol says a helper may
-   not outlive the channel that started it. That single sentence is what lets the relay add a
+   not outlive the channel that started it. That single sentence is what lets the helper add a
    socket and a `--connect` bridge later without renegotiating the wire.
 
 Explicitly **not** built: a daemon, a listening socket, reattachment, replay, PTY lease
-semantics, or any state that survives the process. When phase B lands, the relay is expected
+semantics, or any state that survives the process. When phase B lands, the helper is expected
 to be **this same binary with a `session` service**, not a second artifact — otherwise we
 ship two files to every machine.
 
@@ -306,7 +306,7 @@ Each step is a bead; each ends green.
 
 0. **Two preparatory changes, in either order.** Amend D3 and D16 **in
    `.internal/specs/2026-08-06-git-manager-design.md` itself** — the rejection of
-   `DiscoveryConn.Exec` stands, the deferral to the relay does not — so the two documents
+   `DiscoveryConn.Exec` stands, the deferral to the helper does not — so the two documents
    never disagree; and extend `cmd/e2e-sshd` to serve `exec` channels over pipes when no
    `pty-req` preceded them.
 1. **D18 next**: move `Caller` and the binding registry out of `internal/git` so the domain
@@ -321,7 +321,7 @@ Each step is a bead; each ends green.
 6. `internal/helper/deploy`: the three-target build and its bundling, platform probe, artifact
    selection, versioned install under lock with its `.install-complete` marker, prune,
    uninstall; wire into the existing footprint screen, and add the second condition to `auto`'s
-   `relay` arm (D8) so shipping the binary does not opt every machine in.
+   `helper` arm (D8) so shipping the binary does not opt every machine in.
 7. Composition root and transport: replace the refusal at `ws_git.go:371` with factory
    selection; new `git.open` states in `contracts/` and in the panel.
 8. The acceptance test of §8, in the e2e container against a real sshd.
@@ -355,7 +355,7 @@ Twelve branches (ten mapped, two added by the reflexion pass). Bead `nocx-4v5c`.
   host is outside the threat model. Overclaiming here would have been the defect.
 - **Version mismatch** → D6, D7. One automatic reinstall before any terminal state; atomic
   rename and an `.install-complete` marker, because an interrupted upload is ordinary.
-- **Consent timing** → D8. The existing `auto` ladder resolves to `relay` as soon as "a
+- **Consent timing** → D8. The existing `auto` ladder resolves to `helper` as soon as "a
   suitable binary exists for that platform" — forward structure written before one did. Left
   alone, shipping the helper opts every machine in at connect time. The arm gains a second
   condition, and the ask moves to the moment the user opens the panel.
@@ -380,7 +380,7 @@ Twelve branches (ten mapped, two added by the reflexion pass). Bead `nocx-4v5c`.
   the same login on both — resolves to one directory name holding the wrong binary. The key
   now carries `goos-goarch`.
 - **Observability across two hops** → D26. The design said nothing about logging, while the
-  epic that owns the relay states the rule for exactly this moment: "the moment there are two
+  epic that owns the helper states the rule for exactly this moment: "the moment there are two
   hops a log line without correlation is useless." A correlation id rides the envelope.
 
 ### Changes made
@@ -395,7 +395,7 @@ sequence, §7's threat model, §8's test list plus the fixture gap, and a step 0
   is a dedicated channel with D9 bounds in front of it, so the numbers should be picked
   against a measurement rather than copied.
 - **`darwin/amd64`.** Answers `unsupportedPlatform` until someone asks for it.
-- **Whether the relay later merges into this binary.** Stated as intent (D15), not designed.
+- **Whether the helper later merges into this binary.** Stated as intent (D15), not designed.
 
 ### Confidence
 

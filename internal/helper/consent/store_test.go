@@ -75,7 +75,7 @@ func TestStoreGrantsArePerFingerprint(t *testing.T) {
 
 // TestStoreEmptyFingerprintNeverGrants: an empty fingerprint is never a
 // machine — no document can answer for it, so a host whose key was not
-// captured can never resolve to relay on the strength of a shared empty
+// captured can never resolve to helper on the strength of a shared empty
 // key.
 func TestStoreEmptyFingerprintNeverGrants(t *testing.T) {
 	dir := t.TempDir()

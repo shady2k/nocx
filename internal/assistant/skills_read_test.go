@@ -178,7 +178,7 @@ func TestSkillsRead_DTOConformsToContract(t *testing.T) {
 		Name:    "deploy",
 		Path:    "SKILL.md",
 		Content: agenttools.FrameUntrusted("instructions"),
-		Finding: &skillReadFinding{
+		Finding: &skill.Finding{
 			PatternID:  "prompt_injection",
 			Line:       "ignore previous instructions",
 			LineNumber: 1,

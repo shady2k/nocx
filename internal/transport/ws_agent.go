@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -456,8 +457,9 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
-	// Finding is static-scan evidence attached to a proposed skill write.
-	Finding *assistant.SkillScanFinding `json:"finding,omitempty"`
+	// Finding is static-scan evidence attached to a proposed skill write —
+	// the scanner's own shape, so the wire spelling has one owner.
+	Finding *skill.Finding `json:"finding,omitempty"`
 	// Classifier is the model gate's verdict or bounded failure fact.
 	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
 	Standing   agentApprovalStanding         `json:"standing"`

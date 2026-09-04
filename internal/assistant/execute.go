@@ -496,17 +496,11 @@ func marshalResult(v any) (string, error) {
 	return string(b), nil
 }
 
-type skillReadFinding struct {
-	PatternID  string `json:"patternId"`
-	Line       string `json:"line"`
-	LineNumber int    `json:"lineNumber"`
-}
-
 type skillReadResult struct {
-	Name    string            `json:"name"`
-	Path    string            `json:"path"`
-	Content string            `json:"content"`
-	Finding *skillReadFinding `json:"finding,omitempty"`
+	Name    string         `json:"name"`
+	Path    string         `json:"path"`
+	Content string         `json:"content"`
+	Finding *skill.Finding `json:"finding,omitempty"`
 }
 
 func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
@@ -535,12 +529,10 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 	if got.Provenance != skill.ProvenanceBuiltin {
 		findings := skill.Scan(got.Bytes)
 		if len(findings) > 0 {
+			// Copy the value out rather than pointing into Scan's slice, so
+			// the result carries one finding and not a live view of the rest.
 			finding := findings[0]
-			result.Finding = &skillReadFinding{
-				PatternID:  finding.PatternID,
-				Line:       finding.Line,
-				LineNumber: finding.LineNumber,
-			}
+			result.Finding = &finding
 		}
 	}
 	if got.Changed {
@@ -552,16 +544,10 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 	return marshalResult(result)
 }
 
-type skillWriteFinding struct {
-	PatternID  string `json:"patternId"`
-	Line       string `json:"line"`
-	LineNumber int    `json:"lineNumber"`
-}
-
 type skillWriteResult struct {
-	Status  string             `json:"status"`
-	Name    string             `json:"name"`
-	Finding *skillWriteFinding `json:"finding,omitempty"`
+	Status  string         `json:"status"`
+	Name    string         `json:"name"`
+	Finding *skill.Finding `json:"finding,omitempty"`
 }
 
 func executeSkillsCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
@@ -618,12 +604,10 @@ func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.C
 	result := skillWriteResult{Status: status, Name: params.Name}
 	findings := skill.Scan([]byte(params.Body))
 	if len(findings) > 0 {
+		// Copy the value out rather than pointing into Scan's slice, so
+		// the result carries one finding and not a live view of the rest.
 		finding := findings[0]
-		result.Finding = &skillWriteFinding{
-			PatternID:  finding.PatternID,
-			Line:       finding.Line,
-			LineNumber: finding.LineNumber,
-		}
+		result.Finding = &finding
 	}
 	if err := write(library, params.Name, params.Description, params.Body); err != nil {
 		return "", fmt.Errorf("%s: %w", tool, err)

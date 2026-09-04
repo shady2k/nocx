@@ -61,9 +61,9 @@ func TestExecuteSkillsCreateScansBodyBeforeCallingStore(t *testing.T) {
 		t.Fatalf("store calls = %v, want one create", library.calls)
 	}
 	var result struct {
-		Status  string             `json:"status"`
-		Name    string             `json:"name"`
-		Finding *skillWriteFinding `json:"finding"`
+		Status  string         `json:"status"`
+		Name    string         `json:"name"`
+		Finding *skill.Finding `json:"finding"`
 	}
 	if err := json.Unmarshal([]byte(got), &result); err != nil {
 		t.Fatalf("decode result: %v", err)
@@ -236,7 +236,7 @@ func TestSkillsWriteDTOConformsToContracts(t *testing.T) {
 			schema := loadSkillsWriteContract(t, tc.name)
 			result := skillWriteResult{Status: tc.status, Name: "deploy"}
 			if tc.name != "delete" {
-				result.Finding = &skillWriteFinding{
+				result.Finding = &skill.Finding{
 					PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
 				}
 			}

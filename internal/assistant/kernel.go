@@ -234,8 +234,11 @@ type ApprovalRequest struct {
 	// approval surface, including malformed command parses.
 	CommandInvocation bool `json:"-"`
 	// Finding is the first static-scan finding in a skills.create or
-	// skills.update body, carried to the person with the exact proposal.
-	Finding *SkillScanFinding `json:"finding,omitempty"`
+	// skills.update body, carried to the person with the exact proposal. It
+	// is evidence about the bytes, never the body itself. The shape is
+	// skill.Finding because the scanner that produced it owns the spelling —
+	// a copy declared here would agree with it until the day it did not.
+	Finding *skill.Finding `json:"finding,omitempty"`
 	// Classifier is the classifier's verdict or bounded failure fact for a
 	// skills write. It is absent for ordinary policy approvals.
 	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
@@ -246,15 +249,6 @@ type ApprovalRequest struct {
 	// shell could be asked at all — that fact and its reason. Absent for
 	// every non-command proposal.
 	Expansion *ExpansionFacts `json:"expansion,omitempty"`
-}
-
-// SkillScanFinding is the first suspicious instruction pattern found in a
-// proposed skill body. It is evidence for the person approving the exact
-// bytes, never the body itself.
-type SkillScanFinding struct {
-	PatternID  string `json:"patternId"`
-	Line       string `json:"line"`
-	LineNumber int    `json:"lineNumber"`
 }
 
 // ApprovalClassifier is the classifier gate's fact carried with an approval
@@ -850,10 +844,11 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 		}
 		if err := json.Unmarshal([]byte(rawArgs), &params); err == nil {
 			if findings := skill.Scan([]byte(params.Body)); len(findings) > 0 {
+				// Copy the value out rather than pointing into Scan's
+				// slice, so the request carries one finding and not a
+				// live view of the rest.
 				finding := findings[0]
-				req.Finding = &SkillScanFinding{
-					PatternID: finding.PatternID, Line: finding.Line, LineNumber: finding.LineNumber,
-				}
+				req.Finding = &finding
 			}
 		}
 	}

@@ -4118,6 +4118,11 @@ export class TerminalContent extends BasePaneContent {
     // makes equal usable geometry a no-op, so this presentation driver and
     // the live-region output driver never re-fit the same rectangle.
     if (this._mounted) {
+      // The pane's own size changed, so the running region's ceiling really
+      // did move — release the cap the running command is holding before
+      // anything reads it. This is the ONLY caller: a cap released from the
+      // output path is the resize-mid-repaint nocx-oikdu was.
+      this.scrollback?.invalidateRunningCap()
       this.fitUsableViewport(this.usableViewport(viewport))
       // And the live BOX, not only the grid inside it. The pane changing size
       // is the one resize the live-region path never heard about: it runs off

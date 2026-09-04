@@ -290,6 +290,7 @@ export class ScrollbackController {
   setRunning(): void {
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
+    if (entering) this._runningCap = undefined
     this._mode = 'running'
     if (entering) {
       this.xtermLiveContainer.style.height = ''
@@ -336,11 +337,36 @@ export class ScrollbackController {
    * to the same cap so tall inline TUIs keep their last rows reachable
    * (nocx-zn4d). Null outside `running` or while unmeasurable.
    */
+  /** The running cap while it is held; `undefined` means "measure it". */
+  private _runningCap: number | undefined = undefined
+
   get runningLiveCap(): number | null {
     if (this._mode !== 'running') return null
+    // HELD FOR THE COMMAND'S LIFETIME, not re-measured per chunk of output.
+    // The grid is fitted to this cap, and fitting the grid resizes the pty —
+    // so a cap that followed the header's live height sent a SIGWINCH into
+    // the middle of a program's repaint every time the running block's own
+    // chrome moved (it gains a duration, its echo wraps). omp came back with
+    // its box drawn at two different widths: the top border truncated
+    // mid-row, the bottom corners at the full width (nocx-oikdu).
+    //
+    // The cache is invalidated by the two things that legitimately change it
+    // — entering the mode, and the PANE changing size — and by nothing the
+    // running program does. A resize the user asked for is still a resize.
+    if (this._runningCap !== undefined) return this._runningCap
     const header = this._blockManager.runningBlock?.el.getBoundingClientRect().height ?? 0
     const max = this.scrollbackArea.clientHeight - header
-    return max > 0 ? max : null
+    // Measured before layout (a zero-height scroller) the answer is not the
+    // cap, it is "not yet" — left uncached so the next chunk asks again.
+    if (max <= 0) return null
+    this._runningCap = max
+    return max
+  }
+
+  /** Forget the held cap: the pane changed size, so the ceiling really did
+   *  move. Called by the viewport driver, never by the output path. */
+  invalidateRunningCap(): void {
+    this._runningCap = undefined
   }
 
   /**
@@ -570,6 +596,7 @@ export class ScrollbackController {
    */
   enterFullscreen(): void {
     this._mode = 'fullscreen'
+    this._runningCap = undefined
     this.xtermLiveViewport.style.height = ''
     this.xtermLiveContainer.className = 'xterm-live-container live-fullscreen'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
@@ -602,6 +629,7 @@ export class ScrollbackController {
   /** Exit alt-screen: restore normal layout. */
   exitFullscreen(): void {
     this._mode = 'idle'
+    this._runningCap = undefined
     this.xtermLiveContainer.style.height = ''
     this.xtermLiveViewport.style.height = ''
     this._setFilledPane(false)

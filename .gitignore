@@ -86,3 +86,16 @@ __pycache__/
 # never an input; the guard stays because the leftovers outlive the branch
 # that made them.
 internal/helper/deploy/artifacts/*.gz
+# --- repowise (local codebase index; nocx-14sbw measured it, nocx-n5gr2 came out of it) ---
+# The index is 385 MB and regenerates from the tree, so it is per-clone, never shared.
+# .repowise/.env holds the OpenRouter key. .claude/CLAUDE.md is repowise's generated
+# agent block: kept local on purpose, so it reaches only whoever opted in.
+.repowise/
+.claude/CLAUDE.md
+# repowise's auto-sync hook. core.hooksPath is .githooks, which is TRACKED, so the
+# hook lands in a shared directory; ignoring it keeps repowise opt-in per clone
+# instead of committing it to everyone.
+.githooks/post-commit
+
+# repowise API keys (local)
+.repowise/.env

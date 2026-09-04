@@ -65,6 +65,12 @@ export class VaultOperationCancelledError extends Error {
  */
 export const SATURATION_TOAST_WINDOW_MS = 10_000
 
+/** The control-plane notification a full refreshable outbound queue sends
+ *  through its one reserved slot, after dropping the frame that overflowed it
+ *  (outbound.StallNoticeMethod). It carries no params: the fact that frames
+ *  were dropped is the whole message. */
+const OUTBOUND_STALLED = 'outbound.stalled'
+
 const SATURATION_TOAST_MESSAGE =
   'The terminal is busy — that action was refused. Try again in a moment.'
 
@@ -176,6 +182,27 @@ export class Dispatcher {
       const _: ControlSaturatedNotification = params as ControlSaturatedNotification
       void _
       this.raiseSaturationToast()
+    })
+    this.subscribe(OUTBOUND_STALLED, () => {
+      // The OUTBOUND twin of control.saturated, and it needs the opposite
+      // remedy. A refused request has an answer — the caller is told no, and
+      // the toast above makes that visible. A stalled outbound queue has
+      // already DROPPED frames: the backend keeps one reserved slot to say so
+      // and then goes on, so what this connection owes the renderer no longer
+      // exists anywhere. There is nothing to retry and nothing to be told.
+      //
+      // So take the existing close path, exactly as the heartbeat's dead
+      // socket does: it rejects what is pending, publishes waiting, schedules
+      // the retry and fires onDisconnect — and the reconnect is what makes
+      // every store re-read from the backend, which is the only thing that
+      // recovers a dropped frame. internal/transport/outbound has said this
+      // was the contract since the queue was written; nothing in the renderer
+      // had ever subscribed, so the notice arrived, matched no handler and
+      // was discarded in silence (nocx-mrtvy).
+      const ws = this.ws
+      if (ws === null || ws.readyState !== WebSocket.OPEN || this._closingDeliberately) return
+      log.warn('nocx: the connection dropped frames; reconnecting to resync')
+      ws.close()
     })
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this._onVisibilityChange)

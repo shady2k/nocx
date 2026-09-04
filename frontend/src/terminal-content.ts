@@ -2886,18 +2886,24 @@ export class TerminalContent extends BasePaneContent {
             })
         },
         // A command whose authenticated outcome reached the projections and
-        // found no ledger record to carry it (nocx-2vb9y). Reported, never
-        // repaired here: the projections say WHAT was lost and this says
-        // where, and a repair that guessed a record would be the guess
-        // nocx-td6d4.10 removed. `at: 'complete'` is the one that costs a
-        // finished command its history row and its notification, and until
-        // this line existed it left no trace in the renderer, on the wire or
-        // in the backend's log.
+        // found no ledger record to carry it (nocx-2vb9y). Not repaired here:
+        // a repair that guessed a record would be the guess nocx-td6d4.10
+        // removed.
+        //
+        // `at: 'complete'` is the one that costs a finished command its
+        // history row and its notification, so it is also the one the PERSON
+        // must be able to see: the block freezes with its exit status either
+        // way, and a log the user never reads is exactly the soft degrade
+        // AGENTS.md refuses. The other two are diagnosis — they say how far
+        // the command got — and belong in the log alone.
         (report: UnattributedCommand) => {
           log.warn('nocx: a command the ledger could not carry', {
             pane: this.pane.paneId,
             ...report,
           })
+          if (report.at === 'complete') {
+            this.scrollback?.blockManager.markUnrecorded(report.attemptId)
+          }
         },
       )
       this._projections.attach()

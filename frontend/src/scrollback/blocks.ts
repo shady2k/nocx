@@ -2174,6 +2174,40 @@ export class BlockManager {
   }
 
   /**
+   * Say, on the block itself, that nothing recorded this command's outcome
+   * (nocx-2vb9y).
+   *
+   * The freeze is unconditional and the ledger record is not, so a finished
+   * command can carry its authenticated exit status and exist nowhere else —
+   * no history row, and no `A command finished` notification, because the
+   * backend was never told. ABSENCE CANNOT CARRY THAT: a line typed at the
+   * native prompt is unrecorded by design (its text may be a literal
+   * password), and it renders exactly the same. So the difference is stated
+   * rather than left to be inferred from a receipt that is not there.
+   *
+   * A muted chip in the header's own vocabulary, not a new surface: it sits
+   * with the duration and the exit status, through the same placement rule,
+   * because it is the same kind of fact about the same command. The word is
+   * `not recorded` and not an error word — the command ran, and it succeeded
+   * or failed on its own terms; what failed is nocx's memory of it.
+   *
+   * Idempotent by the chip's own identity class: the report that drives this
+   * can arrive more than once for one attempt, and a second chip would read
+   * as a second fact.
+   */
+  markUnrecorded(attemptId: string): void {
+    const rec = this.blockForAttempt(attemptId)
+    if (rec === null) return
+    rec.el.dataset.recorded = 'no'
+    const right = rec.el.querySelector('.cmd-header-right')
+    if (right === null || right.querySelector('.cmd-header-unrecorded') !== null) return
+    const chip = document.createElement('span')
+    chip.className = 'nocx-chip nocx-chip-muted cmd-header-unrecorded'
+    chip.textContent = 'not recorded'
+    placeHeaderChip(right, chip)
+  }
+
+  /**
    * Start a new running block. Called on OSC 133 C.
    */
   /** Where this session is — `user@host`, or empty for a local shell. */

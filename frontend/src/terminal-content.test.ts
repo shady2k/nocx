@@ -4587,6 +4587,63 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       Element.prototype.scrollIntoView = protoScrollIntoView
     }
   }
+  it('a finished command the ledger could not carry says so on the block (nocx-2vb9y)', async () => {
+    // The person's end of it. The freeze is unconditional and the record is
+    // not, so this block shows `exit 1` and reaches neither history nor the
+    // bell. Absence cannot carry that — a line typed at the native prompt is
+    // unrecorded by design and looks identical — so the block says it.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The backend echoed a submit token, so an app submit really happened —
+      // and this renderer holds no record carrying it.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-lost',
+          state: 'open',
+          origin: 'app',
+          submitId: 'sub-that-never-was',
+          command: 'make deploy',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-lost',
+          state: 'completed',
+          exitCode: 1,
+          fence: 'e'.repeat(64),
+        },
+      })
+
+      const block = withScrollback.scrollback.blockManager.blockForAttempt('att-lost')
+      expect(block).not.toBeNull()
+      expect(block!.el.dataset.recorded).toBe('no')
+      expect(block!.el.querySelector('.cmd-header-unrecorded')?.textContent).toBe('not recorded')
+      // And nothing was sent to the store, which is the fact the chip states.
+      expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(false)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
   it('a refused attempt still runs the command, and the record it opened still carries the outcome (nocx-2vb9y)', async () => {
     // The fail-open is deliberate: a control plane that is busy must never
     // swallow a command. What it used to cost was the RECORD — the submit

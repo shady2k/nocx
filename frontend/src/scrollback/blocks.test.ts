@@ -1639,6 +1639,46 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen!.el.dataset.blockId).toBeUndefined()
   })
 
+  it('a block whose outcome nothing recorded says so, and says it once (nocx-2vb9y)', () => {
+    // The freeze is unconditional and the record is not, so a finished
+    // command can show its authenticated exit status and exist nowhere else —
+    // no history row, no notification. Absence is not a signal: an ordinary
+    // shell-originated line is unrecorded BY DESIGN and looks identical. This
+    // is what makes the difference readable on the block the person is
+    // looking at, rather than only in a log.
+    const rec = manager.startBlock('make deploy', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 1 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
+    expect(frozen).toBe(rec)
+    expect(rec.el.dataset.recorded).toBeUndefined()
+
+    manager.markUnrecorded('att-1')
+    expect(rec.el.dataset.recorded).toBe('no')
+    const chips = rec.el.querySelectorAll('.cmd-header-unrecorded')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toBe('not recorded')
+    // It sits with the other header chips, left of the ⋮, like every chip.
+    expect(chips[0].parentElement?.className).toContain('cmd-header-right')
+
+    // Idempotent: the report can arrive again (a re-settle, a second pump)
+    // and a second chip would read as a second command.
+    manager.markUnrecorded('att-1')
+    expect(rec.el.querySelectorAll('.cmd-header-unrecorded')).toHaveLength(1)
+  })
+
+  it('marking an attempt no block is bound to changes nothing', () => {
+    const rec = manager.startBlock('make', '~', 0)
+    manager.markUnrecorded('att-nobody')
+    expect(rec.el.dataset.recorded).toBeUndefined()
+    expect(rec.el.querySelectorAll('.cmd-header-unrecorded')).toHaveLength(0)
+  })
+
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')

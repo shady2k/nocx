@@ -609,6 +609,37 @@ describe('control-plane saturation visibility', () => {
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(1)
   })
+
+  it('an outbound stall drops the socket, because the connection cannot deliver what it owes (nocx-mrtvy)', async () => {
+    // outbound.stalled is what a full refreshable queue sends through its one
+    // reserved slot after dropping a frame (internal/transport/outbound:
+    // "the renderer treats it as a cue to reconnect"). Until this handler it
+    // treated it as nothing: the notification arrived, found no subscriber,
+    // and was discarded — so every frame that episode dropped was lost for
+    // good, with no resync and nothing said. Its INBOUND twin,
+    // control.saturated, was handled all along.
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+    let disconnects = 0
+    d.onDisconnect(() => {
+      disconnects++
+    })
+    const ws = socket()
+    const inFlight = d.call('history.query', {})
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'outbound.stalled' })
+
+    // The existing close path, deliberately: it rejects what is pending,
+    // publishes waiting, schedules the retry and fires onDisconnect — the
+    // same route the heartbeat's dead socket takes. Reconnecting is what
+    // makes every store re-read; a handler that only logged would leave the
+    // renderer confidently displaying state the backend has moved past.
+    expect(ws.closeCalled).toBe(true)
+    expect(disconnects).toBe(1)
+    expect(d.reconnectPending).toBe(true)
+    await expect(inFlight).rejects.toThrow()
+  })
 })
 
 describe('lifecycle event ordering', () => {

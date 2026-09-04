@@ -83,6 +83,11 @@ type Fact struct {
 	// reason rather than reported as sent" a property of the record and not
 	// of a log line.
 	Wake WakeOutcome
+	// AlsoOwed is how many OTHER facts of the same wave were undispatched at
+	// the moment this one reached the human. It exists because escalation
+	// coalesces per wave: five workers finishing while the coordinator is
+	// away must produce one card that says five, not five cards.
+	AlsoOwed int
 	// Escalated is set when the deadline elapsed and the human was reached.
 	// The fact stays open afterwards and the alarm is not re-armed: it has
 	// reached somebody, and re-arming would turn a backstop into a repeat.
@@ -145,6 +150,58 @@ func (systemAlarms) After(d time.Duration, f func()) func() {
 // composition root overrides it; nocx-dkawo.4 measures it.
 const defaultFactDeadline = 5 * time.Minute
 
+// Stats is what the mechanism costs, counted rather than assumed.
+//
+// §12 of the design names the number it is judged by: what fraction of facts
+// reaches the HUMAN rather than the coordinator. If most escalate, the
+// mechanism moved the work to a person and should say so out loud instead of
+// being described as orchestration. That number cannot be argued from a
+// design, so the record counts it.
+type Stats struct {
+	// Routine is facts recorded that woke nobody, because the coordinator
+	// had nothing to decide about them yet.
+	Routine int
+	// Judgement is facts that entered the undispatched set.
+	Judgement int
+	// Woken is wakes DELIVERED — never attempted, because an attempt that a
+	// pane refused reached nobody.
+	Woken int
+	// Escalated is facts that reached the human. This over Facts() is the
+	// fraction §12 asks for: coalescing means five facts can reach a person
+	// in one card, and all five DID reach them, because the card says five.
+	Escalated int
+	// Cards is how many times a person was interrupted. It is a different
+	// number from Escalated on purpose — one measures whether the mechanism
+	// is doing the work, the other measures what it costs someone's
+	// attention, and a design can be wrong in either direction alone.
+	Cards int
+	// Dispatched is facts the coordinator fetched for itself.
+	Dispatched int
+}
+
+// Facts is every fact the record has routed, which is the denominator of the
+// fraction.
+func (s Stats) Facts() int { return s.Routine + s.Judgement }
+
+// waveState is the per-wave half of the routing decision.
+//
+// The deadline stays PER FACT (D2) — nothing about coalescing changes what is
+// being timed. What coalesces is the two things that cost somebody something:
+// a wake costs the coordinator a turn, and an escalation costs a person their
+// attention, and neither should be spent twice for one situation.
+type waveState struct {
+	// owed is how many facts of this wave are undispatched.
+	owed int
+	// woken records that a wake was DELIVERED for this wave and the
+	// coordinator has not fetched since. A REFUSED wake deliberately does not
+	// set it: a refusal told the coordinator nothing, and the next fact is a
+	// fresh chance to catch a pane that is waiting for input.
+	woken bool
+	// escalated records that the human has been told about this wave and has
+	// not seen it cleared. A backstop that repeats is an alarm clock.
+	escalated bool
+}
+
 // factKey is (participant, kind): one participant produces at most one of
 // each fact, and a repeat of one it already owes judgement on is the same
 // fact rather than a second one.
@@ -166,6 +223,8 @@ type Backstop struct {
 	mu     sync.Mutex
 	open   map[factKey]*Fact
 	cancel map[factKey]func()
+	waves  map[ID]*waveState
+	stats  Stats
 }
 
 // BackstopOption configures a Backstop. The DEADLINE is the only thing the
@@ -199,11 +258,28 @@ func NewBackstop(lg log.Logger, w Waker, e Escalation, opts ...BackstopOption) *
 		now:      time.Now,
 		open:     make(map[factKey]*Fact),
 		cancel:   make(map[factKey]func()),
+		waves:    make(map[ID]*waveState),
 	}
 	for _, o := range opts {
 		o(b)
 	}
 	return b
+}
+
+// Routine records a fact the coordinator has nothing to decide about yet.
+//
+// It is one half of the routing table and it is deliberately a METHOD rather
+// than an early return inside Entered: a fact that woke nobody is still a
+// fact, and it is the denominator of the number §12 judges this design by. A
+// routing table whose routine branch left no trace could not report what
+// fraction of facts reached anybody.
+func (b *Backstop) Routine(f Fact) {
+	b.mu.Lock()
+	b.stats.Routine++
+	b.mu.Unlock()
+	b.log.Debug("wave: a fact was recorded and nobody was woken",
+		"participant", string(f.Participant), "wave", string(f.Wave),
+		"kind", string(f.Kind), "state", string(f.State))
 }
 
 // Entered admits a fact that needs judgement.
@@ -230,7 +306,32 @@ func (b *Backstop) Entered(ctx context.Context, f Fact) {
 	}
 	b.open[key] = &f
 	b.cancel[key] = b.alarms.After(b.deadline, func() { b.due(key) })
+	b.stats.Judgement++
+	ws := b.waveOf(f.Wave)
+	ws.owed++
+	// One wake per wave per undispatched run. The coordinator's answer to a
+	// wake is wave.holdings, which returns EVERYTHING its session holds — so
+	// a second wake before it has fetched would spend a turn to say what the
+	// first turn was already going to show. A refused wake does not count,
+	// because it said nothing.
+	alreadyWoken := ws.woken
 	b.mu.Unlock()
+
+	if alreadyWoken {
+		// Recorded rather than left blank. Every fact carries why it was or
+		// was not woken about; a zero outcome here would read as "nothing
+		// happened", which is the one thing that did not.
+		b.mu.Lock()
+		if cur, still := b.open[key]; still {
+			cur.Wake = WakeOutcome{
+				Reason: "the coordinator was already woken for this wave and has not fetched since",
+			}
+		}
+		b.mu.Unlock()
+		b.log.Debug("wave: the coordinator is already awake for this wave",
+			"participant", string(f.Participant), "wave", string(f.Wave))
+		return
+	}
 
 	out := b.attempt(ctx, f)
 
@@ -238,7 +339,22 @@ func (b *Backstop) Entered(ctx context.Context, f Fact) {
 	if cur, still := b.open[key]; still {
 		cur.Wake = out
 	}
+	if out.Delivered {
+		b.stats.Woken++
+		b.waveOf(f.Wave).woken = true
+	}
 	b.mu.Unlock()
+}
+
+// waveOf returns the wave's coalescing state, creating it if this is its first
+// undispatched fact. The caller holds the lock.
+func (b *Backstop) waveOf(id ID) *waveState {
+	ws, ok := b.waves[id]
+	if !ok {
+		ws = &waveState{}
+		b.waves[id] = ws
+	}
+	return ws
 }
 
 // attempt tries to start the coordinator's turn and reports honestly.
@@ -286,6 +402,10 @@ func wakeText(f Fact) string {
 }
 
 // due is the deadline elapsing on one fact.
+//
+// The fact is marked escalated whether or not the human is told, because it
+// HAS reached the end of its deadline and re-arming is not a thing this does.
+// Whether a card appears is the wave's decision, not the fact's.
 func (b *Backstop) due(key factKey) {
 	b.mu.Lock()
 	f, still := b.open[key]
@@ -294,20 +414,45 @@ func (b *Backstop) due(key factKey) {
 		return
 	}
 	f.Escalated = true
+	b.stats.Escalated++
+	ws := b.waveOf(f.Wave)
 	snapshot := *f
+	snapshot.AlsoOwed = ws.owed - 1
+	repeat := ws.escalated
+	ws.escalated = true
+	if !repeat {
+		b.stats.Cards++
+	}
 	b.mu.Unlock()
 
+	if repeat {
+		// The human has a card for this wave already and has not seen it
+		// cleared. Five workers finishing while the coordinator is away is
+		// one situation, and five cards for it is how an attention surface
+		// becomes noise — which is the failure the attention queue's own
+		// bead warns about in its first paragraph.
+		b.log.Info("wave: another fact went undispatched, and the human already has this wave",
+			"participant", string(snapshot.Participant), "wave", string(snapshot.Wave),
+			"also_owed", snapshot.AlsoOwed)
+		return
+	}
 	if b.escalate == nil {
 		b.log.Error("wave: a fact went undispatched past its deadline and this backend has nothing to tell anyone with",
 			"participant", string(snapshot.Participant), "wave", string(snapshot.Wave),
 			"kind", string(snapshot.Kind))
 		return
 	}
+	stats := b.Stats()
 	b.log.Warn("wave: a fact went undispatched past its deadline and is reaching the human",
 		"participant", string(snapshot.Participant), "wave", string(snapshot.Wave),
-		"kind", string(snapshot.Kind), "wake_delivered", snapshot.Wake.Delivered,
-		"wake_refused_because", snapshot.Wake.Reason)
-	// context.WithoutCancel of nothing: an alarm has no caller's context to
+		"kind", string(snapshot.Kind), "also_owed", snapshot.AlsoOwed,
+		"wake_delivered", snapshot.Wake.Delivered,
+		"wake_refused_because", snapshot.Wake.Reason,
+		// The number §12 judges the design by, on the one line that is
+		// written exactly when it moves. A fraction nobody reports is a
+		// fraction nobody measures.
+		"escalated", stats.Escalated, "of_facts", stats.Facts(), "cards", stats.Cards)
+	// context.Background of nothing: an alarm has no caller's context to
 	// inherit, and the escalation is the last thing that will happen about
 	// this fact.
 	b.escalate.Escalate(context.Background(), snapshot)
@@ -325,16 +470,57 @@ func (b *Backstop) Dispatched(ids ...ParticipantID) {
 	for _, id := range ids {
 		told[id] = true
 	}
+	var settled []ID
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for key, cancel := range b.cancel {
 		if !told[key.participant] {
 			continue
 		}
+		open, ok := b.open[key]
+		if !ok {
+			// open and cancel are written and deleted together, so this is
+			// unreachable; it is guarded rather than asserted because a nil
+			// dereference under this lock would take the whole record down.
+			continue
+		}
+		wave := open.Wave
 		cancel()
 		delete(b.cancel, key)
 		delete(b.open, key)
+		b.stats.Dispatched++
+		if ws, ok := b.waves[wave]; ok {
+			ws.owed--
+			if ws.owed <= 0 {
+				// The wave owes nothing, so the next fact starts fresh: it
+				// may wake the coordinator again, and it may raise a new
+				// card. Coalescing suppresses a REPEAT of a situation the
+				// person still has in front of them, never the next one.
+				delete(b.waves, wave)
+				// And the number §12 judges the design by is written down at
+				// the moment a wave settles, not only when something goes
+				// wrong: an escalated fraction read only off escalation lines
+				// has no denominator.
+				settled = append(settled, wave)
+			}
+		}
 	}
+	stats := b.stats
+	b.mu.Unlock()
+
+	for _, id := range settled {
+		b.log.Info("wave: the coordinator has judged everything this wave owed",
+			"wave", string(id),
+			"facts", stats.Facts(), "routine", stats.Routine,
+			"woken", stats.Woken, "escalated", stats.Escalated, "cards", stats.Cards)
+	}
+}
+
+// Stats is what the mechanism has cost so far. It is read by the escalation
+// log line, which is where the fraction §12 asks for is written down.
+func (b *Backstop) Stats() Stats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stats
 }
 
 // Open is what the record still owes judgement on, newest information and

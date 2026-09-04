@@ -292,18 +292,52 @@ func (r *Registrar) admit(ctx context.Context, id ParticipantID, l Liveness, kin
 	// The fact needs judgement, and it enters the set AFTER the record is
 	// settled — so what the coordinator is woken about is what the record
 	// says, never what the caller believed it was about to say.
-	r.needsJudgement(ctx, after, kind)
+	r.route(ctx, after, kind)
 	return after, nil
 }
 
-// needsJudgement puts an admitted fact into the undispatched set.
+// route decides what the record does about an admitted fact, and it is the
+// design question §4 of the bead calls the one that decides whether any of
+// this is useful.
 //
-// A refusal earlier in admit never reaches here, which is what it means for
-// this to be driven by the record rather than by the carrier: stale evidence
-// from a replaced incarnation and a late fact against an interrupted record
-// wake nobody, because neither changed anything anybody must judge.
-func (r *Registrar) needsJudgement(ctx context.Context, p Participant, kind FactKind) {
-	// The coordinator is read now and not when the deadline fires: by then
+// # The table
+//
+// A fact whose participant did not SUCCEED needs judgement, whatever else is
+// running: a worker that failed or died without saying anything is the
+// situation a coordinator exists to handle, and holding it until the wave is
+// finished would report a crash after the work that depended on it.
+//
+// A fact whose participant succeeded needs judgement only when NOTHING ELSE
+// IS RUNNING. "A worker finished with two still running" is routine — the
+// coordinator is waiting on all of them and has nothing to decide yet — and
+// waking it costs a turn to be told what it already expects. When the last
+// one lands, the wave is finished and nobody has read it, and that is the
+// moment the coordinator is for.
+//
+// # Why the wave's remaining work and not the fact alone
+//
+// The same fact means different things at different moments, and the record
+// is the only thing that knows which moment it is. A design that classified
+// facts in isolation would have to choose between waking on every completion
+// (which is the poll this whole mechanism replaced) and waking on none
+// (which loses the end of the wave). Nothing on a screen takes part in this:
+// what is read is the participant rows.
+func (r *Registrar) route(ctx context.Context, p Participant, kind FactKind) {
+	f := Fact{
+		Participant: p.ID,
+		Wave:        p.Wave,
+		Kind:        kind,
+		State:       p.State,
+		Task:        p.Task,
+	}
+	if !r.needsJudgement(ctx, p) {
+		// No coordinator is read for a routine fact: nobody is being
+		// addressed, so looking up who would be is a store call the answer
+		// does not depend on.
+		r.attention.Routine(f)
+		return
+	}
+	// The coordinator is read NOW and not when the deadline fires: by then
 	// the wave may hold nothing non-terminal.
 	coordinator, err := r.store.CoordinatorSession(ctx, p.Wave)
 	if err != nil {
@@ -313,14 +347,54 @@ func (r *Registrar) needsJudgement(ctx context.Context, p Participant, kind Fact
 		// honest half of the two.
 		coordinator = ""
 	}
-	r.attention.Entered(ctx, Fact{
-		Participant:        p.ID,
-		Wave:               p.Wave,
-		CoordinatorSession: coordinator,
-		Kind:               kind,
-		State:              p.State,
-		Task:               p.Task,
-	})
+	f.CoordinatorSession = coordinator
+	r.attention.Entered(ctx, f)
+}
+
+// needsJudgement is the table itself, kept apart from the plumbing above so
+// that what it decides can be read in one screen.
+func (r *Registrar) needsJudgement(ctx context.Context, p Participant) bool {
+	if !succeeded(p) {
+		return true
+	}
+	// "Is anything else still working?" — the participant this fact is about
+	// does not count, because a worker that just said it finished is not the
+	// reason its coordinator should wait.
+	open, err := r.store.NonTerminal(ctx, p.Wave)
+	if err != nil {
+		// A read that failed is not evidence that the wave is finished, and
+		// it is not evidence that it is not. Judgement is the fail-closed
+		// direction: a fact the coordinator did not need costs it one turn,
+		// and a fact it never learns about costs it the wave.
+		return true
+	}
+	for _, other := range open {
+		if other.ID != p.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// succeeded reports whether the participant, as the record now stands, has
+// given nobody anything to worry about.
+//
+// A live participant that declared OK counts as succeeded: it said it
+// finished and it is still there, so whether the coordinator is needed
+// depends on the rest of the wave rather than on it. Abandoned, failed and
+// interrupted do not, and neither does a declaration that reported failure —
+// which is the closest thing the record has to a worker ASKING, until the
+// mailbox gives it a word of its own.
+func succeeded(p Participant) bool {
+	if p.Declared != nil && !p.Declared.OK {
+		return false
+	}
+	switch p.State {
+	case StateFailed, StateAbandoned, StateInterrupted:
+		return false
+	default:
+		return true
+	}
 }
 
 // reduce derives the state from the FACT SET, never from the order the facts
@@ -371,6 +445,12 @@ func (r *Registrar) HeldBy(ctx context.Context, coordinatorSession string) ([]Pa
 	r.attention.Dispatched(ids...)
 	return held, nil
 }
+
+// Cost is what the mechanism has spent so far — the number §12 of the design
+// says the whole thing is judged by. It is a read on the record rather than a
+// log line to grep, because "measured and reported, not assumed" is an
+// acceptance criterion and a criterion nothing can query is prose.
+func (r *Registrar) Cost() Stats { return r.attention.Stats() }
 
 // Undispatched is what the record still owes judgement on. It is the read
 // behind "a wave with no undispatched facts wakes nobody": an empty answer

@@ -47,11 +47,15 @@ type waveParticipantResult struct {
 	Task    string `json:"task"`
 	Summary string `json:"summary,omitempty"`
 	// NeedsJudgement marks a worker something happened to that this
-	// coordinator has not been told about. It is what makes the wake
-	// actionable: nocx types "call wave.holdings", and this is what
-	// distinguishes the worker it was about from the four that have not
-	// moved. Omitted rather than false, so a list where nothing is new reads
-	// as nothing new.
+	// coordinator has not been told about AND that the routing table decided
+	// needs a decision. It is what makes the wake actionable: nocx types
+	// "call wave.holdings", and this is what distinguishes the worker it was
+	// about from the four that have not moved.
+	//
+	// A routine completion is deliberately NOT marked — a worker finishing
+	// while others still run does not need the coordinator, which is the
+	// whole of nocx-dkawo.4's table. Omitted rather than false, so a list
+	// where nothing needs deciding reads as nothing needing deciding.
 	NeedsJudgement bool `json:"needsJudgement,omitempty"`
 }
 

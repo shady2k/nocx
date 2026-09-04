@@ -544,6 +544,15 @@ func (e *waveEscalation) Escalate(ctx context.Context, f wave.Fact) {
 	if !f.Wake.Delivered {
 		body = "nocx could not reach the coordinator: " + f.Wake.Reason
 	}
+	// One card per wave, and the card says how many. Escalation coalesces
+	// (nocx-dkawo.4), so this is the whole situation rather than the first
+	// fact of it, and a person who reads "and 4 others" knows not to go
+	// looking for four more cards that were deliberately not raised.
+	if f.AlsoOwed == 1 {
+		body += " One other worker in this wave is also waiting."
+	} else if f.AlsoOwed > 1 {
+		body += fmt.Sprintf(" %d other workers in this wave are also waiting.", f.AlsoOwed)
+	}
 	title := fmt.Sprintf("A worker is waiting: %s", f.Task)
 	if f.Task == "" {
 		title = "A worker is waiting for its coordinator"

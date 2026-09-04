@@ -21,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/panegrid"
@@ -55,6 +56,9 @@ type wakeStand struct {
 	raiser      *recordingRaiser
 	chunks      []agentcapture.Chunk
 	waveID      wave.ID
+	// workerSessions is every session a worker has already been given, so a
+	// second registration waits for a session that did not exist yet.
+	workerSessions map[session.ID]bool
 }
 
 const wakeAgent = "claude"
@@ -125,6 +129,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 		waveStand: stand, coordinator: coordinator, coordPTY: coordPTY,
 		grid: grid, rules: rules, raiser: raiser,
 		chunks: chunks, waveID: waveID,
+		workerSessions: map[session.ID]bool{},
 	}
 }
 
@@ -148,6 +153,11 @@ func (w *wakeStand) driveTo(t *testing.T, atMs int64, want agentdriver.State) {
 
 // register starts one worker in the wake stand's wave and supplies the
 // enrolment its launcher would have sent.
+//
+// It waits for a session it has not seen before, so a second and a third
+// worker are not satisfied by the first one's session — a helper that matched
+// "any session that is not the coordinator" would let a fan-out test pass
+// while only one worker ever started.
 func (w *wakeStand) register(t *testing.T, task string) wave.Participant {
 	t.Helper()
 	type outcome struct {
@@ -163,17 +173,20 @@ func (w *wakeStand) register(t *testing.T, task string) wave.Participant {
 		done <- outcome{p, err}
 	}()
 	var sid session.ID
-	waittest.WaitFor(t, "the worker's session to exist", func() bool {
+	waittest.WaitFor(t, "a new worker session to exist", func() bool {
 		for _, s := range w.reg.List() {
-			if s.ID() != w.coordinator {
-				sid = s.ID()
-				return true
+			if s.ID() == w.coordinator || w.workerSessions[s.ID()] {
+				continue
 			}
+			sid = s.ID()
+			return true
 		}
 		return false
 	})
-	w.lanes.register("lane-worker", string(sid))
-	w.enrol.enrolled(sid, "lane-worker")
+	w.workerSessions[sid] = true
+	lane := lifecycle.LaneID("lane-worker-" + string(sid))
+	w.lanes.register(lane, string(sid))
+	w.enrol.enrolled(sid, string(lane))
 	got := <-done
 	if got.err != nil {
 		t.Fatalf("register: %v", got.err)
@@ -601,5 +614,129 @@ func TestACoordinatorWhoseSessionIsGoneIsNotReportedAsWoken(t *testing.T) {
 	}
 	if open[0].Wake.Reason == "" {
 		t.Fatalf("the refusal carries no reason")
+	}
+}
+
+// ── fan-out, through the real seams (nocx-dkawo.4) ────────────────────────
+
+// THREE WORKERS RUN, and the coordinator's pane stays quiet until the wave
+// arrives.
+//
+// This is the routing table asserted where a person would feel it: three
+// real sessions in three real panes, and the coordinator's own pty receiving
+// nothing at all for the first two completions and the wake for the third.
+// The unit tests decide the table; this decides that the table is the one
+// wired into the product.
+func TestThreeWorkersRunAndTheCoordinatorIsWokenOnceAtTheEnd(t *testing.T) {
+	ctx := context.Background()
+	w := newWakeStand(t)
+	w.driveTo(t, 11000, agentdriver.StateFreeText)
+
+	workers := []wave.Participant{
+		w.register(t, "read AGENTS.md"),
+		w.register(t, "read the architecture"),
+		w.register(t, "read the vision"),
+	}
+	if workers[0].ID == workers[1].ID || workers[1].ID == workers[2].ID {
+		t.Fatalf("three registrations produced fewer than three participants: %v", workers)
+	}
+
+	quiet := len(w.coordPTY.read())
+	finishWorker(t, w, workers[0])
+	finishWorker(t, w, workers[1])
+	if got := w.coordPTY.read()[quiet:]; got != "" {
+		t.Fatalf("the coordinator was typed into while a worker was still running: %q", got)
+	}
+	if got := len(w.record.Undispatched()); got != 0 {
+		t.Fatalf("undispatched while a worker is still running = %d, want 0", got)
+	}
+
+	finishWorker(t, w, workers[2])
+	var typed string
+	waittest.WaitFor(t, "the wave's end to reach the coordinator's pty", func() bool {
+		typed = w.coordPTY.read()[quiet:]
+		return strings.HasSuffix(typed, "\r")
+	})
+	if !strings.Contains(typed, "wave.holdings") {
+		t.Fatalf("the coordinator was not told what to call: %q", typed)
+	}
+
+	// One wake for the wave, not one per fact: the third worker produces both
+	// a declaration and an exit, and both need judgement once nothing else is
+	// running.
+	if strings.Count(typed, "wave.holdings") != 1 {
+		t.Fatalf("the coordinator was woken %d times for one wave: %q",
+			strings.Count(typed, "wave.holdings"), typed)
+	}
+
+	// And the number the design is judged by is a read, not a guess.
+	cost := w.record.Cost()
+	if cost.Facts() != 6 {
+		t.Fatalf("facts = %d, want six (three workers, two facts each)", cost.Facts())
+	}
+	if cost.Routine != 4 {
+		t.Fatalf("routine = %d, want the four facts nobody was woken for", cost.Routine)
+	}
+	if cost.Woken != 1 {
+		t.Fatalf("woken = %d, want one delivered wake", cost.Woken)
+	}
+	if cost.Escalated != 0 {
+		t.Fatalf("escalated = %d; the coordinator was reached, so nobody should have been", cost.Escalated)
+	}
+
+	if _, err := w.record.HeldBy(ctx, string(w.coordinator)); err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if got := len(w.record.Undispatched()); got != 0 {
+		t.Fatalf("undispatched after the coordinator asked = %d, want 0", got)
+	}
+}
+
+// finishWorker declares success and closes the worker's real session, which
+// is the two facts arriving the way the product produces them.
+func finishWorker(t *testing.T, w *wakeStand, p wave.Participant) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := w.record.Declared(ctx, p.ID, p.Liveness,
+		wave.Declaration{OK: true, Summary: "done", At: time.Now()}); err != nil {
+		t.Fatalf("declare %s: %v", p.ID, err)
+	}
+	if err := w.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
+		t.Fatalf("close %s: %v", p.ID, err)
+	}
+	waittest.WaitFor(t, "the worker's exit to reach the record", func() bool {
+		stored, err := w.db.Waves().Participant(ctx, p.ID)
+		return err == nil && stored.State == wave.StateCompleted
+	})
+}
+
+// One card per wave, and the card says how many — so a person who reads it
+// knows the other four were deliberately not raised rather than lost.
+func TestTheEscalationSaysHowManyOthersAreWaiting(t *testing.T) {
+	raiser := &recordingRaiser{}
+	esc := &waveEscalation{raise: raiser, log: log.NewSlogAdapter(nil)}
+	for _, tc := range []struct {
+		also int
+		says string
+	}{
+		{also: 0, says: ""},
+		{also: 1, says: "One other worker"},
+		{also: 4, says: "4 other workers"},
+	} {
+		raiser.events = nil
+		esc.Escalate(context.Background(), wave.Fact{
+			Participant: "p-1", CoordinatorSession: "sess-coordinator", Task: "read it",
+			AlsoOwed: tc.also, Wake: wave.WakeOutcome{Attempted: true, Delivered: true},
+		})
+		body := raiser.events[0].Body
+		if tc.says == "" {
+			if strings.Contains(body, "also waiting") {
+				t.Fatalf("a single-fact card counts others that are not there: %q", body)
+			}
+			continue
+		}
+		if !strings.Contains(body, tc.says) {
+			t.Fatalf("body = %q, want it to say %q", body, tc.says)
+		}
 	}
 }

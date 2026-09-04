@@ -399,7 +399,12 @@ func testLiveness() Liveness {
 	}
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessBound(t, 2) }
+
+// newHarnessBound is newHarness with the participant bound named, so a
+// fan-out test can hold more than one worker at a time without every other
+// test's bound moving with it.
+func newHarnessBound(t *testing.T, bound int) *harness {
 	t.Helper()
 	h := &harness{
 		store:  newMemStore(),
@@ -419,7 +424,7 @@ func newHarness(t *testing.T) *harness {
 	backstop.alarms = h.alarms
 	h.reg = NewRegistrar(h.store, h.spawn, h.enrol, h.sup,
 		WithBackstop(backstop),
-		WithBound(2),
+		WithBound(bound),
 		WithEnrolmentDeadline(50*time.Millisecond),
 	)
 	h.reg.newID = func() ParticipantID {

@@ -42,7 +42,7 @@
               },
               "needsJudgement": {
                 "type": "boolean",
-                "description": "True when something happened to this worker that you have not been told about until now — it reported, or its process ended. Absent means nothing is new since you last asked. Reading this list is what clears it, so what you see here you will not be shown twice."
+                "description": "True when something happened to this worker that NEEDS YOUR DECISION and you have not been told about it yet. Absent covers two ordinary cases: nothing has happened, or what happened was routine — a worker finishing successfully while others are still running does not need you, and is not marked. Reading this list is what clears it, so what you see here you will not be shown twice."
               }
             }
           }

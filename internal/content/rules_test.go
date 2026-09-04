@@ -746,3 +746,35 @@ func TestADocumentWhoseRulesShareAnIDDoesNotParse(t *testing.T) {
 		t.Fatal("a rule claiming a source outside the two constants parsed")
 	}
 }
+
+func TestAStaleRefusalStillRefuses(t *testing.T) {
+	// The version guard exists because a PERMIT is a claim about what a
+	// command does, and a later reading of commands can falsify that claim.
+	// A refusal makes no such claim. A richer reading can only make a loose
+	// refusal cover MORE, which is the safe direction — the same asymmetry
+	// that lets a HasFeature selector over-match. So a refusal saved under an
+	// older reading keeps refusing, and never falls back to a row that
+	// permits: a version bump nobody performed is not a place to lose a
+	// safety control.
+	permitEverything := content.EffectPolicy{
+		Observe:           content.EffectRow{Decision: content.DecisionPermit},
+		MutateDestructive: content.EffectRow{Decision: content.DecisionPermit},
+	}
+	stale := content.InvocationRule{
+		ID:               "no-curl",
+		Selector:         content.InvocationSelector{Program: "curl"},
+		Decision:         content.DecisionRefuse,
+		CreatedAt:        time.Unix(1700000000, 0).UTC(),
+		Source:           content.SourceWritten,
+		EvaluatorVersion: content.EvaluatorVersion - 1,
+	}
+	policy := permitEverything.WithRule(stale)
+
+	curl := content.Invocation{Commands: [][]string{{"curl", "https://example.com"}}, Parsed: true}
+	if got := policy.DecisionForInvocation(content.EffectObserve, curl); got != content.DecisionRefuse {
+		t.Errorf("curl = %q, want refuse — a refusal saved under an older reading went inert and the permitting row took over", got)
+	}
+	if got := policy.RulesNeedingConfirmation(); len(got) != 0 {
+		t.Errorf("RulesNeedingConfirmation() = %+v, want none — a refusal is never waiting on a person to re-agree to it", got)
+	}
+}

@@ -292,7 +292,9 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 			// ConfirmRule). An EXACT rule is never skipped here: it
 			// names the literal command line the person was shown,
 			// and that does not move when the classifier learns to
-			// see more.
+			// see more. Nor is a REFUSAL: only a permit is a claim a
+			// later reading can falsify, and inerting a refusal would
+			// drop it through to a row that may permit.
 			continue
 		}
 		if rule.Decision == DecisionPermit && rule.GrantedUnder != "" && rule.GrantedUnder != e {

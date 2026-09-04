@@ -144,7 +144,18 @@ type InvocationRule struct {
 // the classifier makes of them; an Exact rule names the literal command line
 // the person read, and its meaning does not move when the classifier learns
 // to see more.
+//
+// And only a PERMIT, which is the same asymmetry the selectors themselves
+// carry: a permit is a claim about what a command does, and a later reading
+// can falsify that claim, so it waits for a person. A refusal — or an ask,
+// which is a refusal to decide — makes no such claim, and a richer reading
+// can only make it cover MORE, which is the safe direction. Inerting one
+// would drop it through to a row that may permit, so a version bump nobody
+// performed would delete a safety control. It never does.
 func (r InvocationRule) needsConfirmation() bool {
+	if r.Decision != DecisionPermit {
+		return false
+	}
 	if r.Selector.Program == "" && r.Selector.HasFeature == nil {
 		return false
 	}

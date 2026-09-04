@@ -228,15 +228,66 @@ spends money the person did not ask to spend.
 The audit reads the bundle and produces a report a person reads. Its verdict
 never changes what policy permits.
 
-## 8. What is still open
+## 8. A skill arrives inert, and is turned on after the person has looked
 
-1. **`scripts/`** — whether a bundle may carry executable text at all. §6 puts
-   the file into the approval question; §3 leaves running it to policy like any
-   other command. Not answered here.
-2. **Which sentence the prompt keeps** (§2). A wording decision, not an
-   architecture one, but somebody has to make it.
+The owner's decision, and it settles what §5 and §7 left open.
 
-## 9. Provenance of this document
+**The bundle travels whole**, `scripts/` included. **It lands disabled.** The
+person opens it in Settings, sees what it is made of with any file readable,
+asks for an audit if they want one, and turns it on themselves. **If anything
+on disk changes afterwards, it stops being on.**
+
+That is what makes carrying executable text defensible, and nothing weaker
+would. The objection to `scripts/` was never that a script is dangerous — a
+skill's body can tell the assistant to write one and run it, so a ban buys no
+incapability. The objection was VISIBILITY: the body is read at install, while
+a bundled script would first be seen when the assistant reached it, possibly
+weeks later. A review that happens after the bytes are on disk and before the
+skill can act removes that gap exactly.
+
+Note what it does NOT copy. hermes allows `scripts/` too, and pays for it at a
+different counter: `tools/skills_guard.py` scans every downloaded skill
+**before installation** and blocks on any finding for a `community` source,
+where "trusted" is a hardcoded list of two organisations. Our scan is
+deliberately advisory and never refuses, so taking "scripts are allowed" from
+that design without taking "any finding blocks" would be taking its permissive
+half alone. What we trade in instead is the person's own look, which is why
+the look has to be real: on the page, later, with the files in front of them.
+
+Three consequences, and each is a decision rather than an implementation
+detail.
+
+**Disabled applies to `installed` and to nothing else.** A managed skill is one
+the assistant wrote because the person asked; an authored one the person wrote.
+Both are inside the boundary, and making somebody confirm what they just did is
+ceremony. The roots already tell them apart.
+
+**The effective state is computed, never written.** Enabling records the
+digest; discovery reports whether the bytes still match; what the assistant is
+offered is `enabled && !changed`. The alternative — writing `enabled = false`
+on noticing a change — makes listing the skills a WRITE, and races the person
+who just turned one on. This is `blocked` on a bead, for the same reason
+AGENTS.md gives: computed, never stored. It follows that restoring a file
+byte-for-byte brings the skill back by itself, which is right — the same bytes
+carry the same review — and is a consequence worth having said out loud.
+
+**The audit is a button, not a page load.** It is a model call, which is money;
+`internal/profile/role.go` already refuses to spend that silently, insisting an
+unassigned role falls back "with a note in the UI, never silently: it spends
+money the person did not ask to spend". Opening a skill's card must not cost
+anything.
+
+And the file list returns. It was cut from the viewer's child because a skill
+was exactly one file and a list would have been empty on every row the product
+could produce; with bundles there is something to list, and it arrives with
+them.
+
+## 9. What is still open
+
+Nothing from the original five. §2's wording question was answered and shipped
+(`nocx-5vztb`); §5's acquisition and §7's `scripts/` are settled above.
+
+## 10. Provenance of this document
 
 Written after reading `hermes` (`tools/skills_hub.py`: nine `SkillSource`
 implementations, taps, a lock file, registry-only ZIP) and `oh-my-pi` (no remote

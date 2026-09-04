@@ -501,7 +501,19 @@ export function SkillsSection(props: SkillsSectionProps) {
     if (ask.kind === 'unreadable') return { kind: 'unreadable', message: ask.message }
     switch (ask.result.refusal) {
       case '':
-        return { kind: 'text', text: ask.result.text }
+        // THE FINDINGS TRAVEL WITH THE BYTES, and they came back from the
+        // same read: opening a file to look at it costs no model call, and
+        // learning that a line in it matched must not cost one either
+        // (nocx-872jc.4). A refused file's branch below carries none,
+        // because nothing was read, so nothing was scanned.
+        return {
+          kind: 'text',
+          text: ask.result.text,
+          marks: ask.result.findings.map((finding) => ({
+            lineNumber: finding.lineNumber,
+            label: scanPatternWords(finding.patternId),
+          })),
+        }
       case 'not-text':
         return { kind: 'not-text' }
       case 'too-large':

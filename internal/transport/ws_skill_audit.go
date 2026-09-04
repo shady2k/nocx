@@ -101,7 +101,7 @@ type skillAuditResult struct {
 	// self-report about a document only it can see; these are checkable
 	// against skills.file, which is what makes the prose beside them worth
 	// reading.
-	Findings []skill.AuditFinding `json:"findings"`
+	Findings []skill.Finding `json:"findings"`
 }
 
 type skillAuditHandlers struct {

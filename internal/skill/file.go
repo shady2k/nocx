@@ -72,6 +72,23 @@ type FileResult struct {
 	Text     string      `json:"text"`
 	Refusal  FileRefusal `json:"refusal"`
 	MaxBytes int         `json:"maxBytes"`
+	// Findings are the static scan's matches over EXACTLY the bytes in Text,
+	// so the line each names is a line of what is on screen and a viewer can
+	// mark it where it sits rather than restating it underneath.
+	//
+	// IT IS SCANNED HERE, in the read, and that is the whole reason this
+	// field exists rather than the viewer asking the audit. An audit spends a
+	// model call, and a person opening a support file to look at it must not
+	// have to buy a model reading to learn that a line in it matched
+	// (nocx-872jc.4). The scan is pure, local and already run on every other
+	// path a skill's bytes travel; running it here is one capability in a
+	// third place, not a fourth answer to what a finding is.
+	//
+	// A REFUSED FILE HAS NONE, and that is a fact about bytes rather than a
+	// policy: nothing was read, so nothing was scanned. It is never nil —
+	// no matches is [] — and the emptiness of it says nothing about the file
+	// either way, which is why a viewer must not draw an all-clear from it.
+	Findings []Finding `json:"findings"`
 }
 
 // File answers with one file of one discovered skill. It answers for ANY
@@ -105,6 +122,7 @@ func File(roots []Root, name, relPath string) (FileResult, error) {
 		Path:       at.path,
 		Provenance: at.skill.Provenance,
 		MaxBytes:   MaxReadBytes,
+		Findings:   []Finding{},
 	}
 	switch {
 	case len(data) > MaxReadBytes:
@@ -116,6 +134,10 @@ func File(roots []Root, name, relPath string) (FileResult, error) {
 		out.Refusal = FileRefusalNotText
 	default:
 		out.Text = string(data)
+		// The RESOLVED path, not the requested one, for the reason Name and
+		// Path are resolved above: the finding is about the file that was
+		// read, and a viewer marks the bytes it is showing.
+		out.Findings = Scan(at.path, data)
 	}
 	return out, nil
 }

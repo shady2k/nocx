@@ -32,6 +32,25 @@
  * `skills.file` exists at all; a tab bound to a filesystem could not read the
  * provenance this component's first caller must be able to read.
  *
+ * A FINDING IS MARKED WHERE IT SITS, and that is the whole reason `marks`
+ * lives on the `text` branch of the outcome and nowhere else (nocx-872jc.4).
+ * A scan match used to reach a person only as a card in a list underneath the
+ * file — a line number and a quoted copy of a line, beside the file that
+ * already holds it — so the reader had to count lines to find the thing being
+ * talked about, and a bundled `scripts/setup.sh` had no list at all. Here the
+ * line is highlighted IN the bytes: the evidence and the file are one thing,
+ * which is what "in the file where it sits" means. A refused file has no
+ * marks BY CONSTRUCTION rather than by a caller remembering — there is no
+ * field to put them in on the other three branches — because an empty
+ * affordance beside a file nothing read would say "nothing was found", which
+ * is a verdict, and nothing here gives verdicts.
+ *
+ * THE KIT DOES NOT KNOW WHAT A PATTERN IS. A mark is a line number and the
+ * caller's own words for it, for the reason `facts` is the caller's: the
+ * words for a skill scan's pattern ids belong to the surface that has the
+ * vocabulary, and a kit that imported them would be the second place a
+ * pattern id is turned into English.
+ *
  * THE THREE REFUSALS ARE DRAWN, NEVER THROWN, and they are drawn in two
  * tones because they are two different kinds of true sentence. `not-text` and
  * `too-large` describe a file that IS there — nothing was refused about the
@@ -43,15 +62,34 @@
  * instead of what happened.
  */
 import { Show } from 'solid-js'
+import type { JSX } from 'solid-js'
 import { CodeBlock } from './code-block'
 import { FactList, type Fact } from './fact-list'
 import { StatusCard, type StatusCardTone } from './status-card'
 import { formatBytes } from './format-bytes'
 
+/**
+ * One line of the file worth pointing at, and the caller's words for why.
+ *
+ * `lineNumber` counts from 1 over the same text this outcome carries, which
+ * is the only way the mark can land on the line the producer meant. `label`
+ * is what the mark says about itself when a reader hovers or asks — the
+ * caller's sentence, never one composed here.
+ */
+export interface FileReadoutMark {
+  lineNumber: number
+  label: string
+}
+
 /** What is on screen for this file. One member per true sentence. */
 export type FileReadoutOutcome =
-  /** The file, verbatim. `''` is an empty FILE, not an absent one. */
-  | { kind: 'text'; text: string }
+  /**
+   * The file, verbatim. `''` is an empty FILE, not an absent one. `marks`
+   * are the lines worth pointing at, and they exist ONLY here: a file whose
+   * bytes were not read has nothing to mark, and a slot for marks on those
+   * branches would be an affordance that reads as "nothing found".
+   */
+  | { kind: 'text'; text: string; marks?: readonly FileReadoutMark[] }
   /** The bytes exist and are not something that can be shown as lines. */
   | { kind: 'not-text' }
   /** The file is bigger than the budget the read was measured against. */
@@ -116,6 +154,42 @@ function refusalFor(outcome: FileReadoutOutcome): Refusal | null {
   }
 }
 
+/**
+ * The file's bytes with the marked lines wrapped, or the plain string when
+ * nothing is marked.
+ *
+ * The newlines are emitted BETWEEN lines rather than appended to them, so the
+ * children reassemble the text byte for byte: a `<pre>` that gained or lost a
+ * trailing newline would be showing something other than the file. And the
+ * label goes on `title` rather than into a visually-hidden span inside the
+ * block, because anything inside the `<pre>` is part of what a reader selects
+ * and copies — our sentence would end up pasted into the middle of somebody's
+ * script.
+ */
+function markedText(text: string, marks: readonly FileReadoutMark[]): JSX.Element {
+  const said = new Map<number, string[]>()
+  for (const mark of marks) {
+    const at = said.get(mark.lineNumber)
+    if (at) at.push(mark.label)
+    else said.set(mark.lineNumber, [mark.label])
+  }
+  const out: JSX.Element[] = []
+  text.split('\n').forEach((line, index) => {
+    if (index > 0) out.push('\n')
+    const labels = said.get(index + 1)
+    out.push(
+      labels ? (
+        <mark class="ui-file-readout__match" title={labels.join(' \u00b7 ')}>
+          {line}
+        </mark>
+      ) : (
+        line
+      ),
+    )
+  })
+  return out
+}
+
 /** One file, as a person reads it: read-only, and never blank. */
 export function FileReadout(props: FileReadoutProps) {
   const refusal = (): Refusal | null => refusalFor(props.outcome)
@@ -123,6 +197,23 @@ export function FileReadout(props: FileReadoutProps) {
    *  an empty file still gets a block: an empty reader and a refused one must
    *  not look the same. */
   const bytes = (): string | null => (props.outcome.kind === 'text' ? props.outcome.text : null)
+  const marks = (): readonly FileReadoutMark[] =>
+    props.outcome.kind === 'text' ? (props.outcome.marks ?? []) : []
+  /**
+   * The key to the highlighting, drawn only when something is highlighted.
+   *
+   * It is NOT a summary of the findings and deliberately carries no line
+   * numbers: those are in the file, on the lines themselves, and a list of
+   * them underneath is exactly the arrangement this component was changed to
+   * stop. What a reader cannot get from a highlight alone is what the colour
+   * MEANS, so that is all this says. `warning` and never `danger`, the tone
+   * the scan's other three surfaces already use, because a mark is evidence
+   * to read and never a refusal.
+   */
+  const legend = (): string => {
+    const words = [...new Set(marks().map((mark) => mark.label))]
+    return words.length === 0 ? '' : words.join(' \u00b7 ')
+  }
 
   return (
     <div class="ui-file-readout" data-state={props.outcome.kind}>
@@ -132,8 +223,19 @@ export function FileReadout(props: FileReadoutProps) {
           <StatusCard tone={said().tone} title={said().title} description={said().description} />
         )}
       </Show>
+      <Show when={legend()}>
+        {(words) => (
+          <StatusCard
+            tone="warning"
+            title="Highlighted lines below matched a static scan"
+            description={`${words()}. The match is highlighted where it sits, in the bytes themselves \u2014 it is evidence to read there, not a refusal, and nothing changed because a pattern matched. Lines nothing matched are not lines anything has vouched for.`}
+          />
+        )}
+      </Show>
       <Show when={bytes() !== null}>
-        <CodeBlock ariaLabel={props.ariaLabel}>{bytes() ?? ''}</CodeBlock>
+        <CodeBlock ariaLabel={props.ariaLabel}>
+          {marks().length === 0 ? (bytes() ?? '') : markedText(bytes() ?? '', marks())}
+        </CodeBlock>
       </Show>
     </div>
   )

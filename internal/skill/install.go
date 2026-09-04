@@ -191,8 +191,15 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// What was adopted, and what the scan had to say about it, in the log the
 	// person's machine keeps. A finding is never a refusal; it is also not
 	// something that should exist only in a dialog that has since closed.
+	//
+	// The count is over the WHOLE BUNDLE, the same reckoning the dialog was
+	// showing a moment ago. It used to count the document's findings alone,
+	// which after nocx-872jc.4 would have written "findings=0" into the
+	// durable record for exactly the install whose bundled script matched —
+	// a log that disagrees with the dialog it is the record of.
 	slog.Info("skill: installed from a URL",
-		"skill", document.Name, "url", rawURL, "findings", len(document.Findings), "files", len(files)+1)
+		"skill", document.Name, "url", rawURL,
+		"findings", len(document.Findings)+len(scanBundleFiles(files)), "files", len(files)+1)
 	return InstallResult{Name: document.Name, Provenance: ProvenanceInstalled}, nil
 }
 

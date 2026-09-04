@@ -819,10 +819,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <StatusCard
                 tone="warning"
                 title={scanPatternWords(finding().patternId)}
-                description={`Line ${finding().lineNumber} of the proposed body matched the static scan. It is evidence to read beside the bytes, not a refusal — the write is still yours to allow or refuse.`}
+                description={`Line ${finding().lineNumber} of ${finding().path} matched the static scan. It is evidence to read beside the bytes, not a refusal — the write is still yours to allow or refuse.`}
               />
               <CodeBlock
-                ariaLabel={`Line ${finding().lineNumber} of the proposed body, which the static scan matched`}
+                ariaLabel={`Line ${finding().lineNumber} of ${finding().path}, which the static scan matched`}
               >
                 {finding().line}
               </CodeBlock>

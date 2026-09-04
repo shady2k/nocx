@@ -82,19 +82,6 @@ type AuditOmission struct {
 	Reason AuditOmissionReason `json:"reason"`
 }
 
-// AuditFinding is one scan match, in the file it matched in.
-//
-// The three fields of Finding are embedded rather than restated, for the
-// reason scan.go gives for declaring them once: a finding travelling in an
-// approval, a finding travelling in a preview and a finding travelling in an
-// audit are one fact, and three shapes for one fact is how they come to
-// disagree. What an audit ADDS is the path, because a line number counted
-// through a document made of four files points at nothing a person can open.
-type AuditFinding struct {
-	Path string `json:"path"`
-	Finding
-}
-
 // AuditMaterial is one skill's bytes as an audit reads them: what was read,
 // what was left out, what the scan matched, and the single document those
 // bytes were composed into.
@@ -115,9 +102,13 @@ type AuditMaterial struct {
 	// Omitted are the paths that are not, each with its reason. Never nil.
 	Omitted []AuditOmission `json:"omitted"`
 	// Findings are the scan's matches over EXACTLY the bytes in Document —
-	// a file that was omitted was not read, so it contributes none. Never
-	// nil: no matches is [].
-	Findings []AuditFinding `json:"findings"`
+	// a file that was omitted was not read, so it contributes none. Each
+	// names the file it matched in, because a line number counted through a
+	// document made of four files points at nothing a person can open; that
+	// path is a field of Finding itself (scan.go) rather than a wrapper this
+	// package puts round one, so the audit's findings and the preview's are
+	// the same shape. Never nil: no matches is [].
+	Findings []Finding `json:"findings"`
 	// Document is what a model is given. It is not on the wire — the person
 	// reads the files through skills.file, which is the same bytes without a
 	// second copy of them crossing the socket.
@@ -171,7 +162,7 @@ func Audit(roots []Root, name string) (AuditMaterial, error) {
 		Provenance: manifest.Provenance,
 		Read:       []string{},
 		Omitted:    []AuditOmission{},
-		Findings:   []AuditFinding{},
+		Findings:   []Finding{},
 		MaxBytes:   MaxAuditBytes,
 	}
 	// The files the manifest could not name are already outside the document
@@ -207,9 +198,7 @@ func Audit(roots []Root, name string) (AuditMaterial, error) {
 		doc.Write(data)
 		doc.WriteByte('\n')
 		out.Read = append(out.Read, path)
-		for _, f := range Scan(data) {
-			out.Findings = append(out.Findings, AuditFinding{Path: path, Finding: f})
-		}
+		out.Findings = append(out.Findings, Scan(path, data)...)
 	}
 	if len(out.Read) == 0 {
 		// Every file was refused, which for a discovered skill means SKILL.md

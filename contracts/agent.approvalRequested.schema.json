@@ -90,11 +90,12 @@
       }
     },
     "finding": {
-      "description": "Skill write only: the first static scan finding in the proposed body.",
+      "description": "Skill write only: the first static scan finding in the proposed body, naming the file it was found in \u2014 always SKILL.md here, because that is the only file skills.create and skills.update write. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.",
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["patternId", "line", "lineNumber"],
+      "required": ["path", "patternId", "line", "lineNumber"],
       "properties": {
+        "path": { "type": "string", "minLength": 1 },
         "patternId": { "type": "string", "minLength": 1 },
         "line": { "type": "string" },
         "lineNumber": { "type": "integer", "minimum": 1 }

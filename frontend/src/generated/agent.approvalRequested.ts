@@ -74,9 +74,10 @@ export interface AgentApprovalRequested {
     id: string
   } | null
   /**
-   * Skill write only: the first static scan finding in the proposed body.
+   * Skill write only: the first static scan finding in the proposed body, naming the file it was found in — always SKILL.md here, because that is the only file skills.create and skills.update write. The path is stated rather than left out so this finding is the same shape skills.preview, skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
    */
   finding?: {
+    path: string
     patternId: string
     line: string
     lineNumber: number

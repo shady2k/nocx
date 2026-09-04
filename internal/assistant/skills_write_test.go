@@ -237,7 +237,7 @@ func TestSkillsWriteDTOConformsToContracts(t *testing.T) {
 			result := skillWriteResult{Status: tc.status, Name: "deploy"}
 			if tc.name != "delete" {
 				result.Finding = &skill.Finding{
-					PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
+					Path: "SKILL.md", PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
 				}
 			}
 			raw, err := json.Marshal(result)

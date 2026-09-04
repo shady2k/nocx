@@ -319,6 +319,23 @@ func (s *Store) fetchBundle(ctx context.Context, docURL, body string) ([]bundleF
 	return files, nil
 }
 
+// scanBundleFiles is the support files' half of a preview's findings: every
+// text file of the bundle, scanned under its own path.
+//
+// EVERY file, and no filter on the name. The bundle is UTF-8 and NUL-free by
+// the time it gets here (fetchBundle refuses anything else), so everything in
+// it is text somebody can read and everything in it is therefore scannable;
+// a rule that scanned `references/` and skipped `scripts/`, or the reverse,
+// would be a second opinion about which of a skill's files matter, held in
+// one place and contradicted by the manifest the person was just shown.
+func scanBundleFiles(files []bundleFile) []Finding {
+	findings := make([]Finding, 0)
+	for _, file := range files {
+		findings = append(findings, Scan(file.Path, []byte(file.Text))...)
+	}
+	return findings
+}
+
 // digestOfBundle is the record an approval is kept as: SKILL.md and every
 // support file, each framed with its own length so no rearrangement of paths
 // and contents can produce the same sum.

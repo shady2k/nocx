@@ -229,22 +229,39 @@ export function SkillsInstallDialog(props: SkillsInstallDialogProps) {
                 the skill, like its name and its description, and not a
                 reading of its contents. */}
             <MarkerList items={manifest()} />
-            {/* EVERY FINDING, ABOVE THE BODY IT IS ABOUT. Warning and never
-                danger: the scan's contract is that a finding is evidence and
-                never a refusal (internal/skill/scan.go), so a tone claiming
-                otherwise would remake a decision the spec already made. The
-                matched line goes in a CodeBlock because it is verbatim
-                evidence quoted out of the body, not prose about it. */}
+            {/* EVERY FINDING IN THE WHOLE BUNDLE, above the body it is about.
+                Each NAMES ITS FILE (nocx-872jc.4), because the manifest above
+                is no longer a list of names whose contents nothing looked at:
+                a bundled scripts/setup.sh is scanned like SKILL.md, and a
+                finding that said only "line 4" would leave the reader with
+                four files and one number. Warning and never danger: the
+                scan's contract is that a finding is evidence and never a
+                refusal (internal/skill/scan.go), so a tone claiming otherwise
+                would remake a decision the spec already made. The matched
+                line goes in a CodeBlock because it is verbatim evidence
+                quoted out of the file, not prose about it — and it is quoted
+                because a support file's bytes are not on this dialog at all,
+                so there is nothing here to mark in place.
+
+                THE NUMBER COUNTS THE FILE, NOT THE BLOCK BELOW. SKILL.md's
+                findings are counted over the whole served document,
+                frontmatter included, because that is the file the finding
+                names — while the block below is the BODY, which is what a
+                person adopting instructions reads. So the sentence says
+                which of the two it is counting rather than leaving a reader
+                to assume it indexes the block: what makes the number worth
+                carrying is that it is checkable against the address they
+                pasted, and the verbatim line beside it is checkable here. */}
             <For each={preview().findings}>
               {(finding) => (
                 <Stack>
                   <StatusCard
                     tone="warning"
                     title={scanPatternWords(finding.patternId)}
-                    description={`Line ${finding.lineNumber} of this skill's body matched the static scan. It is evidence to read beside the bytes, not a refusal — installing is still yours to do or not.`}
+                    description={`Line ${finding.lineNumber} of ${finding.path}, counted from the top of that file as it is served, matched the static scan. It is evidence to read beside the bytes, not a refusal — installing is still yours to do or not.`}
                   />
                   <CodeBlock
-                    ariaLabel={`Line ${finding.lineNumber} of the skill's body, which the static scan matched`}
+                    ariaLabel={`Line ${finding.lineNumber} of ${finding.path}, which the static scan matched`}
                   >
                     {finding.line}
                   </CodeBlock>

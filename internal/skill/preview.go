@@ -40,11 +40,22 @@ import (
 // path attach one finding is a property of a tool result and not of a dialog
 // (design §5 step 5).
 type PreviewResult struct {
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Body        string    `json:"body"`
-	URL         string    `json:"url"`
-	Findings    []Finding `json:"findings"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Body        string `json:"body"`
+	URL         string `json:"url"`
+	// Findings are every static-scan match in the WHOLE BUNDLE — SKILL.md
+	// and every support file that will land — each naming the file it
+	// matched in. A bundled scripts/setup.sh is the file whose contents most
+	// warrant a look and it used to get no findings anywhere, so the person
+	// approved a manifest of names and a scan of one of them (nocx-872jc.4).
+	//
+	// SKILL.md's are counted over the whole fetched document, frontmatter
+	// included, not over Body: the finding names a file, so its line number
+	// has to count that file from its first byte or it points at nothing —
+	// and the description in the frontmatter is what the assistant is offered
+	// on every ask, which makes it exactly the wrong half to leave unscanned.
+	Findings []Finding `json:"findings"`
 	// Files is every path that will land, SKILL.md first (bundle.go). It is
 	// the manifest design §5 asks the approval to name, and it is PATHS and
 	// not contents: the person is reading the body here, and reading each
@@ -173,6 +184,15 @@ func (s *Store) Preview(ctx context.Context, rawURL string) (PreviewResult, erro
 		return PreviewResult{}, err
 	}
 	result.Files = bundleManifest(files)
+	// THE SUPPORT FILES ARE SCANNED HERE, where their bytes are, and not in
+	// documentPreview, which is pure and reaches nothing (see its Files
+	// note). This is the one place in the install path that holds a whole
+	// bundle in memory before anything is written, so it is the only place
+	// the person can be shown a finding in a file they are about to adopt.
+	// The install re-fetches and re-digests the same bundle; it does not
+	// re-scan, because nothing there reads a finding — the reading happened
+	// before the approval, which is the point of a preview.
+	result.Findings = append(result.Findings, scanBundleFiles(files)...)
 
 	s.rememberPreview(rawURL, text, files)
 	return result, nil
@@ -275,11 +295,12 @@ func documentPreview(text, rawURL string) (PreviewResult, error) {
 		return PreviewResult{}, fmt.Errorf("that document has frontmatter for %q and no body, so there are no instructions to read", name)
 	}
 
-	// The scan is advisory and stays advisory (scan.go:55-57): a finding is
-	// evidence for the person, never a refusal. It reads the BODY, which is
-	// what every other caller of Scan reads and what the person is shown, so
-	// a finding's line number counts the lines they are looking at.
-	findings := Scan([]byte(body))
+	// The scan is advisory and stays advisory (scan.go): a finding is
+	// evidence for the person, never a refusal. It reads the WHOLE DOCUMENT
+	// under the name SKILL.md rather than the body alone, so the line number
+	// counts the file the finding names — see PreviewResult.Findings for why
+	// the frontmatter is not the half to leave out.
+	findings := Scan("SKILL.md", []byte(text))
 	if findings == nil {
 		findings = []Finding{}
 	}

@@ -30,14 +30,15 @@
       "minItems": 1
     },
     "findings": {
-      "description": "EVERY static-scan match in the body, in pattern order, never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. Never null: no matches is []. A finding is evidence and never a refusal.",
+      "description": "EVERY static-scan match in the WHOLE BUNDLE \u2014 SKILL.md and every support file listed in `files` \u2014 in pattern order per file and never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. A bundled scripts/setup.sh is the file whose contents most warrant a look, and until nocx-872jc.4 it got no findings anywhere, so the person approved a manifest of names beside a scan of one of them. SKILL.md's matches count the WHOLE fetched document, frontmatter included, because the finding names a file and a line number that counted only the body would point at nothing in it \u2014 and the description in that frontmatter is what the assistant is offered on every ask. Never null: no matches is []. A finding is evidence and never a refusal; nothing here has been written to disk.",
       "type": "array",
       "items": {
-        "description": "One scan match. The three fields are the ones agent.approvalRequested already declares for a finding, because two shapes for one fact is how they come to disagree; they are inlined rather than named so the generated renderer type has no second export nothing consumes.",
+        "description": "One scan match, in the file it matched in. The four fields are the ones agent.approvalRequested, skills.audit and skills.file also declare for a finding, because two shapes for one fact is how they come to disagree; they are inlined rather than named so the generated renderer type has no second export nothing consumes. `path` is what makes the other three usable: a line number with no file attached names a line of nothing once a skill carries more than one file.",
         "type": "object",
         "additionalProperties": false,
-        "required": ["patternId", "line", "lineNumber"],
+        "required": ["path", "patternId", "line", "lineNumber"],
         "properties": {
+          "path": { "type": "string", "minLength": 1 },
           "patternId": { "type": "string", "minLength": 1 },
           "line": { "type": "string" },
           "lineNumber": { "type": "integer", "minimum": 1 }

@@ -37,4 +37,13 @@ export interface SkillsFile {
    * The read budget, in bytes, that a too-large refusal was measured against. It travels so the viewer's sentence can name the limit rather than keeping a second copy of the number.
    */
   maxBytes: number
+  /**
+   * Every static-scan match over EXACTLY the bytes in `text`, so each names a line of what the viewer is about to draw and can be marked where it sits rather than restated underneath it. IT IS SCANNED IN THIS READ, and that is why the field is here rather than left to skills.audit: an audit spends a model call, and a person who opens a support file to look at it must not have to buy a model reading to learn that a line in it matched (nocx-872jc.4). A refused file carries [] because nothing was read, so nothing was scanned — which is not a statement about the file, and a viewer must draw no all-clear from an empty array here: the scan is a fixed set of known phrasings, so a file it matched nothing in is a file it had nothing to say about. Advisory throughout: a finding refuses no read, disables no skill and changes no status. Never null.
+   */
+  findings: {
+    path: string
+    patternId: string
+    line: string
+    lineNumber: number
+  }[]
 }

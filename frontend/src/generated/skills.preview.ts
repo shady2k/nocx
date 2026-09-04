@@ -36,9 +36,10 @@ export interface SkillsPreview {
    */
   files: [string, ...string[]]
   /**
-   * EVERY static-scan match in the body, in pattern order, never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. Never null: no matches is []. A finding is evidence and never a refusal.
+   * EVERY static-scan match in the WHOLE BUNDLE — SKILL.md and every support file listed in `files` — in pattern order per file and never only the first: the 8 KiB bound that makes the assistant's write path attach one finding belongs to a tool result, not to a dialog. A bundled scripts/setup.sh is the file whose contents most warrant a look, and until nocx-872jc.4 it got no findings anywhere, so the person approved a manifest of names beside a scan of one of them. SKILL.md's matches count the WHOLE fetched document, frontmatter included, because the finding names a file and a line number that counted only the body would point at nothing in it — and the description in that frontmatter is what the assistant is offered on every ask. Never null: no matches is []. A finding is evidence and never a refusal; nothing here has been written to disk.
    */
   findings: {
+    path: string
     patternId: string
     line: string
     lineNumber: number

@@ -5,15 +5,28 @@ import (
 	"strings"
 )
 
-// Finding identifies a suspicious pattern and the source line where it first
-// occurs. The line is included so an approval or read result can name the
-// evidence without returning a second copy of the content.
+// Finding identifies a suspicious pattern, the FILE it was found in, and the
+// source line where it first occurs. The line is included so an approval or a
+// read result can name the evidence without returning a second copy of the
+// content; the path is included because a line number with no file attached
+// points at nothing a person can open.
 //
-// The json tags are the wire spelling declared once, here: three fields for
-// one fact, so a finding travelling in an approval request and a finding
-// travelling in a skill preview cannot come to disagree about what a finding
-// is (contracts/agent.approvalRequested.schema.json, skills.preview).
+// The path is a field of the finding and not a wrapper around it. There was a
+// second shape for exactly one release — an audit-only struct that carried a
+// path beside an embedded Finding — and it existed because only the audit
+// scanned more than one file. Now that an install fetches a bundle and the
+// viewer reads any file of one, every producer has a path to name, so the
+// wrapper would be a second vocabulary for one fact with no caller left that
+// needs the narrower one (nocx-872jc.4).
+//
+// The json tags are the wire spelling declared once, here: four fields for
+// one fact, so a finding travelling in an approval request, a finding
+// travelling in a skill preview, a finding travelling in an audit and a
+// finding travelling beside a file a person opened cannot come to disagree
+// about what a finding is (contracts/agent.approvalRequested.schema.json,
+// skills.preview, skills.audit, skills.file).
 type Finding struct {
+	Path       string `json:"path"`
 	PatternID  string `json:"patternId"`
 	Line       string `json:"line"`
 	LineNumber int    `json:"lineNumber"`
@@ -57,10 +70,20 @@ var scanPatterns = []scanPattern{
 	{id: "hermes_config_mod", re: regexp.MustCompile(`(?i)(update|modify|edit|write|change|append|add\s+to)\s+[^\n]{0,1000}\.hermes/(config\.yaml|SOUL\.md)`)},
 }
 
-// Scan examines at most 64 KiB and returns one finding per matching pattern,
-// in stable pattern-table order. It is advisory: callers surface findings but
-// do not turn them into an unreadable result.
-func Scan(b []byte) []Finding {
+// Scan examines at most 64 KiB of ONE FILE's bytes and returns one finding
+// per matching pattern, in stable pattern-table order. It is advisory:
+// callers surface findings but do not turn them into an unreadable result.
+//
+// The path is a PARAMETER and not something a caller fills in afterwards, so
+// there is one way to produce a finding and it names a file by construction.
+// Callers that scan a single document still pass its name — "SKILL.md" — for
+// the same reason the wire carries it: a surface that had to guess which file
+// an unnamed finding came from would guess wrong the first time a bundle
+// carried two.
+//
+// lineNumber counts from the first byte of THAT file, so it is checkable
+// against skills.file, which returns the same bytes.
+func Scan(path string, b []byte) []Finding {
 	if len(b) > maxScanBytes {
 		b = b[:maxScanBytes]
 	}
@@ -72,7 +95,7 @@ func Scan(b []byte) []Finding {
 			continue
 		}
 		line, lineNumber := sourceLine(text, match[0])
-		findings = append(findings, Finding{PatternID: pattern.id, Line: line, LineNumber: lineNumber})
+		findings = append(findings, Finding{Path: path, PatternID: pattern.id, Line: line, LineNumber: lineNumber})
 	}
 	return findings
 }

@@ -843,7 +843,10 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 			Body string `json:"body"`
 		}
 		if err := json.Unmarshal([]byte(rawArgs), &params); err == nil {
-			if findings := skill.Scan([]byte(params.Body)); len(findings) > 0 {
+			// "SKILL.md": these two tools propose the body of exactly that
+			// file, and a finding with no file named is one a surface has
+			// to guess a subject for (internal/skill/scan.go).
+			if findings := skill.Scan("SKILL.md", []byte(params.Body)); len(findings) > 0 {
 				// Copy the value out rather than pointing into Scan's
 				// slice, so the request carries one finding and not a
 				// live view of the rest.

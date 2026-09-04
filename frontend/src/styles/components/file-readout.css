@@ -22,3 +22,35 @@
      scrolling inside the block that already owns a scroll box. */
   min-width: 0;
 }
+
+/* The scan's mark, ON the line it matched, inside the CodeBlock this
+   component places (nocx-872jc.4). It paints its OWN element and not the
+   block: the `<pre>`'s background, border, type and scroll cap are still
+   CodeBlock's, and this rule reaches nothing of theirs.
+
+   THREE CHANNELS, because one of them cannot carry it alone. The element is
+   `<mark>`, so every browser hands it a yellow background and black text of
+   its own — the background is therefore turned OFF and re-declared rather
+   than merely left unset, and the colour is pinned to `inherit`, the same
+   trap `.ui-floating-panel__match` documents. Then:
+
+   the WASH locates the line. Measured across the theme catalogue at 15% of
+   the warning token over the block's canvas, the block's own muted text
+   still holds 4.70:1 at its worst — above the body-text bar — while a
+   heavier wash buys visibility by darkening the very glyphs the reader came
+   for (one-dark falls to 3.36:1 at 30%).
+
+   the WAVY UNDERLINE says WHICH line without spending contrast. The wash is
+   faint by construction (1.13:1 against canvas on the palest theme), so a
+   reader on a light theme would be hunting for a tint; an underline is a
+   SHAPE, it survives a colour-blind reader and a low-contrast palette, and
+   inside a `<pre>` it changes no metrics — a marker glyph or a gutter would
+   move every column of the file it is supposed to be showing verbatim.
+
+   and the `title` says what matched. Colour is never the only carrier. */
+.ui-file-readout__match {
+  background: color-mix(in srgb, var(--color-warning), transparent 85%);
+  color: inherit;
+  text-decoration: underline wavy var(--color-warning);
+  text-underline-offset: 2px;
+}

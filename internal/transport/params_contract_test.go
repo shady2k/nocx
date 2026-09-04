@@ -248,6 +248,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"policy.forgetRule": {
 			[]byte(`{"id":"0123456789abcdef0123456789abcdef"}`),
 		},
+		"policy.explain": {
+			[]byte(`{"command":"df -h","effect":"observe"}`),
+			[]byte(`{"command":"rm -rf /tmp/x","effect":"mutate-destructive"}`),
+		},
 		"ports.pause": {
 			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
 		},

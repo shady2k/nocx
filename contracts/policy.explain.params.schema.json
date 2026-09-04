@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/policy.explain.params.schema.json",
+  "title": "PolicyExplainParams",
+  "description": "Params for policy.explain: the command line to explain, and the effect class the call classified as. The effect is the caller's because the backend has no run to ask here — a call's effect depends on the tool's declared reachable set, which the approval prompt was already told — and deriving a second answer would explain a decision nobody took.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "effect"],
+  "properties": {
+    "command": {
+      "description": "The command line, exactly as the person is looking at it. The backend parses it with the SAME parser a run uses, so the explanation is of the reading the enforcement had.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "effect": {
+      "description": "The effect class the call classified as. It must name a class the matrix has a row for: an effect outside the lattice has no row, so the evaluator would answer with the ask an absent row decides and a caller would read a typo as a policy decision.",
+      "type": "string",
+      "enum": [
+        "observe",
+        "mutate-reversible",
+        "mutate-destructive",
+        "privilege-change",
+        "disclose",
+        "cross-boundary",
+        "delegate"
+      ]
+    }
+  }
+}

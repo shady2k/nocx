@@ -32,6 +32,7 @@ import type {
 import type { PolicySet } from './generated/policy.set'
 import type { PolicySetRule } from './generated/policy.setRule'
 import type { PolicyForgetRule } from './generated/policy.forgetRule'
+import type { PolicyExplain, Step, Scope as ExplanationScope } from './generated/policy.explain'
 
 type EffectDecision = 'permit' | 'ask' | 'refuse'
 
@@ -123,6 +124,25 @@ export interface PolicyRuleWrite {
   grantedUnder?: PolicyRule['grantedUnder']
 }
 
+/**
+ * Why one decision came out the way it did: the outcome, and the steps the
+ * BACKEND's evaluator took, in the order it took them.
+ *
+ * Exactly as the wire declares it. Naming it here is what lets a surface hold
+ * an explanation without re-describing its shape — and re-describing the shape
+ * is one short step from re-deriving the content.
+ */
+export type PolicyExplanation = PolicyExplain
+
+/** One step of an explanation: what the evaluator did, and what it did it to.
+ *  A step names effects, rules and resources, and never a tool. */
+export type PolicyExplanationStep = Step
+
+/** The one resource an explanation points at, when one fell outside — in the
+ *  scope form a row states it in, so a widening answer can be written from the
+ *  explanation alone. */
+export type PolicyExplanationResource = ExplanationScope
+
 /** A fresh all-ask matrix — what the backend serves when nothing is set. */
 export function blankPolicy(): PolicyMatrix {
   const m = {} as PolicyMatrix
@@ -181,6 +201,26 @@ export class PolicyClient {
    */
   setRule(rule: PolicyRuleWrite): Promise<PolicySetRule> {
     return this.dispatcher.call<PolicySetRule>('policy.setRule', { rule })
+  }
+
+  /**
+   * Ask WHY: what the policy decides about one command, and every step the
+   * backend's evaluator took to decide it, in the order it took them.
+   *
+   * The steps arrive; they are never worked out here. The precedence order —
+   * the effect row first and a refusing row final before any rule is read,
+   * then the rules with their two skip guards, then the resource layer — has
+   * exactly one implementation, and it is the evaluator. A second one in
+   * TypeScript would agree with it everywhere anyone looked and disagree
+   * somewhere nobody did, which is how a saved host was once inserted over a
+   * user's choice. `policy-explain-is-not-reimplemented.test.ts` is the test
+   * that keeps this a rule rather than an intention.
+   *
+   * `effect` is the class the CALL classified as, which a surface was already
+   * told (the approval prompt receives it); it is not derived here either.
+   */
+  explain(command: string, effect: PolicyExplain['effect']): Promise<PolicyExplanation> {
+    return this.dispatcher.call<PolicyExplain>('policy.explain', { command, effect })
   }
 
   /**

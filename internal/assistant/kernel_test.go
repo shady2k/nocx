@@ -22,6 +22,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -214,7 +215,9 @@ func TestTheKernelAndThePolicyReturnOneVerdictForOneResource(t *testing.T) {
 				[]content.GrantScope{{Kind: content.ResourcePath, ID: path}},
 				fence,
 			)
-			if command != declared {
+			// reflect, not ==: a Verdict carries the trace it was asked
+			// for, and neither of these asked for one.
+			if !reflect.DeepEqual(command, declared) {
 				t.Fatalf("one resource, two verdicts: `cat %s` gave %+v and the declared path gave %+v", path, command, declared)
 			}
 		})

@@ -683,3 +683,122 @@ func TestPolicySetParams_SchemaAndValidatorBothRefuseRules(t *testing.T) {
 		}
 	}
 }
+
+// ── policy.explain (nocx-8nktm) ──────────────────────────────────────────
+
+// explainOverTheSocket asks policy.explain the way a page asks it, and decodes
+// what came back. It decodes into the shape the CONTRACT declares — not into
+// an anonymous struct naming the fields the test is about — so a field the
+// handler stopped sending is a field this test stops seeing.
+func explainOverTheSocket(t *testing.T, h *askHarness, command string, effect content.Effect) policyExplainResult {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.explain", map[string]any{
+		"command": command, "effect": string(effect),
+	})
+	var envelope struct {
+		Result policyExplainResult `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.explain: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
+func explainKinds(r policyExplainResult) []content.TraceKind {
+	out := make([]content.TraceKind, 0, len(r.Trace))
+	for _, step := range r.Trace {
+		out = append(out, step.Kind)
+	}
+	return out
+}
+
+// TestPolicyExplain_AnswersWhyInTheOrderItWasDecided is the seam a person
+// reaches: they are looking at a command and a decision, and they ask why.
+//
+// The assertions are about ORDER and about the step that was ACTUALLY TAKEN.
+// A refusing row is read before any rule, so a person whose standing permit
+// did not apply must be told the rules were never reached — "it lost" and "it
+// was never read" are different sentences, and only the second one is true.
+func TestPolicyExplain_AnswersWhyInTheOrderItWasDecided(t *testing.T) {
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	p.Rules = []content.InvocationRule{{
+		ID:               "df-answered",
+		Selector:         content.InvocationSelector{Exact: [][]string{{"df", "-h"}}},
+		Decision:         content.DecisionPermit,
+		Source:           content.SourceAnswered,
+		EvaluatorVersion: content.EvaluatorVersion,
+	}}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	permitted := explainOverTheSocket(t, h, "df -h", content.EffectObserve)
+	if permitted.Decision != content.DecisionPermit {
+		t.Fatalf("df -h decided %q, want permit", permitted.Decision)
+	}
+	if got := explainKinds(permitted); len(got) != 3 ||
+		got[0] != content.TraceEffectRow ||
+		got[1] != content.TraceRuleMatched ||
+		got[2] != content.TraceResourceInside {
+		t.Fatalf("trace = %v, want the row, then the rule that permitted, then the resource layer", got)
+	}
+	if permitted.Trace[1].RuleID != "df-answered" {
+		t.Errorf("the permitting step names %q, want the rule a person can take back", permitted.Trace[1].RuleID)
+	}
+	if permitted.Cause != "" || permitted.Resource != nil {
+		t.Errorf("a permitted call carries a cause %q and a resource %+v", permitted.Cause, permitted.Resource)
+	}
+
+	outside := explainOverTheSocket(t, h, "cat /etc/hosts", content.EffectObserve)
+	if outside.Cause != content.OutOfScopeRowScope || outside.Resource == nil ||
+		outside.Resource.ID != "/etc/hosts" {
+		t.Fatalf("out-of-scope answer = %+v, want the editable row scope and the resource that fell outside", outside)
+	}
+	if got := explainKinds(outside); len(got) == 0 || got[len(got)-1] != content.TraceResourceOutsideRowScope {
+		t.Fatalf("trace = %v, want it to close on the resource step that decided", got)
+	}
+
+	shadowed := explainOverTheSocket(t, h, "df -h", content.EffectMutateDestructive)
+	if shadowed.Decision != content.DecisionRefuse {
+		t.Fatalf("a refusing row decided %q, want refuse", shadowed.Decision)
+	}
+	if got := explainKinds(shadowed); len(got) != 2 ||
+		got[0] != content.TraceEffectRow || got[1] != content.TraceRowRefuses {
+		t.Fatalf("trace = %v, want the row consulted and then the rules NOT consulted", got)
+	}
+	for _, step := range shadowed.Trace {
+		if step.RuleID != "" {
+			t.Fatalf("step %+v names a rule the evaluator never read", step)
+		}
+	}
+}
+
+// TestPolicyExplain_RefusesAnEffectWithNoRow keeps the wire's gate on the
+// caller's one derived input. An effect outside the lattice has no row, so the
+// evaluator would answer with the ask an absent row decides — and a page would
+// draw a typo as a policy decision.
+func TestPolicyExplain_RefusesAnEffectWithNoRow(t *testing.T) {
+	h, _ := newPolicyHarness(t)
+	raw := jsonrpcCall(t, h.conn, "policy.explain", map[string]any{
+		"command": "df -h", "effect": "read-everything",
+	})
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("an effect the matrix has no row for answered %s, want invalid params", raw)
+	}
+}

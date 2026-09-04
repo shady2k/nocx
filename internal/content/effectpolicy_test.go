@@ -21,6 +21,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -754,11 +755,13 @@ func TestTheSameAddressIsBoundedTheSameWayThroughACommandAndATool(t *testing.T) 
 				command := policy.EvaluateInvocation(
 					content.EffectCrossBoundary, curlInvocation(address), fence,
 				)
-				if declared != command {
+				// reflect, not ==: a Verdict carries the trace it was
+				// asked for, and neither of these asked for one.
+				if !reflect.DeepEqual(declared, command) {
 					t.Fatalf("%s: fetch.url answers %+v and curl answers %+v — one address, two verdicts",
 						address, declared, command)
 				}
-				if command != want[address][fenceName] {
+				if !reflect.DeepEqual(command, want[address][fenceName]) {
 					t.Fatalf("%s %s: both paths answer %+v, want %+v",
 						address, fenceName, command, want[address][fenceName])
 				}

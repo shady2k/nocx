@@ -17,6 +17,9 @@ import {
   type EffectKey,
   type PolicyRule,
   type PolicyRuleWrite,
+  type PolicyExplanation,
+  type PolicyExplanationStep,
+  type PolicyExplanationResource,
 } from './policy-client'
 import type { Dispatcher } from './dispatcher'
 
@@ -229,5 +232,54 @@ describe('PolicyClient.forgetRule', () => {
     await expect(new PolicyClient(dispatcher).forgetRule('gone')).resolves.toEqual({
       removed: false,
     })
+  })
+})
+
+describe('PolicyClient.explain', () => {
+  it('asks the backend why, and passes the steps through untouched', async () => {
+    // Typed as the wire declares it, so a fixture cannot describe a shape the
+    // contract does not carry — the defect the generated types exist for.
+    const steps: [PolicyExplanationStep, ...PolicyExplanationStep[]] = [
+      { kind: 'effect-row', effect: 'observe', decision: 'ask' },
+      { kind: 'rule-matched', ruleId: 'rule-1', decision: 'permit' },
+      { kind: 'resource-inside', effect: 'observe', decision: 'permit' },
+    ]
+    const explanation: PolicyExplanation = {
+      effect: 'observe',
+      decision: 'permit',
+      trace: steps,
+    }
+    const { dispatcher, calls } = fakeDispatcher([explanation])
+
+    const answer = await new PolicyClient(dispatcher).explain('df -h', 'observe')
+
+    expect(calls[0]?.method).toBe('policy.explain')
+    expect(calls[0]?.params).toEqual({ command: 'df -h', effect: 'observe' })
+    // The order is the explanation. A client that re-sorted, filtered or
+    // summarised would be deciding what a person is allowed to be told.
+    expect(answer).toEqual(explanation)
+  })
+
+  it('carries the cause and the resource that fell outside', async () => {
+    const outside: PolicyExplanationResource = { kind: 'path', id: '/etc/hosts' }
+    const { dispatcher } = fakeDispatcher([
+      {
+        effect: 'observe',
+        decision: 'ask',
+        cause: 'row-scope',
+        resource: outside,
+        trace: [
+          { kind: 'effect-row', effect: 'observe', decision: 'permit' },
+          { kind: 'resource-outside-row-scope', effect: 'observe', decision: 'ask' },
+        ],
+      } satisfies PolicyExplanation,
+    ])
+
+    const answer = await new PolicyClient(dispatcher).explain('cat /etc/hosts', 'observe')
+
+    // 'row-scope' is a question a person can answer and 'fence' is not, so the
+    // two may never reach a surface as one "out of scope".
+    expect(answer.cause).toBe('row-scope')
+    expect(answer.resource).toEqual(outside)
   })
 })

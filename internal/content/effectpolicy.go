@@ -237,10 +237,19 @@ const (
 // Resource is the resource that fell outside, in the scope form a row states
 // it in — so a widening answer can be written from the verdict alone, without
 // re-deriving the scope from the command line a second time.
+//
+// Trace is HOW the decision was reached, in the order it was taken, and it is
+// present only when a caller asked for one (ExplainInvocation). It is nil for
+// every caller that wants the outcome and not the reason. When it is present
+// it is COMPLETE: it opens on the first thing the evaluator did and closes
+// where the verdict returned, and its last step carries this same Decision —
+// so a reader never has to wonder whether a step is missing off the end. The
+// vocabulary and each step's meaning are in effecttrace.go.
 type Verdict struct {
 	Decision Decision
 	Cause    OutOfScopeCause
 	Resource GrantScope
+	Trace    []TraceStep
 }
 
 // EvaluateInvocation resolves one validated command, and this comment is
@@ -265,12 +274,53 @@ type Verdict struct {
 // A rule is therefore an exception to the effect layer alone. A permit whose
 // invocation names a resource outside its row falls back to asking a person:
 // never to something more permissive, and never past a refusal.
+//
+// The order above is also what the evaluator RECORDS, step by step, when a
+// caller asks for a trace (ExplainInvocation) — see effecttrace.go. It is
+// recorded here, as each step is taken, rather than derived from the result
+// afterwards, because a derivation would be this order written down a second
+// time and free to drift from it.
 func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []GrantScope) Verdict {
+	return p.evaluateInvocation(e, inv, fence, nil)
+}
+
+// ExplainInvocation is EvaluateInvocation over the policy's own mint-supplied
+// fence, WITH the trace: the same evaluation, answering "why" as well as
+// "what". It is the paired opposite of DecisionForInvocation — same fence,
+// same answer, the whole of the reasoning instead of none of it — and it
+// exists so a surface can explain a decision without owning the order that
+// produced it.
+func (p EffectPolicy) ExplainInvocation(e Effect, inv Invocation) Verdict {
+	tr := &evalTrace{}
+	return tr.sealed(p.evaluateInvocation(e, inv, p.runFence, tr))
+}
+
+// evaluateInvocation is the ONE implementation of the composition order. tr is
+// nil for a caller that wants no trace, and every step call below is then a
+// nil check: the traced and untraced paths are the same path, so there is no
+// second order to keep in step with this one.
+func (p EffectPolicy) evaluateInvocation(e Effect, inv Invocation, fence []GrantScope, tr *evalTrace) Verdict {
 	if !inv.Parsed {
+		tr.step(TraceStep{
+			Kind: TraceUnparsed, Decision: DecisionAsk,
+			Detail: "the command could not be read, so no row and no rule can speak about it",
+		})
 		return Verdict{Decision: DecisionAsk}
 	}
 	base := p.DecisionFor(e)
-	if base == DecisionRefuse || inv.Disqualified {
+	tr.step(TraceStep{Kind: TraceEffectRow, Effect: e, Decision: base})
+	if base == DecisionRefuse {
+		tr.step(TraceStep{
+			Kind: TraceRowRefuses, Effect: e, Decision: base,
+			Detail: "the row refuses, and a rule is an exception to the effect layer alone, so no rule was read",
+		})
+		return Verdict{Decision: base}
+	}
+	if inv.Disqualified {
+		tr.step(TraceStep{
+			Kind: TraceDisqualified, Effect: e, Decision: base,
+			Detail: "the command uses a shell feature whose effect cannot be determined, so it takes the row's answer and no rule was read",
+		})
 		return Verdict{Decision: base}
 	}
 	decision := base
@@ -295,6 +345,12 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 			// see more. Nor is a REFUSAL: only a permit is a claim a
 			// later reading can falsify, and inerting a refusal would
 			// drop it through to a row that may permit.
+			tr.step(TraceStep{
+				Kind: TraceRuleStale, RuleID: rule.ID, Decision: rule.Decision,
+				Detail: fmt.Sprintf(
+					"agreed to under reading %d of commands; commands are read as %d now, so it waits for a person",
+					rule.EvaluatorVersion, EvaluatorVersion),
+			})
 			continue
 		}
 		if rule.Decision == DecisionPermit && rule.GrantedUnder != "" && rule.GrantedUnder != e {
@@ -302,9 +358,15 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 			// milder. It does not reach this call. This is the whole
 			// guard, and it lives here rather than in Matches because
 			// only this layer is told what the call classified as.
+			tr.step(TraceStep{
+				Kind: TraceRuleOtherEffect, RuleID: rule.ID,
+				Effect: rule.GrantedUnder, Decision: rule.Decision,
+				Detail: "granted while the command did something milder, so it does not reach this call",
+			})
 			continue
 		}
 		matched = true
+		tr.step(TraceStep{Kind: TraceRuleMatched, RuleID: rule.ID, Decision: rule.Decision})
 		if restrictiveRank(rule.Decision) > restrictiveRank(ruleDecision) {
 			ruleDecision = rule.Decision
 		}
@@ -317,12 +379,14 @@ func (p EffectPolicy) EvaluateInvocation(e Effect, inv Invocation, fence []Grant
 			decision = ruleDecision
 		}
 	}
-	return p.resourceVerdict(e, decision, namedScopes(inv.Resources), fence, boundKindWise)
+	return p.resourceVerdict(e, decision, namedScopes(inv.Resources), fence, boundKindWise, tr)
 }
 
 // DecisionForInvocation is EvaluateInvocation's decision alone, over the
 // policy's own mint-supplied fence. It is the retained shape for every caller
-// that wants the outcome and not the reason.
+// that wants the outcome and not the reason, and it builds no trace: the hot
+// path does not pay for an explanation nobody asked for. ExplainInvocation is
+// the same question with the reasoning attached.
 func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 	return p.EvaluateInvocation(e, inv, p.runFence).Decision
 }
@@ -343,7 +407,7 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 // A command's resources are inferred from a command line instead, so they are
 // bounded kind-wise (see resourceVerdict).
 func (p EffectPolicy) EvaluateResources(e Effect, decision Decision, resources, fence []GrantScope) Verdict {
-	return p.resourceVerdict(e, decision, resources, fence, boundOutright)
+	return p.resourceVerdict(e, decision, resources, fence, boundOutright, nil)
 }
 
 // scopeBound is how a resource set meets a scope set.
@@ -381,12 +445,20 @@ const (
 // Like the kernel's own check this is the advisory lexical approximation, not
 // the enforcement: the capability resolves canonical identity (ADR-0020 §7),
 // and a call this predicate lets through can still be refused by it.
-func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fence []GrantScope, bound scopeBound) Verdict {
+func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fence []GrantScope, bound scopeBound, tr *evalTrace) Verdict {
 	if decision == DecisionRefuse {
+		tr.step(TraceStep{
+			Kind: TraceResourceNotReached, Effect: e, Decision: decision,
+			Detail: "the decision was already a refusal, and the resource layer can only narrow, so no resource was compared",
+		})
 		return Verdict{Decision: decision}
 	}
 	if len(fence) > 0 {
 		if outside, ok := firstOutside(resources, fence, bound); ok {
+			tr.step(TraceStep{
+				Kind: TraceResourceOutsideFence, Effect: e, Decision: DecisionRefuse,
+				Detail: "outside the run's immutable bound, which no answer widens",
+			})
 			return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: outside}
 		}
 	}
@@ -399,11 +471,20 @@ func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fe
 		// answer. Under boundKindWise the same emptiness means the opposite
 		// (see the constant's doc), which is why this is asked here and not
 		// inside firstOutside.
+		tr.step(TraceStep{
+			Kind: TraceResourceOutsideFence, Effect: e, Decision: DecisionRefuse,
+			Detail: "the row states no scope at all, so there is no bound to widen",
+		})
 		return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: resources[0]}
 	}
 	if outside, ok := firstOutside(resources, scopes, bound); ok {
+		tr.step(TraceStep{
+			Kind: TraceResourceOutsideRowScope, Effect: e, Decision: DecisionAsk,
+			Detail: "outside the row's own scopes, which an operator wrote and can widen",
+		})
 		return Verdict{Decision: DecisionAsk, Cause: OutOfScopeRowScope, Resource: outside}
 	}
+	tr.step(TraceStep{Kind: TraceResourceInside, Effect: e, Decision: decision})
 	return Verdict{Decision: decision}
 }
 

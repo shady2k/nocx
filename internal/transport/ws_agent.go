@@ -1996,7 +1996,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// A standing NO is a standing answer: "never ask me to run this
 		// again" configured something exactly as much as "always" did, and
 		// gets its receipt in the same words for the same reason.
-		h.notifyStandingAnswer(ap, p, outcome)
+		h.notifyStandingAnswer(ap, p, outcome, rc)
 		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 			h.resumeRunDeclined(taskCtx, rc, h.r)
 		}}); rej != nil {
@@ -2053,7 +2053,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// write actually happened, so a receipt can never claim a rule the
 		// store refused — that failure travels in `warning`, on the
 		// response, and is the surface's to show.
-		h.notifyStandingAnswer(ap, p, outcome)
+		h.notifyStandingAnswer(ap, p, outcome, rc)
 	}
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
@@ -2249,15 +2249,25 @@ func refusedStandingAnswer(reason string) standingAnswerOutcome {
 // screen true: "once" saves nothing, an egress question is refused a width
 // before it reaches here, and a refused write leaves `saved` false and its
 // sentence on the response instead.
-func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome) {
+//
+// IT IS ROUTED BY THE TURN, LIKE EVERY OTHER NOTIFICATION ABOUT A RUN, and
+// that is why `rc` is a parameter (nocx-2019q). The entry it carries used to
+// be the approvals store's — `EntryIDFor`, the PROPOSAL's ledger row, the one
+// the approved call runs as a subsequent attempt of. That is the entry this
+// file already sends beside a tool call as `actionEntryId`, and it is not a
+// routing key: the renderer compares `entryId` with the turn block's own and
+// drops anything else, exactly as it drops a stray delta (agent-ask.ts). So a
+// receipt addressed by the proposal was silently discarded for every run that
+// had a ledger — which is every run — and nobody ever saw one. Two entries,
+// two jobs (see agentRunToolCall above); this one wants the turn's.
+func (h agentHandlers) notifyStandingAnswer(ap assistant.Approval, p approveParams, outcome standingAnswerOutcome, rc askRunContext) {
 	if !outcome.saved {
 		return
 	}
 	effect, _ := h.approvals.EffectFor(ap)
-	entryID, _ := h.approvals.EntryIDFor(ap)
 	_ = h.r.TryNotify("agent.standingAnswerSaved", mustMarshal(agentStandingAnswerSaved{
 		RunID:    p.RunID,
-		EntryID:  entryID,
+		EntryID:  rc.entryID,
 		Approved: p.Approved,
 		Scope:    p.Scope,
 		Rule:     outcome.rule,

@@ -76,32 +76,31 @@
  * not a gap in this check, and it is a defect of the page rather than of the
  * evaluator.
  *
- * ═══ THIS FILE IS RED ON ONE ASSERTION, DELIBERATELY ═════════════════════
+ * ═══ THE ONE DEFECT THIS FILE FOUND, AND WHY IT SURVIVED ═════════════════
  *
- * The receipt never appears, and it is a defect of TASK 10 (`nocx-2019q`),
- * not of this check. `agent.standingAnswerSaved.entryId` is contracted as
- * "the ledger entry of the TURN that asked"
- * (contracts/agent.standingAnswerSaved.schema.json), and the renderer drops
- * any notification whose `entryId` is not the turn block's
- * (frontend/src/agent-ask.ts). The backend sends
- * `h.approvals.EntryIDFor(ap)` instead (internal/transport/ws_agent.go,
- * `notifyStandingAnswer`) — the PROPOSAL's ledger entry, which every other
- * notification in that file sends separately as `actionEntryId` while
- * sending `rc.entryID` as `entryId`. Measured on the wire in this container:
+ * The receipt step below was red on the first run, and the cause was in
+ * shipped code: `agent.standingAnswerSaved` carried the PROPOSAL's ledger
+ * entry as `entryId`, while the renderer routes a receipt by the TURN's and
+ * drops anything else (frontend/src/agent-ask.ts) — so no receipt was ever
+ * drawn, for any run with a ledger, which is every run. Measured on the wire
+ * here before the fix:
  *
  *   standingAnswerSaved.entryId  5c5db933-…   ← runToolCall.actionEntryId
  *   runToolCall.entryId          31558bbf-…   ← the turn block's data-entry-id
  *
- * so the guard rejects it and no receipt is drawn, for every run that has a
- * ledger — which is every run. With `entryID` taken from `rc.entryID` the
- * whole journey below is green, first time, end to end. The fix belongs in
- * `nocx-2019q`; nothing here is weakened to go around it, because a spec
- * bent until it is green reports that a broken product works.
+ * Fixed in `notifyStandingAnswer` (internal/transport/ws_agent.go), which now
+ * sends `rc.entryID` like every sibling notification in that file. Nothing in
+ * this spec changed for it: the assertion that found it is the assertion that
+ * now passes.
  *
- * It was invisible to that task's own tests for AGENTS.md testing rule 4's
- * reason exactly: the frontend tests build the notification themselves and
- * the transport test asserts the field is the approval's entry, so the two
- * sides agree with each other and are wrong together.
+ * Worth keeping because of HOW it survived, which is AGENTS.md testing rule 4
+ * with nothing left out. Both sides were unit-green and neither could see it:
+ * the renderer's tests build the notification themselves, so their fixture
+ * simply used the turn's entry and the guard let it through — and the Go side
+ * asserted every field of the receipt EXCEPT this one, in a harness whose
+ * scripted proposal carried no ledger entry at all, so the two entries were
+ * indistinguishable there. The wire was the only place they differed, and the
+ * only check that reads the real wire is this one.
  */
 import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'

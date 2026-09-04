@@ -96,6 +96,19 @@ func TestAgentApprove_StandingAnswer_ReceiptCarriesTheStoredRuleID(t *testing.T)
 	if got.RunID != h.asked.RunID {
 		t.Fatalf("receipt runId = %q, want the run that asked %q", got.RunID, h.asked.RunID)
 	}
+	// AND IT IS ROUTED BY THE TURN'S ENTRY, NOT THE PROPOSAL'S. The renderer
+	// drops a receipt whose entryId is not the block's, exactly as it drops a
+	// stray delta, so this field decides whether the receipt is drawn at all.
+	// The proposal has a ledger entry of its own and it is the WRONG one here:
+	// every sibling notification in ws_agent.go sends the turn's as `entryId`
+	// and the proposal's separately as `actionEntryId`, and the contract's
+	// wording — "the ledger entry of the turn that asked" — rests on that
+	// distinction.
+	if got.EntryID != h.entryID {
+		t.Fatalf("receipt entryId = %q, want the TURN's entry %q — the renderer routes by that "+
+			"and drops anything else, so a receipt carrying the proposal's entry is never drawn",
+			got.EntryID, h.entryID)
+	}
 }
 
 // A standing NO is a standing answer. "Never ask me to run this again"

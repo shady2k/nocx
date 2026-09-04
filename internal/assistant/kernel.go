@@ -1489,7 +1489,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
 		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
-		if err != nil {
+		var notCapturable *skillNotCapturableError
+		switch {
+		case errors.As(err, &notCapturable):
+			// The summarizer judged the conversation to hold nothing worth
+			// keeping, which is a verdict and not a breakage — so it reaches
+			// the person in its own words and is logged at info, where a
+			// warning would put a routine decision in the same column as an
+			// endpoint that fell over.
+			k.info("agent tool: skill draft declined", "reason", notCapturable.reason)
+			return modelResult{text: notCapturable.Error(), kind: modelNocxMessage}, nil
+		case err != nil:
 			k.warn("agent tool: skill draft could not be generated", "error", err)
 			return modelResult{
 				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
@@ -1953,6 +1963,12 @@ func truncateRunes(s string, n int) string {
 func (k *effectKernel) warn(msg string, args ...any) {
 	if k.log != nil {
 		k.log.Warn(msg, args...)
+	}
+}
+
+func (k *effectKernel) info(msg string, args ...any) {
+	if k.log != nil {
+		k.log.Info(msg, args...)
 	}
 }
 

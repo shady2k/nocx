@@ -1148,3 +1148,96 @@ export async function answerPermission(
   await panel.getByRole('button', { name: 'Close', exact: true }).click()
   await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
 }
+
+/**
+ * ONE STANDING ANSWER, in the list of answers a person has given.
+ *
+ * The sibling of `permissionAnswer` above, for the OTHER kind of thing that
+ * page lists. A row answers for a whole class of work and is addressed by its
+ * effect; a standing answer is addressed by the rule's id, which nobody on
+ * this side of the wire can know — the store mints it (AD-7) — so it is found
+ * by the SENTENCE it covers, which is what a person reads and the only handle
+ * they have.
+ *
+ * SCOPED TO THE ANSWERED LIST for `permissionAnswer`'s reason, and here the
+ * scoping is the whole assertion rather than a precaution: a rule appears in
+ * that list and NOWHERE ELSE — forgetting one removes it rather than moving it
+ * to the questions, because a rule is not a question anybody was asked. So its
+ * presence is "this answer stands" and its absence is "it has been taken
+ * back", and a section-blind locator could say neither.
+ */
+export function permissionRule(page: Page, covers: string): Locator {
+  return page
+    .locator('[data-answers="answered"]')
+    .locator('[data-answer^="rule:"]')
+    .filter({ hasText: covers })
+}
+
+/**
+ * Take one standing answer back, through Forget. The Assistant permissions
+ * page must already be open.
+ *
+ * Waits on the answer LEAVING the list rather than on the panel closing, for
+ * `answerPermission`'s reason: there is no draft and no Save, so the store's
+ * own word — what a fresh read comes back with — is the only thing worth
+ * waiting for.
+ *
+ * It does NOT answer the "what happens to the work already running" question
+ * (nocx-r4fh8): a caller that forgets an answer while a run is still deciding
+ * under it has a decision to make, and making it here silently would be this
+ * helper choosing for the spec. Such a forget leaves the panel open with the
+ * question in it, and this fails on the answer that never left the list —
+ * which is the honest report.
+ */
+export async function forgetPermission(page: Page, covers: string): Promise<void> {
+  const row = permissionRule(page, covers)
+  await baseExpect(row).toHaveCount(1, { timeout: 15_000 })
+  await row.getByRole('button', { name: `Forget ${covers}`, exact: true }).click()
+  const panel = page
+    .locator('.nocx-dialog__panel')
+    .filter({ has: page.locator('[data-permissions-panel="forget"]') })
+  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+  await panel.getByRole('button', { name: 'Forget it', exact: true }).click()
+  await baseExpect(permissionRule(page, covers)).toHaveCount(0, { timeout: 15_000 })
+}
+
+/**
+ * Open one of the two writing panels on Assistant permissions, type a command
+ * into it, and have the BACKEND read it. Answers with the panel.
+ *
+ * It stops at the reading DELIBERATELY. Both panels begin the same way and
+ * then diverge — a permit is offered over the command WORD the reading
+ * answered with, a refusal over the exact parse or over a semantic feature the
+ * classifier recorded — and which of those a spec accepts, and what the offer
+ * must say before it does, is the claim the spec is making. A helper that
+ * pressed the save button would be making it instead, once, for every caller.
+ *
+ * The command is never run: `policy.classify` parses and classifies it. That
+ * is the property the whole gesture stands on and it is the backend's to keep,
+ * not this helper's to assume.
+ */
+export async function readCommandForPermission(
+  page: Page,
+  mode: 'allow' | 'refuse',
+  command: string,
+): Promise<Locator> {
+  await page
+    .getByRole('button', { name: mode === 'allow' ? '+ Allow a command…' : '+ Write a refusal' })
+    .click()
+  const panel = page
+    .locator('.nocx-dialog__panel')
+    .filter({ has: page.locator(`[data-permissions-panel="${mode}"]`) })
+  await baseExpect(panel).toBeVisible({ timeout: 15_000 })
+  // BY ROLE, AND NOT BY LABEL, and that is a finding rather than a taste.
+  // The field is drawn as `<TextField label="The command">` with no `id`, and
+  // the kit derives both `<label for>` and the input's `id` from that prop
+  // (ui/text-field.tsx `inputId`), so both come out empty and the label is
+  // associated with nothing: `getByLabel('The command')` matches only the
+  // action group whose aria-label CONTAINS those words, and the exact form
+  // matches nothing at all. The control has no accessible name — filed as
+  // task 12's (nocx-fl0o3) to fix on the page, not here. The panel holds one
+  // textbox, so the role is unambiguous and is what a person clicks.
+  await panel.getByRole('textbox').fill(command)
+  await panel.getByRole('button', { name: 'Read this command', exact: true }).click()
+  return panel
+}

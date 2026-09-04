@@ -43,6 +43,34 @@ export interface PromptProps {
   actionsLayout?: 'row' | 'stacked'
 }
 
+/** The three numbers a scroll container reports about itself. */
+export interface ScrollBox {
+  scrollTop: number
+  clientHeight: number
+  scrollHeight: number
+}
+
+/**
+ * Which edges of a scroll container are cut — content hidden above the top,
+ * below the bottom, or both.
+ *
+ * Pure, and exported, because it is the only part of the fade that can be
+ * checked without a layout engine: jsdom reports zero for all three numbers,
+ * so a test that renders a Prompt and looks at the result learns nothing about
+ * the arithmetic. `e2e/prompt-height.spec.ts` supplies the other half.
+ *
+ * The one-pixel tolerance is not slack: a scroll container's numbers are
+ * fractional under a non-integer device pixel ratio, and a half-pixel
+ * remainder is not "there is more to read". Announcing one would be exactly
+ * the lie the fade exists to avoid.
+ */
+export function overflowEdges(box: ScrollBox): { start: boolean; end: boolean } {
+  return {
+    start: box.scrollTop > 1,
+    end: box.scrollTop + box.clientHeight < box.scrollHeight - 1,
+  }
+}
+
 /**
  * Put the caret where the user is about to type — the same preference order
  * a native `<dialog>`'s showModal gives: an explicit autofocus, then the
@@ -62,6 +90,7 @@ function focusInitial(panel: HTMLElement): void {
 
 export function Prompt(props: PromptProps) {
   let element: HTMLDivElement | undefined
+  let body: HTMLDivElement | undefined
   let entry: OverlayEntry | null = null
   let removeFocusGuard: (() => void) | null = null
   /**
@@ -123,6 +152,50 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  /**
+   * Mark the edges where the body is cut, so a reader can tell there is more.
+   *
+   * The panel now stops at the bottom of the window and the body scrolls
+   * inside it (prompt.css), which removes the one thing that told a reader
+   * the content continues: a panel running off the screen at least looked
+   * wrong. A body clipped at a hard edge looks finished. The fade painted
+   * from these attributes is what puts the fact back — the same answer, and
+   * the same argument, as the tab strip's horizontal fade (tab-strip.css):
+   * an edge that says "there is more" when there is not cannot be checked by
+   * looking, so it is MEASURED rather than painted unconditionally.
+   */
+  const markOverflow = () => {
+    const el = body
+    if (!el) return
+    const { start, end } = overflowEdges(el)
+    el.toggleAttribute('data-overflow-start', start)
+    el.toggleAttribute('data-overflow-end', end)
+  }
+
+  /**
+   * Three things change the answer, and none of them subsumes another:
+   * scrolling (the reader moves within the same content), the body's own box
+   * (the window is resized — the cap is expressed against the viewport), and
+   * the content (a Show branch arrives, an expanded command streams in). A
+   * ResizeObserver on the body cannot see the third: the body is capped, so
+   * its own box does not change when what is inside it grows.
+   */
+  createEffect(() => {
+    const el = props.open ? body : undefined
+    if (!el) return
+    markOverflow()
+    el.addEventListener('scroll', markOverflow, { passive: true })
+    const box = new ResizeObserver(markOverflow)
+    box.observe(el)
+    const content = new MutationObserver(markOverflow)
+    content.observe(el, { childList: true, subtree: true, characterData: true })
+    onCleanup(() => {
+      el.removeEventListener('scroll', markOverflow)
+      box.disconnect()
+      content.disconnect()
+    })
+  })
+
   onCleanup(() => {
     removeFocusGuard?.()
     removeFocusGuard = null
@@ -171,7 +244,9 @@ export function Prompt(props: PromptProps) {
         <Show when={props.title}>
           <h2 class="ui-prompt__title">{props.title}</h2>
         </Show>
-        <div class="ui-prompt__body">{props.children}</div>
+        <div ref={body} class="ui-prompt__body">
+          {props.children}
+        </div>
         <div class="ui-prompt__actions" data-layout={props.actionsLayout ?? 'row'}>
           {props.actions}
         </div>

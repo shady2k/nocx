@@ -5342,6 +5342,55 @@
       }
     },
     {
+      "name": "policy.forgetRule",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/policy.forgetRule.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "policy.forgetRuleResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/policy.forgetRule.schema.json"
+        }
+      }
+    },
+    {
       "name": "policy.get",
       "params": [
         {
@@ -5436,6 +5485,55 @@
         "name": "policy.setResult",
         "schema": {
           "$ref": "https://nocx.local/contracts/policy.set.schema.json"
+        }
+      }
+    },
+    {
+      "name": "policy.setRule",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/policy.setRule.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "policy.setRuleResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/policy.setRule.schema.json"
         }
       }
     },
@@ -10172,10 +10270,16 @@
       "$ref": "https://nocx.local/contracts/panes.setCwd.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/policy.forgetRule.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/policy.get.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/policy.set.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/policy.setRule.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/ports.pause.schema.json"

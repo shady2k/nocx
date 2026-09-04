@@ -1,8 +1,9 @@
 package transport
 
-// policy.get / policy.set — the ONE global agent policy (ADR-0020 §7 as
-// amended 2026-08-16, accepted), ON THE WIRE because the settings surface
-// edits it: the matrix the run grants are minted from (runGrantFor). The result shape is declared once in
+// policy.get / policy.set / policy.setRule / policy.forgetRule — the ONE
+// global agent policy (ADR-0020 §7 as amended 2026-08-16, accepted), ON THE
+// WIRE because the settings surface edits it: the matrix the run grants are
+// minted from (runGrantFor). The result shape is declared once in
 // contracts/policy.get.schema.json, generated into the renderer, and the Go
 // side is validated against it (DTO + over the socket, ws_contract_test.go).
 //
@@ -16,6 +17,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
@@ -75,10 +77,119 @@ func validatePolicySetRaw(raw json.RawMessage) string {
 	if len(p.Policy) == 0 {
 		return "policy is required"
 	}
+	if policyDocumentNamesRules(p.Policy) {
+		return policySetNamesRules
+	}
 	if _, err := content.ParseEffectPolicy(p.Policy); err != nil {
 		return "policy: " + err.Error()
 	}
 	return ""
+}
+
+// policySetNamesRules is the refusal that makes policy.set a MATRIX write and
+// nothing else.
+//
+// A whole-document write is how a person's standing answers were deleted once
+// already (nocx-39bly): the page saves the matrix while holding a document it
+// read a minute ago, and the prompt has written a rule into the store since.
+// The patch that followed read "an absent rules field means nothing to say",
+// which holds only while the renderer never sends the key — and `rules: []`
+// is exactly what JSON.stringify of an empty list sends. It is not absent, it
+// says "no rules", and it would be obeyed.
+//
+// So the document cannot say it at all. A gesture that is about one rule
+// writes one rule, through a method whose name says so, and the refusal names
+// that method rather than leaving a caller to guess which key offended.
+const policySetNamesRules = "policy: a matrix write may not carry rules; " +
+	"one rule is written or forgotten at a time, with policy.setRule and policy.forgetRule"
+
+// policyDocumentNamesRules reports that a policy document states the rules
+// key at all — present-and-empty included, which is the whole point. The
+// validator and the handler ask the same function so the refusal cannot hold
+// at one door and not the other.
+func policyDocumentNamesRules(policy json.RawMessage) bool {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(policy, &doc); err != nil {
+		return false // not an object: ParseEffectPolicy answers for it
+	}
+	_, named := doc["rules"]
+	return named
+}
+
+// policyRuleParams is the wire form of ONE invocation rule a caller writes:
+// what the rule SAYS, and nothing about where it came from.
+//
+// Provenance is deliberately absent. The id is minted by the backend (AD-7)
+// and may only be restated to name a rule that already exists; createdAt,
+// source and evaluatorVersion are facts the store records about the write,
+// not claims a caller gets to make — a renderer that could set createdAt or
+// source could dress a rule it wrote as one a person answered.
+type policyRuleParams struct {
+	ID           string                     `json:"id,omitempty"`
+	Selector     content.InvocationSelector `json:"selector"`
+	Decision     content.Decision           `json:"decision"`
+	GrantedUnder content.Effect             `json:"grantedUnder,omitempty"`
+}
+
+// policySetRuleParams is the policy.setRule params: ONE rule under "rule".
+type policySetRuleParams struct {
+	Rule *policyRuleParams `json:"rule"`
+}
+
+// policyForgetRuleParams is the policy.forgetRule params: ONE id.
+type policyForgetRuleParams struct {
+	ID string `json:"id"`
+}
+
+// policySetRuleResult names the rule the store now holds. The id is the whole
+// reason it exists: a caller that sent none learns the one it was given, and
+// that is the only place it can learn it without a second read. Added
+// separates the two things one method does — a rule appended, or a rule
+// replaced in place.
+type policySetRuleResult struct {
+	ID    string `json:"id"`
+	Added bool   `json:"added"`
+}
+
+// policyForgetRuleResult says whether a rule was there to remove. An id
+// naming nothing is not an error — the rule is already gone, which is what
+// was asked for — so the answer carries the fact rather than raising it.
+type policyForgetRuleResult struct {
+	Removed bool `json:"removed"`
+}
+
+// validatePolicySetRuleRaw checks the envelope and the shape of the one rule.
+// It deliberately does NOT decide whether the rule is safe: that is
+// content's gate (validateInvocationRules, through ParseEffectPolicy in the
+// store), and a second reading of the asymmetry here would be a second answer
+// to drift from the first.
+func validatePolicySetRuleRaw(raw json.RawMessage) string {
+	var p policySetRuleParams
+	if msg := decodeObject(raw, &p, "rule"); msg != "" {
+		return msg
+	}
+	if p.Rule == nil {
+		return "rule is required"
+	}
+	if msg := configIDRunes("rule.id", p.Rule.ID); msg != "" {
+		return msg
+	}
+	if p.Rule.Decision == "" {
+		return "rule.decision is required"
+	}
+	return ""
+}
+
+// validatePolicyForgetRuleRaw checks the envelope and the id's bound.
+func validatePolicyForgetRuleRaw(raw json.RawMessage) string {
+	var p policyForgetRuleParams
+	if msg := decodeObject(raw, &p, "id"); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	return configIDRunes("id", p.ID)
 }
 
 // policyHandlers serves policy.get and policy.set off one store seam, plus
@@ -102,6 +213,14 @@ func (s *WSServer) policySpecs() []methodSpec {
 		regResponder(s.lane, "policy.set", params(validatePolicySetRaw), func(r Responder) handlerFunc {
 			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySet(ctx, req) }
+		}),
+		regResponder(s.lane, "policy.setRule", params(validatePolicySetRuleRaw), func(r Responder) handlerFunc {
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicySetRule(ctx, req) }
+		}),
+		regResponder(s.lane, "policy.forgetRule", params(validatePolicyForgetRuleRaw), func(r Responder) handlerFunc {
+			h := policyHandlers{store: s.agentPolicy, wired: s.agentPolicy != nil, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePolicyForgetRule(ctx, req) }
 		}),
 	}
 }
@@ -132,6 +251,10 @@ func (h policyHandlers) handlePolicySet(ctx context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.set: " + msg})
 		return
 	}
+	if policyDocumentNamesRules(p.Policy) {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.set: " + policySetNamesRules})
+		return
+	}
 	policy, err := content.ParseEffectPolicy(p.Policy)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.set: " + err.Error()})
@@ -142,4 +265,85 @@ func (h policyHandlers) handlePolicySet(ctx context.Context, req jsonrpcRequest)
 		return
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(policySetResult{OK: true}))
+}
+
+// handlePolicySetRule writes ONE rule and leaves the rest of the document
+// exactly as it was.
+//
+// The read-modify-write happens in the STORE, under the store's own lock, and
+// not here. Reading the policy in this handler, editing it and writing it
+// back would be the very race this method exists to remove, moved one layer
+// up: the prompt writes rules while the settings page holds a document it
+// read a minute ago, so a merge on the read side is merging a copy that was
+// already stale when it arrived.
+//
+// An id naming no stored rule is invalid params rather than an internal
+// error, and that is the AD-7 line drawn where a person can see it: a
+// renderer may replace a rule it can SEE, and may not choose the identity of
+// a new one — leaving the id out is how a new rule is written, and the answer
+// carries the id the mint gave it.
+func (h policyHandlers) handlePolicySetRule(ctx context.Context, req jsonrpcRequest) {
+	if !h.wired {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.setRule not available"})
+		return
+	}
+	var p policySetRuleParams
+	if msg := decodeObject(req.Params, &p); msg != "" || p.Rule == nil {
+		if msg == "" {
+			msg = "rule is required"
+		}
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.setRule: " + msg})
+		return
+	}
+	stored, err := h.store.SetRule(content.InvocationRule{
+		ID:           p.Rule.ID,
+		Selector:     p.Rule.Selector,
+		Decision:     p.Rule.Decision,
+		GrantedUnder: p.Rule.GrantedUnder,
+		// The write is made under the reading of commands running NOW,
+		// which is the claim the person is making by making it. Source and
+		// createdAt are the store's to default or preserve.
+		EvaluatorVersion: content.EvaluatorVersion,
+	})
+	switch {
+	case errors.Is(err, assistant.ErrNoSuchRule):
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.setRule: " + err.Error() +
+			"; leave the id out to write a new rule — the backend mints it"})
+		return
+	case errors.Is(err, content.ErrPolicySyntax):
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.setRule: " + err.Error()})
+		return
+	case err != nil:
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "policy.setRule: " + err.Error()})
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(policySetRuleResult{
+		ID:    stored.ID,
+		Added: p.Rule.ID == "",
+	}))
+}
+
+// handlePolicyForgetRule removes ONE rule by id, in the store and under its
+// lock, for the same reason setRule does.
+//
+// An unknown id succeeds with removed:false. It is not an error because the
+// person's gesture — "stop applying this rule" — is already satisfied, and a
+// page whose read predates somebody else's forget would otherwise raise a
+// danger toast about a state it wanted.
+func (h policyHandlers) handlePolicyForgetRule(ctx context.Context, req jsonrpcRequest) {
+	if !h.wired {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "policy.forgetRule not available"})
+		return
+	}
+	var p policyForgetRuleParams
+	if msg := decodeObject(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "policy.forgetRule: " + msg})
+		return
+	}
+	removed, err := h.store.ForgetRule(p.ID)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "policy.forgetRule: " + err.Error()})
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(policyForgetRuleResult{Removed: removed}))
 }

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/policy.setRule.params.schema.json",
+  "title": "PolicySetRuleParams",
+  "description": "Params for policy.setRule: ONE invocation rule. The rule carries what it SAYS and nothing about where it came from — createdAt, source and evaluatorVersion are facts the store records about the write, not claims a caller may make, and a renderer that could set them could dress a rule it wrote as one a person answered.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rule"],
+  "properties": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "decision"],
+      "properties": {
+        "id": {
+          "description": "The rule to REPLACE. Absent writes a new rule and the backend mints its id (AD-7); present must name a rule the document already carries, and an id naming nothing is invalid params. A renderer may replace a rule it can see, and may not choose the identity of a new one.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "selector": {
+          "description": "WHICH invocations the rule speaks about, and nothing about what it decides: exactly one of the three is set. 'exact' names a fixed command line positionally; 'program' covers every argument list of one command word and may only permit while bound to the effect it was granted under; 'hasFeature' matches a semantic fact the CLASSIFIER recorded and may never permit. The asymmetry is enforced by content's own gate, not restated here.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "exact": {
+              "description": "A fixed number of subcommands and a fixed number of tokens in each, matched positionally. A '*' in a token matches any contents of that one token and never spans a token boundary or a shell separator.",
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "program": {
+              "description": "One command word, carrying ANY arguments.",
+              "type": "string",
+              "minLength": 1
+            },
+            "hasFeature": {
+              "description": "One command word carrying one feature of the classifier's CLOSED vocabulary. Both halves are required: a feature alone would speak for every program that can carry it.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["program", "feature"],
+              "properties": {
+                "program": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "feature": {
+                  "type": "string",
+                  "enum": ["writes-option-named-path"]
+                }
+              }
+            }
+          }
+        },
+        "decision": {
+          "description": "What the rule decides for the invocations its selector covers.",
+          "type": "string",
+          "enum": ["permit", "ask", "refuse"]
+        },
+        "grantedUnder": {
+          "description": "The effect class a widening permit was granted for, checked against the effect the CALL classified as. Absent on a rule that does not widen.",
+          "type": "string",
+          "enum": [
+            "observe",
+            "mutate-reversible",
+            "mutate-destructive",
+            "privilege-change",
+            "disclose",
+            "cross-boundary",
+            "delegate"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -6186,6 +6186,85 @@ func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
 }
 
+// The policy.setRule result off the REAL socket: the id the mint gave the
+// rule and whether it was added. It is the third row of the contracts
+// README's table and the one that counts — a payload the test built would
+// prove the struct is well-formed, not that the handler sends it. Both
+// branches are driven, because "added" is the field a DTO case could get
+// right while the handler answered the same value for both.
+func TestPolicySetRule_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.setRule.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	added := policyRuleResultBytes(t, h, map[string]any{
+		"selector": map[string]any{"exact": []any{[]any{"df", "-h"}}},
+		"decision": "permit",
+	})
+	validateJSON(t, schema, added, "policy.setRule added (real socket)")
+
+	var first policySetRuleResult
+	if err := json.Unmarshal(added, &first); err != nil {
+		t.Fatalf("unmarshal %s: %v", added, err)
+	}
+	replaced := policyRuleResultBytes(t, h, map[string]any{
+		"id":       first.ID,
+		"selector": map[string]any{"exact": []any{[]any{"df", "-k"}}},
+		"decision": "refuse",
+	})
+	validateJSON(t, schema, replaced, "policy.setRule replaced (real socket)")
+}
+
+// The policy.forgetRule result off the REAL socket, both branches: a rule
+// that was there, and an id naming nothing — which is a success carrying
+// removed:false, so the contract has to accept it as readily as the other.
+func TestPolicyForgetRule_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.forgetRule.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	added := policyRuleResultBytes(t, h, map[string]any{
+		"selector": map[string]any{"exact": []any{[]any{"df", "-h"}}},
+		"decision": "permit",
+	})
+	var stored policySetRuleResult
+	if err := json.Unmarshal(added, &stored); err != nil {
+		t.Fatalf("unmarshal %s: %v", added, err)
+	}
+
+	for _, id := range []string{stored.ID, stored.ID} { // the second is now unknown
+		raw := jsonrpcCall(t, h.conn, "policy.forgetRule", map[string]any{"id": id})
+		var envelope struct {
+			Result json.RawMessage  `json:"result"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+		}
+		if envelope.Error != nil {
+			t.Fatalf("policy.forgetRule: %+v", envelope.Error)
+		}
+		validateJSON(t, schema, envelope.Result, "policy.forgetRule result (real socket)")
+	}
+}
+
+// policyRuleResultBytes drives policy.setRule and hands back the raw result
+// bytes, so the schema validates what the socket carried rather than a
+// re-marshalled decode of it.
+func policyRuleResultBytes(t *testing.T, h *askHarness, rule map[string]any) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "policy.setRule", map[string]any{"rule": rule})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.setRule: %+v", envelope.Error)
+	}
+	return envelope.Result
+}
+
 // ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
 
 // The DTO's own conformance: one case per interesting shape of the ack the

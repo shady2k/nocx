@@ -241,6 +241,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"policy.set": {
 			[]byte(`{"policy":{}}`),
 		},
+		"policy.setRule": {
+			[]byte(`{"rule":{"selector":{"exact":[["df","-h"]]},"decision":"permit"}}`),
+			[]byte(`{"rule":{"id":"0123456789abcdef0123456789abcdef","selector":{"program":"df"},"decision":"refuse"}}`),
+		},
+		"policy.forgetRule": {
+			[]byte(`{"id":"0123456789abcdef0123456789abcdef"}`),
+		},
 		"ports.pause": {
 			[]byte(`{"profileId":"profile-1","paused":false,"visible":true}`),
 		},

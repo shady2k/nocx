@@ -54,7 +54,9 @@ const LOADED: PolicyMatrix = {
  * tests exist to catch.
  */
 function view(matrix: PolicyMatrix, live: EffectKey[] = LIVE): PolicyView {
-  return { matrix: structuredClone(matrix), live: [...live] }
+  // No rules: this surface edits the matrix and draws no rule today. The
+  // rules a read carries reach the page in nocx-fliln's follow-up.
+  return { matrix: structuredClone(matrix), live: [...live], rules: [] }
 }
 
 afterEach(() => {

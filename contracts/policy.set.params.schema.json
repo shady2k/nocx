@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/policy.set.params.schema.json",
   "title": "PolicySetParams",
-  "description": "Params for policy.set.",
+  "description": "Params for policy.set. The document is the MATRIX — seven effect rows — and may not name rules: a whole-document write made against a document read a minute ago deleted every standing answer a person had approved (nocx-39bly), and 'rules' present-and-empty is what a renderer serialising an empty list sends. One rule is written or forgotten at a time, through policy.setRule and policy.forgetRule.",
   "type": "object",
   "additionalProperties": false,
   "required": ["policy"],
   "properties": {
     "policy": {
-      "type": "object"
+      "type": "object",
+      "not": { "required": ["rules"] }
     }
   }
 }

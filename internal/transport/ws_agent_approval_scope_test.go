@@ -198,6 +198,12 @@ func (f failingPolicyStore) Policy() content.EffectPolicy {
 
 func (f failingPolicyStore) SetPolicy(content.EffectPolicy) error { return f.err }
 
+func (f failingPolicyStore) SetRule(content.InvocationRule) (content.InvocationRule, error) {
+	return content.InvocationRule{}, f.err
+}
+
+func (f failingPolicyStore) ForgetRule(string) (bool, error) { return false, f.err }
+
 // ── "once": exactly today's behaviour ─────────────────────────────────────
 
 // TestAgentApprove_ScopeOnce_WritesNothing: the default answer is not a

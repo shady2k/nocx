@@ -12,6 +12,7 @@ import {
   freezeBlock as kernelFreezeBlock,
 } from './lifecycle/state'
 import { LifecycleProjections } from './lifecycle/projections'
+import type { UnattributedCommand } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
@@ -2883,6 +2884,20 @@ export class TerminalContent extends BasePaneContent {
                 error: String(error),
               })
             })
+        },
+        // A command whose authenticated outcome reached the projections and
+        // found no ledger record to carry it (nocx-2vb9y). Reported, never
+        // repaired here: the projections say WHAT was lost and this says
+        // where, and a repair that guessed a record would be the guess
+        // nocx-td6d4.10 removed. `at: 'complete'` is the one that costs a
+        // finished command its history row and its notification, and until
+        // this line existed it left no trace in the renderer, on the wire or
+        // in the backend's log.
+        (report: UnattributedCommand) => {
+          log.warn('nocx: a command the ledger could not carry', {
+            pane: this.pane.paneId,
+            ...report,
+          })
         },
       )
       this._projections.attach()
@@ -6893,6 +6908,16 @@ export class TerminalContent extends BasePaneContent {
       // shell's own start (if any) opens a shell-originated attempt and the
       // block binds to it — a conventional terminal stays conventional, and
       // the privacy rule holds either way.
+      //
+      // NOT orphaned, deliberately, though no attempt will echo its token
+      // here either. Orphaning invites the next unattributed attempt to
+      // claim the record, and that is only sound when the next one really is
+      // this command — which holds on the refusal path below, where the
+      // bytes go out at a LIVE prompt and the shell's start follows them. A
+      // lane with no domain has no integration to produce a start at all, so
+      // the attempt that eventually arrives may belong to a different
+      // command entirely, and binding it here would store one command's exit
+      // status under another's text — the defect nocx-td6d4.10 removed.
       write()
       return { block, ledgerId }
     }
@@ -6915,7 +6940,21 @@ export class TerminalContent extends BasePaneContent {
         ...(submitId ? { submitId } : {}),
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
-      .then(write, write)
+      .then(write, (err: unknown) => {
+        // STILL fail-open — the bytes go out either way, and swallowing a
+        // command because the control plane was busy is the worse failure.
+        // What changes is that it stops being invisible: this rejection and
+        // a success took the same silent path, so a refused submit and a
+        // healthy one were indistinguishable from every surface, while the
+        // record left behind could never be bound by token.
+        if (ledgerId !== null) this.ledger?.orphan(ledgerId)
+        log.warn('nocx: the lifecycle attempt was refused; the command runs unattributed', {
+          pane: this.pane.paneId,
+          ledgerId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        write()
+      })
     return { block, ledgerId }
   }
 

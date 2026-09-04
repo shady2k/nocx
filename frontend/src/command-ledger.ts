@@ -88,6 +88,9 @@ export class CommandLedger {
    *  attempt belongs to exactly one record, and only the record bound to an
    *  authenticated attempt may be completed by it (ADR-0024 §5). */
   private readonly _attemptBindings = new Map<string, number>()
+  /** Records whose submit was refused, so no attempt will ever echo their
+   *  token. See orphan. */
+  private readonly _orphaned = new Set<number>()
   constructor(opts: LedgerOpts) {
     this._now = opts.now
     this._mintSubmitId = opts.mintSubmitId ?? defaultSubmitId
@@ -163,6 +166,10 @@ export class CommandLedger {
   bindAttempt(attempt: { readonly id: string; readonly submitId?: string }): CommandRecord | null {
     const already = this._attemptBindings.get(attempt.id)
     if (already !== undefined) return this.resolveID(already) ?? null
+    const bindTo = (rec: CommandRecord): CommandRecord => {
+      this._attemptBindings.set(attempt.id, rec.id)
+      return rec
+    }
     // Equality on the submit's own token, and nothing else. This used to
     // take "the first unbound record still running", which is a guess that
     // is right until a record is left behind — and one always can be, since
@@ -175,14 +182,47 @@ export class CommandLedger {
     // literal password. So a finished command could vanish from history and
     // from the bell with nothing logged (nocx-td6d4.10).
     const token = attempt.submitId
-    if (token === undefined || token === '') return null
     const bound = this._boundRecordIds()
+    if (token === undefined || token === '') {
+      // No token, so nothing can be matched on equality — and the guess this
+      // method used to make is exactly what nocx-td6d4.10 removed. What is
+      // left is not a guess: an ORPHANED record is one whose submit already
+      // told us no attempt is coming for it (see orphan), so the next
+      // unattributed attempt in the pane is the command it opened. Without
+      // this, a fail-open submit left the record unbound, the block model
+      // opened a SECOND block for the shell-originated attempt, and
+      // complete()'s fallback closed the first record anyway — the ledger
+      // and the block model disagreeing about which block carried the
+      // outcome, which is the loser-advertises shape AGENTS.md names.
+      const orphan = this._records.find(
+        (r) => this._orphaned.has(r.id) && r.status === 'running' && !bound.has(r.id),
+      )
+      return orphan === undefined ? null : bindTo(orphan)
+    }
     const rec = this._records.find(
       (r) => r.submitId === token && r.status === 'running' && !bound.has(r.id),
     )
     if (rec === undefined) return null
-    this._attemptBindings.set(attempt.id, rec.id)
-    return rec
+    return bindTo(rec)
+  }
+
+  /** Declare that no attempt will ever carry this record's token.
+   *
+   *  The submit path is fail-open by design (ADR-0024 §5, terminal-content):
+   *  a refused lifecycle.submitAttempt must never swallow the command — the
+   *  bytes go out anyway and the session stays conventional. The record
+   *  opened at that submit then carries a token the backend never minted an
+   *  attempt for, so the equality bindAttempt insists on can never succeed.
+   *
+   *  Marking it says so, which turns a guess into a fact. It is sound only
+   *  where the caller knows the NEXT unattributed attempt is this command,
+   *  which is why the refusal marks and the no-live-domain path does not:
+   *  there the bytes went out at a live prompt and the shell's start follows
+   *  them, here there is no integration to produce a start at all.
+   *  Idempotent, and it names one record: it never widens to "whatever is
+   *  pending". */
+  orphan(id: number): void {
+    if (this.resolveID(id) !== undefined) this._orphaned.add(id)
   }
 
   /** Record ids already claimed by an attempt — one attempt per record. */

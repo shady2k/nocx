@@ -4587,6 +4587,94 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       Element.prototype.scrollIntoView = protoScrollIntoView
     }
   }
+  it('a refused attempt still runs the command, and the record it opened still carries the outcome (nocx-2vb9y)', async () => {
+    // The fail-open is deliberate: a control plane that is busy must never
+    // swallow a command. What it used to cost was the RECORD — the submit
+    // opened one carrying a token no attempt would ever echo, so the shell's
+    // own start looked shell-originated, opened a SECOND block, and the
+    // finished command could reach history and the bell through nothing but
+    // a fallback that guesses. This asserts the whole interval: the bytes go
+    // out, one block carries the command, and its authenticated completion
+    // is recorded with the app-owned text.
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e-refused',
+          source: 'user',
+          redactions: [],
+          maskedCommand: 'make deploy',
+          captures: [],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    client.dispatcher.call.mockImplementation(() =>
+      Promise.reject(new Error('control lane saturated')),
+    )
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // Fail-open, unchanged: the refusal did not eat the command.
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
+
+      // The shell's own start, with no token — nothing minted one for this
+      // submit. It must bind to the block already open, not open a second.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-refused', state: 'open', origin: 'shell', command: 'make deploy' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-refused',
+          state: 'completed',
+          exitCode: 3,
+          fence: 'd'.repeat(64),
+        },
+      })
+
+      // Recorded — with the APP-OWNED text, which is the half a shell line
+      // may never contribute.
+      await vi.waitFor(() => {
+        const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+        expect(recordCall).toBeTruthy()
+        const params = recordCall![1] as { command: string; exitCode: number }
+        expect(params.command).toBe('make deploy')
+        expect(params.exitCode).toBe(3)
+      })
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
   it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
     const client = makeClient()
     const submitAttempt = client.dispatcher.call

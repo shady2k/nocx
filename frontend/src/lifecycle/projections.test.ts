@@ -11,7 +11,12 @@ import { LifecycleKernel } from './state'
 import type { ExecutionAttempt, LifecycleFact } from './state'
 import { CommandLedger } from '../command-ledger'
 import type { CommandRecord } from '../command-ledger'
-import { LifecycleProjections, type BlockProjectionPort } from './projections'
+import {
+  LifecycleProjections,
+  type BlockProjectionPort,
+  type UnattributedCommand,
+  type UnattributedPort,
+} from './projections'
 
 const LANE = 'lane-1'
 const FENCE = 'a'.repeat(64)
@@ -61,7 +66,7 @@ class FakeBlocks implements BlockProjectionPort {
   }
 }
 
-function makeEnv() {
+function makeEnv(opts: { unattributed?: UnattributedPort } = {}) {
   const kernel = new LifecycleKernel()
   let minted = 0
   const ledger = new CommandLedger({ now: () => 1000, mintSubmitId: () => `sub-${++minted}` })
@@ -69,7 +74,14 @@ function makeEnv() {
   const persist = vi.fn<(rec: CommandRecord, attempt: ExecutionAttempt) => Promise<unknown>>(() =>
     Promise.resolve(null),
   )
-  const projections = new LifecycleProjections(kernel, ledger, blocks, persist)
+  const projections = new LifecycleProjections(
+    kernel,
+    ledger,
+    blocks,
+    persist,
+    undefined,
+    opts.unattributed,
+  )
   projections.attach()
   return { kernel, ledger, blocks, persist, projections }
 }
@@ -449,5 +461,122 @@ describe('an attempt binds the record its own submit opened', () => {
     const stale = ledger.records().find((r) => r.command === 'deploy staging')
     expect(stale?.status).toBe('running')
     expect(stale?.exitCode).toBeNull()
+  })
+})
+
+describe('a command whose outcome is authenticated and recorded nowhere leaves a trace', () => {
+  // nocx-2vb9y. The loss is silent in both halves today: the block freezes
+  // with its exit status while nothing persists, and the backend never hears
+  // of the command at all — no request, no error, no log. Two occurrences
+  // cost a whole session and still did not settle which route they took, so
+  // the routes are reported apart.
+
+  it('reports a completed attempt that carried app authority and bound nothing', () => {
+    const seen: UnattributedCommand[] = []
+    const { kernel } = makeEnv({ unattributed: (r) => seen.push(r) })
+    kernel.applyFact(promptReady())
+    // The backend minted a submit token for this attempt — an app-owned
+    // submit really happened — and the ledger holds no record carrying it.
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-7', origin: 'app', submitId: 'sub-gone', command: 'make' }),
+    )
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-7', state: 'completed', exitCode: 1, fence: FENCE }),
+    )
+
+    expect(seen.map((r) => r.at)).toEqual(['bind', 'complete'])
+    expect(seen[1]).toMatchObject({
+      at: 'complete',
+      attemptId: 'att-7',
+      hadSubmitId: true,
+      origin: 'app',
+      exitCode: 1,
+    })
+  })
+
+  it('reports the other door: a submitted record abandoned with the domain', () => {
+    // The completion that arrives AFTER this door closes carries no app
+    // authority — the shell's own start has no token — so the two branches
+    // above would stay silent about a command that was submitted, ran, and
+    // reached neither history nor the bell. This is the report that names it.
+    const seen: UnattributedCommand[] = []
+    const { kernel, ledger } = makeEnv({ unattributed: (r) => seen.push(r) })
+    kernel.applyFact(promptReady('parent', 1))
+    kernel.applyFact(nativeFact())
+    kernel.applyFact(promptReady('child', 2))
+    const rec = ledger.open('exit', '/home/pi', 'far-host', () => undefined, 'shell')
+
+    kernel.applyFact(nativeFact())
+    kernel.applyFact(promptReady('parent', 1))
+
+    expect(rec.status).toBe('unknown')
+    expect(seen).toEqual([
+      {
+        at: 'abandon',
+        attemptId: '',
+        hadSubmitId: false,
+        origin: 'app',
+        exitCode: null,
+        runningRecords: 0,
+      },
+    ])
+  })
+
+  it('says nothing about a genuinely shell-originated command', () => {
+    const seen: UnattributedCommand[] = []
+    const { kernel, persist } = makeEnv({ unattributed: (r) => seen.push(r) })
+    // A line typed at the native prompt: no submit, no token, no record —
+    // and persisting nothing is the command-text decision, not a loss.
+    kernel.applyFact(promptReady())
+    kernel.applyFact(running('d1', 1, { id: 'att-8', origin: 'shell', command: 'ls' }))
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-8', state: 'completed', exitCode: 0, fence: FENCE }),
+    )
+
+    expect(persist).not.toHaveBeenCalled()
+    expect(seen).toEqual([])
+  })
+})
+
+describe('a record orphaned by a fail-open submit is still the command that ran', () => {
+  // The submit path is fail-open by design: a refused lifecycle.submitAttempt
+  // must never swallow the command, so the bytes go out anyway. The record it
+  // opened then carries a token no attempt will ever echo. Before this, the
+  // ledger refused to bind it (rightly — guessing is what nocx-td6d4.10 took
+  // out) and the block model opened a SECOND block for the shell-originated
+  // attempt, while complete()'s fallback quietly closed the first record. The
+  // two halves disagreed about which block the outcome belonged to.
+
+  it('binds the next unattributed attempt, so one block carries the outcome', () => {
+    const { kernel, ledger, blocks, persist } = makeEnv()
+    const rec = ledger.open('make test', '/repo', '', () => undefined, 'shell')
+    // The submit was refused: nothing will ever carry this record's token.
+    ledger.orphan(rec.id)
+    kernel.applyFact(promptReady())
+    kernel.applyFact(running('d1', 1, { id: 'att-3', origin: 'shell', command: 'make test' }))
+
+    // Bound, not opened: the block that already exists is this command's.
+    expect(blocks.events).toEqual(['bind:att-3'])
+    expect(ledger.recordForAttempt('att-3')?.id).toBe(rec.id)
+
+    kernel.applyFact(
+      running('d1', 1, { id: 'att-3', state: 'completed', exitCode: 2, fence: FENCE }),
+    )
+    expect(persist).toHaveBeenCalledTimes(1)
+    // The record keeps the APP-OWNED text, never the attempt's wire line.
+    expect(persist.mock.calls[0][0].command).toBe('make test')
+    expect(ledger.records()[0].exitCode).toBe(2)
+  })
+
+  it('and a record nobody orphaned is still never claimed by a tokenless attempt', () => {
+    const { kernel, ledger, blocks } = makeEnv()
+    ledger.open('make test', '/repo', '', () => undefined, 'shell')
+    kernel.applyFact(promptReady())
+    // No orphan mark: this is the guess nocx-td6d4.10 removed, and it stays
+    // removed — a live submit's record is not up for grabs.
+    kernel.applyFact(running('d1', 1, { id: 'att-4', origin: 'shell', command: 'ls' }))
+
+    expect(blocks.events).toEqual(['open:att-4:ls'])
+    expect(ledger.recordForAttempt('att-4')).toBeUndefined()
   })
 })

@@ -1,6 +1,7 @@
 import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
+import type { SkillsAudit } from './generated/skills.audit'
 import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsPreview } from './generated/skills.preview'
 
@@ -15,6 +16,7 @@ export interface SkillsClientLike {
   install(url: string): Promise<SkillsInstall>
   file(name: string, path: string): Promise<SkillsFile>
   files(name: string): Promise<SkillsFiles>
+  audit(name: string): Promise<SkillsAudit>
 }
 
 export type SkillsState =
@@ -107,6 +109,16 @@ export class SkillsStore {
   // passthrough so the page keeps ONE collaborator for skills.
   files(name: string): Promise<SkillsFiles> {
     return this.client.files(name)
+  }
+
+  // Asking for a reading refreshes nothing either, and here the reason is
+  // the point rather than a consequence: skills.audit writes nothing, and it
+  // must be VISIBLE that it writes nothing. The report changes no switch, no
+  // digest and no status — what the assistant is offered is still the
+  // person's switch and the digest comparison — so a refresh after one would
+  // suggest the reading had moved something.
+  audit(name: string): Promise<SkillsAudit> {
+    return this.client.audit(name)
   }
 
   // Installing goes through the store because the list is now different, and

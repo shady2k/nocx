@@ -34,6 +34,13 @@ type skillSettingsSource interface {
 	// pre-install — so the card that design §8 requires could not be drawn
 	// without it.
 	Files(name string) (skill.FilesResult, error)
+	// Audit composes the bundle one audit reads (skill/audit.go). It is on
+	// this interface rather than one of its own because the settings
+	// surface asks the library exactly one kind of question — what is this
+	// skill — and a second interface over the same object would be a second
+	// place to keep that answer. It reaches no network and no model: the
+	// model call belongs to the engine, and this is only the bytes.
+	Audit(name string) (skill.AuditMaterial, error)
 }
 
 type skillSetEnabledParams struct {

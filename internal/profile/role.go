@@ -40,12 +40,34 @@ const (
 	// note in the UI, never silently: it spends money the person did not
 	// ask to spend.
 	RoleSummarizing ModelRole = "summarizing"
+	// RoleAuditing is the model a person asks to READ one skill they
+	// already hold and describe it back to them — design §7's audit, which
+	// gates nothing and certifies nothing. It arrives WITH its consumer
+	// (skills.audit), which is the whole of the warning above: a role in
+	// the closed set that nothing asks for is the shape RoleClassifier is
+	// stuck in, and this const would have been worse than no role at all
+	// if the button had landed a bead later.
+	//
+	// It is its own role rather than a second use of RoleSummarizing
+	// because the two want opposite things from a model. Summarizing reads
+	// a transcript WE composed and writes something short from it;
+	// auditing reads a stranger's document and describes it, which is the
+	// one call in the product whose input is attacker-controlled prose. A
+	// person may reasonably want a cheap model for the first and a careful
+	// one for the second, and one role could not say that.
+	//
+	// Unassigned, it falls back to the ANSWERING role's endpoint with a
+	// note in the UI, never silently — for RoleSummarizing's reason, which
+	// binds harder here: an audit is a call the person pressed a button
+	// for, and being billed for a model they did not choose is exactly the
+	// surprise the note exists to prevent.
+	RoleAuditing ModelRole = "auditing"
 )
 
 // AllRoles is the closed role set, in the order the roles surface renders
 // them (answering first: it is the role a normal ask uses).
 func AllRoles() []ModelRole {
-	return []ModelRole{RoleAnswering, RoleClassifier, RoleSummarizing}
+	return []ModelRole{RoleAnswering, RoleClassifier, RoleSummarizing, RoleAuditing}
 }
 
 // ValidModelRole reports whether v is a value this build recognises. An

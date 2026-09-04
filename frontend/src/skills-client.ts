@@ -1,5 +1,6 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
+import type { SkillsAudit } from './generated/skills.audit'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsInstall } from './generated/skills.install'
@@ -58,6 +59,27 @@ export class SkillsClient {
   // and see what it carries before turning it on.
   files(name: string): Promise<SkillsFiles> {
     return this.dispatcher.call<SkillsFiles>('skills.files', { name })
+  }
+
+  // THE READING A PERSON ASKS FOR (design §7). It is a method of its own —
+  // never a field the card fills on open — because it is a model call, and a
+  // model call is money: `internal/profile/role.go` refuses to spend that
+  // silently, and a page load is the silent spend in another costume.
+  //
+  // The name is the WHOLE request. Nothing about the model is a parameter:
+  // which model reads a skill is the auditing role's assignment, resolved on
+  // the backend in the one place a role becomes an (endpoint, model) pair, so
+  // a renderer that named one would be a second answer to that question. The
+  // result says which role actually answered, on which endpoint, because an
+  // unassigned auditing role falls back to the answering one and must never
+  // do it quietly.
+  //
+  // A reading that could not happen REJECTS — no model assigned, an endpoint
+  // that is gone, a skill that vanished since the card opened. It is never an
+  // empty report, because an empty report is indistinguishable from a clean
+  // one, which is the whole reason this feature refuses to certify anything.
+  audit(name: string): Promise<SkillsAudit> {
+    return this.dispatcher.call<SkillsAudit>('skills.audit', { name })
   }
 
   // Reading, never writing: the backend fetches the document at this address,

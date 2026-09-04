@@ -47,6 +47,7 @@ func (fixedSkills) Delete(string) error {
 }
 
 type grantPromptClient struct {
+	unauditedClient
 	seen chan assistant.AskParams
 }
 

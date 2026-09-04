@@ -195,3 +195,42 @@ describe('SkillsClient.files', () => {
     await expect(new SkillsClient(dispatcher).files('absent')).rejects.toThrow('was not found')
   })
 })
+
+describe('SkillsClient.audit', () => {
+  it('sends the skill and nothing about the model, and answers with a reading', async () => {
+    const answer = {
+      name: 'weather',
+      provenance: 'installed',
+      role: 'auditing',
+      endpoint: 'Local',
+      model: 'qwen3',
+      report: 'It asks a station and curls example.test.',
+      read: ['SKILL.md', 'scripts/fetch.sh'],
+      omitted: [],
+      maxBytes: 131072,
+      findings: [],
+    }
+    const { dispatcher, calls } = fakeDispatcher([answer])
+
+    const got = await new SkillsClient(dispatcher).audit('weather')
+
+    // NOTHING ABOUT THE MODEL is a parameter. Which model reads a skill is
+    // the auditing role's assignment, resolved on the backend in the one
+    // place a role becomes an (endpoint, model) pair; a renderer that named
+    // one would be a second answer to that.
+    expect(calls).toEqual([{ method: 'skills.audit', params: { name: 'weather' } }])
+    expect(got.report).toBe('It asks a station and curls example.test.')
+    expect(got.role).toBe('auditing')
+  })
+
+  it('lets a refusal through as it was written', async () => {
+    // A reading that did not happen is a refusal the person reads, never an
+    // empty report — an empty report is indistinguishable from a clean one.
+    const { dispatcher } = fakeDispatcher([
+      new Error('no model is assigned to the auditing role, and none to the answering role either'),
+    ])
+    await expect(new SkillsClient(dispatcher).audit('weather')).rejects.toThrow(
+      'no model is assigned',
+    )
+  })
+})

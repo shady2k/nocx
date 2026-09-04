@@ -43,11 +43,14 @@ import {
   type Fact,
   type FileReadoutOutcome,
 } from './ui'
+import { CodeBlock, MarkerList } from './ui'
 import { Dialog, showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import type { BadgeTone } from './ui/badge'
 import { classifyPastedSource } from './api/api-paths'
 import { SkillsInstallDialog } from './skills-install-dialog'
+import { scanPatternWords } from './scan-pattern-words'
+import type { SkillsAudit } from './generated/skills.audit'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsPreview } from './generated/skills.preview'
@@ -161,6 +164,41 @@ type Manifest =
   | { kind: 'reading' }
   | { kind: 'read'; result: SkillsFiles }
   | { kind: 'unreadable'; message: string }
+
+/**
+ * The reading a person ASKED FOR (nocx-0bsa4.4), and the states it passes
+ * through.
+ *
+ * A refusal is DRAWN and never thrown, for the manifest's reason — but here
+ * the distinction is load-bearing rather than tidy: a reading that did not
+ * happen must never look like a reading that found nothing. So `refused`
+ * carries the backend's own sentence and renders INSTEAD of a report, and
+ * there is deliberately no fourth state in which the block is on screen with
+ * nothing in it.
+ */
+type AuditAsk =
+  { kind: 'reading' } | { kind: 'read'; result: SkillsAudit } | { kind: 'refused'; message: string }
+
+/**
+ * What one omitted file says, in the person's words.
+ *
+ * The switch is total over the wire's closed union, so a fifth reason added
+ * to the contract fails the compile here rather than rendering as a path with
+ * no explanation beside it — which would be the silent degrade the whole
+ * omission list exists to prevent.
+ */
+const omissionWords = (omission: SkillsAudit['omitted'][number]): string => {
+  switch (omission.reason) {
+    case 'too-large':
+      return `${omission.path} was not read: it is larger than one file's read budget.`
+    case 'not-text':
+      return `${omission.path} was not read: its bytes are not text, so there was nothing to describe.`
+    case 'budget-spent':
+      return `${omission.path} was not read: the reading was already full when its turn came.`
+    case 'unreadable':
+      return `${omission.path} was not read: it could not be opened just now.`
+  }
+}
 
 export function SkillsSection(props: SkillsSectionProps) {
   const [state, setState] = createSignal<SkillsState>({ kind: 'loading' })
@@ -288,6 +326,7 @@ export function SkillsSection(props: SkillsSectionProps) {
   const [cardName, setCardName] = createSignal<string | null>(null)
   const [fileAsk, setFileAsk] = createSignal<FileAsk | null>(null)
   const [manifest, setManifest] = createSignal<Manifest | null>(null)
+  const [auditAsk, setAuditAsk] = createSignal<AuditAsk | null>(null)
 
   /** The skill the card is about, live from the list. Null once it is gone —
    *  a card left open over a Delete closes rather than describing a skill
@@ -303,6 +342,14 @@ export function SkillsSection(props: SkillsSectionProps) {
    *  arriving for the skill before last is the same defect in the list. */
   let fileGeneration = 0
 
+  /** Which OPEN CARD an audit belongs to. It is a counter of its own rather
+   *  than `fileGeneration`, because the two are about different things:
+   *  opening another file of the same skill abandons the bytes on screen and
+   *  must NOT abandon a reading of the skill those files belong to — and
+   *  re-asking would be a second model call for a click that spent nothing.
+   *  It moves only when the card does. */
+  let auditGeneration = 0
+
   /** Opening the card asks for both halves at once: the document the person
    *  came for, and the manifest of everything else the skill carries. The
    *  contract puts SKILL.md first in that manifest, so reading it before the
@@ -311,10 +358,32 @@ export function SkillsSection(props: SkillsSectionProps) {
    *  trip on the ordinary skill, which carries exactly that one file. */
   function openCard(skill: Skill): void {
     const generation = ++fileGeneration
+    auditGeneration++
     setCardName(skill.name)
     setManifest({ kind: 'reading' })
+    // NOT the audit. Opening a card asks for bytes the person already owns,
+    // which costs nothing; the reading is a model call and waits for the
+    // button. That is design §8's rule and role.go's, and it is enforced by
+    // there being no call here rather than by anybody remembering it.
+    setAuditAsk(null)
     void readFile(skill.name, SKILL_FILE, generation)
     void readManifest(skill.name, generation)
+  }
+
+  /** The button. It spends money, so it is pressed rather than triggered, and
+   *  a second press while one is in flight is ignored rather than queued. */
+  async function askForAudit(name: string): Promise<void> {
+    if (auditAsk()?.kind === 'reading') return
+    const generation = ++auditGeneration
+    setAuditAsk({ kind: 'reading' })
+    try {
+      const result = await props.store.audit(name)
+      if (generation !== auditGeneration) return
+      setAuditAsk({ kind: 'read', result })
+    } catch (err) {
+      if (generation !== auditGeneration) return
+      setAuditAsk({ kind: 'refused', message: refusalSentence(err) })
+    }
   }
 
   async function readManifest(name: string, generation: number): Promise<void> {
@@ -357,9 +426,11 @@ export function SkillsSection(props: SkillsSectionProps) {
    *  would be the surface deciding to show something nobody asked for. */
   const closeCard = (): void => {
     fileGeneration++
+    auditGeneration++
     setCardName(null)
     setFileAsk(null)
     setManifest(null)
+    setAuditAsk(null)
   }
 
   const cardTitle = (): string => `\u201c${cardName() ?? ''}\u201d`
@@ -437,6 +508,55 @@ export function SkillsSection(props: SkillsSectionProps) {
         return { kind: 'too-large', maxBytes: ask.result.maxBytes }
     }
   }
+
+  /** The reading the person asked for, or null. Read out of the ask so every
+   *  sentence below draws from one answer rather than from three accessors
+   *  that could disagree about whether a reading is on screen. */
+  const reading = (): SkillsAudit | null => {
+    const held = auditAsk()
+    return held?.kind === 'read' ? held.result : null
+  }
+
+  /** Why there is no reading, or ''. It mirrors `manifestRefusal` rather
+   *  than narrowing the union inline, because a `Show` that carries the
+   *  discriminated value cannot narrow it for its child. */
+  const auditRefusal = (): string => {
+    const held = auditAsk()
+    return held?.kind === 'refused' ? held.message : ''
+  }
+
+  /** WHAT WENT INTO THE READING, as a stance per file: read, or not read and
+   *  why. It is the kit's MarkerList because that is the component for
+   *  exactly this vocabulary — this is included, this is not, and here is the
+   *  caveat — and the install ask already states its manifest with it, so a
+   *  person meets one grammar for "what is in and what is out" in both
+   *  places. */
+  const auditManifest = (result: SkillsAudit) => [
+    ...result.read.map((path) => ({ text: path, tone: 'included' as const })),
+    ...result.omitted.map((omission) => ({
+      text: omissionWords(omission),
+      tone: 'excluded' as const,
+    })),
+  ]
+
+  /** Which model was billed, said beside what it wrote. Facts rather than
+   *  prose because that is what they are, and because a reader checking a
+   *  reading needs to know which model made it before they weigh a word of
+   *  it. */
+  const auditFacts = (result: SkillsAudit): Fact[] => [
+    { name: 'Read by', value: result.model },
+    { name: 'Endpoint', value: result.endpoint },
+  ]
+
+  /** THE NOTE ROLE.GO INSISTS ON, or ''. An unassigned auditing role spends
+   *  the answering role's endpoint, and it may never do that quietly: the
+   *  person pressed a button and is entitled to know which model they were
+   *  billed for. Silent when the role they assigned is the one that ran —
+   *  a note under every reading is a note nobody reads. */
+  const auditFallbackNote = (result: SkillsAudit): string =>
+    result.role === 'answering'
+      ? `No model is assigned to the auditing role, so this reading was made by ${result.model} on ${result.endpoint} — the answering role's endpoint. Assign an auditing model under Model roles if you want a different one reading your skills.`
+      : ''
 
   /** Why a skill that is switched off is off, in one sentence that is true of
    *  every skill it is drawn for. An installed skill ARRIVED off and the rest
@@ -678,6 +798,121 @@ export function SkillsSection(props: SkillsSectionProps) {
                       />
                     )}
                   </Show>
+                )}
+              </Show>
+              {/* THE AUDIT (nocx-0bsa4.4). Last on the card, and that is the
+                  argument for where it sits: the card exists so a person can
+                  READ the skill, and this is what they ask for when reading
+                  it did not settle the question. Putting it above the file
+                  would offer a model's paragraph before the bytes it is
+                  about, which is the opposite of what design §7 is for.
+
+                  It is a BUTTON. Opening the card asks for nothing here, and
+                  that is enforced by there being no call in `openCard`
+                  rather than by anybody remembering the rule: an audit is a
+                  model call, and `internal/profile/role.go` refuses to spend
+                  that silently.
+
+                  It CHANGES NOTHING. There is no control in this block, no
+                  branch anywhere reads what comes back, and the switch above
+                  is exactly where it was — which is asserted rather than
+                  assumed, both here and off the socket. */}
+              <Button
+                onClick={() => void askForAudit(skill().name)}
+                disabled={auditAsk()?.kind === 'reading'}
+              >
+                Audit this skill
+              </Button>
+              <Show when={auditAsk()?.kind === 'reading'}>
+                <StatusCard
+                  tone="neutral"
+                  title="Reading this skill"
+                  description={`A model is reading the files of \u201c${skill().name}\u201d and writing a description of them.`}
+                />
+              </Show>
+              {/* The backend's own sentence, and NO report beside it. A
+                  reading that did not happen must never look like a reading
+                  that found nothing — the same rule the wire keeps by
+                  refusing rather than answering with an empty one. */}
+              <Show when={auditRefusal()}>
+                <StatusCard
+                  tone="danger"
+                  title="This skill was not read"
+                  description={auditRefusal()}
+                />
+              </Show>
+              <Show when={reading()}>
+                {(result) => (
+                  <>
+                    {/* WHAT THIS IS, before what it says. The heading is the
+                        claim being made and it is deliberately small: a
+                        model read some files and wrote paragraphs about
+                        them. Nothing here is certified, and the sentence
+                        says so in the words a person can act on rather than
+                        in a tone or a colour they have to interpret. */}
+                    <StatusCard
+                      tone="neutral"
+                      title="A description, not a verdict"
+                      description="A model read the files below and wrote the paragraphs under this. It decides nothing: what the assistant is offered is still your switch and the bytes on disk, and neither moved when you pressed the button. A skill's own text can address whoever reads it, so read this beside the files rather than instead of them."
+                    />
+                    <FactList
+                      facts={auditFacts(result())}
+                      ariaLabel="Which model read this skill"
+                    />
+                    <Show when={auditFallbackNote(result())}>
+                      <StatusCard
+                        tone="warning"
+                        title="This was read by the answering model"
+                        description={auditFallbackNote(result())}
+                      />
+                    </Show>
+                    <StatusCard
+                      tone="neutral"
+                      prose
+                      title={`What a model read in \u201c${result().name}\u201d`}
+                      description={result().report}
+                    />
+                    {/* WHICH FILES IT WAS ABOUT, and which it was not. A
+                        reading of a subset that did not say so would read
+                        exactly like a reading of the whole skill. */}
+                    <MarkerList items={auditManifest(result())} />
+                    {/* THE SCAN'S OWN MATCHES, ours and not the model's, so
+                        the line and its number are checkable against the
+                        file above rather than reported by the thing being
+                        checked. Warning and never danger: a finding is
+                        evidence and never a refusal
+                        (internal/skill/scan.go). */}
+                    <For each={result().findings}>
+                      {(finding) => (
+                        <Stack>
+                          <StatusCard
+                            tone="warning"
+                            title={scanPatternWords(finding.patternId)}
+                            description={`Line ${finding.lineNumber} of ${finding.path} matched the static scan. It is evidence to read beside the bytes, not a refusal — what to do about it is yours.`}
+                          />
+                          <CodeBlock
+                            ariaLabel={`Line ${finding.lineNumber} of ${finding.path}, which the static scan matched`}
+                          >
+                            {finding.line}
+                          </CodeBlock>
+                        </Stack>
+                      )}
+                    </For>
+                    <Show when={result().findings.length === 0}>
+                      {/* ABSENCE OF A MATCH IS NOT SAFETY, and this is the
+                          sentence that keeps the surface from implying it
+                          is. The scan is eleven patterns looking for known
+                          phrasings; a file none of them hit is a file they
+                          had nothing to say about. Saying "no issues found"
+                          here would put our signature on bytes nobody
+                          certified, which is what design §4 removed. */}
+                      <StatusCard
+                        tone="neutral"
+                        title="The static scan matched nothing in these files"
+                        description="That is not the same as safe. The scan looks for a fixed set of known phrasings, so files it matched nothing in are files it had nothing to say about — not files anything has vouched for."
+                      />
+                    </Show>
+                  </>
                 )}
               </Show>
             </>

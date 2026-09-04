@@ -22,6 +22,7 @@ import (
 // the model turn can be proved independent from stopping its foreground child.
 
 type cancelBlockingClient struct {
+	unauditedClient
 	started chan struct{}
 	emitted chan struct{}
 	stopped chan struct{}

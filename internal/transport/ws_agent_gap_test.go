@@ -440,6 +440,7 @@ func (r outboundNotifyResponder) TryNotify(method string, params json.RawMessage
 // test releases it — the deterministic stand-in for "the stream is still
 // producing while the consumer has stopped reading".
 type barrierAskClient struct {
+	unauditedClient
 	n           int
 	emitted     chan struct{}
 	release     chan struct{}
@@ -746,6 +747,7 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 // about which text belongs to which run then reported the swap as
 // corruption (nocx-sxvnh).
 type interleavedAskClient struct {
+	unauditedClient
 	mu          sync.Mutex
 	scripts     map[string][]string
 	started     int

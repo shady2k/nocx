@@ -1025,13 +1025,33 @@ func (h agentHandlers) resolveEndpointMaterial(
 	ctx context.Context,
 	endpoint profile.Endpoint,
 ) (credential.Secret, []assistant.Header, error) {
+	return resolveEndpointMaterial(ctx, h.credentials, endpoint, credential.Operation("answer the ask"))
+}
+
+// resolveEndpointMaterial is the ONE place an endpoint becomes a usable
+// (key, headers) pair. It became a free function when the skill audit needed
+// the same resolution from a handler family that is not the agent's: a second
+// copy would have agreed with this one on every endpoint anybody tried and
+// disagreed the day a header's secret went missing, because only one of them
+// would have been taught the difference between a missing credential and a
+// missing header.
+//
+// The OPERATION is the caller's, and it is the only thing they differ on: it
+// is what the vault shows a person when it raises an unlock, so "answer the
+// ask" and "audit a skill" must not be one string.
+func resolveEndpointMaterial(
+	ctx context.Context,
+	credentials credential.Resolver,
+	endpoint profile.Endpoint,
+	op credential.Stance,
+) (credential.Secret, []assistant.Header, error) {
 	secret := credential.Secret{}
 	if endpoint.NeedsCredential() {
-		if h.credentials == nil {
+		if credentials == nil {
 			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
 		}
-		resolved, err := h.credentials.Resolve(
-			ctx, credential.SecretID(endpoint.CredentialRef), credential.Operation("answer the ask"))
+		resolved, err := credentials.Resolve(
+			ctx, credential.SecretID(endpoint.CredentialRef), op)
 		if err != nil {
 			// A sealed vault (headless), a dismissed unlock and a deleted
 			// secret are terminalized by runAskStream, which owns the mapping
@@ -1051,12 +1071,12 @@ func (h agentHandlers) resolveEndpointMaterial(
 			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
 			continue
 		}
-		if h.credentials == nil {
+		if credentials == nil {
 			return credential.Secret{}, nil,
 				fmt.Errorf("the header %q references a missing secret", hd.Name)
 		}
-		hSecret, hErr := h.credentials.Resolve(
-			ctx, credential.SecretID(hd.ValueRef), credential.Operation("answer the ask"))
+		hSecret, hErr := credentials.Resolve(
+			ctx, credential.SecretID(hd.ValueRef), op)
 		if hErr != nil {
 			return credential.Secret{}, nil, hErr
 		}

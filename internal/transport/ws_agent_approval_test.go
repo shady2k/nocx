@@ -38,6 +38,7 @@ type approvalScriptStep struct {
 // scriptedApprovalClient plays a script of Ask outcomes, recording every
 // AskParams it received so the tests can assert what the resume carried.
 type scriptedApprovalClient struct {
+	unauditedClient
 	mu       sync.Mutex
 	script   []approvalScriptStep
 	received []assistant.AskParams

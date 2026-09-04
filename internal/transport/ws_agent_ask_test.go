@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -51,9 +52,22 @@ func (b *synchronizedBuffer) String() string {
 	return b.buf.String()
 }
 
+// unauditedClient supplies the audit seam to every fake engine in this
+// package that is not about the audit. It REFUSES rather than answering:
+// embedding a fake that quietly returned a report would let an audit test
+// pass against a client that never ran one, which is the shape rule 1 of
+// AGENTS.md's testing rules exists to prevent. The audit's own fake
+// (ws_skill_audit_test.go) overrides it.
+type unauditedClient struct{}
+
+func (unauditedClient) AuditSkill(context.Context, assistant.SkillAuditParams) (string, error) {
+	return "", errors.New("this fake engine does not audit skills")
+}
+
 // scriptedAssistantClient is the injected engine: Ask plays back a script of
 // deltas and an outcome, so the orchestration is deterministic.
 type scriptedAssistantClient struct {
+	unauditedClient
 	mu             sync.Mutex
 	deltas         []string
 	err            error // terminal error Ask returns after the deltas
@@ -438,6 +452,7 @@ var (
 // refused socket write must not wedge the run: the connection context
 // cancels the stream and the run closes failed, "the connection was lost").
 type blockingAskClient struct {
+	unauditedClient
 	firstDone chan struct{} // closed after the first delta is emitted
 	release   chan struct{} // the test closes this to unblock
 }

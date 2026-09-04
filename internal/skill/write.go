@@ -225,6 +225,17 @@ func (s *Store) Files(name string) (FilesResult, error) {
 	return Files(s.roots, name)
 }
 
+// Audit composes one skill's bundle for a reading (audit.go), over the same
+// roots and the same resolution File and Files use. It is a method here
+// beside them for their reason: a caller must not be able to reach one of
+// them with a different root order than the other.
+func (s *Store) Audit(name string) (AuditMaterial, error) {
+	if s == nil {
+		return AuditMaterial{}, errUnavailable
+	}
+	return Audit(s.roots, name)
+}
+
 // Create writes a new managed skill. An empty leftover directory is completed;
 // a directory containing SKILL.md is an existing name and is refused.
 func (s *Store) Create(name, description, body string) error {

@@ -182,6 +182,7 @@ function openSection(container: HTMLElement, label: string): void {
 /** A skills backend with one authored skill, for the pages that need one. */
 function fakeSkillsClient(): SkillsClientLike {
   return {
+    audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
     list: vi.fn().mockResolvedValue({
       documentPath: '/tmp/nocx/skills.json',
       skills: [

@@ -18,6 +18,7 @@ function fakeClient(installed: string[]) {
     return Promise.resolve({ name: 'deploy', provenance: 'installed' as const })
   })
   const client: SkillsClientLike = {
+    audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
     list: vi.fn(() => {
       order.push('list')
       return Promise.resolve({

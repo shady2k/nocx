@@ -35,8 +35,9 @@ import (
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
-// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
-// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
+// endpoint form's Test button (Probe, nocx-edio), the ask transaction (Ask,
+// nocx-x8s2.2 — the run f4s5 prepares is driven here), and the skill card's
+// audit button (AuditSkill, nocx-0bsa4.4).
 type Client interface {
 	// Probe streams one real response from the given endpoint configuration
 	// — the Test button's whole meaning: it probes what will actually be
@@ -77,6 +78,19 @@ type Client interface {
 	// transport can call it from its one terminal funnel without asking
 	// whether the run ever suspended.
 	Discard(runID string)
+	// AuditSkill asks the auditing role's model to DESCRIBE one skill's
+	// bundle and returns its prose (design §7). It is here beside Probe
+	// rather than behind a seam of its own because it is the same shape:
+	// the caller resolves the pair and the credential, the engine owns the
+	// model call.
+	//
+	// It gates nothing and certifies nothing. Nothing in the product
+	// branches on what comes back — a skill is offered to the assistant
+	// when the person's switch is on and the bytes still match, and this
+	// call touches neither. An error means there is no reading, and the
+	// caller must say so rather than showing an empty one: a blank report
+	// reads exactly like a clean report.
+	AuditSkill(ctx context.Context, p SkillAuditParams) (string, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed

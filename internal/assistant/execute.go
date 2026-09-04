@@ -763,6 +763,30 @@ func executeFilesRead(ctx context.Context, cap agenttools.Capability, args json.
 	return string(b), nil
 }
 
+// A CAPABILITY REFUSAL LEAVES THESE TOOLS AS AN ERROR (nocx-4yjwk.5).
+//
+// files.edit and files.create answer an editor failure as a tool result —
+// {"status":"refused"} with the editor's own reason — and that is right for a
+// FAILURE: a stale revision, an unwritable file, a patch that does not apply
+// are outcomes the model must read and act on, and they name only what the
+// model already named. It is wrong for the narrowed capability's ErrOutOfScope,
+// which is not a failure at all but the enforcement refusing a call it cannot
+// express — a policy fact, whose stringification names an absolute path outside
+// the grant and the shape of the fence that stopped it. Answered here, it
+// reached the model verbatim, which is exactly what refusalResult's contract
+// forbids.
+//
+// So the capability refusal is HANDED UP rather than answered: the kernel's one
+// predicate recognises it at the single seam that decides fault-or-answer
+// (kernel.go step 6c, nocx-4yjwk.3) and returns OUR sentence. That is a second
+// CALL SITE of capabilityRefusal, deliberately, and not a second predicate —
+// the alternative, minting our sentence here, would put the fault-or-answer
+// decision back in each tool, which is the spread that made files.read and
+// these two disagree in the first place.
+//
+// The interval: from the capability's refusal — nothing was written, and the
+// error carries no result — until the kernel closes the attempt and returns
+// refusalResult(RefusedOutOfScope). Every other error keeps the result it had.
 type filesMutationResult struct {
 	Path     string `json:"path"`
 	Status   string `json:"status"`
@@ -788,6 +812,9 @@ func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.
 	}
 	result, err := editor.Edit(ctx, p.Path, p.Revision, p.Patch)
 	if err != nil {
+		if capabilityRefusal(err) {
+			return "", err
+		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
 	}
 	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "applied", Revision: result.Revision})
@@ -810,6 +837,9 @@ func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args jso
 	}
 	result, err := editor.Create(ctx, p.Path, p.Content)
 	if err != nil {
+		if capabilityRefusal(err) {
+			return "", err
+		}
 		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
 	}
 	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "created", Revision: result.Revision})

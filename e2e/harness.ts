@@ -1089,7 +1089,18 @@ export type PermissionAnswer = 'Allowed' | 'Ask every time' | 'Never'
  * so a spec had to read a state line beside it.
  */
 export function permissionAnswer(page: Page, effect: PermissionEffect): Locator {
-  return page.locator(`[data-answer="row:${effect}"]`)
+  // SCOPED TO THE ANSWERED LIST, and that is the whole point of the helper.
+  // The page draws a row in BOTH sections — answered, and not answered yet —
+  // and both carry `data-answer="row:<effect>"`, because it is the same row
+  // either way. A section-blind locator therefore matches after an answer is
+  // taken back as well as before it is given, and an assertion built on it
+  // cannot tell the two apart. Which list the row is in IS the answer.
+  return page.locator('[data-answers="answered"]').locator(`[data-answer="row:${effect}"]`)
+}
+
+/** The same row where it sits when nobody has answered it. */
+export function permissionQuestion(page: Page, effect: PermissionEffect): Locator {
+  return page.locator('[data-answers="unanswered"]').locator(`[data-answer="row:${effect}"]`)
 }
 
 /**
@@ -1123,10 +1134,17 @@ export async function answerPermission(
   await baseExpect(panel).toBeVisible({ timeout: 15_000 })
   await panel.getByRole('button', { name: new RegExp(`^${answer} `) }).click()
   if (answer === 'Ask every time') {
+    // Taking an answer back does not delete the row, it MOVES it: the kind of
+    // work is back among the questions nobody has answered. Waiting on its
+    // arrival there, rather than only on its absence from the answered list,
+    // is what makes this a wait on the store's word and not on a repaint.
     await baseExpect(permissionAnswer(page, effect)).toHaveCount(0, { timeout: 15_000 })
+    await baseExpect(permissionQuestion(page, effect)).toHaveCount(1, { timeout: 15_000 })
   } else {
     await baseExpect(permissionAnswer(page, effect)).toContainText(answer, { timeout: 15_000 })
   }
-  await panel.getByRole('button', { name: 'Close' }).click()
+  // `exact` because the Dialog kit gives every panel a "Close dialog" icon
+  // button as well as this footer one, and a loose name matches both.
+  await panel.getByRole('button', { name: 'Close', exact: true }).click()
   await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
 }

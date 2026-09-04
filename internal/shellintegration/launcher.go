@@ -72,14 +72,6 @@ type LaunchOptions struct {
 	// together or not at all — a command whose digest names bytes nobody
 	// will send is a far side that blocks on a frame that never arrives.
 	StageDigest string
-	// BootstrapFD is the inherited descriptor the rcfile writes its two
-	// bootstrap progress facts to (internal/bootstrapprogress, nocx-yww2).
-	// It is deliberately independent of the lifecycle fields above: the
-	// progress channel is not the lifecycle channel, carries no authority
-	// and no capability, and is exported on its own so nothing couples the
-	// two. Zero means no progress reporting, which is what every remote
-	// tier gets — there is no second descriptor to hand a far shell.
-	BootstrapFD int
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's
@@ -132,13 +124,6 @@ func launcherEnvBlock(opts LaunchOptions) string {
 			b.WriteString("NOCX_LIFECYCLE_PORT=" + fmt.Sprintf("%d\n", opts.LifecyclePort))
 		}
 	}
-	// The bootstrap progress descriptor (nocx-yww2), in its own block and
-	// gated on nothing else: a fd NUMBER is not a secret, it authenticates
-	// nothing, and a shell that has this and no lifecycle channel still
-	// reports how far its startup got.
-	if opts.BootstrapFD > 0 {
-		b.WriteString("NOCX_BOOTSTRAP_FD=" + fmt.Sprintf("%d\n", opts.BootstrapFD))
-	}
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
@@ -151,9 +136,6 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		if opts.LifecyclePort > 0 {
 			b.WriteString(" NOCX_LIFECYCLE_PORT")
 		}
-	}
-	if opts.BootstrapFD > 0 {
-		b.WriteString(" NOCX_BOOTSTRAP_FD")
 	}
 	b.WriteString("\n")
 	return b.String()

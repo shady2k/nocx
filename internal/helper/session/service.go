@@ -769,7 +769,15 @@ func (s *Service) signal(p proto.SignalParams) error {
 	if !ok {
 		return fmt.Errorf("%w: process groups are unavailable", ErrSignal)
 	}
-	if err := signaller.SignalProcessGroup(hs.launch.Pgid, syscall.Signal(p.Signal)); err != nil {
+	// Zero means the session's own group, which is what every level-1 caller
+	// asked for and what the launch record names. A caller that named a group
+	// gets that group — see SignalParams.Pgid for why that is addressing and
+	// not authority.
+	pgid := p.Pgid
+	if pgid <= 0 {
+		pgid = hs.launch.Pgid
+	}
+	if err := signaller.SignalProcessGroup(pgid, syscall.Signal(p.Signal)); err != nil {
 		return fmt.Errorf("%w: %v", ErrSignal, err)
 	}
 	return nil

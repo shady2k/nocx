@@ -12,8 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/storage"
@@ -41,8 +40,8 @@ func TestNew_AllModulesInjected(t *testing.T) {
 	if a.Logger == nil {
 		t.Error("Logger is nil")
 	}
-	if a.Pty == nil {
-		t.Error("Pty is nil")
+	if a.localHelper == nil {
+		t.Error("localHelper is nil: this machine's panes have no opener")
 	}
 	if a.Session == nil {
 		t.Error("Session is nil")
@@ -253,142 +252,55 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 	}
 }
 
-// TestLifecycleChannelWiring proves the composition root constructs the
-// lifecycle kernel and wires one descriptor transport per enhanced session:
-// an enhanced pty gets a channel that closes with it; a conventional pty
-// gets none (ADR-0024 decision 4: no channel, conventional session).
-func TestLifecycleChannelWiring(t *testing.T) {
+// THE COMPOSITION ROOT WIRES THIS MACHINE'S OPENER, and every seam it reaches
+// through (nocx-ie23r.3).
+//
+// It replaces three tests that asserted the same thing about internal/app's
+// localPTYFactory — that it held the lifecycle kernel, that it bound a lane to
+// its session, and that the enhanced pty it returned carried a channel. That
+// factory is gone: the daemon forks the shell and the coordinator adopts what
+// it minted. What is left to assert here is that every fact the factory used
+// to carry still has somebody carrying it, because a nil seam here is a
+// feature that silently reports nothing — which is how nocx-dvql, nocx-cgzc
+// and nocx-u7uh.11 each shipped half-wired once already.
+//
+// It is a wiring check and it says so: it proves the seams EXIST, never that
+// they work. That they work — that a pane really is the daemon's child, really
+// integrates, really resizes and really reports its exit — is local_pane_test.
+// go, which opens one through the shipped composition root.
+func TestLocalPaneOpenerIsWiredAtTheCompositionRoot(t *testing.T) {
 	storagetest.Isolate(t)
 	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
-	f, ok := a.Pty.(*localPTYFactory)
-	if !ok {
-		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
-	}
-	if f.kernel == nil {
-		t.Fatal("lifecycle kernel was not constructed at the composition root")
-	}
-	if f.registerLane == nil {
-		t.Fatal("lifecycle lane registration was not wired at the composition root")
-	}
+	defer a.Shutdown(context.Background())
 
-	enhanced, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-wiring"})
-	if err != nil {
-		t.Fatalf("NewPTY(enhanced): %v", err)
+	o := a.localHelper
+	if o == nil {
+		t.Fatal("no local pane opener: this machine has no route to its own helper")
 	}
-	wrapped, ok := enhanced.(*lifecyclePTY)
-	if !ok {
-		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", enhanced)
-	}
-	if wrapped.ch == nil {
-		t.Fatal("enhanced session got no lifecycle channel")
-	}
-	_ = wrapped.Close()
-
-	plain, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("NewPTY(conventional): %v", err)
-	}
-	if _, ok := plain.(*lifecyclePTY); ok {
-		t.Fatal("conventional session must not carry a lifecycle channel")
-	}
-	_ = plain.Close()
-}
-
-// TestLifecycleLaneRegistrationBindsSession proves the production wiring of
-// the lane→session registry: an enhanced pty spawn with a session id reports
-// the minted lane bound to that id, and a conventional spawn reports
-// nothing. Without this binding every published lifecycle fact is dropped at
-// the transport and enhanced mode never engages — the fact path's dead half.
-func TestLifecycleLaneRegistrationBindsSession(t *testing.T) {
-	storagetest.Isolate(t)
-	a, err := newTestApp(t)
-	if err != nil {
-		t.Fatalf("New(): %v", err)
-	}
-	f, ok := a.Pty.(*localPTYFactory)
-	if !ok {
-		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
-	}
-	var registered []string
-	f.registerLane = func(lane lifecycle.LaneID, sid string) {
-		registered = append(registered, string(lane)+"->"+sid)
-	}
-
-	enhanced, err := f.NewPTY(context.Background(), pty.Config{
-		Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-test-1",
-	})
-	if err != nil {
-		t.Fatalf("NewPTY(enhanced): %v", err)
-	}
-	if len(registered) != 1 || !strings.HasSuffix(registered[0], "->sid-test-1") {
-		t.Fatalf("registered = %v, want exactly one lane bound to sid-test-1", registered)
-	}
-	_ = enhanced.Close()
-
-	plain, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("NewPTY(conventional): %v", err)
-	}
-	if len(registered) != 1 {
-		t.Fatalf("a conventional spawn must not register a lane, got %v", registered)
-	}
-	_ = plain.Close()
-}
-
-// TestLocalEnhancedChildEnv_SecretNeverReachesIt is the nocx-u7uh.21
-// acceptance assertion in its strongest form, over the SHELL'S ACTUAL
-// environment rather than over what the factory intended to pass: a local
-// enhanced session's shell carries the lifecycle addressing (the non-secret
-// NOCX_LIFECYCLE_* names) but never the capability or the recovery fence —
-// those ride the rcfile text, and a value in the environment would leak the
-// authenticator to every child (ADR-0024 decision 2).
-func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
-	storagetest.IsolateWithHome(t)
-	a, err := newTestApp(t)
-	if err != nil {
-		t.Fatalf("New(): %v", err)
-	}
-	f, ok := a.Pty.(*localPTYFactory)
-	if !ok {
-		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
-	}
-
-	pt, err := f.NewPTY(context.Background(), pty.Config{
-		Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-env-proof",
-	})
-	if err != nil {
-		t.Fatalf("NewPTY(enhanced): %v", err)
-	}
-	// Closed AND waited for: the shell writes ~/.bash_history from its exit
-	// trap, and the disposable home outlives the test only if nothing is
-	// still writing to it.
-	defer func() {
-		_ = pt.Close()
-		select {
-		case <-pt.Done():
-		case <-time.After(10 * time.Second):
-			t.Error("the shell did not exit after Close")
+	for name, wired := range map[string]bool{
+		"the session registry to adopt into":         o.registry != nil,
+		"the lifecycle kernel (ADR-0024)":            o.kernel != nil,
+		"the lifecycle loss report (nocx-dvql)":      o.lifecycleLoss != nil,
+		"the process observer (nocx-cgzc)":           o.procs != nil,
+		"the shell-replacement report (nocx-cgzc)":   o.reportShellReplaced != nil,
+		"the child-domain registries (nocx-u7uh.11)": o.noteChildDomainParent != nil,
+	} {
+		if !wired {
+			t.Errorf("this machine's pane opener has no %s", name)
 		}
-	}()
-	if _, ok := pt.(*lifecyclePTY); !ok {
-		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", pt)
 	}
-	// The shell reports its own environment (shellenviron_test.go); on macOS
-	// the kernel will not report another process's to anybody.
-	env := readShellEnviron(t, pt)
-	if env["NOCX_SHELL_INTEGRATION"] != "1" {
-		t.Fatal("the child's actual environment must carry the activation gate (proving this is the right process)")
-	}
-	// The point of the assertion: neither the capability nor the recovery
-	// fence — both 64 lowercase hex — may exist anywhere in the delivered
-	// environment. They ride the rcfile text only.
-	for key, val := range env {
-		if len(val) == 64 && isLowerHex(val) {
-			t.Fatalf("child environment leaked a 64-hex authenticator (%s)", key)
-		}
+
+	// And the registry it adopts into has NO local PTY factory, which is the
+	// other half of the same statement: nothing in this process forks a shell
+	// any more, so a local open that did not reach the helper has nowhere else
+	// to go (ADR-0057).
+	if _, oerr := a.Session.Open(context.Background(), session.Config{Kind: session.KindLocal}); oerr == nil {
+		t.Fatal("the session registry opened a local session by itself: the second PTY owner is back")
+	} else if !strings.Contains(oerr.Error(), "helper") {
+		t.Fatalf("refusal = %q, want one that says the helper owns this machine's panes", oerr)
 	}
 }
 
@@ -453,16 +365,18 @@ func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) 
 // capability over the inherited descriptor. Before .21 this test could not
 // pass: the local shell never learned its lane, domain, epoch or capability,
 // so no local session ever established.
+//
+// SINCE nocx-ie23r.3 IT IS ALSO THE PROOF THAT THE MOVE KEPT IT. The shell is
+// now forked by this machine's helper daemon and its lifecycle descriptor is
+// the daemon's socketpair, carried to this coordinator over the helper's
+// lifecycle window and interpreted by a stream adapter here — four hops where
+// there used to be one inherited fd. Nothing about the ASSERTION changed,
+// which is the point: the same fact reaches the same renderer over the same
+// socket, or the epic broke shell integration on this machine and said
+// nothing.
 func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
-	storagetest.IsolateWithHome(t)
-	a, err := newTestApp(t)
-	if err != nil {
-		t.Fatalf("New(): %v", err)
-	}
-	if serr := a.Start(context.Background()); serr != nil {
-		t.Fatalf("Start: %v", serr)
-	}
-	defer a.Shutdown(context.Background())
+	requireIntegratedLoginShell(t)
+	a := newLocalPaneApp(t)
 
 	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.Transport.Port()) + "/session"
 	conn, _, err := (&websocket.Dialer{

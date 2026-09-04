@@ -32,7 +32,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -147,81 +146,6 @@ type Adapter struct {
 	closed bool
 	loss   sync.Once
 	timer  *time.Timer
-}
-
-// arrives).
-//
-// Failure to establish the transport leaves the session conventional: New
-// returns an error and the caller spawns the shell without a channel.
-func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
-	o := options{helloTimeout: lifecycle.HelloTimeout}
-	for _, opt := range opts {
-		opt(&o)
-	}
-
-	// Per-OS: Linux sets close-on-exec atomically, everything else closes the
-	// same window with ForkLock (socketpair_linux.go / socketpair_other.go).
-	// The constant this used to name inline exists only on Linux, which is
-	// how the product came to not build on macOS at all (nocx-1w69).
-	fds, err := socketpairCloexec()
-	if err != nil {
-		return nil, nil, fmt.Errorf("lifecycle socketpair: %w", err)
-	}
-	parent := os.NewFile(uintptr(fds[0]), "lifecycle-channel-parent")
-	child := os.NewFile(uintptr(fds[1]), "lifecycle-channel-child")
-
-	tptHex, err := randHex(8)
-	if err != nil {
-		_ = parent.Close()
-		_ = child.Close()
-		return nil, nil, err
-	}
-	laneHex, err := randHex(8)
-	if err != nil {
-		_ = parent.Close()
-		_ = child.Close()
-		return nil, nil, err
-	}
-	a := &Adapter{
-		log:          log,
-		kernel:       k,
-		id:           lifecycle.TransportID("tpt-" + tptHex),
-		lane:         lifecycle.LaneID("lane-" + laneHex),
-		conn:         parent,
-		helloTimeout: o.helloTimeout,
-		report:       o.lossReporter,
-	}
-	a.dec = lifecyclecodec.NewDecoder(parent, lifecyclecodec.Config{}, a.reportGap)
-
-	cleanup := func() {
-		_ = parent.Close()
-		_ = child.Close()
-	}
-	if berr := k.BindTransport(a.id, a); berr != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("bind lifecycle transport: %w", berr)
-	}
-	h, err := k.RequestDomain(a.lane, nil, a.id)
-	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("request lifecycle domain: %w", err)
-	}
-	a.domain = h.Domain
-	a.epoch = h.Epoch
-	a.capability = h.Capability
-	a.recovery = h.Recovery
-	log.Info("lifecycle channel established",
-		"transport", a.id, "lane", a.lane, "domain", h.Domain, "epoch", h.Epoch)
-
-	// The timer may fire before New returns (a short hello timeout), so the
-	// field is stored under the same mutex stopHelloTimer reads: the
-	// callback's read is then ordered against this write and never races.
-	t := time.AfterFunc(a.helloTimeout, func() { a.lose(LossHelloTimeout) })
-	a.mu.Lock()
-	a.timer = t
-	a.mu.Unlock()
-	go a.pump()
-	return a, child, nil
 }
 
 // NewStream constructs the same authenticated lifecycle adapter over an

@@ -544,6 +544,23 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
+		// A LOCAL SESSION IS NOT OPENED HERE ANY MORE, and this says so in the
+		// same words the line above says it about ssh (nocx-ie23r.3). On this
+		// machine the pane belongs to the helper: the daemon owns the PTY, the
+		// coordinator adopts what the helper minted, and the shipped
+		// composition root supplies no local PTY factory at all — so there is
+		// exactly one constructor of a local PTY in the repository and it is
+		// not reachable from here.
+		//
+		// It is a refusal rather than a fallback, deliberately (ADR-0057):
+		// opening the pane by a second route would be the rarely executed path
+		// that diverges silently, and the person would get a terminal that
+		// looks like nocx and behaves differently in ways nobody chose. The
+		// factory survives as a SEAM because the registry is a general one and
+		// a test may legitimately supply a channel; nothing shipped does.
+		if r.ptf == nil {
+			return nil, fmt.Errorf("local sessions are opened by this machine's helper, not by the session registry (no local PTY factory wired)")
+		}
 		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
 			Cols:      eff.Cols,

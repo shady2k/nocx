@@ -1,15 +1,11 @@
 package shellintegration
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,8 +18,25 @@ import (
 // to, because the local enhanced session had exactly one tier. These tests are
 // the ones that report whether a zsh user gets their own shell AND keeps shell
 // integration — not whether the code that was written does what it was written
-// to do, so they start the shell the way internal/app starts it and assert what
+// to do, so they start the shell the way the product starts it and assert what
 // the user gets.
+//
+// SINCE nocx-ie23r.3 THE PRODUCT STARTS IT THE OTHER WAY, and this file
+// follows it. A local pane is forked by this machine's helper daemon now, and
+// the daemon delivers the integration through an inherited PIPE rather than
+// through a transient ZDOTDIR on disk (LocalEnhancedLaunchInMemory) — the same
+// delivery every helper-hosted session has always used, which is D11's "no
+// code path that exists only for one of them" arriving where it was aimed.
+//
+// The on-disk tier is gone with its only caller, and so are the tests that
+// were about the transient directory itself: where it was written, that it was
+// 0700, that it carried the login-phase files, that it was erased before the
+// user's rc ran, and that ZDOTDIR came back to what the user had. None of
+// those states exists any more — the user's own zsh starts as their own zsh,
+// with their own ZDOTDIR untouched, because nothing shadows it. What survives
+// here is the assertion that was never about the mechanism: a zsh user gets
+// THEIR shell, with THEIR startup files, integrated, and without the
+// capability in the environment.
 
 // TestLocalShellKind pins the classification the tier choice is made on. It is
 // a mirror of autoDispatcherScript's case arms, and the arms that matter most
@@ -56,166 +69,30 @@ func TestLocalShellKind(t *testing.T) {
 	}
 }
 
-// TestLocalZshRcfile_SecretRidesTextNotEnv is the bash tier's assertion made
-// for zsh, and it has to be made separately: the two tiers render from
-// different templates, and a capability that reached the environment would be
-// in /proc/<pid>/environ of every child of the user's shell (ADR-0024
-// decision 2).
-func TestLocalZshRcfile_SecretRidesTextNotEnv(t *testing.T) {
-	opts := LaunchOptions{
-		SessionID:   "sid-local-zsh",
+// localTestOpts is the launch a local enhanced session is built from.
+//
+// LifecycleFD is 4 and not 3, and that is the in-memory tier's descriptor
+// order rather than an arbitrary number: the rendered script is delivered on
+// fd 3 (`/dev/fd/3`), so the lifecycle channel is the second inherited
+// descriptor. internal/helper/session's LocalSpawner appends them in exactly
+// that order, and this test starts the shell the same way for the same reason.
+func localTestOpts() LaunchOptions {
+	return LaunchOptions{
+		SessionID:   "sid-local",
 		Enhanced:    true,
-		Capability:  strings.Repeat("ab", 32),
-		Recovery:    strings.Repeat("cd", 32),
-		Lane:        "lane-z",
-		Domain:      "dom-z",
-		Epoch:       9,
-		LifecycleFD: 3,
-	}
-	rc, err := LocalZshRcfile(opts)
-	if err != nil {
-		t.Fatalf("LocalZshRcfile: %v", err)
-	}
-	if !strings.Contains(rc, "__nocx_cap='"+opts.Capability+"'") {
-		t.Fatalf("rcfile must carry the capability as substituted text")
-	}
-	if !strings.Contains(rc, "__nocx_lc_recovery='"+opts.Recovery+"'") {
-		t.Fatalf("rcfile must carry the recovery fence as substituted text")
-	}
-	env := launcherEnvBlock(opts)
-	if strings.Contains(env, opts.Capability) || strings.Contains(env, opts.Recovery) {
-		t.Fatalf("a secret leaked into the exported environment block")
-	}
-	// The rcfile is the one that reaches a shell, so the addressing has to be
-	// in IT, not merely in a block a different tier substitutes.
-	for _, want := range []string{
-		"NOCX_LIFECYCLE_LANE='lane-z'",
-		"NOCX_LIFECYCLE_DOMAIN='dom-z'",
-		"NOCX_LIFECYCLE_EPOCH=9",
-		"NOCX_LIFECYCLE_FD=3",
-		"NOCX_SESSION_ID='sid-local-zsh'",
-	} {
-		if !strings.Contains(rc, want) {
-			t.Fatalf("rendered .zshrc must carry %s", want)
-		}
-	}
-	// The local tier EMBEDS the script rather than sourcing the installed
-	// generation: this session's authenticators must win over an installer-era
-	// install the user's own ~/.zshrc may load.
-	if !strings.Contains(rc, "__nocx_lc_send") {
-		t.Fatalf("rendered .zshrc does not embed nocx.zsh")
-	}
-}
-
-// TestLocalZshRcfile_RequiresEnhancedSession pins the precondition, the same
-// one the bash tier has: a conventional session has no session id to anchor the
-// ownership protocol and no channel to authenticate, so refusing beats
-// rendering a .zshrc that claims a channel which cannot exist.
-func TestLocalZshRcfile_RequiresEnhancedSession(t *testing.T) {
-	if _, err := LocalZshRcfile(LaunchOptions{Enhanced: false}); err == nil {
-		t.Error("a conventional session must not render a lifecycle .zshrc")
-	}
-	if _, err := LocalZshRcfile(LaunchOptions{Enhanced: true}); err == nil {
-		t.Error("an enhanced session with no session id must not render a lifecycle .zshrc")
-	}
-}
-
-// TestWriteLocalZDOTDIR_MatchesSelfDeleteGuardAndStaysPrivate is the failure
-// this tier would otherwise ship: the .zshrc carries the per-epoch capability,
-// and the shell deletes the directory by matching `*/nocx-zsh.??????`. A name
-// the guard does not match is never removed, so every session would leave the
-// capability in TMPDIR — and a directory another user can read makes the
-// capability theirs.
-func TestWriteLocalZDOTDIR_MatchesSelfDeleteGuardAndStaysPrivate(t *testing.T) {
-	dir, err := WriteLocalZDOTDIR("# test zshrc\n")
-	if err != nil {
-		t.Fatalf("WriteLocalZDOTDIR: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-
-	if !regexp.MustCompile(`^nocx-zsh\.[0-9a-f]{6}$`).MatchString(filepath.Base(dir)) {
-		t.Fatalf("zdotdir %q must match the template's */nocx-zsh.?????? self-delete guard", filepath.Base(dir))
-	}
-	st, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat dir: %v", err)
-	}
-	if st.Mode().Perm() != 0o700 {
-		t.Errorf("zdotdir mode = %o, want 0700", st.Mode().Perm())
-	}
-	rc, err := os.Stat(filepath.Join(dir, ".zshrc"))
-	if err != nil {
-		t.Fatalf("stat .zshrc: %v", err)
-	}
-	if rc.Mode().Perm() != 0o600 {
-		t.Errorf(".zshrc mode = %o, want 0600 (it carries the capability)", rc.Mode().Perm())
-	}
-	// zsh reads $ZDOTDIR/.zshrc and nothing else here; a directory with the
-	// file under any other name is a session with no integration at all.
-	body, err := os.ReadFile(filepath.Join(dir, ".zshrc")) //nolint:gosec // test-owned temp path
-	if err != nil || string(body) != "# test zshrc\n" {
-		t.Errorf("the rendered rcfile is not at $ZDOTDIR/.zshrc: %v %q", err, body)
-	}
-}
-
-// TestWriteLocalZDOTDIR_LeavesNothingBehindWhenItCannotWrite is the failure
-// path AGENTS.md rule 3 asks for, stated as an interval with both ends: from
-// before the directory exists until the launch owns it, a caller that gets an
-// error must be able to assume NOTHING was left on disk — otherwise a machine
-// with a full or read-only TMPDIR accumulates 0700 directories nobody removes.
-func TestWriteLocalZDOTDIR_LeavesNothingBehindWhenItCannotWrite(t *testing.T) {
-	// A TMPDIR that exists but refuses creation is the shape of a read-only
-	// or exhausted temp filesystem.
-	readOnly := filepath.Join(t.TempDir(), "ro")
-	if err := os.Mkdir(readOnly, 0o500); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	t.Setenv("TMPDIR", readOnly)
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: mode 0500 does not refuse root, so there is no failure to observe")
-	}
-
-	if _, err := WriteLocalZDOTDIR("# unreachable\n"); err == nil {
-		t.Fatal("WriteLocalZDOTDIR must fail when the temp directory refuses creation")
-	}
-	entries, err := os.ReadDir(readOnly)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("a failed write left %d entries behind: %v", len(entries), entries)
-	}
-}
-
-// TestLocalZshEnv_DistinguishesUnsetFromEmpty is the whole reason there are TWO
-// carrier variables instead of one. The template restores an unset ZDOTDIR by
-// unsetting it and a set-but-empty one by exporting the empty string, and an
-// empty NOCX_ZDOTDIR_ORIG cannot tell those apart — so a user who had no
-// ZDOTDIR would come out of a nocx session with an exported empty one, which
-// zsh reads as "look for startup files in the current directory".
-func TestLocalZshEnv_DistinguishesUnsetFromEmpty(t *testing.T) {
-	unset := localZshEnv("/tmp/nocx-zsh.abcdef", "", false)
-	if !contains(unset, "NOCX_ZDOTDIR_WAS_SET=0") {
-		t.Errorf("an unset ZDOTDIR must be carried as WAS_SET=0: %v", unset)
-	}
-	set := localZshEnv("/tmp/nocx-zsh.abcdef", "", true)
-	if !contains(set, "NOCX_ZDOTDIR_WAS_SET=1") || !contains(set, "NOCX_ZDOTDIR_ORIG=") {
-		t.Errorf("a set-but-empty ZDOTDIR must be carried as WAS_SET=1 with an empty original: %v", set)
-	}
-	real := localZshEnv("/tmp/nocx-zsh.abcdef", "/home/u/.config/zsh", true)
-	if !contains(real, "NOCX_ZDOTDIR_ORIG=/home/u/.config/zsh") {
-		t.Errorf("the original ZDOTDIR must be carried verbatim: %v", real)
-	}
-	for _, env := range [][]string{unset, set, real} {
-		if !contains(env, "ZDOTDIR=/tmp/nocx-zsh.abcdef") {
-			t.Errorf("ZDOTDIR must point at the transient directory: %v", env)
-		}
+		Capability:  testCap,
+		Recovery:    strings.Repeat("ef", 32),
+		Lane:        testLane,
+		Domain:      testDom,
+		Epoch:       testEpoch,
+		LifecycleFD: 4,
 	}
 }
 
 // unsetZDOTDIR removes ZDOTDIR for the duration of one test and puts the
 // process environment back afterwards. t.Setenv cannot express it: setting the
-// variable to the empty string is the OTHER case these tests distinguish.
+// variable to the empty string is a different state, and this test is about
+// the user who has none.
 func unsetZDOTDIR(t *testing.T) {
 	t.Helper()
 	prev, had := os.LookupEnv("ZDOTDIR")
@@ -229,130 +106,17 @@ func unsetZDOTDIR(t *testing.T) {
 	})
 }
 
-func contains(env []string, want string) bool {
-	for _, kv := range env {
-		if kv == want {
-			return true
-		}
-	}
-	return false
-}
-
-// TestLocalEnhancedLaunch_BashIsUnchanged is acceptance criterion 4 as an
-// assertion: a bash user must get exactly what they got before this bead —
-// a non-login interactive bash reading one transient rcfile — and the only
-// difference is that the binary is now the account's bash by path rather than
-// whichever bash PATH happened to find.
-func TestLocalEnhancedLaunch_BashIsUnchanged(t *testing.T) {
-	launch, err := LocalEnhancedLaunch("/bin/bash", ShellBash, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch(bash): %v", err)
-	}
-	defer launch.Cleanup()
-
-	if launch.Command != "/bin/bash" {
-		t.Errorf("command = %q, want the login shell's own path", launch.Command)
-	}
-	if len(launch.Args) != 3 || launch.Args[0] != "--rcfile" || launch.Args[2] != "-i" {
-		t.Fatalf("args = %v, want [--rcfile <path> -i]", launch.Args)
-	}
-	if launch.Env != nil {
-		t.Errorf("the bash tier must add no environment; got %v", launch.Env)
-	}
-	if _, err := os.Stat(launch.Args[1]); err != nil {
-		t.Errorf("the rcfile the launch names does not exist: %v", err)
-	}
-	launch.Cleanup()
-	if _, err := os.Stat(launch.Args[1]); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("Cleanup must remove the rcfile; stat says %v", err)
-	}
-}
-
-// TestLocalEnhancedLaunch_ZshCarriesTheTransientZDOTDIR pins the zsh launch
-// shape: the login shell by path, `-l -i`, and ZDOTDIR pointed at a directory
-// that actually holds the rendered .zshrc.
-func TestLocalEnhancedLaunch_ZshCarriesTheTransientZDOTDIR(t *testing.T) {
-	t.Setenv("ZDOTDIR", "/home/u/zdot")
-	launch, err := LocalEnhancedLaunch("/bin/zsh", ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch(zsh): %v", err)
-	}
-	defer launch.Cleanup()
-
-	if launch.Command != "/bin/zsh" {
-		t.Errorf("command = %q, want the login shell's own path", launch.Command)
-	}
-	if len(launch.Args) != 2 || launch.Args[0] != "-l" || launch.Args[1] != "-i" {
-		t.Errorf("args = %v, want [-l -i]: -l for the login startup files a GUI launch has no PATH without, "+
-			"-i because zsh reads $ZDOTDIR/.zshrc only when interactive", launch.Args)
-	}
-	if !contains(launch.Env, "NOCX_ZDOTDIR_ORIG=/home/u/zdot") || !contains(launch.Env, "NOCX_ZDOTDIR_WAS_SET=1") {
-		t.Errorf("the user's own ZDOTDIR must be carried for restoration: %v", launch.Env)
-	}
-	var dir string
-	for _, kv := range launch.Env {
-		if rest, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
-			dir = rest
-		}
-	}
-	if dir == "" {
-		t.Fatalf("the launch sets no ZDOTDIR: %v", launch.Env)
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".zshrc")); err != nil {
-		t.Errorf("ZDOTDIR names a directory with no .zshrc in it: %v", err)
-	}
-	launch.Cleanup()
-	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("Cleanup must remove the transient directory; stat says %v", err)
-	}
-}
-
-// TestLocalEnhancedLaunch_RefusesAShellWithNoTier pins the contract the caller
-// depends on to keep the degrade honest: a fish or tcsh login shell has no
-// local tier, and the launcher says so rather than handing back a bash the user
-// never asked for. The caller starts the user's own shell conventionally and
-// reports ReasonUnsupportedShell.
-func TestLocalEnhancedLaunch_RefusesAShellWithNoTier(t *testing.T) {
-	for _, shell := range []string{"/usr/local/bin/fish", "/bin/tcsh", "/bin/sh"} {
-		launch, err := LocalEnhancedLaunch(shell, LocalShellKind(shell), localTestOpts())
-		if err == nil {
-			t.Errorf("%s: expected a refusal, got %+v", shell, launch)
-		}
-		if launch.Command != "" {
-			t.Errorf("%s: a refusal must name no command, got %q", shell, launch.Command)
-		}
-	}
-}
-
-func localTestOpts() LaunchOptions {
-	return LaunchOptions{
-		SessionID:   "sid-local",
-		Enhanced:    true,
-		Capability:  testCap,
-		Recovery:    strings.Repeat("ef", 32),
-		Lane:        testLane,
-		Domain:      testDom,
-		Epoch:       testEpoch,
-		LifecycleFD: 3,
-	}
-}
-
-// TestLocalZshSession_IsIntegratedOnTheUsersOwnShell is the bead's acceptance
-// criterion driven end to end, through the exact call the composition root
-// makes: a REAL zsh started by LocalEnhancedLaunch on a REAL pty with a REAL
+// TestLocalZshSession_IsIntegratedOnTheUsersOwnShell is nocx-wwz0's acceptance
+// criterion driven end to end through the launch the product now makes: a REAL
+// zsh started by LocalEnhancedLaunchInMemory on a REAL pty with a REAL
 // lifecycle channel on the inherited descriptor.
 //
-// What it watches a user do that they could not before: open a local tab on a
-// machine whose login shell is zsh and get command blocks — the handshake, the
-// OSC 133 markers, the command-existence snapshot completion needs, and a
-// lifecycle start/complete for a command they ran. Before this bead the same
-// machine got bash 3.2.57 and none of the user's own environment.
-//
-// It also closes the two intervals the transient ZDOTDIR opens, because both
-// ends of each are what makes them invariants rather than moments: the
-// directory exists from the write until the shell's own rc phase and NOT
-// after, and ZDOTDIR carries our directory from the spawn until the top of the
-// .zshrc and the user's own value from there on.
+// What it watches a user do: open a local tab on a machine whose login shell
+// is zsh and get command blocks — the handshake, the OSC 133 markers, the
+// command-existence snapshot completion needs, and a lifecycle start/complete
+// for a command they ran. Before nocx-wwz0 the same machine got bash 3.2.57
+// and none of the user's own environment; before nocx-ie23r.3 it got all of
+// that from a shell the coordinator forked, which died with the coordinator.
 func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 
@@ -363,23 +127,14 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 		[]byte("alias mine='echo USER_RC_ALIAS'\nexport USER_RC_RAN=yes\n"), 0o600); err != nil {
 		t.Fatalf("write user .zshrc: %v", err)
 	}
-	// No ZDOTDIR of our own, which is the ordinary case and the one where an
-	// unset-versus-empty mistake is visible.
+	// No ZDOTDIR of our own, which is the ordinary case. Nothing sets one any
+	// more, and this is where that would show.
 	unsetZDOTDIR(t)
 
 	opts := localTestOpts()
-	launch, err := LocalEnhancedLaunch(zsh, LocalShellKind(zsh), opts)
+	launch, err := LocalEnhancedLaunchInMemory(zsh, ShellZsh, opts)
 	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-	transient := ""
-	for _, kv := range launch.Env {
-		if rest, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
-			transient = rest
-		}
-	}
-	if _, serr := os.Stat(filepath.Join(transient, ".zshrc")); serr != nil {
-		t.Fatalf("the transient ZDOTDIR is not ready before the spawn: %v", serr)
+		t.Fatalf("LocalEnhancedLaunchInMemory: %v", err)
 	}
 
 	kernelFile, shellFile := lifecycleSocketpair(t)
@@ -387,21 +142,18 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	// #nosec G204 — launch.Command is the requireShell-resolved zsh; starting
 	// a real interactive shell is the only way to observe what a user gets.
 	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile} // fd 3, exactly as pty.WithExtraFiles
+	// The script's reader first and the lifecycle channel second — fd 3 and
+	// fd 4, the order LaunchOptions.LifecycleFD names and the order the
+	// helper's spawner appends them in.
+	cmd.ExtraFiles = append(append([]*os.File{}, launch.ExtraFiles...), shellFile)
 	// NOCX_SNAPSHOT_WAIT_MS, for the reason the script states where it reads
 	// it (nocx.zsh): 250 ms is the budget a HUMAN's first prompt may spend
 	// waiting for the source-time snapshot job, and on timeout the payload is
 	// deliberately left for a LATER prompt rather than delaying this one. So
 	// the default makes "the snapshot has been emitted" a claim about how
-	// fast the machine is — this test runs exactly one command and then
-	// asserts on 636;S, which on a loaded runner had not been emitted yet.
-	// It failed three times in one CI day while passing here in 0.10 s.
-	//
-	// Raising the budget does not paper over a race, it removes one: the
-	// first prompt now waits for the FILE TO EXIST — an observable state
-	// change — and 15 s is a hang detector rather than an expectation. Ten
-	// tests in scripts_exec_test.go already do exactly this; the launcher
-	// tier simply never inherited it.
+	// fast the machine is. The first prompt waits for the FILE TO EXIST — an
+	// observable state change — and 15 s is a hang detector rather than an
+	// expectation.
 	cmd.Env = append(
 		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
 		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000", "NOCX_SNAPSHOT_WAIT_MS=15000")...,
@@ -412,7 +164,7 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		launch.Cleanup()
+		launch.Abort()
 		t.Fatalf("pty start: %v", err)
 	}
 	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
@@ -420,22 +172,22 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	defer func() {
 		_ = ptmx.Close()
 		_ = cmd.Process.Kill()
-		launch.Cleanup()
 	}()
+	// The bootstrap the helper writes into the pty once the shell is up: zsh
+	// has no --rcfile, so the script is SOURCED from the descriptor rather
+	// than delivered as one. It is written here for the same reason the
+	// daemon writes it — the shell is already running its own startup, and
+	// this is the line that adds ours to it.
+	if _, werr := ptmx.Write(launch.Bootstrap); werr != nil {
+		t.Fatalf("write the launch bootstrap: %v", werr)
+	}
+	launch.Cleanup()
 
 	s.waitForHandshake()
 
-	// 1. The transient directory is gone — erased by the .zshrc before any
-	//    user code ran, which is the closing end of the "capability on disk"
-	//    interval. Waiting on the handshake above is what makes this a state
-	//    assertion rather than a race against a duration.
-	if _, err := os.Stat(transient); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the transient ZDOTDIR survived the shell's startup (%v) — every session would leave the capability in TMPDIR", err)
-	}
-
-	// 2. The user's own rc ran and its effects are live, and ZDOTDIR is back
-	//    to unset. One command, because both are properties of the same shell.
-	s.run(`echo "RC=[${USER_RC_RAN-no}] ZD=[${ZDOTDIR-UNSET}] SH=[$ZSH_NAME]"; mine`)
+	// The user's own rc ran and its effects are live, in the shell they
+	// actually use. One command, because both are properties of one shell.
+	s.run(`echo "RC=[${USER_RC_RAN-no}] SH=[$ZSH_NAME]"; mine`)
 	out := s.output()
 	if !strings.Contains(out, "RC=[yes]") {
 		t.Errorf("the user's own ~/.zshrc did not run: %q", out)
@@ -443,17 +195,14 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	if !strings.Contains(out, "USER_RC_ALIAS") {
 		t.Errorf("an alias from the user's own ~/.zshrc is not available: %q", out)
 	}
-	if !strings.Contains(out, "ZD=[UNSET]") {
-		t.Errorf("ZDOTDIR was not restored to its original unset state: %q", out)
-	}
 	if !strings.Contains(out, "SH=[zsh]") {
 		t.Errorf("the session is not running zsh: %q", out)
 	}
 
-	// 3. Shell integration, which is the half a conventional fallback would
-	//    have silently cost: the prompt markers, the command-existence
-	//    snapshot the completion dropdown needs (nocx-qduc), and the
-	//    lifecycle start/complete pair for the command just run.
+	// Shell integration, which is the half a conventional fallback would have
+	// silently cost: the prompt markers, the command-existence snapshot the
+	// completion dropdown needs (nocx-qduc), and the lifecycle start/complete
+	// pair for the command just run.
 	if !strings.Contains(out, "\x1b]133;A") {
 		t.Errorf("no OSC 133 prompt marker — the session is not integrated: %q", out)
 	}
@@ -466,27 +215,22 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 		}
 	}
 
-	// 4. The capability is usable BY the shell and absent FROM its
-	//    environment — the property the whole text-substitution design exists
-	//    for (ADR-0024 decision 2), asked of the real process the user's own
-	//    commands are children of rather than of the rendered text.
+	// The capability is usable BY the shell and absent FROM its environment —
+	// the property the whole text-substitution design exists for (ADR-0024
+	// decision 2), asked of the real process the user's own commands are
+	// children of rather than of the rendered text.
 	//
-	//    Both verdict words are SPLIT across two quoted strings, the idiom
-	//    the two tests below already use and for the same reason: zsh's line
-	//    editor redraws the typed line in pieces, so a reader sampling the
-	//    pty sees a PREFIX of the echo, and this command's echo carries
-	//    "CAP_IN_ENVIRON" a whole clause before it carries "CAP_TEXT_ONLY".
-	//    Whole words here let the echo answer for the shell: sampled in that
-	//    window, the leak verdict wins on a session that never leaked. It
-	//    won on `ci-backend` (run 32470670241) and reproduces 10 times in 10
-	//    on a bare zsh outside this suite. The old comment reasoned that the
-	//    verdict words carry none of the CAPABILITY, which is true and is
-	//    not the hazard — the hazard is the verdict words themselves.
+	// Both verdict words are SPLIT across two quoted strings: zsh's line
+	// editor redraws the typed line in pieces, so a reader sampling the pty
+	// sees a PREFIX of the echo, and this command's echo carries
+	// "CAP_IN_ENVIRON" a whole clause before it carries "CAP_TEXT_ONLY".
+	// Sampled in that window, the leak verdict would win on a session that
+	// never leaked.
 	//
-	//    The shell-variable half is asserted with it, in the same command:
-	//    "absent from the environment" is satisfied vacuously by a session
-	//    that never received a capability at all, and this is a security
-	//    assertion, so it may not be able to pass for the wrong reason.
+	// The shell-variable half is asserted with it, in the same command:
+	// "absent from the environment" is satisfied vacuously by a session that
+	// never received a capability at all, and this is a security assertion,
+	// so it may not be able to pass for the wrong reason.
 	probe := `echo "CAP_VAR""=${__nocx_cap:+yes}"; ` +
 		`env | grep -q ` + testCap[:16] + ` && echo "CAP_IN""_ENVIRON" || echo "CAP_TEXT""_ONLY"`
 	if _, err := ptmx.Write([]byte(probe + "\n")); err != nil {
@@ -514,621 +258,4 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	if !strings.Contains(s.output(), "CAP_VAR=yes") {
 		t.Errorf("the shell does not hold the capability in its non-exported variable, so the check above passed on a session that had none: %q", s.output())
 	}
-}
-
-// TestLocalZshSession_RestoresAUsersOwnZDOTDIR is the other half of the
-// unset-versus-set interval, and it needs its own shell because a shell can
-// only have started one way. A user who keeps their zsh configuration outside
-// $HOME must come out of the session with that ZDOTDIR still pointing there —
-// and must have had THAT directory's .zshrc sourced, not $HOME's.
-func TestLocalZshSession_RestoresAUsersOwnZDOTDIR(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte("export WHICH_RC=home\n"), 0o600); err != nil {
-		t.Fatalf("write home .zshrc: %v", err)
-	}
-	userZdot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(userZdot, ".zshrc"), []byte("export WHICH_RC=zdotdir\n"), 0o600); err != nil {
-		t.Fatalf("write zdotdir .zshrc: %v", err)
-	}
-	t.Setenv("ZDOTDIR", userZdot)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-
-	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile}
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", "ZDOTDIR="+userZdot),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
-	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		launch.Cleanup()
-		t.Fatalf("pty start: %v", err)
-	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
-	go s.readPump()
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		launch.Cleanup()
-	}()
-
-	s.waitForHandshake()
-	s.run(fmt.Sprintf(`echo "ZD=[${ZDOTDIR-UNSET}] RC=[$WHICH_RC] MATCH=[%s]"`, userZdot))
-	out := s.output()
-	if !strings.Contains(out, "ZD=["+userZdot+"]") {
-		t.Errorf("the user's own ZDOTDIR was not restored: %q", out)
-	}
-	if !strings.Contains(out, "RC=[zdotdir]") {
-		t.Errorf("the .zshrc under the user's own ZDOTDIR was not the one sourced: %q", out)
-	}
-}
-
-// TestLocalZshSession_SurvivesAUserRcThatFails is the failure path for the one
-// piece of user code this tier runs: a broken ~/.zshrc must not cost the user
-// a terminal. The declared equivalence set says user startup wins — including
-// when it is wrong — so the shell must still come up and still be usable, and
-// the transient directory must still be gone.
-func TestLocalZshSession_SurvivesAUserRcThatFails(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"),
-		[]byte("this-command-does-not-exist\nfalse\n"), 0o600); err != nil {
-		t.Fatalf("write user .zshrc: %v", err)
-	}
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-	transient := ""
-	for _, kv := range launch.Env {
-		if rest, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
-			transient = rest
-		}
-	}
-
-	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile}
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
-	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		launch.Cleanup()
-		t.Fatalf("pty start: %v", err)
-	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
-	go s.readPump()
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		launch.Cleanup()
-	}()
-
-	// A usable shell is the assertion: it RUNS what it is told, whatever the
-	// user's rc did on the way past. The marker is split across two quoted
-	// strings so the pty's echo of the typed line cannot contain it — matching
-	// the echo would let this pass ~25 ms in, before the shell had sourced
-	// anything, which is exactly how it passed on a fast host and failed in the
-	// Linux container.
-	if _, err := ptmx.Write([]byte(`echo "BROKEN""_RC_STILL_USABLE"` + "\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	var verdict string
-	waittest.WaitForTimeoutDetail(t, "one of the broken-rc verdicts", 20*time.Second,
-		func() string { return fmt.Sprintf("output=%q", s.output()) },
-		func() bool {
-			out := s.output()
-			ia, ib := strings.LastIndex(out, "BROKEN_RC_STILL_USABLE"), strings.LastIndex(out, "__NOCX_NEVER__")
-			switch {
-			case ia > ib:
-				verdict = "BROKEN_RC_STILL_USABLE"
-			case ib > ia:
-				verdict = "__NOCX_NEVER__"
-			default:
-				return false
-			}
-			return true
-		})
-	if verdict != "BROKEN_RC_STILL_USABLE" {
-		t.Fatalf("a broken user ~/.zshrc cost the user a terminal: %q", s.output())
-	}
-	// And the transient directory is gone — the shell reached a prompt, so the
-	// rc phase that erases it has run. Anchoring on the command's own output
-	// rather than on a duration is what makes that a fact rather than a hope.
-	if _, err := os.Stat(transient); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the transient ZDOTDIR survived a failing user rc (%v)", err)
-	}
-}
-
-// TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper is the defect a real
-// machine reported the moment this tier first ran on one: pressing Enter
-// printed "No such widget `_zsh_highlight_widget_orig-…-accept-line'" and the
-// command did not run. Every zsh user with fast-syntax-highlighting,
-// zsh-syntax-highlighting or zsh-autosuggestions — which is most of them —
-// would have been handed a terminal that cannot execute a command.
-//
-// The mechanism is a name confusion in the nested-launch interception:
-// `zle -lL accept-line` reports the FUNCTION that implements the widget, and
-// the chain called that name as if it were a WIDGET. It works whenever the
-// framework happens to register a widget of the same name, which is why it
-// survived review; it fails for every framework that does not.
-//
-// The fixture wraps accept-line the way those plugins do — a wrapper function
-// that is not itself a widget — and the assertions are the user's: the command
-// runs, the framework's wrapper still ran, and nothing complained.
-func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	userRC := "__fixture_accept_line() { print -u2 FIXTURE_WRAPPER_RAN; zle .accept-line }\n" +
-		"zle -N accept-line __fixture_accept_line\n"
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte(userRC), 0o600); err != nil {
-		t.Fatalf("write user .zshrc: %v", err)
-	}
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-
-	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile}
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
-	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 120, Rows: 40})
-	if err != nil {
-		launch.Cleanup()
-		t.Fatalf("pty start: %v", err)
-	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
-	go s.readPump()
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		launch.Cleanup()
-	}()
-
-	s.waitForHandshake()
-	// The marker is split across two quoted strings, so the pty's echo of the
-	// typed line cannot contain it — only the shell's OUTPUT does. Without
-	// that, the assertion passes on the echo of a command that never ran.
-	if _, err := ptmx.Write([]byte(`echo "ENTER""_WORKS"` + "\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	var verdict string
-	waittest.WaitForTimeoutDetail(t, "the Enter verdict", 20*time.Second,
-		func() string { return fmt.Sprintf("output=%q", s.output()) },
-		func() bool {
-			out := s.output()
-			ia, ib := strings.LastIndex(out, "ENTER_WORKS"), strings.LastIndex(out, "No such widget")
-			switch {
-			case ia > ib:
-				verdict = "ENTER_WORKS"
-			case ib > ia:
-				verdict = "No such widget"
-			default:
-				return false
-			}
-			return true
-		})
-	if verdict != "ENTER_WORKS" {
-		t.Fatalf("pressing Enter did not run the command: %q", s.output())
-	}
-	if strings.Contains(s.output(), "No such widget") {
-		t.Errorf("the accept-line chain named something that is not a widget: %q", s.output())
-	}
-	if !strings.Contains(s.output(), "FIXTURE_WRAPPER_RAN") {
-		t.Errorf("the framework's own accept-line wrapper was bypassed — nocx took a surface it does not own: %q", s.output())
-	}
-}
-
-// TestWriteLocalZDOTDIR_CarriesEveryLoginPhaseFile is nocx-2ka0 at the cheapest
-// seam that can report it. ZDOTDIR names a DIRECTORY, so pointing it at ours
-// shadows all four of the user's startup files at once; a transient directory
-// holding only .zshrc means the .zshenv and .zprofile phases find nothing and
-// the user's own files for those phases are never read. The remote tier has
-// written all three since nocx-m8jwn (zshArgFor); the local one wrote one.
-//
-// The assertion is on the FILES rather than on their text because that is the
-// whole mechanism: zsh reads a phase's file if and only if it exists in the
-// directory ZDOTDIR names.
-func TestWriteLocalZDOTDIR_CarriesEveryLoginPhaseFile(t *testing.T) {
-	dir, err := WriteLocalZDOTDIR("# test zshrc\n")
-	if err != nil {
-		t.Fatalf("WriteLocalZDOTDIR: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-
-	for _, f := range []string{".zshenv", ".zprofile", ".zshrc"} {
-		st, serr := os.Stat(filepath.Join(dir, f))
-		if serr != nil {
-			t.Errorf("the transient ZDOTDIR has no %s, so zsh reads nothing at that phase "+
-				"and the user's own %s is shadowed by an absent file: %v", f, f, serr)
-			continue
-		}
-		if st.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %o, want 0600", f, st.Mode().Perm())
-		}
-	}
-	// The two login-phase files are the SAME text the remote tier ships, not a
-	// second spelling of it: one owner for "how a transient ZDOTDIR replays the
-	// user's phases", or the two tiers drift and agree only where anybody looks.
-	env, err := os.ReadFile(filepath.Join(dir, ".zshenv")) //nolint:gosec // test-owned temp path
-	if err != nil {
-		t.Fatalf("read .zshenv: %v", err)
-	}
-	if string(env) != zshEnvFile() {
-		t.Errorf(".zshenv is not the shared render:\n got %q\nwant %q", env, zshEnvFile())
-	}
-	prof, err := os.ReadFile(filepath.Join(dir, ".zprofile")) //nolint:gosec // test-owned temp path
-	if err != nil {
-		t.Fatalf("read .zprofile: %v", err)
-	}
-	if string(prof) != zshProfileFile() {
-		t.Errorf(".zprofile is not the shared render:\n got %q\nwant %q", prof, zshProfileFile())
-	}
-}
-
-// TestLocalZshSession_RunsTheUsersLoginPhases is nocx-2ka0's acceptance
-// criterion, driven end to end on a real zsh on a real pty through the exact
-// call the composition root makes.
-//
-// What a user can do that they could not before: open a local tab on the
-// common macOS layout — Homebrew's own documented install puts
-// `eval "$(brew shellenv)"` in ~/.zprofile — and have brew on PATH by the time
-// their own ~/.zshrc runs. The owner's machine reported it as
-// `~/.zshrc:33: command not found: bao`: the tool was in /opt/homebrew/bin,
-// ~/.zprofile is what puts that on PATH, and ~/.zprofile was never read.
-//
-// The probe is taken AT .zshrc TIME, not at prompt time, because that is where
-// the defect lived: this machine re-added /opt/homebrew/bin from its own
-// ~/.zshrc a few lines later, so a prompt-time PATH assertion passes on a
-// session whose ~/.zshrc failed. Order is asserted with it — a file read in
-// the wrong phase sets a variable a later phase was supposed to see first.
-func TestLocalZshSession_RunsTheUsersLoginPhases(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	// The tool the user's ~/.zshrc reaches for, on a PATH entry that exists
-	// only in ~/.zprofile — the Homebrew shape, reduced to its mechanism.
-	bin := filepath.Join(home, "brewbin")
-	if err := os.Mkdir(bin, 0o700); err != nil {
-		t.Fatalf("mkdir brewbin: %v", err)
-	}
-	//nolint:gosec // a fixture tool the shell must be able to EXECUTE; 0600 would
-	// make `command -v` succeed and the probe still fail, which is a test that
-	// cannot report the defect it exists for.
-	if err := os.WriteFile(filepath.Join(bin, "nocxprobe"), []byte("#!/bin/sh\necho probe\n"), 0o700); err != nil {
-		t.Fatalf("write probe tool: %v", err)
-	}
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(home, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-	write(".zshenv", "echo PHASEZSHENV\n")
-	write(".zprofile", "echo PHASEZPROFILE\nexport PATH="+ShellQuote(bin)+":$PATH\n")
-	// Resolved at .zshrc time and kept, so the assertion cannot be satisfied
-	// by anything that happens to PATH afterwards.
-	write(".zshrc", "echo PHASEZSHRC\nexport PROBE_AT_ZSHRC=\"$(command -v nocxprobe || echo MISSING)\"\n")
-	write(".zlogin", "echo PHASEZLOGIN\n")
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-
-	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile}
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
-	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		launch.Cleanup()
-		t.Fatalf("pty start: %v", err)
-	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
-	go s.readPump()
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		launch.Cleanup()
-	}()
-
-	s.waitForHandshake()
-	s.run(`echo "PROBE=[$PROBE_AT_ZSHRC]"`)
-	out := s.output()
-
-	if !strings.Contains(out, "PROBE=["+filepath.Join(bin, "nocxprobe")+"]") {
-		t.Errorf("a tool on a PATH entry the user sets in ~/.zprofile was not found by their own "+
-			"~/.zshrc — this is `command not found` on the ordinary macOS Homebrew layout; output:\n%q", out)
-	}
-
-	want := []string{"PHASEZSHENV", "PHASEZPROFILE", "PHASEZSHRC", "PHASEZLOGIN"}
-	at := make([]int, len(want))
-	for i, w := range want {
-		at[i] = strings.Index(out, w)
-		if at[i] < 0 {
-			t.Errorf("the user's %s phase did not run; output:\n%q", w, out)
-		}
-	}
-	for i := 1; i < len(at); i++ {
-		if at[i] >= 0 && at[i-1] >= 0 && at[i] < at[i-1] {
-			t.Errorf("%s ran before %s; a native login runs them in the order %v; output:\n%q",
-				want[i], want[i-1], want, out)
-		}
-	}
-}
-
-// TestLocalZshSession_AZprofileThatExitsLeavesNothingBehind is the failure path
-// the new phase opens, stated with both ends: from the moment the transient
-// directory is written until the shell is gone, the capability inside it must
-// not outlive the process. The .zshrc erases it — but a ~/.zprofile that exits
-// runs BEFORE the .zshrc phase, so that eraser never runs, and the EXIT trap
-// armed in the .zshenv phase is the only thing left. This is why the trap is
-// set there rather than in the .zshrc.
-func TestLocalZshSession_AZprofileThatExitsLeavesNothingBehind(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".zprofile"), []byte("exit 0\n"), 0o600); err != nil {
-		t.Fatalf("write user .zprofile: %v", err)
-	}
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-	defer launch.Cleanup()
-	transient := ""
-	for _, kv := range launch.Env {
-		if rest, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
-			transient = rest
-		}
-	}
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		launch.Env...,
-	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
-	defer func() { _ = ptmx.Close() }()
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("a ~/.zprofile that exits left the shell running: the session never came up and never went away")
-	}
-
-	if _, err := os.Stat(transient); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("a ~/.zprofile that exits left the transient ZDOTDIR — and the capability in it — "+
-			"on disk (%v); the EXIT trap armed in the .zshenv phase is what must cover this", err)
-	}
-}
-
-// TestLocalZshSession_HonoursAZdotdirChosenInTheUsersZshenv covers a branch
-// that only became reachable from the LOCAL tier when it started writing a
-// .zshenv: ~/.zshenv is the one user file zsh lets choose ZDOTDIR, and a
-// native zsh then reads every later phase from wherever it pointed. The
-// template handles it — but the values it reads (NOCX_ZDOTDIR_ORIG,
-// NOCX_ZDOTDIR_WAS_SET, ZDOTDIR) are computed by the remote tier's outer shell
-// script and by localZshEnv in Go, two implementations of one contract. The
-// carrier's counterpart is TestStartupFidelity_ZshHonoursAUserChosenZdotdir;
-// this is the half that would catch the two drifting apart.
-func TestLocalZshSession_HonoursAZdotdirChosenInTheUsersZshenv(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-
-	home := t.TempDir()
-	chosen := filepath.Join(home, "zdotdir")
-	if err := os.Mkdir(chosen, 0o700); err != nil {
-		t.Fatalf("mkdir chosen zdotdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".zshenv"),
-		[]byte("export ZDOTDIR="+ShellQuote(chosen)+"\n"), 0o600); err != nil {
-		t.Fatalf("write user .zshenv: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(chosen, ".zprofile"),
-		[]byte("export FROM_CHOSEN_ZPROFILE=yes\n"), 0o600); err != nil {
-		t.Fatalf("write chosen .zprofile: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(chosen, ".zshrc"),
-		[]byte("export FROM_CHOSEN_ZSHRC=yes\n"), 0o600); err != nil {
-		t.Fatalf("write chosen .zshrc: %v", err)
-	}
-	// $HOME's own files must NOT be the ones read once ~/.zshenv has moved
-	// ZDOTDIR — reading both is as wrong as reading neither.
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"),
-		[]byte("export FROM_HOME_ZSHRC=yes\n"), 0o600); err != nil {
-		t.Fatalf("write home .zshrc: %v", err)
-	}
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-
-	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.ExtraFiles = []*os.File{shellFile}
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
-	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		launch.Cleanup()
-		t.Fatalf("pty start: %v", err)
-	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
-	go s.readPump()
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		launch.Cleanup()
-	}()
-
-	s.waitForHandshake()
-	s.run(`echo "ZD=[${ZDOTDIR-UNSET}] PROF=[${FROM_CHOSEN_ZPROFILE-no}] ` +
-		`RC=[${FROM_CHOSEN_ZSHRC-no}] HOMERC=[${FROM_HOME_ZSHRC-no}]"`)
-	out := s.output()
-
-	if !strings.Contains(out, "ZD=["+chosen+"]") {
-		t.Errorf("ZDOTDIR was not restored to the one the user's ~/.zshenv chose: %q", out)
-	}
-	if !strings.Contains(out, "PROF=[yes]") {
-		t.Errorf("the .zprofile under the ZDOTDIR the user's ~/.zshenv chose was not read: %q", out)
-	}
-	if !strings.Contains(out, "RC=[yes]") {
-		t.Errorf("the .zshrc under the ZDOTDIR the user's ~/.zshenv chose was not read: %q", out)
-	}
-	if !strings.Contains(out, "HOMERC=[no]") {
-		t.Errorf("$HOME/.zshrc was read as well, so the session ran two rc files: %q", out)
-	}
-}
-
-// TestLocalZshSession_AZprofileThatExecsStillRuns is the other half of the
-// acceptance criterion the exit test opens: a startup file that replaces the
-// shell must still do what it says. Fail-open is absolute (ADR-0004) — the
-// tier's own files run before the user's and must never turn a working
-// ~/.zprofile into a dead session.
-//
-// What it deliberately does NOT assert is the transient directory. `exec`
-// replaces the process image without running EXIT traps and without ever
-// reaching the .zshrc phase that erases it, so the capability is left in
-// TMPDIR. That is real, it is filed as nocx-r9ruy, and it is a different
-// defect from this one; asserting the leak here would pin the broken
-// behaviour in place.
-func TestLocalZshSession_AZprofileThatExecsStillRuns(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-	// The program the fixture's ~/.zprofile execs is RESOLVED on this host,
-	// not written down. /bin/echo is the FHS answer and is not NixOS's or
-	// Guix's, where coreutils lives under /run/current-system/sw/bin: a
-	// hard-coded path made this test report the machine's layout ("no such
-	// file or directory: /bin/echo") for twenty seconds instead of reporting
-	// whether an exec'ing ~/.zprofile still runs (nocx-9jomd). Nothing about
-	// the assertion changes — the marker still has to come out of the PTY,
-	// which it cannot unless the tier's own startup files got out of the way.
-	echoBin, lookErr := exec.LookPath("echo")
-	if lookErr != nil {
-		t.Fatalf("echo is not installed: %v — this test needs a real program for "+
-			"the user's ~/.zprofile to exec", lookErr)
-	}
-
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".zprofile"),
-		[]byte("exec "+ShellQuote(echoBin)+" NOCX_EXEC_PROBE\n"), 0o600); err != nil {
-		t.Fatalf("write user .zprofile: %v", err)
-	}
-	unsetZDOTDIR(t)
-
-	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunch: %v", err)
-	}
-	defer launch.Cleanup()
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		launch.Env...,
-	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-	}()
-
-	var mu sync.Mutex
-	var seen strings.Builder
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := ptmx.Read(buf)
-			if n > 0 {
-				mu.Lock()
-				seen.Write(buf[:n])
-				mu.Unlock()
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-
-	// Waiting on the marker rather than on the process: what the criterion
-	// asks is that the exec'd program RAN, and a duration would only say how
-	// fast this machine is.
-	waittest.WaitForTimeoutDetail(t, "the program the user's ~/.zprofile exec'd", 20*time.Second,
-		func() string { mu.Lock(); defer mu.Unlock(); return fmt.Sprintf("output=%q", seen.String()) },
-		func() bool {
-			mu.Lock()
-			defer mu.Unlock()
-			return strings.Contains(seen.String(), "NOCX_EXEC_PROBE")
-		})
 }

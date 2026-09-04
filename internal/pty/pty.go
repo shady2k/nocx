@@ -68,25 +68,6 @@ type Config struct {
 	ExtraFiles []*os.File
 }
 
-// Option configures a Config before PTY creation.
-type Option func(*Config)
-
-// WithExtraEnv appends extra environment variables to the PTY process.
-func WithExtraEnv(env []string) Option {
-	return func(cfg *Config) {
-		cfg.Env = append(cfg.Env, env...)
-	}
-}
-
-// WithExtraFiles appends open files the child shell inherits as fds 3, 4, …
-// via exec.Cmd.ExtraFiles — the lifecycle channel descriptor is the first
-// one, so it is fd 3 in the shell.
-func WithExtraFiles(files ...*os.File) Option {
-	return func(cfg *Config) {
-		cfg.ExtraFiles = append(cfg.ExtraFiles, files...)
-	}
-}
-
 type Stub struct {
 	log  log.Logger
 	done chan struct{}

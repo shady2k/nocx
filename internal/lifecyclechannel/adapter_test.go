@@ -110,7 +110,7 @@ func mustEstablish(t *testing.T, a *Adapter, child *os.File) *lifecyclecodec.Dec
 // over the descriptor with the domain's addressing and capability.
 func TestHandshakeThroughTheWire(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestHandshakeThroughTheWire(t *testing.T) {
 // completes the handshake.
 func TestGarbageBeforeHelloStillEstablishes(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestGarbageBeforeHelloStillEstablishes(t *testing.T) {
 // snapshot answering the refresh request restores authority.
 func TestGarbageDesyncsAndSnapshotRestores(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestGarbageDesyncsAndSnapshotRestores(t *testing.T) {
 // reports transport loss: the domain is Lost and the lane falls to Lost.
 func TestTransportLossMarksDomainLost(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestTransportLossMarksDomainLost(t *testing.T) {
 // relabeled.
 func TestShellExitClosesDomain(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestShellExitClosesDomain(t *testing.T) {
 // becomes unknown (never successful, never assigned an exit code).
 func TestShellDiesWithoutDomainClosed(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestShellDiesWithoutDomainClosed(t *testing.T) {
 // without an authenticated hello the domain is abandoned within the window.
 func TestHelloTimeoutAbandonsDomain(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k, WithHelloTimeout(50*time.Millisecond))
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k, WithHelloTimeout(50*time.Millisecond))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestHelloTimeoutAbandonsDomain(t *testing.T) {
 // the domain.
 func TestOversizeHelloThenValidHello(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestOversizeHelloThenValidHello(t *testing.T) {
 // adapter loses the domain so its open attempts become unknown.
 func TestCloseEndsSession(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestCloseEndsSession(t *testing.T) {
 // establishes — end to end, through a process that is not the test.
 func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 	k := newTestKernel()
-	a, child, err := New(log.NewSlogAdapter(nil), k)
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -494,7 +494,7 @@ func (r *causeRecorder) allLanes() []lifecycle.LaneID {
 func TestHelloTimeoutReportsItsCause(t *testing.T) {
 	k := newTestKernel()
 	rec := newCauseRecorder()
-	a, child, err := New(log.NewSlogAdapter(nil), k,
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k,
 		WithHelloTimeout(50*time.Millisecond), WithLossReporter(rec.report))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -518,7 +518,7 @@ func TestHelloTimeoutReportsItsCause(t *testing.T) {
 func TestShellClosingItsEndReportsEndOfStream(t *testing.T) {
 	k := newTestKernel()
 	rec := newCauseRecorder()
-	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestShellClosingItsEndReportsEndOfStream(t *testing.T) {
 func TestSessionDisposalReportsClosed(t *testing.T) {
 	k := newTestKernel()
 	rec := newCauseRecorder()
-	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestSessionDisposalReportsClosed(t *testing.T) {
 func TestCauseIsReportedBeforeTheKernelIsTold(t *testing.T) {
 	k := newTestKernel()
 	order := make(chan string, 4)
-	a, child, err := New(log.NewSlogAdapter(nil), &orderingKernel{Kernel: k, order: order},
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), &orderingKernel{Kernel: k, order: order},
 		WithHelloTimeout(50*time.Millisecond),
 		WithLossReporter(func(lifecycle.LaneID, LossCause) { order <- "cause" }))
 	if err != nil {

@@ -63,6 +63,28 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 		if err != nil {
 			return fmt.Errorf("content: encode session metadata: %w", err)
 		}
+		// THE DEFAULT WORKSPACE IS A FALLBACK ROW THIS REPOSITORY ALREADY
+		// WRITES, and it is written here for the same reason it is written in
+		// ensureSessionRecorded: sessions.workspace_id is a foreign key, the
+		// default workspace is a coordinator-side CONSTANT rather than
+		// something a person created, and on a fresh profile nothing has
+		// created its row yet. Without this, the first pane a new install
+		// opens fails on a FOREIGN KEY constraint — which nothing noticed
+		// while no open wrote a session row on that path (nocx-ie23r.3).
+		//
+		// Guarded on the default, deliberately. Any other workspace id came
+		// off the pane → tab → workspace chain, so its row exists by
+		// construction, and inserting one here would be this repository
+		// minting a workspace — which belongs to LayoutRepository (AD-8) and
+		// would turn a caller's typo into a new workspace.
+		if sess.WorkspaceID == DefaultWorkspaceID {
+			if _, werr := s.db.ExecContext(ctx,
+				`INSERT INTO workspaces (id, name, created_at) VALUES (?, 'default', ?)
+				 ON CONFLICT(id) DO NOTHING`,
+				DefaultWorkspaceID, time.Now().UnixMilli()); werr != nil {
+				return werr
+			}
+		}
 		_, err = s.db.ExecContext(ctx,
 			`INSERT INTO sessions (id, workspace_id, started_at, payload) VALUES (?, ?, ?, ?)`,
 			// string(raw), not raw: `sessions` is STRICT and `payload` is

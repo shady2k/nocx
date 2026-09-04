@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 	"github.com/shady2k/nocx/internal/app/clienthost"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
-	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
@@ -52,7 +50,6 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
@@ -60,7 +57,6 @@ import (
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/reveal"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -100,7 +96,6 @@ func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
 
 type App struct {
 	Logger           log.Logger
-	Pty              session.PTYFactory
 	Session          *session.Reg
 	Transport        *transport.WSServer
 	ShellIntegration shellintegration.ShellIntegration
@@ -135,6 +130,11 @@ type App struct {
 	// artifact source answers "which build" for every host including this
 	// one.
 	helperArtifacts deploy.ArtifactSource
+	// localHelper is this machine's own entry in that inventory: the route a
+	// local pane is opened through. Held here because Start is what tells it
+	// which generation was installed, and Shutdown is what releases its
+	// connection — the sessions behind it survive both, which is the epic.
+	localHelper *localHelperOpener
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -709,14 +709,19 @@ func New(opts ...Option) (*App, error) {
 	// a per-session observer would mean a kernel queue and a goroutine per
 	// tab.
 	procs := procwatch.New(logger)
-	// One login-shell resolver, built here and injected: "which shell is this
-	// user's login shell" is one question with one owner (nocx-wwz0), and the
-	// composition root is where the platform half gets wired in.
-	ptf := &localPTYFactory{
-		log: logger, shint: shint, transports: childTransports,
-		shells: loginshell.New(), procs: procs,
-	}
-	sess := session.New(logger, ptf)
+	// THIS MACHINE'S PANES ARE THE HELPER'S (L1, ADR-0057). The opener is
+	// built here and its generation arrives at Start, which is where the
+	// install happens; everything else it needs is bound below as the seams
+	// it reaches come into existence.
+	localOpener := &localHelperOpener{log: slogger, procs: procs}
+	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
+	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
+	// of a local PTY in this repository and it lives in the daemon
+	// (internal/helper/session), so nothing in this process forks a shell any
+	// more; a local open reaches the helper, and if it cannot, it refuses.
+	// Reg.Open says so by name when something asks it for a local session
+	// anyway, in the same words it has always used for a missing ssh factory.
+	sess := session.New(logger, nil)
 
 	// SSH config resolver: shared by both the SSH client and the profile
 	// resolver so the authorization comparison matches canonical hostnames.
@@ -840,6 +845,12 @@ func New(opts ...Option) (*App, error) {
 	// bookkeeping that started them.
 	helperFactory, helperReg := helperGitFactory(sshClient, helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
 	helperReg.registry = sess
+	localOpener.registry = sess
+	// The one seam the transport asks for every destination. hostedOpeners is
+	// a dispatch and nothing else: this machine's opener answers for a local
+	// pane, the helper registry for a remote one, and neither learns the
+	// other's question (see helper_local.go).
+	hosted := &hostedOpeners{local: localOpener, remote: helperReg}
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -1297,7 +1308,7 @@ func New(opts ...Option) (*App, error) {
 		// uninstall surface needs it to close them before removing an
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
-		transport.WithHelperSessionOpener(helperReg),
+		transport.WithHelperSessionOpener(hosted),
 		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before
@@ -1416,7 +1427,7 @@ func New(opts ...Option) (*App, error) {
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
-	ptf.kernel = lifecyclePub
+	localOpener.kernel = lifecyclePub
 	// Helper-hosted sessions use this same publisher; their byte carrier is
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
@@ -1807,7 +1818,18 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 	remoteLifecycle.registerLane = registerLane
-	ptf.registerLane = registerLane
+	// A HELPER-HOSTED LOCAL PANE REGISTERS THE SAME TWO FACTS, by two seams
+	// rather than one closure, because the transport already owns half of it:
+	// the hosted open path binds the lane to its session through
+	// laneRegistrar, and what is left is the child-domain half — which
+	// transport a nested sudo/su rides, and which session a lane speaks for
+	// when the wave record and the pane enroller ask (nocx-u7uh.11). The
+	// shell inherits the daemon's descriptor exactly as it inherited this
+	// process's before, so the parent transport is still a local one.
+	localOpener.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
+		childTransports.register(t, transportKind{local: true})
+		childSessions.register(lane, sid)
+	}
 	// The bootstrap's terminal outcome (carrier design §5.5, §6.1), routed
 	// by the same lane the lifecycle facts use. It is a THIRD seam onto the
 	// integration axis and it has to be: the bootstrap concludes before any
@@ -1840,31 +1862,20 @@ func New(opts ...Option) (*App, error) {
 	// session.integrationChanged. The cause crosses as its string so the
 	// transport does not depend on the adapter package — the adapter's
 	// constants remain the single spelling.
-	ptf.reportIntegration = func(sid, shell, status string, reason ssh.RefusalReason) {
-		tp.RegisterIntegration(session.ID(sid), shell, status, reason)
-	}
-	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+	localOpener.lifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
 	// The same seam for a HELPER-hosted session's channel, opened or taken
 	// back (nocx-k6p18.31). One sink and not two: the axis does not care
 	// which transport carried the lane, and the loss cause spelling has one
 	// owner either way.
-	helperReg.lifecycleLoss = ptf.noteLifecycleLoss
+	helperReg.lifecycleLoss = localOpener.lifecycleLoss
 	// The third seam onto the same axis (nocx-cgzc): the observer says the
 	// shell was replaced before it ever answered, and the transport decides
 	// whether that still applies. The factory does not decide it, because
 	// only the transport knows whether the session has integrated since.
-	ptf.reportShellReplaced = func(sid, observed string) {
+	localOpener.reportShellReplaced = func(sid, observed string) {
 		tp.NoteShellReplaced(session.ID(sid), observed)
-	}
-	// And how far the shell got through nocx's rcfile (nocx-yww2), which is
-	// what turns the dominant failure from "ten seconds of silence" into a
-	// stage. Routed by session id rather than by lane: the progress
-	// descriptor belongs to the session, carries no domain and confers no
-	// authority, so it never touches the lane registry.
-	ptf.noteBootstrapStage = func(sid, stage string) {
-		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
 	// The connection/SSH material seam uses the same resolver as the egress
 	// gate. The auth ladder resolves on the dial — PHASE TWO of the open,
@@ -1978,7 +1989,6 @@ func New(opts ...Option) (*App, error) {
 
 	app := &App{
 		Logger:           logger,
-		Pty:              ptf,
 		Session:          sess,
 		Transport:        tp,
 		UploadSources:    tp.UploadSources(),
@@ -1992,6 +2002,7 @@ func New(opts ...Option) (*App, error) {
 		gitFactory:       gitFactory,
 		helperRegistry:   helperReg,
 		helperArtifacts:  localHelperArtifacts(o),
+		localHelper:      localOpener,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
@@ -2315,428 +2326,6 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 	appendRouteHops(hopCfg, hops)
 }
 
-type localPTYFactory struct {
-	log    log.Logger
-	shint  shellintegration.ShellIntegration
-	kernel lifecyclechannel.Kernel
-	// shells answers which shell this user logs in with. Injected because the
-	// platform half is a subprocess against the OS account database, and
-	// because the answer decides the tier: it is the single call site of the
-	// value (nocx-wwz0).
-	shells loginshell.Resolver
-	// transports records each local adapter's transport kind so the child
-	// grant builder knows the child rides the inherited descriptor
-	// (nocx-u7uh.11).
-	transports *transportRegistry
-	// registerLane binds a minted lifecycle lane to the session that owns
-	// it, so published facts route to the right subscriber. Wired at the
-	// composition root once the transport exists; nil (tests, or a server
-	// without lifecycle wiring) leaves facts unrouted, which is the safe
-	// direction — the renderer keys enhanced mode on the fact, and an
-	// unregistered lane is a conventional terminal.
-	registerLane func(lane lifecycle.LaneID, sid string)
-	// reportIntegration enters a session into the integration axis the
-	// product renders (nocx-dvql): what this factory started, and how far
-	// it got before it handed the pty back. Only this factory knows which
-	// binary was exec'd, so only it may answer — the transport registers
-	// remote sessions from the ssh path instead. Nil (tests, or a server
-	// without the wiring) leaves the session unregistered, which emits
-	// nothing, which is the safe direction.
-	reportIntegration func(sid, shell, status string, reason ssh.RefusalReason)
-	// noteLifecycleLoss carries the adapter's loss cause to the same axis.
-	// It is a separate seam from the published lifecycle facts because a
-	// handshake that expires establishes no domain and therefore publishes
-	// no fact at all — the silence this bead exists to end.
-	noteLifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
-	// procs watches the process this factory forked, so a shell replaced
-	// out of the user's own startup files is noticed when it happens rather
-	// than when the handshake bound expires ten seconds later (nocx-cgzc).
-	// Injected because the observation is per-OS; nil (tests, or a server
-	// without the wiring) leaves the bound as the only detector, which is
-	// where the product was before.
-	procs procwatch.Watcher
-	// reportShellReplaced carries one observation to the session's
-	// integration axis. Separate from reportIntegration because it answers
-	// a different question — reportIntegration says what the launch did,
-	// this says what happened to it afterwards — and because only the
-	// transport may decide whether an observation still applies.
-	reportShellReplaced func(sid, observed string)
-	// noteBootstrapStage carries how far the shell got through nocx's rcfile
-	// to the same axis (nocx-yww2). A third seam and not a variant of the
-	// two above, because it is the only one that speaks BEFORE anything has
-	// failed: the handshake bound can say a session did not integrate, and
-	// only these facts can say where it stopped. Diagnostic only — nothing
-	// reached through here may grant authority, and the transport's
-	// NoteBootstrapStage emits nothing on its own.
-	noteBootstrapStage func(sid, stage string)
-}
-
-// lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
-// descriptor the shell inherited. It exists so the channel dies with the
-// session that owns it: a conventional session is a bare pty and carries no
-// channel at all, which is the observable difference ADR-0024 decision 4 is
-// about.
-type lifecyclePTY struct {
-	pty.Pty
-	ch *lifecyclechannel.Adapter
-	// stopWatch releases this session's process observation. Nil when
-	// nothing is watching — no observer wired, or a platform that cannot
-	// look.
-	stopWatch func()
-	// bp is the bootstrap progress reader, when one was created. It dies
-	// with the session for the same reason the channel does: both are
-	// descriptors this session's shell inherited, and a reader outliving its
-	// shell would report a stage for a session that no longer exists.
-	bp *bootstrapprogress.Reader
-}
-
-// WaitErr forwards the shell's wait result from the pty this wraps
-// (nocx-o3amz). It exists because lifecyclePTY embeds the pty.Pty INTERFACE,
-// and a concrete type's method is not promoted through an embedded interface:
-// *pty.LocalPty.WaitErr — the only thing that knows what cmd.Wait returned —
-// was invisible to the optional-method assertion session.ExitOutcome makes, so
-// every enhanced local session classified as a LOSS. The tab hung about marked
-// "Connection lost" on a clean `exit`, and the shell's status was discarded.
-//
-// Anything else optional a pty grows needs the same forward, for the same
-// reason. The `(nil, false)` answer is not a stand-in for a clean exit: it says
-// this pty made no report, which ExitOutcome maps to a loss without inventing
-// a status.
-func (p *lifecyclePTY) WaitErr() (error, bool) {
-	provider, ok := p.Pty.(interface{ WaitErr() (error, bool) })
-	if !ok {
-		return nil, false
-	}
-	return provider.WaitErr()
-}
-
-// SignalForeground forwards the signal to the pty this wraps, for exactly the
-// reason WaitErr above does and with a costlier consequence (nocx-7l4ex.13).
-//
-// Without it the optional-method assertion in realSession.SignalForeground
-// found nothing on an ENHANCED local session, answered pty.ErrNoForeground for
-// every signal, and session.signal told the person "nothing is running in this
-// pane" while their command plainly was — the incident nocx-92gfl.4 was filed
-// as. The shell's protected process group had nothing to do with it: nothing
-// ever asked the pty at all.
-//
-// ForegroundProcessGroup travels with it because it is the same seam asked a
-// question instead of told to act, and a wrapper that can signal a group it
-// cannot name is half-wired in the way that hides.
-func (p *lifecyclePTY) SignalForeground(sig syscall.Signal) error {
-	sg, ok := p.Pty.(interface {
-		SignalForeground(sig syscall.Signal) error
-	})
-	if !ok {
-		return pty.ErrNoForeground
-	}
-	return sg.SignalForeground(sig)
-}
-
-func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
-	fg, ok := p.Pty.(interface{ ForegroundProcessGroup() (int, error) })
-	if !ok {
-		return 0, pty.ErrNoForeground
-	}
-	return fg.ForegroundProcessGroup()
-}
-
-// ForegroundJob and SignalProcessGroup travel with the two above for the
-// reason the comment on SignalForeground already gives, and they are here
-// because that reason was proved a second time (nocx-i5a1k's sibling).
-//
-// nocx-uvac6.11 split a stop into "name the addressee once" and "signal that
-// exact group", and a stop now ASKS ForegroundJob before it signals anything.
-// This wrapper forwarded SignalForeground and ForegroundProcessGroup and not
-// these two, so on an ENHANCED local session the optional-method assertion in
-// realSession.ForegroundJob found nothing, answered pty.ErrNoForeground, and
-// session.signal told the person "nothing is running in this pane" about a
-// full-screen program that plainly was — nocx-92gfl.4 word for word, through
-// a door that did not exist when it was closed.
-//
-// The rule this seam keeps: every method of the pty signal seam is forwarded
-// here, or none is. A wrapper that answers some of them is not degraded, it
-// is wrong, and it is wrong silently — nothing fails to compile and the
-// answer it gives is a plausible one.
-func (p *lifecyclePTY) ForegroundJob() (int, error) {
-	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
-	if !ok {
-		return 0, pty.ErrNoForeground
-	}
-	return fg.ForegroundJob()
-}
-
-func (p *lifecyclePTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
-	sg, ok := p.Pty.(interface {
-		SignalProcessGroup(pgid int, sig syscall.Signal) error
-	})
-	if !ok {
-		return pty.ErrNoForeground
-	}
-	return sg.SignalProcessGroup(pgid, sig)
-}
-
-func (p *lifecyclePTY) Close() error {
-	err := p.Pty.Close()
-	_ = p.ch.Close()
-	// The pid is the OS's to reuse the moment the shell is reaped, so a
-	// watch that outlived its session would be a watch on somebody else's
-	// process.
-	if p.stopWatch != nil {
-		p.stopWatch()
-	}
-	if p.bp != nil {
-		_ = p.bp.Close()
-	}
-	return err
-}
-
-func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
-	env := f.shint.ActivationEnv(cfg.Enhanced)
-	if !cfg.Enhanced || f.kernel == nil {
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
-	}
-	// Which shell the user logs in with, and which local tier starts it. One
-	// resolution, one log line, one decision — everything below reads them
-	// (nocx-wwz0). Before this the answer was the constant "bash", so on macOS,
-	// whose default login shell has been zsh since Catalina, every local tab
-	// opened a shell the user had not chosen and none of their own environment.
-	shell := f.shells.Resolve()
-	kind := shellintegration.LocalShellKind(shell.Path)
-	f.log.Info("local session shell resolved",
-		"shell", shell.Path, "source", string(shell.Source), "tier", string(kind))
-
-	if kind == shellintegration.ShellUnknown {
-		// fish, csh, tcsh, dash, anything: started as itself, integrated not
-		// at all, and SAID so. Substituting bash here is the defect this bead
-		// is; degrading silently is the one AGENTS.md names. The activation
-		// env is the conventional one — a shell that will not be integrated
-		// must not be told it is being integrated.
-		cfg.Command = shell.Path
-		cfg.Args = []string{"-l"}
-		p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
-		if err != nil {
-			return nil, err
-		}
-		f.log.Warn("no local shell-integration tier for this login shell; the session is conventional",
-			"shell", shell.Path, "reason", string(ssh.ReasonUnsupportedShell))
-		// Reported here and only here. A local session's status has one owner
-		// — this factory, the only thing that knows which binary it exec'd —
-		// and registerRemoteIntegration returns early for local sessions, so
-		// a reason carried on the session's optional-method seam instead
-		// would be a write nothing reads: the fish user's tab would degrade
-		// exactly as silently as before this bead.
-		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnsupportedShell)
-		return p, nil
-	}
-	// Enhanced: the shell reports its lifecycle over a descriptor that is not
-	// the tty (ADR-0024 decision 2). The child end goes in as fd 3; the parent
-	// end stays here and is pumped by the adapter.
-	// The handshake bound is set here rather than left to the adapter's
-	// default: how long a shell may take to prove itself before the session
-	// falls back to conventional is a product decision, and the composition
-	// root is where product decisions belong.
-	ch, child, err := lifecyclechannel.New(f.log, f.kernel,
-		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout),
-		lifecyclechannel.WithLossReporter(f.noteLifecycleLoss))
-	if err != nil {
-		return nil, err
-	}
-	// The bootstrap progress descriptor (nocx-yww2): a SECOND, one-way
-	// descriptor, never the lifecycle channel and never its codec. It carries
-	// two unauthenticated facts about how far the rcfile got, and the reason
-	// it is a separate object rather than two more frames is the rule it must
-	// not break — every envelope on the lifecycle channel is authenticated,
-	// and these cannot be. A failure to create it costs the diagnosis, never
-	// the session: the shell starts anyway and the handshake bound goes back
-	// to being the only detector.
-	bp, bpChild := f.newBootstrapProgress(cfg.SessionID)
-	if f.transports != nil {
-		f.transports.register(ch.TransportID(), transportKind{local: true})
-	}
-	// The local bootstrap (nocx-u7uh.21, extended to zsh by nocx-wwz0): the
-	// user's own login shell starts with a transient artefact carrying THIS
-	// session's capability and recovery fence in its TEXT — never in the
-	// environment (ADR-0024 decision 2) — and the non-secret addressing as
-	// NOCX_LIFECYCLE_* env, exactly the way the remote tier learns them.
-	// shellintegration.LaunchOptions is the single description of "how a shell
-	// learns its addressing and its capability", and LocalEnhancedLaunch owns
-	// the per-tier difference between them: a transient rcfile for bash, a
-	// transient ZDOTDIR for zsh, because zsh has no --rcfile.
-	launch := ch.Launch()
-	local, rerr := shellintegration.LocalEnhancedLaunch(shell.Path, kind, shellintegration.LaunchOptions{
-		SessionID:   cfg.SessionID,
-		Enhanced:    true,
-		Capability:  launch.Capability,
-		Recovery:    launch.Recovery,
-		Lane:        string(launch.Lane),
-		Domain:      string(launch.Domain),
-		Epoch:       launch.Epoch,
-		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
-		BootstrapFD: bootstrapFD(bpChild),
-	})
-	if rerr != nil {
-		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
-			"shell", shell.Path, "tier", string(kind), "error", rerr)
-		_ = ch.Close()
-		_ = child.Close()
-		closeProgress(bp, bpChild)
-		// No channel and no bootstrap: the user's OWN login shell, plain, with
-		// a visible native prompt (the script's init bails without config).
-		// The activation env is the conventional one — a shell that will not
-		// be integrated must not be told it is being integrated.
-		cfg.Command = shell.Path
-		cfg.Args = []string{"-i"}
-		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
-		if perr != nil {
-			return nil, perr
-		}
-		// The session asked for integration and will not get it, so it says
-		// so — with `unknown`, because the failure is a local bootstrap error
-		// and none of the refusal vocabulary describes it. `unknown` is a
-		// real visible answer, never a synonym for success, which is what the
-		// renderer would read an absent reason as.
-		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnknown)
-		return p, nil
-	}
-	cfg.Command = local.Command
-	cfg.Args = local.Args
-	// Descriptor order is the contract: fd 3 is the lifecycle channel, fd 4
-	// the bootstrap progress pipe, and the rcfile reads both numbers from the
-	// environment block LaunchOptions rendered above. Appending the progress
-	// end second is what makes bootstrapFD's answer true.
-	p, err := pty.NewLocal(f.log, cfg,
-		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(extraFiles(child, bpChild)...))
-	// The child ends are the shell's once the fork has happened; this process
-	// keeps no reference either way.
-	_ = child.Close()
-	if bpChild != nil {
-		_ = bpChild.Close()
-	}
-	if err != nil {
-		_ = ch.Close()
-		if bp != nil {
-			_ = bp.Close()
-		}
-		// The shell erases the artefact itself once it has read it; on a spawn
-		// failure there is no shell, so the capability would sit in TMPDIR
-		// until the machine cleaned it.
-		local.Cleanup()
-		return nil, err
-	}
-	// Bind the lane to the session that will receive its facts. Without
-	// this, published lifecycle facts are dropped (the transport routes by
-	// lane registration) and enhanced mode never engages — the whole
-	// lifecycle stack reachable only from its own tests (AGENTS.md check 5).
-	if cfg.SessionID != "" && f.registerLane != nil {
-		f.registerLane(ch.Lane(), cfg.SessionID)
-	}
-	// The lane is bound first, deliberately: the loss reporter resolves a
-	// lane to its session, so a handshake that expired between the two
-	// would have nowhere to land. Registering the axis afterwards is the
-	// safe order — the status is only emitted after the open ack anyway.
-	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
-	// Watched only here, on the one path that has a handshake to shorten.
-	// A session already reported conventional has nothing an observation
-	// could bring forward, and watching it could only produce noise.
-	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: f.watchForReplacement(cfg.SessionID, p)}, nil
-}
-
-// watchForReplacement asks the observer to say when the shell this factory
-// just started stops being the process running under its pid — the takeover
-// nocx-cgzc measured, where a wrapper execs out of the user's own startup
-// file milliseconds after the fork and the product finds out ten seconds
-// later.
-//
-// It is a SECOND detector, never a replacement for the first: the handshake
-// bound still bounds the handshake, and a platform that cannot observe an
-// exec (or a kernel that refuses the watch) degrades to exactly the product
-// that shipped before this — which is why the failure is a Debug line and
-// not an error the session carries.
-func (f *localPTYFactory) watchForReplacement(sid string, p *pty.LocalPty) func() {
-	if sid == "" || f.procs == nil || f.reportShellReplaced == nil {
-		return nil
-	}
-	pid := p.Pid()
-	if pid <= 0 {
-		return nil
-	}
-	shell := p.Shell()
-	stop, err := f.procs.Started(pid, shell, func(obs procwatch.Observation) {
-		f.log.Info("the shell this session started was replaced before it answered",
-			"session", sid, "pid", obs.PID, "started", shell, "observed", obs.Name)
-		f.reportShellReplaced(sid, obs.Name)
-	})
-	if err != nil {
-		f.log.Debug("this session's shell is not watched for replacement",
-			"session", sid, "error", err)
-		return nil
-	}
-	return stop
-}
-
-// report enters this session into the integration axis, when the wiring
-// exists. A local session that never asked for integration never reaches
-// here, and so emits nothing at all: absence is how "conventional by design"
-// is expressed, and a session with nothing to say must not nag.
-func (f *localPTYFactory) report(sid, shell, status string, reason ssh.RefusalReason) {
-	if sid == "" || shell == "" || f.reportIntegration == nil {
-		return
-	}
-	f.reportIntegration(sid, shell, status, reason)
-}
-
-// newBootstrapProgress creates this session's progress reader, or reports
-// nothing at all. Both halves are legitimate outcomes: a session with no
-// session id has nowhere to route a stage, a factory with no sink has nobody
-// to tell, and a pipe that cannot be created costs a diagnosis rather than a
-// terminal. Every caller downstream treats a nil reader as "no progress
-// reporting", which is exactly where the product was before this existed.
-func (f *localPTYFactory) newBootstrapProgress(sid string) (*bootstrapprogress.Reader, *os.File) {
-	if sid == "" || f.noteBootstrapStage == nil {
-		return nil, nil
-	}
-	bp, child, err := bootstrapprogress.New(f.log, func(stage bootstrapprogress.Stage) {
-		f.noteBootstrapStage(sid, string(stage))
-	})
-	if err != nil {
-		f.log.Warn("bootstrap progress channel unavailable; a startup that does not return will report only a timeout",
-			"session", sid, "error", err)
-		return nil, nil
-	}
-	return bp, child
-}
-
-// bootstrapFD is the descriptor number the rcfile writes its progress facts
-// to: 4, because ExtraFiles hands the shell fd 3 first and the lifecycle
-// channel is always that one. Zero when there is no progress pipe, which the
-// rcfile's own guard reads as "report nothing".
-func bootstrapFD(child *os.File) int {
-	if child == nil {
-		return 0
-	}
-	return 4
-}
-
-// extraFiles assembles the descriptors the shell inherits, in the order their
-// numbers depend on.
-func extraFiles(lifecycleChild, progressChild *os.File) []*os.File {
-	if progressChild == nil {
-		return []*os.File{lifecycleChild}
-	}
-	return []*os.File{lifecycleChild, progressChild}
-}
-
-// closeProgress releases both ends on a path that will not start a shell.
-func closeProgress(bp *bootstrapprogress.Reader, child *os.File) {
-	if bp != nil {
-		_ = bp.Close()
-	}
-	if child != nil {
-		_ = child.Close()
-	}
-}
-
 func (a *App) Start(ctx context.Context) error {
 	a.Logger.Info("starting application services")
 
@@ -2803,12 +2392,25 @@ func (a *App) installLocalHelper(ctx context.Context, home string) {
 	}
 	a.Logger.Info("helper: the local generation is installed",
 		"generation", string(installed.Generation), "binary", installed.Binary)
+	// The install and the open route agree on ONE generation and ONE home,
+	// because they are told them together. A route that resolved the home
+	// itself would be a second answer to "where does this machine's helper
+	// live", and the two would agree until somebody moved HOME.
+	if a.localHelper != nil {
+		a.localHelper.installedLocalGeneration(installed, home)
+	}
 }
 
 func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// After the transport, so no pane can still be opening. The daemon and
+	// every session on it survive this — closing the connection is this
+	// coordinator leaving, not the sessions ending.
+	if a.localHelper != nil {
+		a.localHelper.close()
 	}
 	// After the transport, so nothing is still writing a note.
 	if a.noteCloser != nil {

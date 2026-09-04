@@ -24,11 +24,12 @@ import "strings"
 //     because --rcfile is the delivery vehicle and bash ignores it for a
 //     login shell;
 //   - if the user's ~/.bashrc execs or exits, control never reaches the
-//     install below: user startup wins. That outcome is no longer silent —
-//     the bootstrap progress descriptor carries "startup entered" before the
-//     source and "user rc returned" after it, so the product can say the
-//     startup did not return instead of reporting ten seconds of nothing
-//     (nocx-yww2). A top-level `return` in the user's file stops only that
+//     install below: user startup wins, and it does so SILENTLY — the
+//     bootstrap-progress descriptor that used to say where the startup
+//     stopped went with internal/app's local pty factory (nocx-ie23r.3),
+//     because the coordinator no longer forks the shell and cannot hand it
+//     a descriptor. The handshake bound is the detector again, as it is on
+//     every other tier. A top-level `return` in the user's file stops only that
 //     file — bash resumes the source — which is indistinguishable from
 //     completion, so the install proceeds; that case is a reported
 //     limitation, not a silent equivalence (nocx-xs1d). The same is true of
@@ -56,24 +57,6 @@ case "${BASH_SOURCE[0]:-}" in
 esac
 @ENV@
 
-# Bootstrap progress fact 1 of 2 (nocx-yww2): this rcfile began executing.
-# The descriptor is one-way, is NOT the lifecycle channel, and confers no
-# authority at all — see internal/bootstrapprogress and ADR-0024 decision 4.
-# Its whole job is to tell "the user's startup took the shell" apart from
-# "the shell never started" and "our own bootstrap broke", which are one
-# indistinguishable silence without it.
-#
-# The redirection is inside a group whose stderr is discarded, and the group
-# is followed by an always-true fallback: a descriptor that is not open makes
-# the REDIRECTION itself fail, which under an inherited errexit would end the
-# session, and which prints "bad file descriptor" on the user's terminal
-# unless the suppression covers the redirection rather than the command.
-__nocx_bp_fd="${NOCX_BOOTSTRAP_FD:-}"
-case "${__nocx_bp_fd}" in
-    ''|*[!0-9]*) __nocx_bp_fd='' ;;
-    *) { builtin printf 'startup-entered\n' >&"${__nocx_bp_fd}"; } 2>/dev/null || : ;;
-esac
-
 @LOGINPHASE@
 # User startup — first, and it wins.
 if [[ -f "${HOME}/.bashrc" ]]; then
@@ -85,18 +68,6 @@ fi
 # install. The user's options are restored immediately after.
 __nocx_old_opts="${-}"
 set +e +x
-# Bootstrap progress fact 2 of 2: the user's startup returned control. Its
-# position is load-bearing twice over. It is written AFTER 'set +e', so a
-# user rc that left errexit on cannot turn a failed write into a dead
-# session; and it is written BEFORE __nocx_cap exists below, so no code the
-# user's rc runs can see the capability — the fact costs the availability
-# window not one byte. The descriptor is closed immediately afterwards, so
-# no descendant of this shell inherits a writer for it.
-if [ -n "${__nocx_bp_fd}" ]; then
-    { builtin printf 'user-rc-returned\n' >&"${__nocx_bp_fd}"; } 2>/dev/null || :
-    { eval "exec ${__nocx_bp_fd}>&-"; } 2>/dev/null || :
-fi
-unset __nocx_bp_fd
 # An installer-era gate line in the user's rc may already have sourced an
 # older integration mid-rc. Rewind its captures so the fresh install below
 # chains to the user's original traps and PROMPT_COMMAND, not to our own

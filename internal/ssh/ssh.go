@@ -135,9 +135,13 @@ const (
 	// only channel for a reason was the session-open ack and this answer
 	// arrives ten seconds after it.
 	ReasonHandshakeTimeout RefusalReason = "handshake-timeout"
-	// ReasonStartupDidNotReturn means the shell started, nocx's rcfile began
-	// executing, and the user's own startup file never gave control back —
-	// so the install line after it was never reached (nocx-yww2). It is a
+	// ReasonStartupDidNotReturn means the shell started and the user's own
+	// startup file never gave control back, so nocx's install line after it
+	// was never reached (nocx-yww2). It used to be reached two ways — the
+	// rcfile's own progress descriptor falling silent, and the process
+	// observer seeing the shell replaced — and since nocx-ie23r.3 only the
+	// second: the descriptor needed the coordinator to fork the shell, and
+	// this machine's helper forks it now. It is a
 	// STAGE, deliberately not a cause: `exec` into a foreign terminal
 	// wrapper is the case that was measured, but a plain `exit`, a
 	// `tmux attach` that never returns, a keychain dialog and a shell that

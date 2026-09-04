@@ -750,15 +750,6 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
-	// bootstrapStages is how far each session's shell got through nocx's
-	// rcfile (nocx-yww2). Its own map rather than a field of
-	// integrationStatus, because the two arrive in an order nothing
-	// controls: the shell can write its first fact microseconds after the
-	// fork, while the launch registers the axis only once the pty is back.
-	// A stage folded into the status would be dropped for arriving early,
-	// and the failure it explains is exactly the one where the shell was
-	// fast and then vanished.
-	bootstrapStages map[session.ID]string
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -1389,8 +1380,24 @@ type HostedSessionOpen struct {
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
+// HelperSessionOpener is "this destination's helper opens the session".
+//
+// IT IS ASKED FOR EVERY DESTINATION, and that is the whole of what makes this
+// machine an entry in the inventory rather than a mode (L1 of the local-helper
+// design, D11 of level 1). Before nocx-ie23r.3 the call was made only on the
+// remote branch, so a local pane could not reach a helper even when one was
+// serving on its own socket; the opener answers "not mine" for what it does
+// not own, which is the same sentence it has always answered, now asked one
+// question more.
+//
+// claim is the idempotency key the coordinator wrote a durable claim under
+// BEFORE this call (L7), and the spawn carries it so a repeat answers with
+// the session the first one made rather than forking a second shell. Empty
+// means no claim was written and the caller is owed no promise — every remote
+// open today, whose spawn/binding interval is the same hole and is not this
+// bead's to close.
 type HelperSessionOpener interface {
-	OpenHosted(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+	OpenHosted(ctx context.Context, cfg session.Config, claim string) (HostedSessionOpen, bool, error)
 }
 
 func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {

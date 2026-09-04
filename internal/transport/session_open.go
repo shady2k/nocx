@@ -31,6 +31,8 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -239,6 +241,14 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 	// and the connection list would draw a row as connected with nothing
 	// behind it (nocx-uxs5.4).
 
+	// L7 — THE PANE'S CLAIM IS DURABLE BEFORE THE SPAWN. Written here, before
+	// either phase, because the point of it is to precede the first
+	// irreversible effect and a resolve can already cost a password prompt.
+	claim, claimErr := o.claimSpawn(ctx, cfg, workspaceID)
+	if claimErr != nil {
+		return OpenedSession{}, claimErr
+	}
+
 	// PHASE ONE — resolve, under [config, session]. Store and vault reads
 	// only.
 	if err := o.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
@@ -256,8 +266,8 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		hosted *HostedSessionOpen
 	)
 	if err := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
-		if cfg.Kind == session.KindRemote && o.helper != nil {
-			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg)
+		if o.helper != nil {
+			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
 			if selected {
 				if oerr != nil {
 					return oerr
@@ -277,10 +287,14 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		sess, oerr = svc.Open(ctx, cfg)
 		return oerr
 	}); err != nil {
+		// The spawn did not happen, or did not survive its own failure arm.
+		// The claim goes with it: a key left standing would name a session
+		// nothing produced, and the next open of this pane would replay it.
+		o.releaseClaim(ctx, claim)
 		return OpenedSession{}, err
 	}
 
-	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID); err != nil {
+	if err := o.recordHostedBinding(ctx, sess, cfg, hosted, workspaceID, claim); err != nil {
 		return OpenedSession{}, err
 	}
 
@@ -416,8 +430,9 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 // its id space, so the interval in which that is possible must be empty. A
 // failed write therefore REFUSES the open and closes the helper session,
 // rather than returning a session no inventory may safely judge.
-func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Session, cfg session.Config, hosted *HostedSessionOpen, workspaceID string) error {
+func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Session, cfg session.Config, hosted *HostedSessionOpen, workspaceID, claim string) error {
 	if hosted == nil || o.ledger == nil {
+		o.releaseClaim(ctx, claim)
 		return nil
 	}
 	err := o.ledger.CreateSession(ctx, content.Session{
@@ -440,8 +455,15 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 		Fingerprint:   hosted.Fingerprint,
 	})
 	if err == nil {
+		// THE CLOSING END OF L7'S INTERVAL, and it is this line rather than
+		// the spawn: the claim stands from before the spawn until the row
+		// naming the session that spawn produced exists. Dropped after the
+		// binding and never before it, so a crash between the two leaves the
+		// binding AND the claim rather than neither.
+		o.releaseClaim(ctx, claim)
 		return nil
 	}
+	o.releaseClaim(ctx, claim)
 	if hosted.AbortLifecycle != nil {
 		hosted.AbortLifecycle()
 	}
@@ -449,6 +471,65 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 		return svc.Close(sess.ID())
 	})
 	return fmt.Errorf("recording the helper binding: %w", err)
+}
+
+// claimSpawn writes the pane's durable claim on the spawn it is about to ask
+// for, and answers with the idempotency key the spawn will carry (L7).
+//
+// THE COORDINATOR CANNOT RECORD WHAT IT IS ABOUT TO GET. The helper mints the
+// session id, so there is no row to write naming a session that does not exist
+// yet — only a row naming what was ASKED FOR. That is what the key is: a name
+// for the SPAWN, minted here, written durably here, and carried into the
+// helper, where a repeat with the same key answers with the session the first
+// one made rather than forking a second shell (proto.SpawnParams.IdempotencyKey).
+//
+// The row's id IS the key, deliberately. A claim has no session id to be keyed
+// by — that is the whole reason it exists — and a claim whose identity were a
+// pane could not tell two spawns of one pane apart.
+//
+// LOCAL ONLY, and that is a scope statement rather than a rule. A remote
+// hosted open has exactly the same hole between its spawn and its binding; it
+// is not closed here because closing it changes the remote path's behaviour,
+// which nocx-ie23r.3 is explicitly not allowed to do. The seam is the same one
+// and the key travels the same way when that bead is taken.
+func (o *sessionOpener) claimSpawn(ctx context.Context, cfg session.Config, workspaceID string) (string, error) {
+	if o.helper == nil || o.ledger == nil || cfg.Kind != session.KindLocal {
+		return "", nil
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", refuse(-32603, "the pane's claim on this session could not be minted: "+err.Error())
+	}
+	key := "spawn-" + hex.EncodeToString(raw[:])
+	// Host, Account and Generation are deliberately EMPTY. They say which
+	// helper owns an id space, and this row names no session id at all — it
+	// names a request. Filling them in with this machine's own generation
+	// would make a claim look like a binding to every reader of the table,
+	// which is the one thing reconciliation must be able to tell apart.
+	if err := o.ledger.CreateSession(ctx, content.Session{
+		ID:          key,
+		WorkspaceID: workspaceID,
+		PaneID:      cfg.PaneID,
+	}); err != nil {
+		// The claim is not optional and a failure is not a degrade: without
+		// it the spawn below would be the live PTY nothing claims, which is
+		// exactly the state L7 exists to make unreachable.
+		return "", fmt.Errorf("recording the pane's claim on this session: %w", err)
+	}
+	return key, nil
+}
+
+// releaseClaim drops a claim that is over, either way. It is best-effort by
+// construction: the claim's purpose is served the moment the binding exists,
+// and a delete that fails leaves a row reconciliation already knows how to
+// judge — one naming no session any inventory can report.
+func (o *sessionOpener) releaseClaim(ctx context.Context, claim string) {
+	if claim == "" || o.ledger == nil {
+		return
+	}
+	if err := o.ledger.DeleteSession(ctx, claim); err != nil {
+		o.log.Warn("the pane's spawn claim outlived its spawn", "claim", claim, "error", err)
+	}
 }
 
 // close ends a session the opener produced, through the same operation the
@@ -482,5 +563,26 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	if s.opener == nil {
 		return OpenedSession{}, errors.New("transport: the session opener is not running")
 	}
-	return s.opener.Open(ctx, spec)
+	opened, err := s.opener.Open(ctx, spec)
+	if err != nil {
+		return OpenedSession{}, err
+	}
+	// THE LIFECYCLE LEG IS STARTED HERE, and this is the one place the two
+	// callers legitimately differ in TIMING rather than in behaviour. The
+	// handler starts it after the ack, because AD-7 requires every
+	// session-scoped notification to follow the open result and the shell can
+	// authenticate the moment the bridge is pumping. A backend caller has no
+	// ack to order against, so there is nothing to wait for.
+	//
+	// It was missing entirely until nocx-ie23r.3, and it did not show: the
+	// only backend-opened sessions were wave participants, and until this
+	// machine's panes became helper sessions none of them was hosted. A
+	// hosted session whose bridge is never pumped integrates never — its
+	// shell says hello into a pipe nobody reads and the handshake bound
+	// expires ten seconds later, which is a working terminal with the
+	// integration silently off.
+	if opened.Hosted != nil && opened.Hosted.StartLifecycle != nil {
+		opened.Hosted.StartLifecycle()
+	}
+	return opened, nil
 }

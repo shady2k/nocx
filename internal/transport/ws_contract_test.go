@@ -5270,14 +5270,11 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 
 	// The composition root's two seams, verbatim: the loss cause crosses as
 	// its string, and the adapter's own constant is the single spelling.
-	ch, child, err := lifecyclechannel.New(logger, pub,
+	ch, child := newLifecycleSocketPairAdapter(t, logger, pub,
 		lifecyclechannel.WithHelloTimeout(50*time.Millisecond),
 		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 			e.ws.NoteIntegrationLoss(lane, string(cause))
 		}))
-	if err != nil {
-		t.Fatalf("lifecyclechannel.New: %v", err)
-	}
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
 	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)

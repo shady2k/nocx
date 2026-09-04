@@ -100,7 +100,7 @@ type openMachine interface {
 	// The session integration axis (nocx-dvql): the remote registration
 	// from the connect path's own decision, and the first emission — which
 	// must happen AFTER the open ack (AD-7).
-	registerRemoteIntegration(sess session.Session, cfg session.Config)
+	registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen)
 	emitIntegration(sid session.ID)
 }
 
@@ -424,10 +424,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// A remote session's launch-time refusal is registered here rather than
 	// at the dial because ShellIntegrationReason is the ssh channel's own
 	// answer and this is where the session first exists as a session. A
-	// local session was registered by the pty factory, which is the only
-	// thing that knows which binary it exec'd; registering it twice is what
-	// AD-8 forbids, so registerRemoteIntegration returns early for one.
-	h.sess.registerRemoteIntegration(sess, cfg)
+	// HOSTED session — every local pane, and a helper-backed remote one —
+	// brings its own answer instead, because the opener is the only thing
+	// that saw which binary the daemon started; registering it twice is what
+	// AD-8 forbids, so one function decides between the two.
+	h.sess.registerOpenedIntegration(sess, cfg, hosted)
 	h.sess.emitIntegration(sess.ID())
 
 	// Stored forwards (nocx-wzc4.5): replay the profile's configured

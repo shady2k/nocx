@@ -39,7 +39,7 @@ type helperOpenTestOpener struct {
 	called bool
 }
 
-func (o *helperOpenTestOpener) OpenHosted(_ context.Context, cfg session.Config) (HostedSessionOpen, bool, error) {
+func (o *helperOpenTestOpener) OpenHosted(_ context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
 	o.called = true
 	sess, err := o.reg.Adopt(cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
 	if err != nil {

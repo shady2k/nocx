@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -147,14 +149,17 @@ func (c *Client) AdoptLifecycle(ctx context.Context, id HostSessionID) (*proto.L
 	return result.Lifecycle, nil
 }
 
-// Signal sends one signal to the helper-owned process group.
-func (c *Client) Signal(ctx context.Context, id HostSessionID, sig int) error {
+// Signal sends one signal to a helper-owned process group. A zero pgid means
+// the session's own group; a named one is the addressee a stop ladder resolved
+// once and keeps (proto.SignalParams.Pgid).
+func (c *Client) Signal(ctx context.Context, id HostSessionID, pgid, sig int) error {
 	return c.Call(ctx, proto.ServiceSession, proto.OpSignal, proto.SignalParams{
 		Session: proto.HostSessionID{
 			Generation: proto.GenerationID(id.Generation),
 			Session:    id.Session,
 		},
 		Signal: sig,
+		Pgid:   pgid,
 	}, nil)
 }
 
@@ -795,4 +800,95 @@ func (a *AttachedSession) Close() error {
 	a.finish()
 	return a.client.Call(context.Background(), proto.ServiceSession, proto.OpDetach,
 		proto.DetachParams{Attachment: attachment}, nil)
+}
+
+// ── the signal seam (nocx-ie23r.3) ───────────────────────────────────────────
+//
+// THE WHOLE SEAM, OR NONE OF IT. internal/session reaches a channel's signal
+// methods by optional-method ASSERTION, so a channel that answers some of them
+// is not degraded — it is wrong, and it is wrong silently: nothing fails to
+// compile, and what the product says instead is "nothing is running in this
+// pane" about a command that plainly is (nocx-92gfl.4, twice, through two
+// different missing methods). internal/app's lifecyclePTY wrapper stated that
+// rule for the local pty it wrapped; this is the same rule for the channel
+// that replaced it.
+//
+// WHY IT LANDS HERE NOW. Before nocx-ie23r.3 no helper-hosted session was ever
+// asked to stop a job: the run-lease ladder only ever ran against a local pty
+// the coordinator itself had forked. Now every local pane is a helper session,
+// so the ladder's three questions have to be answerable over the wire or the
+// stop button stops working on this machine.
+//
+// The ADDRESSEE IS RESOLVED ONCE AND KEPT, which is the whole point of
+// ForegroundJob being separate from SignalForeground (nocx-uvac6.11): a shell
+// that starts another job between SIGINT and SIGKILL must not be hit by the
+// second, so the caller names a group and then signals that group.
+
+// ErrNoForegroundJob is a session whose foreground group this generation
+// cannot name: the OS could not be asked, or the helper's observation carries
+// no foreground group. It is typed rather than silent so a caller can tell
+// "there is nothing running" from "nobody could look" — the second is a
+// diagnosis and the first is an answer.
+var ErrNoForegroundJob = errors.New("helper: this session's foreground process group is not known")
+
+// signalTimeout bounds one signal-seam call. It is a REQUEST bound and not a
+// policy: the ladder's own timing is the transport's, and what this stops is a
+// stop button that hangs on a helper that has gone quiet.
+const signalTimeout = 5 * time.Second
+
+func (a *AttachedSession) hostID() HostSessionID {
+	return HostSessionID{Generation: string(a.generation), Session: proto.SessionHex(a.session)}
+}
+
+// ForegroundJob names the process group in front of this session's terminal,
+// as the HELPER's own observation of the host reports it. It is evidence read
+// from the operating system on the machine the shell is actually on, which is
+// the only place the question can be answered — the coordinator may be on a
+// different machine entirely.
+func (a *AttachedSession) ForegroundJob() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), signalTimeout)
+	defer cancel()
+	entries, err := a.client.Sessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	id := a.hostID()
+	for i := range entries {
+		if entries[i].HostSessionID != id {
+			continue
+		}
+		obs := entries[i].Observed
+		if obs == nil || obs.ForegroundPgid <= 0 {
+			return 0, ErrNoForegroundJob
+		}
+		return obs.ForegroundPgid, nil
+	}
+	// The helper answered and does not hold this session. Said as its own
+	// sentence rather than as ErrNoForegroundJob: "there is no job in front"
+	// and "there is no session" are different facts, and answering both the
+	// same way would let a stop button report a quiet pane about one that has
+	// ended.
+	return 0, fmt.Errorf("helper: this generation no longer holds session %s", a.hostID().Session)
+}
+
+// SignalProcessGroup signals the exact group a previous ForegroundJob named.
+func (a *AttachedSession) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	ctx, cancel := context.WithTimeout(context.Background(), signalTimeout)
+	defer cancel()
+	return a.client.Signal(ctx, a.hostID(), pgid, int(sig))
+}
+
+// SignalForeground is the ONE-SHOT form: whatever is in front right now.
+//
+// It is composed from the two above rather than being a third question asked
+// of the helper, so there is one answer to "which group is in front" and one
+// answer to "signal this group". A helper that resolved the foreground itself
+// on this call would be a second derivation, and the two would disagree in
+// exactly the window the ladder cares about.
+func (a *AttachedSession) SignalForeground(sig syscall.Signal) error {
+	pgid, err := a.ForegroundJob()
+	if err != nil {
+		return err
+	}
+	return a.SignalProcessGroup(pgid, sig)
 }

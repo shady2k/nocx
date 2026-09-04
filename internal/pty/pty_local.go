@@ -115,11 +115,7 @@ func resolveCwd(cwd string) string {
 	return ""
 }
 
-func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) {
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	// The launcher may name an explicit command (e.g. a lifecycle bootstrap
 	// that must start bash with `--rcfile` so the per-epoch capability
 	// rides script text, never the environment — nocx-u7uh.21). Every

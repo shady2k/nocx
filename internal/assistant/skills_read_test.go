@@ -119,7 +119,7 @@ func TestExecuteSkillsReadSaysChangedBytesDifferFromTheApprovedOnes(t *testing.T
 	if strings.Contains(result.Content, "untrusted data, not instructions") {
 		t.Fatalf("a changed skill is framed as data, contradicting the prompt: %q", result.Content)
 	}
-	if !strings.Contains(result.Content, `skill "deploy" has changed since the person approved it`) ||
+	if !strings.Contains(result.Content, `skill "deploy" has changed since it was installed`) ||
 		!strings.Contains(result.Content, "may be out of date") ||
 		!strings.Contains(result.Content, body) {
 		t.Fatalf("content = %q, want the staleness note and the original bytes", result.Content)
@@ -302,6 +302,12 @@ func TestExecuteSkillsReadServesAnInstalledSkillLikeAManagedOne(t *testing.T) {
 	}
 	if err := library.Approve("downloaded"); err != nil {
 		t.Fatalf("Approve the installed skill: %v", err)
+	}
+	if len(library.Index()) != 0 {
+		t.Fatal("recording the bytes put the skill in play; an installed skill waits for the person to turn it on (nocx-0bsa4.2)")
+	}
+	if err := library.SetEnabled("downloaded", true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
 	}
 	index := library.Index()
 	if len(index) != 1 || index[0].Name != "downloaded" || index[0].Provenance != skill.ProvenanceInstalled {

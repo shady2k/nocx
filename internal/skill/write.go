@@ -173,14 +173,22 @@ func (s *Store) Index() []Skill {
 	if s == nil {
 		return nil
 	}
-	index := Discover(s.roots)
-	ready := index[:0]
-	for _, item := range index {
-		if item.Status != StatusChanged {
-			ready = append(ready, item)
+	// The filter is Skill.Offered and nothing else, because Offered IS the
+	// rule for what the assistant is told about: the person has it on and the
+	// bytes are the recorded ones. Discovery has already dropped the skills
+	// that are switched off, so the first half of that conjunction is
+	// trivially true here — and it is asked anyway, deliberately. What the
+	// assistant is offered must be decided by the whole rule at the point it
+	// is decided, or a change to what discovery excludes silently becomes a
+	// change to what reaches the prompt, which is the one thing here nobody
+	// would notice.
+	switchedOn := Discover(s.roots)
+	index := make([]Skill, 0, len(switchedOn))
+	for _, found := range switchedOn {
+		if found.Offered() {
+			index = append(index, found)
 		}
 	}
-	index = ready
 	if len(index) > MaxIndexed {
 		slog.Warn("skill: index cap reached", "cap", MaxIndexed)
 		index = index[:MaxIndexed]

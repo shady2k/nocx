@@ -84,7 +84,7 @@ func File(roots []Root, name, relPath string) (FileResult, error) {
 	if strings.TrimSpace(relPath) == "" {
 		return FileResult{}, errors.New("no file was named, and this reads one file of a skill")
 	}
-	at, err := locate(roots, name, relPath)
+	at, err := locate(roots, name, relPath, true)
 	if err != nil {
 		return FileResult{}, err
 	}

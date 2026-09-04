@@ -232,12 +232,15 @@ func TestInstall_WritesTheDocumentAndRecordsTheDigestAndTheSourceTogether(t *tes
 		t.Error("the recorded digest is the digest of the FETCHED document, not of the written file")
 	}
 
-	assertUsable(t, stand.store, "deploy")
+	assertInertThenUsable(t, stand.store, "deploy")
 }
 
-// assertUsable is the whole point of recording a digest: the next discovery
-// pass vouches for the skill, and the assistant is offered it.
-func assertUsable(t *testing.T, store *Store, name string) {
+// assertInertThenUsable is the whole point of recording a digest, and the
+// whole of what design §8 adds to it: the next discovery pass vouches for the
+// bytes, and the skill still waits — inert, listed, readable — until the
+// person turns it on. Both halves in one helper, because "installed" is not a
+// state either half describes alone.
+func assertInertThenUsable(t *testing.T, store *Store, name string) {
 	t.Helper()
 	listing, err := store.List()
 	if err != nil {
@@ -253,8 +256,22 @@ func assertUsable(t *testing.T, store *Store, name string) {
 	if found.Status != StatusApproved {
 		t.Errorf("status = %q, want approved", found.Status)
 	}
+	if found.Enabled {
+		t.Error("the skill arrived enabled; an installed skill waits for the person to look at it")
+	}
+	if _, offered := indexed(store.Index(), name); offered {
+		t.Error("the skill is in the index before anybody turned it on")
+	}
+	// And the person can read it while it is off, which is the look the
+	// inertness exists to make room for.
+	if _, err := store.File(name, "SKILL.md"); err != nil {
+		t.Errorf("File on an inert skill: %v — the person cannot look at what they are being asked to turn on", err)
+	}
+	if err := store.SetEnabled(name, true); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
 	if _, offered := indexed(store.Index(), name); !offered {
-		t.Error("the skill is not in the index, so no ask can ever use it")
+		t.Error("the skill is not in the index after the person turned it on, so no ask can ever use it")
 	}
 }
 
@@ -281,7 +298,7 @@ func TestInstall_UpdatesTheSkillFromTheAddressItWasInstalledFrom(t *testing.T) {
 	if !hasSource || source.URL != firstSource.URL {
 		t.Errorf("source = %+v, want the recorded address unchanged", source)
 	}
-	assertUsable(t, stand.store, "deploy")
+	assertInertThenUsable(t, stand.store, "deploy")
 }
 
 // --- "is this the document the person approved" ----------------------------
@@ -476,8 +493,15 @@ func TestInstall_AFailedRecordOnAnUpdateRestoresTheApprovedVersion(t *testing.T)
 	if digest != digestBefore || source != sourceBefore {
 		t.Errorf("record after a failed update = %q/%+v, want %q/%+v", digest, source, digestBefore, sourceBefore)
 	}
-	// And the skill is still usable, because bytes and digest still agree.
-	assertUsable(t, stand.store, "deploy")
+	if got := listed(t, mustList(t, stand.store), "deploy").Status; got != StatusApproved {
+		t.Errorf("status = %q, want approved: the restored bytes are the recorded ones", got)
+	}
+	// And the skill is still the one the person had: bytes and digest agree,
+	// so the row is `approved` rather than the changed state a half-written
+	// update would leave. It is asserted WITHOUT turning the skill on,
+	// because this stand's document writes are still failing and a toggle is
+	// a write — the enablement half of the install path is asserted by the
+	// two tests above, on a stand whose disk works.
 }
 
 // --- what an update may not do ---------------------------------------------

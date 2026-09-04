@@ -23,7 +23,7 @@ const DocumentName = "skills.json"
 // named constant rather than a literal in Module because the migration rung
 // below has to stamp the same number, and a func referencing Module inside
 // Module's own initializer is an initialization cycle.
-const skillsSchemaVersion storage.SchemaVersion = 2
+const skillsSchemaVersion storage.SchemaVersion = 3
 
 // Module declares the skill settings document's schema version. The document
 // owns dynamic per-skill enablement, the digest recorded when the person
@@ -33,42 +33,70 @@ var Module = storage.Module{
 	Name:    "skills",
 	Current: skillsSchemaVersion,
 	Migrations: []storage.Migration{
-		{From: 1, To: 2, Up: migrateToSources},
+		{From: 1, To: 2, Up: restampTo(2)},
+		{From: 2, To: 3, Up: restampTo(3)},
 	},
 }
 
-// migrateToSources carries a version 1 document forward. Version 2 IS version
-// 1, plus an optional `sources` map, so there is nothing to convert: a
-// document written before a skill could be installed simply has no sources,
-// and an absent map reads as an empty one.
+// restampTo builds a rung that carries a document forward without converting
+// anything. Both of this module's version steps are that shape, and both are
+// PURELY ADDITIVE: version 2 is version 1 plus an optional `sources` map, and
+// version 3 is version 2 plus an optional `enabled` list, so a document
+// written before either existed simply has neither, and an absent map or list
+// reads as an empty one.
 //
-// The rung still has to exist, and this is the whole reason it does.
+// The rungs still have to exist, and this is the whole reason they do.
 // storage.Module.Migrate refuses a stored version it has no migration FROM, so
-// without a rung every skills.json already on disk would fail the entire list
+// without one every skills.json already on disk would fail the entire list
 // closed the moment Current moved — it is the version bump that needs
 // carrying, not the shape. Restamping keeps the in-memory document honest
-// about which shape the reader just applied.
+// about which shape the reader just applied, and each rung stamps the version
+// it declares rather than whatever Current happens to be, so adding the next
+// one cannot silently make an earlier rung claim to have done more than it did.
+//
+// WHAT AN OLD ENTRY MEANS, said rather than inferred (nocx-0bsa4.2): a version
+// 2 document records no `enabled` list, so every installed skill it names
+// arrives inert and waits for the person to turn it on — including one that
+// was in play before the bump. That is the intended reading and not a loss:
+// nobody has ever looked at those bytes on the Skills page, which is exactly
+// the look design §8 makes carrying them defensible. There is deliberately no
+// shim that turns them all on to preserve the old behaviour.
 //
 // A version 0 document — one with no schemaVersion at all — is deliberately
 // still refused, exactly as it was at version 1: there is no rung from 0, and
 // inventing one would mean guessing at a shape nothing ever wrote.
-func migrateToSources(data []byte) ([]byte, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return nil, err
+func restampTo(version storage.SchemaVersion) func([]byte) ([]byte, error) {
+	return func(data []byte) ([]byte, error) {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return nil, err
+		}
+		if fields == nil {
+			return nil, errors.New("document is not a JSON object")
+		}
+		fields["schemaVersion"] = json.RawMessage(strconv.Itoa(int(version)))
+		return json.Marshal(fields)
 	}
-	if fields == nil {
-		return nil, errors.New("document is not a JSON object")
-	}
-	fields["schemaVersion"] = json.RawMessage(strconv.Itoa(int(skillsSchemaVersion)))
-	return json.Marshal(fields)
 }
 
 type document struct {
 	SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
-	Disabled      []string              `json:"disabled"`
-	Digests       map[string]string     `json:"digests,omitempty"`
-	Sources       map[string]Source     `json:"sources,omitempty"`
+	// Disabled names the skills the person turned OFF among the roots that
+	// arrive on, and Enabled names the ones they turned ON among the roots
+	// that arrive off (Provenance.inertOnArrival). Both are DEPARTURES from a
+	// default the root decides, which is why there are two of them and why
+	// neither is a statement about a skill the other one names: a skill's
+	// root settles which list is consulted before either is read, so a name
+	// in both cannot make the document mean two things.
+	//
+	// The alternative — one list of enabled names — would have to be
+	// rewritten for every skill on the machine the first time anything moved
+	// a default, and would turn "the person has never touched this" into a
+	// row that says they turned it off.
+	Disabled []string          `json:"disabled"`
+	Enabled  []string          `json:"enabled,omitempty"`
+	Digests  map[string]string `json:"digests,omitempty"`
+	Sources  map[string]Source `json:"sources,omitempty"`
 }
 
 // Source records where an installed skill came from, keyed by skill name like
@@ -150,24 +178,45 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 		docStore: docStore, locks: make(map[string]*sync.Mutex),
 	}
 	for i := range s.roots {
-		s.roots[i].disabled = s.loadDisabled
+		s.roots[i].switches = s.loadSwitches
 		s.roots[i].digests = s.loadApprovedDigests
 	}
 	return s
 }
 
-func (s *Store) loadDisabled() (map[string]struct{}, error) {
+// loadSwitches hands discovery both of the document's departure lists in one
+// read. One call rather than two, because a second read is a second chance
+// for the two halves of one answer to come from two different versions of the
+// file.
+func (s *Store) loadSwitches() (switches, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
 	d, err := s.loadDocumentLocked()
 	if err != nil {
-		return nil, err
+		return switches{}, err
 	}
-	disabled := make(map[string]struct{}, len(d.Disabled))
-	for _, name := range d.Disabled {
-		disabled[name] = struct{}{}
+	return switches{off: nameSet(d.Disabled), on: nameSet(d.Enabled)}, nil
+}
+
+func nameSet(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
 	}
-	return disabled, nil
+	return set
+}
+
+// sortedNames is the on-disk shape of a departure list: sorted, so a toggle
+// that changes nothing about the set does not rewrite the file differently,
+// and never nil, so the JSON carries an empty array rather than a null the
+// next reader has to special-case.
+func sortedNames(set map[string]struct{}) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (s *Store) loadApprovedDigests() (map[string]string, error) {
@@ -181,7 +230,7 @@ func (s *Store) loadApprovedDigests() (map[string]string, error) {
 }
 
 func (s *Store) loadDocumentLocked() (document, error) {
-	d := document{Disabled: []string{}, Digests: map[string]string{}, Sources: map[string]Source{}}
+	d := document{Disabled: []string{}, Enabled: []string{}, Digests: map[string]string{}, Sources: map[string]Source{}}
 	if s.docStore == nil {
 		s.docFailure = nil
 		return d, nil
@@ -218,15 +267,30 @@ func (s *Store) loadDocumentLocked() (document, error) {
 	if d.Sources == nil {
 		d.Sources = map[string]Source{}
 	}
-	for _, name := range d.Disabled {
-		canonical, err := normalizeName(name)
-		if err != nil {
-			s.docFailure = fmt.Errorf("parse %s: disabled name %q: %w", DocumentName, name, err)
-			return document{}, s.docFailure
-		}
-		if canonical != name {
-			s.docFailure = fmt.Errorf("parse %s: disabled name %q is not canonical", DocumentName, name)
-			return document{}, s.docFailure
+	if d.Disabled == nil {
+		d.Disabled = []string{}
+	}
+	if d.Enabled == nil {
+		d.Enabled = []string{}
+	}
+	// Both departure lists are read exactly as strictly, because they are one
+	// kind of row and a name nobody can address is a defect in the file
+	// whichever direction it points.
+	for _, list := range []struct {
+		field string
+		names []string
+	}{{"disabled", d.Disabled}, {"enabled", d.Enabled}} {
+		field, names := list.field, list.names
+		for _, name := range names {
+			canonical, err := normalizeName(name)
+			if err != nil {
+				s.docFailure = fmt.Errorf("parse %s: %s name %q: %w", DocumentName, field, name, err)
+				return document{}, s.docFailure
+			}
+			if canonical != name {
+				s.docFailure = fmt.Errorf("parse %s: %s name %q is not canonical", DocumentName, field, name)
+				return document{}, s.docFailure
+			}
 		}
 	}
 	for name, digest := range d.Digests {
@@ -369,9 +433,11 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	if listed.DocumentError != "" {
 		return errors.New(listed.DocumentError)
 	}
+	var provenance Provenance
 	found := false
 	for _, item := range listed.Skills {
 		if item.Name == name {
+			provenance = item.Provenance
 			found = true
 			break
 		}
@@ -386,35 +452,55 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	disabled := make(map[string]struct{}, len(d.Disabled))
-	for _, item := range d.Disabled {
-		disabled[item] = struct{}{}
-	}
-	if enabled {
-		delete(disabled, name)
+	// Which list the switch is recorded in is settled by the ROOT, exactly as
+	// discovery settles which one it reads. A skill that arrives inert is
+	// remembered by the names turned ON; everything else by the names turned
+	// OFF. The two are never written together, so a name can appear in the
+	// other list only if the skill has since moved roots — in which case the
+	// list its new root reads is the one that speaks about it, and the stale
+	// row means nothing until it moves back.
+	//
+	// The digest is deliberately NOT re-recorded here. The snapshot belongs to
+	// the moment the bytes landed (install) or were adopted (Approve), and
+	// recording it on a toggle would let flipping the switch quietly adopt
+	// bytes the person never read — turning the one control that is supposed
+	// to be cheap into the one that admits a stranger's edit.
+	if provenance.inertOnArrival() {
+		on := nameSet(d.Enabled)
+		if enabled {
+			on[name] = struct{}{}
+		} else {
+			delete(on, name)
+		}
+		d.Enabled = sortedNames(on)
 	} else {
-		disabled[name] = struct{}{}
+		off := nameSet(d.Disabled)
+		if enabled {
+			delete(off, name)
+		} else {
+			off[name] = struct{}{}
+		}
+		d.Disabled = sortedNames(off)
 	}
-	return s.writeDocumentLocked(d, disabled)
+	return s.writeDocumentLocked(d)
 }
 
-// writeDocumentLocked persists the document that was loaded, with disabled
-// replacing its Disabled list. It takes the whole loaded value rather than a
-// parameter per map ON PURPOSE: every mutation rebuilds the file from what it
-// read, so a field a writer forgets to carry is a field the next toggle
-// silently deletes. Passing the document through means a new field is carried
-// by construction instead of by three call sites remembering it.
-func (s *Store) writeDocumentLocked(d document, disabled map[string]struct{}) error {
+// writeDocumentLocked persists the document that was loaded. It takes the
+// whole loaded value and NOTHING ELSE, ON PURPOSE: every mutation rebuilds the
+// file from what it read, so a field a writer forgets to carry is a field the
+// next toggle silently deletes. Passing the document through — rather than a
+// parameter per list the caller happens to be changing — means a new field is
+// carried by construction instead of by four call sites remembering it. It
+// used to take the disabled set as a second argument, and the second departure
+// list is exactly the field that would have been dropped.
+func (s *Store) writeDocumentLocked(d document) error {
 	if s.docStore == nil {
 		return errors.New("skill settings document is unavailable")
 	}
-	names := make([]string, 0, len(disabled))
-	for name := range disabled {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	d.SchemaVersion = Module.Current
-	d.Disabled = names
+	if d.Disabled == nil {
+		d.Disabled = []string{}
+	}
 	if err := s.docStore.Write(DocumentName, d); err != nil {
 		return fmt.Errorf("write %s: %w", DocumentName, err)
 	}
@@ -465,11 +551,13 @@ func (s *Store) recordApprovalDigest(name, dir, sourceURL string) error {
 		}
 		d.Sources[name] = Source{URL: sourceURL, InstalledAt: time.Now().UTC().Format(time.RFC3339)}
 	}
-	disabled := make(map[string]struct{}, len(d.Disabled))
-	for _, item := range d.Disabled {
-		disabled[item] = struct{}{}
-	}
-	return s.writeDocumentLocked(d, disabled)
+	// The person's switch is left exactly as it was. An install of a name
+	// they have never turned on leaves it inert, which is the whole of design
+	// §8; an UPDATE of one they did turn on leaves it on, because they just
+	// read the new document in the preview and said to adopt it — turning it
+	// off there would take a working skill out of play at the moment they
+	// asked for the newer version of it.
+	return s.writeDocumentLocked(d)
 }
 
 // recordedSource answers where an installed skill was installed from. It is
@@ -487,10 +575,12 @@ func (s *Store) recordedSource(name string) (Source, bool, error) {
 }
 
 // clearApprovalDigest forgets everything the document records about one skill:
-// the digest AND the source, together, because they are one record of a skill
-// the person did not write. A source outliving its skill is a row for a name
-// that is not on disk, which the next install of that name would read as its
-// own history.
+// the digest, the source AND the switch the person set, together, because they
+// are one record of a skill the person did not write. A row outliving its
+// skill is a row for a name that is not on disk, which the next install of
+// that name would read as its own history — and for the switch that is not
+// merely untidy: it would let a skill removed while it was on come BACK on,
+// reinstalled from anywhere, without the look design §8 exists to require.
 func (s *Store) clearApprovalDigest(name string) error {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
@@ -500,11 +590,10 @@ func (s *Store) clearApprovalDigest(name string) error {
 	}
 	delete(d.Digests, name)
 	delete(d.Sources, name)
-	disabled := make(map[string]struct{}, len(d.Disabled))
-	for _, item := range d.Disabled {
-		disabled[item] = struct{}{}
-	}
-	return s.writeDocumentLocked(d, disabled)
+	on := nameSet(d.Enabled)
+	delete(on, name)
+	d.Enabled = sortedNames(on)
+	return s.writeDocumentLocked(d)
 }
 
 // Approve records the current bytes of a changed managed or installed skill.

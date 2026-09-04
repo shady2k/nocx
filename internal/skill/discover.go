@@ -49,12 +49,12 @@ func Discover(roots []Root) []Skill {
 // from this same result so a skill cannot be indexed differently from how it
 // is read.
 func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
-	disabled := map[string]struct{}{}
+	set := switches{off: map[string]struct{}{}, on: map[string]struct{}{}}
 	digests := map[string]string{}
 	for _, root := range roots {
-		if root.disabled != nil {
+		if root.switches != nil {
 			var err error
-			disabled, err = root.disabled()
+			set, err = root.switches()
 			if err != nil {
 				return nil
 			}
@@ -66,7 +66,7 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				return nil
 			}
 		}
-		if root.disabled != nil || root.digests != nil {
+		if root.switches != nil || root.digests != nil {
 			break
 		}
 	}
@@ -154,12 +154,22 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				continue
 			}
 			seen[skName] = struct{}{}
-			enabled := true
-			if _, isDisabled := disabled[skName]; isDisabled {
-				enabled = false
-				if !includeDisabled {
-					continue
+			// The person's switch, defaulted by the ROOT and then moved by
+			// whatever the document records about this name. An installed
+			// skill arrives off and the document says who turned it on;
+			// everything else arrives on and the document says who turned it
+			// off. Both directions are read here, in the one place that owns
+			// enablement, rather than at the two call sites that care.
+			enabled := !root.Provenance.inertOnArrival()
+			if enabled {
+				if _, turnedOff := set.off[skName]; turnedOff {
+					enabled = false
 				}
+			} else if _, turnedOn := set.on[skName]; turnedOn {
+				enabled = true
+			}
+			if !enabled && !includeDisabled {
+				continue
 			}
 			changed := false
 			if root.Provenance.digested() {

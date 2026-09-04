@@ -30,9 +30,18 @@ type located struct {
 // would agree with this one everywhere anybody looked and disagree on the one
 // case nobody tried. An empty relPath means the skill's own SKILL.md, which
 // is what a caller asks for when it wants the body.
-func locate(roots []Root, name, relPath string) (located, error) {
+//
+// offToo is the ONE thing the two callers differ on, and it is not a
+// containment rule. The assistant may reach only what the person has switched
+// on; the person may read anything on their own machine, and MUST be able to
+// — design §8 has an installed skill land inert precisely so they can open it
+// and see what it is made of BEFORE turning it on, so a viewer that refused
+// an off skill would make the look it exists for impossible. The row already
+// offers Read on every provenance for the same reason: reading is not
+// offering.
+func locate(roots []Root, name, relPath string, offToo bool) (located, error) {
 	var found *discovered
-	for _, candidate := range discoverDetailed(roots, false) {
+	for _, candidate := range discoverDetailed(roots, offToo) {
 		if candidate.Name == name {
 			copy := candidate
 			found = &copy
@@ -88,7 +97,7 @@ func locate(roots []Root, name, relPath string) (located, error) {
 // or a verbatim file within that skill directory. Every returned byte carries
 // the provenance of the root that supplied it.
 func Read(roots []Root, name, relPath string) (Content, error) {
-	at, err := locate(roots, name, relPath)
+	at, err := locate(roots, name, relPath, false)
 	if err != nil {
 		return Content{}, err
 	}

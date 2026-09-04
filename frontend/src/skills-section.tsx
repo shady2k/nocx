@@ -20,7 +20,11 @@
  *           the answer to "which file am I looking at" that the Settings page
  *           is the only place to get — JOINED, for a skill that records one,
  *           by the address it was installed from (see `evidence` below).
- *   status  shown ONLY when the bytes changed since approval. Enabled state
+ *   status  shown ONLY when the bytes changed since the skill was installed.
+ *           INSTALLATION, not approval (nocx-hzsxl): the digest was taken
+ *           when the bytes landed, and approval only ever admitted them — it
+ *           never certified them, so a row saying "since approval" claimed
+ *           more for the person's click than the click was. Enabled state
  *           is not a status here — the switch beside it already says so, and
  *           a row that reports one fact twice is how the two come to disagree.
  */
@@ -232,7 +236,14 @@ export function SkillsSection(props: SkillsSectionProps) {
     try {
       const installed = await props.store.install(held.url)
       closeInstall()
-      showToast({ level: 'success', message: `Installed “${installed.name}”` })
+      // The toast names the state the skill actually lands in, because the
+      // row alone does not: an installed skill arrives OFF (nocx-0bsa4.2),
+      // and a person told only "Installed" would go and ask the assistant to
+      // use it, get nothing, and conclude the install failed.
+      showToast({
+        level: 'success',
+        message: `Installed “${installed.name}” — it is off until you turn it on`,
+      })
     } catch (err) {
       setInstallRefusal(refusalSentence(err))
     } finally {
@@ -484,7 +495,7 @@ export function SkillsSection(props: SkillsSectionProps) {
                   detail={evidence(skill)}
                   status={
                     skill.status === 'changed'
-                      ? { tone: 'error', text: 'Changed since approval' }
+                      ? { tone: 'error', text: 'Changed since installation' }
                       : undefined
                   }
                   /* Enabling a skill is the record's STATE, not an action on

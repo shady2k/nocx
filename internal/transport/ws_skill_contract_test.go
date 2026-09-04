@@ -651,3 +651,94 @@ func skillsFileConnection(t *testing.T) (*websocket.Conn, func()) {
 	conn := connectWS(t, ws)
 	return conn, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
 }
+
+// The two kinds of "off", off the real socket (nocx-0bsa4.2). A skill can be
+// out of play because nobody has turned it on yet, or because its bytes moved
+// after they did, and the page has to say which — so the wire has to carry
+// enough to tell them apart. It does it with the two facts it already
+// carries, and this test is what pins that they are BOTH there and that they
+// differ between the two states: `enabled` is the person's switch and nothing
+// else touches it, `status` is the digest comparison and nothing else touches
+// that.
+//
+// Installed by the shipped handler, turned on through the shipped handler,
+// and changed on disk the way a person's editor would change it. A fixture
+// this test built itself would prove the struct is well-formed, not that the
+// server computes the state.
+func TestSkillsList_OverTheWireTellsTheTwoKindsOfOffApart(t *testing.T) {
+	document := "---\nname: weather\ndescription: Answer questions about the weather\n---\nbody\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(document))
+	}))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	conn, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+	url := srv.URL + "/anything/SKILL.md"
+	if env := callSkills(t, conn, "skills.preview", url); env.Error != nil {
+		t.Fatalf("preview: %+v", env.Error)
+	}
+	if env := callSkills(t, conn, "skills.install", url); env.Error != nil {
+		t.Fatalf("install: %+v", env.Error)
+	}
+
+	// Off because nobody has turned it on: the switch is off and the bytes
+	// are the ones the install recorded.
+	inert := listOneSkillOverTheWire(t, conn, "weather")
+	if inert.Enabled {
+		t.Error("a freshly installed skill arrives enabled on the wire; it must arrive inert")
+	}
+	if inert.Status != skill.StatusApproved {
+		t.Errorf("status = %q, want approved: nothing has changed under a skill that was just written", inert.Status)
+	}
+
+	resp := jsonrpcCall(t, conn, "skills.setEnabled", map[string]any{"name": "weather", "enabled": true})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("setEnabled: %+v", env.Error)
+	}
+	if on := listOneSkillOverTheWire(t, conn, "weather"); !on.Enabled || on.Status != skill.StatusApproved {
+		t.Fatalf("after the person turned it on: enabled=%v status=%q, want true and approved", on.Enabled, on.Status)
+	}
+
+	// Off because it changed: the switch the person set is still on, which is
+	// what makes the two states distinguishable at all.
+	path := filepath.Join(configDir, "installed-skills", "weather", "SKILL.md")
+	if err := os.WriteFile(path, []byte(document+"and one more line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := listOneSkillOverTheWire(t, conn, "weather")
+	if !changed.Enabled {
+		t.Error("the person's switch was turned off by a byte moving; the effective state is computed, never written")
+	}
+	if changed.Status != skill.StatusChanged {
+		t.Errorf("status = %q, want changed", changed.Status)
+	}
+}
+
+// listOneSkillOverTheWire calls the shipped skills.list, validates the result
+// against the contract, and returns one row.
+func listOneSkillOverTheWire(t *testing.T, conn *websocket.Conn, name string) skill.ListedSkill {
+	t.Helper()
+	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("skills.list: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "skills.list wire")
+	var got skill.ListResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DocumentError != "" {
+		t.Fatalf("DocumentError = %q, want none", got.DocumentError)
+	}
+	return wireSkill(t, got, name)
+}

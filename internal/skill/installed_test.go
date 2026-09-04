@@ -120,6 +120,12 @@ func TestInstalledSkillWithNoRecordedDigestIsChangedAndLeavesTheIndex(t *testing
 	if _, found := indexed(store.Index(), "deploy"); found {
 		t.Fatalf("Index() = %+v, want a changed installed skill kept out of the prompt", store.Index())
 	}
+	// Turned on, so the ONLY thing this asserts is the digest — an installed
+	// skill also arrives inert (nocx-0bsa4.2), and a Read of one that is off
+	// refuses before it can report anything about its bytes.
+	if enableErr := store.SetEnabled("deploy", true); enableErr != nil {
+		t.Fatalf("SetEnabled: %v", enableErr)
+	}
 	content, err := store.Read("deploy", "")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -145,6 +151,15 @@ func TestApproveRecordsAnInstalledSkillSoItReachesTheIndexAndReadsClean(t *testi
 	}
 	if got := listed(t, result, "deploy").Status; got != StatusApproved {
 		t.Fatalf("status = %q, want approved after Approve", got)
+	}
+	// Approve records the bytes; it does not turn the skill on, and it must
+	// not — the two are different acts and an installed skill is in play only
+	// once the person says so.
+	if _, found := indexed(store.Index(), "deploy"); found {
+		t.Fatalf("Index() = %+v, want Approve to record bytes without putting the skill in play", store.Index())
+	}
+	if enableErr := store.SetEnabled("deploy", true); enableErr != nil {
+		t.Fatalf("SetEnabled: %v", enableErr)
 	}
 	index := store.Index()
 	entry, found := indexed(index, "deploy")

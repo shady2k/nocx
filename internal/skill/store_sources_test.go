@@ -2,6 +2,7 @@ package skill
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,11 +48,11 @@ func readDocument(t *testing.T, configDir string) struct {
 	return doc
 }
 
-// TestVersionOneDocumentLoadsAndTheNextWritePersistsVersionTwo asserts BOTH
+// TestVersionOneDocumentLoadsAndTheNextWritePersistsTheCurrentVersion asserts BOTH
 // halves of the version bump, because either alone is a broken product: a v1
 // document is what every existing install has on disk, and a bump with no
 // migration rung fails the whole list closed rather than loading it.
-func TestVersionOneDocumentLoadsAndTheNextWritePersistsVersionTwo(t *testing.T) {
+func TestVersionOneDocumentLoadsAndTheNextWritePersistsTheCurrentVersion(t *testing.T) {
 	configDir := t.TempDir()
 	writeExistingSkill(t, filepath.Join(configDir, "skills"), "deploy", "name: deploy\ndescription: mine", "body")
 	writeExistingSkill(t, filepath.Join(configDir, "installed-skills"), "downloaded", "name: downloaded\ndescription: theirs", "body")
@@ -73,8 +74,8 @@ func TestVersionOneDocumentLoadsAndTheNextWritePersistsVersionTwo(t *testing.T) 
 		t.Fatalf("SetEnabled: %v", err)
 	}
 	persisted := readDocument(t, configDir)
-	if persisted.SchemaVersion != 2 {
-		t.Fatalf("persisted schemaVersion = %d, want 2", persisted.SchemaVersion)
+	if persisted.SchemaVersion != int(skillsSchemaVersion) {
+		t.Fatalf("persisted schemaVersion = %d, want %d", persisted.SchemaVersion, skillsSchemaVersion)
 	}
 	if persisted.Digests["downloaded"] != aDigest {
 		t.Fatalf("persisted digests = %v, want the version 1 digest carried forward", persisted.Digests)
@@ -86,7 +87,7 @@ func TestVersionOneDocumentLoadsAndTheNextWritePersistsVersionTwo(t *testing.T) 
 func TestADocumentNewerThanTheModuleIsRefused(t *testing.T) {
 	configDir := t.TempDir()
 	writeExistingSkill(t, filepath.Join(configDir, "skills"), "deploy", "name: deploy\ndescription: mine", "body")
-	writeDocument(t, configDir, `{"schemaVersion":3,"disabled":[]}`)
+	writeDocument(t, configDir, fmt.Sprintf(`{"schemaVersion":%d,"disabled":[]}`, skillsSchemaVersion+1))
 
 	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
 	result, err := store.List()

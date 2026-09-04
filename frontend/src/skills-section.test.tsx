@@ -230,13 +230,13 @@ describe('SkillsSection', () => {
     await waitFor(() =>
       expect(
         rowFor(container, 'deploy')?.querySelector('.ui-record-row__status')?.textContent,
-      ).toContain('Changed since approval'),
+      ).toContain('Changed since installation'),
     )
     const deploy = rowFor(container, 'deploy')!
     expect(deploy.textContent).toContain('/tmp/nocx/skills/deploy/SKILL.md')
     fireEvent.click(actionIn(deploy, 'Re-approve')!)
     await waitFor(() => expect(approve).toHaveBeenCalledWith('deploy'))
-    await waitFor(() => expect(container.textContent).not.toContain('Changed since approval'))
+    await waitFor(() => expect(container.textContent).not.toContain('Changed since installation'))
   })
 
   /** The evidence lines under a row's meta, in the order the row draws them. */
@@ -379,7 +379,9 @@ const INSTALLED: SkillsList = {
       description: 'Answer questions about the weather',
       provenance: 'installed',
       path: '/tmp/nocx/installed-skills/weather/SKILL.md',
-      enabled: true,
+      // A freshly installed skill lands OFF (nocx-0bsa4.2): the bytes came
+      // from outside, and the person turns it on after they have looked.
+      enabled: false,
       status: 'approved',
       source: {
         url: 'https://example.com/weather/SKILL.md',
@@ -501,6 +503,11 @@ describe('SkillsSection — installing a skill by its URL (nocx-qja4m.6)', () =>
     expect(rowFor(container, 'weather')!.textContent).toContain(
       'https://example.com/weather/SKILL.md',
     )
+    // …and it arrives OFF. This is the half of the install a person has to
+    // see: the row is there, the switch is not on, and nothing reached the
+    // assistant until they say so.
+    const toggle = rowFor(container, 'weather')!.querySelector<HTMLInputElement>('[role="switch"]')!
+    expect(toggle.checked).toBe(false)
     // The ask is done and gets out of the way.
     await waitFor(() => expect(ask(container).open).toBe(false))
   })

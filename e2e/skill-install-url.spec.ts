@@ -7,8 +7,9 @@
  * order: Settings opens, Skills is the one entry under Assistant, an address
  * is pasted, the document that comes back is READ — its name, its description
  * and its whole body on screen — the install is approved, the row appears
- * saying `installed` and where the bytes came from, and a later ask in
- * another pane answers from that skill's content.
+ * saying `installed` and where the bytes came from, the switch is turned on —
+ * the skill arrives inert, because the bytes came from outside — and a later
+ * ask in another pane answers from that skill's content.
  *
  * TWO LOCAL SERVERS, both owned by this spec process, both on 127.0.0.1.
  * `FakeOpenAI` is the model the assistant dials. The second is a plain
@@ -259,6 +260,25 @@ test.describe('a skill installed from a URL is followed in another pane (nocx-qj
     // the address the bytes came from. The URL is the point of this epic.
     await expect(row.locator('.ui-record-row__detail')).toContainText(skillURL)
     await expect(row.locator('.ui-record-row__detail')).toContainText(SKILL_NAME)
+
+    // ── AND IT ARRIVES OFF, SO THE PERSON TURNS IT ON ─────────────────────
+    // The bytes came from outside, so the skill lands inert and the assistant
+    // is not offered it until somebody has looked (nocx-0bsa4.2, design §8).
+    // That step is part of this happy path rather than a detour: without it
+    // the ask below would answer from a skill nobody in this test ever
+    // reviewed, which is the state the whole design exists to remove.
+    // From the COLLECTION row and not from `row` above: `.ui-record-row` fills
+    // CollectionRow's info slot, and the state cell hangs off the actions
+    // region on the other side of it, so the switch is a sibling subtree and
+    // never a descendant. record-row.css says so where the cell is declared;
+    // this is that warning arriving as a failing locator.
+    const rowSwitch = page
+      .locator('.ui-collection-row')
+      .filter({ has: page.locator('.ui-record-row__title', { hasText: SKILL_NAME }) })
+      .locator('.ui-record-row__state [role="switch"]')
+    await expect(rowSwitch).not.toBeChecked()
+    await rowSwitch.click()
+    await expect(rowSwitch).toBeChecked({ timeout: 15_000 })
 
     // ── AND A LATER ASK IN ANOTHER PANE ANSWERS FROM IT ────────────────────
     // A newly created terminal session, not another way to address the pane

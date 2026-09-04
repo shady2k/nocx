@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/storage"
@@ -25,6 +26,37 @@ const (
 	managedSkillDirMode  os.FileMode = 0o700
 	managedSkillFileMode os.FileMode = 0o600
 	maxSkillFileBytes                = 64 << 10
+	// maxDescriptionRunes bounds the one field of a skill that is copied
+	// verbatim into the SYSTEM prompt, under our own sentence vouching for it,
+	// on every ask (internal/assistant/systemprompt.go). The file ceiling above
+	// is the only other bound in play, and 64 KiB of somebody else's prose in
+	// the most trusted region of the context is not a bound at all.
+	//
+	// The number is measured, not round. Across the 140 SKILL.md files on this
+	// machine — this repo's builtin, agentskills.io publishers, Anthropic's own
+	// plugin marketplace — the median description is about 200 characters, the
+	// 95th percentile about 530, and the longest genuine one 1506. AgentMail's,
+	// the skill this feature was built to install, is 449. So 2048 refuses
+	// nothing anybody has actually published while cutting the worst case a
+	// single skill can spend from roughly 16000 tokens to about 500; a cap that
+	// turned away a legitimate published skill would be a worse defect than the
+	// one it fixes, which is why 512 and 1024 were both rejected — each of them
+	// refuses skills Anthropic ships today.
+	//
+	// The read budget is DERIVED from this number rather than chosen beside it
+	// (MaxFrontmatterBytes, skill.go), because a description this cap admits
+	// and discovery cannot parse would be written, accepted, and then invisible
+	// — which is the failure this file exists to refuse, arriving by the other
+	// door.
+	//
+	// RUNES, NOT BYTES. A byte cap allows a Cyrillic or Japanese author half or
+	// a third of the description an English author gets for the same prose, and
+	// what is being rationed here is the reader's attention and the model's
+	// context, neither of which is denominated in UTF-8. The residue — that a
+	// four-byte script can spend 8 KiB inside the cap — is bounded absolutely by
+	// maxSkillFileBytes, and sanitizeDescription already counts in runes, so
+	// this is also the unit the rest of the field is measured in.
+	maxDescriptionRunes = 2048
 )
 
 // FileSystem is the filesystem surface used by Store's writes. Sync accepts
@@ -475,6 +507,9 @@ func prepareSkill(rawName, description, body string) (string, []byte, error) {
 		return "", nil, err
 	}
 	description = sanitizeDescription(description)
+	if err := checkDescriptionLength(name, description); err != nil {
+		return "", nil, err
+	}
 	if strings.TrimSpace(body) == "" {
 		return "", nil, errors.New("skill body must not be empty")
 	}
@@ -491,6 +526,37 @@ func normalizeName(raw string) (string, error) {
 		return "", fmt.Errorf("skill name %q must match [a-z0-9][a-z0-9-]{0,63}", raw)
 	}
 	return name, nil
+}
+
+// descriptionOverCap is the comparison itself, in one place, so the sentence
+// a person reads and the line discovery logs can never come to disagree about
+// what too long means. It answers the length too, because both callers say the
+// number out loud and neither should arrive at it separately.
+func descriptionOverCap(description string) (int, bool) {
+	length := utf8.RuneCountInString(description)
+	return length, length > maxDescriptionRunes
+}
+
+// checkDescriptionLength is the whole of the cap, and it is one function
+// because the three places that ask are asking one question: the assistant's
+// Create and Update (through prepareSkill), the person's preview and install
+// (through documentPreview), and discovery, over bytes no write of ours ever
+// touched. A second copy of the comparison would agree with this one until
+// somebody moved the number.
+//
+// It counts what will be COPIED — the sanitized, trimmed description — so the
+// number in the refusal is the number of characters that would have reached
+// the prompt, not the number the caller happened to type.
+func checkDescriptionLength(name, description string) error {
+	length, over := descriptionOverCap(description)
+	if !over {
+		return nil
+	}
+	return fmt.Errorf(
+		"the description for %q is %d characters and a skill's description may be at most %d: it is copied verbatim into the "+
+			"assistant's system prompt on every ask, and it is refused rather than shortened, because a shortened description "+
+			"is a claim its author did not make — what does not fit belongs in the body, which is read only when the skill is used",
+		name, length, maxDescriptionRunes)
 }
 
 func sanitizeDescription(description string) string {

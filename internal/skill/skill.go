@@ -142,7 +142,18 @@ const (
 	// with 100 000 entries costs 256 reads.
 	MaxEntriesPerRoot = 256
 	// MaxFrontmatterBytes bounds the head of each SKILL.md that is parsed.
-	MaxFrontmatterBytes = 4096
+	// It is DERIVED from the description cap (maxDescriptionRunes, write.go)
+	// rather than chosen, because the two bounds have to agree in one
+	// direction: every description the write cap admits must still be
+	// PARSEABLE here, or a skill would be written, accepted, and then dropped
+	// by discovery as malformed — refused for the wrong reason, and silently.
+	// The factor is four because the cap counts runes and UTF-8 spends at
+	// most four bytes on one; the slack covers the name line, the delimiters
+	// and the escaping strconv.Quote adds. Nothing is spent by the widening:
+	// the read stops at the file's end, so it costs only files that are
+	// actually that large, which is exactly the case that must not be
+	// truncated.
+	MaxFrontmatterBytes = 4*maxDescriptionRunes + 512
 	// MaxIndexed is how many skills reach the system prompt. Every
 	// description is paid for in tokens on every ask.
 	MaxIndexed = 64

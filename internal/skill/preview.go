@@ -206,6 +206,14 @@ func documentPreview(text, rawURL string) (PreviewResult, error) {
 		return PreviewResult{}, fmt.Errorf(
 			"that document's frontmatter carries no description for %q, and a skill without one is never offered to the assistant", name)
 	}
+	// Asked HERE and not only at the write, for the reason the name check
+	// above is asked here: a preview that showed a document the install would
+	// refuse offers the person a button that can only fail. The cap belongs to
+	// write.go, which is where the number is, so this is the same comparison
+	// and not a second one.
+	if err := checkDescriptionLength(name, description); err != nil {
+		return PreviewResult{}, err
+	}
 	body := text[offset:]
 	if strings.TrimSpace(body) == "" {
 		return PreviewResult{}, fmt.Errorf("that document has frontmatter for %q and no body, so there are no instructions to read", name)

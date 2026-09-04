@@ -130,6 +130,26 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				slog.Warn("skill: missing description", "skill", name)
 				continue
 			}
+			// The read path is where a description no write of ours ever saw
+			// arrives: a directory placed by hand, restored from a backup, or
+			// written before the cap existed. It is REFUSED rather than
+			// clamped, and that is the decision. Clamping would put a
+			// sentence into the system prompt that stops mid-clause and reads
+			// as though its author had written it — a claim they did not
+			// make, which is precisely what the write refuses to manufacture;
+			// and the description is the whole of what a skill offers the
+			// model, so half of one is not a lesser version of the skill, it
+			// is a different one.
+			//
+			// The cost is that the skill leaves the Settings list with only a
+			// log line to say why, which is the same visibility every other
+			// refusal in this loop has and is less than this repo would like.
+			// The person's remedy is to shorten the description in the file,
+			// so the warning names both numbers rather than only the fact.
+			if length, over := descriptionOverCap(description); over {
+				slog.Warn("skill: description too long", "skill", name, "characters", length, "limit", maxDescriptionRunes)
+				continue
+			}
 			if _, exists := seen[skName]; exists {
 				continue
 			}

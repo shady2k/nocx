@@ -37,6 +37,7 @@ function fakeClient(installed: string[]) {
     approve: vi.fn().mockResolvedValue(undefined),
     preview: vi.fn(),
     install,
+    file: vi.fn(),
   }
   return { client, order, install }
 }

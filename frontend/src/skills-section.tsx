@@ -30,16 +30,20 @@ import {
   Button,
   Checkbox,
   EmptyState,
+  FileReadout,
   RecordRow,
   Section,
   Stack,
   StatusCard,
+  type Fact,
+  type FileReadoutOutcome,
 } from './ui'
-import { showConfirm } from './ui/dialog'
+import { Dialog, showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import type { BadgeTone } from './ui/badge'
 import { classifyPastedSource } from './api/api-paths'
 import { SkillsInstallDialog } from './skills-install-dialog'
+import type { SkillsFile } from './generated/skills.file'
 import type { SkillsPreview } from './generated/skills.preview'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
@@ -99,6 +103,37 @@ function provenanceTone(provenance: Skill['provenance']): BadgeTone {
  */
 const evidence = (skill: Skill): readonly string[] =>
   skill.source ? [skill.path, skill.source.url] : [skill.path]
+
+/**
+ * The one file every skill has, and the ONLY file this page asks for.
+ *
+ * `internal/skill` writes exactly one file per skill, so there is nothing to
+ * list and no picker to draw: a control that is empty on every row the product
+ * can produce is not a feature. Support files arrive with a later epic, and
+ * `skills.file` already takes a path for them.
+ *
+ * It is a path RELATIVE to the skill's own directory, which is why it is not
+ * `skill.path` — the row's path is absolute for a skill on disk and is not a
+ * path at all for a builtin, whose bytes live inside the binary. Where the
+ * file is, and whether that place is inside the skill, is settled once by the
+ * backend through the same containment the assistant's read goes through
+ * (see `SkillsClient.file`); joining or cleaning anything here would be a
+ * second answer to that question.
+ */
+const SKILL_FILE = 'SKILL.md'
+
+/**
+ * What the reader is holding: one skill, and how far its file has got.
+ *
+ * The SKILL travels in every member rather than being a signal beside them,
+ * so the facts on screen and the bytes on screen cannot come from two
+ * different rows — which is the state a person would reach by opening one
+ * skill, closing it and opening another while the first read was still out.
+ */
+type FileAsk =
+  | { kind: 'reading'; skill: Skill }
+  | { kind: 'read'; skill: Skill; result: SkillsFile }
+  | { kind: 'unreadable'; skill: Skill; message: string }
 
 export function SkillsSection(props: SkillsSectionProps) {
   const [state, setState] = createSignal<SkillsState>({ kind: 'loading' })
@@ -205,6 +240,80 @@ export function SkillsSection(props: SkillsSectionProps) {
     }
   }
 
+  /* ── Reading a skill's SKILL.md (nocx-872jc.2) ─────────────────────────
+     Reading writes nothing, so it refreshes nothing and touches neither
+     `busy` (which disables the controls that CHANGE a row) nor the list.
+     The ask's state lives here for the install ask's reason: the call is the
+     surface's, the reader draws what it is handed. */
+  const [fileAsk, setFileAsk] = createSignal<FileAsk | null>(null)
+
+  /** Which read the answer on screen belongs to. A person who opens one
+   *  skill, closes it and opens another has two reads in flight against one
+   *  panel, and without this the slower one wins by arriving last — the same
+   *  race `SkillsStore.refresh` counts for the list. */
+  let fileGeneration = 0
+
+  async function readFile(skill: Skill): Promise<void> {
+    const generation = ++fileGeneration
+    setFileAsk({ kind: 'reading', skill })
+    try {
+      const result = await props.store.file(skill.name, SKILL_FILE)
+      if (generation !== fileGeneration) return
+      setFileAsk({ kind: 'read', skill, result })
+    } catch (err) {
+      if (generation !== fileGeneration) return
+      setFileAsk({ kind: 'unreadable', skill, message: refusalSentence(err) })
+    }
+  }
+
+  /** Closing ABANDONS the read in flight as well as the one on screen: a
+   *  panel that reopened itself because bytes arrived after it was dismissed
+   *  would be the surface deciding to show something nobody asked for. */
+  const closeFile = (): void => {
+    fileGeneration++
+    setFileAsk(null)
+  }
+
+  const fileTitle = (): string => {
+    const ask = fileAsk()
+    return ask ? `“${ask.skill.name}” · ${SKILL_FILE}` : SKILL_FILE
+  }
+
+  /** Which file is on screen, said in words beside it.
+   *
+   *  The RESOLVED values win where there are any: `skills.file` answers with
+   *  the skill as root precedence resolved it and the path as it resolved it,
+   *  which is what the bytes actually came from — the row's copy is what was
+   *  asked for. They differ exactly when two roots hold the same name, and
+   *  that is the moment a reader most needs to know which one they got. A
+   *  read that never arrived has no resolved anything, so it falls back to
+   *  the row, which is still true about the request. */
+  const fileFacts = (ask: FileAsk): Fact[] => {
+    const resolved = ask.kind === 'read' ? ask.result : null
+    return [
+      { name: 'Skill', value: resolved?.name ?? ask.skill.name },
+      { name: 'File', value: resolved?.path ?? SKILL_FILE },
+      { name: 'Provenance', value: resolved?.provenance ?? ask.skill.provenance },
+    ]
+  }
+
+  /** The wire's outcome as the reader's. The `switch` is total over
+   *  `refusal`'s closed union, so a third refusal added to the contract
+   *  fails the compile here rather than falling through to a blank panel —
+   *  which is the failure this whole bead exists to prevent. */
+  const fileOutcome = (ask: FileAsk): FileReadoutOutcome | null => {
+    if (ask.kind === 'reading') return null
+    if (ask.kind === 'unreadable') return { kind: 'unreadable', message: ask.message }
+    switch (ask.result.refusal) {
+      case '':
+        return { kind: 'text', text: ask.result.text }
+      case 'not-text':
+        return { kind: 'not-text' }
+      case 'too-large':
+        return { kind: 'too-large', maxBytes: ask.result.maxBytes }
+    }
+  }
+
   onMount(() => {
     const unsubscribe = props.store.subscribe(setState)
     onCleanup(unsubscribe)
@@ -293,6 +402,54 @@ export function SkillsSection(props: SkillsSectionProps) {
         onRead={() => void readSkill()}
         onInstall={() => void installSkill()}
       />
+      {/* THE READER. Mounted beside the install ask and for the same reason:
+          the kit's Dialog owns opening and closing, and a surface that
+          unmounted the component instead would be deciding that a second
+          time. It stays a Dialog rather than a workspace tab because reading
+          a skill must not cost the page a person is on — and because
+          `src/file-viewer/` reads through a live binding on some machine,
+          which a builtin skill, whose bytes are inside the binary, does not
+          have. */}
+      <Dialog
+        open={fileAsk() !== null}
+        title={fileTitle()}
+        /* `lg` for the install ask's reason: a file is on screen, and `md`
+           would set a skill's instructions in a column narrower than the
+           editor that wrote them. */
+        size="lg"
+        onClose={closeFile}
+        footer={
+          <Button variant="default" onClick={closeFile}>
+            Close
+          </Button>
+        }
+      >
+        <Show when={fileAsk()}>
+          {(ask) => (
+            <Show
+              when={fileOutcome(ask())}
+              /* The bytes are on their way, which is a fourth true sentence
+                 about the same file — said in the page's own words for a
+                 wait, the ones the list above already uses. */
+              fallback={
+                <StatusCard
+                  tone="neutral"
+                  title="Reading this skill"
+                  description={`Reading ${SKILL_FILE} of “${ask().skill.name}”.`}
+                />
+              }
+            >
+              {(outcome) => (
+                <FileReadout
+                  facts={fileFacts(ask())}
+                  ariaLabel={`${SKILL_FILE} of “${ask().skill.name}”, verbatim`}
+                  outcome={outcome()}
+                />
+              )}
+            </Show>
+          )}
+        </Show>
+      </Dialog>
       <Show when={state().kind === 'loading'}>
         <StatusCard
           tone="neutral"
@@ -347,45 +504,59 @@ export function SkillsSection(props: SkillsSectionProps) {
                       onChange={(enabled) => void toggle(skill, enabled)}
                     />
                   }
-                  /* The group is drawn only when the row has an action to
-                     put in it. With the switch out of it a builtin approved
-                     row has none, and a named `role="group"` around nothing
-                     announces a boundary with nothing on the other side of it
-                     — the very thing ActionGroup's own doc calls worse than no
-                     group at all. */
+                  /* The group used to be drawn only when the row had an
+                     action to put in it: with the switch moved into the state
+                     cell, a builtin approved row had none, and a named
+                     `role="group"` around nothing announces a boundary with
+                     nothing on the other side of it. Read ended that — every
+                     row can be read, so the group always has at least one
+                     control and the guard would now be a condition that is
+                     true on every row the product can produce. */
                   actions={
-                    <Show when={skill.status === 'changed' || skill.provenance !== 'builtin'}>
-                      <ActionGroup ariaLabel={`${skill.name} actions`}>
-                        {/* Only when the bytes moved. A permanent Re-approve
+                    <ActionGroup ariaLabel={`${skill.name} actions`}>
+                      {/* EVERY row, every provenance. Reading is not
+                          writing, so a builtin is as readable as a skill the
+                          person wrote — and the builtin is the row that needs
+                          it most, because its path names a file nothing on
+                          the machine can open. It is the first control
+                          because it is the one that changes nothing; the two
+                          that do follow it. And it is the one control here
+                          that `busy` does not disable, for the same reason:
+                          `busy` marks a row whose STATE is mid-change, and a
+                          person is entitled to read the file while a toggle
+                          is in flight. */}
+                      <Button size="sm" onClick={() => void readFile(skill)}>
+                        Read
+                      </Button>
+                      {/* Only when the bytes moved. A permanent Re-approve
                             would invite re-approving a skill nobody changed,
                             which is a person clicking past the one prompt that
                             is load-bearing. */}
-                        <Show when={skill.status === 'changed'}>
-                          <Button
-                            size="sm"
-                            disabled={busy() === skill.name}
-                            onClick={() => void approve(skill)}
-                          >
-                            Re-approve
-                          </Button>
-                        </Show>
-                        {/* A builtin ships inside the binary, so there is
+                      <Show when={skill.status === 'changed'}>
+                        <Button
+                          size="sm"
+                          disabled={busy() === skill.name}
+                          onClick={() => void approve(skill)}
+                        >
+                          Re-approve
+                        </Button>
+                      </Show>
+                      {/* A builtin ships inside the binary, so there is
                             nothing on disk to delete and no button to explain
                             away. The sentence that used to say so sat in the
                             row's body as loose text on every builtin row; the
                             absence says it once and says it everywhere. */}
-                        <Show when={skill.provenance !== 'builtin'}>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            disabled={busy() === skill.name}
-                            onClick={() => void remove(skill)}
-                          >
-                            Delete
-                          </Button>
-                        </Show>
-                      </ActionGroup>
-                    </Show>
+                      <Show when={skill.provenance !== 'builtin'}>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={busy() === skill.name}
+                          onClick={() => void remove(skill)}
+                        >
+                          Delete
+                        </Button>
+                      </Show>
+                    </ActionGroup>
                   }
                 />
               )}

@@ -1,0 +1,24 @@
+/* FileReadout — one file, read (nocx-872jc.2). See ui/file-readout.tsx.
+
+   The whole stylesheet is LAYOUT. Every visible thing inside is a kit
+   component that carries its own appearance — FactList, StatusCard,
+   CodeBlock — and this file paints none of them; it only decides how far
+   apart they sit and that a long line cannot widen the panel.
+
+   The gap is read from the same space scale Stack reads, so the rhythm is
+   one decision rather than two. It is declared here rather than delegated to
+   a nested Stack because the component needs the identity class and the
+   `data-state` variance on ONE element, and Stack takes no class by design
+   (§3.6) — wrapping a Stack in a classless div would put the hook on a
+   wrapper that carries nothing, which is exactly what the kit's identity
+   rule forbids. */
+
+.ui-file-readout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  /* A flex item's floor is its content, so without this a single long line
+     inside the code block widens the readout past its dialog instead of
+     scrolling inside the block that already owns a scroll box. */
+  min-width: 0;
+}

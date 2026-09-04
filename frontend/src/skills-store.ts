@@ -1,4 +1,5 @@
 import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
+import type { SkillsFile } from './generated/skills.file'
 import type { SkillsInstall } from './generated/skills.install'
 import type { SkillsPreview } from './generated/skills.preview'
 
@@ -11,6 +12,7 @@ export interface SkillsClientLike {
   approve(name: string): Promise<unknown>
   preview(url: string): Promise<SkillsPreview>
   install(url: string): Promise<SkillsInstall>
+  file(name: string, path: string): Promise<SkillsFile>
 }
 
 export type SkillsState =
@@ -84,6 +86,17 @@ export class SkillsStore {
   // for the read would be two collaborators that can differ.
   preview(url: string): Promise<SkillsPreview> {
     return this.client.preview(url)
+  }
+
+  // Reading one file REFRESHES NOTHING either, and for the same reason
+  // `preview` does not: skills.file writes nothing, so a list that changed
+  // after a read would be a list that changed for a reason nobody can name.
+  // It is a passthrough rather than a call the surface makes on a client of
+  // its own, so that the page has ONE collaborator for skills — a surface
+  // holding a store for the writes and a client for the reads is two things
+  // that can be pointed at different backends.
+  file(name: string, path: string): Promise<SkillsFile> {
+    return this.client.file(name, path)
   }
 
   // Installing goes through the store because the list is now different, and

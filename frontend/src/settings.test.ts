@@ -206,6 +206,14 @@ function fakeSkillsClient(): SkillsClientLike {
       findings: [],
     }),
     install: vi.fn().mockResolvedValue({ name: 'deploy', provenance: 'installed' }),
+    file: vi.fn().mockResolvedValue({
+      name: 'deploy',
+      path: 'SKILL.md',
+      provenance: 'authored' as const,
+      text: '# Deploy\n',
+      refusal: '' as const,
+      maxBytes: 65536,
+    }),
   }
 }
 

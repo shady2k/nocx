@@ -5,6 +5,7 @@ import { SkillsSection } from './skills-section'
 import { SkillsStore, type SkillsClientLike } from './skills-store'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsPreview } from './generated/skills.preview'
+import type { SkillsFile } from './generated/skills.file'
 
 const confirmAnswer = true
 // Only `showConfirm` is faked — the rest of the module is the real thing,
@@ -38,6 +39,21 @@ afterEach(() => {
   HTMLDialogElement.prototype.showModal = origShowModal
   HTMLDialogElement.prototype.close = origClose
 })
+
+/**
+ * The one file every skill has. `skills.file` answers for any provenance —
+ * builtin included, whose bytes are inside the binary and have no path on
+ * disk at all, which is why the request is the skill's NAME plus a path
+ * relative to the skill's own directory rather than the path the row prints.
+ */
+const BUILTIN_FILE: SkillsFile = {
+  name: 'skill-authoring',
+  path: 'SKILL.md',
+  provenance: 'builtin',
+  text: '---\nname: skill-authoring\n---\n\n# Write useful skills\n\nName the sentence first.\n',
+  refusal: '',
+  maxBytes: 65536,
+}
 
 const SKILLS: SkillsList = {
   documentPath: '/tmp/nocx/skills.json',
@@ -75,6 +91,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
       findings: [],
     }),
     install: vi.fn().mockResolvedValue({ name: 'deploy', provenance: 'installed' }),
+    file: vi.fn().mockResolvedValue(BUILTIN_FILE),
     ...overrides,
   }
 }
@@ -148,7 +165,11 @@ describe('SkillsSection', () => {
     // which is why this asserts the two rows against each other rather than
     // counting the buttons on the page.
     expect(actionIn(builtin, 'Delete')).toBeUndefined()
-    expect(builtin.querySelectorAll('button')).toHaveLength(0)
+    // Read is the one thing every row offers, builtin included, so the
+    // absence of Delete is asserted against what IS there rather than
+    // against an empty row (nocx-872jc.2).
+    expect(actionIn(builtin, 'Read')).toBeTruthy()
+    expect(builtin.querySelectorAll('button')).toHaveLength(1)
     const del = actionIn(deploy, 'Delete')
     expect(del).toBeTruthy()
 
@@ -546,5 +567,118 @@ describe('SkillsSection — installing a skill by its URL (nocx-qja4m.6)', () =>
     type(container, 'the weather skill, please')
     await waitFor(() => expect(buttonNamed(ask(container), 'Read this skill')!.disabled).toBe(true))
     expect(preview).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Reading a skill's SKILL.md from the page (nocx-872jc.2).
+ *
+ * Before this there was no way to read a skill's bytes from the interface at
+ * all: `skills.read` is a tool the assistant holds, and the row printed a
+ * path. So every test here starts where a person starts — at the row — and
+ * asserts what appears, never what was called instead of what was drawn.
+ *
+ * THE THREE REFUSALS EACH GET A CASE, because they are the whole risk in this
+ * surface. Two of them come back as a RESOLVED result carrying `refusal`, and
+ * only the third rejects (see SkillsClient.file); a viewer that treated them
+ * alike would either throw away a true sentence about a file that is there or
+ * show a blank panel where a reason belongs.
+ */
+const reader = (container: HTMLElement): HTMLDialogElement | undefined =>
+  Array.from(container.querySelectorAll('dialog')).find((dialog) =>
+    dialog.querySelector('.nocx-dialog__title')?.textContent?.includes('SKILL.md'),
+  )
+
+async function readFileOf(client: SkillsClientLike, name: string): Promise<HTMLElement> {
+  const store = new SkillsStore(client)
+  const { container } = render(() => <SkillsSection store={store} />)
+  await waitFor(() => expect(container.textContent).toContain('Deploy the service'))
+  fireEvent.click(actionIn(rowFor(container, name)!, 'Read')!)
+  await waitFor(() => expect(reader(container)?.open).toBe(true))
+  return container
+}
+
+describe('SkillsSection — reading a skill’s SKILL.md (nocx-872jc.2)', () => {
+  afterEach(cleanup)
+
+  it('opens a builtin skill’s SKILL.md and shows it whole, without leaving the page', async () => {
+    const file = vi.fn().mockResolvedValue(BUILTIN_FILE)
+    const container = await readFileOf(fakeClient({ file }), 'skill-authoring')
+
+    // The request is the skill's NAME and a path inside the skill's own
+    // directory. A builtin's bytes are in the binary, so the path the row
+    // prints is not something anything can open — which is exactly why this
+    // is the argument, and why builtin is the provenance this case uses.
+    expect(file).toHaveBeenCalledWith('skill-authoring', 'SKILL.md')
+
+    const panel = reader(container)!
+    // Verbatim, frontmatter included: what is on disk, not the body the
+    // assistant is handed.
+    expect(codeBlocks(panel)).toContain(BUILTIN_FILE.text)
+    // What the reader is looking at, said in words beside the bytes.
+    expect(panel.textContent).toContain('skill-authoring')
+    expect(panel.textContent).toContain('builtin')
+
+    // READ-ONLY: nothing here takes an edit.
+    expect(panel.querySelector('textarea')).toBeNull()
+    expect(panel.querySelector('input')).toBeNull()
+
+    // …and the page is still the page underneath it.
+    expect(rowFor(container, 'deploy')).toBeTruthy()
+
+    fireEvent.click(buttonNamed(panel, 'Close')!)
+    await waitFor(() => expect(reader(container)?.open).toBe(false))
+  })
+
+  it('draws a file that is not text as a sentence, not as an empty reader', async () => {
+    const file = vi.fn().mockResolvedValue({
+      ...BUILTIN_FILE,
+      name: 'deploy',
+      provenance: 'authored',
+      text: '',
+      refusal: 'not-text',
+    })
+    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const panel = reader(container)!
+
+    expect(panel.textContent).toContain('not text')
+    // The file is there and nothing happened to it — the sentence says so
+    // rather than leaving the reader to guess from a blank panel.
+    expect(panel.textContent).toContain('on disk')
+    expect(panel.querySelector('.ui-code-block')).toBeNull()
+  })
+
+  it('draws a file over the read budget, and names the budget', async () => {
+    const file = vi.fn().mockResolvedValue({
+      ...BUILTIN_FILE,
+      name: 'deploy',
+      provenance: 'authored',
+      text: '',
+      refusal: 'too-large',
+      maxBytes: 65536,
+    })
+    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const panel = reader(container)!
+
+    // The limit travels on the wire so the sentence can name it; a viewer
+    // keeping its own copy of the number is a viewer that will one day quote
+    // a budget the backend stopped enforcing.
+    expect(panel.textContent).toContain('65.5 kB')
+    expect(panel.querySelector('.ui-code-block')).toBeNull()
+  })
+
+  it('draws a read the backend refused outright, in the backend’s own sentence', async () => {
+    const refusal = 'skill "deploy" path "SKILL.md": no such file or directory'
+    const file = vi.fn().mockRejectedValue(new Error(refusal))
+    const container = await readFileOf(fakeClient({ file }), 'deploy')
+    const panel = reader(container)!
+
+    // A rejection, not a result: there is no file to describe, so the reader
+    // says what happened instead of describing bytes it never had.
+    expect(panel.textContent).toContain(refusal)
+    expect(panel.querySelector('.ui-code-block')).toBeNull()
+    // Drawn, not thrown: the ask is still on screen and still closable.
+    expect(panel.open).toBe(true)
+    expect(buttonNamed(panel, 'Close')).toBeTruthy()
   })
 })

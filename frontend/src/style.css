@@ -970,13 +970,29 @@
 
 /* Xterm wrapper: always has a stable min-height so xterm.fit() produces a
    sane grid even when the content clip is one row tall. xterm mounts here,
-   inside the clip; overflow:hidden is defence-in-depth against artifacts
-   leaking below it (P1-5: stray bar below tabs). */
+   inside the clip.
+   
+   IT MUST NOT CLIP, because it is the element the echo shift TRANSLATES
+   (controller._applyEchoShift). A clip on a translated element is applied in
+   that element's own box, BEFORE the translation moves anything — so the last
+   row of the live region was cut here and the shift then slid the survivors
+   up, leaving the region one row shorter than it had been sized for. Measured
+   in the owner's pane: outer viewport [259, 772), this element after the
+   shift [240, 753), and their overlap 494px — exactly 26 rows of the 27 the
+   box was sized to show. The row lost was omp's input line, which is why the
+   program could not be typed into (nocx-hg0dg).
+   
+   It carried `overflow: hidden` as "defence-in-depth against artifacts
+   leaking below it (P1-5: stray bar below tabs)". Against a transform that is
+   not redundant defence — it decides which rows can ever reach the real clip.
+   The clipping is done ONCE, outside: `.xterm-live-container` and
+   `.xterm-live-viewport` are both `overflow: hidden` and neither is
+   translated. Do not answer a future leak by putting a clip back on this
+   element; fix it on one of those. */
 .xterm-inner {
   min-height: 140px;
   height: 100%;
   width: 100%;
-  overflow: hidden;
 }
 
 /* Fullscreen: override min-height so xterm fills the viewport. */

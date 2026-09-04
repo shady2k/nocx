@@ -1261,32 +1261,6 @@ export class XtermRenderer implements TerminalRenderer {
     return 0
   }
 
-  /** The bottom edge of the row the cursor is on, or null when unmeasurable.
-   *
-   *  A FACT, NOT A POLICY — which is the whole reason it is separate from
-   *  liveContentHeight. A program waiting for input parks its caret on a row
-   *  that holds nothing yet (omp's composer), so the measurement above stops
-   *  above it and you cannot see what you type (nocx-hg0dg). Whether that row
-   *  must be shown depends on whether a command still OWNS the screen, and
-   *  this renderer cannot know that: it is the running block's existence, and
-   *  the scrollback controller holds it.
-   *
-   *  Two earlier attempts decided it here and both were wrong. The cursor's
-   *  COLUMN said nothing — a freshly started program parks its caret at
-   *  column 0 of its own input line, so the symptom came back on the next
-   *  restart. The shell's OSC 133 A was worse: a nested shell, a multiplexer
-   *  or a prompt framework emits it too, a multiline prompt puts it on a
-   *  different row from the caret, and a stale mark from before a TUI started
-   *  collides with the TUI's own home row.
-   */
-  liveCursorBottom(): number | null {
-    const t = this.term
-    if (!t) return null
-    const cell = this._getCellDims()
-    if (!cell) return null
-    return (t.buffer.active.cursorY + 1) * cell.height
-  }
-
   // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────
 
   registerMarker(): MarkerAdapter | undefined {

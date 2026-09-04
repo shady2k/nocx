@@ -948,29 +948,6 @@ describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
     r.dispose()
   })
 
-  it('reports the cursor row separately, as a fact the controller decides on (nocx-hg0dg)', async () => {
-    // liveContentHeight measures WRITTEN rows and stops there. A program
-    // waiting for input parks its caret on a row that holds nothing — omp's
-    // composer — so the two answers differ, and the difference is exactly the
-    // row you type into. Whether that row must be shown is the running
-    // block's question, not this renderer's: see
-    // ScrollbackController.setLiveHeight.
-    const r = await mountRenderer()
-    let markerDone: () => void
-    const marker = new Promise<void>((resolve) => {
-      markerDone = resolve
-    })
-    r.onCommandMarker(() => markerDone())
-    r.write('one\r\ntwo\r\n')
-    r.write('\x1b]133;C\x07')
-    await marker
-    publishDims(r, { width: 8.5, height: 20 })
-
-    expect(r.liveContentHeight()).toBe(40)
-    expect(r.liveCursorBottom()).toBe(60)
-    r.dispose()
-  })
-
   it('reports nothing for a grid nobody has written to', async () => {
     // A blank grid with the cursor in its corner is not one row of content —
     // it is none, and the live region must not reserve a row for it between

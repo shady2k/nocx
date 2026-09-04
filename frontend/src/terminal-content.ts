@@ -4100,7 +4100,7 @@ export class TerminalContent extends BasePaneContent {
       // the grid stayed at the old size until the next chunk of output arrived,
       // and `top` refreshes every three seconds: the pane visibly re-laid
       // itself several seconds after the program started.
-      this.scrollback.setLiveHeight(this.scrollback.liveBottomEdge())
+      this.scrollback.setLiveHeight(this.renderer.liveContentHeight())
       this.refitIfResized()
     })
   }

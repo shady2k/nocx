@@ -32,7 +32,6 @@ function makeRenderer(): TerminalRenderer {
     // on the first frame (the command-start pop), so tests that want the
     // sizing path override it.
     liveContentHeight: vi.fn(() => 0),
-    liveCursorBottom: vi.fn(() => 0),
     getBufferLine: vi.fn(() => null),
     cursorLine: vi.fn(() => 0),
     reset: vi.fn(),
@@ -1087,43 +1086,6 @@ describe('the running live region follows its written rows', () => {
   })
   afterEach(() => {
     Element.prototype.scrollTo = protoScrollTo
-  })
-
-  it('reaches the row a running command parked its caret on, and stops at the freeze (nocx-hg0dg)', () => {
-    // omp's composer: the caret sits on a row that holds nothing until you
-    // type, so the written-rows measurement stops one row above it and the
-    // person cannot see their own keystrokes.
-    //
-    // The row a SHELL moves to after a newline looks identical and must NOT
-    // be reserved — it is the next prompt's, the frozen block ends above it,
-    // and counting it drops the pane by a row at every freeze (nocx-i4h04.1).
-    // Ownership is what tells them apart: the logical freeze frees the
-    // running slot before the rows are serialized, so the block's existence
-    // is the boundary, and this asserts both sides of it.
-    const renderer = makeRenderer()
-    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(40)
-    ;(renderer.liveCursorBottom as LiveContentHeightSpy).mockReturnValue(60)
-    const pane = document.createElement('div')
-    const controller = new ScrollbackController({
-      pane,
-      renderer,
-      snapshotStore: new CommandSnapshotStore(),
-    })
-
-    // No command owns the screen: the caret's row is the next prompt's.
-    expect(controller.blockManager.runningBlock).toBeNull()
-    expect(controller.liveBottomEdge()).toBe(40)
-
-    // A command owns it: the caret's row is where a person is typing.
-    controller.beginBlock('omp', '~', 0)
-    expect(controller.blockManager.runningBlock).not.toBeNull()
-    expect(controller.liveBottomEdge()).toBe(60)
-
-    // A grid nobody has written to is still no rows at all — the caret in
-    // the corner must not open the region between the keypress and the first
-    // byte of output.
-    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(0)
-    expect(controller.liveBottomEdge()).toBe(0)
   })
 
   it('sizes the flow box and clip together as output grows', () => {

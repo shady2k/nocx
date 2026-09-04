@@ -67,6 +67,7 @@ func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 				Arguments: `{"sessionId":"session-a"}`, ArgHash: "hash-a",
 				Effect:   content.EffectObserve,
 				Resource: &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
+				EntryID:  proposalEntryID,
 			}}
 		}},
 		{deltas: []string{"done"}},
@@ -87,6 +88,7 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 				Resource:          &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
 				Invocation:        content.Invocation{Parsed: false},
 				CommandInvocation: true,
+				EntryID:           proposalEntryID,
 			}}
 		}},
 		{deltas: []string{"done"}},
@@ -98,11 +100,13 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 // whose standing answer is an invocation rule.
 //
 // Its EntryID is the PROPOSAL's ledger entry and is deliberately unlike the
-// turn's, which agent.ask answers with. In the product the kernel always sets
-// it (kernel.go escalate: the proposal is recorded before the latch trips), so
-// a harness leaving it empty describes a run that does not exist — and, worse,
-// makes the two entries indistinguishable in exactly the test that has to tell
-// them apart.
+// turn's, which agent.ask answers with — as it is on every builder in this
+// file that carries an ApprovalRequest. In the product the kernel always sets
+// it (kernel.go escalate records the proposal before the latch trips, and its
+// ledger is nil only where the content store is, which agent.ask refuses
+// outright), so a harness leaving it empty describes a run that does not
+// exist — and, worse, makes the two entries indistinguishable in exactly the
+// test that has to tell them apart.
 func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{

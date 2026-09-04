@@ -103,6 +103,11 @@ func (s *scriptedApprovalClient) askCount() int {
 // non-command tool. It carries an effect because the real gate always does:
 // agent.approvalRequested REQUIRES the field, while the absent invocation
 // carrier is what distinguishes this effect-row standing answer.
+// EntryID is the PROPOSAL's ledger entry, which the kernel always records
+// before the latch trips (kernel.go escalate). A scripted suspension leaving
+// it empty describes a run the product cannot produce, and makes the
+// proposal's entry indistinguishable from the turn's in the one test that
+// has to tell them apart.
 func policySuspension(tool, callID, args, argHash string) func(runID string) error {
 	return func(runID string) error {
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
@@ -110,6 +115,7 @@ func policySuspension(tool, callID, args, argHash string) func(runID string) err
 			Arguments: args, ArgHash: argHash,
 			Effect:   content.EffectObserve,
 			Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
+			EntryID:  proposalEntryID,
 		}}
 	}
 }

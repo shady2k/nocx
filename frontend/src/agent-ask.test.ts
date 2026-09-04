@@ -770,6 +770,24 @@ describe('AgentInputTarget standing-answer receipt routing (nocx-2019q)', () => 
     expect(handle.notice).not.toHaveBeenCalled()
   })
 
+  /**
+   * An empty entry is not a wildcard. The contract requires a non-empty one
+   * (minLength 1) and the backend refuses to send a receipt without it, so
+   * anything arriving with none is off-contract — and drawing it on whatever
+   * block the run id found is the wrong block exactly as often as the right
+   * one.
+   */
+  it('drops a receipt that names no entry at all', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1
+    handle.el.dataset.entryId = 'answer-1'
+
+    dispatcher.emit('agent.standingAnswerSaved', saved({ runId: String(runId), entryId: '' }))
+
+    expect(handle.notice).not.toHaveBeenCalled()
+  })
+
   it('drops a receipt whose entry names a different block', async () => {
     const { dispatcher, handle, target } = makeTarget()
     await target.submit('will this need approval?')

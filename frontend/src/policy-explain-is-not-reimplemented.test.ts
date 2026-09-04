@@ -76,7 +76,27 @@ const REIMPLEMENTED = [
   },
   {
     what: 'the GrantedUnder guard that stops a widening permit reaching another effect',
-    pattern: /\bgrantedUnder\s*(===|!==|==|!=)/,
+    // COMPARED TO AN EFFECT, and not merely tested for presence. The guard is
+    // "the effect this permit was granted under is the effect this CALL
+    // classified as", it needs a call to have been classified, and it belongs
+    // to `content.EvaluateInvocation` alone.
+    //
+    // Whether a rule CARRIES one at all is a different question with a
+    // different owner. It is the WRITE gate's — `validateInvocationRules`
+    // will not save a permit over a command word without one — it is answered
+    // by the document and never by a call, and the wire declares it on the
+    // rule ("absent on a rule that does not widen") for exactly that reason.
+    // The permissions page asks it so it can stop OFFERING an answer the store
+    // would turn down (nocx-4yjwk.6). Forbidding that would not remove a
+    // second implementation; it would force the page to send the write and
+    // read the refusal, which is the defect that bead exists to fix.
+    // Both lookaheads are load-bearing, and each was written after watching
+    // the presence test slip through without it. Without `(?!=)`, `!==`
+    // backtracks to `!=` and the next lookahead sees `= undefined`. With the
+    // space OUTSIDE the lookahead (`\s*(?!undefined)`), `\s*` backtracks to
+    // empty and the lookahead sees ` undefined`. The whitespace has to be
+    // inside what is being refused.
+    pattern: /\bgrantedUnder\s*(?:={2,3}|!={1,2})(?!=)(?!\s*undefined\b)/,
   },
   {
     what: 'the rule-staleness predicate itself',
@@ -224,6 +244,28 @@ describe('the precedence order is not reimplemented in the renderer (AD-8)', () 
   it('finds no shipped module deciding it, and none minting a trace step', () => {
     const hits = scan()
     expect(hits, hits.length === 0 ? '' : report(hits)).toEqual([])
+  })
+
+  // The amendment above narrows a pattern, so it is guarded from both sides:
+  // the evaluator's guard is still caught in every spelling, and the write
+  // gate's presence test is not.
+  it('tells the evaluator’s grantedUnder guard from a test for its presence', () => {
+    const guard = REIMPLEMENTED.find((r) => r.what.startsWith('the GrantedUnder guard'))
+    expect(guard).toBeDefined()
+    for (const decides of [
+      'if (rule.grantedUnder === call.effect) return true',
+      'rule.grantedUnder !== step.effect',
+      "if (r.grantedUnder === 'observe') {",
+      'grantedUnder == effect',
+    ]) {
+      expect(guard!.pattern.test(decides), decides).toBe(true)
+    }
+    for (const reads of [
+      'if (rule.selector.program) return rule.grantedUnder !== undefined',
+      'const widens = rule.grantedUnder === undefined',
+    ]) {
+      expect(guard!.pattern.test(reads), reads).toBe(false)
+    }
   })
 
   it('is looking at the modules that could hold one', () => {

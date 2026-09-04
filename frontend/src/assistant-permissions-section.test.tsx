@@ -67,6 +67,36 @@ const STALE_RULE: PolicyRule = {
   evaluatorVersion: 1,
 }
 
+/**
+ * A refusal somebody WROTE, over a command word rather than a command line.
+ *
+ * It is the shape the page used to offer an answer it could not deliver.
+ * `content.validateInvocationRules` will not take a `program` permit that does
+ * not carry the effect it was granted under — a permit over a word is only as
+ * narrow as the reading it is bound to, and this rule was never read — so
+ * clicking Allowed on it sent a write the store turned down.
+ */
+const PROGRAM_REFUSAL: PolicyRule = {
+  id: 'r-rm',
+  selector: { program: 'rm' },
+  decision: 'refuse',
+  createdAt: '2026-09-02T11:00:00Z',
+  source: 'written',
+  evaluatorVersion: 2,
+}
+
+/** A refusal over a semantic FACT. A matcher this loose may only ever narrow,
+ *  whatever it carries: there is no effect that would make it safe, so no
+ *  gesture on this page can turn it into an Allowed. */
+const FEATURE_REFUSAL: PolicyRule = {
+  id: 'r-sort',
+  selector: { hasFeature: { program: 'sort', feature: 'writes-option-named-path' } },
+  decision: 'refuse',
+  createdAt: '2026-09-02T12:00:00Z',
+  source: 'written',
+  evaluatorVersion: 2,
+}
+
 function matrixWith(patch: Partial<PolicyMatrix>): PolicyMatrix {
   return { ...blankPolicy(), ...patch }
 }
@@ -391,6 +421,103 @@ describe('assistant permissions: Change', () => {
     fireEvent.click(within(p).getByRole('button', { name: /^Allowed/ }))
     await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
     expect(set.mock.calls[0][0].observe.decision).toBe('permit')
+  })
+})
+
+/**
+ * AN ANSWER THAT CANNOT BE GIVEN IS NOT OFFERED (nocx-4yjwk.6).
+ *
+ * `Change → Allowed` on a rule the store will not widen used to send the write
+ * anyway. Nothing unsafe happened — the gate refused it and the page raised
+ * the danger toast and re-read — and that is the whole defect: a person
+ * clicked an answer, got a red message, and learned nothing. Least of all the
+ * thing they needed, which is that a permit comes from a command that was
+ * READ, and that `+ Allow a command…` is where that happens.
+ *
+ * The tests drive the panel a person opens and assert the ABSENCE of the
+ * control, not the failure of a write.
+ */
+describe('assistant permissions: an answer the store would not widen', () => {
+  it('does not offer Allowed on it, and still offers the two answers it can take', async () => {
+    const { client, setRule } = fakeClient([
+      view(matrixWith({}), { rules: [PROGRAM_REFUSAL, FEATURE_REFUSAL] }),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    for (const subject of ['any rm command', 'any sort command that writes a file']) {
+      const p = await openPanel(container, new RegExp(`^Change ${subject}`))
+      expect(
+        within(p).queryByRole('button', { name: /^Allowed/ }),
+        `Allowed is offered for ${subject}`,
+      ).toBeNull()
+      // Narrowing is exactly what this answer may still do, so both remain.
+      within(p).getByRole('button', { name: /^Ask every time/ })
+      within(p).getByRole('button', { name: /^Never/ })
+      fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
+      await settle()
+    }
+    expect(setRule).not.toHaveBeenCalled()
+  })
+
+  it('says why, and points at the gesture that can give that answer', async () => {
+    const { client } = fakeClient([view(matrixWith({}), { rules: [PROGRAM_REFUSAL] })])
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, /^Change any rm command/)
+    const text = p.textContent ?? ''
+    // The reason, in the person's words, and the control by the name its
+    // button actually wears — a sentence pointing somewhere they cannot find
+    // is not an answer.
+    expect(text).toContain('is not offered')
+    expect(text).toContain('nocx reads it — it is never run')
+    expect(text).toContain('+ Allow a command…')
+  })
+
+  it('still offers Allowed where the store would take it', async () => {
+    // The exact answer names one command line; the wide one names a word AND
+    // carries the effect it was granted under. Both are documents the gate
+    // accepts, and a fix that removed the offer everywhere is not a fix.
+    const { client, setRule } = fakeClient([
+      view(matrixWith({}), { rules: [ANSWERED_RULE, WIDE_RULE] }),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    for (const subject of ['df -h', 'any find command']) {
+      const p = await openPanel(container, new RegExp(`^Change ${subject}`))
+      within(p).getByRole('button', { name: /^Allowed/ })
+      expect(p.textContent).not.toContain('is not offered')
+      fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
+      await settle()
+    }
+
+    const p = await openPanel(container, /^Change any find command/)
+    fireEvent.click(within(p).getByRole('button', { name: /^Allowed/ }))
+    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        id: 'r-find',
+        selector: WIDE_RULE.selector,
+        decision: 'permit',
+        grantedUnder: 'observe',
+      },
+      'ask',
+    )
+  })
+
+  it('offers all three on a row, which no rule gate speaks about', async () => {
+    // A row is written by policy.set and carries no selector at all, so the
+    // rule gate has nothing to say about it. Reading the absence of a permit
+    // onto rows would take away the only way to answer an open question.
+    const { client } = fakeClient([view(matrixWith({}))])
+    const container = mount(client)
+    await loaded(container)
+
+    const p = await openPanel(container, 'Answer this now: may the assistant read and inspect?')
+    within(p).getByRole('button', { name: /^Allowed/ })
+    expect(p.textContent).not.toContain('is not offered')
   })
 })
 

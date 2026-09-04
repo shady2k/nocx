@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/wave.close.schema.json",
+  "title": "WaveCloseParams",
+  "description": "Parameters for the wave.close agent tool: end one of your workers. It stops the worker's process; whatever it had not finished is not finished. Reach for it when the work is done or is no longer wanted — not to retry, since a closed worker does not come back and starting another is a separate act. You can only close workers your own session started, and only while nocx still says you may.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker"],
+  "properties": {
+    "worker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The worker's id, exactly as wave.spawn returned it or wave.holdings listed it."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WaveCloseResult",
+      "description": "What was asked of the worker. Note what this does NOT say: it does not say the worker has finished. Ending its process is a request, and how it ended is a fact nocx observes for itself — ask wave.holdings for that.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ended"],
+      "properties": {
+        "id": { "type": "string", "description": "The worker that was asked to end." },
+        "ended": {
+          "type": "boolean",
+          "description": "True when nocx asked the worker's process to stop, and true as well when it had already finished before you asked — tidying up should not have to win a race."
+        }
+      }
+    }
+  }
+}

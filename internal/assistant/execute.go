@@ -72,6 +72,8 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"wave.holdings":    executeWaveHoldings,
 	"wave.spawn":       executeWaveSpawn,
 	"wave.say":         executeWaveSay,
+	"wave.wait":        executeWaveWait,
+	"wave.close":       executeWaveClose,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is

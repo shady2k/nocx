@@ -32,6 +32,11 @@ type memStore struct {
 	mail    map[ReaderID][]Message
 	cursors map[[2]ReaderID]Cursor
 	minted  int
+	// duringHeldBy runs once, INSIDE HeldBy and before it reads anything.
+	// It is how a test puts a fact exactly in the window between a wait
+	// taking its wake-up channel and selecting on it, which is the one
+	// ordering that cannot be produced by racing two goroutines and hoping.
+	duringHeldBy func()
 }
 
 func newMemStore() *memStore {
@@ -215,6 +220,19 @@ func (m *memStore) PutDelegation(_ context.Context, d Delegation) error {
 	return nil
 }
 
+func (m *memStore) Delegation(_ context.Context, id ParticipantID) (Delegation, error) {
+	if err := m.hit("delegation"); err != nil {
+		return Delegation{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.dels[id]
+	if !ok {
+		return Delegation{}, fmt.Errorf("no delegation over %q: %w", id, ErrNotDelegated)
+	}
+	return d, nil
+}
+
 func (m *memStore) Participant(_ context.Context, id ParticipantID) (Participant, error) {
 	if err := m.hit("participant"); err != nil {
 		return Participant{}, err
@@ -330,12 +348,20 @@ func (m *memStore) HeldBy(_ context.Context, coord string) ([]Participant, error
 		return nil, err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	var out []Participant
 	for _, p := range m.parts {
 		if m.waves[p.Wave] == coord {
 			out = append(out, p)
 		}
+	}
+	m.mu.Unlock()
+	// AFTER the rows are read and before the caller sees them: the hook runs
+	// outside the lock so it can drive the record, and it runs here so a fact
+	// it admits is not in the answer this call is about to give. That is the
+	// window a wait's wake-up channel has to already cover.
+	if f := m.duringHeldBy; f != nil {
+		m.duringHeldBy = nil
+		f()
 	}
 	return out, nil
 }

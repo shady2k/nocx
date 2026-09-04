@@ -1923,6 +1923,10 @@ func New(opts ...Option) (*App, error) {
 		waveEnrol,
 		waveSup,
 		wave.WithBackstop(waveBackstop),
+		// The seam a coordinator's wave.close reaches. Unwired it refuses,
+		// which is the right answer: reporting a worker ended that is still
+		// running is the one thing a close must never do.
+		wave.WithCloser(&waveCloser{sessions: sess, log: logger}),
 		wave.WithBound(waveParticipantBound),
 		wave.WithEnrolmentDeadline(waveEnrolmentDeadline),
 	)

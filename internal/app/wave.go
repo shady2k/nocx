@@ -432,6 +432,37 @@ func (r *waveReporter) Report(lane lifecycle.LaneID, ok bool, summary string) er
 	return nil
 }
 
+// waveCloser ends a participant by closing its session.
+//
+// It is the composition root's because what a participant's process IS is a
+// session, and only this layer holds the registry. It writes nothing and
+// reports no verdict: closing the session produces a real process exit, which
+// the supervisor already watches and the record already reduces — so a close
+// adds no second author of a participant's state.
+type waveCloser struct {
+	sessions sessionCloser
+	log      log.Logger
+}
+
+func (c *waveCloser) Close(_ context.Context, p wave.Participant) error {
+	sid := session.ID(p.Liveness.SessionID)
+	// Asked FIRST, because the registry's Close reports a missing session as
+	// an ordinary error and a session that is already gone is not a failure
+	// to end one: the supervisor has already reported that exit or is about
+	// to, and the record needs nothing from here. There is no sentinel to
+	// match on, and matching on the sentence would be worse than asking.
+	if _, err := c.sessions.Get(sid); err != nil {
+		c.log.Info("wave close: the participant's session was already gone",
+			"participant", string(p.ID), "session_id", string(sid))
+		return nil
+	}
+	if err := c.sessions.Close(sid); err != nil {
+		return fmt.Errorf("wave close: %w", err)
+	}
+	c.log.Info("wave participant closed", "participant", string(p.ID), "session_id", string(sid))
+	return nil
+}
+
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────
 //
 // internal/wave says WHO must be told and ABOUT WHAT. It says nothing about

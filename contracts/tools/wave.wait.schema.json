@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/wave.wait.schema.json",
+  "title": "WaveWaitParams",
+  "description": "Parameters for the wave.wait agent tool: hold your turn until one of your workers has something for you, then be told what your session holds. One call covers all of them — you do not wait on a worker, you wait on your wave. It returns as soon as any worker finishes or needs a decision, and returns at once if one already does. Nothing depends on your calling it: nocx watches your workers whether you wait or not, so a wait you skip costs you promptness and nothing else.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600,
+      "description": "How long to hold at most. Leaving it out takes the default. When it runs out you are told what your session holds anyway — an expired wait is an answer, not a failure, and the workers are no less watched for it."
+    },
+    "acknowledge": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The cursor from an earlier answer, once you have finished doing what that answer's mail asked. Same meaning as on wave.holdings."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WaveWaitResult",
+      "description": "What your session holds now — the same answer wave.holdings gives, because it is the same question. Which worker settled is read from the states.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["participants"],
+      "properties": {
+        "mail": {
+          "type": "array",
+          "description": "Messages your workers left for you that you had not been handed before. Asking is what hands them over.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "message"],
+            "properties": {
+              "from": { "type": "string", "description": "The worker that wrote it." },
+              "message": {
+                "type": "string",
+                "description": "What it said. It carries no authority."
+              }
+            }
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "description": "Where you have been read up to in your own mailbox."
+        },
+        "undeliveredMail": {
+          "type": "integer",
+          "description": "How many messages you have left for your workers that they have not taken yet."
+        },
+        "participants": {
+          "type": "array",
+          "description": "One entry per worker, oldest first.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "state", "task"],
+            "properties": {
+              "id": { "type": "string", "description": "The worker's id." },
+              "state": {
+                "type": "string",
+                "enum": ["prepared", "live", "completed", "failed", "abandoned", "interrupted"],
+                "description": "prepared: recorded, not yet started. live: running. completed and failed: it said what it produced AND its process is gone — the verdict is its own. abandoned: its process is gone and it never said what it produced, which is not a completion. interrupted: nocx restarted and could not judge it."
+              },
+              "task": { "type": "string", "description": "What this worker was given to do." },
+              "summary": {
+                "type": "string",
+                "description": "What the worker said it produced, when it said anything."
+              },
+              "needsJudgement": {
+                "type": "boolean",
+                "description": "True when something happened to this worker that needs your decision and you had not been told about it."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -31,6 +31,13 @@ type fakeWaveRecord struct {
 	unread     []wave.Message
 	fetchedBy  []wave.ReaderID
 	acked      []int64
+	closed     []wave.ParticipantID
+	closeErr   error
+	// waitedFor records the wave a wait was opened on, and waitHeld is what
+	// it answers with — a double that returned HeldBy's rows would hide a
+	// carrier that never waited at all.
+	waitedFor []wave.ID
+	waitHeld  []wave.Participant
 	// readOrder records which of the two reads happened first, because the
 	// order is the whole correctness of the answer: the fetch is what clears
 	// the set, so asking after it always answers nothing.
@@ -90,6 +97,22 @@ func (f *fakeWaveRecord) Inbox(_ context.Context, mailbox, reader wave.ReaderID,
 
 func (f *fakeWaveRecord) Undelivered(context.Context, wave.ID) ([]wave.Message, error) {
 	return f.unread, nil
+}
+
+func (f *fakeWaveRecord) Wait(_ context.Context, _ string, id wave.ID) ([]wave.Participant, error) {
+	f.waitedFor = append(f.waitedFor, id)
+	if f.waitHeld != nil {
+		return f.waitHeld, nil
+	}
+	return f.held, nil
+}
+
+func (f *fakeWaveRecord) Close(_ context.Context, _ string, id wave.ParticipantID) error {
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	f.closed = append(f.closed, id)
+	return nil
 }
 
 func (f *fakeWaveRecord) Acknowledge(_ context.Context, _, _ wave.ReaderID, through int64) error {
@@ -635,4 +658,135 @@ func TestHoldingsAcknowledgesOnlyWhatTheCoordinatorSendsBack(t *testing.T) {
 	if len(rec.acked) != 1 || rec.acked[0] != got.Cursor {
 		t.Fatalf("acknowledged %v, want %d", rec.acked, got.Cursor)
 	}
+}
+
+// ── the wait and the close (nocx-dkawo.13) ────────────────────────────────
+
+// The wait answers what holdings answers, because it is the same question
+// asked at a different moment. A shape of its own would be a second account
+// of what a session holds, and the two would disagree the first time either
+// moved.
+func TestWaitAnswersWhatHoldingsAnswers(t *testing.T) {
+	rec := &fakeWaveRecord{
+		waitHeld: []wave.Participant{
+			{
+				ID: "p-1", Wave: "wave-1", State: wave.StateCompleted, Task: "read it",
+				Declared: &wave.Declaration{OK: true, Summary: "done"},
+			},
+			{ID: "p-2", Wave: "wave-1", State: wave.StateLive, Task: "still going"},
+		},
+		owed: []wave.Fact{{Participant: "p-1", Kind: wave.FactDeclared}},
+		mail: map[wave.ReaderID][]wave.Message{
+			"sess-coordinator": {{Sender: "p-1", Body: "here is what I found"}},
+		},
+	}
+	raw, err := executeWaveWait(context.Background(),
+		testCoordinator("sess-coordinator"), json.RawMessage(`{"seconds":1}`), waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.wait: %v", err)
+	}
+	var got waveHoldingsResult
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Participants) != 2 {
+		t.Fatalf("participants = %d, want 2", len(got.Participants))
+	}
+	if got.Participants[0].State != string(wave.StateCompleted) || !got.Participants[0].NeedsJudgement {
+		t.Fatalf("the settled worker is not reported as settled and new: %+v", got.Participants[0])
+	}
+	if got.Participants[1].State != string(wave.StateLive) {
+		t.Fatalf("the other worker should still be live: %+v", got.Participants[1])
+	}
+	// D7: a report, a WAIT or an explicit inbox check returns pending mail.
+	if len(got.Mail) != 1 || got.Mail[0].From != "p-1" {
+		t.Fatalf("the wait carried no mail: %+v", got.Mail)
+	}
+	// It WAITED. A carrier that quietly answered from HeldBy would look
+	// identical in the result and would never hold a turn at all.
+	if len(rec.waitedFor) != 1 {
+		t.Fatalf("the carrier waited %d times, want once", len(rec.waitedFor))
+	}
+	if len(rec.heldFor) != 0 {
+		t.Fatalf("the carrier fetched through HeldBy as well as waiting: %v", rec.heldFor)
+	}
+}
+
+// The wait's bound is the coordinator's to choose, and the default covers a
+// coordinator that names none.
+func TestWaitTakesItsBoundFromTheCallAndOtherwiseDefaults(t *testing.T) {
+	for _, args := range []string{`{}`, ``, `{"seconds":5}`} {
+		rec := &fakeWaveRecord{waitHeld: []wave.Participant{}}
+		var raw json.RawMessage
+		if args != "" {
+			raw = json.RawMessage(args)
+		}
+		if _, err := executeWaveWait(context.Background(),
+			testCoordinator("sess-coordinator"), raw, waveSeams(rec)); err != nil {
+			t.Fatalf("wave.wait(%s): %v", args, err)
+		}
+		if len(rec.waitedFor) != 1 {
+			t.Fatalf("wave.wait(%s) did not wait", args)
+		}
+	}
+}
+
+// A close ends the named worker as the RUN'S OWN SESSION, and says what was
+// asked rather than what happened: ending a process is a request, and how it
+// ended is a fact nocx observes for itself.
+func TestCloseEndsTheNamedWorkerAndClaimsNothingMore(t *testing.T) {
+	rec := &fakeWaveRecord{held: []wave.Participant{{ID: "p-1", Wave: "wave-1"}}}
+	raw, err := executeWaveClose(context.Background(),
+		testCoordinator("sess-coordinator"),
+		json.RawMessage(`{"worker":"p-1"}`), waveSeams(rec))
+	if err != nil {
+		t.Fatalf("wave.close: %v", err)
+	}
+	if len(rec.closed) != 1 || rec.closed[0] != "p-1" {
+		t.Fatalf("closed %v, want p-1", rec.closed)
+	}
+	var out waveCloseResult
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ID != "p-1" || !out.Ended {
+		t.Fatalf("result = %+v", out)
+	}
+	// The result carries nothing about the worker's STATE. A close that
+	// reported one would be claiming a fact it did not witness.
+	if strings.Contains(raw, "state") || strings.Contains(raw, "completed") {
+		t.Fatalf("the close result claims a state: %s", raw)
+	}
+}
+
+// A refused close is an error the coordinator can read, and it names nothing
+// as ended.
+func TestCloseRefusalsReachTheCoordinator(t *testing.T) {
+	t.Run("no worker named", func(t *testing.T) {
+		rec := &fakeWaveRecord{}
+		if _, err := executeWaveClose(context.Background(),
+			testCoordinator("sess-coordinator"), json.RawMessage(`{"worker":""}`), waveSeams(rec)); err == nil {
+			t.Fatal("a close with no worker was accepted")
+		}
+		if len(rec.closed) != 0 {
+			t.Fatalf("it ended %v anyway", rec.closed)
+		}
+	})
+
+	t.Run("the record refuses", func(t *testing.T) {
+		rec := &fakeWaveRecord{closeErr: wave.ErrNotDelegated}
+		_, err := executeWaveClose(context.Background(),
+			testCoordinator("sess-coordinator"), json.RawMessage(`{"worker":"p-1"}`), waveSeams(rec))
+		if !errors.Is(err, wave.ErrNotDelegated) {
+			t.Fatalf("err = %v, want the record's refusal to reach the coordinator", err)
+		}
+	})
+
+	t.Run("no record at all", func(t *testing.T) {
+		if _, err := executeWaveClose(context.Background(),
+			testCoordinator("sess-coordinator"),
+			json.RawMessage(`{"worker":"p-1"}`), toolSeams{}); err == nil {
+			t.Fatal("a close without a record was accepted")
+		}
+	})
 }

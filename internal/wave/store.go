@@ -65,6 +65,13 @@ type Store interface {
 	// participant.
 	PutDelegation(ctx context.Context, d Delegation) error
 
+	// Delegation reads back the controller session's authority over a
+	// participant. It is a READ and not a check: what an effect permits is
+	// this package's semantics (Delegation.Permits), and a store that
+	// answered "may this session close that worker" would be a second place
+	// authority is decided.
+	Delegation(ctx context.Context, id ParticipantID) (Delegation, error)
+
 	// Participant reads one back.
 	Participant(ctx context.Context, id ParticipantID) (Participant, error)
 
@@ -159,6 +166,15 @@ type Enrolments interface {
 	// Withdraw undoes an arrived enrolment. It is the compensation for a
 	// failure after step 4.
 	Withdraw(ctx context.Context, p ParticipantID) error
+}
+
+// Closer ends a participant's process. It is the far end of Close, and it is
+// deliberately narrow: what it is handed is a participant the record has
+// already decided may be ended, and what it does is end the session behind it.
+// It writes no state and reports no verdict — the exit it causes arrives by
+// the ordinary path.
+type Closer interface {
+	Close(ctx context.Context, p Participant) error
 }
 
 // Supervisor is the watch that outlives the coordinator's turn. It is attached

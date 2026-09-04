@@ -765,6 +765,54 @@ var declarations = []Declaration{
 		Params:           "wave.say.schema.json",
 		Narrow:           narrowWave,
 	},
+	{
+		Name:        "wave.wait",
+		Description: "Hold your turn until one of your workers has something for you, then be told what your session holds. One call covers all of them: you wait on your wave, not on a worker. Nothing depends on your calling it — nocx watches your workers whether you wait or not — so a wait you skip costs you promptness and nothing else.",
+		// OBSERVE, for session.wait's reason and not by analogy with it:
+		// waiting exercises no authority of its own. It starts nothing, ends
+		// nothing and names nothing outside the session the grant already
+		// named; what it does is answer the question wave.holdings answers,
+		// later.
+		Effect:      []content.Effect{content.EffectObserve},
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		// ABOVE THE WAIT'S OWN CEILING, not below it and not absent. The
+		// wait carries its own bound — `seconds`, at most 600 — and a
+		// declaration deadline under that would end the call while the wave
+		// was still inside the interval the caller asked for, which would
+		// look to a coordinator exactly like a wave that failed. session.wait
+		// gets to declare none because it runs in the renderer under the
+		// transport's run lease; an in-Go tool has no such second bound, so
+		// this one states a ceiling with a minute of slack over the largest
+		// wait anybody can ask for.
+		Deadline:         11 * time.Minute,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "wave.wait.schema.json",
+		Narrow:           narrowWave,
+	},
+	{
+		Name:        "wave.close",
+		Description: "End one of your workers. It stops the worker's process, so whatever it had not finished is not finished; reach for it when the work is done or is no longer wanted, never as a retry. You can only close workers your own session started.",
+		// MUTATE-DESTRUCTIVE, and it is not session.wait's `stop`. That one
+		// withdraws an authority already in flight — a command the person
+		// authorized, which stopping can only reduce. This ends a PROCESS
+		// THE PERSON MAY NEVER HAVE WATCHED START, whose work is lost with
+		// it and does not come back, and a person who wants to be asked
+		// before an agent kills things has a row to say so in.
+		Effect:           []content.Effect{content.EffectMutateDestructive},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 2 << 10, Truncation: TruncationDropTail},
+		Deadline:         10 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "wave.close.schema.json",
+		Narrow:           narrowWave,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

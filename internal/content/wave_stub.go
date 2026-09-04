@@ -71,6 +71,10 @@ func (w *waveStub) PutDelegation(context.Context, wave.Delegation) error {
 	return w.errNoRecord("put delegation")
 }
 
+func (w *waveStub) Delegation(context.Context, wave.ParticipantID) (wave.Delegation, error) {
+	return wave.Delegation{}, w.errNoRecord("read a delegation")
+}
+
 func (w *waveStub) Participant(context.Context, wave.ParticipantID) (wave.Participant, error) {
 	return wave.Participant{}, w.errNoRecord("read participant")
 }

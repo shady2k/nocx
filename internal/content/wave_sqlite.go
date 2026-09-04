@@ -221,6 +221,51 @@ const participantColumns = `id, wave_id, role, state, task, registered_at,
 	backend_instance, session_id, epoch, lane, attempt, output_offset,
 	declared_ok, declared_summary, declared_at, exit_cause, exit_code, exited_at`
 
+// Delegation reads back what a controller session may do to a participant.
+//
+// A participant with no delegation row is not an empty answer: it is
+// ADDRESSABLE AND NOT CONTROLLABLE, which is a real state — a registration
+// that failed at step 5, or a record whose delegation was revoked — and
+// returning a zero delegation would let a caller read "no effects" as "no
+// row" and refuse for the wrong reason. It refuses by name instead.
+func (s *sqliteContent) Delegation(ctx context.Context, id wave.ParticipantID) (wave.Delegation, error) {
+	out := wave.Delegation{Participant: id}
+	var epoch int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT controller_session, epoch, created_by_run_id, state
+		   FROM wave_delegations WHERE participant_id = ?`, string(id)).
+		Scan(&out.ControllerSession, &epoch, &out.CreatedByRunID, &out.State)
+	if errors.Is(err, sql.ErrNoRows) {
+		return wave.Delegation{}, fmt.Errorf("content: no delegation over participant %q: %w",
+			id, wave.ErrNotDelegated)
+	}
+	if err != nil {
+		return wave.Delegation{}, fmt.Errorf("content: delegation over %q: %w", id, err)
+	}
+	if epoch < 0 {
+		return wave.Delegation{}, fmt.Errorf("content: delegation over %q: epoch %d is negative", id, epoch)
+	}
+	out.Epoch = uint64(epoch)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT effect FROM wave_delegation_effects WHERE participant_id = ? ORDER BY effect`,
+		string(id))
+	if err != nil {
+		return wave.Delegation{}, fmt.Errorf("content: delegation effects of %q: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var e wave.Effect
+		if err := rows.Scan(&e); err != nil {
+			return wave.Delegation{}, fmt.Errorf("content: delegation effects of %q: %w", id, err)
+		}
+		out.Effects = append(out.Effects, e)
+	}
+	if err := rows.Err(); err != nil {
+		return wave.Delegation{}, fmt.Errorf("content: delegation effects of %q: %w", id, err)
+	}
+	return out, nil
+}
+
 func (s *sqliteContent) Participant(ctx context.Context, id wave.ParticipantID) (wave.Participant, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+participantColumns+` FROM wave_participants WHERE id = ?`, string(id))

@@ -59,6 +59,11 @@ type Registrar struct {
 	newID    func() ParticipantID
 	now      func() time.Time
 
+	// closer ends a participant. It is a seam because ending one means
+	// closing a SESSION, and what a session is belongs to the composition
+	// root; this package knows only that a participant has one.
+	closer Closer
+
 	// attention is the undispatched fact set and its two routes out
 	// (nocx-dkawo.3). It is never nil: an unwired one still records every
 	// fact and says at Error that it has nothing to reach anyone with, which
@@ -81,6 +86,11 @@ func WithBound(n int) Option { return func(r *Registrar) { r.bound = n } }
 func WithEnrolmentDeadline(d time.Duration) Option {
 	return func(r *Registrar) { r.deadline = d }
 }
+
+// WithCloser wires the seam that ends a participant. Without it Close
+// refuses and says so, rather than reporting a worker ended that is still
+// running.
+func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 
 // WithBackstop replaces the undispatched fact set. The composition root
 // supplies one wired to the pane typist and to the notification pipeline; the
@@ -620,4 +630,122 @@ func (r *Registrar) Acknowledge(ctx context.Context, mailbox, reader ReaderID, t
 // not taken. It is reported as itself and never as a delivery.
 func (r *Registrar) Undelivered(ctx context.Context, wave ID) ([]Message, error) {
 	return r.store.Undelivered(ctx, wave)
+}
+
+// ── waiting, and ending (nocx-dkawo.13) ───────────────────────────────────
+
+// Wait blocks until something about this session's participants changes, then
+// answers exactly what HeldBy answers.
+//
+// It is a CONVENIENCE OVER THE RECORD and nothing rests on it (§7.2). The
+// backend watches the workers whether or not this is ever called; a
+// coordinator that never waits loses its own promptness and nothing else.
+// That is the whole difference from the blocking call and then the lease this
+// design started with, and it has to stay true — a wait anything depended on
+// would be the lease back under a friendlier name.
+//
+// It answers with HeldBy's own answer rather than a delta of its own. "Which
+// one settled" is read from the states, and a second shape for it would be a
+// second account of what a session holds.
+//
+// The channel is taken BEFORE the first read, so a fact admitted between the
+// read and the select has already closed the channel this is holding. Without
+// that order the wait would miss exactly the event it was opened for.
+func (r *Registrar) Wait(ctx context.Context, coordinatorSession string, wave ID) ([]Participant, error) {
+	if wave == "" {
+		wave = ID(coordinatorSession)
+	}
+	for {
+		changed := r.attention.Changed(wave)
+		// Owed is read BEFORE the fetch, because the fetch is what clears
+		// it: asking afterwards would always answer nothing, and the wait
+		// would sit through the one thing it exists to catch.
+		owed := r.attention.Owed(wave)
+		held, err := r.HeldBy(ctx, coordinatorSession)
+		if err != nil {
+			return nil, err
+		}
+		// Nothing to wait FOR is not a reason to wait: a session that holds
+		// nothing, one whose worker has settled, or one that already owes
+		// judgement is answered at once. Blocking on the last of those would
+		// be two mechanisms disagreeing about one moment — the routing table
+		// has already decided the coordinator is needed and woken it.
+		if answerable(held, owed) {
+			return held, nil
+		}
+		select {
+		case <-changed:
+			// Round again rather than answering from here: what closed the
+			// channel is one fact, and the caller asked what its session
+			// HOLDS, which is a read of the record and not of that fact.
+		case <-ctx.Done():
+			// An expired wait is an ANSWER and not a failure. The
+			// coordinator asked to be told promptly and was not; what it
+			// holds is still true, and returning it is more useful than an
+			// error it would have to translate back into the same read.
+			return held, nil
+		}
+	}
+}
+
+// answerable reports whether the wait has something to answer with.
+//
+// Three ways, and the third is the one that is easy to leave out. A session
+// that holds nothing has nothing to wait for. A participant that has SETTLED
+// is what the criterion names. And a fact that needs JUDGEMENT is a
+// coordinator that the routing table has already decided is needed — a worker
+// that reported failure and is still running is exactly that, and a wait that
+// sat through it while the wake fired would be two mechanisms disagreeing
+// about one moment.
+func answerable(held []Participant, owed int) bool {
+	if len(held) == 0 || owed > 0 {
+		return true
+	}
+	for _, p := range held {
+		if p.State.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
+// Close ends a participant, and it is the first operation that reads a
+// DELEGATION rather than membership.
+//
+// Membership makes a worker addressable — that is what mail is checked
+// against — and delegation makes it controllable. Until this, EffectClose sat
+// in DefaultBundle and nothing had ever consulted it, which made "membership
+// is not delegation" a comment rather than a mechanism. A human takeover
+// suspends send-input and leaves close alone, and DelegationState.Permits
+// already says so; this is where that stops being theoretical.
+//
+// It writes NO state. Ending the session produces a process exit, and that
+// exit reaches the record by the ordinary path and reduces the participant the
+// way any exit does. A close that also terminalized would be a second author
+// of a participant's state, and the two would disagree the first time a
+// worker declared between the kill and the write.
+func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id ParticipantID) error {
+	if r.closer == nil {
+		return errors.New("wave: this backend cannot end a participant")
+	}
+	del, err := r.store.Delegation(ctx, id)
+	if err != nil {
+		return err
+	}
+	if del.ControllerSession != coordinatorSession {
+		return fmt.Errorf("wave: participant %q is held by another session: %w", id, ErrNotDelegated)
+	}
+	if !del.Permits(EffectClose) {
+		return fmt.Errorf("wave: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+	}
+	p, err := r.store.Participant(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p.State.Terminal() {
+		// Already finished. Not an error: a coordinator tidying up should
+		// not have to have raced the record to be allowed to.
+		return nil
+	}
+	return r.closer.Close(ctx, p)
 }

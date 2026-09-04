@@ -450,9 +450,18 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// keyboard, cannot answer a modal, and must go on working while a
 		// person helps their own worker past a prompt.
 		"wave.say": {content.EffectObserve},
+		// OBSERVE for the wait, for session.wait's reason: waiting starts
+		// nothing, ends nothing, and names nothing outside the session the
+		// grant already named.
+		"wave.wait": {content.EffectObserve},
+		// MUTATE-DESTRUCTIVE for the close, and it is NOT session.wait's
+		// `stop`. That one withdraws an authority already in flight; this
+		// ends a process the person may never have watched start, whose work
+		// is lost with it.
+		"wave.close": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 25 {
-		t.Fatalf("declaration count = %d, want 25", len(declarations))
+	if len(declarations) != 27 {
+		t.Fatalf("declaration count = %d, want 27", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -571,6 +580,8 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.delete.schema.json":    skillsReadSchema,
 		"wave.holdings.schema.json":    waveHoldingsSchema,
 		"wave.say.schema.json":         waveSaySchema,
+		"wave.wait.schema.json":        waveWaitSchema,
+		"wave.close.schema.json":       waveCloseSchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
@@ -622,16 +633,23 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// wave.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say", "wave.wait"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
 	// The session.run row's set includes mutate-destructive + session. A grant
-	// carrying exactly that effect and kind offers exactly session.run; an observe
-	// grant also offers it because observe is another reachable member.
+	// carrying exactly that effect and kind offers exactly session.run and
+	// wave.close; an observe grant also offers session.run because observe is
+	// another reachable member, and does NOT offer wave.close, which declares
+	// mutate-destructive alone. That asymmetry is the point: ending a worker
+	// is not something a run permitted only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	if got := reg.ForGrant(runGrant); !containsName(got, "session.run") || len(got) != 1 {
-		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [session.run]", toolNames(got))
+	wantDestructive := []string{"session.run", "wave.close"}
+	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
+		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
+	}
+	if containsName(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)), "wave.close") {
+		t.Fatalf("an observe grant offers wave.close; ending a worker is not looking at one")
 	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
@@ -721,6 +739,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.delete.schema.json":    skillsReadSchema,
 		"wave.holdings.schema.json":    waveHoldingsSchema,
 		"wave.say.schema.json":         waveSaySchema,
+		"wave.wait.schema.json":        waveWaitSchema,
+		"wave.close.schema.json":       waveCloseSchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
 	}))
 	if err != nil {
@@ -1395,6 +1415,32 @@ const waveHoldingsSchema = `{
     "additionalProperties": false,
     "required": ["participants"],
     "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const waveWaitSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {"seconds": {"type": "integer"}, "acknowledge": {"type": "integer"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["participants"],
+    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const waveCloseSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker"],
+  "properties": {"worker": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "ended"],
+    "properties": {"id": {"type": "string"}, "ended": {"type": "boolean"}}
   }}
 }`
 

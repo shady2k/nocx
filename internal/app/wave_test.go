@@ -155,6 +155,11 @@ func newWaveStand(t *testing.T, opts ...wave.Option) *waveStand {
 			// deliberately withholds it; the number bounds the withheld case
 			// and decides nothing about the others.
 			wave.WithEnrolmentDeadline(2 * time.Second),
+			// The product's closer, over the real registry: a close here has
+			// to end a real session and let the exit reach the record by the
+			// ordinary path, which is the only thing that makes "close
+			// writes no state" checkable.
+			wave.WithCloser(&waveCloser{sessions: reg, log: logger}),
 		}, opts...)...,
 	)
 	report.declare = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, d wave.Declaration) error {

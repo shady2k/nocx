@@ -12,6 +12,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -738,5 +739,114 @@ func TestTheEscalationSaysHowManyOthersAreWaiting(t *testing.T) {
 		if !strings.Contains(body, tc.says) {
 			t.Fatalf("body = %q, want it to say %q", body, tc.says)
 		}
+	}
+}
+
+// ── the epic's sentence, through the real seams (nocx-dkawo.13) ───────────
+
+// ONE WAIT ON THREE WORKERS, and a close that ends the rest.
+//
+// This is the shape the epic's DONE WHEN names — "creates three workers,
+// gives each a task, waits on all three with ONE wait that returns when the
+// first settles, reads what each produced, and closes them" — driven through
+// real sessions in real panes. What is missing from it is a MODEL: the calls
+// a coordinator would make are asserted where they live, and this is the
+// sequence they drive.
+func TestOneWaitReturnsWhenTheFirstOfThreeSettlesAndACloseEndsTheRest(t *testing.T) {
+	ctx := context.Background()
+	w := newWakeStand(t)
+	w.driveTo(t, 11000, agentdriver.StateFreeText)
+
+	workers := []wave.Participant{
+		w.register(t, "read AGENTS.md"),
+		w.register(t, "read the architecture"),
+		w.register(t, "read the vision"),
+	}
+
+	// One wait, on the wave and not on a worker.
+	waited := make(chan []wave.Participant, 1)
+	go func() {
+		held, err := w.record.Wait(ctx, string(w.coordinator), w.waveID)
+		if err != nil {
+			t.Errorf("wait: %v", err)
+		}
+		waited <- held
+	}()
+
+	finishWorker(t, w, workers[0])
+
+	var held []wave.Participant
+	select {
+	case held = <-waited:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the wait never returned, so the first settling reached nobody")
+	}
+	var settled, live int
+	for _, p := range held {
+		if p.State.Terminal() {
+			settled++
+		} else {
+			live++
+		}
+	}
+	if settled != 1 || live != 2 {
+		t.Fatalf("the wait returned %d settled and %d live, want 1 and 2", settled, live)
+	}
+
+	// And it read what that one produced.
+	for _, p := range held {
+		if p.ID != workers[0].ID {
+			continue
+		}
+		if p.State != wave.StateCompleted {
+			t.Fatalf("the settled worker is %q, want completed", p.State)
+		}
+		if p.Declared == nil || p.Declared.Summary != "done" {
+			t.Fatalf("the coordinator was not told what it produced: %+v", p.Declared)
+		}
+	}
+
+	// Now close the other two. The close ends the session and writes no
+	// state; what terminalizes them is the exit that follows, by the same
+	// path any exit takes.
+	for _, p := range workers[1:] {
+		if err := w.record.Close(ctx, string(w.coordinator), p.ID); err != nil {
+			t.Fatalf("close %s: %v", p.ID, err)
+		}
+	}
+	for _, p := range workers[1:] {
+		waittest.WaitFor(t, "the closed worker's exit to reach the record", func() bool {
+			stored, err := w.db.Waves().Participant(ctx, p.ID)
+			return err == nil && stored.State.Terminal()
+		})
+		stored, err := w.db.Waves().Participant(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		// ABANDONED and not completed: the worker was ended and never said
+		// what it produced, which is exactly what the record should say
+		// about a worker somebody stopped.
+		if stored.State != wave.StateAbandoned {
+			t.Fatalf("a closed worker is %q, want abandoned", stored.State)
+		}
+	}
+	if _, err := w.reg.Get(session.ID(workers[1].Liveness.SessionID)); err == nil {
+		t.Fatalf("the closed worker's session is still in the registry")
+	}
+}
+
+// A coordinator cannot close somebody else's worker, and the refusal comes
+// from the DELEGATION rather than from anything the caller said.
+func TestACoordinatorCannotCloseAWorkerItDoesNotHold(t *testing.T) {
+	ctx := context.Background()
+	w := newWakeStand(t)
+	w.driveTo(t, 11000, agentdriver.StateFreeText)
+	p := w.register(t, "belongs to this coordinator")
+
+	if err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, wave.ErrNotDelegated) {
+		t.Fatalf("close by a stranger = %v, want ErrNotDelegated", err)
+	}
+	if _, err := w.reg.Get(session.ID(p.Liveness.SessionID)); err != nil {
+		t.Fatalf("a refused close ended the worker's session anyway: %v", err)
 	}
 }

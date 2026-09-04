@@ -192,6 +192,18 @@ func (s Stats) Facts() int { return s.Routine + s.Judgement }
 type waveState struct {
 	// owed is how many facts of this wave are undispatched.
 	owed int
+	// changed is closed when ANY fact about this wave is admitted — routine
+	// or judgement — and replaced with a fresh channel. A waiter that holds
+	// one cannot miss an entry that happened between two waits, because what
+	// it holds is the channel of the moment it started waiting.
+	//
+	// ROUTINE FACTS SIGNAL TOO, and that is the whole difference between
+	// this and the wake. The routing table decides whether to spend a
+	// coordinator's TURN, and a routine completion is not worth one; a wait
+	// is a turn ALREADY SPENT, and "the first of three settles" is exactly
+	// the routine case. A wait that woke only on judgement facts would sit
+	// through the event it was opened for.
+	changed chan struct{}
 	// woken records that a wake was DELIVERED for this wave and the
 	// coordinator has not fetched since. A REFUSED wake deliberately does not
 	// set it: a refusal told the coordinator nothing, and the next fact is a
@@ -276,6 +288,9 @@ func NewBackstop(lg log.Logger, w Waker, e Escalation, opts ...BackstopOption) *
 func (b *Backstop) Routine(f Fact) {
 	b.mu.Lock()
 	b.stats.Routine++
+	// A routine fact wakes nobody and still SETTLES something, so anything
+	// waiting on this wave is told.
+	b.announce(f.Wave)
 	b.mu.Unlock()
 	b.log.Debug("wave: a fact was recorded and nobody was woken",
 		"participant", string(f.Participant), "wave", string(f.Wave),
@@ -307,6 +322,7 @@ func (b *Backstop) Entered(ctx context.Context, f Fact) {
 	b.open[key] = &f
 	b.cancel[key] = b.alarms.After(b.deadline, func() { b.due(key) })
 	b.stats.Judgement++
+	b.announce(f.Wave)
 	ws := b.waveOf(f.Wave)
 	ws.owed++
 	// One wake per wave per undispatched run. The coordinator's answer to a
@@ -351,10 +367,41 @@ func (b *Backstop) Entered(ctx context.Context, f Fact) {
 func (b *Backstop) waveOf(id ID) *waveState {
 	ws, ok := b.waves[id]
 	if !ok {
-		ws = &waveState{}
+		ws = &waveState{changed: make(chan struct{})}
 		b.waves[id] = ws
 	}
 	return ws
+}
+
+// Changed returns the channel that closes when the next fact about this wave
+// is admitted. A caller takes it BEFORE reading the record and selects on it
+// afterwards, which is what makes the gap between the two harmless: a fact
+// admitted in that gap has already closed the channel the caller holds.
+func (b *Backstop) Changed(id ID) <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.waveOf(id).changed
+}
+
+// Owed is how many facts of this wave are undispatched. It is read BEFORE a
+// fetch and never after: the fetch is what clears them, so asking afterwards
+// always answers nothing.
+func (b *Backstop) Owed(id ID) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ws, ok := b.waves[id]
+	if !ok {
+		return 0
+	}
+	return ws.owed
+}
+
+// announce wakes everything waiting on this wave and arms the next wait. The
+// caller holds the lock.
+func (b *Backstop) announce(id ID) {
+	ws := b.waveOf(id)
+	close(ws.changed)
+	ws.changed = make(chan struct{})
 }
 
 // attempt tries to start the coordinator's turn and reports honestly.
@@ -495,7 +542,14 @@ func (b *Backstop) Dispatched(ids ...ParticipantID) {
 				// may wake the coordinator again, and it may raise a new
 				// card. Coalescing suppresses a REPEAT of a situation the
 				// person still has in front of them, never the next one.
-				delete(b.waves, wave)
+				// The state is RESET rather than deleted: deleting it
+				// would drop the channel every current waiter is holding,
+				// and waveOf would mint a fresh one that the next announce
+				// closes — so a waiter that started before the fetch would
+				// never be woken again.
+				ws.woken = false
+				ws.escalated = false
+				ws.owed = 0
 				// And the number §12 judges the design by is written down at
 				// the moment a wave settles, not only when something goes
 				// wrong: an escalated fraction read only off escalation lines

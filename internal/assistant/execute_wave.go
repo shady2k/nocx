@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/wave"
@@ -44,6 +45,12 @@ type WaveRecord interface {
 	// of everything through a sequence. It is what stops a retry of one
 	// response committing the same spawn twice.
 	Acknowledge(ctx context.Context, mailbox, reader wave.ReaderID, through int64) error
+	// Wait blocks until this session has something to be told, then answers
+	// what HeldBy answers. It dispatches, exactly as HeldBy does.
+	Wait(ctx context.Context, coordinatorSession string, id wave.ID) ([]wave.Participant, error)
+	// Close ends a participant. It writes no state: the exit it causes
+	// reaches the record by the ordinary path.
+	Close(ctx context.Context, coordinatorSession string, id wave.ParticipantID) error
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -106,6 +113,31 @@ type waveHoldingsParams struct {
 	Acknowledge int64 `json:"acknowledge,omitempty"`
 }
 
+// waveWaitParams is holdings' parameters plus a bound. It is a separate
+// struct and not holdings' own because the two tools have different costs and
+// a person reading the declarations should see that; what they SHARE is the
+// answer, and that is one struct.
+type waveWaitParams struct {
+	Seconds     int   `json:"seconds,omitempty"`
+	Acknowledge int64 `json:"acknowledge,omitempty"`
+}
+
+// defaultWaveWait is how long a wait holds when the coordinator names no
+// bound. It is a bound on a TURN the coordinator chose to spend, not on the
+// supervision — the record watches the workers regardless — so it is generous
+// enough to cover an ordinary piece of work and short enough that a
+// coordinator is not parked past the point where a person would look.
+const defaultWaveWait = 120 * time.Second
+
+type waveCloseParams struct {
+	Worker string `json:"worker"`
+}
+
+type waveCloseResult struct {
+	ID    string `json:"id"`
+	Ended bool   `json:"ended"`
+}
+
 type waveSayParams struct {
 	Worker  string `json:"worker"`
 	Message string `json:"message"`
@@ -160,6 +192,63 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, args js
 			return "", fmt.Errorf("wave.holdings: %w", argErr)
 		}
 	}
+	return waveAnswer(ctx, "wave.holdings", coordinator, seams, p.Acknowledge, nil)
+}
+
+// executeWaveWait holds the coordinator's turn until its wave has something
+// to say, and then answers exactly what holdings answers.
+//
+// The two share one answer because they are one question asked at two
+// moments. A wait with a shape of its own would be a second account of what a
+// session holds, and the two would disagree the first time either moved.
+//
+// NOTHING RESTS ON IT (§7.2). The backend watches the workers whether this is
+// ever called or not; a coordinator that never waits loses its own promptness
+// and nothing else, which is the whole difference from the blocking call and
+// then the lease this design started with.
+func executeWaveWait(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := waveCoordinatorFrom(cap, "wave.wait")
+	if err != nil {
+		return "", err
+	}
+	if seams.waves == nil {
+		return "", errors.New("wave.wait: this backend keeps no wave record")
+	}
+	var p waveWaitParams
+	if len(args) > 0 {
+		if argErr := json.Unmarshal(args, &p); argErr != nil {
+			return "", fmt.Errorf("wave.wait: %w", argErr)
+		}
+	}
+	hold := defaultWaveWait
+	if p.Seconds > 0 {
+		hold = time.Duration(p.Seconds) * time.Second
+	}
+	return waveAnswer(ctx, "wave.wait", coordinator, seams, p.Acknowledge,
+		func(ctx context.Context, id wave.ID) ([]wave.Participant, error) {
+			// The bound is this call's own. An expired wait is an ANSWER,
+			// so the deadline is spent inside Wait and never surfaces as an
+			// error here.
+			waitCtx, cancel := context.WithTimeout(ctx, hold)
+			defer cancel()
+			return seams.waves.Wait(waitCtx, coordinator.Session(), id)
+		})
+}
+
+// waveAnswer builds the answer both calls give.
+//
+// fetch is how the participants are read: holdings reads them now, a wait
+// reads them when there is something to read. Everything after that — what is
+// new, the mail, the cursor, what nobody took — is identical, because it is
+// the same question.
+func waveAnswer(
+	ctx context.Context,
+	tool string,
+	coordinator *agenttools.WaveCoordinator,
+	seams toolSeams,
+	acknowledge int64,
+	fetch func(context.Context, wave.ID) ([]wave.Participant, error),
+) (string, error) {
 	// Read what is owed BEFORE the fetch, because the fetch is what clears
 	// it. The other order would answer this question with the record's state
 	// after it had been answered, which is always "nothing new".
@@ -167,9 +256,15 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, args js
 	for _, f := range seams.waves.Undispatched() {
 		owed[f.Participant] = true
 	}
-	held, err := seams.waves.HeldBy(ctx, coordinator.Session())
+	var held []wave.Participant
+	var err error
+	if fetch == nil {
+		held, err = seams.waves.HeldBy(ctx, coordinator.Session())
+	} else {
+		held, err = fetch(ctx, wave.ID(coordinator.Session()))
+	}
 	if err != nil {
-		return "", fmt.Errorf("wave.holdings: %w", err)
+		return "", fmt.Errorf("%s: %w", tool, err)
 	}
 	out := waveHoldingsResult{Participants: make([]waveParticipantResult, 0, len(held))}
 	for _, p := range held {
@@ -192,14 +287,14 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, args js
 	// PREVIOUS answer, and doing it after would let this call's own page
 	// slide under an acknowledgement the coordinator made about mail it has
 	// not seen yet.
-	if p.Acknowledge > 0 {
-		if ackErr := seams.waves.Acknowledge(ctx, box, box, p.Acknowledge); ackErr != nil {
-			return "", fmt.Errorf("wave.holdings: acknowledge: %w", ackErr)
+	if acknowledge > 0 {
+		if ackErr := seams.waves.Acknowledge(ctx, box, box, acknowledge); ackErr != nil {
+			return "", fmt.Errorf("%s: acknowledge: %w", tool, ackErr)
 		}
 	}
 	fetched, err := seams.waves.Inbox(ctx, box, box, 0)
 	if err != nil {
-		return "", fmt.Errorf("wave.holdings: mail: %w", err)
+		return "", fmt.Errorf("%s: mail: %w", tool, err)
 	}
 	for _, m := range fetched.Messages {
 		out.Mail = append(out.Mail, waveMailResult{From: string(m.Sender), Message: m.Body})
@@ -210,17 +305,47 @@ func executeWaveHoldings(ctx context.Context, cap agenttools.Capability, args js
 	// is the only place that difference is visible.
 	unread, err := seams.waves.Undelivered(ctx, waveOf(coordinator, held))
 	if err != nil {
-		return "", fmt.Errorf("wave.holdings: undelivered mail: %w", err)
+		return "", fmt.Errorf("%s: undelivered mail: %w", tool, err)
 	}
 	for _, m := range unread {
 		if m.Sender == box {
 			out.UndeliveredMail++
 		}
 	}
-
 	raw, err := json.Marshal(out)
 	if err != nil {
-		return "", fmt.Errorf("wave.holdings: result: %w", err)
+		return "", fmt.Errorf("%s: result: %w", tool, err)
+	}
+	return string(raw), nil
+}
+
+// executeWaveClose ends one worker.
+//
+// It answers what was ASKED of the worker and never that the worker has
+// finished: ending a process is a request, and how it ended is a fact nocx
+// observes for itself through the ordinary exit path. A result that claimed
+// the second would be the record's only claim it did not witness.
+func executeWaveClose(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := waveCoordinatorFrom(cap, "wave.close")
+	if err != nil {
+		return "", err
+	}
+	if seams.waves == nil {
+		return "", errors.New("wave.close: this backend keeps no wave record")
+	}
+	var p waveCloseParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("wave.close: %w", argErr)
+	}
+	if p.Worker == "" {
+		return "", errors.New("wave.close: name the worker to end")
+	}
+	if closeErr := seams.waves.Close(ctx, coordinator.Session(), wave.ParticipantID(p.Worker)); closeErr != nil {
+		return "", fmt.Errorf("wave.close: %w", closeErr)
+	}
+	raw, err := json.Marshal(waveCloseResult{ID: p.Worker, Ended: true})
+	if err != nil {
+		return "", fmt.Errorf("wave.close: result: %w", err)
 	}
 	return string(raw), nil
 }

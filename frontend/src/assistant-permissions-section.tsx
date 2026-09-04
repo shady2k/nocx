@@ -158,6 +158,34 @@ const ANSWER_TONE: Record<Decision, BadgeTone> = {
   refuse: 'neutral',
 }
 
+/**
+ * The control that widens an answer from nothing, named exactly as its button
+ * reads.
+ *
+ * It is written once because the page has to POINT at it — a Change panel that
+ * cannot offer Allowed says where that answer comes from — and a sentence
+ * naming the control by any other words points at something a person cannot
+ * find on the screen in front of them.
+ */
+const ALLOW_A_COMMAND = '+ Allow a command…'
+
+/**
+ * What each writing panel says about itself, and the ONE place either sentence
+ * is written.
+ *
+ * The allow one is said twice: over the box in its own panel, and over a
+ * standing answer that cannot be widened where it stands, which has to explain
+ * what can. Both are the same fact about the same gesture, so they are the
+ * same string — a second spelling of one concept is what AD-8 exists to
+ * prevent, and this page has paid for it twice already.
+ */
+const WRITER_CAPTION: Record<'allow' | 'refuse', string> = {
+  allow:
+    'Type a command you would rather not be asked about. nocx reads it — it is never run — and shows what allowing it would cover before anything is saved.',
+  refuse:
+    'Type a command the assistant should not run on its own. nocx reads it — it is never run — so the answer covers what the command does rather than the way it was typed.',
+}
+
 /** The classifier's closed feature vocabulary, in words. The wire declares the
  *  keys; this is the sentence a person reads for each. */
 const FEATURE_WORDS: Record<'writes-option-named-path', string> = {
@@ -273,6 +301,30 @@ function exactSelector(
  *  is in the list. */
 function ruleSubject(rule: PolicyRule): string {
   return selectorSubject(rule.selector)
+}
+
+/**
+ * Whether this standing answer could be turned into an Allowed at all.
+ *
+ * IT MIRRORS A BACKEND RULE AND DERIVES NOTHING. The gate is
+ * `content.validateInvocationRules`: a selector that covers more than one
+ * command line may only NARROW, and the single loose form that may widen —
+ * a command word — is only as narrow as the effect it was granted under, so it
+ * has to carry one. Both facts a person's answer turns on are on the wire, in
+ * the rule itself: which of the three selectors is set, and whether
+ * `grantedUnder` is there. Nothing here reads a command, maps a word to an
+ * effect, or reasons about what a call would do — that is the classifier's
+ * work and this page has never had it.
+ *
+ * It exists because the page was OFFERING AN ANSWER IT COULD NOT DELIVER
+ * (nocx-4yjwk.6): `Change → Allowed` on a hand-written refusal over a command
+ * word sent a permit, the gate turned it down, and the person got a red
+ * message that taught them nothing.
+ */
+function canBeAllowed(rule: PolicyRule): boolean {
+  if (rule.selector.hasFeature) return false
+  if (rule.selector.program) return rule.grantedUnder !== undefined
+  return true
 }
 
 /**
@@ -960,11 +1012,17 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
 
   function changePanel(answer: Answer) {
     const current = () => decisionOf(answer)
+    /** A ROW is not a rule and the rule gate says nothing about it: it is
+     *  written by `policy.set`, carries no selector, and answering one Allowed
+     *  is the only way to answer an open question. Only a standing answer is
+     *  asked. */
+    const widenable = () => answer.kind !== 'rule' || canBeAllowed(answer.rule)
+    const offered = () => ANSWER_ORDER.filter((d) => d !== 'permit' || widenable())
     return (
       <Stack>
         <Caption>{`This answer covers ${coverage(subjectOf(answer))}.`}</Caption>
         <ActionGroup ariaLabel={`Your answer for ${subjectOf(answer)}`}>
-          <For each={ANSWER_ORDER}>
+          <For each={offered()}>
             {(decision) => (
               <Button
                 variant={decision === current() ? 'primary' : 'default'}
@@ -984,6 +1042,16 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             )}
           </For>
         </ActionGroup>
+        {/* Where the widest answer is missing, why — and where it is given
+            instead. Saying nothing here would leave a person looking at two
+            answers where they remember three, which is the same failure as
+            offering a third that cannot be taken, one step quieter. */}
+        <Show when={!widenable()}>
+          <Caption>
+            {`“${ANSWER_LABEL.permit}” is not offered here: this answer speaks about more than the one command line it was written over, and that is an answer nocx only gives to a command it has read. “${ALLOW_A_COMMAND}”, at the foot of the page, is where that happens.`}
+          </Caption>
+          <Caption>{WRITER_CAPTION.allow}</Caption>
+        </Show>
         <Show when={answer.kind === 'row'}>
           <Section id="permissions-places" title="Where this applies" dense>
             <Show
@@ -1128,11 +1196,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   function commandWriter(mode: 'allow' | 'refuse') {
     return (
       <Stack>
-        <Caption>
-          {mode === 'allow'
-            ? 'Type a command you would rather not be asked about. nocx reads it — it is never run — and shows what allowing it would cover before anything is saved.'
-            : 'Type a command the assistant should not run on its own. nocx reads it — it is never run — so the answer covers what the command does rather than the way it was typed.'}
-        </Caption>
+        <Caption>{WRITER_CAPTION[mode]}</Caption>
         <TextField
           label="The command"
           value={typed()}
@@ -1311,7 +1375,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             + Write a refusal
           </Button>
           <Button variant="default" disabled={busy()} onClick={() => openWriter('allow')}>
-            + Allow a command…
+            {ALLOW_A_COMMAND}
           </Button>
         </ActionGroup>
       </Show>

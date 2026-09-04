@@ -218,38 +218,139 @@ under standing permission. The body stays available under "Inspect contents" —
 but no forced scroll and **no "I have verified this is safe" checkbox**, which
 would reinstate the impossible question in different words.
 
-## 7. Acquisition, which is now the small problem
+## 7. Acquisition: the agent does it, and the second surface goes away
 
-With content untrusted, the eight-file exact-byte review disappears and only
-mechanics remain. One GitHub adapter, resolved by code and never by a model:
-parse repo/ref/path, resolve the ref to a commit, enumerate `SKILL.md`
-candidates under bounds, show every candidate and let the person pick, fetch the
-selected file and its referenced support files from that pinned commit, record
-both the friendly source and the immutable identity.
+This section replaces an earlier answer, and the reversal is the point.
 
-An arbitrary page may be accepted but handled weakly: parse the HTML without
-executing it, look only at that page's links, recognise only shapes we already
-support, present candidates **with their origin transitions**, never ask a model
-which link is canonical, and never auto-select even when there is exactly one.
+`2026-09-03-installing-a-skill-by-url-design.md` §2 refused an agent-callable
+installer, and its reason was:
 
-Determinism buys reproducibility and reviewability. **It does not buy
-authenticity** — a compromised page mechanically links to a hostile repository
+> A model that read a URL in a tool result and proposed installing it would be
+> **laundering untrusted bytes into an instruction** through a door the person
+> holds open.
+
+Under §3 that reason is gone. The bytes do not become an instruction. Installing
+grants nothing, so "the agent installed it" is the agent writing a file that
+authorises nothing — and every consequence still meets policy.
+
+**ADR-0053 does not block this; it anticipated it.** It does not forbid doors,
+it requires a door to declare a SET of effect classes and moves the decision to
+execution. Its own consequences say so: "A future tool that is also a door — a
+remote exec relay, **a package manager wrapper** — declares a set and needs no
+new mechanism." A skill installer is that tool.
+
+What this deletes is most of what the previous draft of this section proposed:
+the HTML parser, the candidate extractor, the origin-transition display, the
+GitHub adapter, ref-to-commit resolution, registry adapters. The assistant
+already searches, reads a page, follows it to a repository and lists a
+directory. "The person does not hunt for a raw URL" arrives without a machine
+built for it.
+
+**The Settings page keeps management and loses acquisition.** The list, the
+enable switch, deletion and "Changed since installation" have no conversational
+substitute and stay. The paste box, the parse and the candidate picker go.
+
+What must hold for that to be safe is short, because the frame does the work:
+
+- the tool declares itself a door with its class set, ADR-0053's mechanism;
+- the approval names the RESOLVED source, the skill's name, its description, the
+  digest and the files that will land;
+- the description is prominent, because it is the one part of a skill that lives
+  in the system prompt forever after;
+- **the description gets a length cap, and that stops being optional.** §5 found
+  there is none; an agent steered by a hostile page could otherwise write
+  unbounded prose into our system prompt;
+- installing grants no authority, which is the whole of §3.
+
+What is lost is reproducibility of resolution. A mechanical adapter answers the
+same twice; an agent does not. The mitigation is to record WHAT resolved — the
+repository, path, commit, digest — rather than HOW, so the result is auditable
+after the fact even though the route is not repeatable.
+
+Residual risk, stated: the agent can be steered into installing a hostile skill.
+It cannot act on one, but the description persists and taints later turns. The
+cost of that mistake is noise and lost standing permission, not execution —
+which is what §5's cap and §4's exposure condition are for.
+
+Determinism was never the thing that mattered anyway. **It does not buy
+authenticity** — a compromised page links mechanically to a hostile repository
 just as well. Authenticity needs same-origin `/.well-known/`, a registry
-assertion, a publisher signature, or an explicit first-install decision that
-shows the origin change. Our digest is TOFU: good change detection after the
-first approval, no evidence at it.
+assertion, a publisher signature, or an explicit first-install decision showing
+the origin change. Our digest is TOFU: good change detection after the first
+approval, no evidence at it.
 
-Support files, if fetched: relative paths only, one hop (links in `SKILL.md`,
-not links found inside support files), same effective origin enforced across
+Support files, whoever fetches them: relative paths only, one hop (links in
+`SKILL.md`, not links found inside support files), same effective origin across
 every redirect, traversal refused, bounded count and size, UTF-8 only, pinned to
-the same commit, and a missing referenced file fails the install rather than
-being skipped — skipping is how the installed skill stops matching the one that
-was shown. Start with `references/` text only; `scripts/` is a separate
-decision, because fetching a script as text and letting a skill direct the agent
-to run it are different capabilities.
+one commit, and a missing referenced file fails the install rather than being
+skipped — skipping is how an installed skill stops matching the one that was
+shown. Start with `references/` text only; `scripts/` is a separate decision,
+because fetching a script as text and letting a skill direct the agent to run it
+are different capabilities.
 
 Arbitrary ZIP URLs: no. Archives make sense as a registry's own endpoint, where
 a known adapter supplies package identity, layout, pinning and update semantics.
+
+## 7a. Reading is a surface, and it is missing
+
+The frame says nobody is asked to certify bytes. It does not say the bytes
+should be hard to find, and today they are: the Skills row prints a path, and
+there is no way to read a skill's files from the interface at all. `skills.read`
+is an agent tool; the person has nothing.
+
+Three places need it, and they are one capability:
+
+**In Settings, every file of an installed skill.** Once a skill is a bundle, the
+row discloses its file list and any one of them opens read-only, with the scan's
+findings marked in place. This is the surface that makes "untrusted, and you can
+look" true rather than merely said.
+
+**At approval, the script a command names.** The prompt today shows the command
+verbatim and the shell's reading of its variables — and nothing about the FILE
+the command runs. Approving `bash deploy.sh` while the meaning lives in
+`deploy.sh` is approving a name, not an act. When a proposed command names a
+file that is readable, the whole of that file belongs in the question, beside
+the command and marked as what it is.
+
+**At install, before admission.** The same viewer, over the bundle that is about
+to land. Available, never compulsory — §6's rule stands: no forced scroll and no
+"I have verified this is safe".
+
+The three share one component and one refusal shape (a file too large, not text,
+gone). Building them separately is how one surface ends up disagreeing with
+another about what a skill contains.
+
+## 7b. An audit is offered, not imposed
+
+The classifier at install dies in §6 because it certified nothing while
+appearing to. An audit is the opposite shape and worth having: the person asks
+for it, about a skill they already hold, and gets a reading — what this skill
+tells the assistant to do, what it reaches for, which of its lines the scan
+matched and what that line does in context. It gates nothing and claims nothing.
+That is exactly why it is honest, and it is what a person actually wants when
+they are staring at seven reference files they did not write.
+
+nocx already has the vocabulary. `internal/profile/role.go` defines `ModelRole`
+as a NAMED model assignment — a feature asks for a role by name and the
+assignment lives in one place, the Roles surface. The set is closed and
+product-defined: `answering`, `classifier`, `summarizing`. An `auditing` role is
+one const plus its consumer.
+
+**And that file carries the warning that binds this.** `RoleClassifier` was
+added ahead of its consumer and is recorded there as a mistake not to repeat:
+
+> a role in the closed set that nothing asks for is the shape `RoleClassifier`
+> is stuck in (`nocx-01ud6`), and repeating it would be worse than not having
+> the role.
+
+So the role lands with the audit, or it does not land. Unassigned it falls back
+to the answering role's endpoint with a visible note, never silently, because it
+spends money the person did not ask to spend.
+
+What the audit reads is the bundle. What it must never be given is authority: it
+produces a report a person reads, and its verdict never changes what policy
+permits. The action classifier keeps that job, and §6 already says it gets the
+exposure facts and not the bodies.
 
 ## 8. The invariant
 
@@ -273,6 +374,9 @@ One sentence, and a test can be written against it:
 4. **Whether taint can be carried through history and compaction at all.** If it
    cannot, §8's invariant is not implementable as written and the proposal has
    to be weakened honestly rather than shipped as language.
+5. **`scripts/`.** Whether a bundle may carry executable text at all, given that
+   §7a puts the file in the approval question but §3 leaves the running of it to
+   policy like any other command. Not answered here.
 
 ## 10. Provenance of this document
 

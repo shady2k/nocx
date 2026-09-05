@@ -6,11 +6,18 @@ its import fails closed on a `_type":"memory"` line. The 144 nocx memories come
 here instead.
 
 We write `.cass/playbook.yaml` directly rather than calling `cm playbook add`,
-because that command always writes `~/.cass-memory/playbook.yaml`, which lives in
-the home directory: nocx memories would surface in unrelated repositories, and
-the colleague and the second machine would never see them at all. The repo
-playbook is committed and travels with the clone — that is its stated purpose,
-and `cm init --repo` says so.
+because that command has no `--repo` and always writes
+`~/.cass-memory/playbook.yaml`, which lives in the home directory: nocx memories
+would surface in unrelated repositories, and the colleague and the second machine
+would never see them at all. The repo playbook is committed and travels with the
+clone — that is its stated purpose, and `cm init --repo` says so.
+
+**This direct write is the one-off migration route, not the ongoing one.** A rule
+written from now on goes through `cm playbook import rules.json --repo`, which is
+the supported path and the only `playbook` subcommand that takes `--repo`. Running
+this script again would overwrite the playbook with the 144 exported memories,
+which is not what anybody wants after 2026-09-05 — see AGENTS.md on why they were
+dropped — so it refuses a destination that already holds rules unless `--force`.
 
 Isolation comes from WHERE the file is, not from the `scope` field inside it.
 See the comment on `scope` below; it is measured.
@@ -25,6 +32,7 @@ because `bd remember` was already written in that shape. No prefix means
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 
@@ -57,7 +65,25 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("src", help="JSONL carrying _type=memory records")
     p.add_argument("dst", help=".cass/playbook.yaml")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite a destination that already holds rules",
+    )
     args = p.parse_args()
+
+    # The destination is a tracked file that people write rules into by hand and
+    # `cm` rewrites in place. Clobbering it with the 144 migrated memories is a
+    # thing this script can only do on purpose.
+    if not args.force and os.path.exists(args.dst):
+        with open(args.dst) as existing:
+            if "\n  - id:" in existing.read():
+                print(
+                    f"{args.dst} already holds rules; refusing to overwrite. "
+                    "Pass --force if that is genuinely what you want.",
+                    file=sys.stderr,
+                )
+                return 1
 
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     bullets: list[str] = []
@@ -125,15 +151,13 @@ def main() -> int:
                 )
             )
 
+    # No comment header, however much this file would benefit from one: `cm`
+    # reserialises the playbook from its own model whenever it writes a rule, and
+    # comments do not survive that. A fifteen-line header explaining the file was
+    # dropped without a word the first time a rule landed there. The explanation
+    # lives in AGENTS.md instead.
     header = "\n".join(
         [
-            "# This repository's rules for cass-memory.",
-            "# Merged with the global ~/.cass-memory/playbook.yaml; repo rules win.",
-            "#",
-            "# These are the memories carried over from `bd remember` on 2026-09-05,",
-            "# when the tracker became br, which has no memory store. The raw export sits",
-            "# beside them in .internal/memories-export.jsonl and is the source whenever",
-            "# scripts/bd-memories-to-cass.py runs again.",
             "schema_version: 2",
             "name: nocx-repo-playbook",
             "description: nocx rules and lessons, each bought by a specific failure",

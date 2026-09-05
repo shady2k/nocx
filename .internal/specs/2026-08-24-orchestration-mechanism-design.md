@@ -138,6 +138,9 @@ why copying the blocking call did not work either.
 | D14 | **The backend wakes the coordinator by TYPING into its pane, and only when the driver says it may.** Locally the backend types; on a remote host the helper types on the far side, so nothing leaves the machine. Delivery is UNACKNOWLEDGED: a wake never closes a fact, only the coordinator's own subsequent call does                                                                    | Sending Escape first to make a mistimed keystroke recoverable. Strictly worse than refusing: a mistimed keystroke does not merely fail to deliver, it ANSWERS whatever modal is on screen, which can approve a tool call the user never saw. Type only on positively identified `free_text`; a permission menu, a spinner or an unknown state receives nothing at all and the refusal is recorded with its reason                                                                                                            |
 | D15 | **One worker first, not three.** Three is the demonstration; one is the mechanism, and fan-out is cheap once one works                                                                                                                                                                                                                                                                       | Building the routing table and the N-worker queue with the record. `nocx-dkawo.4` is where fan-out and the escalation policy live, and it is deliberately after the mechanism rather than inside it                                                                                                                                                                                                                                                                                                                          |
 
+**D5 is not what ships.** The delivery shape was reopened on 2026-09-05 and settled the
+other way; the §7.1 amendment below names the shipping shape and the fact that decided it.
+
 ## 5. The invariant
 
 1. **Supervision is the backend's, not the agent's** (D1). The wave cannot come into existence
@@ -278,6 +281,64 @@ external caller is the harder one and the rest of §7 is written for it; nothing
 design.
 
 ### 7.1 Alias → launcher → `exec`
+
+> **Amendment — 2026-09-05: the shell-bracketed delivery ships.** D5 remains the
+> design's launcher shape, but the shipped shape is the shell function that brackets
+> `claude` (answer B). The deciding fact is not the implementation cost. The
+> declaration contract in `docs/lifecycle-protocol.md` §16 requires the shell to send
+> the participant's declaration after the agent returns and before `agent_withdraw`;
+> D9 requires that declaration and process exit as separate facts. An `exec` preserves
+> the launcher's pid, but it also removes the wrapper that must send that declaration.
+> `internal/shellintegration/scripts/nocx.bash:631-635` made the opposite choice for
+> exactly this reason: bracketing supplies an interval end the shell cannot forget.
+>
+> This does not make B's authority hop equivalent by assertion. Under A, the pinned
+> launcher pid is the agent pid. Under B, the authenticated sender is the shell and the
+> child pid is a claim made by that sender, so the hop is weaker until the pin task
+> makes the backend validate the child's `(pid, startTime)` and its membership in the
+> enrolled process tree. Once that kernel-backed check exists, the same authenticated
+> lifecycle channel can carry the child identity and the distinction is operational
+> rather than an extra bearer capability. The recent measurement in
+> `.internal/specs/2026-09-03-the-waves-authority-model-design.md` §5 is therefore
+> evidence that the current tree has not yet enforced this pin, not evidence that no
+> carrier can be built: `peerPID` is available beside the platform peer credentials,
+> and the helper exposes the `StartTime` field and its pid-reuse reasoning, but does not compare or pin it; authority-model §5 records it as diagnostic only.
+>
+> Process exit does not, by itself, replace the shell's withdraw. With A, procwatch can
+> observe the agent pid directly. With B, the shell must keep the authenticated interval
+> open long enough to send the declaration after the child returns, then close the
+> watching interval with `agent_withdraw`; closing on the child's exit first would
+> reject or misorder the declaration. The backend still owns the PTY exit fact and D9's
+> state reduction, but only the shell can provide this declaration ordering under the
+> current §16 protocol.
+>
+> B also keeps ownership of launch staging in the shell function, not in the backend:
+> the shell that holds the per-epoch capability creates the temporary report/config
+> files, passes only their paths to the child, and removes them after declaration and
+> withdrawal, with cleanup for interrupted returns. This preserves ADR-0024 decision 2
+> and the existing `NOCX_AGENT_REPORT` drop rather than introducing a second staging
+> owner.
+>
+> B already satisfies D4's visible refusal: when enrolment fails, the pane says why
+> and the ordinary agent still runs without orchestration. A would have to print that
+> refusal before `exec` and fall back to the ordinary command; after a successful
+> `exec`, no launcher remains to report a later staging or declaration failure, so the
+> backend would need an equivalent visible path. Both shapes are removable: remove the
+> panel-session function or alias, and `claude` runs conventionally and is marked
+> unorchestrated.
+>
+> The cost difference is real but not decisive: B is shipped, covered by the bash/zsh
+> real-pty enrolment and report tests, and byte-ratcheted; A needs a binary, build and
+> install path, plus the pin and declaration changes above. This amendment reopens A
+> if the pin lands with the required kernel-backed child validation **and** an
+> `exec` path proves that the declaration drop is still delivered and recorded in the
+> §16 order (for example through a supported pre-exit agent hook). A pin alone does
+> not reopen it; if `exec` breaks that declaration path as the current protocol says it
+> does, B remains the shipping mechanism.
+>
+> This amendment changes no AD or ADR. It applies D4, D5 and D9 as written, retains
+> ADR-0024 decision 2's shell-held capability, and records the consequence of
+> authority-model §5 without copying D5's original rationale over it.
 
 nocx defines the alias in the panel session it already composes — the same session that carries
 shell integration from the versioned bundle under `~/.nocx/`. **No rc file is edited**, which the

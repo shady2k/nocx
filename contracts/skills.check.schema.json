@@ -66,8 +66,8 @@
           "type": "string"
         },
         "checkedAt": {
-          "description": "Unix millis, backend wall clock, when the check was made.",
-          "type": "integer"
+          "description": "RFC3339, when the check was made. Was unix millis; unified onto the same representation skills.list's row summary uses (its check.at) so the row and the card never show two different clocks for one check.",
+          "type": "string"
         },
         "read": {
           "description": "The files whose bytes the model was given, as skills.audit recorded them when the check was made.",

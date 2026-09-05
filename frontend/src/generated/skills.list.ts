@@ -35,4 +35,15 @@ export interface Skill {
      */
     digest?: string
   }
+  /**
+   * The row's summary of a stored skills.audit reading — a date, a verdict and a model, exactly what a person can act on regardless of what the bytes are now. ABSENT, never an empty object, for a skill nobody has checked: an empty object would render as a row saying something about a check that does not exist. Deliberately carries no currency flag — whether the bytes still match what was checked is skills.check's answer, computed once when a card opens, because a digest recomputation on this hot path would put a bundle walk behind every toggle, delete and approve that refreshes this list.
+   */
+  check?: {
+    /**
+     * RFC3339, when the check was made.
+     */
+    at: string
+    verdict: 'clear' | 'suspect'
+    model: string
+  }
 }

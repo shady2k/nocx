@@ -2425,7 +2425,11 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.list", noParams(), func(r Responder) handlerFunc {
-			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			// checks and log are the only fields this registration sets that
+			// the other skills.* registrations below do not: every other
+			// method here never reads a stored check, so it never needs
+			// somewhere to report one it could not read.
+			h := skillSettingsHandlers{source: skillSource, checks: s.skillChecks, log: s.log, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.setEnabled", params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {

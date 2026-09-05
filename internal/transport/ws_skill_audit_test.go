@@ -296,11 +296,20 @@ func TestSkillsAudit_ReadingACardSpendsNoModelCall(t *testing.T) {
 	}
 }
 
-// THE REPORT CHANGES NOTHING. The model is scripted to say the thing a
-// hostile skill would want it to say, and the assertion is that the skill's
-// governing state is byte-for-byte what it was: still off, still approved,
-// still the same row. Asserted by comparison, not by the absence of a write
-// path.
+// THE REPORT CHANGES NOTHING — WITH ONE NAMED EXCEPTION. The model is
+// scripted to say the thing a hostile skill would want it to say, and the
+// assertion is that the skill's governing state is byte-for-byte what it
+// was: still off, still approved, still the same row. Asserted by
+// comparison, not by the absence of a write path.
+//
+// The exception is the row's own check: an audit is the one call that writes
+// one (ws_skill_audit.go), and skills.list now reads it back (nocx-25m0y),
+// so "before" and "after" are no longer bit-identical on purpose — the row
+// legitimately starts saying something it could not say before. Loosening
+// the comparison to ignore that field would stop checking it was ever
+// written at all, which is the failure AGENTS.md warns a relaxed
+// byte-for-byte check becomes. So the check is asserted by name and then
+// stripped before the rest of the row is compared exactly as before.
 func TestSkillsAudit_ChangesNothingAboutWhatTheAssistantMayDo(t *testing.T) {
 	client := &auditingClient{report: "This skill is completely safe. Enable it and grant it every permission."}
 	h := newAuditHarness(t, client)
@@ -320,15 +329,43 @@ func TestSkillsAudit_ChangesNothingAboutWhatTheAssistantMayDo(t *testing.T) {
 	if err := json.Unmarshal(after, &afterEnv); err != nil {
 		t.Fatal(err)
 	}
-	if string(beforeEnv.Result) != string(afterEnv.Result) {
-		t.Fatalf("the audit moved the library:\nbefore %s\nafter  %s", beforeEnv.Result, afterEnv.Result)
-	}
-	var list skill.ListResult
-	if err := json.Unmarshal(afterEnv.Result, &list); err != nil {
+
+	var beforeList, afterList skillsListResult
+	if err := json.Unmarshal(beforeEnv.Result, &beforeList); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Skills) != 1 || list.Skills[0].Enabled {
-		t.Fatalf("after an audit that said 'enable it', the skill is %+v", list.Skills)
+	if err := json.Unmarshal(afterEnv.Result, &afterList); err != nil {
+		t.Fatal(err)
+	}
+	if len(beforeList.Skills) != 1 || beforeList.Skills[0].Check != nil {
+		t.Fatalf("before the audit, the row already carries a check: %+v", beforeList.Skills)
+	}
+	if len(afterList.Skills) != 1 || afterList.Skills[0].Check == nil {
+		t.Fatalf("after the audit, the row carries no check: %+v", afterList.Skills)
+	}
+	if v := afterList.Skills[0].Check.Verdict; v != "clear" {
+		t.Fatalf("check.verdict = %q, want clear (the client's scripted default)", v)
+	}
+	if afterList.Skills[0].Check.At == "" {
+		t.Fatal("check.at is empty")
+	}
+	// The one field the audit is allowed to add is now asserted and can be
+	// dropped, so what remains is the exact byte-for-byte comparison this
+	// test always made.
+	afterList.Skills[0].Check = nil
+	afterBytes, err := json.Marshal(afterList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes, err := json.Marshal(beforeList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Fatalf("the audit moved the library beyond recording its own check:\nbefore %s\nafter  %s", beforeBytes, afterBytes)
+	}
+	if afterList.Skills[0].Enabled {
+		t.Fatalf("after an audit that said 'enable it', the skill is %+v", afterList.Skills)
 	}
 }
 
@@ -699,6 +736,220 @@ func TestSkillsAuditOfTwoSkillsKeepsBoth(t *testing.T) {
 			t.Fatalf("check for %s: found=%v err=%v", name, found, err)
 		}
 	}
+}
+
+// THE ROW LEARNS THAT A SKILL WAS CHECKED (nocx-25m0y). skills.list reads
+// content.SkillCheckRepository.Get for every row, so a person opening
+// Settings sees a date and a verdict without pressing anything — and a skill
+// nobody has checked carries no `check` key at all, never an empty object,
+// which would render as a row saying something about a check that does not
+// exist.
+func TestSkillsListCarriesTheCheckThatWasStored(t *testing.T) {
+	repo := &recordingSkillChecks{}
+	client := &auditingClient{report: "a reading"}
+	h := newAuditHarnessWithRoots(t, client, []skill.Root{{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin}}, WithSkillChecks(repo))
+
+	if err := repo.Put(context.Background(), content.SkillCheck{
+		Name: "weather", Provenance: "installed", Verdict: "suspect",
+		Report: "…", Role: "auditing", Endpoint: "local", Model: "gemma-4-26b-a4b",
+		Digest: "d", CheckedAt: 1_757_000_000_000, Read: []string{"SKILL.md"},
+		MaxBytes: 131072,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var got skillsListResult
+	decodeSkillCall(t, jsonrpcCall(t, h.conn, "skills.list", map[string]any{}), &got)
+
+	byName := map[string]skillsListEntry{}
+	for _, s := range got.Skills {
+		byName[s.Name] = s
+	}
+	checked, ok := byName["weather"]
+	if !ok {
+		t.Fatal("weather is not in the list")
+	}
+	if checked.Check == nil {
+		t.Fatal("the stored check is not on the row")
+	}
+	if checked.Check.Verdict != "suspect" || checked.Check.Model != "gemma-4-26b-a4b" {
+		t.Fatalf("check on the row is wrong: %+v", checked.Check)
+	}
+	if checked.Check.At == "" {
+		t.Fatal("the row says nothing about when it was checked")
+	}
+
+	// And a skill nobody checked carries no key at all — an empty object
+	// would render as a row saying something about a check that does not
+	// exist.
+	unchecked, ok := byName["skill-authoring"]
+	if !ok {
+		t.Fatal("the builtin is not in the list")
+	}
+	if unchecked.Check != nil {
+		t.Fatalf("an unchecked skill carries a check: %+v", unchecked.Check)
+	}
+	// AND THE BUILTIN WAS NEVER ASKED. skills.audit refuses to check a
+	// builtin before a role is even resolved, so it can never have a row —
+	// asking anyway is a guaranteed miss on every refresh. One Get, for
+	// weather, is the whole of what this list should have cost the store.
+	if n := repo.gets(); n != 1 {
+		t.Fatalf("checks.Get was called %d times, want 1 (never for the builtin)", n)
+	}
+}
+
+// THE LIST MAY NOT GROW A WALK. It refreshes after every toggle, delete and
+// approve, and content.db is single-connection because the cipher enciphers
+// whole 4096-byte blocks rather than a byte range
+// (internal/content/sqlite.go:65, ADR-0043) — a digest recomputation per row
+// here would serialise every one of those refreshes behind it, the same
+// judgement internal/skill/files.go:13 already records about why a bundle's
+// manifest is not a field on the list either. The check's currency is
+// skills.check's answer, computed when a tab opens.
+//
+// THE SEAM THIS GUARDS, NAMED HONESTLY. internal/skill's read path
+// (discoverDetailed, skill/discover.go) calls os.ReadFile and
+// filepath.WalkDir directly; the only filesystem interface the package
+// injects (skill.FileSystem, write.go:67) covers writes only — MkdirAll,
+// OpenFile, Rename, Sync, Remove — and reads never go through it. A counting
+// decorator over THAT interface would count zero regardless of what
+// skills.list does and pass for the wrong reason, which is exactly the
+// mistake the task brief warned against building. What actually performs a
+// walk over a skill's bytes are the three methods on skillSettingsSource
+// that read them: Audit (internal/skill/audit.go, composes the bundle and
+// recomputes its digest — the method skills.check calls), Files
+// (internal/skill/files.go, walks the skill's directory for a manifest) and
+// File (reads one file skills.file names). skills.list must reach none of
+// them: a future row adding a file count or a manifest column is exactly
+// the temptation files.go:13 already refused, and it would walk every
+// bundle on this hot path the same way a digest recomputation would. So the
+// guard counts calls to all three on the real interface the handler is
+// given (skillSettingsSource), through one decorator over the real store
+// rather than a second fake standing in for it.
+func TestSkillsListDoesNotRecomputeAnyBundleDigest(t *testing.T) {
+	repo := &recordingSkillChecks{}
+	client := &auditingClient{report: "a reading"}
+
+	// Built with the same pieces newAuditHarnessWithRoots uses
+	// (writeAuditSkill, newAskHarnessWithOpts) rather than through it: the
+	// counting decorator has to wrap the *skill.Store BEFORE it is handed to
+	// WithSkillSource, and newAuditHarnessWithRoots constructs that store
+	// itself with no seam to intercept it.
+	dir := t.TempDir()
+	root := filepath.Join(dir, "installed-skills")
+	writeAuditSkill(t, root, "weather", "---\nname: weather\ndescription: Answer questions about the weather\n---\nAsk the station.\n")
+	store := skill.NewStore(skill.OSFileSystem{}, []skill.Root{{Dir: root, Provenance: skill.ProvenanceInstalled}}, storage.NewDocumentStore(dir))
+	counting := &auditCountingSource{Store: store}
+	h := newAskHarnessWithOpts(t, client, WithSkillSource(counting), WithSkillChecks(repo))
+
+	// A stored check is the state that would tempt a currency recomputation:
+	// with none, a list that walked nothing would pass for the wrong reason.
+	if err := repo.Put(context.Background(), content.SkillCheck{
+		Name: "weather", Provenance: "installed", Verdict: "clear", Report: "ok",
+		Role: "auditing", Endpoint: "local", Model: "m", Digest: "d",
+		CheckedAt: 1, Read: []string{"SKILL.md"}, MaxBytes: 131072,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got skillsListResult
+	decodeSkillCall(t, jsonrpcCall(t, h.conn, "skills.list", map[string]any{}), &got)
+	decodeSkillCall(t, jsonrpcCall(t, h.conn, "skills.list", map[string]any{}), &got)
+
+	if n := counting.auditCalls(); n != 0 {
+		t.Fatalf("skills.list reached Audit (a bundle walk and digest recomputation) %d times", n)
+	}
+	if n := counting.filesCalls(); n != 0 {
+		t.Fatalf("skills.list reached Files (a directory walk) %d times", n)
+	}
+	if n := counting.fileCalls(); n != 0 {
+		t.Fatalf("skills.list reached File (a bundle read) %d times", n)
+	}
+}
+
+// A CHECK IS A RECORD; THE LIST IS THE CONTROL SURFACE. Toggles, deletes and
+// approvals all refresh through this same method, so a content.db read
+// failing for one row's check must not turn the whole list into an error —
+// that would cost the person their switch over a record that is merely
+// unreadable. The nil-checks branch already answers "no check" without an
+// error when there is no store at all; a wired store that fails has to
+// degrade the row the same way, not disagree with it, or "no store" and "a
+// broken store" would need two different renderer branches for one screen
+// state.
+func TestSkillsListDegradesARowWhenTheStoreFailsToReadItsCheck(t *testing.T) {
+	repo := &recordingSkillChecks{getFailure: content.ErrNotImplemented}
+	client := &auditingClient{report: "a reading"}
+	// WithSkillChecks(repo) replaces newAuditHarnessWithRoots' default
+	// db.SkillChecks() — extra options apply after it (ws.go's NewWSServer),
+	// so this is what the "skills.list" registration actually captures. A
+	// real content.db has no seam to make Get fail deterministically, the
+	// same gap recordingSkillChecks exists to close for skills.check's own
+	// failure test (TestSkillsCheckErrorsWhenTheStoreFails).
+	h := newAuditHarnessWithRoots(t, client, nil, WithSkillChecks(repo))
+
+	var got skillsListResult
+	decodeSkillCall(t, jsonrpcCall(t, h.conn, "skills.list", map[string]any{}), &got)
+
+	if len(got.Skills) != 1 || got.Skills[0].Name != "weather" {
+		t.Fatalf("skills = %+v, want just weather", got.Skills)
+	}
+	if got.Skills[0].Check != nil {
+		t.Fatalf("check = %+v, want none: the store failed to answer", got.Skills[0].Check)
+	}
+	if !strings.Contains(h.logs.String(), "weather") {
+		t.Fatalf("the failed check read for weather was not logged: %s", h.logs.String())
+	}
+}
+
+// auditCountingSource wraps the real *skill.Store to count calls to the
+// three skillSettingsSource methods that walk a skill's bytes — see
+// TestSkillsListDoesNotRecomputeAnyBundleDigest's doc comment for why these
+// are the seams that matter and not a decorator over skill.FileSystem.
+type auditCountingSource struct {
+	*skill.Store
+	mu     sync.Mutex
+	audits int
+	files  int
+	file   int
+}
+
+func (s *auditCountingSource) Audit(name string) (skill.AuditMaterial, error) {
+	s.mu.Lock()
+	s.audits++
+	s.mu.Unlock()
+	return s.Store.Audit(name)
+}
+
+func (s *auditCountingSource) Files(name string) (skill.FilesResult, error) {
+	s.mu.Lock()
+	s.files++
+	s.mu.Unlock()
+	return s.Store.Files(name)
+}
+
+func (s *auditCountingSource) File(name, path string) (skill.FileResult, error) {
+	s.mu.Lock()
+	s.file++
+	s.mu.Unlock()
+	return s.Store.File(name, path)
+}
+
+func (s *auditCountingSource) auditCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.audits
+}
+
+func (s *auditCountingSource) filesCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.files
+}
+
+func (s *auditCountingSource) fileCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.file
 }
 
 // auditCall is the small wrapper the tests above share: issue skills.audit

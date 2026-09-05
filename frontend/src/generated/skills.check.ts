@@ -56,9 +56,9 @@ export type SkillsCheck = {
      */
     digest: string
     /**
-     * Unix millis, backend wall clock, when the check was made.
+     * RFC3339, when the check was made. Was unix millis; unified onto the same representation skills.list's row summary uses (its check.at) so the row and the card never show two different clocks for one check.
      */
-    checkedAt: number
+    checkedAt: string
     /**
      * The files whose bytes the model was given, as skills.audit recorded them when the check was made.
      */

@@ -184,7 +184,7 @@ describe('SkillsClient.check', () => {
         endpoint: 'Local',
         model: 'qwen3',
         digest: 'abc123',
-        checkedAt: 1_757_000_000_000,
+        checkedAt: '2025-09-04T15:33:20Z',
         read: ['SKILL.md'],
         omitted: [],
         findings: [],

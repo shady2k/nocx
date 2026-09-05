@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/skill"
@@ -24,26 +25,37 @@ import (
 
 func TestSkillsList_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "skills.list.schema.json")
-	// Both shapes of a row, because the source is optional: a skill with no
-	// recorded source omits the key entirely, and one with a source has to
-	// satisfy the same `additionalProperties: false` object as everything else.
-	raw, err := json.Marshal(skill.ListResult{Skills: []skill.ListedSkill{
-		{Name: "deploy", Description: "d", Provenance: skill.ProvenanceAuthored, Path: "/skills/deploy/SKILL.md", Enabled: true, Status: skill.StatusApproved},
-		{
+	// Every shape a row can take: the source field's two states (as before),
+	// plus a row WITH a stored check (checked's own additionalProperties:
+	// false, required and closed verdict enum all need something to
+	// exercise them — see nocx-25m0y's review) and a row with none, which
+	// exercises the OTHER half: that omitempty really omits the key rather
+	// than emitting `"check":null`, which the schema's object type would
+	// reject just as loudly as a wrong field would.
+	raw, err := json.Marshal(skillsListResult{Skills: []skillsListEntry{
+		{ListedSkill: skill.ListedSkill{Name: "deploy", Description: "d", Provenance: skill.ProvenanceAuthored, Path: "/skills/deploy/SKILL.md", Enabled: true, Status: skill.StatusApproved}},
+		{ListedSkill: skill.ListedSkill{
 			Name: "downloaded", Description: "d", Provenance: skill.ProvenanceInstalled,
 			Path: "/installed-skills/downloaded/SKILL.md", Enabled: true, Status: skill.StatusApproved,
 			Source: &skill.Source{
 				URL: "https://example.com/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z",
 				Digest: "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed",
 			},
-		},
-		{
+		}},
+		{ListedSkill: skill.ListedSkill{
 			// A source recorded before the served digest existed: the field
 			// is optional on the wire for exactly this row, so the contract
 			// has to accept a source object without it.
 			Name: "older", Description: "d", Provenance: skill.ProvenanceInstalled,
 			Path: "/installed-skills/older/SKILL.md", Enabled: false, Status: skill.StatusApproved,
 			Source: &skill.Source{URL: "https://example.com/older/SKILL.md", InstalledAt: "2026-09-03T12:00:00Z"},
+		}},
+		{
+			ListedSkill: skill.ListedSkill{
+				Name: "audited", Description: "d", Provenance: skill.ProvenanceInstalled,
+				Path: "/installed-skills/audited/SKILL.md", Enabled: false, Status: skill.StatusApproved,
+			},
+			Check: &skillsListCheck{At: "2026-09-03T12:00:00Z", Verdict: "suspect", Model: "qwen3"},
 		},
 	}, DocumentPath: "/skills.json"})
 	if err != nil {
@@ -86,10 +98,24 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	writeSkillFile(t, filepath.Join(configDir, "skills", "deploy"), "deploy", "Deploy the service")
 	writeSkillFile(t, filepath.Join(configDir, "installed-skills", "byhand"), "byhand", "Put here with mv")
 
-	conn, store, cleanup := skillsURLConnection(t, configDir)
+	conn, store, checks, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
 	url := srv.URL + "/anything/SKILL.md"
 	preview := installThroughTheLibrary(t, store, url)
+
+	// A stored check on the real socket (nocx-25m0y's review): the DTO test
+	// exercises the schema's additionalProperties/required/enum in
+	// isolation, and this is the test that proves the handler actually
+	// fills them from content.SkillCheckRepository.Get rather than merely
+	// being ABLE to marshal a literal that satisfies the schema.
+	if err := checks.Put(context.Background(), content.SkillCheck{
+		Name: "weather", Provenance: string(skill.ProvenanceInstalled), Verdict: "suspect",
+		Report: "…", Role: "auditing", Endpoint: "Local", Model: "qwen3",
+		Digest: "d", CheckedAt: 1_757_000_000_000, Read: []string{"SKILL.md"},
+		MaxBytes: 131072,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
 
 	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
 	var env rpcEnvelope
@@ -101,7 +127,7 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "skills.list wire")
 
-	var got skill.ListResult
+	var got skillsListResult
 	if err := json.Unmarshal(env.Result, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +143,20 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, weather.Source.InstalledAt); err != nil {
 		t.Errorf("source installedAt = %q, want an RFC3339 time: %v", weather.Source.InstalledAt, err)
+	}
+	if weather.Check == nil {
+		t.Fatal("weather has no check on the wire: the stored row never left the backend")
+	}
+	if weather.Check.Verdict != "suspect" || weather.Check.Model != "qwen3" {
+		t.Errorf("check = %+v, want the stored verdict and model", weather.Check)
+	}
+	if _, err := time.Parse(time.RFC3339, weather.Check.At); err != nil {
+		t.Errorf("check.at = %q, want an RFC3339 time: %v", weather.Check.At, err)
+	}
+	// deploy is authored and was never checked: its row must carry no key at
+	// all, the same absence byHand proves below for source.
+	if deploy := wireSkill(t, got, "deploy"); deploy.Check != nil {
+		t.Errorf("deploy check = %+v, want none: nobody has audited it", deploy.Check)
 	}
 	// AND THE DIGEST THE PERSON WAS SHOWN (nocx-ojfuc.3). The value compared
 	// against is the PREVIEW's own — the number the approval question printed
@@ -157,6 +197,11 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 		if _, present := row["source"]; present != (name == "weather") {
 			t.Errorf("skill %q source key present = %v, want %v", name, present, name == "weather")
 		}
+		// The same absence proof for check: only weather was ever audited,
+		// so it is the only row `omitempty` may leave the key on.
+		if _, present := row["check"]; present != (name == "weather") {
+			t.Errorf("skill %q check key present = %v, want %v", name, present, name == "weather")
+		}
 	}
 }
 
@@ -173,7 +218,7 @@ func writeSkillFile(t *testing.T, dir, name, description string) {
 	}
 }
 
-func wireSkill(t *testing.T, result skill.ListResult, name string) skill.ListedSkill {
+func wireSkill(t *testing.T, result skillsListResult, name string) skillsListEntry {
 	t.Helper()
 	for _, listed := range result.Skills {
 		if listed.Name == name {
@@ -181,7 +226,7 @@ func wireSkill(t *testing.T, result skill.ListResult, name string) skill.ListedS
 		}
 	}
 	t.Fatalf("skill %q is not in the listed result %+v", name, result.Skills)
-	return skill.ListedSkill{}
+	return skillsListEntry{}
 }
 
 func TestSkillsSetEnabled_OverTheWireConformsToContract(t *testing.T) {
@@ -274,7 +319,15 @@ func skillsContractConnection(t *testing.T) (*websocket.Conn, func()) {
 // about installs it the way the product does — through the library — and then
 // asks the wire. Reaching for a `skills.install` request here would be reaching
 // for a method nothing sends.
-func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skill.Store, func()) {
+//
+// THE CHECKS STORE COMES BACK TOO (nocx-25m0y's review), a *recordingSkillChecks
+// rather than a real content.db, for the same reason the store above is
+// handed back rather than reached through a second method: a test that wants
+// skills.list to answer with a stored check has to be able to Put one in
+// before asking, and building the fake here rather than a real encrypted
+// content.db keeps this connection's setup to the two things the tests that
+// use it actually need — a skill library and a place to file a check.
+func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skill.Store, *recordingSkillChecks, func()) {
 	t.Helper()
 	routes := func(_ context.Context, routeID string) (httppolicy.Route, error) {
 		if routeID != "" {
@@ -287,13 +340,14 @@ func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skil
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
 		{Dir: filepath.Join(configDir, "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}, storage.NewDocumentStore(configDir), skill.WithFetcher(apifetch.New(routes, nil)))
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store))
+	checks := &recordingSkillChecks{}
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store), WithSkillChecks(checks))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	conn := connectWS(t, ws)
-	return conn, store, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
+	return conn, store, checks, func() { _ = conn.Close(); _ = ws.Stop(ctx) }
 }
 
 // installThroughTheLibrary adopts one address the way the assistant's executor
@@ -664,7 +718,10 @@ func TestSkillsList_OverTheWireTellsTheTwoKindsOfOffApart(t *testing.T) {
 	defer srv.Close()
 
 	configDir := t.TempDir()
-	conn, store, cleanup := skillsURLConnection(t, configDir)
+	// This test is about enabled/status, not about a check — the checks
+	// store comes back unused, the same way store's checks would if nothing
+	// here ever called skills.audit.
+	conn, store, _, cleanup := skillsURLConnection(t, configDir)
 	defer cleanup()
 	installThroughTheLibrary(t, store, srv.URL+"/anything/SKILL.md")
 
@@ -707,7 +764,7 @@ func TestSkillsList_OverTheWireTellsTheTwoKindsOfOffApart(t *testing.T) {
 
 // listOneSkillOverTheWire calls the shipped skills.list, validates the result
 // against the contract, and returns one row.
-func listOneSkillOverTheWire(t *testing.T, conn *websocket.Conn, name string) skill.ListedSkill {
+func listOneSkillOverTheWire(t *testing.T, conn *websocket.Conn, name string) skillsListEntry {
 	t.Helper()
 	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
 	var env rpcEnvelope
@@ -718,7 +775,7 @@ func listOneSkillOverTheWire(t *testing.T, conn *websocket.Conn, name string) sk
 		t.Fatalf("skills.list: %+v", env.Error)
 	}
 	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "skills.list wire")
-	var got skill.ListResult
+	var got skillsListResult
 	if err := json.Unmarshal(env.Result, &got); err != nil {
 		t.Fatal(err)
 	}

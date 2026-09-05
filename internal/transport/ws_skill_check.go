@@ -86,8 +86,12 @@ type skillCheckDTO struct {
 	// given when it ran — never the freshly recomputed one. `current` is
 	// where the comparison's answer lives; this field is evidence of what
 	// was checked, not a live fact.
-	Digest    string                `json:"digest"`
-	CheckedAt int64                 `json:"checkedAt"`
+	Digest string `json:"digest"`
+	// CheckedAt travels as RFC3339, not the store's unix-millis column
+	// (content.SkillCheck.CheckedAt): unified with skills.list's row summary
+	// (checkTimeRFC3339, ws_skill_handlers.go) so the card and the row never
+	// show two representations of the same value.
+	CheckedAt string                `json:"checkedAt"`
 	Read      []string              `json:"read"`
 	Omitted   []skill.AuditOmission `json:"omitted"`
 	Findings  []skill.Finding       `json:"findings"`
@@ -186,7 +190,7 @@ func toSkillCheckDTO(c content.SkillCheck) *skillCheckDTO {
 		Endpoint:   c.Endpoint,
 		Model:      c.Model,
 		Digest:     c.Digest,
-		CheckedAt:  c.CheckedAt,
+		CheckedAt:  checkTimeRFC3339(c.CheckedAt),
 		Read:       nonNilSkillCheckReads(c.Read),
 		Omitted:    checkOmissions(c.Omitted),
 		Findings:   checkFindings(c.Findings),

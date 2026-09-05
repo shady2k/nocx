@@ -360,7 +360,7 @@ func TestSkillsCheck_DTOConformsToContract(t *testing.T) {
 				Check: &skillCheckDTO{
 					Provenance: "installed", Verdict: "clear", Report: "ok",
 					Role: "auditing", Endpoint: "Local", Model: "qwen3",
-					Digest: "abc123", CheckedAt: 1_757_000_000_000,
+					Digest: "abc123", CheckedAt: "2025-09-04T15:33:20Z",
 					Read: []string{"SKILL.md"}, Omitted: []skill.AuditOmission{},
 					Findings: []skill.Finding{}, MaxBytes: 131072,
 				},

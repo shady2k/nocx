@@ -1,0 +1,27 @@
+/* Skill tab (nocx-btg7d) — the header this task builds. The root element is
+   SolidPaneContent's own `.surface-host` (settings.css and api-workbench.css
+   render into the same one), which already gives the pane its flex column,
+   its flex:1 and its zero padding via `.pane:has(> .surface-host)` in
+   base.css — repeating any of that here would be a second, driftable copy of
+   what that rule already guarantees. A surface, not a kit component: every
+   control inside it is the kit's own (Badge, Checkbox, Button, FactList) and
+   this file places them — flex and gap — without ever repainting one. The
+   two non-kit elements it owns outright, `.skill-view__header` itself and
+   the `<h1>` beside the provenance badge, may carry any rule that is not a
+   kit component's, the way `.note-tab` and `.git-diff` do. */
+
+.skill-view__header {
+  padding: var(--space-4);
+}
+
+/* The name and its provenance badge read as one line: the badge answers
+   "what kind of skill is this" right where the name answers "which one". */
+.skill-view__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.skill-view__name {
+  margin: 0;
+}

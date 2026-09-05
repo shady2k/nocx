@@ -23,6 +23,12 @@ export const SURFACE_ID_SETTINGS = 'settings'
  *  and the id is also what the activity bar's entry is called. */
 export const SURFACE_ID_API = 'api'
 
+/** The skill tab (nocx-btg7d), replacing the modal `Dialog`
+ *  skills-section.tsx used to read one in. Never singleton-keyed here — the
+ *  registry entry has no target and cannot open a view (its factory throws);
+ *  `openSkill` in `./skill-view` builds the real, per-skill singleton key. */
+export const SURFACE_ID_SKILL = 'skill'
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 export interface SurfaceRegistration {

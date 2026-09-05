@@ -72,6 +72,7 @@ import {
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
+import { registerSkillSurface } from './skill-view'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
 import type { FilesStatError } from './generated/files.stat.error'
@@ -659,6 +660,11 @@ function main(): void {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
+  // The skill tab (nocx-btg7d), replacing the modal card skills-section.tsx
+  // used to read a skill in. `skillsStore` is the one built above (line
+  // 242) — every consumer of skills.* shares it, so a toggle from this tab
+  // and a toggle from the Settings page's row are one write seen by both.
+  registerSkillSurface(registry, tm, { store: skillsStore })
   // The upload surface (design §5.5), resolved from the dispatcher — the
   // SAME instance the terminal panes resolve, because a transfer has one
   // state and two stores would each mint a row for every transfer the other

@@ -79,9 +79,10 @@ descriptor)`. **Three** surfaces are registered through the registry —
   enciphers whole 4096-byte blocks (`sqlite.go:65`, ADR-0043). Reads queue
   behind live ledger writes, which is why nothing here touches the database on
   the list path (§6).
-- **Durable model output is masked before it is written.**
-  `maskClassifierReason` (`classifier.go:252`) runs `masking.MaskWithSegments`
-  and, fail-closed, records the empty string rather than an unvetted echo.
+- **Durable model output is BOUNDED before it is written, and the ledger also
+  masks it.** `maskClassifierReason` (`classifier.go:252`) truncates to
+  `classifierReasonMax` and runs `masking.MaskWithSegments`, fail-closed. Only
+  the bound transfers here — see §6 for why the masking does not.
 - **`Skill.Offered()` is the only filter on what the assistant is given**
   (`write.go:177` → `skill.go:162`): enabled, plus approval status. Nothing
   else may enter that predicate (§3).
@@ -270,8 +271,8 @@ on no key and no database. Builtin needs it too, and builtin can carry nothing
 of its own.
 
 **Checks go in `content.db`, in a table of their own.** One row per skill
-name: verdict, masked report, role, endpoint, model, taken-at, material
-digest, read paths, omissions, findings. Reached through a new
+name: verdict, report, role, endpoint, model, taken-at, material digest,
+read paths, omissions, findings. Reached through a new
 `SkillChecks() SkillCheckRepository` on `ContentDB` (`content.go:50`), with
 its own stub arm.
 
@@ -294,10 +295,22 @@ Consequences, all of them wanted:
 - **Checks do not travel in a backup.** `internal/backup` carries settings
   documents and skill trees; it does not carry `content.db`. Satisfied by
   construction, with no redaction code to write and none to forget.
-- **The report is masked before it is stored**, by the same pass and the same
-  fail-closed belt as the ledger's (`classifier.go:252`). If masking cannot
-  see, the VERDICT is stored and the report is not, and the tab says the
-  report was withheld — never an unvetted echo, and never a silent one.
+- **The report is NOT masked, and that is decided rather than skipped.** The
+  ledger masks the classifier's justification because it is model output about
+  COMMAND ARGUMENTS, which carry secrets, and because the command is ephemeral
+  while the ledger is durable — the ledger is what creates the durability. The
+  premise does not hold here in either half. This report is about a skill's
+  FILES, which are already on disk in plaintext in an unencrypted directory,
+  and it would be written into `content.db`, which is encrypted. Masking would
+  move a secret from a less protected place to a more protected one and redact
+  it there, while the original sits beside it in the clear. Against
+  `contentkey.go:14`'s stated threat — the detached copy — the copy carries the
+  skill file itself whether or not the report was masked. It is ceremony, and
+  ceremony is what teaches people to click past the prompt that matters.
+- **The report IS bounded.** A model can emit any length; a row with no
+  ceiling is a small but real hazard, and `MaxAuditBytes` already bounds the
+  input for the same kind of reason. The report is truncated to a stated
+  maximum and says so when it was cut.
 - **A stub database is a visible state, not a degrade.** With no store, a
   check runs and shows its result and the tab says it was not saved. It is not
   a `slog.Warn` under a UI that claims otherwise.
@@ -413,8 +426,8 @@ let these regress would be the defect AGENTS.md's rule 2 is about.
   ones, over both an `FS` root and a `Dir` root.
 - `Skill.Offered()` has no third term — asserted structurally, so a verdict
   can never enter it.
-- Masking fail-closed: a report the recognizer cannot see is not stored, the
-  verdict is, and the result says so.
+- A report longer than the maximum is stored truncated and says it was cut;
+  one at exactly the maximum is not marked as cut.
 - Builtin: `skills.audit` on a builtin is refused.
 - **Failure paths, one per external call:** the model refuses; the store is a
   stub; the store write fails; the document is unwritable; a file in the

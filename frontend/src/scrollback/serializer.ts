@@ -317,6 +317,10 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
 interface GenericRun<A> {
   chars: string
   attrs: A
+  /** Колонки, в которые ячейку надо запереть, либо undefined — ран течёт
+   *  потоком. Ран с этим полем НЕ склеивается ни с чем: он и есть одна
+   *  ячейка, а слитая пара заняла бы одну колонку на двоих. */
+  box?: number
 }
 
 /** What one cell walk yields: the merged runs, and the COLUMNS they occupy
@@ -351,6 +355,7 @@ function collectRunsOf<A>(
   equal: (a: A, b: A) => boolean,
   escape: boolean,
   keepTrailingSpace: boolean,
+  boxColumns?: (chars: string, width: number, attrs: A) => number | null,
 ): Walked<A> {
   const len = line.length
   if (len === 0) return { runs: [], cols: 0 }
@@ -371,8 +376,9 @@ function collectRunsOf<A>(
     const attrs = attrsOf(line, i)
 
     if (chars.length === 0) {
-      if (runs.length > 0 && equal(runs[runs.length - 1].attrs, attrs)) {
-        runs[runs.length - 1].chars += ' '
+      const last = runs.length > 0 ? runs[runs.length - 1] : undefined
+      if (last !== undefined && last.box === undefined && equal(last.attrs, attrs)) {
+        last.chars += ' '
       } else {
         runs.push({ chars: ' ', attrs })
       }
@@ -385,8 +391,16 @@ function collectRunsOf<A>(
       ? chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       : chars
 
-    if (runs.length > 0 && equal(runs[runs.length - 1].attrs, attrs)) {
-      runs[runs.length - 1].chars += text
+    // Коробка принимается ТОЛЬКО на колонки самой ячейки. «Одна колонка»
+    // для ячейки шириной две — это сдвиг, которого в сетке нет; лучше
+    // сегодняшний поток, чем выдуманная геометрия.
+    const columns = Math.max(1, width)
+    const box = boxColumns?.(chars, columns, attrs) === columns ? columns : null
+    const last = runs.length > 0 ? runs[runs.length - 1] : undefined
+    if (box !== null) {
+      runs.push({ chars: text, attrs, box })
+    } else if (last !== undefined && last.box === undefined && equal(last.attrs, attrs)) {
+      last.chars += text
     } else {
       runs.push({ chars: text, attrs })
     }
@@ -396,12 +410,14 @@ function collectRunsOf<A>(
 
   if (!keepTrailingSpace && runs.length > 0) {
     const last = runs[runs.length - 1]
-    const trimmed = last.chars.replace(/ +$/, '')
-    // Every trimmed character is a single-column pad cell, so the columns
-    // come off one for one. Counting them would report drift on every
-    // padded row in the buffer, which is most of them.
-    cols -= last.chars.length - trimmed.length
-    last.chars = trimmed
+    if (last.box === undefined) {
+      const trimmed = last.chars.replace(/ +$/, '')
+      // Every trimmed character is a single-column pad cell, so the columns
+      // come off one for one. Counting them would report drift on every
+      // padded row in the buffer, which is most of them.
+      cols -= last.chars.length - trimmed.length
+      last.chars = trimmed
+    }
   }
 
   return { runs, cols }
@@ -411,6 +427,7 @@ function collectRuns(
   snapshot: TerminalSnapshot,
   line: IBufferLine,
   keepTrailingSpace = false,
+  boxColumns?: (chars: string, width: number, attrs: CellAttrs) => number | null,
 ): Walked<CellAttrs> {
   return collectRunsOf(
     line,
@@ -418,6 +435,7 @@ function collectRuns(
     attrsEqual,
     true,
     keepTrailingSpace,
+    boxColumns,
   )
 }
 
@@ -541,14 +559,20 @@ export function serializeRange(
   startLine: number,
   endLine: number,
   colsOut?: number[],
+  boxColumns?: (chars: string, width: number, attrs: CellAttrs) => number | null,
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace)
+    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace, boxColumns)
     let content = ''
     for (const run of runs) {
       if (run.chars.length === 0) continue
       const style = attrsToStyle(snapshot, run.attrs)
-      content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
+      if (run.box !== undefined) {
+        const styleAttr = style ? ` style="${style}"` : ''
+        content += `<span class="term-cell" data-cols="${run.box}"${styleAttr}>${run.chars}</span>`
+      } else {
+        content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
+      }
     }
     return { content, cols }
   })
@@ -563,6 +587,45 @@ export function serializeRange(
     for (const g of groups) colsOut.push(g.cols)
   }
   return groups.map((g) => `<span class="term-line">${g.content}</span>`).join('')
+}
+
+/**
+ * Пройти те же ячейки и назвать их, ничего не строя (nocx-ec18).
+ *
+ * Заморозка меряет ширины ПАКЕТОМ: чтение ректа после записи форсирует
+ * раскладку, и поштучно это N раскладок в тот самый момент, когда блок
+ * подменяет живую область. Значит кандидатов надо знать ДО сериализации.
+ *
+ * Это тот же collectRunsOf, а не второй обход в смысле AD-8: функция,
+ * знающая, как ходить по ячейкам и как считать колонки, по-прежнему одна.
+ * Здесь она вызывается с пустыми атрибутами — как это уже делает
+ * serializeRangeText, — поэтому проход дешёвый: ни вывода цвета, ни
+ * экранирования, ни склейки строк.
+ *
+ * ПОРЯДОК И СОСТАВ ОБЯЗАНЫ СОВПАДАТЬ с тем, что увидит классификатор при
+ * сериализации, иначе кэш окажется холодным ровно там, где нужен, и коробка
+ * не появится молча. Это утверждается тестом, сравнивающим два списка.
+ */
+export function collectFitCandidates(
+  getLine: (y: number) => IBufferLine | undefined,
+  startLine: number,
+  endLine: number,
+  sink: (chars: string, width: number, attrs: CellAttrs) => void,
+): void {
+  walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
+    const { cols } = collectRunsOf<CellAttrs>(
+      line,
+      (l, i) => cellAttrs(DEFAULT_SNAPSHOT, l, i),
+      attrsEqual,
+      false,
+      keepTrailingSpace,
+      (chars, width, attrs) => {
+        sink(chars, width, attrs)
+        return null
+      },
+    )
+    return { content: '', cols }
+  })
 }
 
 /**

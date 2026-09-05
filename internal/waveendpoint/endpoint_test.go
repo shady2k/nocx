@@ -350,9 +350,14 @@ func TestEndpointRefusesPeerBeforeParsing(t *testing.T) {
 			cfg.Peers = tc.peer
 			ep := startEndpoint(t, cfg)
 			conn := dialEndpoint(t, ep)
-			if _, err := io.WriteString(conn, `not JSON and contains secret task text`+"\n"); err != nil && tc.name != "foreign uid" {
-				t.Fatalf("write request: %v", err)
-			}
+			// The refusal happens on connect, before a byte is read, so the
+			// server may already have answered and closed by the time this
+			// write reaches it — a broken pipe here is the endpoint behaving
+			// correctly, not a failure. The payload is sent only to prove it is
+			// never parsed; what is under test is the response below and the
+			// untouched auth and dispatch counters, both of which hold whether
+			// or not the bytes land.
+			_, _ = io.WriteString(conn, `not JSON and contains secret task text`+"\n")
 			response := readResponse(t, conn)
 			if response.Error == nil || !strings.Contains(response.Error.Message, tc.reason) {
 				t.Fatalf("response error = %+v, want %q", response.Error, tc.reason)

@@ -301,6 +301,40 @@ it.
 
 ### Task 5: One live caller per session, and what the slot does not gate
 
+> **Amended 2026-09-06, mid-execution.** The task as written could not be done from
+> `internal/app/waveauth.go` alone, and the worker proved it with a failing test rather
+> than working around it. `Authorizer.Admit` hands back an invocation and nothing else,
+> so the only end-of-life signal reaching the authorizer is `invocation.Context` being
+> cancelled — and `endpoint.go` cancels at line 339, _before_ `requests.Wait()` on 340.
+> Releasing the slot on that signal releases it while a call is still in flight, which is
+> exactly what the acceptance criterion forbids. The **Interfaces** line below said
+> "when the connection is observed closed"; the criterion said "after its in-flight call
+> has settled". Under the endpoint's real ordering those are two different moments, and
+> the plan asserted both.
+>
+> Reading that ordering turned up a second defect, in Task 3's own code and therefore
+> ours: `requests.Wait()` sits _after_ the read loop, while the loop has early `return`s
+> on every error path. Those returns run only the defers — `untrack`, `conn.Close`,
+> `cancel` — so `serve` returns with handler goroutines still running, `e.wait.Done()`
+> fires, and `Endpoint.Close` can return mid-dispatch.
+>
+> Both are one fix, because both are the same missing thing: **the connection's teardown
+> is not expressed in one place, and the interval has no closing event.** So:
+>
+> - `Authorizer.Admit` gains a third result — a release closure:
+>   `Admit(Peer) (assistant.WaveInvocation, func(), error)`. The closure ends the interval
+>   that `Admit` opened, is idempotent, and releases _that_ admission rather than
+>   "whatever holds the session now" — by the time it runs a replacement may legitimately
+>   hold the slot. On the refusal path it is nil and never called.
+> - `serve` teardown becomes a single deferred function covering **every** exit path,
+>   normal or error, in this order: `cancel()` → `requests.Wait()` → `release()`. The
+>   trailing `cancel(); requests.Wait()` after the loop goes away; `defer cancel()` is
+>   subsumed rather than left beside it.
+>
+> This widens the task's file set to `internal/waveendpoint/{authorizer.go,endpoint.go}`
+> and its tests. It does not widen the authority model: the closure carries no identity a
+> caller can send, and nothing here reads anything from the wire.
+
 **Files:**
 
 - Modify: `internal/app/waveauth.go`

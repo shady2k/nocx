@@ -1403,6 +1403,21 @@
   width: calc(var(--term-cell-width, 1ch) * 2);
 }
 
+/* КРАСКА УЖИМАЕТСЯ, ПРОДВИЖКА НЕТ (nocx-ec18).
+   Глиф, чья продвижка шире его колонок, рисуется за краем коробки, и сосед,
+   несущий свой фон, закрашивает вылезшее — у владельца так пропадала правая
+   половина 🗑 (14px краски в ячейке 8px). transform не участвует в раскладке,
+   поэтому строка остаётся ровно в своих колонках, а глиф становится целым.
+   Обёртка отдельная, потому что трансформация на самой коробке ужала бы и её
+   фон вместе с краской. */
+.term-cell-ink {
+  display: inline-block;
+  transform: scale(var(--cell-fit, 1));
+  /* От левого края своей колонки, по вертикали посередине строки: глиф
+     начинается там, где начинается ячейка, и не съезжает вниз. */
+  transform-origin: 0 50%;
+}
+
 /* A whole-block grant fills the block; a row grant fills only its selected
    output rows. Neither mark owns a rail — the editor's accent border is the
    composer's identity. */

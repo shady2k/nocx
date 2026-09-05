@@ -17,7 +17,7 @@
 // самый момент, когда блок подменяет живую область. Пакет делает ВСЕ записи,
 // потом ВСЕ чтения: одна раскладка независимо от N. Поэтому заморозка сперва
 // собирает кандидатов (тем же обходом ячеек, с пустыми атрибутами), греет
-// кэш, и только потом сериализует — на этом проходе boxColumns уже чистое
+// кэш, и только потом сериализует — на этом проходе boxOf уже чистое
 // чтение Map.
 //
 // ПОЧЕМУ ПО ЗАМЕРУ, А НЕ ПО КОДПОИНТУ. Кодпоинт не определяет ни выбранный
@@ -54,6 +54,16 @@ export interface FitCandidate {
 
 export type BatchMeasure = (host: HTMLElement, candidates: readonly FitCandidate[]) => number[]
 
+/** Что классификатор говорит про ячейку, которая не ложится сама. */
+export interface CellBox {
+  /** Колонки, в которые заперта ячейка. */
+  cols: number
+  /** Во сколько раз ужать НАРИСОВАННЫЙ глиф, чтобы он поместился в свои
+   *  колонки. Никогда больше 1: глиф уже своей ячейки не растягиваем — щель
+   *  безвредна, а растянутая буква заметна. 1 означает «ужимать не надо». */
+  fit: number
+}
+
 export interface CellFit {
   /** Открыть заморозку: разрешить зонд, снять ширину ячейки и сигнатуру.
    *  false — мерить негде, вся заморозка пройдёт как сегодня. */
@@ -61,11 +71,18 @@ export interface CellFit {
   /** Измерить неизвестных кандидатов одним пакетом. */
   warm(candidates: Iterable<FitCandidate>): void
   /** Чистое чтение кэша. */
-  boxColumns(chars: string, width: number, face: FitFace): number | null
+  boxOf(chars: string, width: number, face: FitFace): CellBox | null
   /** Убрать зонд из DOM. */
   dispose(): void
   /** Размер кэша. Для тестов границы. */
   size(): number
+}
+
+/** До четырёх знаков — та же точность, что у опубликованной дельты
+ *  (cell-metric.ts): 8/14 это 0.5714285714285714, а множитель в миллидолях
+ *  уже мельче любой сетки раскладки, и в разметке он читается. */
+function round4(value: number): number {
+  return Math.round(value * 1e4) / 1e4
 }
 
 const PROBE_CLASS = 'cell-fit-probe'
@@ -181,6 +198,11 @@ export function createCellFit(
   container: () => HTMLElement | null,
   measure: BatchMeasure = domBatchMeasure,
 ): CellFit {
+  // КЭШ ХРАНИТ ЗАМЕР, А НЕ ВЕРДИКТ. Оба вывода — нужна ли коробка и на
+  // сколько ужимать краску — считаются из продвижки, поэтому вторая
+  // величина не может разойтись с первой. Раньше здесь лежали колонки либо
+  // ноль как «измерен и ложится сам»: ноль был вердиктом, притворявшимся
+  // замером, и второго вывода из него не сделать.
   const cache = new Map<string, number>()
   let probe: HTMLElement | null = null
   let signature = ''
@@ -257,17 +279,22 @@ export function createCellFit(
         // зонд не отрисовался. Не кэшируем — следующая заморозка спросит.
         if (!(advance > 0)) continue
         const c = pending[i]
-        const miss = Math.abs(advance - c.width * cellWidth)
-        cache.set(keyOf(c.chars, c.width, c.face), miss >= FIT_EPSILON_PX ? c.width : 0)
+        cache.set(keyOf(c.chars, c.width, c.face), advance)
       }
     },
 
-    boxColumns(chars, width, face) {
+    boxOf(chars, width, face) {
       if (signature === '' || isCalibratedAscii(chars, width)) return null
-      const verdict = touch(keyOf(chars, width, face))
-      // 0 в кэше означает «измерен и ложится сам»; отсутствие означает «не
-      // измерен» — оба дают null, но по разным причинам, и обе законны.
-      return verdict === undefined || verdict === 0 ? null : verdict
+      const advance = touch(keyOf(chars, width, face))
+      // Отсутствие означает «не измерен» — коробки нет, следующая заморозка
+      // спросит. Измеренная продвижка отвечает на оба вопроса сразу.
+      if (advance === undefined) return null
+      const target = width * cellWidth
+      if (Math.abs(advance - target) < FIT_EPSILON_PX) return null
+      // МЕНЬШЕ ЕДИНИЦЫ ИЛИ РОВНО ЕДИНИЦА, никогда больше. Глиф у́же своей
+      // ячейки уже помещается: растянуть его — значит поменять начертание
+      // ради щели, которой никто не видит, а искажённая буква видна сразу.
+      return { cols: width, fit: Math.min(1, round4(target / advance)) }
     },
 
     dispose() {

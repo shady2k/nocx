@@ -690,7 +690,7 @@ describe('serializeRange column accounting', () => {
 // назначить её текстовому кластеру без layout-объекта вокруг него. Здесь
 // проверяется РАЗМЕТКА; что она даёт нужную ширину — в e2e.
 describe('serializeRange cell boxes', () => {
-  const boxEverything = () => 1
+  const boxEverything = () => ({ cols: 1, fit: 1 })
   const boxNothing = () => null
 
   it('оборачивает ячейку, которую классификатор не пропустил', () => {
@@ -701,7 +701,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '\u{1F5D1}' ? 1 : null),
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
     )
     expect(html).toBe(
       '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
@@ -722,7 +722,7 @@ describe('serializeRange cell boxes', () => {
       cols,
       (chars, width) => {
         seen.push([chars, width])
-        return width === 2 ? 2 : null
+        return width === 2 ? { cols: 2, fit: 1 } : null
       },
     )
     expect(seen).toEqual([
@@ -743,7 +743,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => 1,
+        () => ({ cols: 1, fit: 1 }),
       ),
     ).not.toContain('term-cell')
     expect(
@@ -753,7 +753,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => 3,
+        () => ({ cols: 3, fit: 1 }),
       ),
     ).not.toContain('term-cell')
     expect(
@@ -763,7 +763,7 @@ describe('serializeRange cell boxes', () => {
         0,
         0,
         undefined,
-        () => 2,
+        () => ({ cols: 2, fit: 1 }),
       ),
       // lineWith ставит явный fg (палитра 7), поэтому коробка несёт style —
       // как и в тесте про атрибуты ниже. Проверяется data-cols и содержимое.
@@ -789,7 +789,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       undefined,
-      (chars) => (chars === '⬢' ? 1 : null),
+      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
     )
     expect(html).toBe(
       '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span>abc</span>',
@@ -805,7 +805,7 @@ describe('serializeRange cell boxes', () => {
       0,
       0,
       cols,
-      (chars) => (chars === '⬢' ? 1 : null),
+      (chars) => (chars === '⬢' ? { cols: 1, fit: 1 } : null),
     )
     expect(html).toBe(
       '<span class="term-line"><span class="term-cell" data-cols="1">⬢</span></span>',
@@ -824,7 +824,7 @@ describe('serializeRange cell boxes', () => {
       undefined,
       (_c, _w, attrs) => {
         faces.push(attrs.bold)
-        return 1
+        return { cols: 1, fit: 1 }
       },
     )
     expect(faces).toEqual([true])
@@ -836,6 +836,85 @@ describe('serializeRange cell boxes', () => {
     const lines = [makeLine('<')]
     const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, undefined, boxEverything)
     expect(html).toContain('<span class="term-cell" data-cols="1">&lt;</span>')
+  })
+
+  it('при fit === 1 не ставит лишнего узла', () => {
+    // Обёртка нужна только ради scale; при единице она была бы узлом на
+    // каждую коробку ради `scale(1)`. Разметка обязана остаться байт в байт
+    // той же, что до появления масштаба.
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 1 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line">a<span class="term-cell" data-cols="1">\u{1F5D1}</span>b</span>',
+    )
+    expect(html).not.toContain('term-cell-ink')
+  })
+
+  it('при fit < 1 ужимает КРАСКУ отдельной обёрткой', () => {
+    const lines = [makeLine('a\u{1F5D1}b')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      (chars) => (chars === '\u{1F5D1}' ? { cols: 1, fit: 0.5714 } : null),
+    )
+    expect(html).toBe(
+      '<span class="term-line">a<span class="term-cell" data-cols="1">' +
+        '<span class="term-cell-ink" style="--cell-fit:0.5714">\u{1F5D1}</span>' +
+        '</span>b</span>',
+    )
+  })
+
+  it('оставляет фон ячейки на коробке, а не на обёртке', () => {
+    // Трансформация, поставленная на саму коробку, ужала бы вместе с
+    // краской и её фон — attrsToStyle вешает background именно на коробку,
+    // — и цветная ячейка стала бы вдвое у́же соседних. Ради этого обёртка и
+    // существует отдельным элементом.
+    const lines = [lineWith({ chars: '\u{1F5D1}', bg: 4, bgMode: XTERM_CM_P16 })]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      () => ({
+        cols: 1,
+        fit: 0.5714,
+      }),
+    )
+    expect(html).toContain('<span class="term-cell" data-cols="1" style="')
+    expect(html).toMatch(/<span class="term-cell" data-cols="1" style="[^"]*background:[^"]*"/)
+    expect(html).toContain('<span class="term-cell-ink" style="--cell-fit:0.5714">')
+    // Обёртка несёт ТОЛЬКО множитель.
+    expect(html).not.toMatch(/class="term-cell-ink" style="[^"]*background/)
+  })
+
+  it('экранирует содержимое обёрнутой коробки', () => {
+    const lines = [makeLine('<')]
+    const html = serializeRange(
+      DEFAULT_SNAPSHOT,
+      (y) => lines[y],
+      0,
+      0,
+      undefined,
+      () => ({
+        cols: 1,
+        fit: 0.5,
+      }),
+    )
+    expect(html).toContain(
+      '<span class="term-cell" data-cols="1">' +
+        '<span class="term-cell-ink" style="--cell-fit:0.5">&lt;</span></span>',
+    )
   })
 
   it('без классификатора даёт ровно сегодняшнюю строку', () => {

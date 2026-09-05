@@ -60,7 +60,39 @@ describe('createCellFit', () => {
     )
     fit.begin()
     fit.warm([{ chars: '🗑', width: 1, face: REGULAR }])
-    expect(fit.boxColumns('🗑', 1, REGULAR)).toBe(1)
+    expect(fit.boxOf('🗑', 1, REGULAR)).toEqual({ cols: 1, fit: 0.5894 })
+  })
+
+  it('ужимает краску ровно во столько, во сколько глиф не влез', () => {
+    // Замер владельца, macOS 2026-09-05: ячейка 8px, а 🗑 меряется в 14.
+    // Коробка держит продвижку 8, глиф рисуется на 14 и вылезает вправо —
+    // сосед со своим фоном закрашивает вылезшую половину. 8/14 = 0.5714:
+    // корзина станет мельче, зато целой.
+    const fit = createCellFit(
+      () => containerWith(8),
+      batch((c) => ({ '🗑': 14, '⬢': 9.34, '⟳': 9.52, '⟲': 9.52 })[c.chars] ?? 8),
+    )
+    fit.begin()
+    const owner = ['🗑', '⬢', '⟳', '⟲'].map((chars) => ({ chars, width: 1, face: REGULAR }))
+    fit.warm(owner)
+    expect(fit.boxOf('🗑', 1, REGULAR)).toEqual({ cols: 1, fit: 0.5714 })
+    expect(fit.boxOf('⬢', 1, REGULAR)).toEqual({ cols: 1, fit: 0.8565 })
+    expect(fit.boxOf('⟳', 1, REGULAR)).toEqual({ cols: 1, fit: 0.8403 })
+    expect(fit.boxOf('⟲', 1, REGULAR)).toEqual({ cols: 1, fit: 0.8403 })
+  })
+
+  it('НЕ растягивает глиф, который у́же своей ячейки', () => {
+    // Продвижка 6 при ячейке 8 — промах, и коробка нужна: без неё строка
+    // недосчитается двух пикселей. Но множитель остаётся единицей, а не
+    // 1.33: щель справа никто не заметит, а растянутая буква видна сразу, и
+    // масштаб вверх — это уже не «вписать», а перерисовать.
+    const fit = createCellFit(
+      () => containerWith(8),
+      batch(() => 6),
+    )
+    fit.begin()
+    fit.warm([{ chars: '⬢', width: 1, face: REGULAR }])
+    expect(fit.boxOf('⬢', 1, REGULAR)).toEqual({ cols: 1, fit: 1 })
   })
 
   it('оставляет в потоке кластер, который ложится сам', () => {
@@ -73,7 +105,7 @@ describe('createCellFit', () => {
     )
     fit.begin()
     fit.warm([{ chars: '─', width: 1, face: REGULAR }])
-    expect(fit.boxColumns('─', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('─', 1, REGULAR)).toBeNull()
   })
 
   it('судит двухколоночную ячейку по ДВУМ колонкам', () => {
@@ -83,15 +115,17 @@ describe('createCellFit', () => {
     )
     ok.begin()
     ok.warm([{ chars: '漢', width: 2, face: REGULAR }])
-    expect(ok.boxColumns('漢', 2, REGULAR)).toBeNull()
+    expect(ok.boxOf('漢', 2, REGULAR)).toBeNull()
 
+    // Судится и ужимается по ДВУМ колонкам: цель 16, продвижка 18 —
+    // множитель 16/18, а не 8/18.
     const off = createCellFit(
       () => containerWith(8),
-      batch(() => 14),
+      batch(() => 18),
     )
     off.begin()
     off.warm([{ chars: '漢', width: 2, face: REGULAR }])
-    expect(off.boxColumns('漢', 2, REGULAR)).toBe(2)
+    expect(off.boxOf('漢', 2, REGULAR)).toEqual({ cols: 2, fit: 0.8889 })
   })
 
   it('судит начертания порознь', () => {
@@ -105,8 +139,8 @@ describe('createCellFit', () => {
       { chars: '⬢', width: 1, face: REGULAR },
       { chars: '⬢', width: 1, face: BOLD },
     ])
-    expect(fit.boxColumns('⬢', 1, REGULAR)).toBeNull()
-    expect(fit.boxColumns('⬢', 1, BOLD)).toBe(1)
+    expect(fit.boxOf('⬢', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('⬢', 1, BOLD)).toEqual({ cols: 1, fit: 0.8511 })
   })
 
   it('не находит вердикт, снятый при другой ширине ячейки', () => {
@@ -153,7 +187,7 @@ describe('createCellFit', () => {
     )
     fit.begin()
     fit.warm([{ chars: '⬢', width: 1, face: REGULAR }])
-    expect(fit.boxColumns('⬢', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('⬢', 1, REGULAR)).toBeNull()
     expect(fit.size()).toBe(0)
   })
 
@@ -166,7 +200,7 @@ describe('createCellFit', () => {
       { chars: ' ', width: 1, face: REGULAR },
     ])
     expect(measure).not.toHaveBeenCalled()
-    expect(fit.boxColumns('a', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('a', 1, REGULAR)).toBeNull()
   })
 
   it('молчит, пока мерить негде, вместо того чтобы гадать', () => {
@@ -180,7 +214,7 @@ describe('createCellFit', () => {
       batch(() => 13.572),
     )
     expect(fit.begin()).toBe(false)
-    expect(fit.boxColumns('⬢', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('⬢', 1, REGULAR)).toBeNull()
   })
 
   it('без begin() не отвечает ничего', () => {
@@ -188,7 +222,7 @@ describe('createCellFit', () => {
       () => containerWith(8),
       batch(() => 13.572),
     )
-    expect(fit.boxColumns('🗑', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('🗑', 1, REGULAR)).toBeNull()
   })
 
   it('раздаёт вердикты по кандидатам, а не одним числом на всех', () => {
@@ -207,8 +241,8 @@ describe('createCellFit', () => {
       { chars: '🗑', width: 1, face: REGULAR },
       { chars: '─', width: 1, face: REGULAR },
     ])
-    expect(fit.boxColumns('🗑', 1, REGULAR)).toBe(1)
-    expect(fit.boxColumns('─', 1, REGULAR)).toBeNull()
+    expect(fit.boxOf('🗑', 1, REGULAR)).toEqual({ cols: 1, fit: 0.5894 })
+    expect(fit.boxOf('─', 1, REGULAR)).toBeNull()
   })
 
   it('не вытесняет то, что положил в этой же заморозке', () => {
@@ -229,8 +263,8 @@ describe('createCellFit', () => {
     fit.begin()
     fit.warm(many)
     expect(fit.size()).toBe(MAX_CACHE_ENTRIES + 1)
-    expect(fit.boxColumns(many[0].chars, 1, REGULAR)).toBe(1)
-    expect(fit.boxColumns(many[many.length - 1].chars, 1, REGULAR)).toBe(1)
+    expect(fit.boxOf(many[0].chars, 1, REGULAR)?.cols).toBe(1)
+    expect(fit.boxOf(many[many.length - 1].chars, 1, REGULAR)?.cols).toBe(1)
     // Следующая заморозка приводит кэш в границы.
     fit.begin()
     expect(fit.size()).toBe(MAX_CACHE_ENTRIES)
@@ -284,7 +318,7 @@ describe('createCellFit', () => {
       fit.warm([{ chars: String.fromCodePoint(0x3000 + i), width: 1, face: REGULAR }])
     }
     // Трогаем самую старую — она обязана пережить следующее вытеснение.
-    expect(fit.boxColumns('　', 1, REGULAR)).toBe(1)
+    expect(fit.boxOf('　', 1, REGULAR)?.cols).toBe(1)
     fit.warm([{ chars: '䀀', width: 1, face: REGULAR }])
     // warm() НЕ вытесняет: иначе он съел бы вердикты, снятые для этой же
     // заморозки. Размер выходит за границу и возвращается в неё на
@@ -292,7 +326,7 @@ describe('createCellFit', () => {
     expect(fit.size()).toBe(MAX_CACHE_ENTRIES + 1)
     fit.begin()
     expect(fit.size()).toBe(MAX_CACHE_ENTRIES)
-    expect(fit.boxColumns('　', 1, REGULAR)).toBe(1)
+    expect(fit.boxOf('　', 1, REGULAR)?.cols).toBe(1)
   })
 
   it('убирает зонд из DOM по dispose', () => {
@@ -318,6 +352,6 @@ describe('createCellFit', () => {
     )
     fit.begin()
     fit.warm([{ chars: '⬢', width: 1, face: REGULAR }])
-    expect(fit.boxColumns('⬢', 1, REGULAR)).toBe(1)
+    expect(fit.boxOf('⬢', 1, REGULAR)?.cols).toBe(1)
   })
 })

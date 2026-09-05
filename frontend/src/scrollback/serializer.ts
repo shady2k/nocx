@@ -12,6 +12,11 @@
 
 import type { IBufferLine, ITheme } from '@xterm/xterm'
 import { cellSGRAttrs, sgrParams, sgrEqual, emptySGR, type SGRAttrs } from './sgr'
+// ТОЛЬКО ТИП, и он берётся у владельца вопроса, а не переобъявляется здесь:
+// форма ответа классификатора одна, и вторая её копия разошлась бы с первой
+// молча. Зависимости на модуль это не создаёт — сериализатор по-прежнему не
+// знает, кто классифицирует, и вызывается с любым замыканием этой формы.
+import type { CellBox } from './cell-fit'
 
 /** Version of the serializer's row-transform contract. Bump when the
  *  transforms that shape a frozen block's text change: wrapped lines joined,
@@ -317,10 +322,10 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
 interface GenericRun<A> {
   chars: string
   attrs: A
-  /** Колонки, в которые ячейку надо запереть, либо undefined — ран течёт
-   *  потоком. Ран с этим полем НЕ склеивается ни с чем: он и есть одна
-   *  ячейка, а слитая пара заняла бы одну колонку на двоих. */
-  box?: number
+  /** Коробка ячейки, либо undefined — ран течёт потоком. Ран с этим полем
+   *  НЕ склеивается ни с чем: он и есть одна ячейка, а слитая пара заняла
+   *  бы одну колонку на двоих. */
+  box?: CellBox
 }
 
 /** What one cell walk yields: the merged runs, and the COLUMNS they occupy
@@ -355,7 +360,7 @@ function collectRunsOf<A>(
   equal: (a: A, b: A) => boolean,
   escape: boolean,
   keepTrailingSpace: boolean,
-  boxColumns?: (chars: string, width: number, attrs: A) => number | null,
+  boxOf?: (chars: string, width: number, attrs: A) => CellBox | null,
 ): Walked<A> {
   const len = line.length
   if (len === 0) return { runs: [], cols: 0 }
@@ -395,7 +400,8 @@ function collectRunsOf<A>(
     // для ячейки шириной две — это сдвиг, которого в сетке нет; лучше
     // сегодняшний поток, чем выдуманная геометрия.
     const columns = Math.max(1, width)
-    const box = boxColumns?.(chars, columns, attrs) === columns ? columns : null
+    const claimed = boxOf?.(chars, columns, attrs) ?? null
+    const box = claimed?.cols === columns ? claimed : null
     const last = runs.length > 0 ? runs[runs.length - 1] : undefined
     if (box !== null) {
       runs.push({ chars: text, attrs, box })
@@ -427,7 +433,7 @@ function collectRuns(
   snapshot: TerminalSnapshot,
   line: IBufferLine,
   keepTrailingSpace = false,
-  boxColumns?: (chars: string, width: number, attrs: CellAttrs) => number | null,
+  boxOf?: (chars: string, width: number, attrs: CellAttrs) => CellBox | null,
 ): Walked<CellAttrs> {
   return collectRunsOf(
     line,
@@ -435,7 +441,7 @@ function collectRuns(
     attrsEqual,
     true,
     keepTrailingSpace,
-    boxColumns,
+    boxOf,
   )
 }
 
@@ -559,17 +565,29 @@ export function serializeRange(
   startLine: number,
   endLine: number,
   colsOut?: number[],
-  boxColumns?: (chars: string, width: number, attrs: CellAttrs) => number | null,
+  boxOf?: (chars: string, width: number, attrs: CellAttrs) => CellBox | null,
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace, boxColumns)
+    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace, boxOf)
     let content = ''
     for (const run of runs) {
       if (run.chars.length === 0) continue
       const style = attrsToStyle(snapshot, run.attrs)
       if (run.box !== undefined) {
         const styleAttr = style ? ` style="${style}"` : ''
-        content += `<span class="term-cell" data-cols="${run.box}"${styleAttr}>${run.chars}</span>`
+        // АТРИБУТЫ ЯЧЕЙКИ — НА КОРОБКЕ, МАСШТАБ — НА ОБЁРТКЕ ВНУТРИ, и это
+        // не вкусовщина. attrsToStyle вешает background-color именно на
+        // коробку; трансформация, поставленная на неё же, ужала бы вместе
+        // с краской и фон, и цветная ячейка стала бы вдвое у́же соседних —
+        // ровно та дыра в строке, которую вся эта работа закрывает.
+        // Масштабируется только краска, поэтому обёртка отдельная.
+        // При fit === 1 обёртки нет вовсе: лишний узел на каждую коробку
+        // ради `scale(1)`.
+        const ink =
+          run.box.fit < 1
+            ? `<span class="term-cell-ink" style="--cell-fit:${run.box.fit}">${run.chars}</span>`
+            : run.chars
+        content += `<span class="term-cell" data-cols="${run.box.cols}"${styleAttr}>${ink}</span>`
       } else {
         content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
       }

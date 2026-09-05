@@ -211,6 +211,57 @@ test('the box mechanism fires when a cell misses its column', async ({ page }) =
   expect(shape.boxes.every((b) => b.text !== '')).toBe(true)
 })
 
+test('the ink of a glyph wider than its cell is scaled to fit inside it', async ({ page }) => {
+  await page.goto('/')
+  await promptReady(page)
+
+  // МЕТРИКА СТАВИТСЯ В ПРОДВИЖКУ УЗКОГО КЛАСТЕРА, а не шире всех, как в
+  // тесте выше. Там коробка нужна была ДЛИННЕЕ глифа, и ужимать было нечего;
+  // здесь нужен обратный промах — глиф ШИРЕ своих колонок, потому что именно
+  // он рисуется за краем коробки и именно его половину закрашивает сосед со
+  // своим фоном. У владельца это 14px краски в ячейке 8px.
+  const advances = await advancesOf(page, SINGLE_COLUMN)
+  let narrow = 0
+  let wide = 0
+  for (let i = 0; i < advances.length; i++) {
+    if (advances[i] < advances[narrow]) narrow = i
+    if (advances[i] > advances[wide]) wide = i
+  }
+  // Как и в тесте про пакет: пара обязана различаться, иначе утверждать
+  // нечего. Схождение продвижек — отчёт о шрифте среды, а не флейк.
+  expect(advances[wide] - advances[narrow]).toBeGreaterThan(1)
+  await forceCellWidth(page, advances[narrow])
+
+  const marker = `FS-${Date.now().toString(36)}`
+  await printLine(page, `WW${SINGLE_COLUMN[wide]}WW`, marker)
+
+  const fitted = await page.evaluate((m) => {
+    const block = Array.from(document.querySelectorAll('.cmd-block')).find((b) =>
+      (b.textContent ?? '').includes(m),
+    )
+    const box = block?.querySelector<HTMLElement>('.cmd-output > .term-line .term-cell')
+    if (!box) return null
+    const ink = box.querySelector<HTMLElement>('.term-cell-ink')
+    if (!ink) return { fit: Number.NaN, boxWidth: box.getBoundingClientRect().width, inkWidth: -1 }
+    return {
+      // Объявленный множитель — тот, что сериализатор положил в разметку.
+      fit: Number.parseFloat(ink.style.getPropertyValue('--cell-fit')),
+      boxWidth: box.getBoundingClientRect().width,
+      // getBoundingClientRect отдаёт УЖЕ ТРАНСФОРМИРОВАННЫЙ прямоугольник,
+      // поэтому это прямая проверка «глиф поместился», а не пересчёт по
+      // множителю, который тест взял из той же разметки.
+      inkWidth: ink.getBoundingClientRect().width,
+    }
+  }, marker)
+
+  expect(fitted).not.toBeNull()
+  expect(fitted!.fit).toBeGreaterThan(0)
+  expect(fitted!.fit).toBeLessThan(1)
+  // Полпикселя — шум округления раскладки, ровно тот же допуск, что у
+  // геометрии строки ниже.
+  expect(fitted!.inkWidth).toBeLessThanOrEqual(fitted!.boxWidth + 0.5)
+})
+
 test('a row of symbols occupies exactly the columns the grid gave it', async ({ page }) => {
   await page.goto('/')
   await promptReady(page)

@@ -2343,28 +2343,21 @@ export class BlockManager {
     // serializer's hot path is what it was.
     const driftCols = driftEnabled() ? [] : undefined
     // ДВА ПРОХОДА, ОДНА РАСКЛАДКА. Первый называет ячейки и греет кэш одним
-    // пакетным замером; второй сериализует, и там boxColumns уже чистое
+    // пакетным замером; второй сериализует, и там boxOf уже чистое
     // чтение Map. Поштучный замер во время сериализации был бы N
     // принудительных раскладок в тот самый момент, когда блок подменяет
     // живую область.
-    let boxColumns: Parameters<typeof serializeRange>[5]
+    let boxOf: Parameters<typeof serializeRange>[5]
     if (this._cellFit.begin()) {
       const candidates: FitCandidate[] = []
       collectFitCandidates(getLine, rec.outputStart, endLine, (chars, width, attrs) =>
         candidates.push({ chars, width, face: { bold: attrs.bold, italic: attrs.italic } }),
       )
       this._cellFit.warm(candidates)
-      boxColumns = (chars, width, attrs) =>
-        this._cellFit.boxColumns(chars, width, { bold: attrs.bold, italic: attrs.italic })
+      boxOf = (chars, width, attrs) =>
+        this._cellFit.boxOf(chars, width, { bold: attrs.bold, italic: attrs.italic })
     }
-    const outputHtml = serializeRange(
-      snapshot,
-      getLine,
-      rec.outputStart,
-      endLine,
-      driftCols,
-      boxColumns,
-    )
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols, boxOf)
     // The DURABLE bodies, from the same rows and the same walk the frozen
     // block on screen is made of — so what comes back after a restart is
     // what was there, not a second reading of the buffer taken later.

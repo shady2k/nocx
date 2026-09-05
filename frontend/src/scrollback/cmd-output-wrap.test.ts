@@ -169,6 +169,24 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
     )
   })
 
+  // Краска ужимается, продвижка нет (nocx-ec18).
+  it('ships a scale for the ink of a glyph too wide for its box', () => {
+    // Коробка держит продвижку, но не прячет краску (клипа нет намеренно —
+    // см. .term-cell выше), поэтому глиф шире своих колонок рисуется за её
+    // краем и сосед со своим фоном закрашивает вылезшее. Масштаб на
+    // ОТДЕЛЬНОЙ обёртке: transform на самой коробке ужал бы вместе с
+    // краской и её background, который attrsToStyle вешает именно туда.
+    expect(shippedValue({ classes: ['term-cell-ink'] }, 'display')).toBe('inline-block')
+    expect(shippedValue({ classes: ['term-cell-ink'] }, 'transform')).toBe(
+      'scale(var(--cell-fit, 1))',
+    )
+    // От левого края своей колонки: origin по умолчанию (50% 50%) увёл бы
+    // ужатый глиф вправо от начала ячейки.
+    expect(shippedValue({ classes: ['term-cell-ink'] }, 'transform-origin')).toBe('0 50%')
+    // Трансформации на самой коробке нет и быть не должно.
+    expect(shippedValue({ classes: ['term-cell'] }, 'transform')).toBe(null)
+  })
+
   it('shapes a frozen row cell by cell, the way the grid draws it', () => {
     // Иначе DOM волен сшить `->` или `ffi` не так, как xterm рисует их по
     // ячейкам, и предпосылка «ASCII всегда ложится» перестаёт быть верной.

@@ -12,6 +12,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/mcp"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -160,9 +162,12 @@ type vaultLifecycleHandlers struct {
 // vault.changed fan-out; the profile/group/credential stores are reachable
 // only through the operation's service.
 type vaultSecretHandlers struct {
-	op      capability.SecretOperation // nil → not fully wired
-	r       Responder
-	machine vaultMachine
+	op         capability.SecretOperation // nil → not fully wired
+	r          Responder
+	machine    vaultMachine
+	mcpRepo    profile.MCPServerRepository
+	mcpNotify  func(mcpServersChangedParams)
+	mcpRuntime mcp.Runtime
 	// secrets is the stanced material seam, held by the HANDLER and never
 	// reached from inside the operation: an operation-stance read blocks
 	// on the unlock, and no admission may be held across that wait
@@ -815,8 +820,14 @@ func (h vaultSecretHandlers) handleDeleteSecret(ctx context.Context, req jsonrpc
 			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.deleteSecret: ", err))
 			return nil
 		}
-		h.machine.broadcastVaultChanged()
 		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+		if h.mcpRepo != nil && h.mcpNotify != nil {
+			if servers, listErr := h.mcpRepo.ListMCPServers(); listErr == nil {
+				for _, server := range servers {
+					h.mcpNotify(mcpServersChangedParams{ID: server.ID, Revision: server.Revision, Change: "vault-delete"})
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -1340,7 +1351,7 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReplaceSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.deleteSecret", params(validateVaultDeleteSecretRaw), func(r Responder) handlerFunc {
-			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
+			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.resolveLine", params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
@@ -1348,11 +1359,11 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(resetSub, "vault.resetPreview", noParams(), func(r Responder) handlerFunc {
-			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
+			h := vaultResetHandlers{op: resetOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResetPreview(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),
 		whenAvailable(regResponder(resetSub, "vault.reset", noParams(), func(r Responder) handlerFunc {
-			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
+			h := vaultResetHandlers{op: resetOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReset(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),
 	}

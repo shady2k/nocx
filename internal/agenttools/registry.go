@@ -196,6 +196,10 @@ type Declaration struct {
 	// them, so the content root still covers everything and a narrow grant
 	// covers only what it named.
 	ScopeFamily string
+	// CatalogSearchText is local-only catalog metadata used to match
+	// tools.search queries. It is never used as the model-facing declaration
+	// description and never participates in policy.
+	CatalogSearchText string
 	// ResolveResources derives the resources named by validated arguments.
 	// Nil means the declaration names no resource at all; a non-nil resolver
 	// returning no refs is a distinct zero-resource call.
@@ -278,6 +282,9 @@ type Capability any
 // only real parameter is `command` (nocx-ydu92).
 type Tool struct {
 	Declaration
+	// CatalogOnly keeps untrusted external declarations out of the provider
+	// tool list until the user/model explicitly loads them through search.
+	CatalogOnly bool
 	// Effect is the singular class selected for the invocation currently
 	// being evaluated. Approval, ledger and wire records describe this
 	// decision, never Declaration.Effect's whole reachable set.
@@ -285,20 +292,6 @@ type Tool struct {
 	ParamsSchema json.RawMessage
 	// ResultSchema is the shape the tool RETURNS, declared in the same
 	// contract document as its parameters, under $defs/result.
-	//
-	// It exists because the composing carriers made a hidden contract
-	// visible (nocx-d6gn4.8.1): under a declared call the framework hands
-	// the result back as text a model reads, but a program indexes it —
-	// `r["text"]` — and nothing anywhere said what the keys were. A live
-	// model guessed `output`, then `stdout`, then gave up and answered with
-	// the whole dict; the worked example in the program description taught
-	// `result["text"]` using the one tool that has no `text`. Two of the
-	// three turns of a live run were spent on that and never reached the
-	// task.
-	//
-	// One document per tool, both directions: the row names the contract,
-	// it does not restate either shape. Empty only for a row that cannot
-	// execute (Narrow nil), which returns nothing to declare.
 	ResultSchema json.RawMessage
 }
 

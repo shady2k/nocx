@@ -31,12 +31,15 @@ type SecretReferenceImpact struct {
 	// "9 connections" and "2 endpoints" answer different questions
 	// (ADR-0031).
 	EndpointCount int
+	// MCPServerCount is MCP server records holding at least one secret reference.
+	MCPServerCount int
 }
 
 func impactOf(d *storeData) SecretReferenceImpact {
 	distinct := make(map[string]struct{})
 	heldByProfiles := make(map[string]struct{})
 	heldByEndpoints := make(map[string]struct{})
+	heldByMCPServers := make(map[string]struct{})
 
 	for i := range d.Profiles {
 		o := &d.Profiles[i].Options
@@ -74,11 +77,24 @@ func impactOf(d *storeData) SecretReferenceImpact {
 			}
 		}
 	}
+	for i := range d.MCPServers {
+		holds := false
+		visitMCPSecretRefs(&d.MCPServers[i], func(ref string, _ bool) {
+			if ref != "" {
+				distinct[ref] = struct{}{}
+				holds = true
+			}
+		})
+		if holds {
+			heldByMCPServers[d.MCPServers[i].ID] = struct{}{}
+		}
+	}
 
 	return SecretReferenceImpact{
-		SecretCount:   len(distinct),
-		ProfileCount:  len(heldByProfiles),
-		EndpointCount: len(heldByEndpoints),
+		SecretCount:    len(distinct),
+		ProfileCount:   len(heldByProfiles),
+		EndpointCount:  len(heldByEndpoints),
+		MCPServerCount: len(heldByMCPServers),
 	}
 }
 
@@ -144,6 +160,9 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 		ep.Headers = kept
 	}
 
+	for i := range d.MCPServers {
+		clearAllMCPSecretRefs(&d.MCPServers[i])
+	}
 	if err := s.writeLocked(d); err != nil {
 		return SecretReferenceImpact{}, err
 	}
@@ -233,6 +252,123 @@ func clearSecretRefLocked(d *storeData, secretID string) bool {
 			kept = append(kept, h)
 		}
 		ep.Headers = kept
+	}
+	for i := range d.MCPServers {
+		if clearMCPSecretRef(&d.MCPServers[i], secretID) {
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func clearAllMCPSecretRefs(server *MCPServer) bool {
+	hasRefs := false
+	visitMCPSecretRefs(server, func(ref string, _ bool) {
+		if ref != "" {
+			hasRefs = true
+		}
+	})
+	if !hasRefs {
+		return false
+	}
+	if server.Stdio != nil {
+		kept := server.Stdio.Env[:0]
+		for _, row := range server.Stdio.Env {
+			if row.Value.Kind == MCPBindingSecret {
+				continue
+			}
+			kept = append(kept, row)
+		}
+		server.Stdio.Env = kept
+	}
+	if server.HTTP != nil {
+		kept := server.HTTP.Headers[:0]
+		for _, row := range server.HTTP.Headers {
+			if row.Value.Kind == MCPBindingSecret {
+				continue
+			}
+			kept = append(kept, row)
+		}
+		server.HTTP.Headers = kept
+		server.HTTP.Bearer = nil
+		if server.HTTP.Auth == MCPHTTPAuthBearer {
+			server.HTTP.Auth = MCPHTTPAuthNone
+		}
+		if oauth := server.HTTP.OAuth; oauth != nil {
+			oauth.ClientSecret = nil
+			oauth.SessionRef = nil
+			oauth.Status = MCPOAuthMissing
+			oauth.Issuer = ""
+			oauth.GrantedScopes = []string{}
+			oauth.AccessTokenExpires = nil
+		}
+	}
+	markMCPUnavailable(server)
+	server.Revision++
+	return true
+}
+
+func markMCPUnavailable(server *MCPServer) {
+	server.Enabled = false
+	server.Catalog.State = MCPCatalogStale
+	for i := range server.Catalog.Tools {
+		server.Catalog.Tools[i].Enabled = false
+	}
+}
+
+func clearMCPSecretRef(server *MCPServer, secretID string) bool {
+	changed := false
+	if server.Stdio != nil {
+		kept := server.Stdio.Env[:0]
+		for _, row := range server.Stdio.Env {
+			if row.Value.Kind == MCPBindingSecret && row.Value.SecretRef == secretID {
+				changed = true
+				continue
+			}
+			kept = append(kept, row)
+		}
+		server.Stdio.Env = kept
+	}
+	if server.HTTP == nil {
+		if changed {
+			markMCPUnavailable(server)
+		}
+		return changed
+	}
+	kept := server.HTTP.Headers[:0]
+	for _, row := range server.HTTP.Headers {
+		if row.Value.Kind == MCPBindingSecret && row.Value.SecretRef == secretID {
+			changed = true
+			continue
+		}
+		kept = append(kept, row)
+	}
+	server.HTTP.Headers = kept
+	if server.HTTP.Bearer != nil && server.HTTP.Bearer.SecretRef == secretID {
+		server.HTTP.Bearer = nil
+		if server.HTTP.Auth == MCPHTTPAuthBearer {
+			server.HTTP.Auth = MCPHTTPAuthNone
+		}
+		changed = true
+	}
+	if oauth := server.HTTP.OAuth; oauth != nil {
+		if oauth.ClientSecret != nil && oauth.ClientSecret.SecretRef == secretID {
+			oauth.ClientSecret = nil
+			changed = true
+		}
+		if oauth.SessionRef != nil && oauth.SessionRef.SecretRef == secretID {
+			oauth.SessionRef = nil
+			oauth.Status = MCPOAuthMissing
+			oauth.Issuer = ""
+			oauth.GrantedScopes = []string{}
+			oauth.AccessTokenExpires = nil
+			changed = true
+		}
+	}
+	if changed {
+		markMCPUnavailable(server)
+		server.Revision++
 	}
 	return changed
 }

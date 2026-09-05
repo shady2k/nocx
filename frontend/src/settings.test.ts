@@ -550,6 +550,7 @@ describe('SettingsContent', () => {
     expect(labels).toEqual([
       'Connections',
       'Endpoints',
+      'MCP Servers',
       'Roles',
       'Agent policy',
       'Protection',

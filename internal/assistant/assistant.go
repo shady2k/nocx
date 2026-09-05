@@ -32,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
@@ -293,6 +294,14 @@ type AskParams struct {
 	// Presentation controls the model-facing lazy tool catalog. It changes
 	// visibility only; the grant and kernel remain the authority boundary.
 	Presentation *agenttools.PresentationConfig
+	// MCPCatalogs are immutable local snapshots composed into this run's
+	// registry. Composition is pure: it performs no discovery and does not
+	// touch MCPRuntime.
+	MCPCatalogs []agenttools.MCPCatalogSnapshot
+	// MCPRuntime is the on-demand execution seam. It is consulted only by an
+	// MCP executor after effectKernel has validated, authorized, recorded,
+	// and narrowed the actual call.
+	MCPRuntime mcp.Runtime
 
 	// RunID and SessionID are the run's backend-owned identities. The
 	// transport passes both from the ask context; SessionID is the pane the

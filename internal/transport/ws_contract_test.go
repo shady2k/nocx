@@ -217,7 +217,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	preview := loadSchema(t, "vault.resetPreview.schema.json")
 	result := loadSchema(t, "vault.reset.schema.json")
 	rawPreview, err := json.Marshal(vaultResetPreviewResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		SystemKeychainReachable: false, VaultInitialized: true,
 	})
 	if err != nil {
@@ -226,7 +226,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	validateJSON(t, preview, rawPreview, "vault.resetPreview DTO")
 
 	rawWithResidue, err := json.Marshal(vaultResetResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		Residue: []vaultResetResidueEntry{{Store: "system", Reason: "no-service"}},
 	})
 	if err != nil {

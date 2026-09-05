@@ -1,0 +1,39 @@
+/* MCP Servers Settings page. The surface owns only layout; controls and rows
+   keep their UI-kit paint and interaction vocabulary. */
+.mcp-servers-root {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.mcp-binding-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(7rem, auto) minmax(12rem, 2fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.mcp-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.mcp-tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mcp-tool-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+@media (max-width: 640px) {
+  .mcp-binding-row,
+  .mcp-limit-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

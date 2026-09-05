@@ -1357,8 +1357,9 @@ func TestExecutorsCoverTheRegistry(t *testing.T) {
 			if _, ok := executors[tl.Name]; !ok {
 				t.Fatalf("tool %q executes in Go but has no executor entry", tl.Name)
 			}
-		case agenttools.InRenderer, agenttools.Dynamic:
-			// InRenderer and Dynamic have explicit middleware dispatch.
+		case agenttools.InRenderer, agenttools.Dynamic, agenttools.InMCP:
+			// These sites have explicit middleware dispatch; only static InGo
+			// declarations require a name-keyed executor entry.
 		default:
 			t.Fatalf("tool %q has an unknown execution site %q", tl.Name, tl.Executes)
 		}

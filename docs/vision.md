@@ -139,7 +139,7 @@ Phases as one-liners. The detailed, executable backlog lives in **beads**, not i
 
 - **Phase 1 — MVP.** Local terminal with agent-TUI-grade rendering, tabs/cwd features, SSH client, GUI config, a CodeMirror 6 command editor with Warp-style blocks, the secrets vault, and Warpify-style UX in nested shells. macOS.
 - **Phase 2 — Comfort layer.** Splits/panes + scrollback search + the semantic command line + API testing without an account.
-- **Phase 3 — Ask an agent + reach.** Natural-language query from the terminal to any AI model the user chooses — bring-your-own, including a fully local model; expand to Windows / Linux.
+- **Phase 3 — Ask an agent + reach.** Natural-language query from the terminal to any AI model the user chooses — bring-your-own, including a fully local model; expand to Windows / Linux. The local MCP integration provides an explicit Settings-managed bridge to stdio and Streamable HTTP tools, with approval and Vault boundaries; it does not add cloud sync, telemetry, or provider-native authority.
 
 ## 7. Tech stack
 

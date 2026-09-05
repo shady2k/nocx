@@ -89,6 +89,7 @@
 @import './styles/components/context-menu.css';
 @import './styles/components/file-viewer.css';
 @import './styles/components/endpoints.css';
+@import './styles/components/mcp-servers.css';
 @import './styles/components/snippets.css';
 @import './styles/components/notes.css';
 @import './styles/components/api-workbench.css';

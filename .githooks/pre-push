@@ -50,29 +50,31 @@ set -eu
 #   sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized'
 #   sh -c '. ./.githooks/containerized-tests.sh; vitest_containerized'
 
-# Some developers install bd with `go install`, which puts it in GOPATH/bin
-# rather than on the default PATH. beads-hook.sh returns 0 when bd is missing —
-# a deliberate skip for someone contributing without beads — so without this
-# line their pushes would silently stop syncing the tracker, which is the exact
-# failure the block below exists to prevent.
-command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
-
-# Push the issue tracker along with the code.
+# WARN WHEN THE BACKLOG IS BEING LEFT BEHIND.
 #
-# The issue database goes to refs/dolt/data on the remote, and that is what a
-# fresh clone reads — there is no tracked .beads/issues.jsonl in this repository
-# to fall back to. So a push that skips this step leaves collaborators on a
-# backlog that can be days old, with nothing on screen to suggest it.
-
-. "$(dirname "$0")/beads-hook.sh"
-
-# The spare copy first, from the local database, to a ref of its own.
+# `br` never runs git — that is its whole design — so nothing but this hook
+# notices when the code goes out and the backlog stays home. It used to be the
+# other way round: the backlog lived in refs/dolt/data and .githooks/beads-hook.sh
+# pushed it here, because there was no tracked .beads/issues.jsonl to fall back
+# on. Now the file IS the transport, and it travels as an ordinary tracked file
+# in the commit you are pushing.
 #
-# Before push_beads_state and not after, because this script runs under `set -e`
-# and push_beads_state deliberately returns nonzero when bd dolt push genuinely
-# fails. That failure IS the scenario the snapshot exists for — a stranded
-# refs/dolt/data with the healthy backlog only on this machine. Publishing
-# afterwards would mean never publishing in the one case that matters.
-publish_beads_snapshot
+# So this warns and never blocks. A push that leaves the backlog behind costs a
+# colleague a stale `br ready`; a push this hook REFUSES costs the developer
+# their next twenty minutes, and a hook people learn to pass with --no-verify
+# guards nothing at all.
+command -v br >/dev/null 2>&1 || exit 0
+br where >/dev/null 2>&1 || exit 0
 
-push_beads_state
+# Changes sitting in SQLite that never reached the file git is about to push.
+if ! br sync --status 2>/dev/null | grep -q "Dirty issues: 0"; then
+    printf "\nWARN: у br есть изменения, не выгруженные в .beads/issues.jsonl.\n" >&2
+    printf "      br sync --flush-only && git add .beads/issues.jsonl\n" >&2
+fi
+
+# The file changed but was never staged, so the push carries the code without
+# the backlog that explains it.
+if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
+    printf "\nWARN: .beads/issues.jsonl изменён и не закоммичен — бэклог остаётся здесь.\n" >&2
+    printf "      git add .beads/issues.jsonl && git commit\n" >&2
+fi

@@ -147,23 +147,22 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 ## Prerequisites
 
-| Tool          | Version           | Install                                                                  |
-| ------------- | ----------------- | ------------------------------------------------------------------------ |
-| Go            | 1.26              | [go.dev](https://go.dev/dl/)                                             |
-| Node          | 24                | [nodejs.org](https://nodejs.org/)                                        |
-| Wails CLI     | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`       |
-| gofumpt       | latest            | `go install mvdan.cc/gofumpt@latest`                                     |
-| golangci-lint | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads)    | **≥ 1.1.0**       | `brew install beads`                                                     |
+| Tool             | Version           | Install                                                                                                            |
+| ---------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Go               | 1.26              | [go.dev](https://go.dev/dl/)                                                                                       |
+| Node             | 24                | [nodejs.org](https://nodejs.org/)                                                                                  |
+| Wails CLI        | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`                                                 |
+| gofumpt          | latest            | `go install mvdan.cc/gofumpt@latest`                                                                               |
+| golangci-lint    | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8`                                           |
+| br (beads_rust)  | latest            | `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh \| bash -s -- --verify` |
+| cm (cass-memory) | latest            | `brew install dicklesworthstone/tap/cm`, or its `install.sh --easy-mode --verify`                                  |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
 
-> ⚠️ `bd` must be **≥ 1.1.0**. Older builds (e.g. 1.0.3, which some distros and
-> nixpkgs still ship) misread the tracker's dependency schema: `bd stats` errors,
-> and — worse — the export strips every dependency edge, which would put a
-> dependency-free backlog into the snapshot the pre-push hook publishes. Check
-> with `bd version` before enabling hooks.
+> The tracker was `bd` (Go beads, embedded Dolt) until 2026-09-05 and is `br`
+> now. `br` is a single static binary with no daemon and no Dolt; it never runs
+> git. `cm` holds what `bd remember` used to — `br` has no memory store at all.
 
 **On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
 latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,
@@ -173,12 +172,21 @@ the rest through the language toolchains:
 ```bash
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
-CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
+
+# The tracker and the memory store: release binaries into ~/.local/bin.
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh?$(date +%s)" \
+  | bash -s -- --dest ~/.local/bin --skip-skills --verify
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/cass_memory_system/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
 ```
 
-`bd` is not in upstream nixpkgs, so `go install` is the clean route (or package
-it yourself) — either way confirm `bd version` is **≥ 1.1.0**, since a system or
-nixpkgs build can lag. The `beads-superpowers` plugin installs via `claude` — see
+Neither is in nixpkgs. `br`'s Linux musl artifact is statically linked, so it runs
+as-is; `cm` is a bun binary against the system loader and needs `nix-ld` enabled
+(`programs.nix-ld.enable = true`), which also covers `cass`, the session indexer
+`cm` reads. Add **`minisign`** and **`sqlite3`** from nixpkgs while you are there:
+the first verifies `br`'s release signatures, the second is how you look at the
+database when `br doctor` disagrees with you. The `beads-superpowers` plugin
+installs via `claude` — see
 [Agent tooling](#agent-tooling).
 
 ## Getting started
@@ -218,20 +226,18 @@ all:frontend/dist` needs populated before the Go compiler runs, and then runs
 
 `make init` is safe to re-run, and does four things:
 
-| Step                                  | Why it matters                                                                                                            |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `git config core.hooksPath .githooks` | Installs the quality gate and the tracker sync. Without it nothing is enforced and issue state never leaves your machine. |
-| `bd bootstrap`                        | Fetches the issue database. Skipped with a note if `bd` is not installed.                                                 |
-| `npm ci` (root)                       | `@playwright/test`, for the e2e suite.                                                                                    |
-| `npm ci` (frontend)                   | The app's own dependencies.                                                                                               |
+| Step                                  | Why it matters                                                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `git config core.hooksPath .githooks` | Installs the quality gate. Without it nothing is enforced.                                              |
+| `br sync --import-only`               | Builds the SQLite from the tracked `.beads/issues.jsonl`. Skipped with a note if `br` is not installed. |
+| `npm ci` (root)                       | `@playwright/test`, for the e2e suite.                                                                  |
+| `npm ci` (frontend)                   | The app's own dependencies.                                                                             |
 
-`bd bootstrap`, not `bd init`: the backlog lives in a Dolt database that git does
-not carry, and bootstrap is the command that knows where to get it — it clones
-from the configured remote. There is no tracked JSONL in this repository to fall
-back to; if the remote itself is unusable, recover from the snapshot ref below. A
-clone without this step has no issue database at all, and `bd ready` will tell you
-so. `bd init --from-jsonl` exists, but it builds a history divergent from the
-remote, so keep it for recovery, not setup.
+The backlog needs no bootstrapping: `.beads/issues.jsonl` is a tracked file, so a
+clone already has every issue and `br` builds its SQLite from it on the first
+command. `make init` just does that eagerly. What a clone can lack is `br` itself
+— git carries the data, not the tool — and without it `make init` says so and
+moves on.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
@@ -253,62 +259,35 @@ every pull request. The trade is deliberate: a commit can be made whose tests
 do not pass, in exchange for a gate that takes seconds and cannot be starved
 into misreporting which check failed (`nocx-y6d9j`).
 
-The pre-push hook pushes the issue database itself with `bd dolt push`. That is
-what a fresh clone reads, so skipping it leaves collaborators on a backlog that
-looks current and is not. It also publishes a spare copy of the export to
-`refs/beads/snapshot` on the same remote — a ref, not a branch, so it stays out of
-the branch list and out of every pull request.
+The pre-push hook does not push the tracker, because there is nothing separate to
+push: the backlog **is** `.beads/issues.jsonl`, an ordinary tracked file that
+travels in the commit you are pushing. What the hook does is warn — when `br` has
+changes that never reached the file, or when the file is modified and not
+committed. It warns and never blocks. A push that leaves the backlog behind costs
+a colleague a stale `br ready`; a hook that refuses the push costs the developer
+their afternoon and teaches them `--no-verify`, after which it guards nothing.
 
-`.beads/issues.jsonl` is **not** tracked. It used to be, regenerated and staged on
-every commit, and it conflicted in almost every pull request: GitHub decides
-mergeability server-side and never runs the repository's merge driver. The
-snapshot ref replaces it, and unlike a CI job it is written from your local
-database — which matters, because the failure it insures against is a stranded
-history on the remote itself.
+There are no post-merge or post-rewrite hooks any more either. `git pull` brings a
+colleague's backlog in as a file change, and `br` imports it before the next
+command on its own (`sync.auto_import`). If both your database and the pulled file
+changed, `br sync --merge` does the three-way against `.beads/beads.base.jsonl`,
+and `--force-db` / `--force-jsonl` / `--force` are the three explicit policies for
+an issue that changed on both sides.
 
-Recovering the backlog from the snapshot:
+**The tracker was `bd` (Go beads, embedded Dolt) until 2026-09-05.** It moved to
+`br` because Dolt's failures compounded: a pull that could not recover a clone
+which had fallen behind, a remote cache that grew ~210 MB per aborted attempt and
+never pruned, and a process that ignored SIGTERM while holding the store lock, so
+every worktree on the machine queued behind it (`nocx-v48vl`). The store went from
+1.9 GB to about 22 MB. Migration is recorded in
+`.internal/specs/2026-09-05-bd-to-br-migration-design.md`, and the two scripts that
+did it — `scripts/bd-to-br-transform.py` and `scripts/bd-to-br-verify.py` — are
+kept so a second machine can repeat and re-check it.
 
-```bash
-git fetch origin refs/beads/snapshot:refs/beads/snapshot
-git cat-file -p refs/beads/snapshot:issues.jsonl > .beads/issues.jsonl
-sed -i '/^sync\.remote:/d' .beads/config.yaml   # do not adopt the stranded remote
-bd init --from-jsonl
-bd list --status all | wc -l                    # must match what you expect
-```
+If `br` is missing, the pre-push hook steps aside silently.
 
-Verified end to end on 2026-08-29: 2720 issues out, 2720 back, ids intact.
-
-Three things this procedure is deliberately not. It is not `bd bootstrap`, which
-prefers the configured remote and reaches a local JSONL only fourth — in the one
-failure this snapshot exists for, a remote that answers but whose history is
-stranded, bootstrap would faithfully restore the broken state. It is not
-`--discard-remote` either: dropping `sync.remote` first says the same thing
-without arming the next `bd dolt push` to force-replace the remote's history.
-And it is not run from a directory of any name — a fresh `bd init` takes the
-issue prefix from the directory, so recover into one named `nocx` or new issues
-will be minted as `<dirname>-<hash>`.
-
-Once the recovered database is verified, put `sync.remote` back and push it to
-the remote to replace the stranded history — that push is the destructive step,
-and it belongs after you have checked the count, not before.
-
-If `bd` is missing or this clone has no database, both hooks step aside silently; a
-genuine sync failure stops the push and says so, and `git push --no-verify`
-overrides it.
-
-The post-merge and post-rewrite hooks are the other direction: they run
-`bd dolt pull`, so `git pull` brings in your colleagues' issue changes the same
-way it brings in their code. Two hooks because git splits the work — a
-fast-forward `git pull` (with or without `--rebase`) triggers post-merge, while
-`git pull --rebase` with local commits to replay triggers post-rewrite instead.
-There is no post-checkout hook on purpose: branch switching is far too frequent
-to pay a network round trip for. Unlike the push side these never block you — a
-failed or slow pull warns and lets the merge stand, because the cost is a stale
-backlog, not a lost one. Verify the policy with
-`sh scripts/test-beads-pull-hook.sh`.
-
-Claiming a task is the one moment where that background freshness is not enough;
-`AGENTS.md` has the three-step claim protocol.
+Claiming a task is the one moment where a stale backlog actually costs something;
+`AGENTS.md` has the claim protocol.
 
 All four frontend gates FAIL with an actionable message if `node_modules` is absent (run `cd frontend && npm ci`).
 
@@ -361,18 +340,22 @@ what enforces **no merge without green** on `main`: the pre-commit hook and
 bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh
 checkout may skip.
 
-## Task tracking — beads (bd)
+## Task tracking — beads (br)
 
-The executable backlog lives in beads, not markdown:
+The executable backlog lives in beads, not markdown, and in `.beads/issues.jsonl`,
+which is a tracked file — so a clone has it:
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+scripts/br-queue.sh          # what to work on next: taken epics' fronts, plus standalone bugs
+br show <id>                 # view an issue
+br update <id> --claim       # claim work
+br close <id> --reason "..." # complete work, with evidence a stranger can check
+br sync --flush-only && git add .beads/issues.jsonl   # send it out with the code
 ```
 
-See `AGENTS.md` for the full workflow.
+`br` never runs git: the last line is yours to type, and nothing does it for you.
+See `AGENTS.md` for the full workflow and for the `bd` → `br` table, which the
+`beads-superpowers` plugin still needs.
 
 ## Sources of truth
 

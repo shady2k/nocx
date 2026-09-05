@@ -1,7 +1,5 @@
 
 .beads-credential-key
-.beads/issues.jsonl
-.beads/proxieddb/
 .claude/settings.local.json
 .dolt/
 .DS_Store

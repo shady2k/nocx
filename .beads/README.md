@@ -1,81 +1,45 @@
-# Beads - AI-Native Issue Tracking
+# `.beads/` — the executable backlog
 
-Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, AI-native tool designed to live directly in your codebase alongside your code.
+The tracker is **`br`** ([beads_rust](https://github.com/Dicklesworthstone/beads_rust)).
+`br ready` to see work, `scripts/br-queue.sh` when the question is "what next", and
+[`AGENTS.md`](../AGENTS.md) for the rules — including the `bd` → `br` table, because
+the `beads-superpowers` plugin still speaks the old binary's name.
 
-## What is Beads?
+## What is in here, and what git carries
 
-Beads is issue tracking that lives in your repo, making it perfect for AI coding agents and developers who want their issues close to their code. No web UI required - everything works through the CLI and integrates seamlessly with git.
+| File                        | Tracked | What it is                                                       |
+| --------------------------- | ------- | ---------------------------------------------------------------- |
+| `issues.jsonl`              | **yes** | The backlog itself. One JSON object per issue, sorted by id.      |
+| `config.yaml`               | yes     | `issue_prefix: nocx`, and nothing else worth setting so far.      |
+| `metadata.json`             | yes     | Which files in here are the database and the export.              |
+| `.gitignore`                | yes     | Everything below, plus the leftovers named at the end.            |
+| `beads.db` + its sidecars   | no      | SQLite, rebuilt from the JSONL by `br sync --import-only`.        |
+| `beads.base.jsonl`          | no      | Merge base for `br sync --merge`. Per-clone, never shared.        |
+| `.br_history/`              | no      | Bounded local snapshots of the JSONL.                             |
 
-**Learn more:** [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
+`issues.jsonl` is tracked on purpose, and that is a reversal — it was untracked on
+2026-08-29 because a pre-commit hook regenerated and staged it on every commit, so
+every branch touched it and pull requests conflicted. `br` removes the cause rather
+than the file: nothing stages it, and `br` resolves the **main checkout's** database
+even when run from a worktree that has its own `.beads/` in the tree. A feature
+branch therefore cannot change it, and two branches cannot conflict over it.
 
-## Quick Start
-
-### Essential Commands
-
-```bash
-# Create new issues
-bd create "Add user authentication"
-
-# View all issues
-bd list
-
-# View issue details
-bd show <issue-id>
-
-# Update issue status
-bd update <issue-id> --claim
-bd update <issue-id> --status done
-
-# Sync with Dolt remote
-bd dolt push
-```
-
-### Working with Issues
-
-Issues in Beads are:
-- **Git-native**: Stored in Dolt database with version control and branching
-- **AI-friendly**: CLI-first design works perfectly with AI coding agents
-- **Branch-aware**: Issues can follow your branch workflow
-- **Sync-ready**: Uses Dolt remotes for backup and team sharing
-
-## Why Beads?
-
-✨ **AI-Native Design**
-- Built specifically for AI-assisted development workflows
-- CLI-first interface works seamlessly with AI coding agents
-- No context switching to web UIs
-
-🚀 **Developer Focused**
-- Issues live in your repo, right next to your code
-- Works offline, syncs when you push
-- Fast, lightweight, and stays out of your way
-
-🔧 **Git Integration**
-- Dolt-native sync via bd dolt push / bd dolt pull
-- Branch-aware issue tracking
-- Dolt-native three-way merge resolution
-
-## Get Started with Beads
-
-Try Beads in your own projects:
+## The database is disposable, the JSONL is not
 
 ```bash
-# Install Beads
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
-
-# Initialize in your repo
-bd init
-
-# Create your first issue
-bd create "Try out Beads"
+br sync --import-only            # JSONL -> SQLite   (after a git pull; usually automatic)
+br sync --flush-only             # SQLite -> JSONL   (before git add; usually automatic)
+br sync --status                 # which way they are out of step
+br sync --merge                  # both changed: three-way against beads.base.jsonl
+br sync --import-only --rebuild  # JSONL is authoritative, rebuild the database to match
+br doctor                        # when none of the above explains what you are seeing
 ```
 
-## Learn More
+Losing `beads.db` costs a `--import-only`. Losing `issues.jsonl` costs the backlog,
+which is why it is the tracked half.
 
-- **Documentation**: [github.com/steveyegge/beads/docs](https://github.com/steveyegge/beads/tree/main/docs)
-- **Quick Start Guide**: Run `bd quickstart`
-- **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
+## Leftovers from `bd`
 
----
-
-*Beads: Issue tracking that moves at the speed of thought* ⚡
+`embeddeddolt/` and `backup/` are the old Go tracker's Dolt store, about 1.9 GB.
+They are ignored, kept only until nobody wants a rollback, and can be deleted
+outright. See `.internal/specs/2026-09-05-bd-to-br-migration-design.md`.

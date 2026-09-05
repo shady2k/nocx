@@ -13,42 +13,58 @@ this file.
 - [`docs/vision.md`](docs/vision.md) — what we're building, MVP scope, roadmap.
 - [`docs/architecture.md`](docs/architecture.md) — the spine: invariants `AD-1`…`AD-10`,
   module boundaries, the WebSocket protocol. **The ADs are binding.**
-- The backlog lives in **beads** (`bd`), not in prose.
+- The backlog lives in **beads** (`br`), not in prose.
 - [`frontend/src/ui/README.md`](frontend/src/ui/README.md) — before any UI element.
 - [README setup](README.md#agent-tooling) — the toolchain _and_ the agent tooling
-  (`bd`, the `beads-superpowers` plugin). `make init` installs neither.
+  (`br`, `cm`, the `beads-superpowers` plugin). `make init` installs none of them.
 
-**Fresh clone:** install the tooling, then `make init`. Git carries neither the issue
-database nor its ref, so until `make init` runs there is no backlog — `bd ready` answers
-"no beads database found". `git push` runs `bd dolt push`; if a push fails on beads, fix
-the sync, because `--no-verify` leaves everyone on a backlog that looks current and is
-not.
+**Fresh clone:** install the tooling, then `make init`. The backlog itself comes
+with the clone — `.beads/issues.jsonl` is a tracked file — and `make init` only
+builds the SQLite from it. Without `br` on PATH there is no backlog to read;
+with it, `br sync --import-only` is the whole bootstrap.
 
-**`.beads/issues.jsonl` is not in git, deliberately.** `.githooks/pre-commit` used to
-regenerate and stage it on every commit, so every branch touched all 2707 lines of it and
-almost every pull request came back conflicted. A merge driver fixed only half of that: it
-is per-clone git config, and GitHub computes mergeability server-side without running
-custom drivers at all — which is why PR #129 was clean locally and CONFLICTING on the
-site. The file is ignored now. The backlog lives in Dolt and syncs through
-`refs/dolt/data`; the spare copy is published by `.githooks/pre-push` to
-`refs/beads/snapshot` on the same remote, from your local database. Recovering it is
-three lines in [README](README.md#agent-tooling).
-
-**A branch cut before this will conflict once, and the resolution is one command.**
-Every branch in flight has commits that modified the file, because the old hook staged
-it on every commit; against a `main` where it is deleted, that is a modify/delete
-conflict, which no merge driver can help with — drivers run only when both sides
-changed content, and this one is resolved in the tree. Counted on 2026-08-29: thirteen
-unmerged branches carried the file, of which four had been touched that day; the other
-nine were between one and five weeks stale and pay this only if somebody revives them.
-Take the deletion and move on:
+**The tracker is `br` (beads_rust), not `bd` (Go beads), since 2026-09-05.** The
+binary is `br`, the store is SQLite plus a JSONL export, and **`br` never runs git
+— that is not an oversight, it is the design.** Nothing commits, pushes or pulls
+the backlog for you, and no hook stages it. `git pull` brings someone else's
+backlog in as an ordinary file change, and `br` imports it before the next command
+on its own (`sync.auto_import`). Sending yours out is two lines you type:
 
 ```bash
-git rm .beads/issues.jsonl
+br sync --flush-only          # db -> .beads/issues.jsonl (usually already done)
+git add .beads/issues.jsonl   # and commit it with the code
 ```
 
-Once a branch carries that merge it never happens again, because nothing writes the
-file any more.
+`.githooks/pre-push` warns when you are about to push code and leave the backlog
+behind. It warns and never blocks, for the reason the rest of this file gives
+about gates people learn to pass with `--no-verify`.
+
+**Why `.beads/issues.jsonl` is tracked again, having been untracked on 2026-08-29.**
+It was untracked because `.githooks/pre-commit` regenerated and staged it on
+**every** commit, so every branch touched all 2707 lines and almost every pull
+request came back CONFLICTING — and a merge driver could not fix it, being
+per-clone config that GitHub's server-side mergeability check never runs. `br`
+removes the cause rather than the file: there is no hook, so nothing stages it,
+and `br` resolves the database of the MAIN checkout even when run from a worktree
+that has its own `.beads/` in the tree. Measured 2026-09-05: an agent in a
+worktree created and edited beads, `git status` there stayed empty, and the write
+landed in the main checkout's file. A feature branch cannot touch it, so two
+branches cannot both change it, so the conflict cannot happen. Between machines
+it still can — that one is real, and `br sync --reconcile-additive` resolves it
+without deleting anything.
+
+**Nothing left of Dolt.** No `refs/dolt/data`, no `bd dolt push`/`pull`, no
+`.githooks/beads-hook.sh`, no embedded database. That machinery is gone with the
+defect that bought this migration (`nocx-v48vl`): a pull that could not recover a
+clone which had fallen behind, a cache that grew ~210 MB per failed attempt and
+never pruned, and a process that ignored SIGTERM while holding the store lock.
+On disk the tracker went from 1.9 GB to about 22 MB.
+
+**Memories are not in the tracker any more.** `br` has no `remember`, no
+`memories`, no `recall`, and its import refuses a memory record outright. The 144
+memories moved to **cass-memory** (`cm`); the raw export is kept in
+`.internal/memories-export.jsonl`. Read with `cm context "<what you are doing>" --json`,
+write with `cm playbook add`.
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
@@ -364,9 +380,9 @@ how two agents ship two answers to one question.
 1. **Already filed?** Area first — it is the only listing short enough to read whole:
 
    ```bash
-   bd list --label <area> --status all   # the closed area list is under Backlog invariants
-   bd search <phrase>                    # then words, for the bead filed in other words
-   bd memories <keyword>                 # what a past session learned the hard way
+   br list --label <area> --status all   # the closed area list is under Backlog invariants
+   br search <phrase>                    # then words, for the bead filed in other words
+   cm context "<keyword>" --json         # what a past session learned the hard way
    ```
 
    A hit is not automatically your task — read it. It may be claimed, blocked, or record
@@ -441,15 +457,17 @@ The anecdote stands; the vocabulary in it does not. Since 2026-08-31 there is no
 the remote binary is the **helper**, it owns the PTY on the host rather than augmenting a
 shell beside it, and `nocx-if6` is closed as superseded. The boundary the third failure
 crossed is exactly where it was; only its name changed. The live chain is
-`bd list --label remote-host`.
+`br list --label remote-host`.
 
 ## Before you investigate: two checks that beat reasoning
 
-**Search the memories before fighting the environment.** `bd memories <keyword>` costs
-seconds and is pull-based — nothing surfaces them for you.
+**Search the memories before fighting the environment.** `cm context "<what you are
+doing>" --json` costs seconds and is pull-based — nothing surfaces them for you. They
+left the tracker on 2026-09-05: `br` has no memory store at all, so they live in
+cass-memory, with the raw export kept in `.internal/memories-export.jsonl`.
 
 > A session spent installing Xvfb and rebuilding NixOS twice to run Playwright ended when
-> `bd memories e2e` turned up the headless backend plus its port shim — a path needing
+> a memory lookup for `e2e` turned up the headless backend plus its port shim — a path needing
 > no display, in the repo the whole time.
 
 **When a branch behaves differently from `main`, diff it against `main` first** — before
@@ -468,39 +486,44 @@ git diff origin/main...HEAD -- <path> | grep '^-'
 Asked to "keep going" with no further instruction, this is the whole answer:
 
 ```bash
-# tasks inside epics somebody has actually taken
-for e in $(bd list --type epic --status in_progress --json | jq -r '.[].id'); do
-  bd ready --parent "$e" --exclude-type epic -u -n 5
-done
-# plus standalone bugs, which legitimately have no epic
-bd ready --exclude-type epic -u -n 100 --json | jq -r '.[] | select(.parent == null) | "\(.id)  \(.title)"'
+scripts/br-queue.sh
 ```
+
+It prints two lists: tasks inside epics somebody has actually taken, and standalone
+bugs, which legitimately have no epic. It is a script rather than two piped
+commands because `br ready` has neither `--parent` nor `--exclude-type` and its
+`--json` carries no parent, so both filters are computed — children from
+`br show <epic> --json` (`dependents` carries `dependency_type: "parent-child"`),
+and "has no parent" from the `parent-child` edge set read once out of
+`.beads/issues.jsonl`. Read the script before working around it; the reasoning is
+in its header.
 
 **If it returns nothing, that is an answer, not a bug** — every open epic's front is
 occupied. Finish something in flight or take a free epic; never widen the query.
 
 - **You may not take a task out of an epic nobody has taken.** If the epic is free, take
-  the epic (`bd update <epic> --claim`), then come back for its children.
+  the epic (`br update <epic> --assignee "$(git config user.email)" --status in_progress`),
+  then come back for its children.
 - **Never take work out of a blocked epic** — it is blocked because the same files are
-  moving. The queue command enforces this; going around it via `bd list`, `bd query` or an
-  ID in a document is the failure mode. If a bead is not in `bd ready`, do not start it.
+  moving. The queue script enforces this; going around it via `br list`, `br search` or an
+  ID in a document is the failure mode. If a bead is not in `br ready`, do not start it.
 - **An epic is assigned, its children are claimed.** Owning an epic means seeing it to its
   DONE WHEN. Never `--claim` an epic bead as though it were a task.
-- **`bd ready -t epic -u`** lists epics nobody owns and nothing blocks — what you can hand
-  to a colleague. Do not flip an epic to `in_progress` to hide it from a task listing;
-  `--exclude-type epic` is what does that.
+- **`br ready -t epic --unassigned`** lists epics nobody owns and nothing blocks — what you
+  can hand to a colleague. Do not flip an epic to `in_progress` to hide it from a task
+  listing; the queue script already excludes epics.
 
 ### Backlog invariants
 
 - **An epic blocks another only when they touch the same code** — not "this is more
-  important" and not "this comes later". `bd dep add <blocked-epic> <blocker-epic>`.
+  important" and not "this comes later". `br dep add <blocked-epic> <blocker-epic>`.
   Priority, not blocking, is where importance goes. Several epics available at once is
   normal and wanted.
 - **`blocked` is computed, never stored.** You cannot set it; you can only add the edge.
   A blocked epic still prints as `○` — read its `DEPENDS ON` list.
 - **An epic is a DAG, not a bag.** Sequence children with `blocks` so the front is ~3:
-  `bd ready --parent <epic> --exclude-type epic -n 100 --json | jq 'length'`. Do not use
-  `bd swarm validate` as a gate — it counts closed children.
+  count the epic's block in `scripts/br-queue.sh`. `br show <epic> --json` also carries
+  a `rollup` of its descendants by status, which is the cheapest read of the same thing.
 - **Where a bug goes.** Inside a live deliverable, a child of that epic. Arriving from
   nowhere, **no parent at all** — a standalone bug is legitimate. Filing it under the
   nearest plausible epic is what grew the two area epics that had to be split. If triage
@@ -508,7 +531,7 @@ occupied. Finish something in flight or take a free epic; never widen the query.
   `discovered-from` edge back to the bug.
 
 > 13 of 20 epic-level edges once encoded "not yet" rather than overlap and were removed;
-> before that, a bare `bd ready` offered 68 issues and the queue was unusable.
+> before that, a bare `br ready` offered 68 issues and the queue was unusable.
 
 ### One area label, and a status that is true
 
@@ -530,7 +553,7 @@ and every new bead makes the next search worse.
   `remote-host` `assistant` `api` `connmgr` `vault` `sandbox` `lifecycle` `content`
   `workspace` `files` `git` `editor` `update` `coordinator` `notify` `pets` `e2e`
   `infra` `docs` — the rest of the tree. `remote-host` keeps that name, not `helper`,
-  because this file and `architecture.md` both cite `bd list --label remote-host`.
+  because this file and `architecture.md` both cite `br list --label remote-host`.
 
   Label by the area that **owns the behaviour**, not every area the bead touches: a tab
   strip that fails to show a badge is `ui`, not `content`. Needing two labels usually
@@ -543,7 +566,7 @@ and every new bead makes the next search worse.
 
 - **`in_progress` means a worker is holding it now** — not "started once", not "nearly
   done". Stopping means setting it back to `open` in the same minute, because an unheld
-  bead sitting in `in_progress` is invisible to `bd ready` and to every colleague looking
+  bead sitting in `in_progress` is invisible to `br ready` and to every colleague looking
   for work. `nocx-viil` sat `in_progress` for three weeks with its work already shipped —
   `contracts/session.integrationChanged.schema.json`, `frontend/src/integration/status.ts`
   and the generated doc all name the bead — and a worker re-derived that entire surface
@@ -554,8 +577,12 @@ and every new bead makes the next search worse.
   stale once the children were counted. Ask the children before believing it:
 
   ```bash
-  bd list --parent <epic> --status open,in_progress,closed --json | jq -r 'map(.updated_at)|max'
+  br show <epic> --json | jq '.[0].rollup'
+  # {"status":"in_progress","descendants":{"closed":3,"in_progress":1,"open":3}}
   ```
+
+  `rollup` is derived, so it cannot drift from the children the way a copied
+  timestamp can.
 
 - **Close with evidence a stranger can check.** Name the file, symbol, test or commit —
   "duplicate" and "done" are not reasons. For a duplicate, name the survivor and say what
@@ -573,7 +600,7 @@ and every new bead makes the next search worse.
    end-to-end check that watches them do it** (rule 2 above). No such sentence means it is
    a chore — label it — or an area of code wearing an epic's clothes.
 3. **A criterion that stops being false exactly once**, plus what is deliberately out.
-   Enforced: `bd create -t epic` without `--acceptance` (or a `## Success Criteria`
+   Enforced by review, not by the tool: `br create -t epic` accepts an epic without a
    heading) fails and creates nothing.
 4. **Set the status deliberately** — `open` means free to assign.
 5. **`blocks` edges only against epics whose files it collides with.**
@@ -586,14 +613,15 @@ Prefer more, smaller epics — "handed over whole" and "large area" cannot both 
 Several people work this repo from their own machines against one shared Dolt database.
 
 ```bash
-bd dolt pull                        # who took what since your last sync
-bd ready && bd update <id> --claim
-bd dolt push                        # publish the claim now
+git pull --rebase                   # who took what since your last sync
+br ready && br update <id> --claim
+br sync --flush-only                 # then commit .beads/issues.jsonl and push
 ```
 
 **Publish every backlog write immediately** — a create, an edit, an edge, a close — not at
 session close. An unpushed bead does not exist for anybody else, and the afternoon it costs
-is somebody else's. Batch with `bd batch` if you like, then push at the end of the batch.
+is somebody else's. Batch your writes if you like — `br update` and `br close` take
+several ids at once — then commit at the end of the batch.
 
 **A claim is not a lock.** Two clones can claim the same bead; last write wins. The
 protocol shrinks the race, it does not close it. Auto-push stays off on purpose (upstream
@@ -604,8 +632,8 @@ routine the fix is a shared sql-server, not a shorter interval (`nocx-wj4`).
 
 Agents have **standing authority to commit and push**. This overrides the "Conservative"
 profile in the managed Beads block below — that block defers to repository instructions,
-and this is one. Allowed without asking: `git commit`, `git push`, `bd close`,
-`bd dolt push`, running the gates. Branch first if you are on `main`.
+and this is one. Allowed without asking: `git commit`, `git push`, `br close`,
+`br sync --flush-only`, running the gates. Branch first if you are on `main`.
 
 **Merging a pull request always requires explicit approval** — in that session, for that
 PR. Authority to commit and push is not authority to merge.
@@ -693,26 +721,14 @@ and three tests in `internal/app` and `internal/git/local` fail here and pass th
 (nocx-58gq, nocx-65v6). Until those are closed, read a local `backend` red against that
 list before believing it — and never the other way round: CI is still the source of truth.
 
-**Take the merge slot before integrating into `main`**, and release it whether you succeed
-or not — a worker that forgets strands everyone behind it:
-
-```bash
-scripts/merge-slot.sh acquire   # add --wait to queue behind the holder
-# merge, resolve, gate, push
-scripts/merge-slot.sh release   # in the failure path too; `check` says who holds it
-```
-
-Without it, two agents resolve conflicts against a `main` moving underneath both and each
-resolution invalidates the other's. This is orthogonal to approval: the slot decides _who
-merges next_, never _whether_.
-
-**Go through the script, not `bd merge-slot` directly** — bare `acquire` takes the holder
-from `git user.name`, which is one string for every agent on the machine, so `check`
-answers "held by shady2k" and you cannot tell your own stale hold from a colleague's live
-one. The script passes `--holder worktree:branch` instead, which is what you actually
-decide on. Twice in one session (2026-08-29) a coordinator burned the investigation on
-worktree mtimes and beads timestamps to guess whose slot it was, and both times had to ask
-the owner (`nocx-e3if5`).
+**There is no merge slot any more.** It was `bd merge-slot`, it went with `bd` on
+2026-09-05, and `br` has no equivalent — the owner's call not to build one. What it
+was for still exists: two agents integrating at once resolve conflicts against a
+`main` moving underneath both, and each resolution invalidates the other's. What
+protected against that was never a lock either; this file said so — a claim is not
+a lock, and the slot only shrank the race. So integrate one at a time by
+arrangement, and if that turns out to cost something, file the bead with what it
+cost rather than reviving the slot from memory.
 
 ### Every commit names its bead
 
@@ -731,7 +747,7 @@ Co-Authored-By: ...
   `beads`). Omit only when the change is genuinely repo-wide.
 - **`(<bead-id>)`** at the end of the subject; several when one commit closes several
   (`(nocx-u7wq.1-.5)` for a run). Ids referenced but **not** closed go in the body.
-- **No bead for it?** Then there is no task — `bd create` takes seconds. **Trivial?** It
+- **No bead for it?** Then there is no task — `br create` takes seconds. **Trivial?** It
   still had a reason, and it is the one nobody can explain in six months.
 
 Checked by eye at review. If that rots, file a `commit-msg` hook rather than dropping it.
@@ -819,87 +835,40 @@ changed.
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control
   plane (AD-1).
 
-Next risk to watch: run `bd ready`.
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+Next risk to watch: run `br ready`.
 
-## Beads Issue Tracker
+## The tracker in one table: `bd` verbs and what replaced them
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+The `beads-superpowers` plugin stays — its process skills (brainstorming,
+writing-plans, test-driven-development, systematic-debugging) are worth more than
+its `bd` half is worth losing. But it speaks `bd`, and by its own rule repository
+instructions win over skills. **This table is that instruction.** Where a skill
+tells you to run a `bd` command, run the right-hand column instead. Two managed
+`<!-- BEGIN BEADS INTEGRATION -->` blocks used to sit here, regenerated by `bd`;
+nothing regenerates them now, and they described Dolt, so they are gone.
 
-### Quick Reference
+| the skill says                                                                                                         | run instead                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `bd ready` / `list` / `show` / `create` / `update` / `close` / `reopen` / `search` / `stats` / `dep add` / `label add` | the same with `br`                                                              |
+| `bd ready` with no argument, meaning "what next"                                                                       | `scripts/br-queue.sh`                                                           |
+| `bd prime`                                                                                                             | nothing to run — this file is the context; `br robot-docs guide` for the CLI    |
+| `bd remember`                                                                                                          | `cm playbook add "<lesson>"`                                                    |
+| `bd memories <word>` / `bd recall`                                                                                     | `cm context "<what you are doing>" --json`                                      |
+| `bd purge`                                                                                                             | `br delete <id>` (writes a tombstone)                                           |
+| `bd batch` / `bd import -`                                                                                             | `br sync --import-only` from a file; `br update <id1> <id2> …` for bulk edits   |
+| `bd export -o <file>`                                                                                                  | `br sync --flush-only` (always to `.beads/issues.jsonl`)                        |
+| `bd dolt push` / `bd dolt pull`                                                                                        | `git push` / `git pull` — the JSONL is a tracked file                           |
+| `bd merge-slot`                                                                                                        | nothing; it was removed deliberately                                            |
+| `bd swarm validate`                                                                                                    | `br show <epic> --json \| jq '.[0].rollup'`                                     |
+| `bd update <id> --claim`                                                                                               | the same with `br`; `claim_exclusive: true` refuses a claim another actor holds |
+| TodoWrite / TaskCreate / markdown TODO                                                                                 | still forbidden — `br` is the tracker for all work                              |
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
+Two more differences worth carrying in your head, because no rename covers them:
 
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
-
-## Agent Context Profiles
-
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
-
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
-
-## Session Completion
-
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
-
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Handle git/sync by active profile**:
-   ```bash
-   # Conservative/minimal/default: report status and proposed commands; wait for approval.
-   git status
-
-   # Team-maintainer opt-in only, unless current instructions forbid it:
-   git pull --rebase
-   bd dolt push
-   git push
-   git status
-   ```
-5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
-
-**Critical rules:**
-
-- Explicit user or orchestrator instructions override this Beads block.
-- Do not commit or push without clear authority from the active profile or the current user request.
-- If a required sync or push is blocked, stop and report the exact command and error.
-
-<!-- END BEADS INTEGRATION -->
-
-<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-
-## Beads Issue Tracker
-
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
-
-### Quick Reference
-
-```bash
-bd ready                # Find available work
-bd show <id>            # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>           # Complete work
-bd prime                # Refresh Beads context
-```
-
-### Rules
-
-- Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
-- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
-<!-- END BEADS CODEX SETUP -->
+- **`br` never runs git.** Nothing syncs the backlog behind your back. After
+  finishing work: `br sync --flush-only`, `git add .beads/issues.jsonl`, commit,
+  push — the same commit as the code it describes.
+- **`br` imports before it reads.** A `git pull` that changes the JSONL is picked
+  up by the next `br` command on its own. If both your database and the pulled
+  JSONL changed, `br sync --merge` does the three-way; `--force-db`,
+  `--force-jsonl` and `--force` (newer timestamp) are the three explicit policies.

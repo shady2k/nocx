@@ -2,6 +2,7 @@ import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.lis
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsAudit } from './generated/skills.audit'
+import type { SkillsCheck } from './generated/skills.check'
 
 export type Skill = GeneratedSkill
 
@@ -13,6 +14,7 @@ export interface SkillsClientLike {
   file(name: string, path: string): Promise<SkillsFile>
   files(name: string): Promise<SkillsFiles>
   audit(name: string): Promise<SkillsAudit>
+  check(name: string): Promise<SkillsCheck>
 }
 
 export type SkillsState =
@@ -102,5 +104,13 @@ export class SkillsStore {
   // suggest the reading had moved something.
   audit(name: string): Promise<SkillsAudit> {
     return this.client.audit(name)
+  }
+
+  // The read half of `audit` refreshes nothing either, for `file`'s reason:
+  // skills.check writes nothing, so a list that changed after one would be a
+  // list that changed for a reason nobody can name. It is a passthrough so
+  // the page keeps ONE collaborator for skills.
+  check(name: string): Promise<SkillsCheck> {
+    return this.client.check(name)
   }
 }

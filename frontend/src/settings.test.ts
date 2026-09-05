@@ -214,6 +214,7 @@ function fakeSkillsClient(): SkillsClientLike {
       truncated: false,
       maxFiles: 256,
     }),
+    check: vi.fn().mockResolvedValue({ name: 'deploy', checked: false }),
   }
 }
 

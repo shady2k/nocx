@@ -75,6 +75,8 @@ import (
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
 	"github.com/shady2k/nocx/internal/wave"
+	"github.com/shady2k/nocx/internal/waveendpoint"
+	"github.com/shady2k/nocx/internal/wavepin"
 	"github.com/shady2k/nocx/internal/workspace"
 )
 
@@ -98,6 +100,8 @@ type App struct {
 	Logger           log.Logger
 	Session          *session.Reg
 	Transport        *transport.WSServer
+	WaveDispatcher   assistant.WaveDispatcher
+	WaveAuthorizer   waveendpoint.Authorizer
 	ShellIntegration shellintegration.ShellIntegration
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
@@ -1968,6 +1972,13 @@ func New(opts ...Option) (*App, error) {
 		wave.WithBound(waveParticipantBound),
 		wave.WithEnrolmentDeadline(waveEnrolmentDeadline),
 	)
+	waveDispatcher, waveDispatcherErr := assistant.NewWaveDispatcher(
+		agentToolRegistry, waveRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if waveDispatcherErr != nil {
+		return nil, fmt.Errorf("wave dispatcher: %w", waveDispatcherErr)
+	}
+	waveAuthorizer := newWaveAuthorizer(wavepin.SystemPinner{}, sess, paneGrid)
 	waveSup.exited = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, e wave.Exit) {
 		if _, err := waveRecord.Exited(ctx, id, l, e); err != nil {
 			logger.Warn("wave: a participant's exit was not recorded",
@@ -1991,6 +2002,8 @@ func New(opts ...Option) (*App, error) {
 		Logger:           logger,
 		Session:          sess,
 		Transport:        tp,
+		WaveDispatcher:   waveDispatcher,
+		WaveAuthorizer:   waveAuthorizer,
 		UploadSources:    tp.UploadSources(),
 		ShellIntegration: shint,
 		Profiles:         profileStore,

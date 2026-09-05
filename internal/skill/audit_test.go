@@ -227,3 +227,33 @@ func TestAuditDigestIsOverTheComposedDocument(t *testing.T) {
 		t.Fatal("digest did not move when a byte did")
 	}
 }
+
+// The header at audit.go names a file's path immediately before its bytes,
+// so the document carries PAIRINGS, not just a bag of bytes. A digest that
+// ignored path would call two different bundles — same paths, same bytes,
+// paired the other way round — the same document, and a check taken on one
+// would wrongly read as still current for the other.
+func TestAuditDigestDependsOnWhichFileHoldsWhichBytes(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "pair", "name: pair\ndescription: d", "body")
+	writeSkillFile(t, root, "pair", "references/a.md", "first content")
+	writeSkillFile(t, root, "pair", "references/b.md", "second content")
+	roots := []skill.Root{{Dir: root, Provenance: skill.ProvenanceInstalled}}
+
+	before, err := skill.Audit(roots, "pair")
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	// Swap: the same two paths, the same two bodies, paired the other way.
+	writeSkillFile(t, root, "pair", "references/a.md", "second content")
+	writeSkillFile(t, root, "pair", "references/b.md", "first content")
+
+	after, err := skill.Audit(roots, "pair")
+	if err != nil {
+		t.Fatalf("Audit after swap: %v", err)
+	}
+	if after.Digest == before.Digest {
+		t.Fatal("digest did not move when the same bytes swapped which file held them")
+	}
+}

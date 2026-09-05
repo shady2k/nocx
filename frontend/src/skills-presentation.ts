@@ -24,9 +24,8 @@ import { scanPatternWords } from './scan-pattern-words'
  * `installed` from warning to danger in one copy and not the other, which
  * compiles clean in both files and disagrees silently — two copies of one
  * judgement agree everywhere you look and disagree where you did not.
- * skills-section.tsx keeps its own copy for now (it is being rewritten by a
- * later task, which drops it for this import in one line); every new
- * consumer takes this one.
+ * skills-section.tsx's own copy folded into this import when the row's card
+ * was deleted (nocx-54a2c); every consumer takes this one now.
  */
 export function provenanceTone(provenance: Skill['provenance']): BadgeTone {
   switch (provenance) {
@@ -49,14 +48,10 @@ export function provenanceTone(provenance: Skill['provenance']): BadgeTone {
  * SkillsFile['refusal']'s closed union, so a fifth wire value fails this
  * switch's compile rather than rendering nothing.
  *
- * ONE OWNER, PARTIALLY. skills-section.tsx's `fileOutcome` still carries its
- * own copy of exactly this switch — wrapped in that file's own `FileAsk`
- * union, which this function does not know about — because that file is
- * being rewritten whole by a later task and is out of scope to edit here
- * (nocx-4m1n1's own review). Moving skill-view-body.tsx's copy here is still
- * worth doing now: it is one fewer place the mapping can drift, and it is
- * where skills-section.tsx's own copy folds into an import once that
- * rewrite lands, the way its `provenanceTone` copy already did above.
+ * ONE OWNER. skills-section.tsx's `fileOutcome` — the modal card's own copy
+ * of this switch, wrapped in that file's `FileAsk` union — was deleted with
+ * the card (nocx-54a2c): the row no longer reads a file's bytes at all, so
+ * there is nothing left there for this mapping to drift from.
  */
 export function skillFileOutcome(result: SkillsFile): FileReadoutOutcome {
   switch (result.refusal) {
@@ -74,4 +69,25 @@ export function skillFileOutcome(result: SkillsFile): FileReadoutOutcome {
     case 'too-large':
       return { kind: 'too-large', maxBytes: result.maxBytes }
   }
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/**
+ * `4 Sep` — the short form the skill viewer's design settled on (its own
+ * §2 layout diagram), and now the row's too (nocx-54a2c's third evidence
+ * line). A fixed short form rather than `toLocaleDateString`, whose
+ * day/month ORDER (not only the month's name) varies by locale and would
+ * make the row and the check pane read a stored date differently on two
+ * machines checking the same skill.
+ *
+ * ONE OWNER: this used to be a private copy inside skill-view-check.tsx
+ * alone; the row growing its own second copy of the same eleven-line
+ * function for the same "4 Sep" is exactly the drift `provenanceTone`'s own
+ * comment above warns about, so it moved here instead.
+ */
+export function shortDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`
 }

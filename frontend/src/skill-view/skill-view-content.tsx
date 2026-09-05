@@ -73,6 +73,7 @@ function SkillView(props: {
   state: ViewState
   busy: boolean
   onToggle: (enabled: boolean) => void
+  onApprove: () => void
   deps: SkillViewDeps
   refreshToken: number
 }): JSX.Element {
@@ -88,6 +89,7 @@ function SkillView(props: {
         state={props.state}
         busy={props.busy}
         onToggle={props.onToggle}
+        onApprove={props.onApprove}
       />
       <Show when={readySkill()}>
         {(skill) => (
@@ -150,6 +152,7 @@ export class SkillViewContent extends SolidPaneContent {
           state={this.viewState()}
           busy={this.busy()}
           onToggle={(enabled) => void this.toggle(enabled)}
+          onApprove={() => void this.approve()}
           deps={this.deps}
           refreshToken={this.visibleGeneration()}
         />
@@ -247,6 +250,28 @@ export class SkillViewContent extends SolidPaneContent {
       // looking at a toast for a tab that no longer exists, and writing to
       // its signals afterward is exactly the "late async callback" case
       // PaneHost's methods are documented to go inert for.
+      if (this._disposed) return
+      showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      if (!this._disposed) this.setBusy(false)
+    }
+  }
+
+  // ── Re-approve (nocx-54a2c review) ───────────────────────────────────
+  //
+  // The row's own Re-approve icon does this same write; the header carries
+  // it too because a person now DECIDES about a skill from this tab, and
+  // "the bytes changed" is a danger card here with nowhere else to send the
+  // press it names (see SkillViewHeader's own comment on the card).
+
+  private async approve(): Promise<void> {
+    const state = this.viewState()
+    if (state.kind !== 'ready' || this.busy()) return
+    this.setBusy(true)
+    try {
+      await this.deps.store.approve(state.skill.name)
+    } catch (err) {
+      // Same B.6 guard toggle() uses: a disposed tab paints nothing.
       if (this._disposed) return
       showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
     } finally {

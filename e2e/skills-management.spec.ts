@@ -333,12 +333,23 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await card.getByRole('button', { name: 'Audit this skill' }).click()
     await fake.waitForRequests(requestBase + 1)
     await expect(card).toContainText(AUDIT_REPORT, { timeout: 30_000 })
-    // It is a description and not a verdict, it names the model that was
-    // billed, and it says which files it was about — a reading of a subset
-    // that did not say so would read exactly like a reading of the whole
-    // skill. It claims no safety either: the scan matched nothing here, and
-    // "nothing matched" is what the card says rather than "nothing is wrong".
-    await expect(card).toContainText('A description, not a verdict')
+    // It is the model's conclusion and not nocx's, it names the model that
+    // was billed, and it says which files it was about — a reading of a
+    // subset that did not say so would read exactly like a reading of the
+    // whole skill. It claims no safety either: the scan matched nothing
+    // here, and "nothing matched" is what the card says rather than
+    // "nothing is wrong".
+    //
+    // THE COPY CHANGED UNDER THIS ASSERTION (nocx-54a2c): the card's own
+    // "A description, not a verdict" StatusCard is gone with the card
+    // itself — the skill's tab (skill-view-check.tsx) states the same fact
+    // in its own words, in a `Caption` beside the verdict line rather than a
+    // titled card above it. `card` below still means the modal this file has
+    // not yet been pointed away from (that migration, and the button label
+    // below moving from "Audit this skill" to "Check this skill", is Task
+    // 12's — this line only had to stop asserting a string the product no
+    // longer has anywhere).
+    await expect(card).toContainText("the model's conclusion, not nocx's")
     await expect(card.getByLabel('Which model read this skill')).toContainText('e2e-model')
     await expect(card.getByLabel('Which model read this skill')).toContainText(ENDPOINT_NAME)
     await expect(card.locator('.ui-marker-list')).toContainText(SKILL_FILE)

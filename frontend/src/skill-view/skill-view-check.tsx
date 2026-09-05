@@ -46,6 +46,7 @@
 
 import { Show, type JSX } from 'solid-js'
 import { Button, Caption, StatusCard } from '../ui'
+import { shortDate } from '../skills-presentation'
 import type { SkillsCheck } from '../generated/skills.check'
 
 /** The wire's own shapes, never re-declared by hand (review round 2's
@@ -91,18 +92,6 @@ export type CheckState =
   | { kind: 'unavailable'; message: string }
   | { kind: 'none' }
   | { kind: 'ready'; reading: Reading; current: boolean }
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-/** `4 Sep` — the design's own format (§2's layout diagram). A fixed short
- *  form rather than `toLocaleDateString`, whose day/month ORDER (not only
- *  the month's name) varies by locale and would make this line read
- *  differently on two machines checking the same skill. */
-function shortDate(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}`
-}
 
 const verdictWord = (verdict: Reading['verdict']): string =>
   verdict === 'suspect' ? 'Suspect' : 'Clear'
@@ -189,6 +178,19 @@ function scanCountSentence(findings: readonly Finding[], current: boolean): stri
 const SCAN_CAVEAT =
   'That is not the same as safe: the scan looks for a fixed set of known phrasings, so files it matched nothing in are files it had nothing to say about.'
 
+/** THE NOTE role.go INSISTS ON — moved here from the modal card's own
+ *  `auditFallbackNote` (skills-section.tsx, nocx-54a2c). An unassigned
+ *  auditing role spends the answering role's endpoint, and it may never do
+ *  that quietly: the person asked for this reading — by pressing the button,
+ *  or by opening a stored one — and is entitled to know which model they
+ *  were billed for. `''` when the role they assigned is the one that ran, so
+ *  a note under every reading is never a note nobody needs. */
+function fallbackNote(reading: Reading): string {
+  return reading.role === 'answering'
+    ? `No model is assigned to the auditing role, so this reading was made by ${reading.model} on ${reading.endpoint} — the answering role's endpoint. Assign an auditing model under Model roles if you want a different one reading your skills.`
+    : ''
+}
+
 export interface SkillViewCheckPanelProps {
   name: string
   state: CheckState
@@ -239,6 +241,13 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
               own text can address whoever reads it, so read this beside the files rather than
               instead of them.
             </Caption>
+            <Show when={fallbackNote(held().reading)}>
+              <StatusCard
+                tone="warning"
+                title="This was read by the answering model"
+                description={fallbackNote(held().reading)}
+              />
+            </Show>
             <p class="skill-view__check-report">{held().reading.report}</p>
             <p>{scanCountSentence(held().reading.findings, held().current)}</p>
             <p>{SCAN_CAVEAT}</p>

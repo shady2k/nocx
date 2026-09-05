@@ -23,6 +23,31 @@
   width: 560px;
   max-width: calc(100vw - var(--space-6) * 2);
   box-sizing: border-box;
+  /* THE HEIGHT CAP, and why it is a percentage rather than a calc (nocx-ck02x).
+     The panel capped its width twice and its height not at all, so an approval
+     prompt for a long command ran out of the bottom of the window and took its
+     answers with it — `Allow once` was the last thing visible and `Deny` was
+     off-screen, on a question the run was suspended waiting for.
+
+     `100%` resolves against the OVERLAY'S CONTENT BOX, which is the viewport
+     minus the overlay's own padding: 8vh at the top and --space-4 at the
+     bottom for a floating prompt, --space-4 at the bottom alone for a
+     top-sheet, since it is deliberately flush with the window's top edge. That
+     is one rule for both placements and it stays true if either padding is
+     ever changed — a `calc(100vh - …)` would have to restate both paddings
+     here and would be wrong the day one of them moved. The overlay is
+     `position: fixed; inset: 0`, so its height is definite and the percentage
+     resolves; `align-items: flex-start` keeps a short panel at its natural
+     height, which the cap does not touch.
+
+     The flex column below is the same chain Dialog uses (dialog.css): a
+     shrinkable middle with `min-height: 0` gives up space and scrolls instead
+     of pushing the ends past the cap. `overflow: hidden` is what makes the
+     panel enforce its own boundary rather than trusting its content. */
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
   padding: var(--space-4);
   background: color-mix(in srgb, var(--color-canvas), black 18%);
   border: 1px solid color-mix(in srgb, var(--color-border), black 20%);
@@ -63,7 +88,10 @@
   }
 }
 
+/* The question and the answers are the two things that must never leave the
+   screen, so neither shrinks and neither scrolls. Only the middle does. */
 .ui-prompt__title {
+  flex: 0 0 auto;
   margin: 0 0 var(--space-3);
   font-size: var(--font-size-lg);
   font-weight: 600;
@@ -73,10 +101,53 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  /* `min-height: 0` is what lets a flex child shrink below its content; without
+     it the body would push the panel past the cap and nothing would scroll. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* A body that is now height-constrained is a flex container whose children can
+   be SHRUNK instead of scrolled, and the automatic minimum size that normally
+   prevents that is zero for any child with its own scroll region — a CodeBlock
+   (`max-height: 200px; overflow: auto`) is exactly that. Without this rule the
+   proposed command collapses to a sliver and the body never overflows: the
+   panel would fit the screen by destroying the thing the question is about. */
+.ui-prompt__body > * {
+  flex-shrink: 0;
+}
+
+/* ── The body is cut: say so ──────────────────────────────────────────────
+   A panel that ran off the screen at least looked wrong. One clipped at a
+   hard edge looks finished, so the fade is what tells a reader the facts
+   continue past it. The attributes are MEASURED (prompt.tsx `markOverflow`),
+   never assumed — an edge that announces more when there is none cannot be
+   checked by looking, which is worse than no edge at all. Same mechanism and
+   same argument as the tab strip's horizontal fade (tab-strip.css); each side
+   is its own rule, so a body scrolled to its end fades only where it is
+   actually cut. */
+.ui-prompt__body[data-overflow-start] {
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--space-6));
+}
+
+.ui-prompt__body[data-overflow-end] {
+  mask-image: linear-gradient(to top, transparent, #000 var(--space-6));
+}
+
+.ui-prompt__body[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--space-6),
+    #000 calc(100% - var(--space-6)),
+    transparent
+  );
 }
 
 .ui-prompt__actions {
   display: flex;
+  flex: 0 0 auto;
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-3);

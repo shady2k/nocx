@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { Show, createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Dialog } from './dialog'
-import { Prompt } from './prompt'
+import { Prompt, overflowEdges, type ScrollBox } from './prompt'
 import { ToastHost, clearToasts, showToast } from './toast'
 import { stackDepth } from './overlay/stack'
 
@@ -166,6 +166,28 @@ describe('Prompt', () => {
     ))
 
     expect(document.activeElement).toBe(document.querySelector('.ui-prompt input'))
+  })
+
+  it('puts the caret on the first enabled action when the body has no field', () => {
+    render(() => (
+      <Prompt
+        open
+        ariaLabel="Approval"
+        onClose={() => undefined}
+        actions={
+          <>
+            <button type="button">Allow once</button>
+            <button type="button">Deny once</button>
+          </>
+        }
+      >
+        A question with nothing to fill in
+      </Prompt>
+    ))
+
+    // Where the keyboard route STARTS. That it reaches the last action from
+    // here needs a browser to press Tab in — e2e/prompt-height.spec.ts.
+    expect((document.activeElement as HTMLElement).textContent).toBe('Allow once')
   })
 
   it('returns focus to the element that had it before opening', () => {
@@ -427,5 +449,143 @@ describe('Prompt', () => {
     expect(container.querySelector('.ui-prompt__actions')!.getAttribute('data-layout')).toBe(
       'stacked',
     )
+  })
+})
+
+/**
+ * A prompt taller than the window (nocx-ck02x).
+ *
+ * The owner could not reach `Deny`: the panel had a width cap and no height
+ * cap at all, so a long proposed command ran the facts table past the bottom
+ * edge and took the answers with it. What is asserted HERE is the arithmetic
+ * and the wiring — jsdom lays nothing out, so the claim "the button is on
+ * screen" is not one this file can make. `e2e/prompt-height.spec.ts` makes it,
+ * in a browser, against the real stylesheet.
+ */
+describe('a prompt that does not fit (nocx-ck02x)', () => {
+  // ── The arithmetic, on numbers the caller supplies ──────────────────
+  // Pure, so it is checkable without a layout engine. The tolerance is one
+  // pixel because a scroll container's own numbers are fractional under a
+  // non-integer device pixel ratio, and a half-pixel remainder is not "there
+  // is more to read".
+
+  it('reports no edge when the content fits', () => {
+    expect(overflowEdges({ scrollTop: 0, clientHeight: 400, scrollHeight: 400 })).toEqual({
+      start: false,
+      end: false,
+    })
+  })
+
+  it('reports the bottom edge when there is more below', () => {
+    expect(overflowEdges({ scrollTop: 0, clientHeight: 400, scrollHeight: 900 })).toEqual({
+      start: false,
+      end: true,
+    })
+  })
+
+  it('reports both edges in the middle of a long body', () => {
+    expect(overflowEdges({ scrollTop: 250, clientHeight: 400, scrollHeight: 900 })).toEqual({
+      start: true,
+      end: true,
+    })
+  })
+
+  it('reports only the top edge at the bottom of a long body', () => {
+    expect(overflowEdges({ scrollTop: 500, clientHeight: 400, scrollHeight: 900 })).toEqual({
+      start: true,
+      end: false,
+    })
+  })
+
+  it('ignores a sub-pixel remainder at either end', () => {
+    expect(overflowEdges({ scrollTop: 0.5, clientHeight: 400, scrollHeight: 400.5 })).toEqual({
+      start: false,
+      end: false,
+    })
+  })
+
+  // ── The wiring: the body's own numbers reach the attributes ─────────
+  // jsdom reports 0 for every geometry, so the numbers are installed on the
+  // element and the body's own scroll event drives the read — the same event
+  // a real scroll fires. This proves the measurement is wired to the element
+  // the CSS paints; it cannot prove the element ever overflows in a browser.
+
+  const fakeGeometry = (el: HTMLElement, box: ScrollBox) => {
+    Object.defineProperty(el, 'scrollTop', { configurable: true, value: box.scrollTop })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: box.clientHeight })
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: box.scrollHeight })
+  }
+
+  it('marks the bottom edge when the body has more below', () => {
+    const { container } = render(() => (
+      <Prompt open ariaLabel="Approval" onClose={() => undefined} actions={null}>
+        Long body
+      </Prompt>
+    ))
+    const body = container.querySelector<HTMLElement>('.ui-prompt__body')!
+
+    fakeGeometry(body, { scrollTop: 0, clientHeight: 400, scrollHeight: 900 })
+    fireEvent.scroll(body)
+
+    expect(body.hasAttribute('data-overflow-end')).toBe(true)
+    expect(body.hasAttribute('data-overflow-start')).toBe(false)
+  })
+
+  it('moves the mark to the top edge once the body is scrolled to its end', () => {
+    const { container } = render(() => (
+      <Prompt open ariaLabel="Approval" onClose={() => undefined} actions={null}>
+        Long body
+      </Prompt>
+    ))
+    const body = container.querySelector<HTMLElement>('.ui-prompt__body')!
+
+    fakeGeometry(body, { scrollTop: 500, clientHeight: 400, scrollHeight: 900 })
+    fireEvent.scroll(body)
+
+    expect(body.hasAttribute('data-overflow-start')).toBe(true)
+    expect(body.hasAttribute('data-overflow-end')).toBe(false)
+  })
+
+  it('marks nothing on a body that fits — the guard against a fade that lies', () => {
+    const { container } = render(() => (
+      <Prompt open ariaLabel="Approval" onClose={() => undefined} actions={null}>
+        Short body
+      </Prompt>
+    ))
+    const body = container.querySelector<HTMLElement>('.ui-prompt__body')!
+
+    fakeGeometry(body, { scrollTop: 0, clientHeight: 400, scrollHeight: 400 })
+    fireEvent.scroll(body)
+
+    expect(body.hasAttribute('data-overflow-start')).toBe(false)
+    expect(body.hasAttribute('data-overflow-end')).toBe(false)
+  })
+
+  // ── The shape the browser spec reproduces ───────────────────────────
+  // e2e/prompt-height.spec.ts builds this markup by hand (it renders no
+  // Solid), so a change to the panel's structure that the CSS cap depends on
+  // must fail HERE rather than leaving that spec quietly measuring a shape
+  // the product no longer has.
+
+  it('renders the panel as title, body and actions, in that order', () => {
+    const { container } = render(() => (
+      <Prompt
+        open
+        ariaLabel="Approval"
+        title="This action needs your approval"
+        onClose={() => undefined}
+        actions={<button type="button">Deny</button>}
+      >
+        Body
+      </Prompt>
+    ))
+
+    const panel = container.querySelector('.ui-prompt')!
+    expect(panel.parentElement!.classList.contains('ui-prompt-overlay')).toBe(true)
+    expect(Array.from(panel.children).map((c) => c.className)).toEqual([
+      'ui-prompt__title',
+      'ui-prompt__body',
+      'ui-prompt__actions',
+    ])
   })
 })

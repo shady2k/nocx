@@ -89,6 +89,21 @@ import (
 // also the one that fixed the most: a byte is not a proxy for a change's
 // weight, which is the assumption a size ratchet quietly invites.
 //
+// 2026-09-05, ninth move (nocx-ec18, noticed by whoever was integrating):
+// 76,440 -> 74,264, -2,176 across the two generation scripts, and the FIRST
+// move in this list that is a SHRINK. `6e2a97ac` moved the local pane onto
+// this machine's helper, so the launcher stopped carrying the coordinator's
+// own fork path — 308 lines out of launcher_local.go and its two shell
+// halves, 38 back. Nothing about publishing changed; the bundle got smaller
+// because a mechanism left it.
+//
+// Recorded late, and that is the finding worth keeping: the shrink landed on
+// 2026-09-04 and the constant was not moved with it, so this test was red on
+// the branch for a day while the work that made it red was green in its own
+// right. A size ratchet only reports growth if somebody re-measures on the
+// commit that changes the size; a downward miss looks exactly like an upward
+// one from here and costs the same red gate.
+//
 // 2026-09-04, eighth move (nocx-dkawo.12): 73,326 -> 76,440, +3,114 across
 // the two generation scripts. This is the biggest single move the ratchet has
 // recorded and it is a whole mechanism rather than a comparison: the agent
@@ -109,13 +124,18 @@ import (
 // exactly the actor ADR-0024 made the capability mandatory for — and 236
 // bytes is what it costs to stop.
 //
-// The CALL counts did not move on any of the eight occasions —
+// The CALL counts did not move on any of the nine occasions —
 // 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
-// changed size, not the work. B = 256 KiB still holds, now at 3.35x
-// headroom.
+// changed size, not the work. B = 256 KiB still holds, and the shrink puts
+// it at 3.45x headroom rather than 3.35x.
+//
+// REPORT-p3-measure.md, which the failure messages below tell you to update
+// alongside these constants, HAS NEVER EXISTED in this repository — checked
+// across every ref. Whoever restores it, or removes the instruction, owns
+// nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 76440
+	measuredMaxPublishBytes = 74264
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

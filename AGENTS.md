@@ -62,9 +62,28 @@ On disk the tracker went from 1.9 GB to about 22 MB.
 
 **Memories are not in the tracker any more.** `br` has no `remember`, no
 `memories`, no `recall`, and its import refuses a memory record outright. The 144
-memories moved to **cass-memory** (`cm`); the raw export is kept in
-`.internal/memories-export.jsonl`. Read with `cm context "<what you are doing>" --json`,
-write with `cm playbook add`.
+memories moved to **cass-memory**: they are `.cass/playbook.yaml`, a tracked file,
+so they travel with the clone the way the backlog does. Read them with
+
+```bash
+cm context "<what you are about to do>" --json    # was: bd memories <keyword>
+```
+
+Two things about that file, both measured on cass-memory 0.2.14 and both easy to
+get wrong. Its rules say `scope: global` rather than the obvious `workspace`,
+because **`cm context` silently returns nothing for `workspace` rules** — an exact
+phrase out of a memory matched 0 with `workspace` and all 144 with `global`. They
+do not leak: `.cass/` is found from the working directory, so outside this repo
+`cm playbook list` shows 1 rule and inside it shows 145. Nothing about them is
+exempted: they are not `pinned`, so cass may deprecate them on evidence like any
+other rule, which is the point of having the mechanism. (`confidenceDecayHalfLifeDays`
+is a red herring for an imported memory — it decays a rule's `feedbackEvents`, and
+these have none.)
+
+To add one, do NOT use `cm playbook add` — it writes to `~/.cass-memory/playbook.yaml`,
+which is per-machine and per-user, so nobody else ever sees it. Append to
+`.internal/memories-export.jsonl` and re-run `scripts/bd-memories-to-cass.py`; the
+JSONL is the source and the playbook is generated from it.
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,

@@ -68,13 +68,13 @@ br where >/dev/null 2>&1 || exit 0
 
 # Changes sitting in SQLite that never reached the file git is about to push.
 if ! br sync --status 2>/dev/null | grep -q "Dirty issues: 0"; then
-    printf "\nWARN: у br есть изменения, не выгруженные в .beads/issues.jsonl.\n" >&2
+    printf "\nWARN: br has changes that never reached .beads/issues.jsonl.\n" >&2
     printf "      br sync --flush-only && git add .beads/issues.jsonl\n" >&2
 fi
 
 # The file changed but was never staged, so the push carries the code without
 # the backlog that explains it.
 if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
-    printf "\nWARN: .beads/issues.jsonl изменён и не закоммичен — бэклог остаётся здесь.\n" >&2
+    printf "\nWARN: .beads/issues.jsonl is modified and uncommitted — the backlog stays here.\n" >&2
     printf "      git add .beads/issues.jsonl && git commit\n" >&2
 fi

@@ -97,3 +97,8 @@ internal/helper/deploy/artifacts/*.gz
 
 # repowise API keys (local)
 .repowise/.env
+
+# cass-memory: blocked.log — локальный журнал заблокированных паттернов,
+# наполняется на каждой машине своим. Плейбук репозитория (.cass/playbook.yaml)
+# наоборот трекается: он и есть общая память.
+.cass/blocked.log

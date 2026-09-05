@@ -1127,6 +1127,7 @@ const READING: SkillsAudit = {
       lineNumber: 2,
     },
   ],
+  stored: 'yes',
 }
 
 const installedClient = (overrides: Partial<SkillsClientLike> = {}): SkillsClientLike =>

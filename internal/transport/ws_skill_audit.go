@@ -29,14 +29,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/skill"
 )
+
+// skillCheckStore is the transport's view of content.SkillCheckRepository —
+// declared here rather than imported so the handler depends on the method
+// set it actually uses and not on the content package's whole repository
+// surface (AD-8). content.SkillCheckRepository satisfies it structurally;
+// nothing converts between them.
+type skillCheckStore interface {
+	Put(ctx context.Context, check content.SkillCheck) error
+	Get(ctx context.Context, name string) (content.SkillCheck, bool, error)
+}
 
 // skillAuditSource is what an audit asks of the skill library: the bundle,
 // composed once, by the same walk and the same containment every other read
@@ -111,6 +123,18 @@ type skillAuditResult struct {
 	// against skills.file, which is what makes the prose beside them worth
 	// reading.
 	Findings []skill.Finding `json:"findings"`
+	// Stored says whether this reading was written to the person's machine
+	// so opening the same skill again costs nothing: "yes" once content.db
+	// has it, "no" when it was not written — because the bytes moved during
+	// the call, because there is no store on this machine, or because the
+	// store refused the write — with StoredError naming which. The RPC
+	// itself errors only when the check could not be PRODUCED at all; a
+	// check that was produced but not saved still reaches the person, which
+	// is the whole reason this field exists rather than folding the failure
+	// into the same error path as an unreachable model.
+	Stored string `json:"stored"`
+	// StoredError is why Stored is "no". Empty when Stored is "yes".
+	StoredError string `json:"storedError,omitempty"`
 }
 
 type skillAuditHandlers struct {
@@ -118,9 +142,14 @@ type skillAuditHandlers struct {
 	engine      skillAuditEngine
 	configOp    capability.ConfigOperation
 	credentials credential.Resolver
-	log         log.Logger
-	wired       bool
-	r           Responder
+	// checks is where the reading is filed once the model has answered. Nil
+	// means no store is wired on this machine — the audit still returns its
+	// report, and Stored says "no" rather than the RPC pretending nothing
+	// was asked for.
+	checks skillCheckStore
+	log    log.Logger
+	wired  bool
+	r      Responder
 }
 
 func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
@@ -142,6 +171,17 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	material, err := h.source.Audit(p.Name)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
+
+	// BUILTIN IS NOT CHECKED, and the refusal is here rather than only in
+	// the UI because a refusal only the renderer knows about is one a
+	// second caller walks straight past. Its bytes came with the binary and
+	// the person decided about them when they installed nocx; a model's
+	// opinion on our own shipped files is theatre with a bill attached.
+	// Before the role is resolved, so it costs nothing.
+	if material.Provenance == skill.ProvenanceBuiltin {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "a builtin skill is not checked: its files came with nocx itself"})
 		return
 	}
 
@@ -172,19 +212,100 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 			"files", len(material.Read), "omitted", len(material.Omitted),
 			"findings", len(material.Findings))
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(skillAuditResult{
+
+	// THE INTERVAL, stated: the material's digest is true of the bytes from
+	// the moment Audit composed the document above until this recomposition
+	// agrees with it. The model call sits inside that span and is slow, so
+	// a delete, a reinstall or an ordinary edit can land in the middle of
+	// it. A check filed against a digest nobody's disk now matches would
+	// describe a document that does not exist, so it is discarded rather
+	// than stored — not stored with a stale digest, which the reader could
+	// mistake for a check that is merely old.
+	//
+	// No lock is held across the model call above, and none is taken here
+	// either: the row is keyed by name and the write is last-writer-wins,
+	// which is the whole of the concurrency story (design §7). Recomposing
+	// through h.source rather than comparing to a cached copy is what makes
+	// this catch a reinstall or an edit and not only a delete — a fresh
+	// Audit sees whatever is on disk right now, cached or not.
+	stored, storedErr := "yes", ""
+	if after, reErr := h.source.Audit(material.Name); reErr != nil || after.Digest != material.Digest {
+		stored = "no"
+		// One sentence covers three different things that can have happened
+		// — the skill was edited, removed, or replaced (a reinstall) — and
+		// "changed" alone would be wrong for the middle one: a person reading
+		// "changed" about a skill that no longer resolves at all is the
+		// reader most likely to be confused, since nothing changed, it is
+		// simply gone. reErr != nil is exactly that case (Audit refuses a
+		// name no root holds); a digest mismatch with no error is the other
+		// two.
+		storedErr = "the skill's files no longer match what was checked — edited, removed, or replaced while the check was running — so this reading was not saved"
+	} else if h.checks == nil {
+		stored, storedErr = "no", "there is no store for checks on this machine"
+	} else if putErr := h.checks.Put(ctx, content.SkillCheck{
 		Name:       material.Name,
-		Provenance: material.Provenance,
+		Provenance: string(material.Provenance),
+		Verdict:    string(reading.Verdict),
+		Report:     reading.Report,
 		Role:       string(role),
 		Endpoint:   endpoint.Name,
 		Model:      model,
-		Verdict:    string(reading.Verdict),
-		Report:     reading.Report,
+		Digest:     material.Digest,
+		CheckedAt:  time.Now().UnixMilli(),
 		Read:       material.Read,
-		Omitted:    material.Omitted,
-		MaxBytes:   material.MaxBytes,
-		Findings:   material.Findings,
+		Omitted:    auditOmissions(material.Omitted),
+		Findings:   auditFindings(material.Findings),
+		MaxBytes:   int64(material.MaxBytes),
+	}); putErr != nil {
+		// A STORE FAILURE MUST NOT SWALLOW THE ANSWER. The person pressed a
+		// button and a model was already billed by the time this write is
+		// attempted; refusing to show the report because content.db could
+		// not take it would spend their money for nothing. The RPC errors
+		// only when the check could not be PRODUCED — this branch is about
+		// one that was and could not be SAVED, which is what Stored exists
+		// to say.
+		stored, storedErr = "no", putErr.Error()
+	}
+
+	_ = h.r.TryResult(req.ID, mustMarshal(skillAuditResult{
+		Name:        material.Name,
+		Provenance:  material.Provenance,
+		Role:        string(role),
+		Endpoint:    endpoint.Name,
+		Model:       model,
+		Verdict:     string(reading.Verdict),
+		Report:      reading.Report,
+		Read:        material.Read,
+		Omitted:     material.Omitted,
+		MaxBytes:    material.MaxBytes,
+		Findings:    material.Findings,
+		Stored:      stored,
+		StoredError: storedErr,
 	}))
+}
+
+// auditOmissions converts the skill package's omission shape to the store's.
+// content must not import skill (AD-8: the store is a store and knows
+// nothing about a bundle's provenance or its scan patterns), so the two
+// shapes are declared separately and this is where they are reconciled.
+func auditOmissions(in []skill.AuditOmission) []content.SkillCheckOmission {
+	out := make([]content.SkillCheckOmission, 0, len(in))
+	for _, o := range in {
+		out = append(out, content.SkillCheckOmission{Path: o.Path, Reason: string(o.Reason)})
+	}
+	return out
+}
+
+// auditFindings converts the skill package's finding shape to the store's,
+// for the same reason auditOmissions does.
+func auditFindings(in []skill.Finding) []content.SkillCheckFinding {
+	out := make([]content.SkillCheckFinding, 0, len(in))
+	for _, f := range in {
+		out = append(out, content.SkillCheckFinding{
+			Path: f.Path, LineNumber: f.LineNumber, Line: f.Line, PatternID: f.PatternID,
+		})
+	}
+	return out
 }
 
 // resolveAuditModel resolves the auditing role, falling back to the answering

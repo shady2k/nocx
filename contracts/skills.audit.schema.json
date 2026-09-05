@@ -16,7 +16,8 @@
     "read",
     "omitted",
     "maxBytes",
-    "findings"
+    "findings",
+    "stored"
   ],
   "properties": {
     "name": {
@@ -96,6 +97,26 @@
           "lineNumber": { "type": "integer", "minimum": 1 }
         }
       }
+    },
+    "stored": {
+      "description": "Whether this reading was written to content.db so opening the same skill again costs nothing. The RPC itself errors only when the check could not be PRODUCED — an unreachable model, an unresolvable role, a skill no root holds. A check that WAS produced but could not be SAVED still reaches the person as a result, with stored:'no': the model was already billed by the time the write is attempted, and refusing to show its answer over a store failure would spend that cost for nothing. 'no' also covers the skill's bytes moving during the call (the digest is re-verified against the disk after the model answers, before the write) and there being no store on this machine at all.",
+      "type": "string",
+      "enum": ["yes", "no"]
+    },
+    "storedError": {
+      "description": "Why stored is 'no': the reason a person reads if they wonder why the audit did not stick. Absent when stored is 'yes' — enforced below, not only described here.",
+      "type": "string",
+      "minLength": 1
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "stored": { "const": "no" } }, "required": ["stored"] },
+      "then": { "required": ["storedError"] }
+    },
+    {
+      "if": { "properties": { "stored": { "const": "yes" } }, "required": ["stored"] },
+      "then": { "not": { "required": ["storedError"] } }
+    }
+  ]
 }

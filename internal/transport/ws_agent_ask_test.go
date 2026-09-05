@@ -166,6 +166,12 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
 		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
+		// The real content db's own repository, wired the same way app.go
+		// wires it — beside WithContentDB rather than derived from it, so a
+		// test that wants a failing or recording store in its place can
+		// override this one entry in extra without standing up a second
+		// content db.
+		WithSkillChecks(db.SkillChecks()),
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 	}

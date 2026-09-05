@@ -12,7 +12,9 @@
 /**
  * Result of skills.audit — a reading of one skill the person already holds, asked for by them and produced by the auditing role's model (design §7). IT CARRIES A VERDICT AND THE VERDICT DECIDES NOTHING. Every field but the verdict is a fact — about the request (which skill, which root), about the call (which role answered, on which endpoint and model), or about what was read (the paths, the omissions, the budget, and the static scan's own matches) — and none of those facts is an opinion about the skill, so there is nothing among them to count, threshold or colour into a judgement. The verdict alone is the model's conclusion about a document a stranger may have written, and it is inert by construction: nothing in the product branches on it. The report itself is one field of prose rather than a form with slots, because an empty slot reads as 'nothing found', which is a verdict wearing a layout — the questions that shape the answer are asked in the prompt instead. A skill with no findings has none; that is not the same as clear, and nothing but the verdict field says it is. The result changes nothing about what the assistant may do: what it is offered is still the person's switch and the digest comparison, and neither is touched by asking for a reading. A name no root holds, an unresolvable role and an unreachable endpoint are JSON-RPC errors rather than an empty report — a blank report is indistinguishable from a clean one.
  */
-export interface SkillsAudit {
+export type SkillsAudit = {
+  [k: string]: unknown
+} & {
   /**
    * The skill as it was RESOLVED, from the frontmatter and by root precedence — not the string that was asked for.
    */
@@ -70,4 +72,12 @@ export interface SkillsAudit {
     line: string
     lineNumber: number
   }[]
+  /**
+   * Whether this reading was written to content.db so opening the same skill again costs nothing. The RPC itself errors only when the check could not be PRODUCED — an unreachable model, an unresolvable role, a skill no root holds. A check that WAS produced but could not be SAVED still reaches the person as a result, with stored:'no': the model was already billed by the time the write is attempted, and refusing to show its answer over a store failure would spend that cost for nothing. 'no' also covers the skill's bytes moving during the call (the digest is re-verified against the disk after the model answers, before the write) and there being no store on this machine at all.
+   */
+  stored: 'yes' | 'no'
+  /**
+   * Why stored is 'no': the reason a person reads if they wonder why the audit did not stick. Absent when stored is 'yes' — enforced below, not only described here.
+   */
+  storedError?: string
 }

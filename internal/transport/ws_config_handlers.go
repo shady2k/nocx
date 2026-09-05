@@ -2452,7 +2452,8 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillAuditHandlers{
 				source: skillSource, engine: s.assistantClient,
 				configOp: configOp, credentials: s.credentialResolver(),
-				log: s.log, wired: skillWired && s.assistantClient != nil, r: r,
+				checks: s.skillChecks,
+				log:    s.log, wired: skillWired && s.assistantClient != nil, r: r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),

@@ -178,6 +178,30 @@ loudly instead. The owner has forbidden the subscription route outright — so
 reflection means an OpenRouter key in a mode-600 file outside the nix store, and
 that guard, before the first run.
 
+**What of `cm` belongs in git, measured against the binary rather than its README.**
+`cm` 0.2.14 resolves four files under `.cass/`: `playbook.yaml`, `blocked.log` — bullet
+ids this repository refuses, not a diagnostic log — `traumas.jsonl`, dangerous
+operations specific to this codebase, and `config.yaml`. All four are shared knowledge
+and belong in git; only the first two exist here so far. A fifth, `context-log.jsonl`,
+is this machine's usage accounting and is ignored.
+
+Everything under `~/.cass-memory/` stays on the machine, and one of them is a secret:
+`config.json` holds the LLM key. Beside it live the personal playbook, `diary/`,
+`reflections/`, `embeddings/`, `usage.jsonl` and `cost/`. None of that is ours to
+commit, and the repo config is not allowed to redirect any of it — `cassPath`,
+`playbookPath` and `diaryDir` are refused from `.cass/config.yaml` by design.
+
+**The upstream README names two of those files differently**, and it is wrong about
+both: it says `.cass/config.json` and `.cass/blocked.yaml`, while
+`strings $(command -v cm)` yields only `.cass/config.yaml` and `.cass/blocked.log`.
+Believe the binary.
+
+**Do not put an explanation inside `.cass/playbook.yaml`.** `cm` reserialises that file
+from its own model every time it writes a rule, and comments do not survive it: a
+fifteen-line header saying why the playbook was empty was dropped without a word the
+first time a rule landed there (2026-09-06). Reasoning goes in this file; the YAML
+holds rules and nothing else.
+
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
 which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,

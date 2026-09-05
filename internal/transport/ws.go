@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/panegrid"
@@ -160,8 +161,12 @@ type WSServer struct {
 	// Optional profile/group stores for the connection-manager control
 	// plane (profiles.*, groups.*). When nil, those methods return a
 	// JSON-RPC error.
-	profiles profile.ProfileRepository
-	groups   profile.GroupRepository
+	profiles     profile.ProfileRepository
+	groups       profile.GroupRepository
+	mcpServers   profile.MCPServerRepository
+	mcpRefresher MCPServerRefresher
+	mcpRuntime   mcp.Runtime
+	mcpOAuth     mcp.OAuthService
 	// credentials is the consumer store: mutations and existence. It
 	// cannot return material — that is what SecretStore dropping Get is
 	// for — so a handler holding it cannot read a secret without a stance.
@@ -1076,6 +1081,24 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 	return func(s *WSServer) { s.groups = gr }
 }
 
+// WithMCPServerRepository attaches the narrow MCP server repository used by
+// the mcpServers.* control-plane methods.
+func WithMCPServerRepository(repo profile.MCPServerRepository) WSServerOption {
+	return func(s *WSServer) { s.mcpServers = repo }
+}
+
+// WithMCPServerRefresher attaches explicit, one-shot MCP catalog discovery.
+// Merely wiring or reading the repository never activates a server.
+func WithMCPServerRefresher(refresher MCPServerRefresher) WSServerOption {
+	return func(s *WSServer) { s.mcpRefresher = refresher }
+}
+
+// WithMCPOAuthService attaches the explicit Settings-only OAuth boundary.
+// Assistant calls never reach this service.
+func WithMCPOAuthService(service mcp.OAuthService) WSServerOption {
+	return func(s *WSServer) { s.mcpOAuth = service }
+}
+
 // WithCredentialStore attaches a credential store, enabling the
 // secrets.* and vault.* secret operations. The backend is taken as a
 // MaterialStore because the resolver is built from it here; handlers are
@@ -1582,6 +1605,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
+	specs = append(specs, s.mcpServerSpecs(configOp)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.notifySpecs()...)

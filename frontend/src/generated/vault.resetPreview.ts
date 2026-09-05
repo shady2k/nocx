@@ -26,6 +26,10 @@ export interface VaultResetPreview {
    */
   endpointCount: number
   /**
+   * MCP server records holding at least one secret binding. Records remain after reset, but their secret-backed bindings are cleared.
+   */
+  mcpServerCount: number
+  /**
    * False when the OS keychain is not answering, so secrets stored there cannot be removed and will remain readable. The user is told this BEFORE confirming, so proceeding is an informed choice rather than a surprise half-way through. True when there is no system keychain on this platform at all: an absent store is not a broken one.
    */
   systemKeychainReachable: boolean

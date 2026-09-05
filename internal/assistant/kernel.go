@@ -1366,6 +1366,8 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 		return executeSessionRead(runCtx, reader, sessions, m.requester, rawArgs)
 	case agenttools.InRenderer:
 		return m.executeInRenderer(runCtx, decl, capability, rawArgs)
+	case agenttools.InMCP:
+		return executeMCP(runCtx, capability, rawArgs, m.runSeams.mcpRuntime)
 	}
 	fn, ok := executors[decl.Name]
 	if !ok {

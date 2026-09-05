@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -93,6 +94,7 @@ type toolSeams struct {
 	fetcher          apifetch.TextFetcher
 	snapshots        *runSnapshots
 	runID            string
+	mcpRuntime       mcp.Runtime
 	// expansions asks ONE live shell what the safe expansions in a proposed
 	// command currently read as (nocx-4h0m7.5). Nil is the ordinary shape
 	// for every caller that is not the transport, and it is also the

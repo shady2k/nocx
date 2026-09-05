@@ -36,6 +36,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
@@ -217,7 +218,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	preview := loadSchema(t, "vault.resetPreview.schema.json")
 	result := loadSchema(t, "vault.reset.schema.json")
 	rawPreview, err := json.Marshal(vaultResetPreviewResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		SystemKeychainReachable: false, VaultInitialized: true,
 	})
 	if err != nil {
@@ -226,7 +227,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	validateJSON(t, preview, rawPreview, "vault.resetPreview DTO")
 
 	rawWithResidue, err := json.Marshal(vaultResetResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		Residue: []vaultResetResidueEntry{{Store: "system", Reason: "no-service"}},
 	})
 	if err != nil {
@@ -273,6 +274,23 @@ func TestVaultReset_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, resultSchema, resetResp.Result, "vault.reset result")
 }
 
+func TestVaultResetClosesMCPSessionsBeforeDestroyingSecrets(t *testing.T) {
+	runtime := &resetMCPRuntime{}
+	reset := &fakeVaultReset{beforeExecute: func() error {
+		if !runtime.serversClosed {
+			return errors.New("MCP sessions are still live")
+		}
+		return nil
+	}}
+	ws, stop := newVaultResetWSServer(t, reset, WithMCPRuntime(runtime))
+	defer stop()
+
+	resp := vaultCall(t, connectWS(t, ws), "vault.reset", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.reset: %+v", resp.Error)
+	}
+}
+
 // A reset must be reachable on a vault that is broken or half-built, so the
 // methods deliberately do not go through the gate that refuses when the vault
 // lifecycle is absent. Routing them there would make the way out unavailable
@@ -287,10 +305,10 @@ func TestVaultReset_IsReachableWithNoVaultLifecycleWired(t *testing.T) {
 	}
 }
 
-func newVaultResetWSServer(t *testing.T, rs VaultResetService) (*WSServer, func()) {
+func newVaultResetWSServer(t *testing.T, rs VaultResetService, extra ...WSServerOption) (*WSServer, func()) {
 	t.Helper()
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithVaultReset(rs))
+	options := append([]WSServerOption{WithVaultReset(rs)}, extra...)
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), options...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -298,7 +316,9 @@ func newVaultResetWSServer(t *testing.T, rs VaultResetService) (*WSServer, func(
 	return ws, func() { _ = ws.Stop(ctx) }
 }
 
-type fakeVaultReset struct{}
+type fakeVaultReset struct {
+	beforeExecute func() error
+}
 
 func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) {
 	return vaultreset.Preview{
@@ -309,10 +329,35 @@ func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) 
 }
 
 func (f *fakeVaultReset) Execute(_ context.Context) (vaultreset.Result, error) {
+	if f.beforeExecute != nil {
+		if err := f.beforeExecute(); err != nil {
+			return vaultreset.Result{}, err
+		}
+	}
 	return vaultreset.Result{
 		Impact:  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
 		Residue: []vaultreset.Residue{{Store: "system", Reason: "no-service"}},
 	}, nil
+}
+
+type resetMCPRuntime struct {
+	serversClosed bool
+}
+
+func (*resetMCPRuntime) Refresh(context.Context, mcp.Activation) (mcp.Catalog, error) {
+	return mcp.Catalog{}, nil
+}
+
+func (*resetMCPRuntime) Invoke(context.Context, mcp.Invocation) (mcp.Result, error) {
+	return mcp.Result{}, nil
+}
+
+func (*resetMCPRuntime) CloseRun(string)    {}
+func (*resetMCPRuntime) CloseServer(string) {}
+func (*resetMCPRuntime) Close() error       { return nil }
+
+func (r *resetMCPRuntime) CloseServers() {
+	r.serversClosed = true
 }
 
 // ── vault.inventory ───────────────────────────────────────────────────

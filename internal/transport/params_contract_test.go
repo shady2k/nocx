@@ -716,6 +716,33 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"detach": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		"mcpServers.list": {
+			[]byte(`{}`),
+		},
+		"mcpServers.get": {
+			[]byte(`{"id":"mcp:local"}`),
+		},
+		"mcpServers.create": {
+			[]byte(`{"name":"Local","enabled":true,"transport":"stdio","stdio":{"command":"/bin/echo","argv":[],"cwd":"","env":[]},"http":null,"limits":{"startupTimeoutMs":15000,"callTimeoutMs":60000,"idleTimeoutMs":30000,"maxResultBytes":262144}}`),
+		},
+		"mcpServers.update": {
+			[]byte(`{"id":"mcp:local","revision":1,"name":"Local","enabled":true,"transport":"stdio","stdio":{"command":"/bin/echo","argv":[],"cwd":"","env":[]},"http":null,"limits":{"startupTimeoutMs":15000,"callTimeoutMs":60000,"idleTimeoutMs":30000,"maxResultBytes":262144}}`),
+		},
+		"mcpServers.delete": {
+			[]byte(`{"id":"mcp:local","revision":1}`),
+		},
+		"mcpServers.refresh": {
+			[]byte(`{"id":"mcp:local","revision":1}`),
+		},
+		"mcpServers.setToolsEnabled": {
+			[]byte(`{"id":"mcp:local","revision":1,"tools":[]}`),
+		},
+		"mcpServers.oauthAuthorize": {
+			[]byte(`{"id":"mcp:local","revision":1}`),
+		},
+		"mcpServers.oauthForget": {
+			[]byte(`{"id":"mcp:local","revision":1}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

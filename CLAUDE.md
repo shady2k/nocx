@@ -58,7 +58,12 @@ steps for you.
    git push
    ```
 
-5. **Hand off** — changed files, what you validated, bead status, and anything you left
+5. **Write down anything that was bought.** If something in this session cost a
+   measurement or a wrong turn and is not derivable from the repository, it goes in
+   `.cass/playbook.yaml` — AGENTS.md has the three tests and the `import --repo`
+   route. Nothing does this for you: there is no reflection hook, and `cm reflect`
+   never runs on its own.
+6. **Hand off** — changed files, what you validated, bead status, and anything you left
    blocked, in those words.
 
 ## Code search

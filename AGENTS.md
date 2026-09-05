@@ -95,6 +95,28 @@ scattered through code that has to be maintained. **Do not write them.** If a ru
 helped or hurt, say so in your report; a person decides whether it becomes
 feedback.
 
+**When to write one, which is the part a tool cannot tell you.** A rule earns its
+place when it was BOUGHT — when something cost you a measurement, a wrong turn, or
+an hour, and the next person would pay it again. Three tests, all of which must
+hold:
+
+- **It is not derivable from the repository.** Code structure, git history and what
+  this file already says are not memories. "`br` resolves the main checkout's
+  database from a worktree" is one; "the tracker is `br`" is not.
+- **It has evidence a stranger can check.** A number, a command with its output, a
+  date, a file. "Indexing is heavy" is not a rule. "1.6 GB of index in 150 s over
+  8340 sessions, measured 2026-09-05" is.
+- **It would change what somebody does.** If knowing it changes nothing, it is
+  trivia.
+
+The moment to write it is when you have just finished paying — not at session
+close, when the detail has already gone. And write the finding, not the story: the
+next reader needs the fact and its evidence, not how you arrived at it.
+
+**Never write a memory that the code should carry instead.** If the lesson is "this
+function must be called before that one", the fix is an assertion or a test, not a
+rule in a playbook nobody is obliged to read.
+
 **Adding a rule: `import --repo`, never `add`.** `cm playbook add` always writes
 `~/.cass-memory/playbook.yaml`, which lives in one person's home directory — a rule
 about this repository put there is invisible to everybody else. The repo playbook

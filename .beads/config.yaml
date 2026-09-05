@@ -1,1 +1,3 @@
 issue_prefix: nocx
+sync:
+    remote: "git+https://github.com/shady2k/nocx.git"

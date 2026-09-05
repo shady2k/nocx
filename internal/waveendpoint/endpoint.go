@@ -253,7 +253,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	defer e.untrack(conn)
 	defer func() { _ = conn.Close() }()
 
-	invocation, err := e.cfg.Auth.Admit(peer)
+	invocation, release, err := e.cfg.Auth.Admit(peer)
 	if err != nil {
 		code, message, reason := rpcErrorFor(err)
 		e.writeError(conn, nil, code, message, reason)
@@ -264,10 +264,16 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 		base = context.Background()
 	}
 	connectionCtx, cancel := context.WithCancel(base)
-	defer cancel()
 
 	reader := bufio.NewReaderSize(conn, maxEnvelopeBytes)
 	var requests sync.WaitGroup
+	defer func() {
+		cancel()
+		requests.Wait()
+		if release != nil {
+			release()
+		}
+	}()
 	var inFlight atomic.Int32
 	for {
 		if inFlight.Load() == 0 {
@@ -336,8 +342,6 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 		}(request)
 
 	}
-	cancel()
-	requests.Wait()
 }
 
 func readEnvelope(reader *bufio.Reader) ([]byte, error) {
@@ -456,6 +460,8 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		return rpcDomainError, "wave request refused", "method is not reachable for the bound grant"
 	case errors.Is(err, assistant.ErrInvalidResult):
 		return rpcDomainError, "wave request refused", "dispatcher returned an invalid result"
+	case errors.Is(err, ErrSessionCallerActive):
+		return rpcPeerRefused, "wave caller refused", ErrSessionCallerActive.Error()
 	case errors.Is(err, ErrNotEnrolled):
 		return rpcPeerRefused, "wave caller refused", "caller is not in an enrolled process tree"
 	default:

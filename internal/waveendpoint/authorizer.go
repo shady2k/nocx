@@ -16,14 +16,20 @@ type Peer struct {
 
 // Authorizer turns an accepted peer into the already-bound invocation it may
 // use. The endpoint supplies Method and RawParams for each request; the
-// authorizer owns Context, RunContext, Grant and the session they imply.
-
+// authorizer owns Context, RunContext, Grant and the session they imply. The
+// release function closes exactly the admission interval opened by this call;
+// it is nil when admission is refused and is idempotent when returned.
+//
 // Enrollment is the admission act here, not D13 human approval. That
 // product-level approval remains deliberately out of this endpoint
 // (nocx-rowqt.12); the authority ceiling is the existing A12 session grant.
 type Authorizer interface {
-	Admit(Peer) (assistant.WaveInvocation, error)
+	Admit(Peer) (assistant.WaveInvocation, func(), error)
 }
+
+// ErrSessionCallerActive means another live connection already owns the
+// session's coordinator slot.
+var ErrSessionCallerActive = errors.New("session already has a wave caller")
 
 // ErrNotEnrolled means the peer is not inside a process tree enrolled for a
 // live wave session.

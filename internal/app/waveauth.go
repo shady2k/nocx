@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -26,10 +27,50 @@ type waveAuthEnrolments interface {
 	Enrolled(paneID string) bool
 }
 
+type waveCallerSlots struct {
+	mu   sync.Mutex
+	held map[session.ID]*waveCallerSlot
+}
+
+type waveCallerSlot struct {
+	once  sync.Once
+	slots *waveCallerSlots
+	sid   session.ID
+}
+
+var errWaveCallerActive = waveendpoint.ErrSessionCallerActive
+
+func (s *waveCallerSlots) acquire(sid session.ID) (func(), bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		s.held = make(map[session.ID]*waveCallerSlot)
+	}
+	if _, ok := s.held[sid]; ok {
+		return nil, false
+	}
+	slot := &waveCallerSlot{slots: s, sid: sid}
+	s.held[sid] = slot
+	return slot.release, true
+}
+
+func (s *waveCallerSlots) release(slot *waveCallerSlot) {
+	s.mu.Lock()
+	if s.held[slot.sid] == slot {
+		delete(s.held, slot.sid)
+	}
+	s.mu.Unlock()
+}
+
+func (s *waveCallerSlot) release() {
+	s.once.Do(func() { s.slots.release(s) })
+}
+
 type waveAuthorizer struct {
 	pinner     wavepin.Pinner
 	sessions   waveAuthSessions
 	enrolments waveAuthEnrolments
+	slots      waveCallerSlots
 }
 
 // newWaveAuthorizer builds the one external caller authorizer. It binds a
@@ -46,9 +87,9 @@ func newWaveAuthorizer(pinner wavepin.Pinner, sessions waveAuthSessions, enrolme
 	return &waveAuthorizer{pinner: pinner, sessions: sessions, enrolments: enrolments}
 }
 
-func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation, error) {
+func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation, func(), error) {
 	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil || peer.PID <= 0 {
-		return assistant.WaveInvocation{}, waveendpoint.ErrNotEnrolled
+		return assistant.WaveInvocation{}, nil, waveendpoint.ErrNotEnrolled
 	}
 
 	var admitted session.ID
@@ -75,21 +116,34 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 		if admitted != "" {
 			// A peer matching two live enrolled roots has no unambiguous
 			// session authority. Refuse rather than selecting map order.
-			return assistant.WaveInvocation{}, waveendpoint.ErrNotEnrolled
+			return assistant.WaveInvocation{}, nil, waveendpoint.ErrNotEnrolled
 		}
 		admitted = sid
 	}
 	if admitted == "" {
-		return assistant.WaveInvocation{}, waveendpoint.ErrNotEnrolled
+		return assistant.WaveInvocation{}, nil, waveendpoint.ErrNotEnrolled
 	}
 
+	release, acquired := a.slots.acquire(admitted)
+	if !acquired {
+		return assistant.WaveInvocation{}, nil, errWaveCallerActive
+	}
 	return assistant.WaveInvocation{
 		Context:    context.Background(),
 		RunContext: agenttools.RunContext{Session: string(admitted)},
 		Grant:      waveCallerGrant(admitted),
-	}, nil
+	}, release, nil
 }
 
+// The slot is the coordinator seat, not a conversation gate. M1 makes talk
+// mesh from day one; A1 says membership makes a participant addressable while
+// delegation makes it controllable. Each participant has its own session, so
+// its own calls use its own slot. The session-keyed coordinator slot therefore
+// must never mute a participant's conversation.
+//
+// D11 is intentionally not implemented here: a lost mutation response stays
+// unknown until wave.holdings reports the existing record; there is no response
+// cache or idempotency promise.
 func waveCallerGrant(sid session.ID) content.Grant {
 	permit := content.EffectRow{Decision: content.DecisionPermit}
 	refuse := content.EffectRow{Decision: content.DecisionRefuse}

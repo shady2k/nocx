@@ -78,7 +78,7 @@ func TestWaveAuthorizerAdmitsEnrolledOwnedTreeThroughRealWaveRecord(t *testing.T
 	pinner := &waveAuthPinner{root: root, member: map[int]bool{9001: true}}
 	auth := newWaveAuthorizer(pinner, reg, grid)
 
-	inv, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
+	inv, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if err != nil {
 		t.Fatalf("admit enrolled tree: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestWaveAuthorizerRefusesCallerOutsideEveryEnrolledTree(t *testing.T) {
 		member: map[int]bool{9001: false},
 	}
 	auth := newWaveAuthorizer(pinner, reg, grid)
-	_, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
+	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("outside-tree admission error = %v, want ErrNotEnrolled", err)
 	}
@@ -165,11 +165,11 @@ func TestWaveAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := newWaveAuthorizer(pinner, reg, grid)
-	if _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001}); err != nil {
+	if _, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001}); err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}
 	grid.Withdraw(string(sess.ID()))
-	if _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001}); !errors.Is(err, waveendpoint.ErrNotEnrolled) {
+	if _, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001}); !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("admit after withdrawal error = %v, want ErrNotEnrolled", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestWaveAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
 		member: map[int]bool{9001: true},
 	}
 	auth := newWaveAuthorizer(pinner, reg, grid)
-	_, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
+	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)
 	}

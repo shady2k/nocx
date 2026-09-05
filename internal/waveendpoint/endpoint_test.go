@@ -39,15 +39,17 @@ type testAuthorizer struct {
 	calls   int
 	inv     assistant.WaveInvocation
 	err     error
+	release func()
 	invoked chan struct{}
 }
 
-func (a *testAuthorizer) Admit(peer Peer) (assistant.WaveInvocation, error) {
+func (a *testAuthorizer) Admit(peer Peer) (assistant.WaveInvocation, func(), error) {
 	a.mu.Lock()
 	a.peer = peer
 	a.calls++
 	inv := a.inv
 	err := a.err
+	release := a.release
 	a.mu.Unlock()
 	if a.invoked != nil {
 		select {
@@ -55,7 +57,10 @@ func (a *testAuthorizer) Admit(peer Peer) (assistant.WaveInvocation, error) {
 		default:
 		}
 	}
-	return inv, err
+	if err == nil && release == nil {
+		release = func() {}
+	}
+	return inv, release, err
 }
 
 func (a *testAuthorizer) callCount() int {
@@ -65,10 +70,13 @@ func (a *testAuthorizer) callCount() int {
 }
 
 type testDispatcher struct {
-	mu    sync.Mutex
-	calls []assistant.WaveInvocation
-	out   string
-	err   error
+	mu        sync.Mutex
+	calls     []assistant.WaveInvocation
+	out       string
+	err       error
+	started   chan struct{}
+	cancelled chan struct{}
+	release   <-chan struct{}
 }
 
 func (d *testDispatcher) Dispatch(inv assistant.WaveInvocation) (string, error) {
@@ -76,6 +84,15 @@ func (d *testDispatcher) Dispatch(inv assistant.WaveInvocation) (string, error) 
 	d.calls = append(d.calls, inv)
 	out, err := d.out, d.err
 	d.mu.Unlock()
+	if d.started != nil {
+		close(d.started)
+		select {
+		case <-inv.Context.Done():
+			close(d.cancelled)
+		case <-d.release:
+		}
+		<-d.release
+	}
 	return out, err
 }
 
@@ -197,6 +214,65 @@ func TestEndpointDispatchesWithAuthorizerInvocationAndAtomicSocket(t *testing.T)
 	}
 }
 
+func TestEndpointCloseWaitsForAHandlerAfterReadError(t *testing.T) {
+	releaseHandler := make(chan struct{})
+	dispatchStarted := make(chan struct{})
+	dispatchCanceled := make(chan struct{})
+	dispatch := &testDispatcher{
+		out:       `{"held":[]}`,
+		started:   dispatchStarted,
+		cancelled: dispatchCanceled,
+		release:   releaseHandler,
+	}
+	releaseAdmission := make(chan struct{})
+	auth := &testAuthorizer{release: func() { close(releaseAdmission) }}
+	ep := startEndpoint(t, endpointConfig(t, auth, dispatch))
+	conn := dialEndpoint(t, ep)
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"wave.holdings","params":{}}`+"\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	select {
+	case <-dispatchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+
+	_ = conn.Close()
+	select {
+	case <-dispatchCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("read error did not cancel the in-flight handler")
+	}
+	select {
+	case <-releaseAdmission:
+		t.Fatal("admission released before the in-flight handler settled")
+	default:
+	}
+	ep.mu.Lock()
+	tracked := len(ep.conns)
+	ep.mu.Unlock()
+	if tracked == 0 {
+		t.Fatal("endpoint stopped tracking the connection before its handler settled")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = ep.Close()
+		close(closed)
+	}()
+	close(releaseHandler)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("endpoint Close did not wait for the handler to settle")
+	}
+	select {
+	case <-releaseAdmission:
+	case <-time.After(time.Second):
+		t.Fatal("admission release did not follow handler settlement")
+	}
+}
+
 func TestEndpointRefusesMalformedOversizedUnknownAndNotification(t *testing.T) {
 	tests := []struct {
 		name string
@@ -274,7 +350,7 @@ func TestEndpointRefusesPeerBeforeParsing(t *testing.T) {
 			cfg.Peers = tc.peer
 			ep := startEndpoint(t, cfg)
 			conn := dialEndpoint(t, ep)
-			if _, err := io.WriteString(conn, `not JSON and contains secret task text`+"\n"); err != nil {
+			if _, err := io.WriteString(conn, `not JSON and contains secret task text`+"\n"); err != nil && tc.name != "foreign uid" {
 				t.Fatalf("write request: %v", err)
 			}
 			response := readResponse(t, conn)

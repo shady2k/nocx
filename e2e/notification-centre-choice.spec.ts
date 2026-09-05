@@ -270,11 +270,32 @@ test('a person can choose visible notification kinds without losing rows or read
     await expect(tabNamed(page, titleC)).toHaveAttribute('aria-selected', 'false')
     fs.writeFileSync(gateC, '')
     await commandFinished(page, titleC)
-    await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 3, {
-      timeout: 30_000,
-    })
-    await expect(rowsOfKind(page, TERMINAL_BELL)).toHaveCount(0)
-    await expect(badge).toHaveText('2')
+    // The same conjunction the two moments above wait on, and for the same
+    // reason: a bare toHaveCount that times out says only that the number was
+    // wrong, never WHICH half never arrived — and this assertion has gone red
+    // in CI exactly once, with that ambiguity costing a session (nocx-2vb9y).
+    // The bell rows are part of it because "0" is a real claim here: the
+    // centre is off, so C's BEL is retained and hidden rather than absent.
+    //
+    // Both halves matter and they fail for different reasons. `finished`
+    // short of its number means the command's outcome never reached the feed
+    // — the ledger could not carry it, which the block now says on its own
+    // header. `bells` above zero means the visibility choice stopped being
+    // applied. One assertion cannot tell those apart; this one names them.
+    await expect
+      .poll(
+        async () => ({
+          badge: await badge.textContent(),
+          bells: await rowsOfKind(page, TERMINAL_BELL).count(),
+          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+        }),
+        { timeout: 30_000 },
+      )
+      .toEqual({
+        badge: '2',
+        bells: 0,
+        finished: finishedRowsBefore + 3,
+      })
 
     // Turn the same matrix choice back on. The feed still holds A, B and C;
     // visibility changed only which rows and unread facts were projected.

@@ -1421,6 +1421,16 @@ Expected: PASS.
 
 - Modify: `frontend/src/skills-client.ts`
 - Modify: `frontend/src/skills-store.ts`
+  **`SkillsClient.check` and the dead-exports baseline are NOT this task's** —
+  they landed in Task 5. Its review established why they could not wait: the
+  baseline's own updater refuses to write a generated-file entry and prints a
+  hand-edit escape hatch, so the entry had gone in past a guard that had already
+  said no; every other `skills.*` generated type has a consumer; and an entry
+  whose removal depends on a later task is a ratchet loosened on a promise —
+  the thirteen entries already sitting in that file are what that promise looks
+  like when it is not kept. This task adds the STORE passthrough and its test
+  only. Verify the client method and its test are there and do not write a
+  second one.
 - Test: `frontend/src/skills-client.test.ts`, `frontend/src/skills-store.test.ts`
 
 **Interfaces:**

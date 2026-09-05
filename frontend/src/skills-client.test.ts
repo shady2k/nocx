@@ -170,3 +170,45 @@ describe('SkillsClient.audit', () => {
     )
   })
 })
+
+describe('SkillsClient.check', () => {
+  it('sends the skill and nothing else, and answers with the result unchanged', async () => {
+    const answer = {
+      name: 'weather',
+      checked: true,
+      check: {
+        provenance: 'installed',
+        verdict: 'clear',
+        report: 'It asks a station.',
+        role: 'auditing',
+        endpoint: 'Local',
+        model: 'qwen3',
+        digest: 'abc123',
+        checkedAt: 1_757_000_000_000,
+        read: ['SKILL.md'],
+        omitted: [],
+        findings: [],
+        maxBytes: 131072,
+      },
+      current: true,
+    }
+    const { dispatcher, calls } = fakeDispatcher([answer])
+
+    const got = await new SkillsClient(dispatcher).check('weather')
+
+    // One name and nothing about a model: this is the read half of `audit`,
+    // never a second way to ask for one.
+    expect(calls).toEqual([{ method: 'skills.check', params: { name: 'weather' } }])
+    expect(got).toEqual(answer)
+  })
+
+  it('answers checked:false as a resolved result, not a rejection', async () => {
+    // Nobody having checked a skill is a true sentence about it, the same
+    // way a file too large to show is — it resolves, it does not reject.
+    const { dispatcher } = fakeDispatcher([{ name: 'weather', checked: false }])
+
+    const got = await new SkillsClient(dispatcher).check('weather')
+
+    expect(got.checked).toBe(false)
+  })
+})

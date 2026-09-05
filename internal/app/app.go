@@ -1129,10 +1129,13 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		// Where skills.audit files what a model concluded, once it has
-		// answered (ws_skill_audit.go). With the store stubbed — no content
+		// answered (ws_skill_audit.go), and where skills.check reads it back
+		// for free (ws_skill_check.go) — one repository, one writer, one
+		// reader that spends nothing. With the store stubbed — no content
 		// key — Put refuses and the audit still returns its report with
-		// stored:"no": a store failure must never swallow an answer the
-		// person already spent a model call on.
+		// stored:"no", and Get answers found:false with no error, so a
+		// check the person already spent a model call on is never swallowed
+		// and a check nobody made never looks like a broken store.
 		transport.WithSkillChecks(contentDB.SkillChecks()),
 		// The durable sink for what a session prints while nothing is
 		// attached (nocx-22k1c.1). It is the replay ring's consumer in that

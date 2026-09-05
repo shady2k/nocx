@@ -130,11 +130,18 @@ func (h *auditHarness) addSkill(name, document string) {
 // sqlite writer. failure, when set, is what Put returns instead of
 // recording: the shape a store failure takes on a real machine (disk full,
 // a locked database), which the real writer has no seam to simulate on
-// demand.
+// demand. getFailure and getCalls are skills.check's half of the same fake
+// (ws_skill_check_test.go): a separate field from failure because a test
+// asserting "the read fails" must not also make the write it never calls
+// fail, and a separate counter from puts because Get must be OBSERVED not to
+// have run at all for a builtin — puts staying empty would also be true of a
+// Get that ran and found nothing.
 type recordingSkillChecks struct {
-	mu      sync.Mutex
-	puts    []content.SkillCheck
-	failure error
+	mu         sync.Mutex
+	puts       []content.SkillCheck
+	failure    error
+	getFailure error
+	getCalls   int
 }
 
 func (r *recordingSkillChecks) Put(_ context.Context, check content.SkillCheck) error {
@@ -150,12 +157,26 @@ func (r *recordingSkillChecks) Put(_ context.Context, check content.SkillCheck) 
 func (r *recordingSkillChecks) Get(_ context.Context, name string) (content.SkillCheck, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.getCalls++
+	if r.getFailure != nil {
+		return content.SkillCheck{}, false, r.getFailure
+	}
 	for _, c := range r.puts {
 		if c.Name == name {
 			return c, true, nil
 		}
 	}
 	return content.SkillCheck{}, false, nil
+}
+
+// gets returns how many times Get has been called so far, under the same
+// mutex Get itself locks — skills.check's builtin refusal is asserted by
+// this staying at zero, which only means something if a concurrent Get is
+// not racing the read.
+func (r *recordingSkillChecks) gets() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getCalls
 }
 
 // stored returns a snapshot of every check Put has recorded so far. Put runs

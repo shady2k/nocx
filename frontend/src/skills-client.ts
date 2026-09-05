@@ -1,6 +1,7 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
 import type { SkillsAudit } from './generated/skills.audit'
+import type { SkillsCheck } from './generated/skills.check'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsList } from './generated/skills.list'
@@ -78,5 +79,16 @@ export class SkillsClient {
   // one, which is the whole reason this feature refuses to certify anything.
   audit(name: string): Promise<SkillsAudit> {
     return this.dispatcher.call<SkillsAudit>('skills.audit', { name })
+  }
+
+  // THE READ HALF OF `audit`, and it spends NOTHING: `audit` is the method
+  // that calls a model, and this one only reads what that call already
+  // wrote. Nobody having checked a skill is a RESOLVED result carrying
+  // `checked: false`, never a rejection — the same shape `file`'s refusal
+  // is, for the same reason: it is a true sentence about a thing (or a
+  // skill) that exists, and a caller that could only tell it apart from a
+  // broken store by reading an error string would get it wrong.
+  check(name: string): Promise<SkillsCheck> {
+    return this.dispatcher.call<SkillsCheck>('skills.check', { name })
   }
 }

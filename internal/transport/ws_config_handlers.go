@@ -2457,6 +2457,14 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
+		regResponder(configSub, "skills.check", params(validateSkillCheckRaw), func(r Responder) handlerFunc {
+			// Spends nothing: no configOp, no credentials, no engine. The
+			// same skillSource skills.audit reads from (it composes the
+			// bundle, never a model) and the same store skills.audit writes
+			// to (nil or a stub both answer checked:false, never an error).
+			h := skillCheckHandlers{source: skillSource, checks: s.skillChecks, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		regResponder(configSub, "skills.approve", params(validateSkillApproveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

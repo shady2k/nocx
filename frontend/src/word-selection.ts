@@ -68,11 +68,13 @@ export function charIndexAt(flat: FlattenedLine, node: Text, offset: number): nu
 }
 
 /** The (node, offset) of the char at flattened `index`, clamped to the last
- *  char so an end-of-line bound still resolves. Exported because the link
- *  decorator (terminal-links/decorate.ts) builds ranges over the SAME
- *  flattened line this module already knows how to walk — a second walker
- *  would be a second answer to "where is char N of this row". */
-export function charPos(flat: FlattenedLine, index: number): { node: Text; offset: number } {
+ *  char so an end-of-line bound still resolves. Module-private again: the
+ *  link decorator used to build one Range per link from it, and now groups
+ *  the link's characters BY NODE instead (nocx-ec18), because a Range that
+ *  crosses a `.term-cell` boundary splits the box when it is extracted. It
+ *  still reads `flat.chars` and no second walker exists — the shared answer
+ *  to "where is char N of this row" is `flattenLine`, which is exported. */
+function charPos(flat: FlattenedLine, index: number): { node: Text; offset: number } {
   const clamped = Math.max(0, Math.min(index, flat.chars.length - 1))
   return flat.chars[clamped]
 }

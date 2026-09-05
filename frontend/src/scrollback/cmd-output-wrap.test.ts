@@ -65,16 +65,54 @@ const RULES: Rule[] = [
   ),
 ]
 
-/** The value the shipped cascade gives `property` for an element carrying
- *  `classes`, or null. Every matching bare-class rule contributes, later rules
- *  winning, which is how the cascade resolves it in the browser. */
-function shippedValue(classes: readonly string[], property: string): string | null {
+/** The element the cascade is asked about. Attributes are part of it because
+ *  a selector like `.term-cell[data-cols='2']` is what actually ships the
+ *  two-column width, and a matcher that only looked at bare classes would
+ *  silently skip it — the same shape of blindness that let nocx-juau come
+ *  back unnoticed, where a compound selector overrode the rule the test was
+ *  reading and the test never saw it. */
+interface ShippedElement {
+  classes: readonly string[]
+  attrs?: Readonly<Record<string, string>>
+}
+
+/** Does one simple selector — `.cls` or `[attr='v']` — match the element? */
+function matchesSimple(el: ShippedElement, simple: string): boolean {
+  if (simple.startsWith('.')) return el.classes.includes(simple.slice(1))
+  const attr = /^\[([\w-]+)(?:\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\]]*)))?\]$/.exec(simple)
+  if (attr === null) return false
+  const name = attr[1]
+  const value = attr[2] ?? attr[3] ?? attr[4]
+  const have = el.attrs?.[name]
+  if (have === undefined) return false
+  return value === undefined || have === value.trim()
+}
+
+/** Split a compound selector (`.a.b[c='d']`) into its simple parts, or null
+ *  when it uses anything this matcher does not model — a descendant
+ *  combinator, an element name, a pseudo. Returning null rather than
+ *  guessing keeps an unmodelled selector from silently "matching". */
+function simpleParts(selector: string): string[] | null {
+  const parts = selector.match(/\.[\w-]+|\[[^\]]*\]/g)
+  if (parts === null) return null
+  return parts.join('') === selector ? parts : null
+}
+
+/** The value the shipped cascade gives `property` for `el`, or null. Every
+ *  matching rule contributes, later rules winning, which is how the cascade
+ *  resolves it in the browser. Specificity is not modelled: within one
+ *  stylesheet read in order, later-and-more-specific is how these rules are
+ *  actually written, and a rule this matcher cannot parse contributes
+ *  nothing rather than everything. */
+function shippedValue(el: ShippedElement, property: string): string | null {
   let found: string | null = null
   const pattern = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`)
   for (const rule of RULES) {
-    if (!rule.selectors.some((s) => /^\.[\w-]+$/.test(s) && classes.includes(s.slice(1)))) {
-      continue
-    }
+    const hit = rule.selectors.some((s) => {
+      const parts = simpleParts(s)
+      return parts !== null && parts.every((part) => matchesSimple(el, part))
+    })
+    if (!hit) continue
     const m = rule.body.match(pattern)
     if (m) found = m[1].trim()
   }
@@ -85,19 +123,19 @@ describe('a frozen block preserves the column alignment the live output had (noc
   it('keeps every term-line on one row: .cmd-output white-space is pre, not pre-wrap', () => {
     // pre-wrap folds a full-width line at the block's edge; `pre` never
     // wraps, so the box-drawing columns survive.
-    expect(shippedValue(['cmd-output'], 'white-space')).toBe('pre')
+    expect(shippedValue({ classes: ['cmd-output'] }, 'white-space')).toBe('pre')
   })
 
   it('never breaks an unbroken run: .cmd-output declares no overflow-wrap', () => {
     // overflow-wrap: break-word is what folded a status bar — a run of box
     // characters with no break opportunity — at an arbitrary point. Absent
     // (or the initial `normal`) is the contract.
-    const value = shippedValue(['cmd-output'], 'overflow-wrap')
+    const value = shippedValue({ classes: ['cmd-output'] }, 'overflow-wrap')
     expect(value === null || value === 'normal').toBe(true)
   })
 
   it('reaches the far end of a wide line by scrolling: .cmd-output keeps overflow-x: auto', () => {
-    expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
+    expect(shippedValue({ classes: ['cmd-output'] }, 'overflow-x')).toBe('auto')
   })
 })
 
@@ -109,14 +147,43 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
     // this, the DOM lays the same font out at its natural fractional advance
     // and a block that fitted the pane while live drifts wider (or narrower)
     // once frozen.
-    expect(shippedValue(['term-line'], 'letter-spacing')).toBe('var(--term-cell-delta, 0px)')
+    expect(shippedValue({ classes: ['term-line'] }, 'letter-spacing')).toBe(
+      'var(--term-cell-delta, 0px)',
+    )
+  })
+
+  // Коробка ячейки поставляется в CSS, а не живёт в инлайне (nocx-ec18).
+  it('ships a fixed-width box for a cell that cannot lay itself out', () => {
+    expect(shippedValue({ classes: ['term-cell'] }, 'display')).toBe('inline-block')
+    expect(shippedValue({ classes: ['term-cell'] }, 'width')).toBe('var(--term-cell-width, 1ch)')
+    expect(shippedValue({ classes: ['term-cell'] }, 'letter-spacing')).toBe('0')
+    // НИ overflow, НИ clip-path: коробка задаёт продвижку, а не прячет
+    // краску. overflow увёл бы базовую линию к нижнему краю margin-бокса;
+    // клип отрезал бы хвост глифу, попавшему в устаревшую коробку после
+    // смены метрики. Оба утверждения — про ОТСУТСТВИЕ правила, потому что
+    // добавить их обратно легко и незаметно.
+    expect(shippedValue({ classes: ['term-cell'] }, 'overflow')).toBe(null)
+    expect(shippedValue({ classes: ['term-cell'] }, 'clip-path')).toBe(null)
+    expect(shippedValue({ classes: ['term-cell'], attrs: { 'data-cols': '2' } }, 'width')).toBe(
+      'calc(var(--term-cell-width, 1ch) * 2)',
+    )
+  })
+
+  it('shapes a frozen row cell by cell, the way the grid draws it', () => {
+    // Иначе DOM волен сшить `->` или `ffi` не так, как xterm рисует их по
+    // ячейкам, и предпосылка «ASCII всегда ложится» перестаёт быть верной.
+    expect(shippedValue({ classes: ['term-line'] }, 'font-variant-ligatures')).toBe('none')
+    expect(shippedValue({ classes: ['term-line'] }, 'font-kerning')).toBe('none')
   })
 
   it('declares the hidden probe the publisher measures with the block\u2019s own font', () => {
-    // The probe must inherit the block's font chain (--font-family-mono,
-    // --font-size-terminal) by living inside the scrollback container, or
-    // the measured natural advance would be for a different font than the
-    // one the block actually renders.
+    // The probe must carry the block's font chain (--font-family-mono,
+    // --font-size-terminal) EXPLICITLY, or the measured natural advance
+    // would be for a different font than the one the block actually renders.
+    // It does not inherit it: the scrollback container has no font-family at
+    // all and `.term-line` declares only a size — believing the inheritance
+    // story is how a second probe came to be written against the UI font
+    // (nocx-ec18).
     const probe = RULES.find((r) => r.selectors.includes('.cell-metric-probe'))
     expect(probe).toBeDefined()
     expect(probe!.body).toMatch(/font-family\s*:\s*var\(--font-family-mono\)/)
@@ -129,26 +196,32 @@ describe('the ask kind body wraps prose but keeps frozen output frozen (nocx-ex6
     // The base .cmd-output rule is pre (frozen rows, nocx-juau); the ask
     // modifier must come later in the cascade and override for the ask
     // kind only.
-    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'white-space')).toBe('pre-wrap')
+    expect(shippedValue({ classes: ['cmd-output', 'cmd-output-ask'] }, 'white-space')).toBe(
+      'pre-wrap',
+    )
   })
 
   it('never runs off the right edge: .cmd-output-ask breaks unbroken runs and scrolls nowhere', () => {
-    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-wrap')).toBe('break-word')
-    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-x')).toBe('visible')
+    expect(shippedValue({ classes: ['cmd-output', 'cmd-output-ask'] }, 'overflow-wrap')).toBe(
+      'break-word',
+    )
+    expect(shippedValue({ classes: ['cmd-output', 'cmd-output-ask'] }, 'overflow-x')).toBe(
+      'visible',
+    )
   })
 
   it('the frozen contract survives untouched: bare .cmd-output is still pre + auto', () => {
     // The modifier must not leak onto command blocks.
-    expect(shippedValue(['cmd-output'], 'white-space')).toBe('pre')
-    expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
+    expect(shippedValue({ classes: ['cmd-output'] }, 'white-space')).toBe('pre')
+    expect(shippedValue({ classes: ['cmd-output'] }, 'overflow-x')).toBe('auto')
   })
 
   it('terminal output inside an answer keeps the old grammar: .cmd-output-code is pre + auto', () => {
     // A fenced block the model returns is the one case where the command
     // rules are the right rules — reached through the kind, never by
     // accident.
-    expect(shippedValue(['cmd-output-code'], 'white-space')).toBe('pre')
-    expect(shippedValue(['cmd-output-code'], 'overflow-x')).toBe('auto')
+    expect(shippedValue({ classes: ['cmd-output-code'] }, 'white-space')).toBe('pre')
+    expect(shippedValue({ classes: ['cmd-output-code'] }, 'overflow-x')).toBe('auto')
   })
 })
 

@@ -1355,6 +1355,52 @@
      block — old or new — adopts the current geometry, deliberately (see
      cell-metric.ts). */
   letter-spacing: var(--term-cell-delta, 0px);
+  /* ОДНА ЯЧЕЙКА — ОДИН ГЛИФ, как рисует сетка. Без этого DOM волен сшить
+     `->`, `==` или `ffi` в лигатуру и подвинуть кернингом то, что xterm
+     кладёт по ячейкам, — и предпосылка «одноколоночная латиница ложится на
+     сетку», на которой стоит вся коррекция выше, перестаёт быть верной. */
+  font-variant-ligatures: none;
+  font-kerning: none;
+}
+
+/* ОДНА ЯЧЕЙКА, КОТОРАЯ НЕ УМЕЕТ ЛЕЧЬ САМА (nocx-ec18).
+   CSS не может задать продвижку текстовому кластеру без layout-объекта
+   вокруг него — ни font-size-adjust, ни transform, ни font-feature-settings
+   этого не делают. Поэтому глиф, чья продвижка разошлась с колонкой сетки
+   (U+1F5D1 — 13.57px против ячейки в 8), запирается в коробку известной
+   ширины. Кого запирать, решает scrollback/cell-fit.ts; сюда попадают
+   единицы ячеек на блок, а не каждая: псевдографика и латиница ложатся
+   сами. Ширина из переменной, а не из пикселей, чтобы блок перепитчивался
+   вместе с сеткой, как это уже делает letter-spacing строки. */
+.term-cell {
+  display: inline-block;
+  width: var(--term-cell-width, 1ch);
+  /* Трекинг применяется К СИМВОЛУ, а ширина задана коробке. Оставить его
+     внутри — значит двигать глиф внутри уже заданной ширины, ничего не
+     выигрывая. */
+  letter-spacing: 0;
+  /* КЛИПА ЗДЕСЬ НЕТ, И ЭТО РЕШЕНИЕ, А НЕ УПУЩЕНИЕ.
+     Коробка задаёт ПРОДВИЖКУ; краска пусть вылезает. Так было отвергнуто
+     сразу два риска. Первый: `overflow: hidden` уводит базовую линию
+     inline-block к нижнему краю его margin-бокса, и глиф уезжает по
+     вертикали относительно соседей. Второй, найденный разбором и тонкий:
+     классификатор меряет кластер в потоке, то есть С трекингом, а внутри
+     коробки трекинг обнулён. Пока метрика та же, это безразлично — ширину
+     задаёт коробка. Но после смены метрики состав коробок устаревает
+     (переклассификация вынесена в follow-up), и глиф, который при новой
+     метрике лёг бы сам, оказывается в коробке шириной с новую ячейку,
+     рисуясь без δ: при отрицательной δ его натуральная продвижка ШИРЕ
+     коробки, и клип отрезал бы у него хвост. Без клипа устаревшая коробка
+     не может спрятать ничего — она лишь даёт наложение краски, ровно то
+     самое, которое сегодня и так происходит.
+     Цена названа: широкий глиф налезает на соседа вместо того, чтобы
+     обрезаться. Эталон, на который равняется владелец, в этом месте рисует
+     заглушку, то есть целого глифа тоже не показывает. Вернуть клип — одна
+     строка, и делать это можно только вместе с переклассификацией. */
+}
+
+.term-cell[data-cols='2'] {
+  width: calc(var(--term-cell-width, 1ch) * 2);
 }
 
 /* A whole-block grant fills the block; a row grant fills only its selected
@@ -1493,8 +1539,10 @@
 }
 
 /* Hidden probe the cell-metric publisher measures the DOM's natural
-   advance from. Inherits the block's font by living inside the scrollback
-   container; positioned out of the way and never visible or interactive. */
+   advance from. The font is DECLARED here, not inherited: the scrollback
+   container carries no font-family at all and `.term-line` declares only a
+   size, so a probe that trusted inheritance would measure the UI font
+   (nocx-ec18). Positioned out of the way and never visible or interactive. */
 .cell-metric-probe {
   position: absolute;
   visibility: hidden;

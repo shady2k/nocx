@@ -111,6 +111,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   createAiEndpoint,
+  expectPermissionRule,
   forgetPermission,
   permissionRule,
   readCommandForPermission,
@@ -320,9 +321,7 @@ async function openPermissionsPage(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(SETTINGS_POLICY_NAV).click()
-  await expect(
-    page.locator('[data-answers="answered"], [data-answers="unanswered"]').first(),
-  ).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-answers="questions"]')).toBeVisible({ timeout: 15_000 })
 }
 
 /**
@@ -485,7 +484,10 @@ test.describe('a person answers once, and can take the answer back (nocx-0dzqq)'
     await openPermissionsPage(page)
     const exactAnswer = permissionRule(page, ANSWER_EXACT)
     await expect(exactAnswer).toHaveCount(1, { timeout: 15_000 })
-    await expect(exactAnswer).toContainText('Allowed')
+    // Where it STANDS is the control's value, never the row's text: a row that
+    // draws all three answers as options contains all three words whatever it
+    // is set to (nocx-v8c5j).
+    await expectPermissionRule(page, ANSWER_EXACT, 'Allowed')
     await expect(exactAnswer).toContainText('in every session, from now on')
     // Where it came from, which is the half that tells an answer a person gave
     // from one an operator wrote.
@@ -522,7 +524,7 @@ test.describe('a person answers once, and can take the answer back (nocx-0dzqq)'
 
     const wideAnswer = permissionRule(page, ANSWER_WIDE)
     await expect(wideAnswer).toHaveCount(1, { timeout: 15_000 })
-    await expect(wideAnswer).toContainText('Allowed')
+    await expectPermissionRule(page, ANSWER_WIDE, 'Allowed')
 
     // ── ...and the same command that asked a moment ago now runs unasked.
     await backToTerminal(page, newTerminal)
@@ -562,7 +564,7 @@ test.describe('a person answers once, and can take the answer back (nocx-0dzqq)'
 
     const refusalAnswer = permissionRule(page, ANSWER_REFUSAL)
     await expect(refusalAnswer).toHaveCount(1, { timeout: 15_000 })
-    await expect(refusalAnswer).toContainText('Never')
+    await expectPermissionRule(page, ANSWER_REFUSAL, 'Never')
 
     // ── ...and now the same proposal is REFUSED rather than asked about. The
     // model's prose says so only because a `REFUSED` tool result reached it.
@@ -586,25 +588,25 @@ test.describe('a person answers once, and can take the answer back (nocx-0dzqq)'
     expect(existsSync(CURL_TARGET)).toBe(false)
 
     // ── AND THE PAGE NAMES WHICH ANSWER REFUSED IT. The sentence in the list
-    // names exactly the class the refused command belongs to, and `Why`
+    // names exactly the class the refused command belongs to, and `Details`
     // restates the same two facts about that answer.
     await openPermissionsPage(page)
     await expect(permissionRule(page, ANSWER_REFUSAL)).toContainText(
       `${ANSWER_REFUSAL} — in every session, from now on`,
     )
     await permissionRule(page, ANSWER_REFUSAL)
-      .getByRole('button', { name: `Why ${ANSWER_REFUSAL}`, exact: true })
+      .getByRole('button', { name: `Details for ${ANSWER_REFUSAL}`, exact: true })
       .click()
-    const whyPanel = page
+    const detailsPanel = page
       .locator('.nocx-dialog__panel')
-      .filter({ has: page.locator('[data-permissions-panel="why"]') })
-    await expect(whyPanel).toBeVisible({ timeout: 15_000 })
-    await expect(whyPanel).toContainText('Your answer')
-    await expect(whyPanel).toContainText('Never')
-    await expect(whyPanel).toContainText(ANSWER_REFUSAL)
-    await expect(whyPanel).toContainText('Written into your permissions')
-    await whyPanel.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(whyPanel).toHaveCount(0, { timeout: 15_000 })
+      .filter({ has: page.locator('[data-permissions-panel="details"]') })
+    await expect(detailsPanel).toBeVisible({ timeout: 15_000 })
+    await expect(detailsPanel).toContainText('Your answer')
+    await expect(detailsPanel).toContainText('Never')
+    await expect(detailsPanel).toContainText(ANSWER_REFUSAL)
+    await expect(detailsPanel).toContainText('Written into your permissions')
+    await detailsPanel.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(detailsPanel).toHaveCount(0, { timeout: 15_000 })
 
     // ══ 6. FORGETTING BOTH MAKES THE ASSISTANT ASK AGAIN ══════════════════
     // Three answers were given, so three are taken back: the exact one the

@@ -219,7 +219,7 @@ async function loaded(container: HTMLElement): Promise<void> {
 
 /** Every answer the page lists, in the order it lists them, as the section it
  *  is under plus its own key. Reading the DOM, not a signal. */
-function answerKeys(container: HTMLElement, section: 'answered' | 'unanswered'): string[] {
+function answerKeys(container: HTMLElement, section: 'questions' | 'rules'): string[] {
   const host = container.querySelector(`[data-answers="${section}"]`)
   if (!host) return []
   return Array.from(host.querySelectorAll<HTMLElement>('[data-answer]')).map((el) =>
@@ -247,8 +247,38 @@ async function openPanel(container: HTMLElement, name: string | RegExp): Promise
   return panel()
 }
 
-describe('assistant permissions: what you have answered', () => {
-  it('lists every standing answer AND every row off its default, each as a sentence', async () => {
+/**
+ * The answer control on one row — the select a person actually operates.
+ *
+ * Found by the row's own key rather than by its accessible name, so a test
+ * says WHICH answer it means in the page's own terms and cannot be satisfied
+ * by some other row's control that happens to be named similarly.
+ */
+function answerControl(container: HTMLElement, key: string): HTMLSelectElement {
+  const row = container.querySelector<HTMLElement>(`[data-answer="${key}"]`)
+  expect(row, `no row for ${key}`).not.toBeNull()
+  const select = row!.querySelector<HTMLSelectElement>('select')
+  expect(select, `no answer control on ${key}`).not.toBeNull()
+  return select!
+}
+
+/** Every answer the control offers, as the words a person reads, and whether
+ *  each can be taken. */
+function answersOffered(select: HTMLSelectElement): { label: string; disabled: boolean }[] {
+  return Array.from(select.options).map((o) => ({
+    label: o.textContent ?? '',
+    disabled: o.disabled,
+  }))
+}
+
+/** Pick one answer, the way a native select is picked. */
+function answer(container: HTMLElement, key: string, decision: 'permit' | 'ask' | 'refuse'): void {
+  const select = answerControl(container, key)
+  fireEvent.change(select, { target: { value: decision } })
+}
+
+describe('assistant permissions: one list, and it does not move', () => {
+  it('lists every question the assistant can be asked, answered or not, in one fixed order', async () => {
     const { client } = fakeClient([
       view(
         matrixWith({
@@ -258,65 +288,264 @@ describe('assistant permissions: what you have answered', () => {
           // governs nothing yet, rather than as an equal.
           delegate: { decision: 'refuse', scopes: [] },
         }),
-        { rules: [ANSWERED_RULE, WIDE_RULE] },
       ),
     ])
     const container = mount(client)
     await loaded(container)
 
-    expect(answerKeys(container, 'answered')).toEqual([
-      'rule:r-df',
-      'rule:r-find',
+    // The order is the lattice's, not the answers': `observe` is answered and
+    // `mutate-destructive` is not, and the answered one does not jump to the
+    // top — which is the whole of nocx-v8c5j.
+    expect(answerKeys(container, 'questions')).toEqual([
       'row:observe',
+      'row:mutate-destructive',
       'row:delegate',
     ])
 
     const text = container.textContent ?? ''
-    // The sentences, in the words the prompt used when it asked.
-    expect(text).toContain('df -h')
-    expect(text).toContain('in every session, from now on')
-    expect(text).toContain('any find command')
-    expect(text).toContain('read and inspect')
+    expect(text).toContain('May the assistant read and inspect?')
+    expect(text).toContain('May the assistant make changes that cannot be undone?')
     // A row nothing can produce yet says so rather than looking like a
     // permission that works.
     expect(text).toContain('Governs nothing yet')
+    // Where an answer is bounded, the row says so without being opened.
+    expect(text).toContain('Only in /workspace.')
   })
 
-  it('names the live rows still on ask as unanswered questions, and only those', async () => {
-    const { client } = fakeClient([
-      view(
-        matrixWith({
-          observe: { decision: 'permit', scopes: [] },
-        }),
-      ),
-    ])
+  it('keeps a question exactly where it was when it is answered', async () => {
+    const answered = view(matrixWith({ observe: { decision: 'permit', scopes: [] } }))
+    const { client } = fakeClient([view(matrixWith({})), answered])
+    const container = mount(client)
+    await loaded(container)
+    const before = answerKeys(container, 'questions')
+
+    answer(container, 'row:observe', 'permit')
+    await vi.waitFor(() => {
+      expect(answerControl(container, 'row:observe').value).toBe('permit')
+    })
+    expect(answerKeys(container, 'questions')).toEqual(before)
+  })
+
+  it('lists the commands somebody has named in their own list, and draws none when there are none', async () => {
+    const { client } = fakeClient([view(matrixWith({}), { rules: [ANSWERED_RULE, WIDE_RULE] })])
     const container = mount(client)
     await loaded(container)
 
-    // observe is answered; mutate-destructive is live and still on ask. The
-    // five rows outside `live` govern nothing, so they are not offered as
-    // questions a person could usefully answer.
-    expect(answerKeys(container, 'unanswered')).toEqual(['row:mutate-destructive'])
-    expect(container.textContent).toContain('make changes that cannot be undone')
-    // One question, and its two answers are on it — not behind a dialog.
-    const questions = container.querySelector<HTMLElement>('[data-answers="unanswered"]')!
-    expect(within(questions).getAllByRole('button', { name: /^Allowed/ }).length).toBe(1)
-    expect(within(questions).getAllByRole('button', { name: /^Never/ }).length).toBe(1)
+    expect(answerKeys(container, 'rules')).toEqual(['rule:r-df', 'rule:r-find'])
+    const text = container.textContent ?? ''
+    expect(text).toContain('df -h')
+    expect(text).toContain('in every session, from now on')
+    expect(text).toContain('any find command')
+
+    cleanup()
+    const bare = mount(fakeClient([view(matrixWith({}))]).client)
+    await loaded(bare)
+    // No section at all rather than one saying it is empty: the two buttons
+    // under it are where a command answer comes from.
+    expect(bare.querySelector('[data-answers="rules"]')).toBeNull()
+    expect(bare.textContent).not.toContain('Commands you have named')
   })
 
-  it('offers Why, Change and Forget on an answer, and no Save button anywhere', async () => {
+  it('offers the answers and Details on a row, and no Save button anywhere', async () => {
     const { client } = fakeClient([view(matrixWith({}), { rules: [ANSWERED_RULE] })])
     const container = mount(client)
     await loaded(container)
 
-    expect(within(container).getByRole('button', { name: /^Why/ })).toBeTruthy()
-    expect(within(container).getByRole('button', { name: /^Change/ })).toBeTruthy()
-    expect(within(container).getByRole('button', { name: /^Forget/ })).toBeTruthy()
+    answerControl(container, 'row:observe')
+    answerControl(container, 'rule:r-df')
+    expect(within(container).getAllByRole('button', { name: /^Details for/ }).length).toBe(3)
     expect(within(container).queryByRole('button', { name: /save/i })).toBeNull()
+    // The names the old shape needed are gone with it: an answer is changed
+    // where it is read, and released by the same control.
+    expect(within(container).queryByRole('button', { name: /^Change/ })).toBeNull()
+    expect(within(container).queryByRole('button', { name: /^Forget/ })).toBeNull()
   })
 })
 
-describe('assistant permissions: Why', () => {
+describe('assistant permissions: the answer control', () => {
+  it('offers all three answers on a question, and says where it stands', async () => {
+    const { client } = fakeClient([
+      view(matrixWith({ observe: { decision: 'permit', scopes: [] } })),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    const select = answerControl(container, 'row:observe')
+    expect(answersOffered(select)).toEqual([
+      { label: 'Allowed', disabled: false },
+      { label: 'Ask every time', disabled: false },
+      { label: 'Never', disabled: false },
+    ])
+    // Where it stands is the control's own value — there is no badge beside
+    // it saying the same thing in different words.
+    expect(select.value).toBe('permit')
+    expect(answerControl(container, 'row:mutate-destructive').value).toBe('ask')
+  })
+
+  it('answers a question from the row, with no dialog in between, and carries every other row back untouched', async () => {
+    const { client, set } = fakeClient([
+      view(matrixWith({ delegate: { decision: 'refuse', scopes: [] } })),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    answer(container, 'row:observe', 'permit')
+
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
+    const document_ = set.mock.calls[0][0]
+    expect(document_.observe).toEqual({ decision: 'permit', scopes: [] })
+    // `policy.set` carries the whole matrix, so every row a person did not
+    // touch has to travel back exactly as it was read.
+    expect(document_.delegate).toEqual({ decision: 'refuse', scopes: [] })
+    // Nothing opened on the way. The choice a person makes IS the answer.
+    expect(document.querySelector('[data-permissions-panel]')).toBeNull()
+  })
+
+  it('writes nothing when the answer picked is the one already in force', async () => {
+    const { client, set, setRule } = fakeClient([
+      view(matrixWith({ observe: { decision: 'permit', scopes: [] } }), { rules: [ANSWERED_RULE] }),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    answer(container, 'row:observe', 'permit')
+    answer(container, 'rule:r-df', 'permit')
+    await settle()
+
+    expect(set).not.toHaveBeenCalled()
+    expect(setRule).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-permissions-panel]')).toBeNull()
+  })
+
+  it('changes a standing answer and writes ONE rule, then adopts what a fresh read says', async () => {
+    const { client, setRule, get } = fakeClient([view(matrixWith({}), { rules: [ANSWERED_RULE] })])
+    const container = mount(client)
+    await loaded(container)
+    const before = get.mock.calls.length
+
+    answer(container, 'rule:r-df', 'refuse')
+
+    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
+    expect(setRule).toHaveBeenCalledWith(
+      {
+        id: 'r-df',
+        selector: ANSWERED_RULE.selector,
+        decision: 'refuse',
+        grantedUnder: undefined,
+      },
+      'ask',
+    )
+    // And the page re-reads: the store is the truth, never the payload we sent.
+    await vi.waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(before))
+  })
+})
+
+/**
+ * TAKING AN ANSWER BACK IS ONE GESTURE, AND IT PREVIEWS WHAT IT RELEASES.
+ *
+ * nocx-6szvl bought this and nocx-v8c5j moved where it lives: "Ask every time"
+ * is the answer's own control now, and choosing it IS Forget — the same
+ * preview, the same write, the same question about the work already running.
+ * What must not come back is a second path that releases an answer without
+ * saying what it releases.
+ */
+describe('assistant permissions: releasing an answer', () => {
+  it('previews what it releases and writes nothing until it is taken', async () => {
+    const { client, set } = fakeClient([
+      view(matrixWith({ observe: { decision: 'permit', scopes: [{ kind: 'path', id: '/w' }] } })),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    answer(container, 'row:observe', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
+    expect(p.textContent).toContain('read and inspect')
+    expect(p.textContent).toContain('asked about again')
+    expect(set).not.toHaveBeenCalled()
+
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
+    // The places go with it: a released answer is back at its default, whole.
+    expect(set.mock.calls[0][0].observe).toEqual({ decision: 'ask', scopes: [] })
+  })
+
+  it('puts the control back where the store has it when the preview is cancelled', async () => {
+    // The one gesture on this page that does not write immediately, and the
+    // one place a native select can end up showing an answer nobody took.
+    const { client, set } = fakeClient([
+      view(matrixWith({ observe: { decision: 'permit', scopes: [] } })),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    answer(container, 'row:observe', 'ask')
+    await vi.waitFor(() => panel())
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }))
+    await settle()
+
+    expect(set).not.toHaveBeenCalled()
+    expect(answerControl(container, 'row:observe').value).toBe('permit')
+  })
+
+  it('releases a standing answer through the same preview', async () => {
+    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })])
+    const container = mount(client)
+    await loaded(container)
+
+    answer(container, 'rule:r-find', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
+    // The calls whose outcome changes, named before the gesture is taken.
+    expect(p.textContent).toContain('any find command')
+    expect(p.textContent).toContain('asked about again')
+    expect(forgetRule).not.toHaveBeenCalled()
+
+    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
+    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find', 'ask'))
+  })
+
+  it('has no path that releases an answer without previewing it', async () => {
+    // Every control the page offers, and every control in whatever it opens —
+    // asserting the absence of a second spelling by walking the surface rather
+    // than by naming the button somebody remembered.
+    const { client, set } = fakeClient([
+      view(matrixWith({ observe: { decision: 'permit', scopes: [] } })),
+    ])
+    const container = mount(client)
+    await loaded(container)
+
+    for (const button of Array.from(container.querySelectorAll<HTMLButtonElement>('button'))) {
+      if (button.disabled || dismisses(button)) continue
+      fireEvent.click(button)
+      await settle()
+      const open = document.querySelector<HTMLElement>('[data-permissions-panel]')
+      if (!open) continue
+      const dialog = open.closest<HTMLElement>('[role="dialog"], dialog') ?? open
+      for (const inner of Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))) {
+        if (inner.disabled || dismisses(inner) || nameOf(inner) === 'Forget it') continue
+        fireEvent.click(inner)
+        await settle()
+      }
+      const stillOpen = document.querySelector<HTMLElement>('[data-permissions-panel]')
+      if (stillOpen) {
+        const host = stillOpen.closest<HTMLElement>('[role="dialog"], dialog') ?? stillOpen
+        const close = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(dismisses)
+        if (close) fireEvent.click(close)
+        await settle()
+      }
+    }
+
+    for (const [document_] of set.mock.calls) {
+      expect(document_.observe, 'a control released the answer without previewing it').not.toEqual({
+        decision: 'ask',
+        scopes: [],
+      })
+    }
+  })
+})
+
+describe('assistant permissions: Details', () => {
   it('renders the steps the wire sent, in the order it sent them, and nothing else', async () => {
     const wire: PolicyExplanation = {
       effect: 'observe',
@@ -335,7 +564,7 @@ describe('assistant permissions: Why', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Why/)
+    const p = await openPanel(container, 'Details for df -h')
     await vi.waitFor(() => {
       expect(p.querySelectorAll('[data-step]').length).toBe(3)
     })
@@ -352,42 +581,11 @@ describe('assistant permissions: Why', () => {
     const container = mount(client)
     await loaded(container)
 
-    await openPanel(container, /^Why/)
+    await openPanel(container, 'Details for df -h')
     await vi.waitFor(() => expect(explain).toHaveBeenCalledTimes(1))
     fireEvent.click(within(panel()).getByRole('button', { name: 'Close' }))
-    await openPanel(container, /^Why/)
+    await openPanel(container, 'Details for df -h')
     await vi.waitFor(() => expect(explain).toHaveBeenCalledTimes(2))
-  })
-})
-
-describe('assistant permissions: Change', () => {
-  it('offers the two answers on a standing answer and writes ONE rule', async () => {
-    const { client, setRule, get } = fakeClient([view(matrixWith({}), { rules: [ANSWERED_RULE] })])
-    const container = mount(client)
-    await loaded(container)
-    const before = get.mock.calls.length
-
-    const p = await openPanel(container, /^Change/)
-    for (const answer of ['Allowed', 'Never']) {
-      expect(within(p).getByRole('button', { name: new RegExp(`^${answer}`) })).toBeTruthy()
-    }
-    // And NOT a third. "Ask every time" is where a rule goes when it is
-    // forgotten, and Forget is the control that says so and previews it.
-    expect(within(p).queryByRole('button', { name: /^Ask every time/ })).toBeNull()
-    fireEvent.click(within(p).getByRole('button', { name: /^Never/ }))
-
-    await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
-    expect(setRule).toHaveBeenCalledWith(
-      {
-        id: 'r-df',
-        selector: ANSWERED_RULE.selector,
-        decision: 'refuse',
-        grantedUnder: undefined,
-      },
-      'ask',
-    )
-    // And the page re-reads: the store is the truth, never the payload we sent.
-    await vi.waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(before))
   })
 
   it('offers named places on a row — and no free-form field and no kind select', async () => {
@@ -402,14 +600,15 @@ describe('assistant permissions: Change', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Change read and inspect/)
+    const p = await openPanel(container, 'Details for read and inspect')
     // The two places nocx knows about, both offered; /workspace already on.
     const workspace = within(p).getByRole<HTMLInputElement>('checkbox', { name: /\/workspace/ })
     const tmp = within(p).getByRole<HTMLInputElement>('checkbox', { name: /\/tmp/ })
     expect(workspace.checked).toBe(true)
     expect(tmp.checked).toBe(false)
 
-    // A person picks from places that exist; they never type one.
+    // A person picks from places that exist; they never type one. And the
+    // answer itself is not in here — it is on the row, where the question is.
     expect(p.querySelector('input[type="text"]')).toBeNull()
     expect(p.querySelector('select')).toBeNull()
 
@@ -420,70 +619,43 @@ describe('assistant permissions: Change', () => {
       { kind: 'path', id: '/tmp' },
     ])
   })
-
-  it('answering a question writes that row and carries every other one back untouched', async () => {
-    const { client, set } = fakeClient([
-      view(matrixWith({ delegate: { decision: 'refuse', scopes: [] } })),
-    ])
-    const container = mount(client)
-    await loaded(container)
-
-    const question = container.querySelector<HTMLElement>('[data-answer="row:observe"]')!
-    fireEvent.click(within(question).getByRole('button', { name: /^Allowed/ }))
-
-    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
-    const document_ = set.mock.calls[0][0]
-    expect(document_.observe).toEqual({ decision: 'permit', scopes: [] })
-    // `policy.set` carries the whole matrix, so every row a person did not
-    // touch has to travel back exactly as it was read.
-    expect(document_.delegate).toEqual({ decision: 'refuse', scopes: [] })
-  })
 })
 
 /**
- * AN ANSWER THAT CANNOT BE GIVEN IS NOT OFFERED (nocx-4yjwk.6).
+ * AN ANSWER THE STORE WOULD NOT TAKE IS SHOWN AND DISABLED (nocx-4yjwk.6,
+ * nocx-v8c5j).
  *
  * `Change → Allowed` on a rule the store will not widen used to send the write
- * anyway. Nothing unsafe happened — the gate refused it and the page raised
- * the danger toast and re-read — and that is the whole defect: a person
- * clicked an answer, got a red message, and learned nothing. Least of all the
- * thing they needed, which is that a permit comes from a command that was
- * READ, and that `+ Allow a command…` is where that happens.
- *
- * The tests drive the panel a person opens and assert the ABSENCE of the
- * control, not the failure of a write.
+ * anyway: the gate refused it, the page raised a danger toast and re-read, and
+ * the person learned nothing. Then it was removed from the panel, which is one
+ * failure quieter and still a failure — a person who remembers three answers
+ * and is offered two concludes the answer has been taken away. So it is drawn,
+ * disabled, and its own label says where that answer does come from.
  */
 describe('assistant permissions: an answer the store would not widen', () => {
-  it('does not offer Allowed on it, and still offers the answer it can take', async () => {
+  it('draws Allowed disabled on it, saying where that answer comes from', async () => {
     const { client, setRule } = fakeClient([
       view(matrixWith({}), { rules: [PROGRAM_REFUSAL, FEATURE_REFUSAL] }),
     ])
     const container = mount(client)
     await loaded(container)
 
-    for (const subject of ['any rm command', 'any sort command that writes a file']) {
-      const p = await openPanel(container, new RegExp(`^Change ${subject}`))
-      expect(
-        within(p).queryByRole('button', { name: /^Allowed/ }),
-        `Allowed is offered for ${subject}`,
-      ).toBeNull()
-      // Narrowing is what this answer may still do, so the answer it is
-      // already at is still drawn — as the one that is pressed.
-      within(p).getByRole('button', { name: /^Never/ })
-      fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
-      await settle()
+    for (const key of ['rule:r-rm', 'rule:r-sort']) {
+      const offered = answersOffered(answerControl(container, key))
+      expect(offered[0].disabled, `Allowed is takeable on ${key}`).toBe(true)
+      expect(offered[0].label).toContain('+ Allow a command…')
+      // Narrowing and releasing are what this answer may still do.
+      expect(offered.slice(1).map((o) => o.disabled)).toEqual([false, false])
     }
-    // And the way back is Forget, which is the only name for it.
-    within(container).getByRole('button', { name: 'Forget any rm command' })
     expect(setRule).not.toHaveBeenCalled()
   })
 
-  it('says why, and points at the gesture that can give that answer', async () => {
+  it('says why in full, and points at the gesture that can give that answer', async () => {
     const { client } = fakeClient([view(matrixWith({}), { rules: [PROGRAM_REFUSAL] })])
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Change any rm command/)
+    const p = await openPanel(container, 'Details for any rm command')
     const text = p.textContent ?? ''
     // The reason, in the person's words, and the control by the name its
     // button actually wears — a sentence pointing somewhere they cannot find
@@ -496,36 +668,34 @@ describe('assistant permissions: an answer the store would not widen', () => {
   it('still offers Allowed where the store would take it', async () => {
     // The exact answer names one command line; the wide one names a word AND
     // carries the effect it was granted under. Both are documents the gate
-    // accepts, and a fix that removed the offer everywhere is not a fix.
+    // accepts, and a fix that took the offer away everywhere is not a fix.
     const { client, setRule } = fakeClient([
       view(matrixWith({}), { rules: [ANSWERED_RULE, WIDE_RULE] }),
     ])
     const container = mount(client)
     await loaded(container)
 
-    for (const subject of ['df -h', 'any find command']) {
-      const p = await openPanel(container, new RegExp(`^Change ${subject}`))
-      within(p).getByRole('button', { name: /^Allowed/ })
-      expect(p.textContent).not.toContain('is not offered')
-      fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
-      await settle()
+    for (const key of ['rule:r-df', 'rule:r-find']) {
+      expect(answersOffered(answerControl(container, key))[0]).toEqual({
+        label: 'Allowed',
+        disabled: false,
+      })
     }
 
-    const p = await openPanel(container, /^Change any find command/)
-    fireEvent.click(within(p).getByRole('button', { name: /^Allowed/ }))
+    answer(container, 'rule:r-find', 'refuse')
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
     expect(setRule).toHaveBeenCalledWith(
       {
         id: 'r-find',
         selector: WIDE_RULE.selector,
-        decision: 'permit',
+        decision: 'refuse',
         grantedUnder: 'observe',
       },
       'ask',
     )
   })
 
-  it('offers both answers on a row, which no rule gate speaks about', async () => {
+  it('offers all three on a row, which no rule gate speaks about', async () => {
     // A row is written by policy.set and carries no selector at all, so the
     // rule gate has nothing to say about it. Reading the absence of a permit
     // onto rows would take away the only way to answer an open question.
@@ -533,187 +703,11 @@ describe('assistant permissions: an answer the store would not widen', () => {
     const container = mount(client)
     await loaded(container)
 
-    const question = container.querySelector<HTMLElement>('[data-answer="row:observe"]')!
-    within(question).getByRole('button', { name: /^Allowed/ })
-    within(question).getByRole('button', { name: /^Never/ })
-    expect(question.textContent).not.toContain('is not offered')
-  })
-})
-
-/**
- * ANSWERING WHERE THE QUESTION IS ASKED (nocx-6szvl).
- *
- * The owner, on first sight of the page: «Захожу на страницу настроек и вижу
- * «ответить на вопрос». Если зайти внутрь и оставить «спрашивать каждый раз»,
- * всё выглядит так, что я ничего не ответил. Зачем вообще этот отдельный
- * диалог?»
- *
- * Three defects with one shape. "Ask every time" is not a third ANSWER to an
- * unanswered question — it IS the unanswered state, so offering it was
- * offering a button indistinguishable from Cancel. On an answered row it and
- * Forget were the same act under two names, and only one of them previewed
- * what it released. And the dialog that carried all three bought a person
- * nothing on the unanswered path: a row's panel holds the place picker and
- * nothing else a row cannot say, and there are no places to pick until
- * somebody has widened an answer to reach one.
- */
-describe('assistant permissions: answering where the question is asked', () => {
-  /** The row for one kind of work, in whichever list it is currently in. */
-  function rowOf(container: HTMLElement, effect: EffectKey): HTMLElement {
-    const el = container.querySelector<HTMLElement>(`[data-answer="row:${effect}"]`)
-    expect(el, `no row for ${effect}`).not.toBeNull()
-    return el!
-  }
-
-  it('answers an unanswered question from the row, with no dialog in between', async () => {
-    const { client, set } = fakeClient([view(matrixWith({}))])
-    const container = mount(client)
-    await loaded(container)
-
-    const row = rowOf(container, 'mutate-destructive')
-    fireEvent.click(within(row).getByRole('button', { name: /^Allowed/ }))
-
-    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
-    expect(set.mock.calls[0][0]['mutate-destructive'].decision).toBe('permit')
-    // Nothing opened on the way. The click a person makes IS the answer.
-    expect(document.querySelector('[data-permissions-panel]')).toBeNull()
-  })
-
-  it('offers no control that writes the row the state it is already in', async () => {
-    const { client, set } = fakeClient([view(matrixWith({}))])
-    const container = mount(client)
-    await loaded(container)
-
-    // Every control the question offers, and every control in whatever it
-    // opens — asserting the ABSENCE of a no-op by walking the surface rather
-    // than by naming the button somebody remembered.
-    const row = rowOf(container, 'mutate-destructive')
-    for (const button of Array.from(row.querySelectorAll<HTMLButtonElement>('button'))) {
-      if (button.disabled) continue
-      fireEvent.click(button)
-      await settle()
-      const open = document.querySelector<HTMLElement>('[data-permissions-panel]')
-      if (!open) continue
-      const dialog = open.closest<HTMLElement>('[role="dialog"], dialog') ?? open
-      for (const inner of Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))) {
-        if (inner.disabled || /^(close|cancel|close dialog)$/i.test(nameOf(inner))) continue
-        fireEvent.click(inner)
-        await settle()
-      }
-      const stillOpen = document.querySelector<HTMLElement>('[data-permissions-panel]')
-      if (stillOpen) {
-        const host = stillOpen.closest<HTMLElement>('[role="dialog"], dialog') ?? stillOpen
-        const close = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(dismisses)
-        if (close) fireEvent.click(close)
-        await settle()
-      }
-    }
-
-    expect(set.mock.calls.length).toBeGreaterThan(0)
-    for (const [document_] of set.mock.calls) {
-      expect(
-        document_['mutate-destructive'],
-        'a control wrote the row the state it was already in',
-      ).not.toEqual({ decision: 'ask', scopes: [] })
-    }
-  })
-
-  it('offers one name for taking an answer back, and it previews what it releases', async () => {
-    // A place exists, so the row still opens a panel — which is exactly where
-    // the second spelling used to hide.
-    const { client, set } = fakeClient([
-      view(matrixWith({ observe: { decision: 'permit', scopes: [{ kind: 'path', id: '/w' }] } })),
+    expect(answersOffered(answerControl(container, 'row:observe')).map((o) => o.disabled)).toEqual([
+      false,
+      false,
+      false,
     ])
-    const container = mount(client)
-    await loaded(container)
-
-    const change = await openPanel(container, /^Change read and inspect/)
-    expect(
-      within(change).queryByRole('button', { name: /^Ask every time/ }),
-      'a second way to take the answer back, without the preview',
-    ).toBeNull()
-    fireEvent.click(within(change).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
-    await settle()
-
-    const forget = await openPanel(container, /^Forget read and inspect/)
-    // The one name, and it says what stops governing before it is taken.
-    expect(forget.textContent).toContain('asked about again')
-    fireEvent.click(within(forget).getByRole('button', { name: 'Forget it' }))
-    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
-    expect(set.mock.calls[0][0].observe).toEqual({ decision: 'ask', scopes: [] })
-  })
-
-  it('opens no panel for a row with no places to pick and nothing withheld', async () => {
-    const { client } = fakeClient([
-      view(matrixWith({ observe: { decision: 'permit', scopes: [] } })),
-    ])
-    const container = mount(client)
-    await loaded(container)
-
-    // Neither list offers one: the panel a row opens carries the places and
-    // nothing else, and there are none.
-    expect(within(container).queryByRole('button', { name: /^Change read and inspect/ })).toBeNull()
-    expect(within(container).queryByRole('button', { name: /^Answer this now/ })).toBeNull()
-    // And the answers are still reachable, on the rows themselves.
-    within(rowOf(container, 'observe')).getByRole('button', { name: /^Never/ })
-    within(rowOf(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ })
-  })
-
-  it('still opens one for a row that has places to pick', async () => {
-    // The guard against over-fixing: the panel is not gone, it is conditional.
-    const { client } = fakeClient([
-      view(
-        matrixWith({
-          observe: { decision: 'permit', scopes: [{ kind: 'path', id: '/workspace' }] },
-        }),
-      ),
-    ])
-    const container = mount(client)
-    await loaded(container)
-
-    const answered = await openPanel(container, /^Change read and inspect/)
-    within(answered).getByRole('checkbox', { name: /\/workspace/ })
-    fireEvent.click(within(answered).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
-    await settle()
-
-    // And an UNANSWERED row too: a question can be answered in a place before
-    // it has ever been answered anywhere.
-    const question = await openPanel(
-      container,
-      'Answer this now: may the assistant make changes that cannot be undone?',
-    )
-    within(question).getByRole('checkbox', { name: /\/workspace/ })
-  })
-})
-
-describe('assistant permissions: Forget', () => {
-  it('previews what it releases and writes nothing until it is taken', async () => {
-    const { client, forgetRule } = fakeClient([view(matrixWith({}), { rules: [WIDE_RULE] })])
-    const container = mount(client)
-    await loaded(container)
-
-    const p = await openPanel(container, /^Forget/)
-    // The calls whose outcome changes, named before the gesture is taken.
-    expect(p.textContent).toContain('any find command')
-    expect(p.textContent).toContain('asked about again')
-    expect(forgetRule).not.toHaveBeenCalled()
-
-    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
-    await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find', 'ask'))
-  })
-
-  it('a forgotten row goes back to being asked about, everywhere', async () => {
-    const { client, set } = fakeClient([
-      view(matrixWith({ observe: { decision: 'permit', scopes: [{ kind: 'path', id: '/w' }] } })),
-    ])
-    const container = mount(client)
-    await loaded(container)
-
-    const p = await openPanel(container, /^Forget read and inspect/)
-    expect(p.textContent).toContain('read and inspect')
-    fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
-    await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
-    expect(set.mock.calls[0][0].observe).toEqual({ decision: 'ask', scopes: [] })
   })
 })
 
@@ -725,7 +719,9 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Forget/)
+    answer(container, 'rule:r-find', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
 
     // The count, said out loud, and the two answers offered with it.
@@ -748,7 +744,9 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Forget/)
+    answer(container, 'rule:r-find', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
 
     await vi.waitFor(() => expect(forgetRule).toHaveBeenCalledWith('r-find', 'ask'))
@@ -766,7 +764,9 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Forget/)
+    answer(container, 'rule:r-find', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
     await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
     const question = p.querySelector('[data-permissions-runs]') as HTMLElement
@@ -790,7 +790,9 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    const p = await openPanel(container, /^Forget/)
+    answer(container, 'rule:r-find', 'ask')
+    await vi.waitFor(() => panel())
+    const p = panel()
     fireEvent.click(within(p).getByRole('button', { name: 'Forget it' }))
     await vi.waitFor(() => expect(p.querySelector('[data-permissions-runs]')).not.toBeNull())
     const question = p.querySelector('[data-permissions-runs]') as HTMLElement
@@ -835,20 +837,12 @@ describe('assistant permissions: the work already running', () => {
   // wording would be a second account of what happens to the work already
   // running.
 
-  /** The row for one kind of work, in whichever list it is currently in. */
-  function rowFor(container: HTMLElement, effect: EffectKey): HTMLElement {
-    const el = container.querySelector<HTMLElement>(`[data-answer="row:${effect}"]`)
-    expect(el, `no row for ${effect}`).not.toBeNull()
-    return el!
-  }
-
   it('says how many answers in flight are still under the old ROW, and writes nothing yet', async () => {
     const { client, set } = fakeClient([view(matrixWith({}))], { affectedRuns: 2 })
     const container = mount(client)
     await loaded(container)
 
-    const row = rowFor(container, 'mutate-destructive')
-    fireEvent.click(within(row).getByRole('button', { name: /^Allowed/ }))
+    answer(container, 'row:mutate-destructive', 'permit')
 
     // The question lands on the PAGE, because a row answered on the row has no
     // dialog to join — and it is the same block with the same two answers.
@@ -877,9 +871,7 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    fireEvent.click(
-      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
-    )
+    answer(container, 'row:mutate-destructive', 'permit')
 
     await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
     await settle()
@@ -892,9 +884,7 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    fireEvent.click(
-      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
-    )
+    answer(container, 'row:mutate-destructive', 'permit')
     await vi.waitFor(() =>
       expect(container.querySelector('[data-permissions-runs]')).not.toBeNull(),
     )
@@ -921,9 +911,7 @@ describe('assistant permissions: the work already running', () => {
     const container = mount(client)
     await loaded(container)
 
-    fireEvent.click(
-      within(rowFor(container, 'mutate-destructive')).getByRole('button', { name: /^Allowed/ }),
-    )
+    answer(container, 'row:mutate-destructive', 'permit')
     await vi.waitFor(() =>
       expect(container.querySelector('[data-permissions-runs]')).not.toBeNull(),
     )
@@ -943,7 +931,7 @@ describe('assistant permissions: the work already running', () => {
 })
 
 describe('assistant permissions: an answer waiting to be re-read', () => {
-  it('is shown as inert, with Review and Forget and no Change', async () => {
+  it('is shown as inert, offers Review, and cannot be widened until it is read', async () => {
     const { client, setRule } = fakeClient([
       view(matrixWith({}), { rules: [STALE_RULE], awaitingReview: ['r-stale'] }),
     ])
@@ -953,9 +941,14 @@ describe('assistant permissions: an answer waiting to be re-read', () => {
     const text = container.textContent ?? ''
     expect(text).toContain('Grants nothing until you read what it now means')
     expect(within(container).getByRole('button', { name: /^Review/ })).toBeTruthy()
-    expect(within(container).getByRole('button', { name: /^Forget/ })).toBeTruthy()
-    // Re-agreeing and re-granting are different gestures.
-    expect(within(container).queryByRole('button', { name: /^Change/ })).toBeNull()
+
+    // Re-agreeing and re-granting are different gestures, so the control
+    // beside Review can narrow this answer or release it and cannot widen it
+    // — and it says which of the two it is, on the option itself.
+    const offered = answersOffered(answerControl(container, 'rule:r-stale'))
+    expect(offered[0].disabled).toBe(true)
+    expect(offered[0].label).toContain('review it first')
+    expect(offered.slice(1).map((o) => o.disabled)).toEqual([false, false])
 
     click(container, /^Review/)
     await vi.waitFor(() => expect(setRule).toHaveBeenCalledTimes(1))
@@ -1061,21 +1054,30 @@ describe('assistant permissions: the words are the product’s', () => {
 
     // The Why panel first, and only once its steps are on screen: a check
     // that ran against an empty panel would pass for ever.
-    const why = await openPanel(container, /^Why df -h/)
+    const why = await openPanel(container, 'Details for df -h')
     await vi.waitFor(() => {
       expect(why.querySelectorAll('[data-step]').length).toBe(everyStep.trace.length)
     })
     fireEvent.click(within(why).getByRole('button', { name: 'Close' }))
 
-    for (const open of [/^Why df -h/, /^Change df -h/, /^Forget df -h/, /^Why read and inspect/]) {
+    for (const open of ['Details for df -h', 'Details for read and inspect']) {
       const p = await openPanel(container, open)
       await vi.waitFor(() => expect(p.textContent).toBeTruthy())
       const text = (p.textContent ?? '').toLowerCase()
-      expect(text, `panel ${String(open)}`).not.toContain('effect class')
-      expect(text, `panel ${String(open)}`).not.toContain('resource scope')
-      expect(text, `panel ${String(open)}`).not.toContain('refuse')
+      expect(text, `panel ${open}`).not.toContain('effect class')
+      expect(text, `panel ${open}`).not.toContain('resource scope')
+      expect(text, `panel ${open}`).not.toContain('refuse')
       fireEvent.click(within(p).getAllByRole('button', { name: /^(Close|Cancel)$/ })[0])
+      await settle()
     }
+
+    // And the preview that releases an answer, which is the other dialog.
+    answer(container, 'rule:r-df', 'ask')
+    await vi.waitFor(() => panel())
+    const releasing = (panel().textContent ?? '').toLowerCase()
+    expect(releasing).not.toContain('effect class')
+    expect(releasing).not.toContain('resource scope')
+    expect(releasing).not.toContain('refuse')
   })
 })
 
@@ -1089,8 +1091,7 @@ describe('assistant permissions: a refused write', () => {
     await loaded(container)
     const before = get.mock.calls.length
 
-    const p = await openPanel(container, /^Change/)
-    fireEvent.click(within(p).getByRole('button', { name: /^Never/ }))
+    answer(container, 'rule:r-df', 'refuse')
 
     await vi.waitFor(() => {
       expect(toasts().some((t) => t.level === 'danger')).toBe(true)

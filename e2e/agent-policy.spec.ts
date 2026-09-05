@@ -58,7 +58,7 @@ import {
   bindEndpoint,
   createAiEndpoint,
   permissionAnswer,
-  permissionQuestion,
+  expectPermissionAnswer,
   setDefaultModel,
   settingsReady,
   VaultBackend,
@@ -351,24 +351,24 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     await answerFinished(page, 'And if I fix the type?')
     await expect(approvalPrompt(page)).toHaveCount(0)
 
-    // ── 5. The page shows the standing answer, as a SENTENCE, in the same
-    // words the question used. It is listed under "What you have answered"
-    // and nowhere else: the page lists answers rather than drawing a field
-    // per row, so the answer being present is itself the assertion — there
-    // is no always-drawn control whose text mentions every option.
+    // ── 5. The page shows the answer where the question is asked: the same
+    // row, in the same place it has always been, with the answer in its own
+    // control. The row is always drawn — a question does not appear or
+    // disappear as it is answered (nocx-v8c5j) — so what is asserted is where
+    // the control STANDS, which is the store's word and not the page's layout.
     await openSettings(page, SETTINGS_POLICY_NAV)
     const observeAnswer = permissionAnswer(page, 'observe')
     await expect(observeAnswer).toBeVisible({ timeout: 15_000 })
     await expect(observeAnswer).toContainText(OBSERVE_WORDS)
-    await expect(observeAnswer).toContainText('Allowed')
-    await expect(observeAnswer).toContainText('in every session, from now on')
+    await expectPermissionAnswer(page, 'observe', 'Allowed')
 
-    // ── 6. Revoking has ONE name — Forget, which previews what it releases
-    // before it is taken (nocx-6szvl). There is no Save button — the answer
-    // writes and the page adopts what a fresh read returns — so the answer
-    // LEAVING the list is the store's word, never the draft's.
+    // ── 6. Revoking is choosing "Ask every time" on that same control, and it
+    // still previews what it releases before it is taken (nocx-6szvl). There
+    // is no Save button — the write happens and the page adopts what a fresh
+    // read returns — so the control coming back to "Ask every time" is the
+    // store's word, never the draft's.
     await answerPermission(page, 'observe', 'Ask every time')
-    await expect(observeAnswer).toHaveCount(0, { timeout: 15_000 })
+    await expectPermissionAnswer(page, 'observe', 'Ask every time')
 
     // ── 7. And the question comes back on the next one.
     await backToTerminal(page)
@@ -457,13 +457,10 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // "always" would look identical from inside the session they were given
     // in.
     await openSettings(page, SETTINGS_POLICY_NAV)
-    // Not listed among the answers at all: a session answer never reached
-    // the global matrix, so there is nothing on this page to take back. It is
-    // still an unanswered QUESTION, which is where the row belongs and what
-    // the two lists are for — asserted by the list it sits in rather than by
-    // the control that opens a dialog, because a row with no place to pick
-    // does not open one at all (nocx-6szvl).
-    await expect(permissionAnswer(page, 'observe')).toHaveCount(0, { timeout: 15_000 })
-    await expect(permissionQuestion(page, 'observe')).toHaveCount(1, { timeout: 15_000 })
+    // Still unanswered: a session answer never reached the global matrix, so
+    // the row that a standing "always" would have moved is where it was, on
+    // "Ask every time". The row itself is always listed, so the assertion is
+    // the control's value and nothing else (nocx-v8c5j).
+    await expectPermissionAnswer(page, 'observe', 'Ask every time')
   })
 })

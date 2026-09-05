@@ -1139,7 +1139,8 @@ export async function openImportDestination(ask: Locator, page: Page): Promise<L
  * answers in them, so a spec that invented its own would be asserting a
  * wording nothing ships. Restated here rather than imported because the e2e
  * suite drives the built app and does not link the renderer's modules; if
- * they drift, `answerPermission` stops finding a control and says so.
+ * they drift, `answerPermission` fails on the row whose question no longer
+ * asks what these words say, and names both.
  */
 const PERMISSION_WORDS = {
   observe: 'read and inspect',
@@ -1155,83 +1156,95 @@ export type PermissionEffect = keyof typeof PERMISSION_WORDS
 export type PermissionAnswer = 'Allowed' | 'Ask every time' | 'Never'
 
 /**
- * The listed answer for one kind of work, on Settings -> Assistant
- * permissions.
+ * The row for one kind of work, on Settings -> Assistant permissions.
  *
- * Present only once somebody has answered it — the page lists answers, not
- * fields — which is what makes its ABSENCE the assertable thing after a
- * revocation. The old matrix could not say that: every row was drawn always,
- * so a spec had to read a state line beside it.
+ * ALWAYS PRESENT, answered or not, and that is the page's shape rather than an
+ * accident of this helper (nocx-v8c5j): the questions are one list in a fixed
+ * order and a row does not move when it is answered. So the assertable thing
+ * is the row's ANSWER — `permissionAnswerControl` below — and never its
+ * presence in one of two lists, which is what a spec had to read before.
  */
 export function permissionAnswer(page: Page, effect: PermissionEffect): Locator {
-  // SCOPED TO THE ANSWERED LIST, and that is the whole point of the helper.
-  // The page draws a row in BOTH sections — answered, and not answered yet —
-  // and both carry `data-answer="row:<effect>"`, because it is the same row
-  // either way. A section-blind locator therefore matches after an answer is
-  // taken back as well as before it is given, and an assertion built on it
-  // cannot tell the two apart. Which list the row is in IS the answer.
-  return page.locator('[data-answers="answered"]').locator(`[data-answer="row:${effect}"]`)
+  return page.locator('[data-answers="questions"]').locator(`[data-answer="row:${effect}"]`)
 }
 
-/** The same row where it sits when nobody has answered it. */
-export function permissionQuestion(page: Page, effect: PermissionEffect): Locator {
-  return page.locator('[data-answers="unanswered"]').locator(`[data-answer="row:${effect}"]`)
+/** The wire's word for one of the three answers — what the control's value
+ *  actually is. The words a person reads are `PermissionAnswer`; these are
+ *  what the option carries, and the mapping lives here so a spec never has to
+ *  know it. */
+const ANSWER_VALUE: Record<PermissionAnswer, string> = {
+  Allowed: 'permit',
+  'Ask every time': 'ask',
+  Never: 'refuse',
+}
+
+/**
+ * The control that holds one row's answer.
+ *
+ * It is a select, and its VALUE is where the row stands — so an assertion goes
+ * through `toHaveValue` and never through the row's text. A row that draws
+ * every answer as an option contains all three words whatever it is set to,
+ * which makes `toContainText('Allowed')` a check that cannot fail.
+ */
+export function permissionAnswerControl(page: Page, effect: PermissionEffect): Locator {
+  return permissionAnswer(page, effect).getByRole('combobox')
+}
+
+/** Assert where one row stands, in the words a person reads. */
+export async function expectPermissionAnswer(
+  page: Page,
+  effect: PermissionEffect,
+  answer: PermissionAnswer,
+): Promise<void> {
+  await baseExpect(permissionAnswerControl(page, effect)).toHaveValue(ANSWER_VALUE[answer], {
+    timeout: 15_000,
+  })
 }
 
 /**
  * Answer, or re-answer, one kind of work. The Assistant permissions page must
  * already be open.
  *
- * There is no Save button and no draft: the panel's answer writes at once and
- * the page adopts what a fresh read returns, so this waits on the LISTED
- * answer rather than on the control it clicked. That is the store's own word
- * for what it took.
+ * There is no Save button and no draft: the control writes at once and the
+ * page adopts what a fresh read returns, so this waits on the control's value
+ * coming back as the store's own word for what it took.
+ *
+ * Returning an answer to "Ask every time" RELEASES it, and that is the one
+ * gesture with a preview in front of it — the same preview Forget always had.
+ * A caller asking for it here is asking for the whole gesture, so this takes
+ * it; what it does NOT do is answer the "work already running" question, for
+ * `forgetPermission`'s reason below.
  */
 export async function answerPermission(
   page: Page,
   effect: PermissionEffect,
   answer: PermissionAnswer,
 ): Promise<void> {
-  const words = PERMISSION_WORDS[effect]
-  // THE ANSWERS ARE ON THE ROW, in whichever list the row is currently in
-  // (nocx-6szvl). There is no dialog on this path any more: a row's panel
-  // carries the places and nothing else, so a row with no place to pick does
-  // not open one, and answering it behind a dialog was a click that bought a
-  // person nothing.
-  const row = page.locator(`[data-answer="row:${effect}"]`)
-  await baseExpect(row).toHaveCount(1, { timeout: 15_000 })
+  // The row is addressed by its effect key, so this is where the words are
+  // checked: the question a person reads must still be the one these helpers
+  // and the approval prompt name (see `PERMISSION_WORDS`).
+  await baseExpect(permissionAnswer(page, effect)).toContainText(PERMISSION_WORDS[effect], {
+    timeout: 15_000,
+  })
+  const control = permissionAnswerControl(page, effect)
+  await baseExpect(control).toHaveCount(1, { timeout: 15_000 })
+
+  // Idempotent: a row already at this answer is answered, and selecting the
+  // value it already holds writes nothing by design.
+  if ((await control.inputValue()) === ANSWER_VALUE[answer]) return
+
+  await control.selectOption(ANSWER_VALUE[answer])
 
   if (answer === 'Ask every time') {
-    // TAKING AN ANSWER BACK HAS ONE NAME, and it is Forget. It used to be
-    // Change → "Ask every time" as well, which was the same act minus the
-    // preview of what it releases; that spelling no longer exists, because
-    // "Ask every time" is the state an unanswered row is IN rather than an
-    // answer anybody gives.
-    await row.getByRole('button', { name: `Forget ${words}`, exact: true }).click()
     const panel = page
       .locator('.nocx-dialog__panel')
       .filter({ has: page.locator('[data-permissions-panel="forget"]') })
     await baseExpect(panel).toBeVisible({ timeout: 15_000 })
     await panel.getByRole('button', { name: 'Forget it', exact: true }).click()
-    // Taking an answer back does not delete the row, it MOVES it: the kind of
-    // work is back among the questions nobody has answered. Waiting on its
-    // arrival there, rather than only on its absence from the answered list,
-    // is what makes this a wait on the store's word and not on a repaint.
-    await baseExpect(permissionAnswer(page, effect)).toHaveCount(0, { timeout: 15_000 })
-    await baseExpect(permissionQuestion(page, effect)).toHaveCount(1, { timeout: 15_000 })
     await baseExpect(panel).toHaveCount(0, { timeout: 15_000 })
-    return
   }
 
-  // Idempotent, and it has to be: a row already at this answer offers no
-  // button for it, because a control that writes what is already written is
-  // the defect this shape was built to remove. Reporting the state a caller
-  // asked for is the honest answer; failing on the missing control would be
-  // reporting the fix as a break.
-  if ((await permissionAnswer(page, effect).filter({ hasText: answer }).count()) > 0) return
-
-  await row.getByRole('button', { name: new RegExp(`^${answer} `) }).click()
-  await baseExpect(permissionAnswer(page, effect)).toContainText(answer, { timeout: 15_000 })
+  await expectPermissionAnswer(page, effect, answer)
 }
 
 /**
@@ -1253,9 +1266,23 @@ export async function answerPermission(
  */
 export function permissionRule(page: Page, covers: string): Locator {
   return page
-    .locator('[data-answers="answered"]')
+    .locator('[data-answers="rules"]')
     .locator('[data-answer^="rule:"]')
     .filter({ hasText: covers })
+}
+
+/** Where one standing answer stands. Its own control, for
+ *  `permissionAnswerControl`'s reason: the row draws all three answers, so its
+ *  text says nothing about which one is in force. */
+export async function expectPermissionRule(
+  page: Page,
+  covers: string,
+  answer: PermissionAnswer,
+): Promise<void> {
+  await baseExpect(permissionRule(page, covers).getByRole('combobox')).toHaveValue(
+    ANSWER_VALUE[answer],
+    { timeout: 15_000 },
+  )
 }
 
 /**
@@ -1277,7 +1304,10 @@ export function permissionRule(page: Page, covers: string): Locator {
 export async function forgetPermission(page: Page, covers: string): Promise<void> {
   const row = permissionRule(page, covers)
   await baseExpect(row).toHaveCount(1, { timeout: 15_000 })
-  await row.getByRole('button', { name: `Forget ${covers}`, exact: true }).click()
+  // Releasing an answer is choosing "Ask every time" on the answer's own
+  // control (nocx-v8c5j): one gesture, and the preview it opens is the one
+  // Forget always had.
+  await row.getByRole('combobox').selectOption(ANSWER_VALUE['Ask every time'])
   const panel = page
     .locator('.nocx-dialog__panel')
     .filter({ has: page.locator('[data-permissions-panel="forget"]') })

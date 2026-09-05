@@ -15,16 +15,38 @@
  * THE UNIT IS A SENTENCE ABOUT A FUTURE QUESTION, not a field of the model.
  * Nobody arrives wanting to configure `observe x path x permit`; they arrive
  * having met a concrete request and wanting to decide whether it should be
- * asked again. So the page has two lists:
+ * asked again. So the page is a list of questions, each with its answer:
  *
- *   WHAT YOU HAVE ANSWERED   every standing answer, and every row off its
- *                            default, each as a sentence
- *                            -> Why . <the other answer> . Forget
- *   NOT ANSWERED YET         the live rows still on ask, named as the
- *                            questions they are
- *                            -> Allowed . Never
+ *   WHAT THE ASSISTANT MAY DO   every live kind of work, always all of them,
+ *                               asked as the question it is
+ *                               -> [ Allowed | Ask every time | Never ] . Details
+ *   COMMANDS YOU HAVE NAMED     the standing answers over one command, which
+ *                               exist only once somebody writes one
+ *                               -> [ … ] . Details . Review (when inert)
  *
  *   + Write a refusal        + Allow a command…
+ *
+ * ONE LIST AND ONE CONTROL, AND THAT IS THE SECOND CORRECTION (nocx-v8c5j).
+ * The shape before this had two lists — answered and unanswered — and two
+ * BUTTONS on each row, because nocx-6szvl had established that "Ask every
+ * time" is the state of a question nobody has answered rather than a third
+ * answer. That is true of a BUTTON and false of a SELECT, and the difference
+ * is the whole of this page's grammar. A button is an act, so a button for the
+ * state you are already in writes what is already written and reads as Cancel;
+ * a select SHOWS a state and offers the moves off it, which is the one control
+ * whose current value is supposed to be where you are. Removing the state from
+ * the control did not remove the state — it pushed it into a badge beside the
+ * control, split the page in two so a row JUMPED lists the moment it was
+ * answered, and gave taking an answer back a second name (Forget) sitting
+ * beside the row's own two buttons. The owner, reading the result: «Что это за
+ * странная механика? Ну сделать просто dropdown с выбором».
+ *
+ * So: the questions stay where they are and never move; each carries one
+ * select holding all three answers; and choosing "Ask every time" on an
+ * answered one IS forgetting it — the same gesture, the same preview of what
+ * it releases, the same question about the work already running. What
+ * nocx-6szvl actually bought is kept: there is still exactly one way to take
+ * an answer back, and it still previews what it releases before it is taken.
  *
  * SEVEN RULES ARE BUILT IN RATHER THAN ASSERTED IN PROSE.
  *
@@ -64,15 +86,22 @@
  *   it against what a CALL classified as, so the permit does not follow the
  *   same word into something more serious.
  *
- * - **AN ANSWER IS GIVEN WHERE THE QUESTION IS ASKED, AND THERE ARE TWO OF
- *   THEM** (nocx-6szvl). "Ask every time" is not a third answer; it is the
- *   state of a question nobody has answered. Offered as a button it changes
- *   nothing and reads as Cancel — a person picked it, came out, and concluded
- *   the page had not taken their answer — and on an answered row it is Forget
- *   under a second name, minus the preview of what it releases. So a row
- *   carries its own answers, taking one back has one name, and the panel
- *   survives only where it holds what a row cannot: a row's PLACES, and a
- *   rule's reason for withholding its widest answer.
+ * - **AN ANSWER IS GIVEN WHERE THE QUESTION IS ASKED** (nocx-6szvl,
+ *   nocx-v8c5j). No dialog stands between a person and their answer: the
+ *   select is on the row the question is asked on, and it writes. A dialog
+ *   opens for the two things a row cannot hold — the PLACES an answer applies
+ *   in and the trace of how a call was decided, both behind one "Details" —
+ *   and for the one thing that must be previewed before it is taken, which is
+ *   releasing an answer.
+ *
+ * - **AN ANSWER NOBODY CAN GIVE IS SHOWN, NOT HIDDEN.** Where the store would
+ *   turn down the widest answer — a standing answer looser than the one
+ *   command line it was read from, or one waiting to be re-read — "Allowed" is
+ *   drawn DISABLED and its label says where that answer does come from. It was
+ *   omitted before, and a person who remembers three answers and is offered
+ *   two concludes the third has been taken away rather than that this
+ *   particular answer cannot have it (nocx-4yjwk.6 is the same defect one step
+ *   louder: the page used to OFFER it and the store refused the write).
  *
  * - **REVOCATION HAS A TIME, AND THE PERSON CHOOSES IT** (nocx-r4fh8). What
  *   the assistant may do is fixed when it starts writing an answer, so taking
@@ -134,11 +163,12 @@ import {
   PageSection,
   RecordRow,
   Section,
+  Select,
   Stack,
   TextField,
   showToast,
-  type BadgeTone,
   type Fact,
+  type SelectOption,
 } from './ui'
 import { Dialog } from './ui/dialog'
 import { Spinner } from './ui/spinner'
@@ -157,30 +187,19 @@ const ANSWER_LABEL: Record<Decision, string> = {
 }
 
 /**
- * The answers a person can GIVE, widest first.
+ * The answers, widest first, as one control offers them.
  *
- * There are two, and the absence of the third is the design (nocx-6szvl).
- * "Ask every time" is not a third answer — it IS the state of a question
- * nobody has answered. Offered on an unanswered row it is a button that
- * changes nothing and is indistinguishable from Cancel, which is exactly what
- * a person reported: they went in, left it on "ask", came out, and concluded
- * the page had not taken their answer. Offered on an answered one it is
- * Forget under a second name — the same act, minus the preview of what it
- * releases — and two names for one concept is what AD-8 exists to prevent.
+ * All three, and the third is the default the other two are departures from —
+ * so it sits between them rather than at an end, which is also where a person
+ * returning an answer to it expects to find it.
  *
- * So taking an answer back has one name and one code path, and it is Forget.
- * `ANSWER_LABEL` still spells "Ask every time", because the page has to LABEL
- * that state; nothing writes it.
+ * Taking an answer back still has ONE name and one code path: choosing "Ask
+ * every time" on an answered row IS Forget, routed through the same preview.
+ * What nocx-6szvl removed was a BUTTON for the state a row is already in;
+ * a select's selected option is not that button — it is the row saying where
+ * it stands, which is the thing the badge beside it used to have to say.
  */
-const ANSWER_ORDER: Decision[] = ['permit', 'refuse']
-
-/** The tone an answer carries in a list. `permit` is the only one that gives
- *  anything away, so it is the only one that is not quiet. */
-const ANSWER_TONE: Record<Decision, BadgeTone> = {
-  permit: 'warning',
-  ask: 'neutral',
-  refuse: 'neutral',
-}
+const ANSWER_ORDER: Decision[] = ['permit', 'ask', 'refuse']
 
 /**
  * The control that widens an answer from nothing, named exactly as its button
@@ -385,7 +404,7 @@ type Answer =
  *  panel names the answer it is about and reads the store's own value every
  *  render, so a write underneath it cannot leave it showing something stale. */
 interface Panel {
-  mode: 'why' | 'change' | 'forget'
+  mode: 'details' | 'forget'
   on: Answer
 }
 
@@ -491,6 +510,18 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    * survive a panel closing.
    */
   const [runsQuestion, setRunsQuestion] = createSignal<RunsQuestion | null>(null)
+  /**
+   * Bumped to make every answer control re-assert what the STORE says.
+   *
+   * A native select moves itself the instant it is picked, and one gesture on
+   * this page does not write immediately: returning an answer to "Ask every
+   * time" opens the preview first. Cancelling that preview leaves the element
+   * showing an answer nobody took, and no store value has changed to correct
+   * it — there is nothing for the effect inside `Select` to react to. This is
+   * that something. It is a counter rather than a flag because two cancels in
+   * a row are two corrections.
+   */
+  const [resync, setResync] = createSignal(0)
 
   async function read(): Promise<void> {
     try {
@@ -513,33 +544,33 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
   const live = (): EffectKey[] => view()?.live ?? []
   const inert = (rule: PolicyRule): boolean => (view()?.awaitingReview ?? []).includes(rule.id)
 
-  /** Every answer a person has given: their standing answers first, in
-   *  document order, then the rows they moved off the default. Rules lead
-   *  because they are what a person actually produced — clicking "Allow
-   *  always" saves one — and the page before this drew only the rows. */
-  const answered = createMemo<Answer[]>(() => {
+  /**
+   * THE QUESTIONS, all of them, in one fixed order that nothing an answer does
+   * can change (nocx-v8c5j).
+   *
+   * A kind of work is listed when the assistant can actually be asked about it
+   * — the backend's `live` — or when somebody has answered it, which keeps an
+   * answer to work no declared tool reaches today visible and takeable back
+   * rather than silently unreachable. The order is `EFFECT_KEYS`', never the
+   * answers': a list that reordered itself as it was answered would move the
+   * row under the pointer that just answered it, which is the two-list shape's
+   * defect with a smaller radius.
+   */
+  const questions = createMemo<Answer[]>(() => {
     const m = matrix()
     if (!m) return []
-    return [
-      ...rules().map((rule): Answer => ({ kind: 'rule', key: `rule:${rule.id}`, rule })),
-      ...EFFECT_KEYS.filter((k) => offDefault(m[k])).map((effect): Answer => ({
-        kind: 'row',
-        key: `row:${effect}`,
-        effect,
-      })),
-    ]
+    return EFFECT_KEYS.filter((k) => live().includes(k) || offDefault(m[k])).map(
+      (effect): Answer => ({ kind: 'row', key: `row:${effect}`, effect }),
+    )
   })
 
-  /** The questions nobody has answered: the LIVE rows still on their default.
-   *  A row outside `live` governs nothing yet, so offering it as a question
-   *  would be offering to answer something that cannot be asked. */
-  const unanswered = createMemo<Answer[]>(() => {
-    const m = matrix()
-    if (!m) return []
-    return live()
-      .filter((k) => !offDefault(m[k]))
-      .map((effect): Answer => ({ kind: 'row', key: `row:${effect}`, effect }))
-  })
+  /** The standing answers, in document order. They are a different list
+   *  because they are a different thing: a question is one of seven fixed
+   *  kinds of work and is always there, while one of these exists only because
+   *  somebody made it and stops existing when it is released. */
+  const standing = createMemo<Answer[]>(() =>
+    rules().map((rule): Answer => ({ kind: 'rule', key: `rule:${rule.id}`, rule })),
+  )
 
   /** The places nocx knows about: every place the policy itself names, once
    *  each, in the rows' order. This is the whole picker — see the header for
@@ -829,7 +860,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
 
   function openPanel(mode: Panel['mode'], on: Answer): void {
     setPanel({ mode, on })
-    if (mode !== 'why') return
+    if (mode !== 'details') return
     setExplanation(null)
     const command = on.kind === 'rule' ? ruleSubjectCommand(on.rule) : null
     const effect = explainUnder(on)
@@ -846,6 +877,9 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     setRunsQuestion(null)
     setPanel(null)
     setExplanation(null)
+    // A cancelled preview wrote nothing, so the control has to be put back
+    // where the store has it — see `resync`.
+    setResync((n) => n + 1)
   }
 
   // Answering ----------------------------------------------------------
@@ -855,53 +889,91 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
    *
    * A ROW is not a rule and the rule gate says nothing about it: it is written
    * by `policy.set`, carries no selector, and answering one Allowed is the
-   * only way to answer an open question. Only a standing answer is asked.
+   * only way to answer an open question. Only a standing answer is asked, and
+   * one waiting to be re-read is refused too — re-granting it under a reading
+   * nobody has looked at is exactly what Review exists to stop.
    */
   function canWiden(answer: Answer): boolean {
-    return answer.kind !== 'rule' || canBeAllowed(answer.rule)
-  }
-
-  /** The answers this one may be set to — both, unless the store would not
-   *  take the widest (see `canBeAllowed`). */
-  function answersOffered(answer: Answer): Decision[] {
-    return ANSWER_ORDER.filter((d) => d !== 'permit' || canWiden(answer))
+    if (answer.kind !== 'rule') return true
+    return canBeAllowed(answer.rule) && !inert(answer.rule)
   }
 
   /**
-   * The answers that would CHANGE something, which is all a row offers.
+   * Why the widest answer is not available here, in the label of the option
+   * itself.
    *
-   * In a panel the current answer is drawn too, as the one that is pressed —
-   * there it is information, "you are here". In a row the badge already says
-   * that, so a button for the answer already in force would be a control that
-   * writes what is already written: the person clicks, nothing moves, and they
-   * conclude the page did not take it (nocx-6szvl).
+   * It is on the OPTION rather than beside the control because that is where a
+   * person looks for it: they open the list precisely to find the answer they
+   * remember, and a sentence somewhere else on the page is a sentence they
+   * read after concluding the answer is gone. The paragraph behind it — what
+   * `+ Allow a command…` is and why a permit may only come from a command that
+   * was read — stays in Details, where there is room for it.
    */
-  function answersThatChange(answer: Answer): Decision[] {
-    return answersOffered(answer).filter((d) => d !== decisionOf(answer))
+  function widenBlocker(answer: Answer): string | null {
+    if (canWiden(answer)) return null
+    if (answer.kind === 'rule' && inert(answer.rule)) return 'review it first'
+    return `only from “${ALLOW_A_COMMAND}”`
   }
 
   /**
-   * Whether the panel carries anything this answer's ROW cannot say.
+   * The three answers, as one control's options.
    *
-   * A row's panel holds the PLACES and nothing else: its coverage sentence is
-   * already the row's title, and its answers are on the row now. With no place
-   * to pick it is a dialog that buys a person nothing and costs them the sense
-   * that answering worked — «зашёл внутрь… всё выглядит так, что я ничего не
-   * ответил» — which is the whole of nocx-6szvl. Where places DO exist it
-   * survives, and it draws the answers beside them because the two are one
-   * decision: what may happen, and where.
-   *
-   * A RULE always opens one, and that is not an exemption. A rule names a
-   * command rather than one of seven fixed questions; its panel is where the
-   * reason its widest answer is withheld is explained, and that is a paragraph
-   * which belongs in no row.
+   * All three are always drawn. Where the store would not take the widest one
+   * it is disabled and says why in its own label — never omitted, because an
+   * option that is missing reads as an answer that no longer exists.
    */
-  function panelCarriesMore(answer: Answer): boolean {
-    return answer.kind === 'rule' || places().length > 0
+  function answerOptions(answer: Answer): SelectOption[] {
+    const blocked = widenBlocker(answer)
+    return ANSWER_ORDER.map((decision) => ({
+      value: decision,
+      label:
+        decision === 'permit' && blocked !== null
+          ? `${ANSWER_LABEL[decision]} — ${blocked}`
+          : ANSWER_LABEL[decision],
+      disabled: decision === 'permit' && blocked !== null,
+    }))
   }
 
-  /** Set one answer, whichever kind of thing it is. ONE code path, so a row
-   *  control and a panel control cannot come to mean different things. */
+  /**
+   * Where this answer stands, as the control's value — and the reason it is
+   * read through `resync`.
+   *
+   * The page is controlled by the STORE, and a native select is not: picking
+   * an option moves the element's own value at once, before anything has been
+   * written. On every path but one that is harmless, because the write is
+   * followed by a fresh read and the effect in `Select` re-asserts whatever
+   * the store now says. The exception is the answer that opens a preview
+   * first: a person who picks "Ask every time" and then cancels has moved the
+   * control and changed nothing, and the control would go on showing an answer
+   * the store never took. Bumping `resync` re-runs that effect and puts the
+   * element back where the store has it.
+   */
+  function answerValue(answer: Answer): Decision {
+    resync()
+    return decisionOf(answer)
+  }
+
+  /**
+   * One answer, chosen.
+   *
+   * The two departures from the default write immediately — there is nothing
+   * to preview about giving an answer, and a dialog in front of it is the
+   * click that bought a person nothing (nocx-6szvl). Returning to the default
+   * is the one that does not: it RELEASES something, so it goes through the
+   * preview that says what, which is the same gesture Forget always was.
+   */
+  function chooseAnswer(answer: Answer, decision: Decision): void {
+    if (decision === decisionOf(answer)) return
+    if (decision === 'ask') {
+      openPanel('forget', answer)
+      return
+    }
+    answerWith(answer, decision)
+  }
+
+  /** Set one answer, whichever kind of thing it is. ONE code path, so a
+   *  question's control and a standing answer's cannot come to mean different
+   *  things. */
   function answerWith(answer: Answer, decision: Decision): void {
     if (answer.kind === 'rule') {
       void writeRule(answer.rule, decision)
@@ -911,89 +983,96 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     if (row) void writeRow(answer.effect, { ...row, decision })
   }
 
-  /** One answer, as a control. Built once so the row and the panel offer the
-   *  same button under the same name — a person who reads it in one place has
-   *  read it in the other. */
-  function answerButton(answer: Answer, decision: Decision, size?: 'sm') {
+  /** The answer control, built once so a question and a standing answer offer
+   *  the same one — a person who has learned it in one list has learned it in
+   *  the other. */
+  function answerSelect(answer: Answer) {
+    const subject = subjectOf(answer)
     return (
-      <Button
-        variant={decision === decisionOf(answer) ? 'primary' : 'default'}
-        size={size}
+      <Select
+        ariaLabel={`Your answer for ${subject}`}
+        value={answerValue(answer)}
+        options={answerOptions(answer)}
         disabled={busy()}
-        ariaLabel={`${ANSWER_LABEL[decision]} — ${coverage(subjectOf(answer))}`}
-        onClick={() => answerWith(answer, decision)}
-      >
-        {ANSWER_LABEL[decision]}
-      </Button>
+        onChange={(value) => chooseAnswer(answer, value as Decision)}
+      />
     )
   }
 
   // The two lists ------------------------------------------------------
 
-  function answeredRow(answer: Answer) {
+  /**
+   * ONE QUESTION, and it reads the same whether or not it has been answered.
+   *
+   * The question is the title, the select is the answer, and neither moves
+   * when the other changes — which is the whole correction (nocx-v8c5j). The
+   * badge that used to name the answer is gone: it said what the control now
+   * says, and two places for one state is how they come to disagree.
+   */
+  function questionRow(answer: Answer) {
     const subject = subjectOf(answer)
-    const waiting = () => answer.kind === 'rule' && inert(answer.rule)
     const dormant = () => answer.kind === 'row' && !live().includes(answer.effect)
-    const status = () => {
-      if (waiting()) {
-        return { tone: 'warning' as const, text: 'Grants nothing until you read what it now means' }
-      }
-      if (dormant()) return { tone: 'neutral' as const, text: 'Governs nothing yet' }
-      return undefined
-    }
     return (
       <div class="st-permissions__answer" data-answer={answer.key}>
         <RecordRow
-          title={coverage(subject)}
-          kind={{ label: ANSWER_LABEL[decisionOf(answer)], tone: ANSWER_TONE[decisionOf(answer)] }}
-          status={status()}
-          detail={answer.kind === 'rule' ? provenance(answer.rule) : undefined}
+          title={`May the assistant ${subject}?`}
+          meta={placesLine(answer)}
+          status={dormant() ? { tone: 'neutral' as const, text: 'Governs nothing yet' } : undefined}
           actions={
             <>
+              {answerSelect(answer)}
               <Button
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Why ${subject}`}
-                onClick={() => openPanel('why', answer)}
+                ariaLabel={`Details for ${subject}`}
+                onClick={() => openPanel('details', answer)}
               >
-                Why
+                Details
               </Button>
-              <Show
-                when={waiting()}
-                fallback={
-                  <>
-                    {/* A ROW's other answer, here rather than behind a dialog:
-                        it is the whole of what Change offered a row that has
-                        no place to pick, and a click is the gesture. A rule's
-                        answers stay in its panel, which it always has. */}
-                    <Show when={answer.kind === 'row' && answersThatChange(answer).length > 0}>
-                      <ActionGroup ariaLabel={`Your answer for ${subject}`}>
-                        <For each={answersThatChange(answer)}>
-                          {(decision) => answerButton(answer, decision, 'sm')}
-                        </For>
-                      </ActionGroup>
-                    </Show>
-                    <Show when={panelCarriesMore(answer)}>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy()}
-                        ariaLabel={`Change ${subject}`}
-                        onClick={() => openPanel('change', answer)}
-                      >
-                        Change
-                      </Button>
-                    </Show>
-                  </>
+            </>
+          }
+        />
+      </div>
+    )
+  }
+
+  /**
+   * ONE STANDING ANSWER — the same grammar, over a command instead of a kind
+   * of work.
+   *
+   * Two things a question does not have. Its widest answer can be one the
+   * store will not take, which the select says on the option itself; and it
+   * can be waiting to be re-read, which is not a change of answer but a
+   * re-reading of the same one — so it is offered Review, and its select can
+   * still narrow or release but not widen.
+   */
+  function ruleRow(answer: Answer) {
+    const subject = subjectOf(answer)
+    const waiting = () => answer.kind === 'rule' && inert(answer.rule)
+    return (
+      <div class="st-permissions__answer" data-answer={answer.key}>
+        <RecordRow
+          title={coverage(subject)}
+          detail={answer.kind === 'rule' ? provenance(answer.rule) : undefined}
+          status={
+            waiting()
+              ? {
+                  tone: 'warning' as const,
+                  text: 'Grants nothing until you read what it now means',
                 }
-              >
-                {/* Re-agreeing and re-granting are different gestures, so an
-                    answer waiting to be re-read is offered Review and NOT
-                    Change: changing it would quietly re-grant it under the new
-                    reading without anybody having read it. */}
+              : undefined
+          }
+          actions={
+            <>
+              {answerSelect(answer)}
+              <Show when={waiting()}>
+                {/* Re-agreeing and re-granting are different gestures. Review
+                    says "I have read what this now means and I still mean
+                    it"; the select beside it cannot widen while that is
+                    outstanding, so neither gesture can be made by accident. */}
                 <Button
-                  variant="ghost"
+                  variant="default"
                   size="sm"
                   disabled={busy()}
                   ariaLabel={`Review ${subject}`}
@@ -1008,10 +1087,10 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
                 variant="ghost"
                 size="sm"
                 disabled={busy()}
-                ariaLabel={`Forget ${subject}`}
-                onClick={() => openPanel('forget', answer)}
+                ariaLabel={`Details for ${subject}`}
+                onClick={() => openPanel('details', answer)}
               >
-                Forget
+                Details
               </Button>
             </>
           }
@@ -1020,51 +1099,22 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     )
   }
 
-  function unansweredRow(answer: Answer) {
-    const subject = subjectOf(answer)
-    // The `kind` badge carries the state this question is in, in the same slot
-    // an answered row names its answer — so the two lists read in one grammar.
-    // It is a BADGE and not a button: "Ask every time" is where this row
-    // already is, and a control for it would change nothing.
-    return (
-      <div class="st-permissions__answer" data-answer={answer.key}>
-        <RecordRow
-          title={`May the assistant ${subject}?`}
-          kind={{ label: ANSWER_LABEL.ask, tone: ANSWER_TONE.ask }}
-          meta="Nobody has answered this, so it is asked every time it comes up."
-          actions={
-            <>
-              {/* The real answers, on the row the question is asked in. */}
-              <ActionGroup ariaLabel={`Your answer for ${subject}`}>
-                <For each={answersThatChange(answer)}>
-                  {(decision) => answerButton(answer, decision, 'sm')}
-                </For>
-              </ActionGroup>
-              {/* And the panel only where it carries the places, which is the
-                  one thing a row cannot hold. */}
-              <Show when={panelCarriesMore(answer)}>
-                <Button
-                  variant="default"
-                  size="sm"
-                  disabled={busy()}
-                  ariaLabel={`Answer this now: may the assistant ${subject}?`}
-                  onClick={() => openPanel('change', answer)}
-                >
-                  Answer this now
-                </Button>
-              </Show>
-            </>
-          }
-        />
-      </div>
-    )
+  /** The places a question's answer is bounded to, on the row — undefined
+   *  where there are none, because "everywhere" is what the coverage sentence
+   *  in Details already says and a row that announced it would be saying the
+   *  default out loud on every line. */
+  function placesLine(answer: Answer): string | undefined {
+    if (answer.kind !== 'row') return undefined
+    const scopes = matrix()?.[answer.effect].scopes ?? []
+    if (scopes.length === 0) return undefined
+    return `Only in ${scopes.map(placeName).join(', ')}.`
   }
 
   // The panels ---------------------------------------------------------
 
-  /** The facts a Why panel states about the answer itself, beside — or instead
-   *  of — the backend's trace. */
-  function whyFacts(answer: Answer): Fact[] {
+  /** The facts the Details panel states about the answer itself, beside — or
+   *  instead of — the backend's trace. */
+  function detailFacts(answer: Answer): Fact[] {
     const facts: Fact[] = [
       { name: 'Your answer', value: ANSWER_LABEL[decisionOf(answer)] },
       { name: 'It covers', value: coverage(subjectOf(answer)) },
@@ -1088,10 +1138,60 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
     return facts
   }
 
-  function whyPanel(answer: Answer) {
+  /**
+   * DETAILS — everything about one answer that a row cannot hold, behind one
+   * name.
+   *
+   * It used to be two dialogs, Why and Change, and Change is gone because its
+   * answers are on the row now (nocx-v8c5j). What is left of it is the PLACES,
+   * which are a second dimension of the same decision — what may happen, and
+   * where — and the paragraph explaining where the widest answer comes from
+   * when this one cannot have it. They join the trace rather than keeping a
+   * dialog of their own: a person asking "why is this the answer" and a person
+   * asking "where does it apply" are asking about one thing.
+   */
+  function detailsPanel(answer: Answer) {
     return (
       <Stack>
-        <FactList facts={whyFacts(answer)} ariaLabel="What this answer says" />
+        <FactList facts={detailFacts(answer)} ariaLabel="What this answer says" />
+        {/* Where the widest answer is withheld, why — and where it is given
+            instead. The option in the select says the same thing in four
+            words; this is the room those four words do not have. */}
+        <Show when={!canWiden(answer)}>
+          <Caption>
+            {answer.kind === 'rule' && inert(answer.rule)
+              ? `“${ANSWER_LABEL.permit}” is not offered until you have read what this answer now means, which is what Review is. Until then it can be narrowed or released, and not widened.`
+              : `“${ANSWER_LABEL.permit}” is not offered here: this answer speaks about more than the one command line it was written over, and that is an answer nocx only gives to a command it has read. “${ALLOW_A_COMMAND}”, at the foot of the page, is where that happens.`}
+          </Caption>
+          <Show when={!(answer.kind === 'rule' && inert(answer.rule))}>
+            <Caption>{WRITER_CAPTION.allow}</Caption>
+          </Show>
+        </Show>
+        <Show when={answer.kind === 'row'}>
+          <Section id="permissions-places" title="Where this applies" dense>
+            <Show
+              when={places().length > 0}
+              fallback={
+                <Caption>
+                  nocx has not learned any places yet. A place is named the first time you widen an
+                  answer to cover somewhere a call actually reached, and it can be picked here
+                  afterwards.
+                </Caption>
+              }
+            >
+              <For each={places()}>
+                {(place) => (
+                  <Checkbox
+                    label={place.name}
+                    checked={rowCovers(answer, place)}
+                    disabled={busy()}
+                    onChange={(on) => void togglePlace(answer, place, on)}
+                  />
+                )}
+              </For>
+            </Show>
+          </Section>
+        </Show>
         <Show
           when={explanation()}
           fallback={
@@ -1156,56 +1256,6 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
       ? [...row.scopes, place.scope]
       : row.scopes.filter((scope) => placeKey(scope) !== place.key)
     return writeRow(answer.effect, { ...row, scopes })
-  }
-
-  function changePanel(answer: Answer) {
-    return (
-      <Stack>
-        <Caption>{`This answer covers ${coverage(subjectOf(answer))}.`}</Caption>
-        {/* Every answer, the current one included and drawn as pressed: here
-            it is information rather than a control that changes nothing, and
-            it is the only place the person is told where they are without
-            reading the list behind the dialog. */}
-        <ActionGroup ariaLabel={`Your answer for ${subjectOf(answer)}`}>
-          <For each={answersOffered(answer)}>{(decision) => answerButton(answer, decision)}</For>
-        </ActionGroup>
-        {/* Where the widest answer is missing, why — and where it is given
-            instead. Saying nothing here would leave a person looking at two
-            answers where they remember three, which is the same failure as
-            offering a third that cannot be taken, one step quieter. */}
-        <Show when={!canWiden(answer)}>
-          <Caption>
-            {`“${ANSWER_LABEL.permit}” is not offered here: this answer speaks about more than the one command line it was written over, and that is an answer nocx only gives to a command it has read. “${ALLOW_A_COMMAND}”, at the foot of the page, is where that happens.`}
-          </Caption>
-          <Caption>{WRITER_CAPTION.allow}</Caption>
-        </Show>
-        <Show when={answer.kind === 'row'}>
-          <Section id="permissions-places" title="Where this applies" dense>
-            <Show
-              when={places().length > 0}
-              fallback={
-                <Caption>
-                  nocx has not learned any places yet. A place is named the first time you widen an
-                  answer to cover somewhere a call actually reached, and it can be picked here
-                  afterwards.
-                </Caption>
-              }
-            >
-              <For each={places()}>
-                {(place) => (
-                  <Checkbox
-                    label={place.name}
-                    checked={rowCovers(answer, place)}
-                    disabled={busy()}
-                    onChange={(on) => void togglePlace(answer, place, on)}
-                  />
-                )}
-              </For>
-            </Show>
-          </Section>
-        </Show>
-      </Stack>
-    )
   }
 
   /**
@@ -1466,15 +1516,13 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
 
   function panelTitle(p: Panel): string {
     const subject = subjectOf(p.on)
-    if (p.mode === 'why') return `Why ${subject}`
-    if (p.mode === 'change') return `Your answer for ${subject}`
-    return `Forget: ${subject}`
+    return p.mode === 'details' ? `Details: ${subject}` : `Forget: ${subject}`
   }
 
   return (
     <PageSection
       title="Assistant permissions"
-      description="The answers you have given about what the assistant may do on its own, and the questions nobody has answered yet. Anything unanswered is asked."
+      description="What the assistant may do on its own. Anything you have not answered is asked every time it comes up."
     >
       <Show when={loadError()}>
         <Badge tone="danger">{`Your permissions could not be read: ${loadError()}`}</Badge>
@@ -1483,30 +1531,32 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
         <Spinner size="sm" label="Loading your permissions" />
       </Show>
       <Show when={view() !== null}>
-        <Section id="permissions-answered" title="What you have answered" divided dense>
+        <Section id="permissions-questions" title="What the assistant may do" divided dense>
           <Show
-            when={answered().length > 0}
+            when={questions().length > 0}
             fallback={
               <Caption>
-                You have not answered anything yet, so the assistant asks about everything it does.
+                No tool the assistant can reach today asks for anything, so there is nothing to
+                answer yet.
               </Caption>
             }
           >
-            <div role="list" aria-label="What you have answered" data-answers="answered">
-              <For each={answered()}>{(answer) => answeredRow(answer)}</For>
+            <div role="list" aria-label="What the assistant may do" data-answers="questions">
+              <For each={questions()}>{(answer) => questionRow(answer)}</For>
             </div>
           </Show>
         </Section>
-        <Section id="permissions-unanswered" title="Not answered yet" divided dense>
-          <Show
-            when={unanswered().length > 0}
-            fallback={<Caption>Nothing is waiting on you.</Caption>}
-          >
-            <div role="list" aria-label="Not answered yet" data-answers="unanswered">
-              <For each={unanswered()}>{(answer) => unansweredRow(answer)}</For>
+        {/* The commands, and only once there are some. A section that is
+            always drawn to say it is empty teaches a person that this page has
+            a part of it they have never used; the two buttons under it are
+            where one comes from, and they say so. */}
+        <Show when={standing().length > 0}>
+          <Section id="permissions-rules" title="Commands you have named" divided dense>
+            <div role="list" aria-label="Commands you have named" data-answers="rules">
+              <For each={standing()}>{(answer) => ruleRow(answer)}</For>
             </div>
-          </Show>
-        </Section>
+          </Section>
+        </Show>
         {/* The two ways to add an answer from nothing, and they are not
             mirror images. A refusal may be written over any command the parser
             can resolve; a permit may only be widened from a command the
@@ -1585,8 +1635,7 @@ export function AssistantPermissionsSection(props: AssistantPermissionsSectionPr
             }
           >
             <div data-permissions-panel={p.mode}>
-              <Show when={p.mode === 'why'}>{whyPanel(p.on)}</Show>
-              <Show when={p.mode === 'change'}>{changePanel(p.on)}</Show>
+              <Show when={p.mode === 'details'}>{detailsPanel(p.on)}</Show>
               <Show when={p.mode === 'forget'}>{forgetPanel(p.on)}</Show>
               {runsQuestionBlock()}
             </div>

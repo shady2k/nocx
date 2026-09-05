@@ -1,11 +1,11 @@
-/* Assistant permissions (nocx-hvb3r): the two lists of sentences a person
-   reads and takes back — what they have answered, and what nobody has
-   answered yet.
+/* Assistant permissions (nocx-hvb3r, nocx-v8c5j): one list of questions, each
+   with the answer it stands at, and — once somebody has written one — the
+   commands they have named.
 
    LAYOUT ONLY, and there is very little of it. The rows are the kit's
-   RecordRow inside the kit's Section, the panels are the kit's Dialog, and
-   every control in them is a kit component; the surface PLACES them and
-   paints none of them. What is left is the wrapper each row needs in order
+   RecordRow inside the kit's Section, the answer control is the kit's Select,
+   the panels are the kit's Dialog, and every control in them is a kit
+   component; the surface PLACES them and paints none of them. What is left is the wrapper each row needs in order
    to be addressable, and the numbered list a trace is read as. The matrix
    editor this file used to describe — a three-column grid of effect label,
    decision select and an unbounded scope column — is gone with the page. */

@@ -62,6 +62,26 @@ describe('Select', () => {
     expect(sel).toHaveProperty('disabled', true)
   })
 
+  // An option a caller cannot take is DRAWN and disabled rather than left
+  // out. An answer that silently disappears from a list reads as an answer
+  // that does not exist; one that is visibly unavailable — carrying, in its
+  // own label, where it does come from — is the difference between a person
+  // who is informed and a person who is confused (Assistant permissions,
+  // nocx-v8c5j).
+  it('draws an option a caller cannot take, and disables it', () => {
+    subject({
+      value: 'alice',
+      options: [
+        { value: 'alice', label: 'Alice (alice@github)' },
+        { value: 'bob', label: 'Bob (bob@corp)', disabled: true },
+      ],
+    })
+    const [alice, bob] = Array.from(screen.getByRole<HTMLSelectElement>('combobox').options)
+    expect(bob.disabled).toBe(true)
+    expect(bob.textContent).toBe('Bob (bob@corp)')
+    expect(alice.disabled).toBe(false)
+  })
+
   it('is natively keyboard-operable (Arrow keys, typeahead)', () => {
     subject()
     const sel = screen.getByRole('combobox')

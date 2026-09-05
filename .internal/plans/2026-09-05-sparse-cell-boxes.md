@@ -474,7 +474,7 @@ describe('createCellFit', () => {
 
 - [ ] **Step 2: Убедиться, что тесты падают**
 
-Run: `cd frontend && npx vitest run src/scrollback/cell-fit.test.ts`
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback/cell-fit.test.ts`
 Expected: FAIL — `Failed to resolve import "./cell-fit"`.
 
 - [ ] **Step 3: Написать модуль**
@@ -773,8 +773,17 @@ export function createCellFit(
 
 - [ ] **Step 4: Убедиться, что тесты проходят**
 
-Run: `cd frontend && npx vitest run src/scrollback/cell-fit.test.ts`
-Expected: PASS, 16 тестов.
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback/cell-fit.test.ts`
+Expected: PASS, 17 тестов.
+
+**Тайпчек — по `tsconfig.test.json`, а НЕ по `tsconfig.json`.** Первый воркер
+поймал это ценой одного круга: `tsconfig.json` тестовые файлы не покрывает, так
+что он зелен и при ошибке типа в тесте, а `pre-commit` гоняет `tsconfig.test.json`
+и коммит не проходит. И бинарник называется точно: `npx tsc` в свежем дереве может
+не разрешиться там, где `./node_modules/.bin/tsc` работает.
+
+Run: `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json`
+Expected: пусто.
 
 - [ ] **Step 5: Коммит**
 
@@ -1013,7 +1022,7 @@ describe('collectFitCandidates', () => {
 
 - [ ] **Step 2: Убедиться, что тесты падают**
 
-Run: `cd frontend && npx vitest run src/scrollback/serializer.test.ts -t "cell boxes"`
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback/serializer.test.ts -t "cell boxes"`
 Expected: FAIL — шестой аргумент игнорируется, `collectFitCandidates` не экспортирован.
 
 - [ ] **Step 3: Провести классификатор через обход**
@@ -1200,7 +1209,7 @@ export function collectFitCandidates(
 
 - [ ] **Step 6: Убедиться, что тесты проходят**
 
-Run: `cd frontend && npx vitest run src/scrollback src/terminal-links src/frame && npx tsc --noEmit -p tsconfig.json`
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback src/terminal-links src/frame && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json`
 Expected: PASS.
 
 - [ ] **Step 7: Коммит**
@@ -1586,7 +1595,7 @@ test('selecting a row with boxes copies the row', async ({ page }) => {
 
 - [ ] **Step 4: Убедиться, что всё падает**
 
-Run: `cd frontend && npx vitest run src/scrollback/cmd-output-wrap.test.ts`
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback/cmd-output-wrap.test.ts`
 Expected: FAIL — правил `.term-cell` в каскаде нет.
 
 Run: `PW_PROJECTS=chromium e2e/run-in-container.sh e2e/frozen-line-grid.spec.ts`
@@ -1819,7 +1828,7 @@ margin-inline-end: calc(-1 * var(--term-cell-delta, 0px));
 
 - [ ] **Step 9: Прогнать всё затронутое**
 
-Run: `cd frontend && npx vitest run src/scrollback src/terminal-links && npx tsc --noEmit -p tsconfig.json`
+Run: `cd frontend && ./node_modules/.bin/vitest run src/scrollback src/terminal-links && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json`
 Run: `PW_PROJECTS=chromium e2e/run-in-container.sh e2e/frozen-line-grid.spec.ts`
 Expected: PASS.
 

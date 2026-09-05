@@ -67,7 +67,8 @@ import { ResizeHandle } from '../ui/resize-handle'
 import { skillFileOutcome } from '../skills-presentation'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
-import type { SkillsStore } from '../skills-store'
+import type { Skill, SkillsStore } from '../skills-store'
+import { SkillViewCheck } from './skill-view-check'
 
 export interface SkillViewBodyProps {
   /** The RESOLVED skill's name — see skill-view-content.tsx's module
@@ -76,6 +77,12 @@ export interface SkillViewBodyProps {
    *  skill and disposes it when the skill leaves, rather than handing an
    *  existing instance a new name. */
   name: string
+  /** Gates the Check group below (nocx-dh14q): a builtin's bytes came with
+   *  the binary, so a check would be theatre with a model's bill attached
+   *  — design §6. Read once here rather than re-derived from `store`,
+   *  because the resolved skill is what SkillViewContent already narrowed
+   *  onto, and a second derivation could disagree with it. */
+  provenance: Skill['provenance']
   store: SkillsStore
   /** Bumped by SkillViewContent on every `setVisible(true)` — see the module
    *  comment. The effect below re-fetches on every change, INCLUDING the
@@ -447,22 +454,31 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
       <div class="skill-view__split">
         <div class="skill-view__list-col">
           <Stack gap="loose">
-            {/* THE CHECK — Task 10 fills this from content.db's stored
-                check. Neutral wording on purpose: the header above already
-                renders "Re-check" for a skill that HAS a stored check, and
-                a placeholder claiming "not checked yet" unconditionally
-                would contradict it in the same tab. It reads nothing:
-                wiring it to the scan marks below would be exactly the
-                "stored fact standing in for a live one" mistake the module
-                comment warns against — the two are different facts with
-                different sources. */}
-            <Section title="Check">
-              <StatusCard
-                tone="neutral"
-                title="Nothing here yet"
-                description="Task 10 shows what content.db knows about this skill here."
-              />
-            </Section>
+            {/* THE CHECK (nocx-dh14q) — what content.db knows about this
+                skill: SkillViewCheck reads it through `skills.check` (spends
+                nothing) and owns the one button that spends a model,
+                `skills.audit`. It reads nothing from the scan below:
+                wiring it to the scan marks would be the "stored fact
+                standing in for a live one" mistake the module comment
+                warns against — the two are different facts with different
+                sources, drawn apart on purpose (design §3, §4).
+
+                GATED ON PROVENANCE, NOT JUST THE BUTTON DISABLED: a builtin
+                skill offers no check at all — design §6, "its bytes came
+                with the binary... a check would be theatre with a model's
+                bill attached." `Show`'s `when` false means SkillViewCheck
+                never mounts, so its effect never fires and `skills.check`
+                is never asked for a builtin either — not merely a button
+                withheld while the panel still spent a call underneath it. */}
+            <Show when={props.provenance !== 'builtin'}>
+              <Section title="Check">
+                <SkillViewCheck
+                  name={props.name}
+                  store={props.store}
+                  refreshToken={props.refreshToken}
+                />
+              </Section>
+            </Show>
             <Section title="Files">
               <Show when={filesRefusal()}>
                 <StatusCard

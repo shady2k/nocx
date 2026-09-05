@@ -1,7 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // SkillViewHeader — what a person needs to answer "which skill is this, and
-// is it on": name, provenance, path, the enable switch, and a Check/Re-check
-// button that is not wired yet (Task 10 spends the model call).
+// is it on": name, provenance, path, and the enable switch.
 //
 // Moved out of skill-view-content.tsx (nocx-4m1n1) when the body landed
 // beside it: the content class was becoming two unrelated concerns in one
@@ -9,10 +8,17 @@
 // activation) and the header's own markup. Splitting them is not a
 // refactor for its own sake; it is what keeps the lifecycle file readable
 // once it also wires the file list and the split.
+//
+// THE CHECK/RE-CHECK BUTTON LIVES IN THE CHECK PANE, NOT HERE (nocx-dh14q).
+// An earlier version of this header carried a disabled placeholder for it;
+// the real button, and the model call it spends, now belong entirely to
+// SkillViewCheck (skill-view-body.tsx's "Check" group) — one control for
+// one action, rather than a second surface naming an action a different
+// one performs.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { Show, type JSX } from 'solid-js'
-import { Badge, Button, Checkbox, FactList, Stack, StatusCard } from '../ui'
+import { Badge, Checkbox, FactList, Stack, StatusCard } from '../ui'
 import { provenanceTone } from '../skills-presentation'
 import type { Skill } from '../skills-store'
 
@@ -65,20 +71,6 @@ export function SkillViewHeader(props: SkillViewHeaderProps): JSX.Element {
               disabled={props.busy}
               onChange={(enabled) => props.onToggle(enabled)}
             />
-            {/* Not wired: a model call belongs to Task 10's check panel, and
-                internal/profile/role.go refuses to spend one silently. This
-                button exists so the header names the action before the panel
-                that performs it exists — disabled, rather than wired to
-                nothing, so pressing it cannot look like it did something. */}
-            <Show when={skill().provenance !== 'builtin'}>
-              <Button
-                disabled
-                title="Reading this skill with a model is not wired up yet"
-                onClick={() => {}}
-              >
-                {skill().check ? 'Re-check' : 'Check this skill'}
-              </Button>
-            </Show>
           </Stack>
         )}
       </Show>

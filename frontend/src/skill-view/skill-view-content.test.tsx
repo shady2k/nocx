@@ -22,6 +22,8 @@ import type { SkillsList } from '../generated/skills.list'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsFiles } from '../generated/skills.files'
 import type { SkillsScan } from '../generated/skills.scan'
+import type { SkillsCheck } from '../generated/skills.check'
+import type { SkillsAudit } from '../generated/skills.audit'
 import { SkillViewContent } from './skill-view-content'
 
 const A_SKILL: SkillsList['skills'][number] = {
@@ -86,6 +88,58 @@ function fileResult(overrides: Partial<SkillsFile> & { path: string }): SkillsFi
     refusal: '',
     maxBytes: 1_000_000,
     findings: [],
+    ...overrides,
+  }
+}
+
+/** A stored `skills.check.check` object — the shape `skills.check` and a
+ *  fresh `skills.audit` both feed into the same rendering (nocx-dh14q). */
+function checkFields(
+  overrides: Partial<NonNullable<SkillsCheck['check']>> = {},
+): NonNullable<SkillsCheck['check']> {
+  return {
+    provenance: 'authored',
+    verdict: 'suspect',
+    report: 'This skill asks scripts/setup.sh to reach the network.',
+    role: 'auditing',
+    endpoint: 'local',
+    model: 'gemma-4-26b-a4b',
+    digest: 'deadbeef',
+    checkedAt: '2026-09-04T10:00:00Z',
+    read: ['SKILL.md'],
+    omitted: [],
+    findings: [],
+    maxBytes: 131072,
+    ...overrides,
+  }
+}
+
+/** `skills.check`'s own result — `null` for "nobody has checked this yet"
+ *  (`checked: false`), or a stored `check` plus whether it is still current. */
+function checkedResult(
+  check: NonNullable<SkillsCheck['check']> | null,
+  current = true,
+): SkillsCheck {
+  return check === null
+    ? { name: 'deploy', checked: false }
+    : { name: 'deploy', checked: true, check, current }
+}
+
+/** A `skills.audit` result — the shape a fresh Re-check press gets back. */
+function auditFields(overrides: Partial<SkillsAudit> = {}): SkillsAudit {
+  return {
+    name: 'deploy',
+    provenance: 'authored',
+    role: 'auditing',
+    endpoint: 'local',
+    model: 'gemma-4-26b-a4b',
+    verdict: 'clear',
+    report: 'Nothing in these files reaches beyond what the skill describes.',
+    read: ['SKILL.md'],
+    omitted: [],
+    maxBytes: 131072,
+    findings: [],
+    stored: 'yes',
     ...overrides,
   }
 }
@@ -458,14 +512,16 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
 
   it('never marks a dot from a stored check — only from skills.scan', async () => {
     // The row summary a stored skills.check would carry lives on `Skill`
-    // via `skills.list`'s `check` field, not on anything skills.files or
-    // skills.scan return. This body never even asks skills.check — it has
-    // no `check` call in its fake client at all — so a dot here can only
-    // ever be sourced from skills.scan's own live answer.
+    // via `skills.list`'s `check` field, and the Check group beside this
+    // list legitimately calls `skills.check` of its own accord (nocx-dh14q)
+    // — a different fact with a different source (design §3, §4). Neither
+    // reaches the FILE LIST: nothing here reads `Skill.check` or
+    // `skills.check`'s result, so a dot in this list can only ever be
+    // sourced from skills.scan's own live answer.
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
       file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'clear' })),
-      check: vi.fn().mockRejectedValue(new Error('the body must never call this')),
+      check: vi.fn().mockResolvedValue({ name: 'deploy', checked: false }),
     })
     const { host } = await mount(client)
 
@@ -474,8 +530,6 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     expect(
       host.querySelector('.skill-view__file-list .ui-status-dot[data-tone="warning"]'),
     ).toBeNull()
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    expect(client.check).not.toHaveBeenCalled()
   })
 
   it('surfaces the cut when the manifest is truncated, naming the cap', async () => {
@@ -591,5 +645,260 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     expect(max).toBeGreaterThanOrEqual(180)
     expect(now).toBeGreaterThanOrEqual(180)
     expect(now).toBeLessThanOrEqual(max)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The check pane (nocx-dh14q, Task 10): what content.db knows about this
+// skill, shown beside the file list. `skills.check` is FREE and asked for on
+// open; `skills.audit` is the one call that spends a model, and it runs only
+// from the button in this pane — never from an effect, because
+// internal/profile/role.go refuses to spend one silently.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
+  const checkPane = (host: HTMLElement): HTMLElement | null =>
+    host.querySelector('.skill-view__check')
+
+  const findButton = (host: HTMLElement, label: string): HTMLButtonElement | undefined =>
+    Array.from(host.querySelectorAll<HTMLButtonElement>('.skill-view__check .ui-button')).find(
+      (b) => b.textContent?.includes(label),
+    )
+
+  it('asks what was concluded and spends nothing, on open', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(null)),
+    })
+    await mount(client)
+
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.check).toHaveBeenCalledWith('deploy')
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.audit).not.toHaveBeenCalled()
+  })
+
+  it('with none: shows the Check this skill button and nothing else in that pane', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(null)),
+    })
+    const { host } = await mount(client)
+
+    const pane = checkPane(host)
+    expect(pane).not.toBeNull()
+    expect(findButton(host, 'Check this skill')).toBeDefined()
+    // No verdict, no prose, no scan sentence — there is nothing stored yet.
+    expect(pane?.textContent).not.toContain('Suspect')
+    expect(pane?.textContent).not.toContain('Clear')
+  })
+
+  it('shows a stored verdict without calling a model again', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi
+        .fn()
+        .mockResolvedValue(
+          checkedResult(
+            checkFields({ verdict: 'suspect', model: 'gemma-4-26b-a4b', endpoint: 'local' }),
+          ),
+        ),
+    })
+    const { host } = await mount(client)
+
+    const pane = checkPane(host)
+    expect(pane?.textContent).toContain('Suspect')
+    expect(pane?.textContent).toContain('gemma-4-26b-a4b')
+    expect(pane?.textContent).toContain('local')
+    expect(pane?.textContent).toContain('This skill asks scripts/setup.sh')
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.audit).not.toHaveBeenCalled()
+    // The button now offers a RE-check, not a first one.
+    expect(findButton(host, 'Re-check')).toBeDefined()
+    expect(findButton(host, 'Check this skill')).toBeUndefined()
+  })
+
+  it('says a stored check is about an earlier version when it no longer fits', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi
+        .fn()
+        .mockResolvedValue(checkedResult(checkFields({ report: 'The old report' }), false)),
+    })
+    const { host } = await mount(client)
+
+    const pane = checkPane(host)
+    // The stale sentence appears...
+    expect(pane?.textContent).toContain('earlier version')
+    // ...and the check itself is still shown in full, never hidden or
+    // trimmed — a stale reading is still the reading.
+    expect(pane?.textContent).toContain('The old report')
+    expect(pane?.textContent).toContain('Suspect')
+  })
+
+  it("renders the model's prose inert: no markup, no live links", async () => {
+    const hostile = '<script>alert(1)</script> and a [click here](javascript:alert(1)) link'
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(checkFields({ report: hostile }))),
+    })
+    const { host } = await mount(client)
+
+    const pane = checkPane(host)
+    expect(pane).not.toBeNull()
+    expect(pane?.querySelector('a[href]')).toBeNull()
+    expect(pane?.innerHTML).not.toContain('<script')
+    // The bytes are still readable, as inert text — not silently dropped.
+    expect(pane?.textContent).toContain('alert(1)')
+  })
+
+  it('names the scan count apart from the verdict, with the files it was in', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(
+        checkedResult(
+          checkFields({
+            findings: [
+              {
+                path: 'scripts/setup.sh',
+                patternId: 'curl-pipe-shell',
+                line: 'curl | sh',
+                lineNumber: 4,
+              },
+            ],
+          }),
+        ),
+      ),
+    })
+    const { host } = await mount(client)
+
+    const pane = checkPane(host)
+    expect(pane?.textContent).toContain('matched 1 line')
+    expect(pane?.textContent).toContain('scripts/setup.sh')
+  })
+
+  it('names what was left out of a stored reading, as a sentence', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi
+        .fn()
+        .mockResolvedValue(
+          checkedResult(
+            checkFields({ omitted: [{ path: 'references/huge.md', reason: 'too-large' }] }),
+          ),
+        ),
+    })
+    const { host } = await mount(client)
+
+    expect(checkPane(host)?.textContent).toContain('references/huge.md')
+  })
+
+  it('shows the report even when it could not be saved', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(null)),
+      audit: vi.fn().mockResolvedValue(
+        auditFields({
+          report: 'A fresh reading',
+          stored: 'no',
+          storedError: 'the store is a stub',
+        }),
+      ),
+    })
+    const { host } = await mount(client)
+
+    const button = findButton(host, 'Check this skill')
+    if (!button) throw new Error('Check this skill button did not render')
+    button.click()
+    await flush()
+
+    const pane = checkPane(host)
+    expect(pane?.textContent).toContain('A fresh reading')
+    expect(pane?.textContent).toContain('not saved')
+    expect(pane?.textContent).toContain('the store is a stub')
+  })
+
+  it('offers no check on a builtin: no button, no panel, no call', async () => {
+    const builtin: SkillsList['skills'][number] = { ...A_SKILL, provenance: 'builtin' }
+    const client = fakeClient({
+      list: vi.fn().mockResolvedValue({ documentPath: '/tmp/nocx/skills.json', skills: [builtin] }),
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    const { host } = await mount(client)
+
+    expect(checkPane(host)).toBeNull()
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.check).not.toHaveBeenCalled()
+  })
+
+  it('a check that could not be read is shown as a refusal, never as "nobody has checked this"', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockRejectedValue(new Error('content.db is locked')),
+    })
+    const { host } = await mount(client)
+
+    expect(checkPane(host)?.textContent).toContain('content.db is locked')
+    expect(findButton(host, 'Check this skill')).toBeUndefined()
+  })
+
+  it('a reading that fails leaves the button available again, with a sentence saying why', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(null)),
+      audit: vi.fn().mockRejectedValue(new Error('the model refused')),
+    })
+    const { host } = await mount(client)
+
+    const button = findButton(host, 'Check this skill')
+    if (!button) throw new Error('button did not render')
+    button.click()
+    await flush()
+
+    expect(checkPane(host)?.textContent).toContain('the model refused')
+    const again = findButton(host, 'Check this skill')
+    expect(again?.disabled).toBe(false)
+  })
+
+  it('Re-check calls skills.audit exactly once per press and is disabled while it is in flight', async () => {
+    let resolveAudit: ((value: SkillsAudit) => void) | undefined
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(checkFields())),
+      audit: vi.fn().mockImplementation(
+        () =>
+          new Promise<SkillsAudit>((resolve) => {
+            resolveAudit = resolve
+          }),
+      ),
+    })
+    const { host } = await mount(client)
+
+    const button = findButton(host, 'Re-check')
+    if (!button) throw new Error('button did not render')
+    button.click()
+    await flush()
+
+    expect(button.disabled).toBe(true)
+    // A second press while the first is still in flight must not ask again.
+    button.click()
+    await flush()
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.audit).toHaveBeenCalledTimes(1)
+
+    resolveAudit?.(auditFields())
+    await flush()
+    expect(button.disabled).toBe(false)
   })
 })

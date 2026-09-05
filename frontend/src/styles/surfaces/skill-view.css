@@ -94,6 +94,41 @@
   min-width: 0;
 }
 
+/* ── The Check group (nocx-dh14q) ──────────────────────────────────────────
+   skill-view-check.tsx's own root: a single child of Section's Stack, so
+   the rhythm BETWEEN its own children (the verdict line, the Caption, the
+   report, the scan sentence, the button) has to come from here rather than
+   from Section — Stack only spaces its own direct children, and this div's
+   grandchildren are not those. Owned outright, not a kit component, so it
+   may carry layout freely (README's own rule for the header and its `<h1>`
+   above). */
+.skill-view__check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.skill-view__check p {
+  margin: 0;
+}
+
+/* The one headline fact in the pane, replacing the whole StatusCard the
+   modal card used to spend on it (design §4's table) — a little louder than
+   body copy, never louder than that. */
+.skill-view__check-verdict {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+/* The model's prose, verbatim. `pre-wrap` keeps the paragraph breaks the
+   model wrote instead of collapsing them into one run-on block — the same
+   reason status-card.tsx grew its own `prose` variant, restated here
+   because this text is no longer inside a StatusCard at all (design §4:
+   "prose at the pane's full width"). */
+.skill-view__check-report {
+  white-space: pre-wrap;
+}
+
 /* Below 640px the two columns no longer fit side by side at any width
    worth reading a file in — the list stacks above the view instead of
    splitting the pane vertically. The seam is hidden rather than left to

@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SkillViewContent — the skill tab (nocx-btg7d, nocx-4m1n1): the HEADER
-// (name, provenance, path, the enable switch, a Check/Re-check button not
-// wired yet) plus the BODY (every file the bundle carries, and the chosen
-// one's bytes) below it. The check panel itself is Task 10 — the body
-// leaves a placeholder row for it and builds nothing else of it.
+// SkillViewContent — the skill tab (nocx-btg7d, nocx-4m1n1, nocx-dh14q): the
+// HEADER (name, provenance, path, the enable switch) plus the BODY below it
+// — every file the bundle carries, the chosen one's bytes, and the Check
+// group with what content.db knows about this skill plus the Check/Re-check
+// button that spends the one model call.
 //
 // SkillViewHeader and SkillViewBody live in their own modules
 // (skill-view-header.tsx, skill-view-body.tsx): this class owns none of
@@ -44,7 +44,7 @@ import { createSignal, Show, type JSX } from 'solid-js'
 import { render } from 'solid-js/web'
 import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import { showToast } from '../ui/toast'
-import type { SkillsState, SkillsStore } from '../skills-store'
+import type { Skill, SkillsState, SkillsStore } from '../skills-store'
 import { SkillViewHeader, type ViewState } from './skill-view-header'
 import { SkillViewBody } from './skill-view-body'
 // Styling lives at styles/surfaces/skill-view.css, imported centrally from
@@ -76,8 +76,11 @@ function SkillView(props: {
   deps: SkillViewDeps
   refreshToken: number
 }): JSX.Element {
-  const readyName = (): string | null =>
-    props.state.kind === 'ready' ? props.state.skill.name : null
+  // The whole resolved skill, not only its name: the body's Check group
+  // (nocx-dh14q) gates on `provenance` — a builtin offers no check at all —
+  // and reading that back out of the same `state` the header already
+  // narrows keeps one answer to "which skill is this" rather than two.
+  const readySkill = (): Skill | null => (props.state.kind === 'ready' ? props.state.skill : null)
   return (
     <>
       <SkillViewHeader
@@ -86,9 +89,14 @@ function SkillView(props: {
         busy={props.busy}
         onToggle={props.onToggle}
       />
-      <Show when={readyName()}>
-        {(name) => (
-          <SkillViewBody name={name()} store={props.deps.store} refreshToken={props.refreshToken} />
+      <Show when={readySkill()}>
+        {(skill) => (
+          <SkillViewBody
+            name={skill().name}
+            provenance={skill().provenance}
+            store={props.deps.store}
+            refreshToken={props.refreshToken}
+          />
         )}
       </Show>
     </>

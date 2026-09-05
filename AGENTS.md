@@ -95,10 +95,34 @@ scattered through code that has to be maintained. **Do not write them.** If a ru
 helped or hurt, say so in your report; a person decides whether it becomes
 feedback.
 
-To add one, do NOT use `cm playbook add` — it writes to `~/.cass-memory/playbook.yaml`,
-which is per-machine and per-user, so nobody else ever sees it. Append to
-`.internal/memories-export.jsonl` and re-run `scripts/bd-memories-to-cass.py`; the
-JSONL is the source and the playbook is generated from it.
+**Adding a rule: `import --repo`, never `add`.** `cm playbook add` always writes
+`~/.cass-memory/playbook.yaml`, which lives in one person's home directory — a rule
+about this repository put there is invisible to everybody else. The repo playbook
+has its own route:
+
+```bash
+cm playbook import rules.json --repo     # --repo targets .cass/playbook.yaml
+```
+
+`import` wants whole bullet records — `id`, `state`, `maturity` and the rest — not
+the `{content, category}` pair that `add --file` accepts; it refuses the short form
+with `Required: id`. Copy the shape of an existing bullet, or generate it the way
+`scripts/bd-memories-to-cass.py` does. That script stays the source of the 144
+migrated memories from `.internal/memories-export.jsonl`; new rules do not go
+through it.
+
+**Growing the playbook without an LLM: `cm onboard`.** It is agent-native and costs
+no API calls — `cm onboard sample --fill-gaps` picks sessions in the categories the
+playbook is thin on, `cm onboard read <session> --template` hands you one to read,
+and `cm onboard mark-done <session>` records it as processed. `cm onboard gaps`
+names the weak categories outright. This works on the partial index we have.
+
+**Reflection duplicates; read what it wrote before keeping it.** `cm reflect` on
+this session's own transcript produced eight rules that were three facts, each
+stated two or three times — `dedupSimilarityThreshold: 0.85` did not catch them,
+and they landed in the global playbook because that is where reflection writes. The
+three survivors are in `.cass/playbook.yaml` tagged `reflected`. Treat reflection
+as a draft with a human editor, not as a write path.
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,

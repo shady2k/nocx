@@ -898,6 +898,18 @@ nothing regenerates them now, and they described Dolt, so they are gone.
 | `bd update <id> --claim`                                                                                               | the same with `br`; `claim_exclusive: true` refuses a claim another actor holds |
 | TodoWrite / TaskCreate / markdown TODO                                                                                 | still forbidden — `br` is the tracker for all work                              |
 
+**The official `br` skill is installed and four of its lines are wrong.** It ships
+with the plugin (`beads@beads-rust`, skill `beads:br`) and is worth having, but it
+carries `bd`-era leftovers that this file overrides. Checked against
+`br config schema` on 0.5.10:
+
+| the skill says                         | the truth                                                                                                                                                                                                       |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `br config get id.prefix`              | the key is `issue_prefix`                                                                                                                                                                                       |
+| `br config set defaults.priority=1`    | the key is `default_priority`                                                                                                                                                                                   |
+| `br config set sync.branch beads-sync` | **there is no such key** — the whole schema is `issue_prefix`, `min_hash_length`, `display.color`, `sync.auto_flush`, `sync.auto_import`, `sync.history_enabled`, `no_db`. `br` has no branch-based sync at all |
+| Agent Mail `thread_id: bd-###`         | our ids are `nocx-*` and always were                                                                                                                                                                            |
+
 Two more differences worth carrying in your head, because no rename covers them:
 
 - **`br` never runs git.** Nothing syncs the backlog behind your back. After

@@ -219,6 +219,51 @@ Each is a bead, not a silence.
 
 ---
 
+### Task 3b: The backend remembers which process it opened a session with
+
+**Inserted 2026-09-05 after Task 4 was blocked, and the block was correct.** The authorizer needs
+a root pid that nocx OWNS rather than one the caller supplies, and the plan assumed a path from a
+session id to that pid. There is none. Measured in the tree: `internal/app/helper_local.go:150-153`
+receives `res.Entry.Launch.Pid` and passes it only to `watchForReplacement`, after which it is
+dropped; `transport.OpenedSession` carries `Session`, `Config`, `Hosted` and `WorkspaceID` and no
+pid; `session.Session` and `session.Channel` expose none; and `internal/pty.LocalPty.Pid()` is
+unreachable through either session-facing interface. The helper knows the number and nobody keeps
+it.
+
+**Files:**
+
+- Modify: `internal/app/helper_local.go`, `internal/transport/session_open.go`
+- Modify: whichever backend-owned record the session id already keys — find it rather than adding
+  a second one; a new map beside an existing registry is the second-owner defect AGENTS.md names.
+- Test: beside the modified files
+
+**Interfaces:**
+
+- Produces: a backend-owned lookup from a session id to the `(pid)` of the process nocx opened
+  that session with. The exact spelling is yours; what is fixed is that the value ORIGINATES from
+  the helper's launch record or the pty, never from anything a caller sent.
+
+**Acceptance Criteria:**
+
+- Opening a local pane records the launch pid against that session id, and a lookup by session id
+  returns it.
+- A session opened by a path that has no owned process — an ssh pane, a session the helper did not
+  launch — answers "not known" rather than zero, so a later caller cannot read an absent pid as a
+  valid root. Name the two cases apart.
+- The pid is dropped when the session ends, and a lookup afterwards says not known. Both ends of
+  the interval, or it is a leak that also lies.
+- No value on this path arrives from the wire. A test asserts the recorded pid equals what the
+  helper reported at launch.
+
+- [ ] **Step 1: Write the failing test** — open a local pane through the existing test harness,
+      look the session up, assert the pid matches the launch record.
+- [ ] **Step 2: Run and watch it fail.**
+- [ ] **Step 3: Implement**, keeping the value on the existing record rather than a new map.
+- [ ] **Step 4: Run** — `go test -tags gtk3 -race -count=1 ./internal/app/ ./internal/transport/`.
+- [ ] **Step 5: Lint and commit** — `git commit -m "feat(app,transport): the backend keeps the pid it opened a session with (nocx-rowqt.8)"`.
+
+---
+
 ### Task 4: The one authorizer — an enrolled tree becomes an invocation
 
 **Files:**

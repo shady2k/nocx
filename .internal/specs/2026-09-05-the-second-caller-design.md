@@ -102,6 +102,32 @@ backend that owned its wave has gone away.
 | **D11** | **A request is not an idempotency guarantee.** The endpoint correlates a response with the JSON-RPC request id only for the lifetime of its connection. If the connection dies after an effect starts and before its response arrives, the caller must not blindly retry a mutating call; it asks `wave.holdings` after re-enrollment and treats the outcome as unknown until the record says otherwise. A future idempotency key, if required, belongs in the wave API design and its contracts.                                                                                                                                                                                                                                        | Treating JSON-RPC ids as globally idempotent is false: ids are caller-chosen and commonly reused after reconnect. Retrying `wave.spawn` automatically could fork a second worker; retrying `wave.say` could duplicate mail; retrying `wave.close` could obscure whether the first close reached the process. Inventing a local response cache without defining its lifetime and relation to the in-memory record would make a partial authority claim.                                                                                                                       |
 | **D12** | **Remote helper transport carries identity as an authenticated assertion, not as a bearer.** The helper's Unix listener obtains the remote process identity from its kernel-stamped peer credentials. The helper bridge authenticates the helper generation using its existing handshake, then transports the bounded RPC request and the identity assertion to the backend authorizer. The separate pin task decides how the remote `(pid, start-time)` root is resolved and pinned; this document only requires an interface that can accept local and helper-provided identity assertions.                                                                                                                                            | Having the agent send its own pid, uid, or start time in ordinary JSON is self-attestation and cannot satisfy D13. Putting a capability in `NOCX_*` environment variables would make every descendant carrying the environment a bearer and would contradict the no-bearer rule. Making the backend trust an arbitrary helper payload without authenticating the helper connection would move the hole rather than close it.                                                                                                                                                 |
 
+> **Amendment — 2026-09-05, the same day, from the owner's review.** This document cites the
+> authority model and does NOT cite
+> `.internal/specs/2026-09-03-mesh-and-what-progress-may-decide-design.md`, which was approved
+> by the owner in session and amends the 2026-08-24 design's `D10` and §7.2. Its `M1` decides
+> mesh on the TALK axis from day one — any participant may address any other — and rejects
+> star on that axis by name. Its `M2` keeps the ACT axis star: reassigning scope, changing the
+> participant set, interrupting, spawning and closing are the coordinator's. Its `M3` requires
+> the split to be enforced by the SHAPE of the API rather than by convention.
+>
+> `D10` above is consistent with that and was read as though it were not, so it is restated
+> rather than changed: the per-session slot governs the COORDINATOR SEAT — who may act for a
+> session — and it is not a gate on talk. Each participant has a session of its own, so a
+> worker's own calls sit under its own slot, and revoking a coordinator's control never mutes a
+> peer (authority model `A1`: membership makes a participant addressable, delegation makes it
+> controllable, and neither implies the other).
+>
+> What this document genuinely does not cover, and what the review found in the tree: the
+> PARTICIPANT caller. Every path here narrows a `*agenttools.WaveCoordinator`, and
+> `grep -rn WaveParticipant --include=*.go .` returns nothing, though the authority model's `A8`
+> requires two capability types. Mail is readable only out of the coordinator's
+> `waveHoldingsResult`, and `wave.say` writes only into "one of your workers' mailboxes"
+> (`internal/agenttools/registry.go:747`). So the coordinator can send mail into a box no
+> external worker can open. That is `nocx-rowqt.9`, and the talk axis `M1` decided and nobody
+> built is `nocx-d3k46`. The endpoint does not change shape for either: same socket, same
+> dispatcher, same declarations, a different capability out of the authorizer's invocation.
+
 ## 4. The channel and its lifecycle
 
 ### 4.1 Local endpoint

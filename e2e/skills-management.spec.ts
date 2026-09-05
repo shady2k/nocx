@@ -274,14 +274,16 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await expect(row.locator('.ui-record-row__status')).toContainText('Changed since installation')
 
     // ── RE-APPROVAL ENDS IT ────────────────────────────────────────────────
-    await row.getByRole('button', { name: 'Re-approve', exact: true }).click()
+    await row.getByRole('button', { name: `Re-approve ${SKILL_NAME}`, exact: true }).click()
     await expect(row.locator('.ui-record-row__status')).toHaveCount(0, { timeout: 15_000 })
     // The button goes with the state: a permanent Re-approve would invite
     // re-approving a skill nobody changed.
-    await expect(row.getByRole('button', { name: 'Re-approve', exact: true })).toHaveCount(0)
+    await expect(
+      row.getByRole('button', { name: `Re-approve ${SKILL_NAME}`, exact: true }),
+    ).toHaveCount(0)
 
     // ── THE CARD, AND THE FILE VIEWER IN IT ────────────────────────────────
-    await row.getByRole('button', { name: 'Open', exact: true }).click()
+    await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
     const card = page.getByRole('dialog', { name: SKILL_NAME })
     await expect(card).toBeVisible({ timeout: 10_000 })
     // Where it is, and where it came from — the two facts the modal covers by
@@ -379,7 +381,7 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await expect(rowSwitch).toBeChecked()
 
     // ── AND DELETE TAKES IT AWAY ───────────────────────────────────────────
-    await row.getByRole('button', { name: 'Delete', exact: true }).click()
+    await row.getByRole('button', { name: `Delete ${SKILL_NAME}`, exact: true }).click()
     const confirm = page.getByRole('dialog').filter({ hasText: `Delete “${SKILL_NAME}”?` })
     await expect(confirm).toBeVisible({ timeout: 10_000 })
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click()

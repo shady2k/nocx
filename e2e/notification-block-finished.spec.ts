@@ -154,7 +154,8 @@ function finishedBlock(page: Page, line: string) {
  *  no data-testid and adding one to the kit for a test is the tail wagging the
  *  dog. */
 const titleOf = (row: ReturnType<Page['locator']>) => row.locator('.ui-record-row__title')
-const badgeOf = (row: ReturnType<Page['locator']>) => row.locator('.ui-record-row__meta .ui-badge')
+const badgeOf = (row: ReturnType<Page['locator']>) =>
+  row.locator('.ui-record-row__heading .ui-badge')
 const detailOf = (row: ReturnType<Page['locator']>) => row.locator('.ui-record-row__detail')
 
 test.use({ viewport: { width: 1280, height: 900 } })

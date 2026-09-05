@@ -21,7 +21,11 @@
  *   title   the record's name, its own line.
  *   kind    the record's category badge — a typed {label, tone, description?}, NOT a JSX
  *           element, so a second badge is structurally impossible. One kind,
- *           one badge; a second badge is not one of the slots.
+ *           one badge; a second badge is not one of the slots. It is drawn
+ *           BESIDE THE TITLE (nocx-6jc4f), not at the head of the meta line
+ *           where it used to sit: what kind of record this is is what the
+ *           name says, and a badge in front of the meta text reads as the
+ *           first clause of the record's own sentence.
  *   meta    the record's descriptive line (address, model count, path).
  *   status  the record's current state, rendered as the kit's StatusDot +
  *           text — never a badge. A state that has no colour to say uses the
@@ -106,7 +110,7 @@ export interface RecordRowProps {
   /** The record's category badge. At most one: the composite renders the
    *  badge from this typed slot, so a surface cannot pass a second one. */
   kind?: { label: string; tone?: BadgeTone; description?: string }
-  /** The record's descriptive line, beside the kind badge. */
+  /** The record's descriptive line, under the title and its kind badge. */
   meta?: string
   /** The record's current state: the kit's dot + text, never a badge. */
   status?: { tone: StatusDotTone; text: string }
@@ -237,22 +241,31 @@ export function RecordRow(props: RecordRowProps) {
                 row above does not fire the same activation a second time —
                 the disclosure's reasoning, applied to the other control in
                 the same row. */}
-            <Show
-              when={props.onActivate !== undefined}
-              fallback={<div class="ui-record-row__title">{props.title}</div>}
-            >
-              <button
-                type="button"
-                class="ui-record-row__title ui-record-row__open"
-                onClick={(e: MouseEvent) => {
-                  e.stopPropagation()
-                  props.onActivate?.(e)
-                }}
+            {/* THE HEADING LINE: the record's name, and what kind of record
+                it is (nocx-6jc4f). The kind badge used to open the META line,
+                so a row read "name / [builtin] its own description" — the
+                composite's word for the record wedged into the front of the
+                record's own sentence, where a scanning eye reads it as the
+                first clause of the description. It is not that: provenance,
+                protocol, generation are all what the record IS, which is what
+                the name says, so the badge belongs on the name's line. The
+                meta line below is now the record's words alone. */}
+            <div class="ui-record-row__heading">
+              <Show
+                when={props.onActivate !== undefined}
+                fallback={<div class="ui-record-row__title">{props.title}</div>}
               >
-                {props.title}
-              </button>
-            </Show>
-            <div class="ui-record-row__meta">
+                <button
+                  type="button"
+                  class="ui-record-row__title ui-record-row__open"
+                  onClick={(e: MouseEvent) => {
+                    e.stopPropagation()
+                    props.onActivate?.(e)
+                  }}
+                >
+                  {props.title}
+                </button>
+              </Show>
               <Show when={props.kind} keyed>
                 {(kind) => (
                   <Badge tone={kind.tone ?? 'neutral'} title={kind.description}>
@@ -260,6 +273,8 @@ export function RecordRow(props: RecordRowProps) {
                   </Badge>
                 )}
               </Show>
+            </div>
+            <div class="ui-record-row__meta">
               <Show when={props.meta}>
                 <span class="ui-record-row__meta-text">{props.meta}</span>
               </Show>

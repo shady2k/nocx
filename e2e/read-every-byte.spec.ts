@@ -274,7 +274,7 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await expect(row).toHaveCount(1, { timeout: 15_000 })
     await expect(row.locator('.ui-record-row__meta-text')).toHaveText(SKILL_DESCRIPTION)
 
-    await row.getByRole('button', { name: 'Open', exact: true }).click()
+    await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
     const card = page.getByRole('dialog', { name: SKILL_NAME })
     await expect(card).toBeVisible({ timeout: 15_000 })
 

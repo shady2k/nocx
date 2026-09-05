@@ -50,6 +50,37 @@ describe("RecordRow — the kit's record grammar", () => {
     expect(container.querySelector('.ui-record-row__status')?.textContent).toContain('Key saved')
   })
 
+  it('puts the kind badge beside the name, not on the meta line (nocx-6jc4f)', () => {
+    // WHERE PROVENANCE BELONGS. The badge used to open the meta line, so a
+    // row read "name / [builtin] its own description" and the record's
+    // category was the first thing said in the record's own sentence. It is
+    // not part of that sentence: it is what the record IS, which is what the
+    // name says — so it sits on the name's line, and the meta line is the
+    // record's words alone. The kit owns the geometry, so this is asserted
+    // here once rather than in every list that has a badge.
+    const { container } = render(() => (
+      <RecordRow
+        title="skill-authoring"
+        kind={{ label: 'builtin' }}
+        meta="How to write a skill for this machine."
+        actions={null}
+      />
+    ))
+
+    const heading = container.querySelector('.ui-record-row__heading')
+    expect(heading).not.toBeNull()
+    // The two things on the heading line, in reading order: the name, then
+    // what kind of record it is.
+    expect(heading?.querySelector('.ui-record-row__title')?.textContent).toBe('skill-authoring')
+    expect(heading?.querySelector('.ui-badge')?.textContent).toBe('builtin')
+    // And nowhere else. A badge in both places is two answers to one
+    // question, which is the defect this composite exists to prevent.
+    expect(container.querySelector('.ui-record-row__meta .ui-badge')).toBeNull()
+    expect(container.querySelector('.ui-record-row__meta-text')?.textContent).toBe(
+      'How to write a skill for this machine.',
+    )
+  })
+
   it('renders no badge and no meta when the slots are absent', () => {
     const { container } = render(() => (
       <RecordRow title="bare" actions={<button type="button">Edit</button>} />

@@ -614,7 +614,7 @@ test.describe('a person installs a skill by asking for it (nocx-ojfuc.5)', () =>
     const rowSwitch = row.locator('.ui-record-row__state [role="switch"]')
     await expect(rowSwitch).not.toBeChecked()
 
-    await row.getByRole('button', { name: 'Open', exact: true }).click()
+    await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
     const card = page.getByRole('dialog', { name: SKILL_NAME })
     await expect(card).toBeVisible({ timeout: 15_000 })
     // The record of the install, on the card: the address, when it was taken,

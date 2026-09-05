@@ -53,6 +53,7 @@ import {
   EmptyState,
   FactList,
   FileReadout,
+  IconButton,
   RecordRow,
   Section,
   Stack,
@@ -61,6 +62,7 @@ import {
   type FileReadoutOutcome,
 } from './ui'
 import { CodeBlock, MarkerList } from './ui'
+import { EyeIcon, RefreshIcon, SearchIcon, TrashIcon } from './ui/icons'
 import { formatTimestamp } from './ui/format-time'
 import { Dialog, showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
@@ -942,24 +944,61 @@ export function SkillsSection(props: SkillsSectionProps) {
                           person is entitled to read the file while a toggle
                           is in flight.
 
-                          It says OPEN and no longer Read: what it opens is
-                          the skill's card, and reading a file is one of the
-                          things on it rather than all of it. */}
-                      <Button size="sm" onClick={() => openCard(skill)}>
-                        Open
-                      </Button>
+                          Its name says OPEN and no longer Read: what it
+                          opens is the skill's card, and reading a file is one
+                          of the things on it rather than all of it. The name
+                          is now the whole of what a person is told, because
+                          the control is an eye (nocx-6jc4f) — so it is on
+                          `title` for the pointer and on `ariaLabel` for the
+                          screen reader, and it names its ROW, since four
+                          identical glyphs down a list need to say which
+                          record they belong to. */}
+                      <IconButton
+                        size="sm"
+                        title="Open"
+                        ariaLabel={`Open ${skill.name}`}
+                        onClick={() => openCard(skill)}
+                      >
+                        <EyeIcon />
+                      </IconButton>
+                      {/* THE READING, ASKED FOR FROM THE ROW (nocx-6jc4f).
+                          It opens the card and starts the audit in one press,
+                          and that is not the rule about model calls being
+                          weakened: the press IS the asking, and design §8's
+                          argument is against a call NOBODY asked for. What it
+                          refuses is `openCard` spending one on its own, which
+                          it still does not — the card opened by the eye above
+                          asks for nothing. The card's own button stays, for a
+                          re-run and for the person who came to read first.
+
+                          Like Open, it is not disabled by `busy`: a reading
+                          changes nothing, and a person is entitled to ask for
+                          one while a toggle is in flight. */}
+                      <IconButton
+                        size="sm"
+                        title="Audit"
+                        ariaLabel={`Audit ${skill.name}`}
+                        onClick={() => {
+                          openCard(skill)
+                          void askForAudit(skill.name)
+                        }}
+                      >
+                        <SearchIcon />
+                      </IconButton>
                       {/* Only when the bytes moved. A permanent Re-approve
                             would invite re-approving a skill nobody changed,
                             which is a person clicking past the one prompt that
                             is load-bearing. */}
                       <Show when={skill.status === 'changed'}>
-                        <Button
+                        <IconButton
                           size="sm"
+                          title="Re-approve"
+                          ariaLabel={`Re-approve ${skill.name}`}
                           disabled={busy() === skill.name}
                           onClick={() => void approve(skill)}
                         >
-                          Re-approve
-                        </Button>
+                          <RefreshIcon />
+                        </IconButton>
                       </Show>
                       {/* A builtin ships inside the binary, so there is
                             nothing on disk to delete and no button to explain
@@ -967,14 +1006,15 @@ export function SkillsSection(props: SkillsSectionProps) {
                             row's body as loose text on every builtin row; the
                             absence says it once and says it everywhere. */}
                       <Show when={skill.provenance !== 'builtin'}>
-                        <Button
-                          variant="danger"
+                        <IconButton
                           size="sm"
+                          title="Delete"
+                          ariaLabel={`Delete ${skill.name}`}
                           disabled={busy() === skill.name}
                           onClick={() => void remove(skill)}
                         >
-                          Delete
-                        </Button>
+                          <TrashIcon />
+                        </IconButton>
                       </Show>
                     </ActionGroup>
                   }

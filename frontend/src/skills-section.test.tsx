@@ -146,11 +146,19 @@ function rowFor(container: HTMLElement, name: string): HTMLElement | null {
   )
 }
 
-/** A row's action by its visible label — the accessible name a person clicks. */
+/**
+ * A row's action by its ACCESSIBLE NAME, which since nocx-6jc4f is the only
+ * name it has: the row's controls are icon buttons, so `textContent` is a
+ * glyph and the thing a person is told the button does lives in `aria-label`.
+ * The label names its row too ("Delete deploy"), so the match is on the verb
+ * that opens it — which is what the caller here knows and what a screen
+ * reader announces first.
+ */
 function actionIn(row: HTMLElement, label: string): HTMLButtonElement | undefined {
-  return Array.from(row.querySelectorAll<HTMLButtonElement>('button')).find(
-    (button) => button.textContent?.trim() === label,
-  )
+  return Array.from(row.querySelectorAll<HTMLButtonElement>('button')).find((button) => {
+    const accessible = button.getAttribute('aria-label') ?? button.textContent ?? ''
+    return accessible.trim() === label || accessible.trim().startsWith(`${label} `)
+  })
 }
 
 describe('SkillsSection', () => {
@@ -195,7 +203,10 @@ describe('SkillsSection', () => {
     // absence of Delete is asserted against what IS there rather than
     // against an empty row (nocx-872jc.2, nocx-0bsa4.3).
     expect(actionIn(builtin, 'Open')).toBeTruthy()
-    expect(builtin.querySelectorAll('button')).toHaveLength(1)
+    // Open and Audit — the two controls that change nothing, which is why
+    // they are the two every row carries whatever its provenance.
+    expect(actionIn(builtin, 'Audit')).toBeTruthy()
+    expect(builtin.querySelectorAll('button')).toHaveLength(2)
     const del = actionIn(deploy, 'Delete')
     expect(del).toBeTruthy()
 
@@ -316,6 +327,54 @@ describe('SkillsSection', () => {
     // installed, because the root decides that and not the document.
     expect(row.textContent).toContain('installed')
     expect(evidenceIn(row)).toEqual(['/tmp/nocx/installed-skills/byhand/SKILL.md'])
+  })
+
+  it('draws the row\u2019s actions as icons, and the audit icon opens the card and reads (nocx-6jc4f)', async () => {
+    // WHAT A ROW OFFERS, and in what vocabulary. The row used to carry one
+    // wide "Open" beside a text Delete and a text Re-approve, so a list a
+    // person scans spent most of its width on words that never change. The
+    // four are icon buttons now — one vocabulary in one group — and each one
+    // keeps a name a screen reader can read, which is the whole cost of the
+    // change and the thing this asserts.
+    const audit = vi.fn().mockResolvedValue(READING)
+    const changed: SkillsList = {
+      ...SKILLS,
+      skills: [{ ...SKILLS.skills[0], status: 'changed' }],
+    }
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(changed), audit }))
+    const { container } = render(() => <SkillsSection store={store} />)
+    await waitFor(() => expect(rowFor(container, 'deploy')).toBeTruthy())
+    const row = rowFor(container, 'deploy')!
+
+    // The busiest row the page can draw: everything it offers, named.
+    const group = row.querySelector('.ui-action-group')!
+    const buttons = Array.from(group.querySelectorAll('button'))
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Open deploy',
+      'Audit deploy',
+      'Re-approve deploy',
+      'Delete deploy',
+    ])
+    // Icons, not words: nothing in the group has a text label of its own, and
+    // every one of them draws a glyph. A button with neither would be an
+    // invisible control, which is the failure this pairing rules out.
+    for (const button of buttons) {
+      expect(button.textContent?.trim()).toBe('')
+      expect(button.querySelector('svg')).not.toBeNull()
+    }
+
+    // ONE CLICK, not two. The audit is a model call, so the card's own button
+    // still exists for a re-run \u2014 but a person who asked for a reading from
+    // the row has asked, and making them ask again on the card that opens is
+    // the second click design \u00a78 spends its argument on avoiding.
+    fireEvent.click(actionIn(row, 'Audit')!)
+    await waitFor(() => expect(reader(container)?.open).toBe(true))
+    await waitFor(() => expect(audit).toHaveBeenCalledWith('deploy'))
+    await waitFor(() =>
+      expect(reader(container)?.textContent).toContain('A description, not a verdict'),
+    )
+    // And it read the skill whose icon was pressed, on that skill's card.
+    expect(audit).toHaveBeenCalledTimes(1)
   })
 
   it('puts every row\u2019s enable switch in the same place, whatever buttons the row carries', async () => {
@@ -482,7 +541,7 @@ describe('SkillsSection — management only, no acquisition (nocx-ojfuc.4)', () 
     expect(textEntryIn(container)).toEqual([])
     // And no control invites one under another name.
     const labels = Array.from(container.querySelectorAll('button')).map((b) =>
-      (b.textContent ?? '').trim(),
+      (b.getAttribute('aria-label') ?? b.textContent ?? '').trim(),
     )
     expect(labels.length).toBeGreaterThan(0)
     for (const label of labels) {

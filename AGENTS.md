@@ -128,10 +128,20 @@ cm playbook import rules.json --repo     # --repo targets .cass/playbook.yaml
 
 `import` wants whole bullet records — `id`, `state`, `maturity` and the rest — not
 the `{content, category}` pair that `add --file` accepts; it refuses the short form
-with `Required: id`. Copy the shape of an existing bullet, or generate it the way
-`scripts/bd-memories-to-cass.py` does. That script stays the source of the 144
-migrated memories from `.internal/memories-export.jsonl`; new rules do not go
-through it.
+with `Required: id`. `scripts/bd-memories-to-cass.py` shows the shape.
+
+**The playbook is deliberately empty, as of 2026-09-05.** It held 144 memories
+carried over from `bd remember` and they were dropped rather than curated, because
+the migration had made a fifth of them false: 7 described `bd`, Dolt and the merge
+slot, which were deleted the same day, and one of those told a reader that a
+worktree has no database — the exact opposite of how `br` behaves. Another 12 named
+Orca, replaced by herdr. And 97 of the 147 sat in category `general`, so the gap
+analysis reported `debugging: 1` while debugging rules were in the pile. A store
+that has to be read sceptically is worth less than an empty one.
+
+Nothing was lost: the 144 are in `.internal/memories-export.jsonl` and the whole
+file is in git history. Refill it from work, one rule at a time, by the three tests
+above — and prefer none to a rule you would have to warn the next reader about.
 
 **Growing the playbook without an LLM: `cm onboard`.** It is agent-native and costs
 no API calls — `cm onboard sample --fill-gaps` picks sessions in the categories the

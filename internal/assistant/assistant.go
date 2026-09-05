@@ -79,11 +79,12 @@ type Client interface {
 	// transport can call it from its one terminal funnel without asking
 	// whether the run ever suspended.
 	Discard(runID string)
-	// AuditSkill asks the auditing role's model to DESCRIBE one skill's
-	// bundle and returns its prose (design §7). It is here beside Probe
-	// rather than behind a seam of its own because it is the same shape:
-	// the caller resolves the pair and the credential, the engine owns the
-	// model call.
+	// AuditSkill asks the auditing role's model to CHECK one skill's bundle
+	// and returns its reading — a verdict plus the prose that says why
+	// (design §7, reversed: the refusal to conclude is gone). It is here
+	// beside Probe rather than behind a seam of its own because it is the
+	// same shape: the caller resolves the pair and the credential, the
+	// engine owns the model call.
 	//
 	// It gates nothing and certifies nothing. Nothing in the product
 	// branches on what comes back — a skill is offered to the assistant
@@ -91,7 +92,7 @@ type Client interface {
 	// call touches neither. An error means there is no reading, and the
 	// caller must say so rather than showing an empty one: a blank report
 	// reads exactly like a clean report.
-	AuditSkill(ctx context.Context, p SkillAuditParams) (string, error)
+	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillReading, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed

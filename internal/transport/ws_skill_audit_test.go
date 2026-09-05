@@ -21,22 +21,30 @@ import (
 // all until somebody pressed it.
 type auditingClient struct {
 	scriptedAssistantClient
-	mu      sync.Mutex
-	calls   int
-	params  assistant.SkillAuditParams
-	report  string
+	mu     sync.Mutex
+	calls  int
+	params assistant.SkillAuditParams
+	report string
+	// verdict defaults to SkillClear when unset: most of this file's tests
+	// are about the fields around the verdict, not the verdict itself, and
+	// the zero value must still be a value the schema's closed enum accepts.
+	verdict assistant.SkillVerdict
 	failure error
 }
 
-func (c *auditingClient) AuditSkill(_ context.Context, p assistant.SkillAuditParams) (string, error) {
+func (c *auditingClient) AuditSkill(_ context.Context, p assistant.SkillAuditParams) (assistant.SkillReading, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
 	c.params = p
 	if c.failure != nil {
-		return "", c.failure
+		return assistant.SkillReading{}, c.failure
 	}
-	return c.report, nil
+	v := c.verdict
+	if v == "" {
+		v = assistant.SkillClear
+	}
+	return assistant.SkillReading{Verdict: v, Report: c.report}, nil
 }
 
 func (c *auditingClient) callCount() int {
@@ -78,7 +86,10 @@ func newAuditHarness(t *testing.T, client *auditingClient) *auditHarness {
 // they hold and gets back a reading naming what the model read, what the scan
 // matched, and which role's model answered.
 func TestSkillsAudit_OverTheWireConformsToContract(t *testing.T) {
-	client := &auditingClient{report: "It tells the assistant to ask a station and curl example.test. It reaches for curl and the address https://example.test. The matched line sits in a shell comment inside scripts/fetch.sh and addresses you rather than the shell."}
+	client := &auditingClient{
+		verdict: assistant.SkillSuspect,
+		report:  "It tells the assistant to ask a station and curl example.test. It reaches for curl and the address https://example.test. The matched line sits in a shell comment inside scripts/fetch.sh and addresses you rather than the shell.",
+	}
 	h := newAuditHarness(t, client)
 	h.createEndpoint()
 	assignAuditingRole(t, h)
@@ -105,6 +116,9 @@ func TestSkillsAudit_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Report != client.report {
 		t.Fatalf("report = %q, want the model's prose verbatim", got.Report)
+	}
+	if got.Verdict != "suspect" {
+		t.Fatalf("verdict = %q, want %q", got.Verdict, "suspect")
 	}
 	if len(got.Read) != 2 {
 		t.Fatalf("read = %v, want both files of the bundle", got.Read)
@@ -297,6 +311,34 @@ func TestSkillsAudit_ReportsAModelThatCouldNotBeReached(t *testing.T) {
 	}
 }
 
+// A model talked into answering with a word outside the closed vocabulary
+// must produce a refusal the person reads, not a result — the closed
+// vocabulary is the whole defence and it belongs on the wire as much as in
+// the parser. parseSkillReading is unexported to this package, so this
+// asserts the SHAPE a refusal takes over the wire — a JSON-RPC error, and no
+// report reaching the caller — rather than reproducing the parser's own
+// wording: a fake engine handed back the exact string the parser builds
+// would only prove that a string the test itself constructed can travel a
+// socket, which is nothing.
+func TestSkillsAuditRefusesAnUnrecognisedVerdict(t *testing.T) {
+	client := &auditingClient{failure: errors.New("skill audit: the model answered with a word outside the closed vocabulary")}
+	h := newAuditHarness(t, client)
+	h.createEndpoint()
+	assignAuditingRole(t, h)
+
+	resp := jsonrpcCall(t, h.conn, "skills.audit", map[string]any{"name": "weather"})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == nil {
+		t.Fatalf("skills.audit answered %s for a verdict the engine refused", env.Result)
+	}
+	if len(env.Result) != 0 {
+		t.Fatalf("a refusal carried a result: %s", env.Result)
+	}
+}
+
 // NO ENGINE, NO AUDIT — and the refusal names which half is missing. A
 // server with a skill library and no assistant client can still list, read
 // and toggle; what it cannot do is spend a model call, and saying that is
@@ -334,6 +376,7 @@ func TestSkillsAudit_DTOConformsToContract(t *testing.T) {
 			result: skillAuditResult{
 				Name: "weather", Provenance: skill.ProvenanceInstalled,
 				Role: "auditing", Endpoint: "Local", Model: "qwen3",
+				Verdict:  "clear",
 				Report:   "It asks a station.",
 				Read:     []string{"SKILL.md"},
 				Omitted:  []skill.AuditOmission{},
@@ -346,6 +389,7 @@ func TestSkillsAudit_DTOConformsToContract(t *testing.T) {
 			result: skillAuditResult{
 				Name: "weather", Provenance: skill.ProvenanceInstalled,
 				Role: "answering", Endpoint: "Local", Model: "qwen3",
+				Verdict: "suspect",
 				Report:  "It curls a station.",
 				Read:    []string{"SKILL.md"},
 				Omitted: []skill.AuditOmission{{Path: "references/huge.md", Reason: skill.AuditOmittedTooLarge}},

@@ -1753,8 +1753,15 @@ Expected: PASS.
 
 - Modify: `frontend/src/skills-section.tsx` (delete the `Dialog` and everything only it used; change the actions)
 - Modify: `frontend/src/skills-section.test.tsx`
-- Modify: `internal/skill/skill_test.go` (the `Offered()` guard)
+- Modify: `e2e/skills-management.spec.ts` (it asserts the old copy at `:304`, `:336`, `:341` — found by Task 2's review; the unit test is NOT the only place)
 - Test: as above
+
+**Moved out of this task:** the `Offered()` guard now lives in
+`internal/skill/skill_test.go` as of Task 2 — its review found the code and the
+contract already CLAIMING that a test asserts the predicate has no third term,
+while none did, so the sentence was made true where it was written rather than
+two tasks later. Verify it is there and still structural; do not write a second
+one.
 
 **Interfaces:**
 

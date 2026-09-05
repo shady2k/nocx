@@ -5,7 +5,9 @@ package transport
 // The opposite shape to the install-time classifier §4 killed. That one ran
 // on bytes nobody had asked about, gated nothing, and certified nothing while
 // looking as though it did. This one is pressed by the person, about a skill
-// they already hold, and produces prose they act on themselves.
+// they already hold, and produces a verdict and prose they act on
+// themselves — design §7's refusal to conclude is reversed, and what
+// replaces it as the defence is inertness (see skillAuditResult below).
 //
 // IT IS A BUTTON AND NOT A PAGE LOAD, and that is a decision the wire
 // enforces rather than a habit the renderer keeps: opening a card is
@@ -47,19 +49,22 @@ type skillAuditSource interface {
 // assistant.Client rather than the whole of it because this handler has no
 // business being able to start an ask.
 type skillAuditEngine interface {
-	AuditSkill(ctx context.Context, p assistant.SkillAuditParams) (string, error)
+	AuditSkill(ctx context.Context, p assistant.SkillAuditParams) (assistant.SkillReading, error)
 }
 
 // skillAuditResult is the wire shape (contracts/skills.audit.schema.json).
 //
-// THERE IS NO VERDICT IN IT, and the absence is structural rather than
-// tasteful. Every field is one of three things: a fact about the REQUEST
-// (which skill, which root), a fact about the CALL (which role answered, on
-// which endpoint and model), or a fact about what was READ (the paths, the
-// omissions, the budget, and the scan's own matches). Not one of them is an
-// opinion about the skill, so there is nothing here a surface could count,
-// threshold or colour into a judgement — which is exactly what an install
-// classifier's `risk` field invited and what §4 removed.
+// IT CARRIES A VERDICT AND THE VERDICT DECIDES NOTHING — design §7's refusal
+// to conclude is reversed, and what replaces it as the defence is that the
+// verdict is inert. Every other field is one of three things: a fact about
+// the REQUEST (which skill, which root), a fact about the CALL (which role
+// answered, on which endpoint and model), or a fact about what was READ (the
+// paths, the omissions, the budget, and the scan's own matches). The verdict
+// alone is an opinion about the skill, and nothing here lets it become more
+// than that: what the assistant is offered is still Skill.Offered() — the
+// person's switch and the digest comparison — and this call touches neither,
+// which is exactly what an install classifier's `risk` field failed to keep
+// true and what §4 removed it for.
 //
 // Report is ONE prose field on purpose. The obvious alternative was three —
 // what it instructs, what it reaches for, the findings in context — and it
@@ -87,6 +92,10 @@ type skillAuditResult struct {
 	// same fact.
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
+	// Verdict is the model's conclusion, in the closed vocabulary the parser
+	// enforces exactly (assistant.SkillVerdict). IT DECIDES NOTHING — see the
+	// type's doc comment for what keeps that true.
+	Verdict string `json:"verdict"`
 	// Report is the auditing model's prose, verbatim and bounded.
 	Report string `json:"report"`
 	// Read, Omitted and MaxBytes are what the reading is ABOUT. They travel
@@ -142,7 +151,7 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
-	report, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
+	reading, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
 		Key: key, BaseURL: endpoint.BaseURL, Model: model, Headers: headers,
 		Document: material.Document,
 	})
@@ -169,7 +178,8 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		Role:       string(role),
 		Endpoint:   endpoint.Name,
 		Model:      model,
-		Report:     report,
+		Verdict:    string(reading.Verdict),
+		Report:     reading.Report,
 		Read:       material.Read,
 		Omitted:    material.Omitted,
 		MaxBytes:   material.MaxBytes,

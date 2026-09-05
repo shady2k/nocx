@@ -1,0 +1,595 @@
+// @vitest-environment jsdom
+//
+// SkillViewContent's BODY (nocx-4m1n1): the file list beside the file. Task
+// 8's open-skill.test.ts already covers the header and the tab's lifecycle
+// (resolution, closing, the switch); this suite is the body's own —
+// mounted directly the way file-viewer-content.test.ts mounts its content,
+// with a plain object standing in for PaneHost, rather than through a full
+// PaneManager the body's own behaviour does not need.
+//
+// TWO CALLS, NOT ONE. `skills.files` is a bare directory listing (fast,
+// unconditional) and `skills.scan` is the separate call that answers the
+// live scan for the same bundle — folding the two together was the shape
+// review rejected a second time: it made the file list, the tab's primary
+// navigation, wait on reading and scanning the whole bundle before it could
+// render at all. Every test below that exercises a dot builds it into the
+// `skills.scan` FIXTURE, and the "no fan-out" test asserts `client.file` is
+// called ONLY for the one file actually selected, never for the others.
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
+import type { PaneHost } from '../pane-content'
+import { SkillsStore, type SkillsClientLike } from '../skills-store'
+import type { SkillsList } from '../generated/skills.list'
+import type { SkillsFile } from '../generated/skills.file'
+import type { SkillsFiles } from '../generated/skills.files'
+import type { SkillsScan } from '../generated/skills.scan'
+import { SkillViewContent } from './skill-view-content'
+
+const A_SKILL: SkillsList['skills'][number] = {
+  name: 'deploy',
+  description: 'Deploy the service',
+  provenance: 'authored',
+  path: '/tmp/nocx/skills/deploy/SKILL.md',
+  enabled: true,
+  status: 'approved',
+}
+
+// 256, not a round fixture number — internal/skill/files.go's own
+// MaxSkillFiles, and a stand-in for it here is exactly the drift a reviewer
+// (rightly) does not have to trust: a test that says 64 is testing a cap
+// nothing on the backend enforces.
+const MAX_SKILL_FILES = 256
+
+type ScanMatch = SkillsScan['matches'][number]
+type Omission = SkillsScan['omitted'][number]
+
+function scanMatch(path: string, count = 1): ScanMatch {
+  return { path, count }
+}
+
+function omission(path: string, reason: Omission['reason']): Omission {
+  return { path, reason }
+}
+
+function filesResult(
+  files: readonly string[],
+  overrides: Partial<Pick<SkillsFiles, 'truncated' | 'maxFiles'>> = {},
+): SkillsFiles {
+  return {
+    name: 'deploy',
+    provenance: 'authored',
+    files: files as [string, ...string[]],
+    truncated: false,
+    maxFiles: MAX_SKILL_FILES,
+    ...overrides,
+  }
+}
+
+function scanResult(
+  overrides: Partial<Pick<SkillsScan, 'read' | 'matches' | 'omitted' | 'maxBytes'>> = {},
+): SkillsScan {
+  return {
+    name: 'deploy',
+    provenance: 'authored',
+    read: [],
+    matches: [],
+    omitted: [],
+    maxBytes: 131072,
+    ...overrides,
+  }
+}
+
+function fileResult(overrides: Partial<SkillsFile> & { path: string }): SkillsFile {
+  return {
+    name: 'deploy',
+    provenance: 'authored',
+    text: '',
+    refusal: '',
+    maxBytes: 1_000_000,
+    findings: [],
+    ...overrides,
+  }
+}
+
+function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike {
+  return {
+    list: vi.fn().mockResolvedValue({ documentPath: '/tmp/nocx/skills.json', skills: [A_SKILL] }),
+    setEnabled: vi.fn().mockResolvedValue({ name: A_SKILL.name, enabled: false }),
+    remove: vi.fn().mockResolvedValue({ name: A_SKILL.name }),
+    approve: vi.fn().mockResolvedValue({ name: A_SKILL.name, status: 'approved' }),
+    file: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
+    files: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
+    scan: vi.fn().mockResolvedValue(scanResult()),
+    audit: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
+    check: vi.fn().mockResolvedValue({ name: A_SKILL.name, checked: false }),
+    ...overrides,
+  }
+}
+
+// Enough microtask turns for one round of: the store's `list()` (setVisible's
+// refresh), the body's `files()` and `scan()` (fired together), and the ONE
+// on-demand `file()` a selection triggers.
+async function flush(times = 12): Promise<void> {
+  for (let i = 0; i < times; i++) await Promise.resolve()
+}
+
+/** A real PaneHost stub: `onStoreState` calls `setTitle` on every resolved
+ *  skill, so `{} as PaneHost` (file-viewer-content.test.ts's stand-in) fails
+ *  differently here — the call throws, `SkillsStore.refresh`'s `try` treats
+ *  it as a failed `list()`, and the content sits in `unavailable` forever
+ *  with no hint why. Named methods, not a cast, so that mistake cannot
+ *  repeat silently. */
+function fakePaneHost(): PaneHost {
+  return {
+    setTitle: vi.fn(),
+    requestAttention: vi.fn(),
+    requestClose: vi.fn(),
+    contentSettled: vi.fn(),
+  }
+}
+
+async function mount(
+  client: SkillsClientLike,
+): Promise<{ host: HTMLElement; content: SkillViewContent }> {
+  const store = new SkillsStore(client)
+  const content = new SkillViewContent('deploy', { store })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const signal = new AbortController().signal
+  await content.mount(host, fakePaneHost(), signal)
+  content.setVisible(true)
+  await flush()
+  return { host, content }
+}
+
+const fileListRows = (host: HTMLElement): HTMLElement[] =>
+  Array.from(host.querySelectorAll('.skill-view__file-list .ui-record-row'))
+
+const rowTitle = (row: HTMLElement): string =>
+  row.querySelector('.ui-record-row__title')?.textContent ?? ''
+
+const rowButton = (row: HTMLElement): HTMLButtonElement =>
+  row.querySelector('.ui-record-row__open') as HTMLButtonElement
+
+const viewCol = (host: HTMLElement): HTMLElement => host.querySelector('.skill-view__view-col')!
+
+const viewText = (host: HTMLElement): string =>
+  viewCol(host).querySelector('.ui-code-block')?.textContent ?? ''
+
+const filePaths = (client: SkillsClientLike): string[] =>
+  (client.file as Mock).mock.calls.map((call: unknown[]) => call[1] as string)
+
+afterEach(() => {
+  document.body.innerHTML = ''
+})
+
+describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
+  it('lists every file of the bundle, including a bundle of one', async () => {
+    // The modal card this tab replaces drew the list only when a skill had
+    // MORE THAN ONE file (skills-section.tsx:691), so a one-file skill said
+    // nothing at all about what it carried. The column's EXISTENCE is what
+    // says the bundle has one file; its absence said nothing.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'the whole skill' })),
+    })
+    const { host } = await mount(client)
+
+    const rows = fileListRows(host)
+    expect(rows).toHaveLength(1)
+    expect(rowTitle(rows[0])).toBe('SKILL.md')
+  })
+
+  it('renders the list from `files` alone — it does not wait on `scan` to answer', async () => {
+    // The whole reason the two calls are separate: a slow or stuck scan
+    // must never hold the file list off the screen.
+    let resolveScan: ((value: SkillsScan) => void) | undefined
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      scan: vi.fn().mockImplementation(
+        () =>
+          new Promise<SkillsScan>((resolve) => {
+            resolveScan = resolve
+          }),
+      ),
+    })
+    const { host } = await mount(client)
+
+    expect(fileListRows(host)).toHaveLength(2)
+    // The scan is still in flight — resolve it so the test does not leak a
+    // pending promise into the next one.
+    resolveScan?.(scanResult())
+    await flush()
+  })
+
+  it('shows the bytes of the file that was chosen, and not of the one before it', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi.fn().mockImplementation((_name: string, path: string) => {
+        if (path === 'SKILL.md') return Promise.resolve(fileResult({ path, text: 'FIRST FILE' }))
+        return Promise.resolve(fileResult({ path, text: 'SECOND FILE' }))
+      }),
+    })
+    const { host } = await mount(client)
+
+    // SKILL.md is first in the manifest and opens by default, the same
+    // contract the modal card's SKILL_FILE constant relied on.
+    expect(viewText(host)).toBe('FIRST FILE')
+
+    const rows = fileListRows(host)
+    const second = rows.find((row) => rowTitle(row) === 'scripts/setup.sh')
+    if (!second) throw new Error('scripts/setup.sh did not render')
+    rowButton(second).click()
+    await flush()
+
+    // Selecting the SECOND file changed what is shown, and the first
+    // file's bytes are no longer on screen — asserted by doing the
+    // selection, not by rendering one file and assuming the wiring holds.
+    expect(viewText(host)).toBe('SECOND FILE')
+    expect(viewText(host)).not.toContain('FIRST FILE')
+  })
+
+  it('reads a file on demand ONLY when it is selected — never a fan-out over the whole bundle', async () => {
+    // The defect review caught: a first version read every listed file
+    // through skills.file on open, which for MaxSkillFiles files is up to
+    // 256 concurrent JSON-RPC calls against configSub's non-blocking
+    // depth-8 semaphore (ws.go:1446,1640). `client.file` here must be
+    // called for SKILL.md (the default selection) and for NOTHING ELSE,
+    // however many files the manifest names.
+    const client = fakeClient({
+      files: vi
+        .fn()
+        .mockResolvedValue(
+          filesResult(['SKILL.md', 'scripts/a.sh', 'scripts/b.sh', 'scripts/c.sh']),
+        ),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    await mount(client)
+
+    expect(filePaths(client)).toEqual(['SKILL.md'])
+  })
+
+  it("marks a scan-matched file with the kit's dot and names it, from the scan call alone", async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      scan: vi.fn().mockResolvedValue(
+        scanResult({
+          read: ['SKILL.md', 'scripts/setup.sh'],
+          matches: [scanMatch('scripts/setup.sh')],
+        }),
+      ),
+      file: vi
+        .fn()
+        .mockImplementation((_name: string, path: string) =>
+          Promise.resolve(fileResult({ path, text: 'x' })),
+        ),
+    })
+    const { host } = await mount(client)
+
+    const rows = fileListRows(host)
+    const matched = rows.find((row) => rowTitle(row) === 'scripts/setup.sh')
+    const clean = rows.find((row) => rowTitle(row) === 'SKILL.md')
+    if (!matched || !clean) throw new Error('expected rows did not render')
+
+    // The kit's dot, on the row the scan actually matched — never a bare
+    // glyph (ui/README.md:383): StatusDot is what check-menu-icons and
+    // nocx/no-raw-controls exist to require here.
+    const dot = matched.querySelector('.ui-status-dot')
+    expect(dot).not.toBeNull()
+    expect(dot?.getAttribute('data-tone')).toBe('warning')
+    expect(matched.querySelector('.ui-record-row__status')?.textContent).toContain(
+      'scripts/setup.sh',
+    )
+
+    // The clean file carries no dot at all, once the scan has answered —
+    // an empty `matches` entry is "nothing was found to match", not
+    // "cleared", and drawing a dot for it would claim a fact the scan
+    // never asserted.
+    expect(clean.querySelector('.ui-status-dot')).toBeNull()
+
+    // And this dot came from the SCAN call, not from reading the file:
+    // only SKILL.md (the default selection) was ever read.
+    expect(filePaths(client)).toEqual(['SKILL.md'])
+  })
+
+  it('marks every row PENDING while the scan has not answered yet — never nothing', async () => {
+    // "not scanned yet" is one of three states a row can be in, and it must
+    // be visibly distinct from "scanned, clean" (nothing drawn) — the
+    // whole point of the two-call split's own review.
+    let resolveScan: ((value: SkillsScan) => void) | undefined
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      scan: vi.fn().mockImplementation(
+        () =>
+          new Promise<SkillsScan>((resolve) => {
+            resolveScan = resolve
+          }),
+      ),
+    })
+    const { host } = await mount(client)
+
+    const row = fileListRows(host)[0]
+    const dot = row.querySelector('.ui-status-dot')
+    expect(dot).not.toBeNull()
+    expect(dot?.getAttribute('data-tone')).toBe('neutral')
+    expect(row.querySelector('.ui-record-row__status')?.textContent).toContain('pending')
+
+    resolveScan?.(scanResult({ read: ['SKILL.md'] }))
+    await flush()
+    // Once the scan answers clean, the pending mark is gone — this is the
+    // one state where an absent dot means something.
+    expect(row.querySelector('.ui-status-dot')).toBeNull()
+  })
+
+  it('a file the scan could not read is marked, never left looking clean', async () => {
+    // internal/skill/file.go:88's own rule, restated for the list: an
+    // absent finding says nothing about a file either way, so a SKIPPED
+    // file (too large, not text, unreadable, budget-spent) must draw
+    // something other than nothing — the same "nothing" a clean, actually
+    // scanned file draws.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'references/huge.md'])),
+      scan: vi.fn().mockResolvedValue(
+        scanResult({
+          read: ['SKILL.md'],
+          omitted: [omission('references/huge.md', 'too-large')],
+        }),
+      ),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    const { host } = await mount(client)
+
+    const rows = fileListRows(host)
+    const skipped = rows.find((row) => rowTitle(row) === 'references/huge.md')
+    if (!skipped) throw new Error('references/huge.md did not render')
+
+    const dot = skipped.querySelector('.ui-status-dot')
+    expect(dot).not.toBeNull()
+    // NEUTRAL, not warning: this is "we don't know", not "this matched" —
+    // the two must not look alike, or a person reads a shrug as a finding.
+    expect(dot?.getAttribute('data-tone')).toBe('neutral')
+    expect(skipped.querySelector('.ui-record-row__status')?.textContent).toContain('not scanned')
+
+    // And the skipped file was never itself read through skills.file either
+    // — the scan already says why it has no match.
+    expect(filePaths(client)).not.toContain('references/huge.md')
+  })
+
+  it('a scan that fails leaves every row pending, with a sentence saying so — never a clean-looking row', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      scan: vi.fn().mockRejectedValue(new Error('the scan could not be run')),
+    })
+    const { host } = await mount(client)
+
+    const row = fileListRows(host)[0]
+    const dot = row.querySelector('.ui-status-dot')
+    expect(dot).not.toBeNull()
+    expect(dot?.getAttribute('data-tone')).toBe('neutral')
+
+    const notice = host.querySelector('.skill-view__list-col .ui-status-card[data-tone="warning"]')
+    expect(notice).not.toBeNull()
+    expect(notice?.textContent).toContain('the scan could not be run')
+  })
+
+  it("a file the scan's own walk never saw is pending, never clean — the race a review caught", async () => {
+    // skills.files and skills.scan each walk the skill's directory at their
+    // OWN moment, through separate calls: a file created in the gap is in
+    // the frontend's file list but in neither the scan's `matches` nor its
+    // `omitted`. Falling through to "clean" there would be the original
+    // fan-out defect back again, arriving through a race instead. `read`
+    // is what a viewer checks first: a path outside it was never examined
+    // by THIS scan, whatever else is true about it.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/new.sh'])),
+      // The scan's OWN walk only saw SKILL.md — as if scripts/new.sh
+      // appeared after skills.scan's directory read but before this
+      // component asked skills.files.
+      scan: vi.fn().mockResolvedValue(scanResult({ read: ['SKILL.md'] })),
+      file: vi
+        .fn()
+        .mockImplementation((_name: string, path: string) =>
+          Promise.resolve(fileResult({ path, text: 'x' })),
+        ),
+    })
+    const { host } = await mount(client)
+
+    const rows = fileListRows(host)
+    const raced = rows.find((row) => rowTitle(row) === 'scripts/new.sh')
+    if (!raced) throw new Error('scripts/new.sh did not render')
+
+    const dot = raced.querySelector('.ui-status-dot')
+    expect(dot).not.toBeNull()
+    expect(dot?.getAttribute('data-tone')).toBe('neutral')
+    expect(raced.querySelector('.ui-record-row__status')?.textContent).toContain('pending')
+  })
+
+  it('a reactivation does not blank the file list or the view while the re-read is in flight', async () => {
+    // The stall the two-call split exists to prevent, back again through
+    // the refresh path: an earlier version reset `filesState`/`fileState`
+    // to a placeholder on every `setVisible(true)`, so an already-open tab
+    // showed nothing for the length of a round trip on every reactivation.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'FIRST' })),
+    })
+    const { host, content } = await mount(client)
+    expect(fileListRows(host)).toHaveLength(1)
+    expect(viewText(host)).toBe('FIRST')
+
+    // Freeze the SECOND round of files()/file() calls mid-flight.
+    let resolveFiles: ((v: SkillsFiles) => void) | undefined
+    let resolveFile: ((v: SkillsFile) => void) | undefined
+    ;(client.files as Mock).mockImplementation(
+      () =>
+        new Promise<SkillsFiles>((resolve) => {
+          resolveFiles = resolve
+        }),
+    )
+    ;(client.file as Mock).mockImplementation(
+      () =>
+        new Promise<SkillsFile>((resolve) => {
+          resolveFile = resolve
+        }),
+    )
+
+    content.setVisible(false)
+    content.setVisible(true)
+    await flush()
+
+    // Still the OLD list and the OLD bytes — nothing blanked while the
+    // manifest re-read is in flight.
+    expect(fileListRows(host)).toHaveLength(1)
+    expect(rowTitle(fileListRows(host)[0])).toBe('SKILL.md')
+    expect(viewText(host)).toBe('FIRST')
+
+    resolveFiles?.(filesResult(['SKILL.md']))
+    await flush()
+
+    // The manifest answered and re-selected SKILL.md, which re-reads it —
+    // still the OLD bytes on screen while THAT read is in flight too.
+    expect(viewText(host)).toBe('FIRST')
+
+    resolveFile?.(fileResult({ path: 'SKILL.md', text: 'FIRST' }))
+    await flush()
+  })
+
+  it('never marks a dot from a stored check — only from skills.scan', async () => {
+    // The row summary a stored skills.check would carry lives on `Skill`
+    // via `skills.list`'s `check` field, not on anything skills.files or
+    // skills.scan return. This body never even asks skills.check — it has
+    // no `check` call in its fake client at all — so a dot here can only
+    // ever be sourced from skills.scan's own live answer.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'clear' })),
+      check: vi.fn().mockRejectedValue(new Error('the body must never call this')),
+    })
+    const { host } = await mount(client)
+
+    // The row's dot must be the pending-or-clean one, never a warning one
+    // sourced from anywhere but skills.scan.
+    expect(
+      host.querySelector('.skill-view__file-list .ui-status-dot[data-tone="warning"]'),
+    ).toBeNull()
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.check).not.toHaveBeenCalled()
+  })
+
+  it('surfaces the cut when the manifest is truncated, naming the cap', async () => {
+    const client = fakeClient({
+      files: vi
+        .fn()
+        .mockResolvedValue(
+          filesResult(['SKILL.md'], { truncated: true, maxFiles: MAX_SKILL_FILES }),
+        ),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    const { host } = await mount(client)
+
+    expect(host.textContent).toContain(String(MAX_SKILL_FILES))
+  })
+
+  it('a manifest read that fails is drawn as a refusal, not an empty list', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockRejectedValue(new Error('the directory could not be read')),
+    })
+    const { host } = await mount(client)
+
+    expect(fileListRows(host)).toHaveLength(0)
+    // Scoped to `data-tone="danger"` rather than the first status card in
+    // the column: the "Check" placeholder above Files renders its own
+    // (neutral) card in the same column.
+    const notice = host.querySelector('.skill-view__list-col .ui-status-card[data-tone="danger"]')
+    expect(notice).not.toBeNull()
+    expect(notice?.textContent).toContain('the directory could not be read')
+  })
+
+  it('an on-demand file read that fails is drawn as a refusal, never as an empty clean file', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockRejectedValue(new Error('disk is gone')),
+    })
+    const { host } = await mount(client)
+
+    // No code block at all — an empty block would be indistinguishable from
+    // an empty FILE (FileReadout's own rule), and this is neither.
+    expect(viewCol(host).querySelector('.ui-code-block')).toBeNull()
+    const notice = viewCol(host).querySelector('.ui-status-card')
+    expect(notice?.getAttribute('data-tone')).toBe('danger')
+    expect(notice?.textContent).toContain('disk is gone')
+  })
+
+  it('re-reads the manifest, the scan, AND the file on screen on every activation, not only once', async () => {
+    // The module comment's own claim: a tab "lives for days", so a re-read
+    // on `setVisible(true)` — the same one SkillsStore.refresh() already
+    // gets — must reach the body too, or a long-lived tab shows the bytes
+    // and the marks exactly as they were the day it opened.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    const { content } = await mount(client)
+
+    const filesCalls = (client.files as Mock).mock.calls.length
+    const scanCalls = (client.scan as Mock).mock.calls.length
+    const fileCalls = (client.file as Mock).mock.calls.length
+    expect(filesCalls).toBeGreaterThan(0)
+    expect(scanCalls).toBeGreaterThan(0)
+    expect(fileCalls).toBeGreaterThan(0)
+
+    content.setVisible(false)
+    content.setVisible(true)
+    await flush()
+
+    expect((client.files as Mock).mock.calls.length).toBeGreaterThan(filesCalls)
+    expect((client.scan as Mock).mock.calls.length).toBeGreaterThan(scanCalls)
+    expect((client.file as Mock).mock.calls.length).toBeGreaterThan(fileCalls)
+  })
+
+  it('↑/↓ move the roving focus, Enter opens the focused file and moves focus to the view', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockImplementation((_name: string, path: string) =>
+          Promise.resolve(fileResult({ path, text: path === 'SKILL.md' ? 'FIRST' : 'SECOND' })),
+        ),
+    })
+    const { host } = await mount(client)
+
+    const list = host.querySelector('.skill-view__file-list') as HTMLElement
+    const rows = fileListRows(host)
+    rowButton(rows[0]).focus()
+    expect(document.activeElement).toBe(rowButton(rows[0]))
+
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    expect(document.activeElement).toBe(rowButton(rows[1]))
+
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flush()
+
+    expect(viewText(host)).toBe('SECOND')
+    const view = host.querySelector('.skill-view__view-col')
+    expect(document.activeElement).toBe(view)
+  })
+
+  it("places the kit's ResizeHandle, bounded to [180px, 40% of the pane]", async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+    })
+    const { host } = await mount(client)
+
+    const handle = host.querySelector('.ui-resize-handle')
+    expect(handle).not.toBeNull()
+    expect(handle?.getAttribute('aria-valuemin')).toBe('180')
+    const max = Number(handle?.getAttribute('aria-valuemax'))
+    const now = Number(handle?.getAttribute('aria-valuenow'))
+    expect(max).toBeGreaterThanOrEqual(180)
+    expect(now).toBeGreaterThanOrEqual(180)
+    expect(now).toBeLessThanOrEqual(max)
+  })
+})

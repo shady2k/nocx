@@ -332,6 +332,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"skills.files": {
 			[]byte(`{"name":"deploy"}`),
 		},
+		"skills.scan": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"skills.list": {
 			[]byte(`{}`),
 		},

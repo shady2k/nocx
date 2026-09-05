@@ -62,6 +62,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     approve: vi.fn().mockResolvedValue({ name: A_SKILL.name, status: 'approved' }),
     file: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
     files: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
+    scan: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
     audit: vi.fn().mockRejectedValue(new Error('not asked for in this suite')),
     check: vi.fn().mockResolvedValue({ name: A_SKILL.name, checked: false }),
     ...overrides,

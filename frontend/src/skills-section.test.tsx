@@ -118,6 +118,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
     file: vi.fn().mockResolvedValue(BUILTIN_FILE),
     files: vi.fn().mockResolvedValue(ONE_FILE),
+    scan: vi.fn().mockRejectedValue(new Error('no scan was asked for in this test')),
     check: vi.fn().mockResolvedValue({ name: 'deploy', checked: false }),
     ...overrides,
   }

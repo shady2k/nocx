@@ -5,6 +5,7 @@ import type { SkillsCheck } from './generated/skills.check'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsList } from './generated/skills.list'
+import type { SkillsScan } from './generated/skills.scan'
 import type { SkillsSetEnabled } from './generated/skills.setEnabled'
 import type { SkillsRemove } from './generated/skills.remove'
 
@@ -58,6 +59,19 @@ export class SkillsClient {
   // and see what it carries before turning it on.
   files(name: string): Promise<SkillsFiles> {
     return this.dispatcher.call<SkillsFiles>('skills.files', { name })
+  }
+
+  // The static scan's own answer for the same skill (nocx-4m1n1), by file: a
+  // count of the patterns matched per file, and which files could not be
+  // read at all. A METHOD OF ITS OWN, never a field `files` also fills:
+  // `files` is a bare directory listing and stays fast so the list renders
+  // before this answers — folding the scan in made the list wait on reading
+  // and scanning the whole bundle first, which is worse than the fan-out it
+  // replaced for exactly the bundles that fan-out hurt. It reaches no model
+  // and reads no more than skills.audit already would; it just never sends
+  // the bytes across the socket.
+  scan(name: string): Promise<SkillsScan> {
+    return this.dispatcher.call<SkillsScan>('skills.scan', { name })
   }
 
   // THE READING A PERSON ASKS FOR (design §7). It is a method of its own —

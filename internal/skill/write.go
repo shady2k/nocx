@@ -236,6 +236,17 @@ func (s *Store) Audit(name string) (AuditMaterial, error) {
 	return Audit(s.roots, name)
 }
 
+// Scan is the static scan's own answer for one discovered skill (scan_skill.go),
+// over the same roots and the same resolution File, Files and Audit use. It
+// is a method here beside them for their reason: a caller must not be able
+// to reach one of them with a different root order than the others.
+func (s *Store) Scan(name string) (ScanResult, error) {
+	if s == nil {
+		return ScanResult{}, errUnavailable
+	}
+	return ScanSkill(s.roots, name)
+}
+
 // Create writes a new managed skill. An empty leftover directory is completed;
 // a directory containing SKILL.md is an existing name and is refused.
 func (s *Store) Create(name, description, body string) error {

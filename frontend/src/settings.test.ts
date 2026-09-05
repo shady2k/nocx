@@ -214,6 +214,14 @@ function fakeSkillsClient(): SkillsClientLike {
       truncated: false,
       maxFiles: 256,
     }),
+    scan: vi.fn().mockResolvedValue({
+      name: 'deploy',
+      provenance: 'authored' as const,
+      read: ['SKILL.md'],
+      matches: [],
+      omitted: [],
+      maxBytes: 131072,
+    }),
     check: vi.fn().mockResolvedValue({ name: 'deploy', checked: false }),
   }
 }

@@ -3,6 +3,7 @@ import { SkillsStore, type SkillsClientLike } from './skills-store'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
+import type { SkillsScan } from './generated/skills.scan'
 
 const SKILLS: SkillsList = {
   documentPath: '/tmp/nocx/skills.json',
@@ -36,6 +37,15 @@ const A_MANIFEST: SkillsFiles = {
   maxFiles: 256,
 }
 
+const A_SCAN: SkillsScan = {
+  name: 'deploy',
+  provenance: 'authored',
+  read: ['SKILL.md'],
+  matches: [],
+  omitted: [],
+  maxBytes: 131072,
+}
+
 function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike {
   return {
     audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
@@ -45,6 +55,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
     file: vi.fn().mockResolvedValue(A_FILE),
     files: vi.fn().mockResolvedValue(A_MANIFEST),
+    scan: vi.fn().mockResolvedValue(A_SCAN),
     check: vi.fn().mockResolvedValue({ name: 'deploy', checked: false }),
     ...overrides,
   }
@@ -60,6 +71,18 @@ describe('SkillsStore.check', () => {
     await store.refresh()
     const listCalls = (client.list as Mock).mock.calls.length
     await store.check('deploy')
+    expect((client.list as Mock).mock.calls.length).toBe(listCalls)
+  })
+})
+
+describe('SkillsStore.scan', () => {
+  it('reading a scan refreshes nothing', async () => {
+    // skills.scan writes nothing either, for the same reason.
+    const client = fakeClient()
+    const store = new SkillsStore(client)
+    await store.refresh()
+    const listCalls = (client.list as Mock).mock.calls.length
+    await store.scan('deploy')
     expect((client.list as Mock).mock.calls.length).toBe(listCalls)
   })
 })

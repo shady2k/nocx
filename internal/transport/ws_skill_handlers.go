@@ -31,6 +31,14 @@ type skillSettingsSource interface {
 	// place to keep that answer. It reaches no network and no model: the
 	// model call belongs to the engine, and this is only the bytes.
 	Audit(name string) (skill.AuditMaterial, error)
+	// Scan is the static scan's own answer for one discovered skill
+	// (scan_skill.go): which files matched, how many patterns each one
+	// matched, and which files it could not read. It is deliberately its
+	// OWN method rather than a field Files also fills — Files stays a bare
+	// directory listing so a person's file list renders before this answers
+	// (nocx-4m1n1's own review: folding the scan into Files made the list
+	// wait on reading and scanning the whole bundle first).
+	Scan(name string) (skill.ScanResult, error)
 }
 
 type skillSetEnabledParams struct {
@@ -247,6 +255,23 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(files))
+	case "skills.scan":
+		var p skillRemoveParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		// A name no root holds is the store's own sentence about a
+		// request there is nothing to describe for -- skills.files'
+		// reason, unchanged. A file the SCAN could not read is not one
+		// of these: it is named in the result's own `omitted`, the same
+		// split skills.audit already makes.
+		scanned, err := h.source.Scan(p.Name)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(scanned))
 	case "skills.approve":
 		var p skillRemoveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
@@ -298,6 +323,10 @@ func validateSkillApproveRaw(raw json.RawMessage) string {
 // contracts declaring one field is one answer to what a skill-name param is,
 // and three copies of the bound would agree until somebody widened one.
 func validateSkillFilesRaw(raw json.RawMessage) string {
+	return validateSkillRemoveRaw(raw)
+}
+
+func validateSkillScanRaw(raw json.RawMessage) string {
 	return validateSkillRemoveRaw(raw)
 }
 

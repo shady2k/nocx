@@ -3,6 +3,7 @@ import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsAudit } from './generated/skills.audit'
 import type { SkillsCheck } from './generated/skills.check'
+import type { SkillsScan } from './generated/skills.scan'
 
 export type Skill = GeneratedSkill
 
@@ -13,6 +14,7 @@ export interface SkillsClientLike {
   approve(name: string): Promise<unknown>
   file(name: string, path: string): Promise<SkillsFile>
   files(name: string): Promise<SkillsFiles>
+  scan(name: string): Promise<SkillsScan>
   audit(name: string): Promise<SkillsAudit>
   check(name: string): Promise<SkillsCheck>
 }
@@ -94,6 +96,15 @@ export class SkillsStore {
   // passthrough so the page keeps ONE collaborator for skills.
   files(name: string): Promise<SkillsFiles> {
     return this.client.files(name)
+  }
+
+  // The scan refreshes nothing either, for `files`' reason: skills.scan
+  // writes nothing, so a list that changed after one would be a list that
+  // changed for a reason nobody can name. It answers separately from
+  // `files` on purpose (see skill-view-body.tsx's module comment) — folding
+  // the two into one call would make the file list wait on the scan.
+  scan(name: string): Promise<SkillsScan> {
+    return this.client.scan(name)
   }
 
   // Asking for a reading refreshes nothing either, and here the reason is

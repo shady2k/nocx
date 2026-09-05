@@ -154,6 +154,59 @@ func auditFileHeader(path string) string {
 	return "----- file: " + path + " -----\n"
 }
 
+// scanBundle reads every path in a skill's manifest, in manifest order, and
+// bounds the reading exactly the way Audit always has: MaxReadBytes per
+// file, MaxAuditBytes for the composed whole. It is the ONE loop that reads
+// a bundle's bytes off disk to learn what the static scan makes of them —
+// Audit needs the concatenated Document for a model call and ScanSkill
+// (scan_skill.go) needs only which paths were skipped and what matched, but
+// both ask the same question of the same bytes under the same budget, and a
+// second loop answering it would be the AD-8 defect: it would agree with
+// this one on every bundle anybody tried and disagree the day a symlink, a
+// huge file or the 128 KiB cap fell on a different file in the two counts.
+//
+// It is a package function rather than a method so it never has to resolve
+// a skill of its own — every caller has already done that through locate,
+// which is the one answer to root precedence and containment.
+func scanBundle(root Root, entry string, paths []string) (read []string, omitted []AuditOmission, findings []Finding, document string) {
+	read = []string{}
+	omitted = []AuditOmission{}
+	findings = []Finding{}
+	var doc strings.Builder
+	for _, path := range paths {
+		// One byte past the per-file budget, file.go's trick: it settles "is
+		// this over" for a directory root and the embedded one at once, and
+		// costs one byte.
+		data, readErr := readRootFile(root, entry, path, MaxReadBytes+1)
+		switch {
+		case readErr != nil:
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedUnreadable})
+			continue
+		case len(data) > MaxReadBytes:
+			// Asked before the text check for file.go's reason: an over-long
+			// file is over-long whatever its bytes decode to, and reporting a
+			// 40 MiB archive as "not text" names the less useful of two true
+			// facts.
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedTooLarge})
+			continue
+		case !utf8.Valid(data):
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedNotText})
+			continue
+		}
+		header := auditFileHeader(path)
+		if doc.Len()+len(header)+len(data)+1 > MaxAuditBytes {
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedBudgetSpent})
+			continue
+		}
+		doc.WriteString(header)
+		doc.Write(data)
+		doc.WriteByte('\n')
+		read = append(read, path)
+		findings = append(findings, Scan(path, data)...)
+	}
+	return read, omitted, findings, doc.String()
+}
+
 // Audit composes one skill's bundle for a reading. It answers for ANY
 // provenance and for a skill that is switched OFF, because a skill that is
 // off is precisely the one this exists for: design §8 lands an installed
@@ -180,53 +233,15 @@ func Audit(roots []Root, name string) (AuditMaterial, error) {
 	out := AuditMaterial{
 		Name:       manifest.Name,
 		Provenance: manifest.Provenance,
-		Read:       []string{},
-		Omitted:    []AuditOmission{},
-		Findings:   []Finding{},
 		MaxBytes:   MaxAuditBytes,
 	}
-	// The files the manifest could not name are already outside the document
-	// and outside the person's view, so the cut is carried forward as an
-	// omission with the reason the manifest gave it.
-	var doc strings.Builder
-	for _, path := range manifest.Files {
-		// One byte past the per-file budget, file.go's trick: it settles "is
-		// this over" for a directory root and the embedded one at once, and
-		// costs one byte.
-		data, readErr := readRootFile(at.skill.root, at.entry, path, MaxReadBytes+1)
-		switch {
-		case readErr != nil:
-			out.Omitted = append(out.Omitted, AuditOmission{Path: path, Reason: AuditOmittedUnreadable})
-			continue
-		case len(data) > MaxReadBytes:
-			// Asked before the text check for file.go's reason: an over-long
-			// file is over-long whatever its bytes decode to, and reporting a
-			// 40 MiB archive as "not text" names the less useful of two true
-			// facts.
-			out.Omitted = append(out.Omitted, AuditOmission{Path: path, Reason: AuditOmittedTooLarge})
-			continue
-		case !utf8.Valid(data):
-			out.Omitted = append(out.Omitted, AuditOmission{Path: path, Reason: AuditOmittedNotText})
-			continue
-		}
-		header := auditFileHeader(path)
-		if doc.Len()+len(header)+len(data)+1 > MaxAuditBytes {
-			out.Omitted = append(out.Omitted, AuditOmission{Path: path, Reason: AuditOmittedBudgetSpent})
-			continue
-		}
-		doc.WriteString(header)
-		doc.Write(data)
-		doc.WriteByte('\n')
-		out.Read = append(out.Read, path)
-		out.Findings = append(out.Findings, Scan(path, data)...)
-	}
+	out.Read, out.Omitted, out.Findings, out.Document = scanBundle(at.skill.root, at.entry, manifest.Files)
 	if len(out.Read) == 0 {
 		// Every file was refused, which for a discovered skill means SKILL.md
 		// itself could not be read — the file discovery just parsed. There is
 		// no document, so there is nothing to send and nothing to describe.
 		return AuditMaterial{}, fmt.Errorf("skill %q: none of its files could be read", manifest.Name)
 	}
-	out.Document = doc.String()
 	sum := sha256.Sum256([]byte(out.Document))
 	out.Digest = hex.EncodeToString(sum[:])
 	return out, nil

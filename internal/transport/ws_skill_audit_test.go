@@ -815,17 +815,21 @@ func TestSkillsListCarriesTheCheckThatWasStored(t *testing.T) {
 // decorator over THAT interface would count zero regardless of what
 // skills.list does and pass for the wrong reason, which is exactly the
 // mistake the task brief warned against building. What actually performs a
-// walk over a skill's bytes are the three methods on skillSettingsSource
+// walk over a skill's bytes are the FOUR methods on skillSettingsSource
 // that read them: Audit (internal/skill/audit.go, composes the bundle and
 // recomputes its digest — the method skills.check calls), Files
-// (internal/skill/files.go, walks the skill's directory for a manifest) and
-// File (reads one file skills.file names). skills.list must reach none of
-// them: a future row adding a file count or a manifest column is exactly
-// the temptation files.go:13 already refused, and it would walk every
-// bundle on this hot path the same way a digest recomputation would. So the
-// guard counts calls to all three on the real interface the handler is
-// given (skillSettingsSource), through one decorator over the real store
-// rather than a second fake standing in for it.
+// (internal/skill/files.go, walks the skill's directory for a manifest),
+// File (reads one file skills.file names), and Scan
+// (internal/skill/scan_skill.go, nocx-4m1n1 — reuses Audit's own
+// read-and-scan loop over the whole bundle, which makes it exactly the kind
+// of hot-path walk this guard exists to keep off skills.list). skills.list
+// must reach none of them: a future row adding a file count, a manifest
+// column or a scan summary is exactly the temptation files.go:13 already
+// refused, and it would walk every bundle on this hot path the same way a
+// digest recomputation would. So the guard counts calls to all four on the
+// real interface the handler is given (skillSettingsSource), through one
+// decorator over the real store rather than a second fake standing in for
+// it.
 func TestSkillsListDoesNotRecomputeAnyBundleDigest(t *testing.T) {
 	repo := &recordingSkillChecks{}
 	client := &auditingClient{report: "a reading"}
@@ -865,6 +869,9 @@ func TestSkillsListDoesNotRecomputeAnyBundleDigest(t *testing.T) {
 	if n := counting.fileCalls(); n != 0 {
 		t.Fatalf("skills.list reached File (a bundle read) %d times", n)
 	}
+	if n := counting.scanCalls(); n != 0 {
+		t.Fatalf("skills.list reached Scan (a bundle read-and-scan) %d times", n)
+	}
 }
 
 // A CHECK IS A RECORD; THE LIST IS THE CONTROL SURFACE. Toggles, deletes and
@@ -902,7 +909,7 @@ func TestSkillsListDegradesARowWhenTheStoreFailsToReadItsCheck(t *testing.T) {
 }
 
 // auditCountingSource wraps the real *skill.Store to count calls to the
-// three skillSettingsSource methods that walk a skill's bytes — see
+// four skillSettingsSource methods that walk a skill's bytes — see
 // TestSkillsListDoesNotRecomputeAnyBundleDigest's doc comment for why these
 // are the seams that matter and not a decorator over skill.FileSystem.
 type auditCountingSource struct {
@@ -911,6 +918,7 @@ type auditCountingSource struct {
 	audits int
 	files  int
 	file   int
+	scans  int
 }
 
 func (s *auditCountingSource) Audit(name string) (skill.AuditMaterial, error) {
@@ -934,6 +942,13 @@ func (s *auditCountingSource) File(name, path string) (skill.FileResult, error) 
 	return s.Store.File(name, path)
 }
 
+func (s *auditCountingSource) Scan(name string) (skill.ScanResult, error) {
+	s.mu.Lock()
+	s.scans++
+	s.mu.Unlock()
+	return s.Store.Scan(name)
+}
+
 func (s *auditCountingSource) auditCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -950,6 +965,12 @@ func (s *auditCountingSource) fileCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.file
+}
+
+func (s *auditCountingSource) scanCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scans
 }
 
 // auditCall is the small wrapper the tests above share: issue skills.audit

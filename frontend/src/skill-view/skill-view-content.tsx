@@ -1,10 +1,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SkillViewContent — the HEADER of the skill tab (nocx-btg7d). The two-pane
-// body (a file list and a file view) and the check panel are later tasks;
-// this content renders only what a person needs to answer "which skill is
-// this, and is it on" — name, provenance, path, the enable switch, and a
-// Check/Re-check button that is not wired yet (Task 10 spends the model
-// call).
+// SkillViewContent — the skill tab (nocx-btg7d, nocx-4m1n1): the HEADER
+// (name, provenance, path, the enable switch, a Check/Re-check button not
+// wired yet) plus the BODY (every file the bundle carries, and the chosen
+// one's bytes) below it. The check panel itself is Task 10 — the body
+// leaves a placeholder row for it and builds nothing else of it.
+//
+// SkillViewHeader and SkillViewBody live in their own modules
+// (skill-view-header.tsx, skill-view-body.tsx): this class owns none of
+// their markup, only the lifecycle that feeds them — the store
+// subscription, the resolved-skill identity, and the re-read on
+// activation.
 //
 // A thin adapter over SolidPaneContent (extended, not re-implemented — it
 // already owns the host element's lifecycle: creation as `.surface-host`,
@@ -38,10 +43,10 @@
 import { createSignal, Show, type JSX } from 'solid-js'
 import { render } from 'solid-js/web'
 import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
-import { Badge, Button, Checkbox, FactList, Stack, StatusCard } from '../ui'
 import { showToast } from '../ui/toast'
-import { provenanceTone } from '../skills-presentation'
-import type { Skill, SkillsState, SkillsStore } from '../skills-store'
+import type { SkillsState, SkillsStore } from '../skills-store'
+import { SkillViewHeader, type ViewState } from './skill-view-header'
+import { SkillViewBody } from './skill-view-body'
 // Styling lives at styles/surfaces/skill-view.css, imported centrally from
 // style.css (npm run lint fails on a stylesheet nothing imports) — the same
 // arrangement notes.css uses, since this module's CSS is not beside it.
@@ -50,73 +55,43 @@ export interface SkillViewDeps {
   readonly store: SkillsStore
 }
 
-type ViewState =
-  { kind: 'loading' } | { kind: 'unavailable'; message: string } | { kind: 'ready'; skill: Skill }
-
-interface SkillViewHeaderProps {
+/**
+ * The tab's whole content: the header always, the body once the skill has
+ * resolved. Kept as one small component (rather than two calls at the
+ * render() site below) so the "which name does the body get" question has
+ * one answer, read out of the same `state` the header already narrows.
+ *
+ * The body is not remounted by an unrelated store refresh (toggling the
+ * switch, say): `Show`'s render function runs once per false→true
+ * transition, not on every truthy update, so `SkillViewBody` keeps its own
+ * fetched files and its selection across a state change that leaves the
+ * skill's PATH the same — only losing the skill (the tab closing) or a
+ * fresh mount rebuilds it.
+ */
+function SkillView(props: {
   name: string
   state: ViewState
   busy: boolean
   onToggle: (enabled: boolean) => void
-}
-
-function SkillViewHeader(props: SkillViewHeaderProps): JSX.Element {
-  const readySkill = (): Skill | null => (props.state.kind === 'ready' ? props.state.skill : null)
-  const unavailableMessage = (): string =>
-    props.state.kind === 'unavailable' ? props.state.message : ''
-
+  deps: SkillViewDeps
+  refreshToken: number
+}): JSX.Element {
+  const readyName = (): string | null =>
+    props.state.kind === 'ready' ? props.state.skill.name : null
   return (
-    <div class="skill-view__header">
-      <Show when={props.state.kind === 'loading'}>
-        <StatusCard
-          tone="neutral"
-          title="Loading this skill"
-          description={`Reading “${props.name}” from the discovered skills.`}
-        />
-      </Show>
-      <Show when={unavailableMessage()}>
-        <StatusCard
-          tone="danger"
-          title="Skills could not be read"
-          description={unavailableMessage()}
-        />
-      </Show>
-      <Show when={readySkill()}>
-        {(skill) => (
-          <Stack gap="loose">
-            <div class="skill-view__title">
-              <h1 class="skill-view__name">{skill().name}</h1>
-              <Badge tone={provenanceTone(skill().provenance)}>{skill().provenance}</Badge>
-            </div>
-            <FactList
-              facts={[{ name: 'Where it is', value: skill().path }]}
-              ariaLabel="Where this skill lives"
-            />
-            <Checkbox
-              variant="switch"
-              label="Offer this skill to the assistant"
-              checked={skill().enabled}
-              disabled={props.busy}
-              onChange={(enabled) => props.onToggle(enabled)}
-            />
-            {/* Not wired: a model call belongs to Task 10's check panel, and
-                internal/profile/role.go refuses to spend one silently. This
-                button exists so the header names the action before the panel
-                that performs it exists — disabled, rather than wired to
-                nothing, so pressing it cannot look like it did something. */}
-            <Show when={skill().provenance !== 'builtin'}>
-              <Button
-                disabled
-                title="Reading this skill with a model is not wired up yet"
-                onClick={() => {}}
-              >
-                {skill().check ? 'Re-check' : 'Check this skill'}
-              </Button>
-            </Show>
-          </Stack>
+    <>
+      <SkillViewHeader
+        name={props.name}
+        state={props.state}
+        busy={props.busy}
+        onToggle={props.onToggle}
+      />
+      <Show when={readyName()}>
+        {(name) => (
+          <SkillViewBody name={name()} store={props.deps.store} refreshToken={props.refreshToken} />
         )}
       </Show>
-    </div>
+    </>
   )
 }
 
@@ -133,6 +108,13 @@ export class SkillViewContent extends SolidPaneContent {
   private readonly setViewState: (state: ViewState) => void
   private readonly busy: () => boolean
   private readonly setBusy: (busy: boolean) => void
+  /** Bumped on every `setVisible(true)` — SkillViewBody's own re-read
+   *  effect is keyed on it (see its module comment). A plain counter
+   *  rather than a boolean toggle: a signal only re-fires an effect when
+   *  its VALUE changes, and two consecutive activations must both be seen
+   *  even though "visible" is true both times. */
+  private readonly visibleGeneration: () => number
+  private readonly setVisibleGeneration: (updater: (g: number) => number) => number
 
   constructor(
     private readonly name: string,
@@ -145,6 +127,9 @@ export class SkillViewContent extends SolidPaneContent {
     const [busy, setBusy] = createSignal(false)
     this.busy = busy
     this.setBusy = setBusy
+    const [visibleGeneration, setVisibleGeneration] = createSignal(0)
+    this.visibleGeneration = visibleGeneration
+    this.setVisibleGeneration = setVisibleGeneration
   }
 
   // ── SolidPaneContent ──────────────────────────────────────────────────
@@ -152,11 +137,13 @@ export class SkillViewContent extends SolidPaneContent {
   renderContent(root: HTMLElement): () => void {
     return render(
       () => (
-        <SkillViewHeader
+        <SkillView
           name={this.name}
           state={this.viewState()}
           busy={this.busy()}
           onToggle={(enabled) => void this.toggle(enabled)}
+          deps={this.deps}
+          refreshToken={this.visibleGeneration()}
         />
       ),
       root,
@@ -185,6 +172,11 @@ export class SkillViewContent extends SolidPaneContent {
     // long-lived tab stops advertising a switch a second window already
     // flipped.
     void this.deps.store.refresh()
+    // The same re-read, for the body: bumping this is what tells
+    // SkillViewBody to re-fetch the manifest (and whichever file is on
+    // screen) rather than going on showing what they were the day the tab
+    // opened.
+    this.setVisibleGeneration((g) => g + 1)
   }
 
   /**
@@ -198,9 +190,11 @@ export class SkillViewContent extends SolidPaneContent {
     super.dispose()
   }
 
-  // viewportChanged and focus are inherited as no-ops: the header lays
-  // itself out in flow, and there is nothing to focus yet — the next task's
-  // file list is where a deliberate focus target belongs.
+  // viewportChanged is inherited as a no-op: the header and the body both
+  // lay themselves out in flow/grid and answer their own scrolling. focus()
+  // is also inherited — a tab activation has no single control to seize;
+  // SkillViewBody's own file list and view own their internal focus moves
+  // (↑/↓, Enter) once a person is inside them.
 
   // ── Store subscription ───────────────────────────────────────────────
 

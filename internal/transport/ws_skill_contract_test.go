@@ -619,6 +619,83 @@ func TestSkillsFiles_AnUnknownSkillIsAnError(t *testing.T) {
 	}
 }
 
+// The second half of nocx-4m1n1's file list: skills.files stays a bare
+// listing (above), and this is the separate call that carries the live
+// scan's own answer for the same bundle — matched files with a count,
+// skipped files with why, over the real socket rather than a fixture this
+// test built itself.
+func TestSkillsScan_OverTheWireConformsToContract(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+	schema := loadSchema(t, "skills.scan.schema.json")
+
+	resp := jsonrpcCall(t, conn, "skills.scan", map[string]any{"name": "deploy"})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("unexpected error: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "skills.scan wire")
+
+	var got skill.ScanResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "deploy" || got.Provenance != skill.ProvenanceAuthored {
+		t.Fatalf("got %+v, want the skill it resolved named", got)
+	}
+
+	var matchedCount int
+	for _, m := range got.Matches {
+		if m.Path == "scripts/setup.sh" {
+			matchedCount = m.Count
+		}
+	}
+	if matchedCount < 1 {
+		t.Fatalf("matches = %+v, want scripts/setup.sh with at least one matched pattern", got.Matches)
+	}
+
+	reasons := map[string]string{}
+	for _, o := range got.Omitted {
+		reasons[o.Path] = string(o.Reason)
+	}
+	if reasons["diagram.png"] != string(skill.AuditOmittedNotText) {
+		t.Fatalf("omitted = %+v, want diagram.png named not-text", got.Omitted)
+	}
+	if reasons["dump.log"] != string(skill.AuditOmittedTooLarge) {
+		t.Fatalf("omitted = %+v, want dump.log named too-large", got.Omitted)
+	}
+
+	// A clean, fully-scanned file carries no entry in EITHER list — the
+	// distinction this whole result exists to preserve.
+	for _, m := range got.Matches {
+		if m.Path == "references/hosts.md" {
+			t.Fatalf("matches = %+v, want references/hosts.md absent (clean)", got.Matches)
+		}
+	}
+	if _, ok := reasons["references/hosts.md"]; ok {
+		t.Fatalf("omitted = %+v, want references/hosts.md absent (it was read)", got.Omitted)
+	}
+}
+
+// A name no root holds has nothing to describe, so it refuses the request
+// rather than answering with an empty scan — skills.files' own split.
+func TestSkillsScan_AnUnknownSkillIsAnError(t *testing.T) {
+	conn, cleanup := skillsFileConnection(t)
+	defer cleanup()
+
+	resp := jsonrpcCall(t, conn, "skills.scan", map[string]any{"name": "absent"})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error == nil {
+		t.Fatalf("want a refusal, got result %s", env.Result)
+	}
+}
+
 // Containment over the socket is the store's, unchanged: a traversal and a
 // symlink out of the skill are refusals of the REQUEST, and they come back as
 // errors because there is no file inside the skill to describe.

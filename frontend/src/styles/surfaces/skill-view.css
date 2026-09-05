@@ -1,16 +1,21 @@
-/* Skill tab (nocx-btg7d) — the header this task builds. The root element is
-   SolidPaneContent's own `.surface-host` (settings.css and api-workbench.css
-   render into the same one), which already gives the pane its flex column,
-   its flex:1 and its zero padding via `.pane:has(> .surface-host)` in
-   base.css — repeating any of that here would be a second, driftable copy of
-   what that rule already guarantees. A surface, not a kit component: every
-   control inside it is the kit's own (Badge, Checkbox, Button, FactList) and
-   this file places them — flex and gap — without ever repainting one. The
-   two non-kit elements it owns outright, `.skill-view__header` itself and
-   the `<h1>` beside the provenance badge, may carry any rule that is not a
+/* Skill tab (nocx-btg7d, nocx-4m1n1) — the header and, below it, the file
+   list beside the file. The root element is SolidPaneContent's own
+   `.surface-host` (settings.css and api-workbench.css render into the same
+   one), which already gives the pane its flex column, its flex:1 and its
+   zero padding via `.pane:has(> .surface-host)` in base.css — repeating any
+   of that here would be a second, driftable copy of what that rule already
+   guarantees. A surface, not a kit component: every control inside it is
+   the kit's own (Badge, Checkbox, Button, FactList, Section, Stack,
+   RecordRow, ResizeHandle, FileReadout, StatusCard) and this file places
+   them — flex, grid tracks, widths, gaps and scroll containers — without
+   ever repainting one. The non-kit elements it owns outright (the header,
+   its `<h1>`, and the layout divs below) may carry any rule that is not a
    kit component's, the way `.note-tab` and `.git-diff` do. */
 
 .skill-view__header {
+  /* A fixed-height sibling of `.skill-view__body` inside `.surface-host`'s
+     flex column: it must not be squeezed by the body's flex:1 below it. */
+  flex: 0 0 auto;
   padding: var(--space-4);
 }
 
@@ -24,4 +29,84 @@
 
 .skill-view__name {
   margin: 0;
+}
+
+/* ── The body: the file list beside the file (nocx-4m1n1) ─────────────────
+   `container-type: inline-size` is what lets the split below query its OWN
+   width rather than the window's — the pane can be narrower than the
+   window whenever the sidebar or a second pane shares it. The body fills
+   whatever the header leaves (flex:1, min-height:0 — the standard "let a
+   flex child scroll instead of push" pair), and never scrolls itself: the
+   two columns inside the split scroll on their own. */
+.skill-view__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  container-name: skill-view;
+}
+
+/* Three tracks — the list, the seam, and the view — with the list's width
+   a custom property the surface sets from what a person dragged
+   (skill-view-body.tsx), the same seam api-pane.tsx's tree column uses.
+   `minmax(0, 1fr)` on the view track is what lets CodeBlock's own
+   `overflow-x` inside FileReadout do its job instead of the grid track
+   growing to fit the widest line — the pane must never scroll
+   horizontally. */
+.skill-view__split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--skill-view-list-width, 260px) auto minmax(0, 1fr);
+  grid-template-areas: 'list seam view';
+  overflow: hidden;
+}
+
+.skill-view__list-col {
+  grid-area: list;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4);
+}
+
+.skill-view__seam {
+  grid-area: seam;
+  display: flex;
+  min-width: 0;
+}
+
+.skill-view__view-col {
+  grid-area: view;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4);
+}
+
+/* The keyboard owner and the ARIA list (skill-view-body.tsx's onKeyDown) —
+   this element carries no appearance of its own; row spacing is the kit
+   Stack's (`divided dense`) placed inside it. */
+.skill-view__file-list {
+  min-width: 0;
+}
+
+/* Below 640px the two columns no longer fit side by side at any width
+   worth reading a file in — the list stacks above the view instead of
+   splitting the pane vertically. The seam is hidden rather than left to
+   drag a column that CSS no longer measures: a handle with no effect is
+   worse than no handle. */
+@container skill-view (max-width: 640px) {
+  .skill-view__split {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(120px, 1fr) minmax(160px, 2fr);
+    grid-template-areas: 'list' 'view';
+  }
+
+  .skill-view__seam {
+    display: none;
+  }
 }

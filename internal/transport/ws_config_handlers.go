@@ -2436,6 +2436,26 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		regResponder(configSub, "skills.file", params(validateSkillFileRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.files", params(validateSkillFilesRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.audit", params(validateSkillAuditRaw), func(r Responder) handlerFunc {
+			// The one method here that spends money, so it is the one that
+			// needs a model as well as the library: the skills source for
+			// the bytes, the config operation and the vault for the role
+			// and its credential, and the engine for the call.
+			h := skillAuditHandlers{
+				source: skillSource, engine: s.assistantClient,
+				configOp: configOp, credentials: s.credentialResolver(),
+				log: s.log, wired: skillWired && s.assistantClient != nil, r: r,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		regResponder(configSub, "skills.approve", params(validateSkillApproveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

@@ -91,6 +91,54 @@
  * NOW, and a shell can `cd` between the question and the answer. Binding an
  * effect to its preconditions is nocx-d6gn4.1 and is not claimed here.
  *
+ * AND THE SCAN'S FINDING IS EVIDENCE, DRAWN (nocx-swn1m). A skill write
+ * carries the first static-scan match in the proposed body, and the skills
+ * spec §6 layer 3 says what it is for: "A finding never silently downgrades
+ * the result. On write it becomes evidence in the approval, naming the
+ * pattern and the line." The wire has carried it since the kernel built it
+ * and this surface drew nothing, so the person approving a body saw the
+ * bytes without the pattern that was matched in them. It is drawn beside the
+ * bytes now, and it is NOT a refusal: the write stays the person's to allow
+ * or deny, which is the decision the spec made and not one this window may
+ * remake. For a skill installed from a URL that reading is the whole of the
+ * defence rather than a backstop — layer 2 (a drafting step kept untainted)
+ * does not apply at all when a stranger wrote the body.
+ *
+ * AND AN INSTALL IS ASKED ABOUT AS A SKILL, NOT AS AN ADDRESS
+ * (nocx-ojfuc.2). `skills.install`'s whole argument is a URL. The model was
+ * asked to install a skill from a page and RESOLVED that page to an address;
+ * what it resolved to is the thing the person is actually deciding, so a
+ * question that named only the ask would let somebody approve a page they
+ * read and receive a repository they never saw. The backend therefore sends
+ * the resolution — the fetched address, the skill's own name and description,
+ * the digest the write is bound to, and every file that will land WITH ITS
+ * BYTES — and this window draws all of it.
+ *
+ * THE DESCRIPTION IS THE PROMINENT PART, and that is not typography. It is
+ * the one part of a skill that lives in the assistant's system prompt
+ * afterwards, so it is the sentence that decides when these instructions get
+ * reached for, on every ask, forever. The window says that in those words: a
+ * person weighing a body of instructions needs to know which of its parts
+ * outlives this decision.
+ *
+ * AND THE FILES ARE READ THROUGH THE SAME VIEWER AS EVERYTHING ELSE HERE.
+ * None of them is on disk yet — that is the point of asking first — so there
+ * is nowhere to send a person to read one and nothing to request: the bytes
+ * came with the question. FileReadout draws them, marked where the scan
+ * matched, exactly as the Skills page draws an installed file and as the
+ * block below draws a named script. One capability in three places is epic
+ * nocx-872jc; a fourth reader built here would be the defect it spent itself
+ * removing.
+ *
+ * AND THE SCRIPT A COMMAND NAMES IS SHOWN (nocx-872jc.3). `bash deploy.sh` is
+ * eleven characters and the whole of its meaning is in a file this window said
+ * nothing about, so approving it was approving a NAME. The file's current
+ * contents are drawn beside the command, through the SAME viewer the Skills
+ * page reads a skill file through, and labelled as what they are: a reading,
+ * not the thing being approved. It changes nothing about the binding — what is
+ * sent is byte for byte what it was — and it is not a scan: the bytes go to
+ * the person, and reading them is theirs to do.
+ *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
  * will. It does NOT promise the domain is untouched: a permitted sibling
@@ -98,17 +146,126 @@
  * where a person deciding reads it.
  */
 import { For, Show } from 'solid-js'
-import { ActionGroup, Badge, Button, CodeBlock, FactList, Prompt, Stack, type Fact } from './ui'
+import {
+  ActionGroup,
+  Badge,
+  Button,
+  CodeBlock,
+  FactList,
+  FileReadout,
+  MarkerList,
+  Prompt,
+  Stack,
+  StatusCard,
+  type Fact,
+  type FileReadoutOutcome,
+  type MarkerListItem,
+  type StatusCardTone,
+} from './ui'
 import { EFFECT_LABEL } from './effect-labels'
+import { scanPatternWords } from './scan-pattern-words'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
 
 /** How far an answer reaches — the wire's own vocabulary, not a second one. */
 type ApprovalScope = AgentApprove['scope']
 
+/**
+ * The two tools this window says something EXTRA about, named once each
+ * (nocx-69sew).
+ *
+ * The window is generic — every proposal renders from `effect`, the parsed
+ * arguments and the pane rows, and nothing here derives an effect from a
+ * tool name (ADR-0028 decision 4 forbids that, and the header says so). Two
+ * PRESENTATION branches are keyed on the name anyway, because they are
+ * statements only true of one tool: the command carrier gets njn8s's
+ * sentence and its verbatim block, and fetch.url gets the row saying the
+ * call leaves this machine.
+ *
+ * Those two literals are the whole of the coupling, and they used to be a
+ * silent one. `run` was renamed `session.run` in d71263ab; `if (ask().tool
+ * !== 'run')` went on compiling, went on passing ten tests written from the
+ * component, and every real command proposal fell through the branch — no
+ * lead sentence, no command block, no variable expansion. Nothing could see
+ * it: the wire type said `string`, so 'run' was as valid a comparand as any
+ * other string, and the tests carried the component's own belief.
+ *
+ * `AgentApprovalRequested['tool']` is now a union generated from the
+ * contract's enum, which a Go test holds equal to the declaration table
+ * (TestApprovalRequestedToolEnumMatchesTheTable). So `satisfies` below fails
+ * to compile the moment a name here stops being a name the backend can
+ * send, and the comparisons that read these constants fail with it — a
+ * rename cannot leave this file comparing against a dead string and a green
+ * suite.
+ */
+const COMMAND_TOOL = 'session.run' satisfies AgentApprovalRequested['tool']
+const NETWORK_TOOL = 'fetch.url' satisfies AgentApprovalRequested['tool']
+
+/**
+ * What the window keys its two by-name branches on, for the test that proves
+ * the chain from this file to the declaration table is unbroken.
+ *
+ * `skills.install` is deliberately NOT a third entry. Its block is keyed on
+ * the PRESENCE of the `install` field, which the backend fills for that tool
+ * and no other, so there is no name here to go stale — the strongest form of
+ * the rule the two constants above were bought by, not an exception to it.
+ */
+export const TOOLS_THIS_WINDOW_NAMES = {
+  command: COMMAND_TOOL,
+  network: NETWORK_TOOL,
+} as const
+
 /** What the command's variables read as, as the backend derived it. */
 type ExpansionFacts = NonNullable<NonNullable<AgentApprovalRequested['expansion']>>
 type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
+
+/** One file the proposed command names, read as the question was asked. */
+type ScriptReading = NonNullable<AgentApprovalRequested['scripts']>[number]
+
+/** What a skills.install proposal resolved to, and one file it would write. */
+type SkillInstall = NonNullable<AgentApprovalRequested['install']>
+type SkillInstallFile = SkillInstall['files'][number]
+
+/**
+ * What the command DOES with the file, in a person's words (nocx-872jc.3).
+ *
+ * The two verbs are not the same act and the difference is the kind a person
+ * deciding is owed: `bash x.sh` starts a subprocess that ends, while
+ * `source x.sh` runs the file in the shell the person is sitting in, so
+ * everything it sets outlives it. The parser already distinguishes them —
+ * internal/content routes source to the privilege-change effect row for
+ * exactly this reason — and this is where that distinction reaches a reader.
+ */
+const SCRIPT_VERB_WORDS: Record<ScriptReading['verb'], string> = {
+  execute: 'the command runs this file as a script',
+  source: 'the command reads this file into the shell itself, so what it sets outlives it',
+}
+
+/**
+ * One reading, as FileReadout's own four-way answer to "what is on screen".
+ *
+ * The mapping is a `switch` over the wire's closed union with no default, so
+ * a fifth refusal fails this return type rather than rendering as a viewer
+ * quietly showing nothing. And the wire's vocabulary is deliberately the
+ * kit's: three of the four values are `skills.file`'s, spelled the same
+ * because they are the same sentences about the same facts, and FileReadout
+ * is the one place those sentences are written.
+ */
+const scriptOutcome = (reading: ScriptReading): FileReadoutOutcome => {
+  switch (reading.refusal) {
+    case '':
+      return { kind: 'text', text: reading.text }
+    case 'not-text':
+      return { kind: 'not-text' }
+    case 'too-large':
+      return { kind: 'too-large', maxBytes: reading.maxBytes }
+    case 'unreadable':
+      // The backend's own sentence, verbatim. A fallback of ours here would
+      // be a second author of "why this file is not on screen", and the two
+      // would disagree the first day a new refusal arrived.
+      return { kind: 'unreadable', message: reading.reason }
+  }
+}
 
 /**
  * What a live shell said a program word IS (nocx-4h0m7.5). nocx does not read
@@ -155,6 +312,118 @@ const expansionRowNote = (part: ExpansionPart, facts: ExpansionFacts): string | 
       return facts.reason || 'no shell could be asked for this value'
   }
 }
+
+/** What the classifier's verdict says on the window: the state, the sentence
+ *  beneath it, and the tone it is painted in. */
+type ClassifierNotice = { tone: StatusCardTone; title: string; description?: string }
+
+/**
+ * The classifier's verdict in a person's words (nocx-u43bb).
+ *
+ * A pure function rather than four ternaries in the JSX, because the shapes
+ * are four and the wire allows all four: cleared, suspect, a gate that never
+ * ran, and — the schema requires only `consulted` and `reason` — a
+ * consultation that came back with no verdict at all.
+ *
+ * THE TONE IS NEVER `danger`. Same reason as the scan finding one block
+ * above: the tone a person reads is part of what the window claims, and a
+ * second model's suspicion is evidence beside the bytes, not a refusal — the
+ * write is still theirs to allow or refuse. And `clear` is deliberately NOT
+ * `ok`: `ok` is the tone of a thing that is fine, and a model saying it
+ * raises no suspicion is not a guarantee that the body is safe. It is one
+ * cheap reader's opinion, which is worth stating and not worth dressing as a
+ * clean bill of health — so it reads as `neutral`, a fact among the facts.
+ *
+ * A gate that DID NOT RUN says so, out loud. An absent gate rendered as
+ * silence is indistinguishable from a clean one, which is the silent degrade
+ * AGENTS.md forbids; `reason` carries why (role resolution refused, or the
+ * input gate withheld the call) and is rendered with it.
+ *
+ * The sentence is ASSEMBLED from the parts that exist, so an absent `model`
+ * removes its own clause instead of leaving "said by ." on the window. The
+ * reason is copied verbatim — it is already bounded and masked by the kernel
+ * and re-wording a fact would be this surface inventing one.
+ */
+const classifierNotice = (
+  classifier: NonNullable<AgentApprovalRequested['classifier']>,
+): ClassifierNotice => {
+  // The model clause is BRANCH-AWARE, because "verdict from X" is itself a
+  // claim that a verdict exists. Two of these four shapes have none — the
+  // gate that did not run, and the consultation that came back empty — so on
+  // those the same field can only say which model was asked. Naming a verdict
+  // where there is none is the defect this bead is about, one field over
+  // again. Today's kernel sends no model on either of those paths
+  // (kernel.go:2016-2027 fills Reason alone), so this is unreachable from our
+  // own backend; the schema permits it, and a surface may not state a
+  // falsehood merely because the current producer never provokes it.
+  const say = (modelClause: (model: string) => string): string | undefined => {
+    const parts: string[] = []
+    if (classifier.reason) parts.push(endSentence(classifier.reason))
+    if (classifier.model) parts.push(modelClause(classifier.model))
+    return parts.length > 0 ? parts.join(' ') : undefined
+  }
+  const verdictFrom = (model: string): string => `Verdict from ${model}.`
+  const askedOf = (model: string): string => `Asked of ${model}.`
+
+  if (!classifier.consulted) {
+    return {
+      tone: 'warning',
+      title: 'The classifier gate did not run.',
+      description: say(askedOf),
+    }
+  }
+  switch (classifier.verdict) {
+    case 'clear':
+      return {
+        tone: 'neutral',
+        title: 'A second model read this proposal and raised no suspicion.',
+        description: say(verdictFrom),
+      }
+    case 'suspect':
+      return {
+        tone: 'warning',
+        title: 'A second model read this proposal and judged it suspect.',
+        description: say(verdictFrom),
+      }
+    default:
+      // Consulted, and no verdict came back. The wire permits it and
+      // inventing either verdict for it would be worse than saying so.
+      return {
+        tone: 'warning',
+        title: 'A second model was consulted and returned no verdict.',
+        description: say(askedOf),
+      }
+  }
+}
+
+/** A fact that has to sit next to another one, given its full stop — the
+ *  kernel's reason is a bounded sentence and may arrive without one. */
+const endSentence = (text: string): string => (/[.!?…]$/.test(text) ? text : `${text}.`)
+
+/** One argument the window states as machine output rather than as a row:
+ *  the model's own key, and the value it rendered to. */
+type ArgumentBlock = { name: string; value: string }
+
+/**
+ * Whether a rendered argument value is machine text rather than a fact.
+ *
+ * A newline is the whole of the test, and it is asked of the VALUE because
+ * that is where the property lives. The reason a skill body cannot be a row
+ * is not that it is called `body`; it is that it is several lines of machine
+ * text, and a fact list states a value as one line beside its name, so the
+ * instructions a person is being asked to adopt arrive looking like a caption
+ * on `name` and `description`. FactList's own header names the carve-out this
+ * implements: a value that needs a code block is not a fact in a list, it is
+ * a CodeBlock beside one.
+ *
+ * A list of known keys was the obvious alternative and it is wrong twice
+ * over. It says nothing about the next tool's multi-line argument — the
+ * second one would read as a caption until somebody noticed and added its
+ * name here — and it would put this surface back in the business of knowing
+ * what each tool's arguments mean, which is exactly what the exhaustive loop
+ * below was built to stop doing.
+ */
+const isMachineText = (value: string): boolean => value.includes('\n')
 
 export interface AgentApprovalPromptProps {
   open: boolean
@@ -298,7 +567,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    * put in the block — and then the command is simply one of the rows.
    */
   const proposedCommand = () => {
-    if (ask().tool !== 'run') return null
+    if (ask().tool !== COMMAND_TOOL) return null
     const command = parsedArguments()?.command
     return typeof command === 'string' && command !== '' ? command : null
   }
@@ -325,6 +594,63 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
+   * Every file the command names, read now (nocx-872jc.3). Empty is the
+   * ordinary case and draws NOTHING — not a heading, not an empty viewer:
+   * an affordance beside a command that names no file would read as "we
+   * looked and there was nothing to show", which is a claim, and a command
+   * that names none is not a command anything was looked for in.
+   */
+  const scripts = (): readonly ScriptReading[] => ask().scripts ?? []
+
+  /**
+   * The skill an install proposal resolved to, or null. The FIELD is the
+   * discriminator and not the tool name: the backend fills it for
+   * `skills.install` and for nothing else, and a branch that compared names
+   * would be one more literal to go stale on a rename (see
+   * TOOLS_THIS_WINDOW_NAMES).
+   */
+  const install = (): SkillInstall | null => ask().install ?? null
+
+  /**
+   * THE MANIFEST: every file that would land, in the order the backend sent
+   * them — SKILL.md first, because it is the document the others were named
+   * by. A skill is not one file, and a person told only about SKILL.md while
+   * `references/` and `scripts/` land beside it is approving a name rather
+   * than an act (design §5, §8). `included` is exactly what the tone means:
+   * this comes with it. There is no `excluded` row and there never will be —
+   * a file the backend could not fetch refuses the whole preview, so a bundle
+   * with a gap in it never reaches a question at all.
+   *
+   * It sits above the bytes rather than instead of them: the list is a fact
+   * about the skill, like its name, and the readouts below are the reading.
+   * Both are projections of the one array, so they cannot drift apart.
+   */
+  const installManifest = (): MarkerListItem[] =>
+    (install()?.files ?? []).map((file) => ({ text: file.path, tone: 'included' }))
+
+  /**
+   * One file that would land, as the viewer's own answer to "what is on
+   * screen". Always the `text` branch, and that is a property of this path
+   * rather than a simplification: every file here was fetched whole, as
+   * UTF-8, under the per-file ceiling, before the question could exist — a
+   * file that could not be got refuses the preview and no question is asked.
+   *
+   * The findings are MARKED WHERE THEY SIT rather than quoted underneath,
+   * which is what having the bytes on the window buys: the install dialog
+   * quotes its findings because a support file's bytes are not on it at all.
+   * The words for a pattern come from `scan-pattern-words.ts`, the one owner
+   * of that vocabulary in this renderer.
+   */
+  const installFileOutcome = (file: SkillInstallFile): FileReadoutOutcome => ({
+    kind: 'text',
+    text: file.text,
+    marks: file.findings.map((finding) => ({
+      lineNumber: finding.lineNumber,
+      label: scanPatternWords(finding.patternId),
+    })),
+  })
+
+  /**
    * The arguments the window has ALREADY stated, which are therefore not
    * repeated as rows. Derived from what is actually rendered rather than
    * from the tool name: `run`'s block states `command`, and the machine and
@@ -335,6 +661,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     const keys = new Set<string>()
     if (proposedCommand() !== null) keys.add('command')
     if (where() !== null) keys.add('sessionId')
+    // An install's own rows state the address that was FETCHED, which is the
+    // resolved fact; the model's `url` argument is the same string arriving
+    // by a worse route. One statement, and it is the resolved one.
+    if (install() !== null) keys.add('url')
     return keys
   }
 
@@ -356,14 +686,45 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
+   * The parsed arguments the window does not already state, split into the
+   * two ways it can state one: a row of the fact list, or a block beside it
+   * (nocx-m40iw). Both halves keep the model's own order and the model's own
+   * key.
+   *
+   * ONE walk and ONE partition. Two derivations — a rows function and a
+   * blocks function, each re-walking `Object.entries` and each re-applying
+   * the predicate — would be two owners of a single rule, and the first day
+   * they disagreed an argument would be stated twice or vanish from the
+   * question altogether. Exhaustiveness is what the arguments are owed, and
+   * a partition computed once is what keeps it true by construction: every
+   * argument lands in exactly one half.
+   */
+  const partitionedArguments = (): { rows: Fact[]; blocks: ArgumentBlock[] } => {
+    const rows: Fact[] = []
+    const blocks: ArgumentBlock[] = []
+    const args = parsedArguments()
+    if (args === null) return { rows, blocks }
+    const stated = statedInTheWindow()
+    for (const [key, value] of Object.entries(args)) {
+      if (stated.has(key)) continue
+      const rendered = argumentValue(key, value)
+      if (isMachineText(rendered)) blocks.push({ name: key, value: rendered })
+      else rows.push({ name: key, value: rendered })
+    }
+    return { rows, blocks }
+  }
+
+  /**
    * The facts of this call, each its own row (nocx-0mvpy.2): where it lands
    * — the pane's machine, tab and directory — then every parsed argument
    * the window does not already state, in the model's own order and under
    * the model's own names, then what the call can do.
    *
-   * Exhaustive by construction — the loop selects nothing, so nothing can be
-   * dropped. An argument this surface has never heard of is a row with the
-   * key the model used, which is the honest name for it.
+   * Exhaustive by construction — the partition above selects nothing, it only
+   * decides WHERE each argument is stated, so nothing can be dropped. An
+   * argument this surface has never heard of is a row with the key the model
+   * used, which is the honest name for it, unless its value is machine text,
+   * in which case it is a block under this list under the same key.
    */
   const facts = (): Fact[] => {
     const rows: Fact[] = []
@@ -405,14 +766,36 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         })
       }
     }
-    const args = parsedArguments()
-    if (args !== null) {
-      const stated = statedInTheWindow()
-      for (const [key, value] of Object.entries(args)) {
-        if (stated.has(key)) continue
-        rows.push({ name: key, value: argumentValue(key, value) })
-      }
+    // WHAT THE ADDRESS RESOLVED TO, as rows of the one fact list
+    // (nocx-ojfuc.2). The name and the source are what a person checks before
+    // adopting anything; the description is not here, because a row states a
+    // value beside a name and this window owes that sentence more than a row.
+    const skill = install()
+    if (skill !== null) {
+      rows.push({ name: 'name', value: skill.name })
+      rows.push({
+        name: 'source',
+        value: skill.url,
+        note: 'the address that was fetched, and what an update would re-read',
+      })
+      rows.push({
+        name: 'digest',
+        value: skill.digest,
+        // WHAT A DIGEST IS AND IS NOT, said here because a digest presented
+        // as assurance is worse than none: it reads as provenance and is
+        // not one (design §5 — good change detection after the first
+        // install, no evidence at it). What it does buy is stated too, and
+        // it is real: the install re-fetches and refuses anything that no
+        // longer hashes to this.
+        note: 'what these bytes hash to — the install refuses anything else. It says nothing about who wrote them',
+      })
     }
+    // Only the ARGUMENTS are partitioned, and only they should be. The pane's
+    // rows above and the expansion's rows below are single-line by
+    // construction — a machine name, a tab title, a directory, one word of a
+    // command and what it resolves to — so asking them whether they are
+    // machine text would be answering a question none of them can raise.
+    rows.push(...partitionedArguments().rows)
     // What the command's variables read as (nocx-4h0m7.5), as rows of the
     // ONE fact list — the assignments the command makes to itself first,
     // because they change what every expansion below them means, then each
@@ -441,7 +824,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         })
       }
     }
-    if (ask().reason === 'policy' && ask().tool === 'fetch.url') {
+    if (ask().reason === 'policy' && ask().tool === NETWORK_TOOL) {
       rows.push({
         name: 'network',
         value: 'reaches the network from this machine',
@@ -569,9 +952,43 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <Show
             when={proposedCommand()}
             fallback={
-              <p>
-                The assistant is asking to call <strong>{ask().tool}</strong>.
-              </p>
+              <Show
+                when={install()}
+                fallback={
+                  <p>
+                    The assistant is asking to call <strong>{ask().tool}</strong>.
+                  </p>
+                }
+              >
+                {(skill) => (
+                  <>
+                    <p>
+                      The assistant read a skill at an address it resolved, and is asking to install
+                      it. What it read is below — the name, the source and every file that would
+                      land.
+                    </p>
+                    {/*
+                      THE DESCRIPTION, PROMINENT, AND WHY IT IS. It is a
+                      StatusCard rather than a row because a row states a
+                      value beside a name, and this sentence is not a value:
+                      it is the one part of a skill that lives in the
+                      assistant's system prompt after the install, so it is
+                      what decides when these instructions get reached for on
+                      every ask from now on. `neutral`, because it is a fact
+                      about the skill and not a condition — nothing here is
+                      wrong, and a tone that said otherwise would be this
+                      window making a judgement the person is here to make.
+                      The description is the TITLE so it is verbatim, the way
+                      the source address is verbatim on its row.
+                    */}
+                    <StatusCard
+                      tone="neutral"
+                      title={skill().description}
+                      description="This is what the assistant is offered on every ask once this skill is installed — the one part of a skill that lives in its system prompt, so it is the sentence that decides when these instructions get reached for."
+                    />
+                  </>
+                )}
+              </Show>
             }
           >
             {(command) => (
@@ -614,6 +1031,153 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           </Show>
         </Show>
         <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
+        {/*
+          The arguments the fact list could not state, in the model's order,
+          BESIDE the rows rather than inside them (nocx-m40iw). A skill body
+          is the clearest case: it is the thing the person is actually being
+          asked to adopt, and a fact value renders it as a caption on `name`
+          and `description`. `label` is the argument's own key, the same
+          vocabulary the rows use, and `copy` is passed because a body is
+          precisely the thing somebody may want on their clipboard before
+          deciding — unlike the finding's quoted line below it.
+        */}
+        <For each={partitionedArguments().blocks}>
+          {(block) => (
+            <CodeBlock
+              copy={props.copy}
+              label={block.name}
+              ariaLabel={`The ${block.name} argument of ${ask().tool}`}
+            >
+              {block.value}
+            </CodeBlock>
+          )}
+        </For>
+        {/*
+          WHAT WOULD LAND, after the facts: the manifest first as a fact about
+          the skill, then the bytes of each file (nocx-ojfuc.2). The lead is
+          said ONCE above the whole set, as the script block below says its
+          own, because it is one sentence about what these bytes are.
+
+          It says the install is BOUND to them, which is a stronger claim than
+          the script block makes and a true one: the address is fetched again
+          and the whole bundle is compared against the digest on the row above,
+          so bytes that moved between this question and the answer are refused
+          rather than written. The script block's disclaimer is the opposite
+          sentence — a command's file can change before it runs — and the two
+          must not be confused, which is why neither is worded generically.
+        */}
+        <Show when={install()}>
+          {(skill) => (
+            <>
+              <p>
+                Every file this would write, and what each holds. Installing writes exactly these
+                bytes: the address is read again and anything that has changed since is refused.
+              </p>
+              <MarkerList items={installManifest()} />
+              <For each={skill().files}>
+                {(file) => (
+                  <FileReadout
+                    // The path is where the file would SIT, which is what the
+                    // manifest above names it. Mono key, like every other row
+                    // in this window.
+                    facts={[{ name: 'path', value: file.path }]}
+                    ariaLabel={`${file.path}, which installing “${skill().name}” would write`}
+                    outcome={installFileOutcome(file)}
+                  />
+                )}
+              </For>
+            </>
+          )}
+        </Show>
+        {/*
+          The file the command NAMES, after the facts, because a person reads
+          it once they have decided what the command IS (nocx-872jc.3). The
+          lead is said ONCE above the whole set rather than on each file: it
+          is one sentence about what these bytes are, and repeating it per
+          file would turn a disclaimer into a lecture.
+
+          It is the same viewer the Skills page reads a SKILL.md through, and
+          that is the point of the epic it belongs to — one capability in
+          three places, not three viewers. Nothing is scanned here, so no
+          `marks`: running the skill scanner over an arbitrary shell script
+          would be a new advisory surface on every command approval, and an
+          empty findings affordance would read as an all-clear nobody gave.
+        */}
+        <Show when={scripts().length > 0}>
+          <p>
+            And what those files hold right now. This is a reading, not what is sent — the command
+            above is what runs, exactly as written, and a file can change between this question and
+            the moment it runs.
+          </p>
+          <For each={scripts()}>
+            {(reading) => (
+              <FileReadout
+                // The path is the one the COMMAND wrote, which is the one
+                // on the line above; `verb` says what the command does with
+                // it, which is not the same act for `bash` and for `source`.
+                // Mono keys, like every other row in this window.
+                facts={[
+                  { name: 'path', value: reading.path },
+                  { name: 'verb', value: SCRIPT_VERB_WORDS[reading.verb] },
+                ]}
+                ariaLabel={`What ${reading.path} holds right now`}
+                outcome={scriptOutcome(reading)}
+              />
+            )}
+          </For>
+        </Show>
+        {/*
+          The scan's finding sits AFTER the facts, which is where the body it
+          is about has just been stated, and it is a StatusCard rather than a
+          paragraph because it is a condition and not body copy — the same
+          reason the Vault page stopped writing its state as prose. `warning`,
+          never `danger`: the tone a person reads is part of what the window
+          claims, and the spec is explicit that a finding does not make the
+          result unreadable. The line goes in a CodeBlock because it is
+          verbatim evidence — bytes from the proposed body, quoted, not
+          restated — and no `copy`, because there is nothing here a person
+          wants on their clipboard.
+        */}
+        <Show when={ask().finding}>
+          {(finding) => (
+            <Stack>
+              <StatusCard
+                tone="warning"
+                title={scanPatternWords(finding().patternId)}
+                description={`Line ${finding().lineNumber} of ${finding().path} matched the static scan. It is evidence to read beside the bytes, not a refusal — the write is still yours to allow or refuse.`}
+              />
+              <CodeBlock
+                ariaLabel={`Line ${finding().lineNumber} of ${finding().path}, which the static scan matched`}
+              >
+                {finding().line}
+              </CodeBlock>
+            </Stack>
+          )}
+        </Show>
+        {/*
+          The classifier's verdict is the finding's sibling and reads like it:
+          a condition stated as a card, after the body it judged. What it does
+          NOT have is a CodeBlock, and the asymmetry is deliberate — the
+          finding's `line` is verbatim bytes quoted out of the proposed body,
+          which is why it earns a block, while the classifier's `reason` is a
+          masked, bounded sentence a person reads. Prose belongs in the card's
+          description; putting it in a block would dress a sentence as machine
+          output. Absent entirely, this renders nothing at all: an ordinary
+          policy approval carries no classifier and must not grow an empty
+          slot for one.
+        */}
+        <Show when={ask().classifier}>
+          {(classifier) => {
+            const notice = () => classifierNotice(classifier())
+            return (
+              <StatusCard
+                tone={notice().tone}
+                title={notice().title}
+                description={notice().description}
+              />
+            )
+          }}
+        </Show>
         <Show when={(ask().findings?.length ?? 0) > 0}>
           <Stack gap="loose">
             <p>What was found, and where — never the material itself:</p>

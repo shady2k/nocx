@@ -22,9 +22,32 @@ export interface AgentApprovalRequested {
    */
   attempt: number
   /**
-   * The tool the model proposed calling.
+   * The tool the model proposed calling — one of the names internal/agenttools' declaration table declares, and nothing else. The set is CLOSED on purpose (nocx-69sew): the renderer keys two sentences on this value (the command block for the command carrier, the network row for fetch.url), and while it was a bare string a rename in the table — `run` became `session.run` — left the renderer comparing against a dead literal, which no test and no schema could see. Enumerated here, the generated renderer type is a union, so a comparison against a name the table no longer declares is a compile error rather than a branch that is quietly never taken; TestApprovalRequestedToolEnumMatchesTheTable is the other end, and fails the moment the table and this list disagree. Only a declared tool can reach this notification: the two names that are not declarations — the unknown-tool anchor and tools.search — are answered inside WrapInvokableToolCall and never reach the kernel that escalates.
    */
-  tool: string
+  tool:
+    | 'files.read'
+    | 'fetch.url'
+    | 'session.list'
+    | 'session.read'
+    | 'session.run'
+    | 'session.wait'
+    | 'files.edit'
+    | 'files.create'
+    | 'git.status'
+    | 'notes.search'
+    | 'notes.create'
+    | 'notes.update'
+    | 'notes.delete'
+    | 'snippets.list'
+    | 'snippets.create'
+    | 'snippets.update'
+    | 'snippets.delete'
+    | 'snippets.reorder'
+    | 'skills.read'
+    | 'skills.create'
+    | 'skills.update'
+    | 'skills.delete'
+    | 'skills.install'
   /**
    * The model's call id for the proposed call — part of the binding.
    */
@@ -74,9 +97,10 @@ export interface AgentApprovalRequested {
     id: string
   } | null
   /**
-   * Skill write only: the first static scan finding in the proposed body.
+   * skills.create and skills.update only: the first static scan finding in the bytes being proposed, naming the file it was found in — always SKILL.md, because that is the only file those two write. A skills.install proposal leaves this ABSENT and puts its findings in `install.files[].findings` instead, attached to the file each matched in: that question carries every file's bytes, so a finding is marked on the line it sits on, and a row repeating the first of them would be a second surface owning one fact (nocx-ojfuc.2). The path is stated rather than left out so this finding is the same shape skills.audit and skills.file carry; a surface handed a finding without one has to invent a subject for it.
    */
   finding?: {
+    path: string
     patternId: string
     line: string
     lineNumber: number
@@ -168,6 +192,101 @@ export interface AgentApprovalRequested {
        */
       target?: string
     }[]
+  } | null
+  /**
+   * Command proposals only (nocx-872jc.3): the whole of every file the proposed command NAMES, read at the moment the question was asked. `bash deploy.sh` is eleven characters whose meaning lives somewhere else, so a person shown only the command was approving a NAME rather than an act. Carried BESIDE the verbatim string and never instead of it, exactly as `expansion` is (nocx-4h0m7.5 settled that shape; nocx-y47mi SETTLED 1 — the verbatim command in `arguments` is what runs, byte for byte). It is a READING and not a promise: these are the file's contents NOW, nothing here is bound into the approval, and the file can change between this question and the run — the surface says so in its own words. Which files are named comes from the command parser's own resource report (the entries whose verb is execute or source), never from a second tokenizing of the command line, so the window can never show a file the policy gate did not see. ABSENT — not an empty array — whenever the parse named no such file, so a proposal with no script draws no empty affordance. EVERY named file is here or the field would lie by omission: `bash a.sh && bash b.sh` carries two, because showing the first of two looks complete while being half the act. Nothing is scanned: the bytes go to the person and reading them is theirs to do.
+   */
+  scripts?: {
+    /**
+     * The path THE COMMAND WROTE, verbatim — `deploy.sh`, not the absolute path it resolved to. It is what the person is reading on the command line above, and a second name for the same subject in the one place the two must obviously be the same thing would be this window's own ambiguity.
+     */
+    path: string
+    /**
+     * How the command names the file, in the parser's own vocabulary. `execute` is `bash x.sh`, `sh ./x.sh`, `./x.sh`; `source` is `source x.sh` and `. x.sh`, which changes the shell itself rather than running a subprocess — a difference a person deciding is owed.
+     */
+    verb: 'execute' | 'source'
+    /**
+     * The file verbatim. `""` with an empty refusal is an EMPTY FILE, which is a true thing to show; empty whenever refusal is set, because half a refused file is neither the file nor a refusal.
+     */
+    text: string
+    /**
+     * Why the bytes are not shown. Empty means nothing was refused and `text` is the file. The first three are skills.file's own values, spelled the same because they are the same sentences about the same facts and one viewer draws both. `unreadable` is this notification's own: skills.file answers a REQUEST and can fail it, while a question has nowhere to put an error, so "there was no file to read" must arrive as a fact inside the question or not at all. Never null.
+     */
+    refusal: '' | 'not-text' | 'too-large' | 'unreadable'
+    /**
+     * The read budget, in bytes, a too-large refusal was measured against. It travels so the viewer's sentence can name the limit rather than keeping a second copy of the number. The head of an over-budget file is deliberately not sent: a person who read the first 64 KiB of a script would believe they had read the script.
+     */
+    maxBytes: number
+    /**
+     * Why an unreadable file was not read, in the words the person reads — no session, no provider for that machine, a relative path with no directory to resolve it against, a file that is gone, permission refused, the read budget spent. Empty for every other refusal. It travels rather than being composed on the surface for the reason expansion.reason does: these differ in ways that matter to whoever is deciding, and a renderer writing one of its own would put our guess in front of them instead of what happened.
+     */
+    reason: string
+  }[]
+  /**
+   * skills.install only (nocx-ojfuc.2): what the proposed address RESOLVED to. The tool's arguments are one URL, and an address is not something anybody can decide about — the model was asked to install a skill from a page, and what it resolved that page to is the thing the person is actually deciding. A question naming the ask rather than the answer would let somebody approve a page they read and receive a repository they never saw. So this carries the resolution: the address that was fetched, the name and description the document gives itself, the digest the write is bound to, and EVERY file that will land, with its bytes. Absent for every other proposal. THE BYTES ARE HERE rather than behind a request, because none of these files is on disk yet and must not be until the person answers: skills.file reads an INSTALLED skill, a notification cannot answer a follow-up, and bytes fetched a second time from a mutable server slot would not be the bytes the question was built from. It is the shape `scripts` already has for the file a command names. The size is bounded upstream and not here: internal/skill refuses a bundle over 32 files, over 512 KiB of support text or with a document over 64 KiB before any question can exist.
+   */
+  install?: {
+    /**
+     * The address that was FETCHED — the one the digest, the manifest and every byte below came from, and never a redirect target. It is sent rather than left to the surface to dig out of `arguments`, so the question states its subject once.
+     */
+    url: string
+    /**
+     * The skill's name, from the document's own frontmatter. A URL's path never names a skill.
+     */
+    name: string
+    /**
+     * The frontmatter description — the one part of a skill that lives in the assistant's system prompt after the install, so it is what decides when these instructions are reached for. Design §5 calls for it to be drawn prominently for exactly that reason.
+     */
+    description: string
+    /**
+     * The sha256 over the whole bundle — the value Install compares its second fetch against, which is what makes "what was approved is what is written" a property rather than a claim. It is CHANGE DETECTION AND NEVER PROVENANCE (design §5: good change detection after the first install, no evidence at it): bytes a stranger served hash to this, and nobody has vouched for them. A surface that dressed it as assurance would be worse than one that omitted it.
+     */
+    digest: string
+    /**
+     * Every file that will land, SKILL.md first and the rest in the manifest's own order — the SAME list the store's bundle manifest names, never a shorter one: a person approving a manifest they were shown half of is approving a name rather than an act. There is no `excluded` counterpart and there never will be: a file that could not be fetched refuses the whole preview, so a bundle with a gap in it never reaches a question. SKILL.md is an entry of this list rather than a case beside it.
+     *
+     * @minItems 1
+     */
+    files: [
+      {
+        /**
+         * Where the file will sit, relative to the skill's own directory and slash-separated.
+         */
+        path: string
+        /**
+         * The file verbatim. For SKILL.md that is the WHOLE served document, frontmatter included — not the body: a finding names a file and counts its lines from that file's first byte, so a surface shown the body alone would put every line number out by the height of the frontmatter. There is no refusal vocabulary beside this field, and that is a fact about this path rather than an omission: every file here was fetched whole, as UTF-8, under the per-file ceiling, before the question could exist.
+         */
+        text: string
+        /**
+         * The static-scan matches IN THIS FILE, from the scan the preview already ran over these exact bytes — so a viewer can mark each on the line it matched rather than quoting it somewhere else. Never null: no matches is [], and an empty array is not an all-clear, because the scan is a fixed set of known phrasings. Advisory throughout: a finding is evidence beside the bytes and never a refusal.
+         */
+        findings: {
+          path: string
+          patternId: string
+          line: string
+          lineNumber: number
+        }[]
+      },
+      ...{
+        /**
+         * Where the file will sit, relative to the skill's own directory and slash-separated.
+         */
+        path: string
+        /**
+         * The file verbatim. For SKILL.md that is the WHOLE served document, frontmatter included — not the body: a finding names a file and counts its lines from that file's first byte, so a surface shown the body alone would put every line number out by the height of the frontmatter. There is no refusal vocabulary beside this field, and that is a fact about this path rather than an omission: every file here was fetched whole, as UTF-8, under the per-file ceiling, before the question could exist.
+         */
+        text: string
+        /**
+         * The static-scan matches IN THIS FILE, from the scan the preview already ran over these exact bytes — so a viewer can mark each on the line it matched rather than quoting it somewhere else. Never null: no matches is [], and an empty array is not an all-clear, because the scan is a fixed set of known phrasings. Advisory throughout: a finding is evidence beside the bytes and never a refusal.
+         */
+        findings: {
+          path: string
+          patternId: string
+          line: string
+          lineNumber: number
+        }[]
+      }[],
+    ]
   } | null
   /**
    * Egress only: what was found and where. Facts, never the material.

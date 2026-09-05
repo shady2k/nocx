@@ -234,8 +234,28 @@ type ApprovalRequest struct {
 	// approval surface, including malformed command parses.
 	CommandInvocation bool `json:"-"`
 	// Finding is the first static-scan finding in a skills.create or
-	// skills.update body, carried to the person with the exact proposal.
-	Finding *SkillScanFinding `json:"finding,omitempty"`
+	// skills.update body, carried to the person with the exact proposal. It
+	// is evidence about the bytes, never the body itself. The shape is
+	// skill.Finding because the scanner that produced it owns the spelling —
+	// a copy declared here would agree with it until the day it did not.
+	//
+	// A skills.install proposal fills Install instead and leaves this empty:
+	// its findings are attached to the files they matched in, where a
+	// surface can mark each on its own line (see request).
+	Finding *skill.Finding `json:"finding,omitempty"`
+	// Install is what an install proposal RESOLVED to — the address that was
+	// fetched, the skill's name and description, the digest the write is
+	// bound to, and every file that will land with its bytes
+	// (nocx-ojfuc.2). Absent for every other proposal.
+	//
+	// It is carried IN the question, like Scripts and for the same reason:
+	// none of these files is on disk yet, so there is nowhere to send a
+	// person to read one, and a notification has no way to answer a
+	// follow-up. Unlike Scripts it is not merely advisory — the digest here
+	// is the value Install refuses to write past — but nothing on this
+	// struct enforces that: the store does, from the record it kept when it
+	// showed these bytes.
+	Install *ApprovalInstall `json:"install,omitempty"`
 	// Classifier is the classifier's verdict or bounded failure fact for a
 	// skills write. It is absent for ordinary policy approvals.
 	Classifier *ApprovalClassifier `json:"classifier,omitempty"`
@@ -246,15 +266,19 @@ type ApprovalRequest struct {
 	// shell could be asked at all — that fact and its reason. Absent for
 	// every non-command proposal.
 	Expansion *ExpansionFacts `json:"expansion,omitempty"`
-}
-
-// SkillScanFinding is the first suspicious instruction pattern found in a
-// proposed skill body. It is evidence for the person approving the exact
-// bytes, never the body itself.
-type SkillScanFinding struct {
-	PatternID  string `json:"patternId"`
-	Line       string `json:"line"`
-	LineNumber int    `json:"lineNumber"`
+	// Scripts is the whole of every file the command NAMES, read now
+	// (nocx-872jc.3). It sits beside the verbatim command for the same
+	// reason Expansion does and with the same disclaimer: it is a READING,
+	// the string in Arguments is what runs, and the file can change between
+	// this question and that run. Absent for a proposal whose parse named
+	// no file to execute or source — which is every non-command proposal
+	// and most command ones.
+	//
+	// It is NOT on the Approval record, and that asymmetry is deliberate.
+	// ExpansionValues are there because they are re-read and compared before
+	// the call runs; a script is advisory only, so binding one would change
+	// what approving means (see internal/assistant/script.go).
+	Scripts []ScriptReading `json:"scripts,omitempty"`
 }
 
 // ApprovalClassifier is the classifier gate's fact carried with an approval
@@ -755,6 +779,25 @@ func (m *effectKernel) bindApprovalExpansions(ctx context.Context, ap *Approval,
 	}
 }
 
+// bindApprovalScripts puts the whole of every file the command names into the
+// question the person is shown (nocx-872jc.3).
+//
+// ONE HALF, not both, and that is the difference between this and
+// bindApprovalExpansions. The expansion goes on the Approval record too
+// because it is re-read and compared before the call runs; a script reading
+// is advisory, nothing compares it to anything later, and putting it on the
+// record would be the first half of a fence this bead did not ask for.
+//
+// It asks the INVOCATION which files the command names, never the raw string:
+// internal/content's parser already owns that question and a second answer to
+// it could disagree with the one the policy gate just used.
+func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalRequest, invocation content.Invocation) {
+	if req == nil {
+		return
+	}
+	req.Scripts = ScriptReadingsFor(ctx, m.runSeams.scripts, m.runCtx.Session, m.runSeams.cwd, invocation)
+}
+
 // ── the ask and the latch ─────────────────────────────────────────────────
 
 // escalate suspends the run BEFORE next — the call that is asking has not
@@ -767,7 +810,7 @@ func (m *effectKernel) bindApprovalExpansions(ctx context.Context, ap *Approval,
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation) error {
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, preview *skill.PreviewResult) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	bindApprovalFileVersions(&ap, decl, resources)
@@ -779,7 +822,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 		}
 		entryID = id
 	}
-	req := m.request(decl, callID, rawArgs, resources)
+	req := m.request(decl, callID, rawArgs, resources, preview)
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
@@ -787,6 +830,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 	// After the ledger record and before the latch: the person is shown the
 	// values, and the SAME values are what the record binds.
 	m.bindApprovalExpansions(ctx, &ap, req, decl, rawArgs)
+	m.bindApprovalScripts(ctx, req, invocation)
 	tripLatch(ctx, &ApprovalRequestedError{Request: req})
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -821,6 +865,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 	ask.Classifier = approvalClassifier(fact)
 	ask.EntryID = entryID
 	m.bindApprovalExpansions(ctx, &ap, ask, decl, rawArgs)
+	m.bindApprovalScripts(ctx, ask, invocation)
 	if m.approvals != nil {
 		ap.EntryID = entryID
 		m.approvals.Request(ap)
@@ -833,7 +878,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 // the effect and the resource come off the declaration the gate just decided
 // with: one builder is what keeps a classifier ask from reaching the surface
 // without an effect, which the notification's schema requires.
-func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef) *ApprovalRequest {
+func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef, preview *skill.PreviewResult) *ApprovalRequest {
 	req := &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
@@ -844,20 +889,72 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 		Resources: append([]agenttools.ResourceRef(nil), resources...),
 		Resource:  matchedResource(resources),
 	}
-	if decl.Name == "skills.create" || decl.Name == "skills.update" {
+	switch {
+	case decl.Name == "skills.create" || decl.Name == "skills.update":
 		var params struct {
 			Body string `json:"body"`
 		}
 		if err := json.Unmarshal([]byte(rawArgs), &params); err == nil {
-			if findings := skill.Scan([]byte(params.Body)); len(findings) > 0 {
+			// "SKILL.md": these two tools propose the body of exactly that
+			// file, and a finding with no file named is one a surface has
+			// to guess a subject for (internal/skill/scan.go).
+			if findings := skill.Scan("SKILL.md", []byte(params.Body)); len(findings) > 0 {
+				// Copy the value out rather than pointing into Scan's
+				// slice, so the request carries one finding and not a
+				// live view of the rest.
 				finding := findings[0]
-				req.Finding = &SkillScanFinding{
-					PatternID: finding.PatternID, Line: finding.Line, LineNumber: finding.LineNumber,
-				}
+				req.Finding = &finding
 			}
 		}
+	case preview != nil:
+		// AN INSTALL IS ASKED ABOUT AS A SKILL, NOT AS AN ADDRESS
+		// (nocx-ojfuc.2). Its arguments are one URL; everything a person
+		// decides on — the resolved address, the name, the description, the
+		// digest and every file that will land, with its bytes — comes out
+		// of the resolution the kernel ran before this ask was built.
+		//
+		// AND IT DOES NOT ALSO FILL Finding. That field is one finding
+		// wide, and nocx-ojfuc.1 filled it here as a placeholder for this
+		// bead. Now that every file travels with its own findings, marked
+		// on the line each matched, a row repeating the first of them would
+		// be a second surface owning one fact — and the loser of that pair
+		// goes on advertising what it can no longer deliver. The skill
+		// WRITE tools above keep the row: they propose one file's body,
+		// nothing carries its bytes for them, and there is nothing else on
+		// their question for a finding to be marked in.
+		req.Install = InstallFactsFor(preview)
 	}
 	return req
+}
+
+// resolveSkillInstall performs the read half of skills.install: the fetch,
+// the parse, the bundle and the scan that turn an address into a skill
+// somebody can be asked about. It writes nothing — the only mark it leaves is
+// the digest the store keeps so the install can refuse bytes that moved.
+//
+// The DECLARED DEADLINE is applied here as it is applied to the executor
+// (kernel.run), because this is the same call's work: half of it happens
+// before the person answers and half after, and a bound that governed only
+// the half after would leave the half a person is waiting through unbounded.
+func (k *effectKernel) resolveSkillInstall(ctx context.Context, decl agenttools.Tool, args map[string]any) (*skill.PreviewResult, error) {
+	library := k.runSeams.skills
+	if library == nil {
+		return nil, errors.New("no skill library is wired for this run")
+	}
+	url, ok := args["url"].(string)
+	if !ok || url == "" {
+		return nil, errors.New("the call named no address")
+	}
+	if decl.Deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, decl.Deadline)
+		defer cancel()
+	}
+	result, err := library.Preview(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func approvalClassifier(fact *classifierFact) *ApprovalClassifier {
@@ -1494,7 +1591,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
 		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
-		if err != nil {
+		var notCapturable *skillNotCapturableError
+		switch {
+		case errors.As(err, &notCapturable):
+			// The summarizer judged the conversation to hold nothing worth
+			// keeping, which is a verdict and not a breakage — so it reaches
+			// the person in its own words and is logged at info, where a
+			// warning would put a routine decision in the same column as an
+			// endpoint that fell over.
+			k.info("agent tool: skill draft declined", "reason", notCapturable.reason)
+			return modelResult{text: notCapturable.Error(), kind: modelNocxMessage}, nil
+		case err != nil:
 			k.warn("agent tool: skill draft could not be generated", "error", err)
 			return modelResult{
 				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
@@ -1590,9 +1697,58 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			if k.approvals != nil && k.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; verify before dispatch
 			}
-			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
+			return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, nil)
 		}
 
+	}
+	// 3a. THE CALL IS RESOLVED BEFORE ANYTHING JUDGES IT (nocx-ojfuc.1).
+	//
+	// skills.install's whole argument is an address, and an address is not
+	// something anybody can approve: the name, the description, the files
+	// that will land and every scan finding in them are in a document nobody
+	// has fetched yet. So the fetch happens HERE — after the policy has
+	// decided the call's class is not refused and its destination is inside
+	// the row's scopes, before the classifier is consulted and before the
+	// person is asked — and what is asked about is a skill rather than a URL.
+	//
+	// THE ALTERNATIVE, REJECTED, WAS TO ASK FIRST AND FETCH AFTER. It is
+	// tempting because it makes the tool a plain post-approval executor like
+	// every neighbour, and it cannot work: the question would name an
+	// address, the person would approve an address, and the bytes that
+	// arrived afterwards would be whatever answered it. Recorded here rather
+	// than left out so the next reader knows it was weighed — internal/skill
+	// is built for this order (Preview shows, Install re-fetches and refuses
+	// unless the bytes are the ones shown), and reversing it would strand
+	// that machinery.
+	//
+	// The cost is stated rather than hidden: this is a NETWORK READ TO A
+	// SOURCE THE MODEL CHOSE, and it happens before the person has answered.
+	// That is exactly what the declaration's cross-boundary class is for, and
+	// it is the class the gate above just decided on — so nothing here
+	// reaches an address the person's policy did not already permit this run
+	// to reach. It writes nothing: Preview's only effect on this machine is a
+	// digest the store keeps so Install can refuse bytes that moved.
+	//
+	// It is skipped on an APPROVED resume, and that is not an optimisation.
+	// The resume re-runs this whole pipeline; a second preview would fetch
+	// the document as it is NOW and remember THAT digest, so Install would
+	// compare the current bytes against themselves and the "the bytes moved
+	// between the question and the answer" refusal would never fire again.
+	var installPreview *skill.PreviewResult
+	if decl.Name == "skills.install" && !k.proposalApproved(decl.Name, callID, rawArgs) {
+		resolved, resolveErr := k.resolveSkillInstall(ctx, decl, args)
+		if resolveErr != nil {
+			// The store's refusals are already sentences that name the step
+			// that refused, in the person's words, and nothing was written
+			// — so this reaches the model as an ANSWER, the way the skill
+			// summarizer's decline does, rather than failing the run.
+			k.info("agent tool: skills.install could not be resolved", "error", resolveErr)
+			return modelResult{
+				text: "I could not read a skill at that address, so nothing was proposed and nothing was installed: " + resolveErr.Error(),
+				kind: modelNocxMessage,
+			}, nil
+		}
+		installPreview = resolved
 	}
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
@@ -1603,7 +1759,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// path where a person is already waiting.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources)
+		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installPreview)
 		if classifyErr != nil {
 			// The classifier's INPUT gate could not see (the recognizer
 			// failed closed): nothing decides this call unseen and
@@ -1619,9 +1775,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		if classifierFact != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources), classifierFact, resources, invocation)
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources, installPreview), classifierFact, resources, invocation)
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, installPreview)
 	}
 
 	// An approved proposal may reach here through either policyAsk or the
@@ -1961,6 +2117,12 @@ func (k *effectKernel) warn(msg string, args ...any) {
 	}
 }
 
+func (k *effectKernel) info(msg string, args ...any) {
+	if k.log != nil {
+		k.log.Info(msg, args...)
+	}
+}
+
 // FrameForModel marks a result as untrusted data before a carrier puts it in
 // front of a model (agenttools.Declaration.FrameToolResult). It is a
 // projection of the declaration and decides nothing; a carrier that does not
@@ -2007,7 +2169,7 @@ func (k *effectKernel) proposalApproved(toolName, callID, rawArgs string) bool {
 //
 // The returned ask is the suspension's approval request; the returned fact
 // is what the ledger records. A nil ask means the verdict was clear.
-func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef) (*ApprovalRequest, *classifierFact, error) {
+func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, preview *skill.PreviewResult) (*ApprovalRequest, *classifierFact, error) {
 	findings, err := k.screenResult(ctx, rawArgs, nil)
 	if err != nil {
 		return nil, nil, err
@@ -2017,14 +2179,14 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Findings: findings,
 			Reason:   "the classifier could not be consulted: " + findingsSentence(findings),
 		}
-		return k.request(decl, callID, rawArgs, resources), fact, nil
+		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
 	}
 	classification, err := k.classifier.Classify(ctx, ClassifyInput{Tool: decl.Name, CallID: callID, Arguments: rawArgs})
 	if err != nil {
 		fact := &classifierFact{
 			Reason: maskClassifierReason("the classifier could not be consulted: " + summarizeClassifierError(err)),
 		}
-		return k.request(decl, callID, rawArgs, resources), fact, nil
+		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
 	}
 	if classification.Verdict != ClassifierClear {
 		fact := &classifierFact{
@@ -2033,7 +2195,7 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Model:     classification.Model,
 			Reason:    maskClassifierReason(classification.Reason),
 		}
-		return k.request(decl, callID, rawArgs, resources), fact, nil
+		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
 	}
 	return nil, &classifierFact{
 		Consulted: true,

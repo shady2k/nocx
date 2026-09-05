@@ -1,8 +1,10 @@
 package skill
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/storage"
@@ -105,4 +107,184 @@ func TestApprovedDigestCoversEveryFileAndIsDeterministic(t *testing.T) {
 	if got := store.Index(); len(got) != 0 {
 		t.Fatalf("index = %+v, want reference files to invalidate approval", got)
 	}
+}
+
+// approvedDigest reads back what Approve actually wrote. Asserting on the
+// document rather than on a nil error is the point: Approve's whole job is to
+// record the digest, so "it returned no error" is not evidence it did.
+func approvedDigest(t *testing.T, configDir, name string) (string, bool) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(configDir, DocumentName)) //nolint:gosec // test path inside t.TempDir
+	if os.IsNotExist(err) {
+		// No document at all is the strongest form of "nothing recorded": a
+		// refused Approve must not create one.
+		return "", false
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", DocumentName, err)
+	}
+	var doc struct {
+		Digests map[string]string `json:"digests"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", DocumentName, err)
+	}
+	digest, found := doc.Digests[name]
+	return digest, found
+}
+
+// TestApproveRecordsAnInstalledSkillWhileTheManagedRootIsASymlink is the whole
+// bead (nocx-ablu5). Approving an INSTALLED skill wrote nothing into the
+// managed root and never has, yet a guard on that root refused the call — so a
+// person whose managed-skills happened to be a symlink could not approve a
+// skill that lives somewhere else entirely.
+func TestApproveRecordsAnInstalledSkillWhileTheManagedRootIsASymlink(t *testing.T) {
+	configDir := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(configDir, "managed-skills")); err != nil {
+		t.Fatalf("symlink managed root: %v", err)
+	}
+	installed := filepath.Join(configDir, "installed-skills")
+	writeExistingSkill(t, installed, "deploy", "name: deploy\ndescription: theirs", "installed body")
+	roots := installedRoots(t, configDir)
+	store := NewStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))
+	if got := listed(t, mustList(t, store), "deploy").Status; got != StatusChanged {
+		t.Fatalf("status before Approve = %q, want changed", got)
+	}
+
+	if err := store.Approve("deploy"); err != nil {
+		t.Fatalf("Approve an installed skill under a symlinked managed root: %v", err)
+	}
+
+	digest, recorded := approvedDigest(t, configDir, "deploy")
+	if !recorded {
+		t.Fatal("Approve recorded no digest for the installed skill")
+	}
+	want, err := hashSkillDirectory(filepath.Join(installed, "deploy"))
+	if err != nil {
+		t.Fatalf("hash installed skill: %v", err)
+	}
+	if digest != want {
+		t.Fatalf("digest = %q, want the hash of the installed skill's own directory %q", digest, want)
+	}
+	if got := listed(t, mustList(t, NewStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))), "deploy").Status; got != StatusApproved {
+		t.Fatalf("status after Approve = %q, want approved", got)
+	}
+	// The symlink target is READ-ONLY to Approve, and stays untouched.
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatalf("read symlink target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target = %v, want Approve to write nothing into the managed root", entries)
+	}
+}
+
+func TestApproveRecordsAChangedManagedSkill(t *testing.T) {
+	configDir := t.TempDir()
+	managed := filepath.Join(configDir, "managed-skills")
+	writeExistingSkill(t, managed, "deploy", "name: deploy\ndescription: drafted", "managed body")
+	roots := installedRoots(t, configDir)
+	store := NewStore(OSFileSystem{}, roots, storage.NewDocumentStore(configDir))
+	if got := listed(t, mustList(t, store), "deploy").Status; got != StatusChanged {
+		t.Fatalf("status before Approve = %q, want changed", got)
+	}
+
+	if err := store.Approve("deploy"); err != nil {
+		t.Fatalf("Approve a changed managed skill: %v", err)
+	}
+
+	digest, recorded := approvedDigest(t, configDir, "deploy")
+	if !recorded {
+		t.Fatal("Approve recorded no digest for the managed skill")
+	}
+	want, err := hashSkillDirectory(filepath.Join(managed, "deploy"))
+	if err != nil {
+		t.Fatalf("hash managed skill: %v", err)
+	}
+	if digest != want {
+		t.Fatalf("digest = %q, want %q", digest, want)
+	}
+}
+
+// TestApproveRefusesAProvenanceWithNoApprovalToRecord keeps the precondition
+// Approve actually has. Authored bytes are the person's own and builtin bytes
+// are ours; neither has an approval digest to diverge from, so there is
+// nothing for Approve to record and the document must stay untouched.
+func TestApproveRefusesAProvenanceWithNoApprovalToRecord(t *testing.T) {
+	for _, tc := range []struct{ name, skill string }{
+		{name: "authored", skill: "deploy"},
+		{name: "builtin", skill: "skill-authoring"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			writeExistingSkill(t, filepath.Join(configDir, "skills"), "deploy", "name: deploy\ndescription: mine", "authored body")
+			store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+
+			err := store.Approve(tc.skill)
+			if err == nil {
+				t.Fatalf("want Approve to refuse a %s skill", tc.name)
+			}
+			if !strings.Contains(err.Error(), "not a changed managed or installed skill") {
+				t.Fatalf("refusal = %q, want it to name the provenance precondition", err)
+			}
+			if _, recorded := approvedDigest(t, configDir, tc.skill); recorded {
+				t.Fatalf("Approve recorded a digest for a %s skill", tc.name)
+			}
+		})
+	}
+}
+
+func TestApproveRefusesAnUnchangedSkill(t *testing.T) {
+	configDir := t.TempDir()
+	writeExistingSkill(t, filepath.Join(configDir, "installed-skills"), "deploy", "name: deploy\ndescription: theirs", "installed body")
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+	if err := store.Approve("deploy"); err != nil {
+		t.Fatalf("first Approve: %v", err)
+	}
+	first, recorded := approvedDigest(t, configDir, "deploy")
+	if !recorded {
+		t.Fatal("first Approve recorded no digest")
+	}
+
+	err := store.Approve("deploy")
+	if err == nil {
+		t.Fatal("want Approve to refuse a skill that is already approved")
+	}
+	if !strings.Contains(err.Error(), "not changed") {
+		t.Fatalf("refusal = %q, want it to say the skill is not changed", err)
+	}
+	if second, _ := approvedDigest(t, configDir, "deploy"); second != first {
+		t.Fatalf("digest moved on a refused Approve: %q -> %q", first, second)
+	}
+}
+
+func TestApproveRefusesANameThatMatchesNothing(t *testing.T) {
+	configDir := t.TempDir()
+	store := NewStore(OSFileSystem{}, installedRoots(t, configDir), storage.NewDocumentStore(configDir))
+
+	err := store.Approve("absent")
+	if err == nil {
+		t.Fatal("want Approve to refuse a name no root holds")
+	}
+	if !strings.Contains(err.Error(), "not a changed managed or installed skill") {
+		t.Fatalf("refusal = %q, want it to name the precondition", err)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, DocumentName)); !os.IsNotExist(err) {
+		t.Fatalf("a refused Approve wrote %s: %v", DocumentName, err)
+	}
+}
+
+// mustList is List with its error already handled, so the assertions above
+// read as the state they are about.
+func mustList(t *testing.T, store *Store) ListResult {
+	t.Helper()
+	result, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if result.DocumentError != "" {
+		t.Fatalf("List document error: %s", result.DocumentError)
+	}
+	return result
 }

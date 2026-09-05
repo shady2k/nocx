@@ -145,6 +145,7 @@ func assertProseSealed(t *testing.T, led content.LedgerRepository, turnID string
 // being tested is the transport's handling of the ordered stream and not a
 // second path built for the test.
 type toolCallScript struct {
+	unauditedClient
 	events []assistant.AskEvent
 	// err is returned after the events are played, so one script can be
 	// "answer this much, then suspend".

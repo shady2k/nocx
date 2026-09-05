@@ -81,8 +81,18 @@ export function formatRelativeTime(at: number, now: number): string {
   return `${Math.round(age / DAY)} d ago`
 }
 
-/** The exact moment, in the reader's own locale — the hover detail behind a
- *  relative label, never the label itself. */
+/** The exact moment, in the reader's own locale.
+ *
+ *  Two callers, and they want it for opposite reasons. An operation row wants
+ *  the hover detail behind a relative label — there, this is never the label
+ *  itself, because the list is read minutes after the work finished and the
+ *  reader would have to do the subtraction. A RECORD wants the opposite: the
+ *  Skills card dates when a skill's bytes were taken, and that is read months
+ *  later, where "312 d ago" is the form that makes the reader do arithmetic.
+ *
+ *  So the rule is not "absolute is for hovers" but "relative for what just
+ *  happened, absolute for what is on file", and this function is the one
+ *  owner of the absolute form either way. */
 export function formatTimestamp(at: number): string {
   if (!Number.isFinite(at)) return ''
   return new Date(at).toLocaleString()

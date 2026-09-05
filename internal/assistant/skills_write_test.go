@@ -43,6 +43,17 @@ func (s *skillsWriteLibrary) Delete(name string) error {
 	return nil
 }
 
+// Refusing rather than recording: this fake is the WRITE seam, and an
+// install that answered here would let a test about skills.create pass
+// while silently exercising a fetch path nobody wired.
+func (s *skillsWriteLibrary) Preview(context.Context, string) (skill.PreviewResult, error) {
+	return skill.PreviewResult{}, errors.New("not used")
+}
+
+func (s *skillsWriteLibrary) Install(context.Context, string) (skill.InstallResult, error) {
+	return skill.InstallResult{}, errors.New("not used")
+}
+
 func skillsWriteTestCapability(name string) *agenttools.SkillWriteScope {
 	return agenttools.NewSkillWriteScope([]agenttools.ResourceRef{{
 		Kind: content.ResourceContent,
@@ -61,9 +72,9 @@ func TestExecuteSkillsCreateScansBodyBeforeCallingStore(t *testing.T) {
 		t.Fatalf("store calls = %v, want one create", library.calls)
 	}
 	var result struct {
-		Status  string             `json:"status"`
-		Name    string             `json:"name"`
-		Finding *skillWriteFinding `json:"finding"`
+		Status  string         `json:"status"`
+		Name    string         `json:"name"`
+		Finding *skill.Finding `json:"finding"`
 	}
 	if err := json.Unmarshal([]byte(got), &result); err != nil {
 		t.Fatalf("decode result: %v", err)
@@ -236,8 +247,8 @@ func TestSkillsWriteDTOConformsToContracts(t *testing.T) {
 			schema := loadSkillsWriteContract(t, tc.name)
 			result := skillWriteResult{Status: tc.status, Name: "deploy"}
 			if tc.name != "delete" {
-				result.Finding = &skillWriteFinding{
-					PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
+				result.Finding = &skill.Finding{
+					Path: "SKILL.md", PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
 				}
 			}
 			raw, err := json.Marshal(result)

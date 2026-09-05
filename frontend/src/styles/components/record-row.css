@@ -13,6 +13,35 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Shrinks, and shrinks FIRST: the badge beside it is a word or two and the
+     name can be a path, so a narrow row ellipsises the name and keeps the
+     category legible. `min-width: 0` is what lets the ellipsis above fire at
+     all inside a flex line — without it the title's automatic minimum is its
+     full text and the badge is pushed off the row instead. */
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* ── The heading line (nocx-6jc4f) ───────────────────────────────────────
+   The record's name and what kind of record it is, on one line. The badge
+   used to head the meta line, where it read as the first clause of the
+   record's own description; it belongs with the name, which is the other
+   thing that says what this record IS.
+
+   Centred rather than baseline-aligned: a Badge is a padded box, and aligning
+   its text baseline to the name's leaves the box sitting low against a line
+   it is taller than. */
+.ui-record-row__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/* The badge keeps its own size whatever the name does — it is the part that
+   must stay readable when the row is narrow. */
+.ui-record-row__heading > .ui-badge {
+  flex: 0 0 auto;
 }
 
 /* ── The name as the control (nocx-5xwub) ────────────────────────────────
@@ -29,7 +58,10 @@
    that happens to focus must not paint one. */
 .ui-record-row__open {
   display: block;
-  width: 100%;
+  /* `max-width` and not `width: 100%`: the name now shares its line with the
+     kind badge, so a button claiming the full width would push the badge off
+     the row. The click target is the name, which is what it names. */
+  max-width: 100%;
   margin: 0;
   padding: 0;
   border: none;
@@ -46,9 +78,9 @@
   outline-offset: 2px;
 }
 
-/* The descriptive line: the kind badge, the meta text, and the status, on
-   one row. The gap is the meta line's own rhythm; the badge keeps its own
-   padding and the status its own dot. */
+/* The descriptive line: the record's own words and its status, on one row.
+   The kind badge left it for the heading line above (nocx-6jc4f). The gap is
+   the meta line's own rhythm; the status keeps its own dot. */
 .ui-record-row__meta {
   display: flex;
   align-items: center;
@@ -217,4 +249,35 @@
 .ui-record-row__disclosed {
   margin-top: var(--space-1);
   min-width: 0;
+}
+
+/* ── The row's state cell (nocx-xa0cq) ───────────────────────────────────
+   A row's STATE and a row's ACTIONS are two kinds of thing, and this cell is
+   the geometry saying so. It hangs off the trailing edge of the row's action
+   region, after whatever the surface put there, so the control's place is the
+   row's right edge rather than the sum of the buttons that happen to precede
+   it. The Skills list drew its enable switch first inside a free-form action
+   group and had three row shapes — no buttons, Delete, Re-approve and Delete
+   — so one switch stood in three places down a list a person scans.
+
+   Reordering inside the group was the cheap alternative and record-row.tsx
+   says why it is refused: last is an anchor only until something else is
+   added after it, and then the destructive button is the one that moves.
+
+   It is RecordRow's part and carries its name, but it is NOT a descendant of
+   `.ui-record-row`: that element fills CollectionRow's `info` slot, and this
+   cell has to sit in the actions region on the other side of the row. Nothing
+   here may be written as `.ui-record-row .ui-record-row__state` — it would
+   match nothing.
+
+   One switch's width, held whether or not the cell has anything in it, so a
+   row with no state control stops its buttons where its neighbours' stop.
+   Content hangs from the right, so a control narrower than the column keeps
+   the same anchor as the ones beside it. */
+.ui-record-row__state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: var(--control-width-switch);
 }

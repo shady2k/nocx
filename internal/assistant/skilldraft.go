@@ -40,12 +40,58 @@ func ComposeDraftInput(turns []content.PriorTurn, _ []AttachedContentItem) strin
 	return b.String()
 }
 
+// The capture rules below are hermes's, and they are stated to the model
+// rather than checked in Go on purpose. Every one of them is a question about
+// what a conversation MEANT — whether a claim is about a tool or about a
+// configuration, whether an error was transient, whether an errand is a class
+// of work — and Go can read only the bytes. The alternative considered and
+// rejected was a structural pre-check over the transcript: refuse when it
+// carries no assistant turn at all, on the theory that nothing can have
+// worked if nothing was ever said. That check would pass exactly the
+// transcripts this bead is named for, because a session that tries five
+// things and fails at all five is full of assistant prose; it would refuse
+// only transcripts that could not reach here anyway, while binding
+// DraftSkill's contract to ComposeDraftInput's line prefixes.
+//
+// So the model judges and Go owns the protocol: a refusal is a reply shape,
+// not an absence, and every rule carries the reason it exists. A rule stated
+// without its reason is the one a model argues itself out of — the
+// negative-claim rule most of all, whose damage arrives months later, when
+// the tool has long been fixed and the skill is still saying it is broken.
 const skillDraftSystemPrompt = `You write one reusable terminal skill from a conversation.
 
 The skill must describe a procedure the person can follow again. Do not retell the conversation, include tool output, include terminal output, or invent facts that are not in the conversation.
 
-Reply with exactly one JSON object and no markdown:
-{"name":"lowercase-kebab-name","description":"one-line description","body":"the reusable procedure"}`
+Some conversations hold nothing worth keeping, and a skill written from one of those is worse than no skill, because whatever you record is read back later as tested guidance. Draft nothing when the conversation offers only:
+- An environment-dependent failure: a missing binary, "command not found", an unconfigured credential, an uninstalled package. The person can fix these, so they are not durable rules. If the conversation found the fix, the fix is the skill and the failure is not.
+- A negative claim about a tool or a feature, such as "X is broken" or "the browser tools do not work". These harden into refusals that get cited for months after the actual problem was fixed.
+- A transient error that resolved before the conversation ended. If a retry worked, the lesson is the retry and not the original failure.
+- A one-off task narrative. "Summarize today's market" is one errand, not a class of work that warrants a skill.
+- Attempts that ended without finding a working method: several things were tried, none of them worked, and the person was left to check by hand. Writing those up as a recommended approach presents an untested sequence of failures as validated guidance a later run will trust and repeat.
+
+Reply with exactly one JSON object and no markdown. When the conversation holds a procedure worth keeping:
+{"name":"lowercase-kebab-name","description":"one-line description","body":"the reusable procedure"}
+When it does not, say in one clause what the conversation was missing and draft nothing:
+{"nothing_to_capture":"the reason, in one clause"}`
+
+// skillNotCapturableError is the summarizer declining, and it is an ANSWER
+// rather than a failure: the person asked a reasonable thing and gets a
+// sentence back. The kernel tells it apart from a genuine drafting failure by
+// type, so a conversation with nothing worth keeping never reads to the
+// person like an endpoint that fell over.
+type skillNotCapturableError struct{ reason string }
+
+func (e *skillNotCapturableError) Error() string {
+	return "I looked through this conversation for a durable procedure worth keeping and did not find one: " +
+		e.reason +
+		". Recording it anyway would hand a later run untested guidance to trust, so I have saved nothing — ask me again once something here has worked."
+}
+
+// maxNotCapturableReason bounds the one clause the summarizer supplies. It is
+// model prose reaching a person unquoted, so it gets the same treatment as
+// any other model text on that path rather than being trusted for its
+// brevity.
+const maxNotCapturableReason = 300
 
 // DraftSkill asks the summarizing model to turn a trusted transcript into the
 // three fields a skills.create proposal needs. The caller remains responsible
@@ -71,12 +117,19 @@ func draftSkillGenerate(ctx context.Context, client einoModel.BaseChatModel, inp
 	}
 
 	var draft struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Body        string `json:"body"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		Body             string `json:"body"`
+		NothingToCapture string `json:"nothing_to_capture"`
 	}
 	if err := json.Unmarshal([]byte(resp.Content), &draft); err != nil {
 		return "", "", "", fmt.Errorf("skill draft: answer is not JSON: %w", err)
+	}
+	// The refusal is read before the three fields, and it wins if both
+	// arrive: a model that hedged by filling in a draft alongside its own
+	// reason for not writing one has still told us the draft is unsafe.
+	if reason := collapseSpace(draft.NothingToCapture); reason != "" {
+		return "", "", "", &skillNotCapturableError{reason: truncateRunes(reason, maxNotCapturableReason)}
 	}
 	if strings.TrimSpace(draft.Name) == "" || strings.TrimSpace(draft.Description) == "" || strings.TrimSpace(draft.Body) == "" {
 		return "", "", "", errors.New("skill draft: answer must include name, description, and body")
@@ -162,4 +215,10 @@ func draftSkillWithHeaders(ctx context.Context, client einoModel.BaseChatModel, 
 	m, names := headerMap(headers)
 	ctx = withCustomHeaderNames(ctx, names)
 	return draftSkillGenerate(ctx, client, input, openai.WithExtraHeader(m))
+}
+
+// collapseSpace folds every run of whitespace to one space so a multi-line
+// reason cannot break the single sentence it is spliced into.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

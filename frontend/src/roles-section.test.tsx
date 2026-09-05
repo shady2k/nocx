@@ -175,6 +175,25 @@ describe('the closed role set is visible', () => {
     })
     expect(text(roleRows(container)[0])).toMatch(/No model assigned/)
   })
+  it('shows that an unassigned auditing role uses the answering endpoint', async () => {
+    // The audit is a button a person presses, so being billed for a model
+    // they did not choose is exactly the surprise role.go's note exists to
+    // prevent — and the page has to say it BEFORE they press it, not only
+    // in the reading afterwards.
+    const { container } = mountRoles(
+      [ep('e1', 'OpenAI', ['gpt-4o'])],
+      [
+        role('answering', 'e1', 'gpt-4o'),
+        role('classifier', null, null),
+        role('summarizing', null, null),
+        role('auditing', null, null),
+      ],
+    )
+    await vi.waitFor(() => expect(roleRows(container).length).toBe(4))
+    expect(text(roleRows(container)[3])).toMatch(/Auditing/)
+    expect(text(roleRows(container)[3])).toMatch(/answering role.*OpenAI|OpenAI.*answering role/i)
+  })
+
   it('shows that an unassigned summarizing role uses the answering endpoint', async () => {
     const { container } = mountRoles(
       [ep('e1', 'OpenAI', ['gpt-4o'])],

@@ -320,6 +320,15 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"settings.set": {
 			[]byte(`{"key":"clipboard.osc52Suppressed","value":true}`),
 		},
+		"skills.audit": {
+			[]byte(`{"name":"deploy"}`),
+		},
+		"skills.file": {
+			[]byte(`{"name":"deploy","path":"references/hosts.md"}`),
+		},
+		"skills.files": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"skills.list": {
 			[]byte(`{}`),
 		},

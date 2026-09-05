@@ -16,10 +16,20 @@ import (
 // intentionally absent: they come from the binary and are restored by the
 // destination build. Files retain their relative paths so references and
 // other files in each skill directory survive a profile move unchanged.
+//
+// Installed skills travel too (owner decision, 2026-09-03; design §11,
+// nocx-qja4m.8). What that accepts, written here because it is the part that
+// is easy to miss: the approval digest lives in skills.json, which travels as
+// Settings, and it is computed over relative content — so a restored
+// installed skill arrives `approved`, replaying on the new machine an
+// approval the person gave once for one set of bytes. It is the same
+// trade-off already taken for managed, which a model drafts and which travels
+// approved today.
 type Snapshot struct {
-	Authored []SnapshotTree  `json:"authored"`
-	Managed  []SnapshotTree  `json:"managed"`
-	Settings json.RawMessage `json:"settings,omitempty"`
+	Authored  []SnapshotTree  `json:"authored"`
+	Managed   []SnapshotTree  `json:"managed"`
+	Installed []SnapshotTree  `json:"installed"`
+	Settings  json.RawMessage `json:"settings,omitempty"`
 }
 
 type SnapshotTree struct {
@@ -32,27 +42,53 @@ type SnapshotFile struct {
 	Bytes string `json:"bytes"`
 }
 
-// Snapshot returns the authored and managed skill trees plus skills.json.
-// Builtins never enter the snapshot.
+// TreeCount is how many skill directories a snapshot carries, and it is the
+// one owner of that sum. Every caller that reports a skill count — the create
+// summary, the restore result and the restore preview — asked it separately,
+// so a fourth root meant three places to remember; they now ask here.
+func (s Snapshot) TreeCount() int {
+	return len(s.Authored) + len(s.Managed) + len(s.Installed)
+}
+
+// treesFor maps a provenance onto the field of this snapshot that carries it,
+// and is the single owner of which roots a backup carries at all. Both
+// directions read it, so a root cannot be walked by one and ignored by the
+// other — which is exactly the defect it replaces: Snapshot's `root.Dir != ""`
+// guard preceded the provenance switch, so the installed root was walked and
+// its result discarded, and an unreadable file under it failed a whole backup
+// for contents that never reached the snapshot.
+//
+// Builtin is deliberately absent, so it reports false: those bytes come from
+// the binary and the destination build restores them.
+func (s *Snapshot) treesFor(provenance Provenance) (*[]SnapshotTree, bool) {
+	switch provenance {
+	case ProvenanceAuthored:
+		return &s.Authored, true
+	case ProvenanceManaged:
+		return &s.Managed, true
+	case ProvenanceInstalled:
+		return &s.Installed, true
+	}
+	return nil, false
+}
+
+// Snapshot returns the authored, managed and installed skill trees plus
+// skills.json. Builtins never enter the snapshot.
 func (s *Store) Snapshot() (Snapshot, error) {
 	if s == nil {
 		return Snapshot{}, errUnavailable
 	}
 	var out Snapshot
 	for _, root := range s.roots {
-		if root.Dir == "" {
+		into, carried := out.treesFor(root.Provenance)
+		if !carried || root.Dir == "" {
 			continue
 		}
 		trees, err := snapshotRoot(root.Dir)
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("snapshot %s skills: %w", root.Provenance, err)
 		}
-		switch root.Provenance {
-		case ProvenanceAuthored:
-			out.Authored = append(out.Authored, trees...)
-		case ProvenanceManaged:
-			out.Managed = append(out.Managed, trees...)
-		}
+		*into = append(*into, trees...)
 	}
 	if s.docStore != nil {
 		var raw json.RawMessage
@@ -67,16 +103,22 @@ func (s *Store) Snapshot() (Snapshot, error) {
 	return out, nil
 }
 
-// RestoreSnapshot atomically writes each file in the authored and managed
-// trees and then restores skills.json. The snapshot's interval begins when a
-// file is renamed into place and ends after the settings document is written;
-// callers journal the prior snapshot before entering it.
+// RestoreSnapshot atomically writes each file in the authored, managed and
+// installed trees and then restores skills.json. The snapshot's interval
+// begins when a file is renamed into place and ends after the settings
+// document is written; callers journal the prior snapshot before entering it.
+//
+// A field the snapshot does not carry — an `installed` written by no build
+// that existed before the decision above — decodes as nil, and a nil tree list
+// writes nothing. Restore never deletes, so a snapshot silent about a root
+// leaves that root exactly as it found it.
 func (s *Store) RestoreSnapshot(snapshot Snapshot) error {
 	if s == nil {
 		return errUnavailable
 	}
 	for _, root := range s.roots {
-		if root.Provenance != ProvenanceAuthored && root.Provenance != ProvenanceManaged {
+		trees, carried := snapshot.treesFor(root.Provenance)
+		if !carried {
 			continue
 		}
 		if root.Dir == "" {
@@ -85,11 +127,7 @@ func (s *Store) RestoreSnapshot(snapshot Snapshot) error {
 		if err := ensureRoot(root.Dir); err != nil {
 			return fmt.Errorf("restore %s skill root: %w", root.Provenance, err)
 		}
-		trees := snapshot.Authored
-		if root.Provenance == ProvenanceManaged {
-			trees = snapshot.Managed
-		}
-		for _, tree := range trees {
+		for _, tree := range *trees {
 			if err := restoreTree(s, root.Dir, tree); err != nil {
 				return fmt.Errorf("restore %s skill %q: %w", root.Provenance, tree.Name, err)
 			}
@@ -139,37 +177,24 @@ func snapshotRoot(root string) ([]SnapshotTree, error) {
 		treeRoot := filepath.Join(root, entry.Name())
 		var tree SnapshotTree
 		tree.Name = entry.Name()
-		err := filepath.WalkDir(treeRoot, func(path string, item fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if item.Type()&os.ModeSymlink != 0 {
-				if item.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if item.IsDir() {
-				return nil
-			}
-			if !item.Type().IsRegular() {
-				return nil
-			}
-			rel, err := filepath.Rel(treeRoot, path)
-			if err != nil {
-				return err
-			}
-			bytes, err := os.ReadFile(path) //nolint:gosec // path is beneath a configured skill root
-			if err != nil {
-				return err
-			}
-			tree.Files = append(tree.Files, SnapshotFile{Path: filepath.ToSlash(rel), Bytes: string(bytes)})
-			return nil
-		})
+		// WHICH files a skill is made of is skillFilePaths' answer, here and
+		// on the card (files.go). This walked with its own copy of the rules
+		// until the card needed the same list, and two walks over one
+		// directory are two answers to "what is this skill made of" that
+		// agree until one of them is changed. What stays here is the only
+		// part that differs: a backup wants the BYTES, so it joins each path
+		// back onto the directory and reads it.
+		paths, err := skillFilePaths(Root{Dir: root}, entry.Name())
 		if err != nil {
 			return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
 		}
-		sort.Slice(tree.Files, func(i, j int) bool { return tree.Files[i].Path < tree.Files[j].Path })
+		for _, rel := range paths {
+			bytes, err := os.ReadFile(filepath.Join(treeRoot, filepath.FromSlash(rel))) //nolint:gosec // path is beneath a configured skill root
+			if err != nil {
+				return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
+			}
+			tree.Files = append(tree.Files, SnapshotFile{Path: rel, Bytes: string(bytes)})
+		}
 		trees = append(trees, tree)
 	}
 	sort.Slice(trees, func(i, j int) bool { return trees[i].Name < trees[j].Name })

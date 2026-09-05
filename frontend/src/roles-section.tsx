@@ -3,8 +3,9 @@
  * (endpoint, model) pair to each model role (bead nocx-e6kn2), and names
  * the ONE default pair every role without an assignment of its own answers
  * with (bead nocx-rikz5). A feature asks for a role — the assistant asks
- * for `answering`; the classifier bead will ask for `classifier`, and skill
- * drafting asks for `summarizing` — and NEVER names a model id; the pair is
+ * for `answering`; the classifier bead will ask for `classifier`; skill
+ * drafting asks for `summarizing`; and the skill card's audit button asks
+ * for `auditing` — and NEVER names a model id; the pair is
  * written HERE and every feature picks it up at its next call, resolved in
  * exactly one place on the backend.
  *
@@ -61,6 +62,7 @@ const ROLE_NAME: Record<string, string> = {
   answering: 'Answering',
   classifier: 'Classifier',
   summarizing: 'Summarizing',
+  auditing: 'Auditing',
 }
 
 const ROLE_DESCRIPTION: Record<string, string> = {
@@ -69,6 +71,28 @@ const ROLE_DESCRIPTION: Record<string, string> = {
     'The second model that will judge proposed tool calls. No feature uses it yet; it is assignable so the classifier task (its own bead) has a role to ask for.',
   summarizing:
     'The model that drafts reusable skills from your own words and the procedures you want to remember.',
+  auditing:
+    'The model that reads one skill you already hold and describes it back to you when you ask. It gates nothing: the reading is yours to act on, and it never changes what the assistant may do.',
+}
+
+/** The roles that spend the ANSWERING role's endpoint when they have no
+ *  assignment and no default stands behind them, and what each spends it ON.
+ *
+ *  It is one table rather than a branch per role for the reason
+ *  `roleStateLine` is one function: the page and the backend may not grow two
+ *  answers to "what does this role mean", and a second `if` here would be the
+ *  first half of that. The backend's fallback is the other half — the
+ *  transport falls back only for the roles named here, and adding a row
+ *  without adding the consumer would put a promise on this page that nothing
+ *  keeps.
+ *
+ *  The phrase completes "…will use the answering role's endpoint", so it is a
+ *  noun phrase for the ACTIVITY that is about to be billed, not the role's
+ *  name: a person reading this is deciding whether to care, and "auditing a
+ *  skill" tells them when it will happen while "the auditing role" does not. */
+const FALLS_BACK_TO_ANSWERING: Record<string, string> = {
+  summarizing: 'skill drafting',
+  auditing: 'auditing a skill',
 }
 
 /** The label the endpoint select shows for "no assignment of my own" — the
@@ -108,7 +132,8 @@ export function roleStateLine(
     return brokenLine(row.endpointId, row.model, endpoints)
   }
   if (!def) {
-    if ((row.role as string) === 'summarizing') {
+    const spends = FALLS_BACK_TO_ANSWERING[row.role as string]
+    if (spends) {
       const answeringEndpoint =
         answering?.endpointId === null || answering?.endpointId === undefined
           ? undefined
@@ -116,7 +141,7 @@ export function roleStateLine(
       const endpointNote = answeringEndpoint ? ` (${answeringEndpoint.name})` : ''
       return {
         tone: 'warning',
-        text: `No model assigned — skill drafting will use the answering role's endpoint${endpointNote}`,
+        text: `No model assigned — ${spends} will use the answering role's endpoint${endpointNote}`,
       }
     }
     return { tone: 'warning', text: 'No model assigned — the role cannot be used until it is' }

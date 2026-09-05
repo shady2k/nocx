@@ -179,6 +179,79 @@ function openSection(container: HTMLElement, label: string): void {
   link!.click()
 }
 
+/** A skills backend with one authored skill, for the pages that need one. */
+function fakeSkillsClient(): SkillsClientLike {
+  return {
+    audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
+    list: vi.fn().mockResolvedValue({
+      documentPath: '/tmp/nocx/skills.json',
+      skills: [
+        {
+          name: 'deploy',
+          description: 'Deploy the service',
+          provenance: 'authored',
+          path: '/tmp/nocx/skills/deploy/SKILL.md',
+          enabled: true,
+          status: 'approved',
+        },
+      ],
+    }),
+    setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
+    remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
+    approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
+    file: vi.fn().mockResolvedValue({
+      name: 'deploy',
+      path: 'SKILL.md',
+      provenance: 'authored' as const,
+      text: '# Deploy\n',
+      refusal: '' as const,
+      maxBytes: 65536,
+    }),
+    files: vi.fn().mockResolvedValue({
+      name: 'deploy',
+      provenance: 'authored' as const,
+      files: ['SKILL.md'],
+      truncated: false,
+      maxFiles: 256,
+    }),
+  }
+}
+
+/** Whether the Skills list has rendered a row for this skill, found by the
+ *  name a person reads on it. The rows are the kit's RecordRow (nocx-fe7fe.3),
+ *  which has no per-row identity hook of its own — and needs none: the title
+ *  is both the visible name and the row's identity. */
+function hasSkillRow(root: HTMLElement, name: string): boolean {
+  return Array.from(root.querySelectorAll('.ui-collection-row .ui-record-row__title')).some(
+    (title) => title.textContent === name,
+  )
+}
+
+/** SettingsContent with a skills store and nothing else — the store is the
+ *  fifteenth positional dependency, which is worth writing down once. */
+function newSettingsContentWithSkills(
+  profileClient: ProfileClient,
+  skillsStore: SkillsStore,
+): SettingsContent {
+  return new SettingsContent(
+    profileClient,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    skillsStore,
+  )
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe('SettingsContent', () => {
@@ -552,13 +625,18 @@ describe('SettingsContent', () => {
       'Endpoints',
       'Roles',
       'Agent policy',
+      // Skills is an ASSISTANT page and the last of them (nocx-fe7fe.1). It
+      // sat under Application beside Backup, and it sat there TWICE, because
+      // `skills.enabled` declares section "Skills" and that minted a second
+      // rail row of the same name. The page owns the section now, so there is
+      // one row and it is here.
+      'Skills',
       'Protection',
       'Secrets',
       'Terminal',
       'Application',
       'Backup & Restore',
       'Snippets',
-      'Skills',
       'About',
       'AI',
     ])
@@ -573,49 +651,86 @@ describe('SettingsContent', () => {
   })
 
   it('Skills rail navigation mounts the Skills page', async () => {
-    const skillsClient: SkillsClientLike = {
-      list: vi.fn().mockResolvedValue({
-        documentPath: '/tmp/nocx/skills.json',
-        skills: [
-          {
-            name: 'deploy',
-            description: 'Deploy the service',
-            provenance: 'authored',
-            path: '/tmp/nocx/skills/deploy/SKILL.md',
-            enabled: true,
-            status: 'approved',
-          },
-        ],
-      }),
-      setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
-      remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
-      approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
-    }
-    const skillsStore = new SkillsStore(skillsClient)
-    content = new SettingsContent(
-      client,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      skillsStore,
-    )
+    const skillsStore = new SkillsStore(fakeSkillsClient())
+    content = newSettingsContentWithSkills(client, skillsStore)
     mockReady(client)
     await content.mount(target, host, signal)
 
     openSection(target, 'Skills')
     await vi.waitFor(() => {
-      expect(target.querySelector('[data-skill-name="deploy"]')).toBeTruthy()
+      expect(hasSkillRow(target, 'deploy')).toBe(true)
     })
+  })
+
+  // The defect the Skills page shipped with (nocx-fe7fe.1): `skills.enabled`
+  // is declared in Go under section "Skills", the rail derives one page per
+  // section, and settings.tsx registers a component page of the same name —
+  // so the rail carried TWO rows called Skills, one holding a lone switch and
+  // one holding the list, both filed under Application. The page owns the
+  // section now: one row, under Assistant, with the switch above the list it
+  // governs. This assertion is what the old tree fails.
+  it('a declaration in the Skills section adds no second rail row, and renders on the page', async () => {
+    const skillsStore = new SkillsStore(fakeSkillsClient())
+    content = newSettingsContentWithSkills(client, skillsStore)
+    mockReady(client, {
+      declarations: [
+        ...TEST_DECLARATIONS,
+        {
+          key: 'skills.enabled',
+          section: 'Skills',
+          label: 'Enable skills',
+          description: 'Allow the assistant to discover and use local skills.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+      ],
+      // Exactly as production declares it: the section names no group,
+      // because the page that owns it decides where it renders.
+      sectionGroups: TEST_SECTION_GROUPS,
+    })
+    await content.mount(target, host, signal)
+
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const rows = Array.from(nav.querySelectorAll<HTMLElement>('.ui-grouped-nav__item')).filter(
+      (l) => l.textContent.replace(/\s*\d+\s*/, '').trim() === 'Skills',
+    )
+    expect(rows.length).toBe(1)
+
+    openSection(target, 'Skills')
+    await vi.waitFor(() => {
+      expect(hasSkillRow(target, 'deploy')).toBe(true)
+    })
+    // The owned section's row is on the page, above the list.
+    expect(target.querySelector('[data-key="skills.enabled"]')).toBeTruthy()
+  })
+
+  // The count belongs to the section, so it has to follow the rows onto the
+  // page that owns them — a dot on a rail row for a page that no longer
+  // exists reports a change nobody can find.
+  it('an owned section carries its modified count onto the rail row of the page that owns it', async () => {
+    const skillsStore = new SkillsStore(fakeSkillsClient())
+    content = newSettingsContentWithSkills(client, skillsStore)
+    mockReady(client, {
+      declarations: [
+        ...TEST_DECLARATIONS,
+        {
+          key: 'skills.enabled',
+          section: 'Skills',
+          label: 'Enable skills',
+          description: 'Allow the assistant to discover and use local skills.',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: true,
+        },
+      ],
+      overridden: ['skills.enabled'],
+    })
+    await content.mount(target, host, signal)
+
+    const links = target.querySelectorAll('.ui-grouped-nav__item > .ui-button')
+    const skillsLink = Array.from(links).find((l) => l.textContent.includes('Skills'))
+    expect(skillsLink!.querySelector('.ui-badge[data-tone="warning"]')!.textContent).toBe('1')
   })
 
   it('section nav shows per-section modified counts', async () => {

@@ -41,7 +41,7 @@
           "type": "integer"
         },
         "skills": {
-          "description": "The number of authored and managed skill trees in the backup. Builtins are embedded and never carried.",
+          "description": "The number of authored, managed and installed skill trees in the backup. Builtins are embedded and never carried.",
           "type": "integer"
         },
         "credentialBindingsRemoved": {

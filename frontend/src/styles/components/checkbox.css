@@ -76,7 +76,7 @@
    stays the filter and selection affordance. */
 
 .ui-checkbox[data-variant='switch'] .ui-checkbox__control {
-  width: 34px;
+  width: var(--control-width-switch);
   height: 20px;
   border-radius: var(--control-radius-full);
   background: var(--color-surface-sunken);

@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -456,8 +457,9 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
-	// Finding is static-scan evidence attached to a proposed skill write.
-	Finding *assistant.SkillScanFinding `json:"finding,omitempty"`
+	// Finding is static-scan evidence attached to a proposed skill write —
+	// the scanner's own shape, so the wire spelling has one owner.
+	Finding *skill.Finding `json:"finding,omitempty"`
 	// Classifier is the model gate's verdict or bounded failure fact.
 	Classifier *assistant.ApprovalClassifier `json:"classifier,omitempty"`
 	Standing   agentApprovalStanding         `json:"standing"`
@@ -469,6 +471,23 @@ type agentApprovalRequested struct {
 	// state — the surface must never present "we refuse to ask" and "we
 	// could not ask" as the same fact. Absent for non-command proposals.
 	Expansion *assistant.ExpansionFacts `json:"expansion,omitempty"`
+	// Scripts is the whole of every file the proposed command NAMES, read
+	// at the moment the question was asked (nocx-872jc.3). Same kind of
+	// thing as Expansion and carried for the same reason: `bash deploy.sh`
+	// is a name, and approving a name is not approving an act. It is a
+	// READING — the string in Arguments is what is sent, byte for byte, and
+	// the file can change before it runs. Absent whenever the parse named
+	// no file to execute or source, so a proposal with no script draws no
+	// empty affordance.
+	Scripts []assistant.ScriptReading `json:"scripts,omitempty"`
+	// Install is what a skills.install proposal RESOLVED to (nocx-ojfuc.2):
+	// the address that was fetched, the skill's own name and description,
+	// the digest the write is bound to, and every file that will land with
+	// its bytes. The model proposed an ADDRESS, and an address is not
+	// something anybody can decide about — this is the answer that address
+	// resolved to, which is what the person is actually being asked. Absent
+	// for every other proposal.
+	Install *assistant.ApprovalInstall `json:"install,omitempty"`
 }
 
 type agentApprovalStanding struct {
@@ -590,6 +609,11 @@ type agentHandlers struct {
 	// today, and why the honest refusal is the product's own outcome rather
 	// than a stub.
 	expansions assistant.ExpansionSource
+	// scripts reads the whole of a file a proposed command names, so the
+	// approval question can carry the script and not only its name
+	// (nocx-872jc.3). The server implements it; see ws_script.go for what
+	// it can and cannot reach.
+	scripts assistant.ScriptSource
 	// knownMaterial is the egress gate's vault comparison (design §7.1,
 	// assistant.KnownMaterial) — the seam that answers "does this tool
 	// result contain a value the vault holds", in the backend, nothing
@@ -1023,13 +1047,33 @@ func (h agentHandlers) resolveEndpointMaterial(
 	ctx context.Context,
 	endpoint profile.Endpoint,
 ) (credential.Secret, []assistant.Header, error) {
+	return resolveEndpointMaterial(ctx, h.credentials, endpoint, credential.Operation("answer the ask"))
+}
+
+// resolveEndpointMaterial is the ONE place an endpoint becomes a usable
+// (key, headers) pair. It became a free function when the skill audit needed
+// the same resolution from a handler family that is not the agent's: a second
+// copy would have agreed with this one on every endpoint anybody tried and
+// disagreed the day a header's secret went missing, because only one of them
+// would have been taught the difference between a missing credential and a
+// missing header.
+//
+// The OPERATION is the caller's, and it is the only thing they differ on: it
+// is what the vault shows a person when it raises an unlock, so "answer the
+// ask" and "audit a skill" must not be one string.
+func resolveEndpointMaterial(
+	ctx context.Context,
+	credentials credential.Resolver,
+	endpoint profile.Endpoint,
+	op credential.Stance,
+) (credential.Secret, []assistant.Header, error) {
 	secret := credential.Secret{}
 	if endpoint.NeedsCredential() {
-		if h.credentials == nil {
+		if credentials == nil {
 			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
 		}
-		resolved, err := h.credentials.Resolve(
-			ctx, credential.SecretID(endpoint.CredentialRef), credential.Operation("answer the ask"))
+		resolved, err := credentials.Resolve(
+			ctx, credential.SecretID(endpoint.CredentialRef), op)
 		if err != nil {
 			// A sealed vault (headless), a dismissed unlock and a deleted
 			// secret are terminalized by runAskStream, which owns the mapping
@@ -1049,12 +1093,12 @@ func (h agentHandlers) resolveEndpointMaterial(
 			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
 			continue
 		}
-		if h.credentials == nil {
+		if credentials == nil {
 			return credential.Secret{}, nil,
 				fmt.Errorf("the header %q references a missing secret", hd.Name)
 		}
-		hSecret, hErr := h.credentials.Resolve(
-			ctx, credential.SecretID(hd.ValueRef), credential.Operation("answer the ask"))
+		hSecret, hErr := credentials.Resolve(
+			ctx, credential.SecretID(hd.ValueRef), op)
 		if hErr != nil {
 			return credential.Secret{}, nil, hErr
 		}
@@ -1387,15 +1431,21 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:              secret,
-		BaseURL:          rc.endpoint.BaseURL,
-		Model:            rc.model,
-		Headers:          headers,
-		Messages:         msgs,
-		Grant:            rc.grant,
-		AttemptLedger:    h.attemptLedger,
-		Requester:        h.requester,
-		Expansions:       h.expansions,
+		Key:           secret,
+		BaseURL:       rc.endpoint.BaseURL,
+		Model:         rc.model,
+		Headers:       headers,
+		Messages:      msgs,
+		Grant:         rc.grant,
+		AttemptLedger: h.attemptLedger,
+		Requester:     h.requester,
+		Expansions:    h.expansions,
+		Scripts:       h.scripts,
+		// The run's OWN cwd — the directory this question carried and the
+		// ledger recorded with it — so `bash deploy.sh` in the approval
+		// window resolves against where the run was asked from and not
+		// against a directory the backend picked (nocx-872jc.3).
+		Cwd:              rc.promptFacts.Cwd,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
@@ -1674,6 +1724,8 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 		n.Finding, n.Classifier = ap.Finding, ap.Classifier
 		n.Expansion = ap.Expansion
+		n.Scripts = ap.Scripts
+		n.Install = ap.Install
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -2590,7 +2642,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
-			requester: s, expansions: s, knownMaterial: s.agentKnownMaterial,
+			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,

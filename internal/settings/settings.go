@@ -1096,8 +1096,11 @@ func init() {
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
-	RegisterSectionGroup("Skills", "application")
 	RegisterSectionGroup("Pets", "application")
+	// "Skills" is deliberately absent. The section is OWNED by the Skills
+	// component page in settings.tsx, which renders its declarations itself
+	// and mints no rail row for them; a group mapping here would name a
+	// placement that nothing places. See settings-rail-pages.ts.
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).

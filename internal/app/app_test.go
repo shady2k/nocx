@@ -515,6 +515,58 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 	}
 }
 
+// TestNew_SearchesTheInstalledSkillRootLast proves the fourth root is reachable
+// from the composition root rather than merely present in the package, and that
+// it is searched after the person's own: deadcode cannot report either fact
+// (AGENTS.md testing rule 2), and slice order is the entire precedence rule.
+func TestNew_SearchesTheInstalledSkillRootLast(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := newTestApp(t)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	store, ok := a.skills.(*skill.Store)
+	if !ok {
+		t.Fatalf("skills = %T, want *skill.Store", a.skills)
+	}
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		t.Fatalf("NewAppPaths: %v", err)
+	}
+	writeSkillFile(t, filepath.Join(paths.ConfigDir(), "installed-skills", "downloaded"), "downloaded", "from a URL")
+	writeSkillFile(t, filepath.Join(paths.ConfigDir(), "installed-skills", "deploy"), "deploy", "from a URL")
+	writeSkillFile(t, filepath.Join(paths.ConfigDir(), "skills", "deploy"), "deploy", "mine")
+
+	listed, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	seen := map[string]skill.Provenance{}
+	for _, item := range listed.Skills {
+		if previous, twice := seen[item.Name]; twice {
+			t.Fatalf("skill %q listed twice: %s and %s", item.Name, previous, item.Provenance)
+		}
+		seen[item.Name] = item.Provenance
+	}
+	if got := seen["downloaded"]; got != skill.ProvenanceInstalled {
+		t.Fatalf("downloaded provenance = %q, want installed: the installed root is not wired", got)
+	}
+	if got := seen["deploy"]; got != skill.ProvenanceAuthored {
+		t.Fatalf("deploy provenance = %q, want authored: the installed root must be searched last", got)
+	}
+}
+
+func writeSkillFile(t *testing.T, dir, name, description string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	doc := "---\nname: " + name + "\ndescription: " + description + "\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(doc), 0o600); err != nil {
+		t.Fatalf("write %s: %v", dir, err)
+	}
+}
+
 func TestNew_WiresOneWritableSkillStoreIntoTheAssistant(t *testing.T) {
 	storagetest.Isolate(t)
 	a, err := newTestApp(t)

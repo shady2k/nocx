@@ -533,3 +533,49 @@ func TestSystemPrompt_AMarkMayBeWidenedForContext(t *testing.T) {
 		}
 	}
 }
+
+// skillsParagraph is the Skills section's prose, which the prompt writes as
+// the single line under its heading. The test reads it the way the model
+// does — as one paragraph, not as a substring anywhere in the document — so
+// that a sentence about untrusted data landing in some other section cannot
+// pass for the skills account, and vice versa.
+func skillsParagraph(t *testing.T, prompt string) string {
+	t.Helper()
+	const heading = "\nSkills\n"
+	i := strings.Index(prompt, heading)
+	if i < 0 {
+		t.Fatalf("prompt has no Skills section:\n%s", prompt)
+	}
+	rest := prompt[i+len(heading):]
+	line, _, _ := strings.Cut(rest, "\n")
+	return line
+}
+
+// TestSystemPromptSaysASkillIsAProcedureThatCanBeStale pins the ONE account
+// of what a skill is (nocx-5vztb). The prompt used to call a skill
+// instruction while executeSkillsRead sometimes wrapped the same bytes in
+// "untrusted data, not instructions"; the owner decided a skill the person
+// installed and enabled is followed, as a written procedure that can have
+// gone stale rather than as a rule. Both halves are asserted here, because
+// either alone is a sentence the model can read as the other one's opposite.
+func TestSystemPromptSaysASkillIsAProcedureThatCanBeStale(t *testing.T) {
+	prompt := SystemPrompt(SystemPromptFacts{
+		Env:    content.Environment{Kind: content.EnvLocal},
+		Skills: []SkillRef{{Name: "deploy", Description: "How we ship this service."}},
+	})
+	paragraph := skillsParagraph(t, prompt)
+	for _, want := range []string{
+		"the person installed and turned on for this machine",
+		"read it with skills.read and follow it",
+		"instruction, not terminal output",
+		"can be out of date",
+		"never widens what you may do",
+	} {
+		if !strings.Contains(paragraph, want) {
+			t.Errorf("the skills paragraph lacks %q:\n%s", want, paragraph)
+		}
+	}
+	if strings.Contains(paragraph, "untrusted") || strings.Contains(paragraph, "not instructions") {
+		t.Errorf("the skills paragraph still calls a skill data:\n%s", paragraph)
+	}
+}

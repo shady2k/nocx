@@ -49,12 +49,12 @@ func Discover(roots []Root) []Skill {
 // from this same result so a skill cannot be indexed differently from how it
 // is read.
 func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
-	disabled := map[string]struct{}{}
+	set := switches{off: map[string]struct{}{}, on: map[string]struct{}{}}
 	digests := map[string]string{}
 	for _, root := range roots {
-		if root.disabled != nil {
+		if root.switches != nil {
 			var err error
-			disabled, err = root.disabled()
+			set, err = root.switches()
 			if err != nil {
 				return nil
 			}
@@ -66,7 +66,7 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				return nil
 			}
 		}
-		if root.disabled != nil || root.digests != nil {
+		if root.switches != nil || root.digests != nil {
 			break
 		}
 	}
@@ -130,23 +130,53 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				slog.Warn("skill: missing description", "skill", name)
 				continue
 			}
+			// The read path is where a description no write of ours ever saw
+			// arrives: a directory placed by hand, restored from a backup, or
+			// written before the cap existed. It is REFUSED rather than
+			// clamped, and that is the decision. Clamping would put a
+			// sentence into the system prompt that stops mid-clause and reads
+			// as though its author had written it — a claim they did not
+			// make, which is precisely what the write refuses to manufacture;
+			// and the description is the whole of what a skill offers the
+			// model, so half of one is not a lesser version of the skill, it
+			// is a different one.
+			//
+			// The cost is that the skill leaves the Settings list with only a
+			// log line to say why, which is the same visibility every other
+			// refusal in this loop has and is less than this repo would like.
+			// The person's remedy is to shorten the description in the file,
+			// so the warning names both numbers rather than only the fact.
+			if length, over := descriptionOverCap(description); over {
+				slog.Warn("skill: description too long", "skill", name, "characters", length, "limit", maxDescriptionRunes)
+				continue
+			}
 			if _, exists := seen[skName]; exists {
 				continue
 			}
 			seen[skName] = struct{}{}
-			enabled := true
-			if _, isDisabled := disabled[skName]; isDisabled {
-				enabled = false
-				if !includeDisabled {
-					continue
+			// The person's switch, defaulted by the ROOT and then moved by
+			// whatever the document records about this name. An installed
+			// skill arrives off and the document says who turned it on;
+			// everything else arrives on and the document says who turned it
+			// off. Both directions are read here, in the one place that owns
+			// enablement, rather than at the two call sites that care.
+			enabled := !root.Provenance.inertOnArrival()
+			if enabled {
+				if _, turnedOff := set.off[skName]; turnedOff {
+					enabled = false
 				}
+			} else if _, turnedOn := set.on[skName]; turnedOn {
+				enabled = true
+			}
+			if !enabled && !includeDisabled {
+				continue
 			}
 			changed := false
-			if root.Provenance == ProvenanceManaged {
+			if root.Provenance.digested() {
 				expected, approved := digests[skName]
 				actual, hashErr := hashSkillDirectory(base)
 				if hashErr != nil {
-					slog.Warn("skill: cannot hash managed skill", "skill", skName, "error", hashErr)
+					slog.Warn("skill: cannot hash skill", "skill", skName, "provenance", root.Provenance, "error", hashErr)
 					changed = true
 				} else {
 					changed = !approved || actual != expected

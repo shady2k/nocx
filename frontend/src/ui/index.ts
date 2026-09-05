@@ -57,6 +57,7 @@ export {
 export { FileStatusRow, type FileStatusRowProps, type FileStatus } from './file-status-row'
 export { RecordRow, type RecordRowProps } from './record-row'
 export { FactList, type Fact, type FactListProps } from './fact-list'
+export { FileReadout, type FileReadoutOutcome } from './file-readout'
 export { ActionGroup, type ActionGroupProps } from './action-group'
 export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'

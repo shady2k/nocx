@@ -267,9 +267,11 @@ and a silent write into a dead store.
 
 ## What is left
 
-1. **Take `bd` off the NixOS system config**, on all three machines. This matters
-   more than deleting data: while the binary is on PATH, a worker in any of the ~40
-   worktrees can call it out of habit. It is one line, and reversible.
+1. ~~Take `bd` off the NixOS system config.~~ **Not doing this** — owner's
+   decision, 2026-09-06: other repositories still use `bd` as their tracker, so
+   the binary stays on PATH on all three machines. The habit hazard it was meant
+   to remove is covered a better way here: nocx's Dolt store is deleted, so `bd`
+   run in this repository fails loudly instead of writing where nobody reads.
 2. **The second machine and the colleague.** `git pull`, install the tooling,
    `br sync --import-only`, then delete their own `embeddeddolt` and `backup`.
    Gate: `br stats` agrees across all three clones.
@@ -305,6 +307,12 @@ and a silent write into a dead store.
   the measurements show does not exist.
 - **A replacement for the merge slot** — the owner's decision to drop it.
 - **Forking `beads-superpowers`** — overriding it through `AGENTS.md` instead.
+- **`cm reflect` as a write path**, and with it any LLM provider for `cm` —
+  owner's decision, 2026-09-06. An agent that has just paid for a lesson already
+  holds it; spending a model pass to read it back out of a whole transcript is the
+  wrong trade, and the one run we measured turned three facts into eight rules in
+  the wrong file. Rules are written by the agent, at the moment it pays, through
+  `cm playbook import --repo`. AGENTS.md carries the reasoning.
 - **Editing the historical documents** in `.internal/plans/` and `.internal/briefs/`
   that mention `bd`. That is an archive; it describes what was.
 - **The author's own `bd-to-br-migration` skill** — it rewrites documentation only,

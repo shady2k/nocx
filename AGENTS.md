@@ -149,12 +149,34 @@ playbook is thin on, `cm onboard read <session> --template` hands you one to rea
 and `cm onboard mark-done <session>` records it as processed. `cm onboard gaps`
 names the weak categories outright. This works on the partial index we have.
 
-**Reflection duplicates; read what it wrote before keeping it.** `cm reflect` on
-this session's own transcript produced eight rules that were three facts, each
-stated two or three times — `dedupSimilarityThreshold: 0.85` did not catch them,
-and they landed in the global playbook because that is where reflection writes. The
-three survivors are in `.cass/playbook.yaml` tagged `reflected`. Treat reflection
-as a draft with a human editor, not as a write path.
+**We do not run `cm reflect`, and the agent writes its own rules.** Owner's
+decision, 2026-09-06: paying an LLM to read a whole transcript back and recover a
+lesson the agent already held at the time is the wrong trade. The moment to write
+a rule is the moment you finish paying for it — by the three tests above, through
+`import --repo`.
+
+Two measurements stand behind that, and they are the reason no automation is
+wanted here rather than merely absent. `cm reflect` on this session's transcript
+produced **eight rules that were three facts**, each stated two or three times;
+`dedupSimilarityThreshold: 0.85` did not catch the repeats. And it wrote them to
+the **global** playbook, `~/.cass-memory/playbook.yaml` — reflection has no other
+destination — where they are invisible to a colleague and visible in every
+unrelated repository on this machine. The repo playbook **merges** with the global
+one rather than replacing it (probe rule in global, `cm playbook list` run here
+returned both), so that leak is not theoretical. All ten of those rules were
+deleted on 2026-09-06; the backup is `~/.cass-memory/playbook.yaml.bak-2026-09-06`.
+
+**So `cm` needs no API key and no model here.** `cm context` and the playbook read
+a file and the cass index; neither takes a provider. `OPENAI_BASE_URL`,
+`OPENAI_API_KEY` and `CASS_CLI_COMMAND` are unset and nothing persists them.
+
+If anyone ever does want reflection, the one setting that is not optional is
+`CASS_CLI_COMMAND=<a binary that does not exist>`. Left unset, `cm` resolves the
+Claude CLI and spends the owner's subscription silently; pointed at nothing,
+`resolveCliCommand()` returns null, `availableProviders` is empty, and it fails
+loudly instead. The owner has forbidden the subscription route outright — so
+reflection means an OpenRouter key in a mode-600 file outside the nix store, and
+that guard, before the first run.
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,

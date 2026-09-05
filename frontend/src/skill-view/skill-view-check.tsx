@@ -50,18 +50,29 @@ import type { SkillsCheck } from '../generated/skills.check'
 
 /** The wire's own shapes, never re-declared by hand (review round 2's
  *  minor: a hand-rolled union is a fourth place these could drift from the
- *  schema they came from). */
+ *  schema they came from). Taken from `skills.check`'s stored `check`
+ *  rather than `skills.audit`'s result — an arbitrary pick between the
+ *  two, since both generated unions are structurally identical and either
+ *  assigns cleanly from the other's result (`skill-view-body.tsx`'s
+ *  `runAudit` assigns a `SkillsAudit['verdict']`/`['role']` straight into
+ *  a `Reading`, and it still compiles: TS's structural typing does not
+ *  care which schema a literal union came from, only that the members
+ *  match). Extended the same way to `verdict` and `role` in review round
+ *  3 — the reviewer flagged them as the same drift surface as `Omission`/
+ *  `Finding`, and deriving them turned out to be exactly as cheap. */
 type Omission = NonNullable<SkillsCheck['check']>['omitted'][number]
 type Finding = NonNullable<SkillsCheck['check']>['findings'][number]
+type Verdict = NonNullable<SkillsCheck['check']>['verdict']
+type Role = NonNullable<SkillsCheck['check']>['role']
 
 /** One reading, whichever call produced it — `skills.check`'s stored
  *  `check` object, or a fresh `skills.audit` result reshaped onto the same
  *  fields. Kept as one type so the render below draws from ONE shape,
  *  never two that could drift apart on what a "reading" contains. */
 export interface Reading {
-  verdict: 'clear' | 'suspect'
+  verdict: Verdict
   report: string
-  role: 'auditing' | 'answering'
+  role: Role
   endpoint: string
   model: string
   checkedAt: string
@@ -110,7 +121,13 @@ function verdictLine(reading: Reading): string {
 export function checkRowTitle(state: CheckState): string {
   switch (state.kind) {
     case 'loading':
-      return 'Checking…'
+      // NOT "Checking…" (review round 3's minor): `skills.check` is a free
+      // content.db read, and that word is exactly what a person reading
+      // this row would infer means a model is running — the one place in
+      // this surface that could suggest a bill for something free. The
+      // panel already gets this right ("Reading the stored check"); this
+      // is the same fact, said the row's own short way.
+      return 'Reading…'
     case 'unavailable':
       return 'Check unavailable'
     case 'none':

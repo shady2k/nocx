@@ -630,6 +630,39 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     expect(document.activeElement).toBe(view)
   })
 
+  it('Enter on a file row shows the file even when a stored check made the pane default to the check', async () => {
+    // Review round 3's finding A: the fixture for the test above defaults
+    // `check` to `{checked:false}` (see `fakeClient`), which already
+    // leaves `rightPane` at 'file' — so that test cannot see a keyboard
+    // path that forgets to set it. A skill WITH a stored check opens on
+    // the check pane by default; Enter on a file row must still switch to
+    // the file, the same way clicking the row already does.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockImplementation((_name: string, path: string) =>
+          Promise.resolve(fileResult({ path, text: path === 'SKILL.md' ? 'FIRST' : 'SECOND' })),
+        ),
+      check: vi.fn().mockResolvedValue(checkedResult(checkFields())),
+    })
+    const { host } = await mount(client)
+
+    // The check exists, so the pane opens on it by default.
+    expect(host.querySelector('.skill-view__view-col .skill-view__check')).not.toBeNull()
+
+    const list = host.querySelector('.skill-view__file-list') as HTMLElement
+    const rows = fileListRows(host)
+    rowButton(rows[0]).focus()
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flush()
+
+    expect(viewText(host)).toBe('FIRST')
+    expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
+    const view = host.querySelector('.skill-view__view-col')
+    expect(document.activeElement).toBe(view)
+  })
+
   it("places the kit's ResizeHandle, bounded to [180px, 40% of the pane]", async () => {
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
@@ -726,6 +759,50 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     expect(host.querySelector('.skill-view__view-col .ui-code-block')?.textContent).toBe(
       'file bytes',
     )
+  })
+
+  it('does not yank a person off a file they already chose once a slow check finally answers', async () => {
+    // Review round 3's finding B: `hasChosenDefaultPane` used to be set
+    // ONLY by the default-pane effect. If `skills.check` is still `loading`
+    // when the manifest settles — the same slow, write-queued content.db
+    // finding 2 was about — the person sees a file, picks one explicitly,
+    // and then the check lands `ready`: the effect re-runs, sees the flag
+    // still false, and calls setRightPane('check'), discarding the choice.
+    let resolveCheck: ((value: SkillsCheck) => void) | undefined
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md', 'scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockImplementation((_name: string, path: string) =>
+          Promise.resolve(fileResult({ path, text: path === 'SKILL.md' ? 'FIRST' : 'SECOND' })),
+        ),
+      check: vi.fn().mockImplementation(
+        () =>
+          new Promise<SkillsCheck>((resolve) => {
+            resolveCheck = resolve
+          }),
+      ),
+    })
+    const { host } = await mount(client)
+
+    // The check has not answered yet, so nothing has been decided by the
+    // default effect — the person is looking at whatever the pane starts
+    // on. They explicitly pick the SECOND file.
+    const rows = fileListRows(host)
+    const second = rows.find((row) => rowTitle(row) === 'scripts/setup.sh')
+    if (!second) throw new Error('scripts/setup.sh did not render')
+    rowButton(second).click()
+    await flush()
+    expect(viewText(host)).toBe('SECOND')
+
+    // The slow check finally answers, with a real stored reading.
+    resolveCheck?.(checkedResult(checkFields()))
+    await flush()
+
+    // The person's explicit choice stands — the pane must not have been
+    // yanked to the check just because it became available.
+    expect(viewText(host)).toBe('SECOND')
+    expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
   })
 
   it('asks what was concluded and spends nothing, on open', async () => {
@@ -1039,6 +1116,12 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     content.setVisible(false)
     content.setVisible(true)
     await flush()
+
+    // Review round 3's minor: `resolveSecondCheck` is a no-op if the
+    // reactivation never made a second call, which would let this test
+    // pass vacuously — green whether or not a reactivation still re-reads
+    // the check at all. Pin the premise before the press.
+    expect(checkCalls).toBe(2)
 
     // Re-check is pressed WHILE that slow read is still in flight.
     const button = findButton(host, 'Re-check')

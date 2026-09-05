@@ -572,6 +572,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
       e.preventDefault()
       const path = filePaths()[current < 0 ? 0 : current]
       if (path === undefined) return
+      // Review round 3's finding A: the mouse path
+      // (`RecordRow.onActivate` below) sets `rightPane('file')`; this
+      // branch used to only fetch the file and move focus, leaving the
+      // pane on 'check' whenever that was the default — exactly the
+      // shape this task made common. Both paths must agree on what
+      // "opening a file" means.
+      hasChosenDefaultPane = true
+      setRightPane('file')
       selectFile(path)
       viewEl?.focus()
     }
@@ -600,7 +608,17 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 bill attached." `Show`'s `when` false means this Section
                 never renders and `loadCheck` is never called for a builtin
                 either (see the refresh effect above) — not merely a row
-                withheld while the state underneath still spent a call. */}
+                withheld while the state underneath still spent a call.
+
+                NOT INSIDE `.skill-view__file-list` / `role="list"` BELOW,
+                which is a known, accepted gap rather than an oversight
+                (review round 3's minor): the design calls the whole left
+                column a single-select listbox, but this row is reached
+                only by click or by Tab — `rowButtons()`/`onListKeyDown`'s
+                ↑/↓ never include it. Left this way because folding it into
+                the same roving-focus group is a bigger change than this
+                round asked for; Tab still reaches it, so nothing is
+                unreachable, only slower to reach by arrow key. */}
             <Show when={props.provenance !== 'builtin'}>
               <Section id="skill-view-check" title="Check">
                 <Stack divided dense>
@@ -609,7 +627,18 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                     density="dense"
                     selected={rightPane() === 'check'}
                     actions={undefined}
-                    onActivate={() => setRightPane('check')}
+                    onActivate={() => {
+                      // Review round 3's finding B: an explicit choice
+                      // must CLOSE the initial-default decision, not only
+                      // the effect below — otherwise a slow `skills.check`
+                      // that is still `loading` when this row (or a file
+                      // row) is activated can resolve afterward, see
+                      // `hasChosenDefaultPane` still false, and yank the
+                      // pane back to whatever it decides, discarding a
+                      // choice the person already made.
+                      hasChosenDefaultPane = true
+                      setRightPane('check')
+                    }}
                   />
                 </Stack>
               </Section>
@@ -660,6 +689,10 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                         status={matchStatus(path)}
                         actions={undefined}
                         onActivate={() => {
+                          // See the Check row's onActivate above — the
+                          // same "an explicit choice closes the decision"
+                          // fix (review round 3's finding B).
+                          hasChosenDefaultPane = true
                           setRightPane('file')
                           selectFile(path)
                         }}

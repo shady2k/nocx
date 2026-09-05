@@ -62,6 +62,11 @@ func (f *fakeRecordHistoryDB) SessionOutput() content.SessionOutputRepository { 
 // reconcile and no reconciler to hand out.
 func (f *fakeRecordHistoryDB) Reconcile() content.SessionReconciler { return nil }
 
+// SkillChecks is a forced arm: content.ContentDB grew this method
+// (nocx-e5f55, internal/content) and every hand-written fake implementing
+// the interface must still compile. Unused by these tests.
+func (f *fakeRecordHistoryDB) SkillChecks() content.SkillCheckRepository { return nil }
+
 // RecordCompleted mints the entry id the backend owns (the renderer sends
 // none) and keeps the row the way the store does: the intent, its resolved
 // environment, and the payload column carrying both sparse readers' keys.

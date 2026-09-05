@@ -87,6 +87,67 @@ type ContentDB interface {
 	// vault, which needs this store — so it carries them over and this is
 	// where the three verdicts land afterwards.
 	Reconcile() SessionReconciler
+	// SkillChecks returns the repository for what a model concluded about a
+	// skill. It is a RECORD and never a CONTROL: nothing in the product
+	// reads a verdict to decide anything, so a check going stale or missing
+	// degrades to "nobody has looked," never to a skill silently disabled.
+	// It lives on ContentDB rather than in skills.json (the enable switch,
+	// which must keep working when nothing else does and is copied
+	// byte-for-byte into every backup) and rather than in the skill's own
+	// directory (bytes a hostile bundle controls, so it could vouch for
+	// itself) — see the skill_checks table comment in sqlite.go.
+	SkillChecks() SkillCheckRepository
+}
+
+// SkillCheck is one model's verdict on one skill, keyed by name. Digest is
+// the sha256 of the document the model was actually given (audit.go's
+// AuditMaterial.Digest) — a different value than skills.json's
+// Digests[name] — so "is this check still about these bytes" is answerable
+// by recomputing a bounded hash rather than trusting a timestamp.
+type SkillCheck struct {
+	Name       string
+	Provenance string
+	Verdict    string
+	Report     string
+	Role       string
+	Endpoint   string
+	Model      string
+	Digest     string
+	CheckedAt  int64 // unix millis, backend wall clock
+	Read       []string
+	Omitted    []SkillCheckOmission
+	Findings   []SkillCheckFinding
+	MaxBytes   int64
+}
+
+// SkillCheckOmission is one file the audit chose not to read, and why.
+type SkillCheckOmission struct {
+	Path   string
+	Reason string
+}
+
+// SkillCheckFinding is one line the audit flagged, with the pattern that
+// matched it.
+type SkillCheckFinding struct {
+	Path       string
+	LineNumber int
+	Line       string
+	PatternID  string
+}
+
+// SkillCheckRepository stores at most one check per skill name.
+type SkillCheckRepository interface {
+	// Put replaces the check for one skill name. Last writer wins. An
+	// empty check.Name is refused: it is the primary key, and a check
+	// nobody can Get back by name is not a record of anything.
+	Put(ctx context.Context, check SkillCheck) error
+	// Get returns the recorded check. found=false when there is none —
+	// a RESULT and never an error, because "nobody has checked this" is a
+	// true answer to the question.
+	Get(ctx context.Context, name string) (check SkillCheck, found bool, err error)
+	// Delete removes the check for one skill name. Deleting a check that
+	// does not exist is not an error.
+	Delete(ctx context.Context, name string) error
 }
 
 // Redaction is one structured redaction segment on a history row. Offsets

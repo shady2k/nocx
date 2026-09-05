@@ -450,6 +450,15 @@ func TestTheFloorMovesWithTheLadderRatherThanBeingAConstant(t *testing.T) {
 	// real ALTER — schema 13's `entries` has no `source` column, which is the
 	// actual difference between the two released shapes — so this is a chain
 	// that could genuinely exist, not a no-op that proves nothing.
+	//
+	// Claiming 13 as a migratable `from` makes this synthetic ladder subject
+	// to the same pin gate a real one is (nocx-e5f55): pin 13's shape from
+	// the same released schema_v13.sql the fixture above is built with, and
+	// remove it once this test is done — 13 is not a version the shipped
+	// ladder actually supports migrating from, and must not leak a
+	// permanent entry into the real map.
+	pinTemporarily(t, 13, releasedSchema(t, 13))
+
 	lowered := build(t)
 	longer := append([]migrationStep{{
 		from: 13, to: 14,
@@ -692,5 +701,119 @@ func TestANewerDatabaseIsRefusedAndACurrentOneOpens(t *testing.T) {
 	}
 	if got := fingerprint(t, current); got.sum != stable.sum {
 		t.Fatal("a database already at the current version was written to — the equal case must be a no-op")
+	}
+}
+
+// ── schema 16: the version this ladder actually broke on ──────────────────
+//
+// Everything above proves the 14→current walk, which is the one path that
+// keeps working while an entry point elsewhere breaks: 14 is pinned from the
+// day the ladder existed, so every rung since has been exercised by opening
+// a 14 file and watching it climb. It is exactly the wrong path to prove
+// nocx-e5f55's regression on, because that regression was never about
+// climbing FROM a version — it was about a version that had just stopped
+// being current, whose shape nobody pins while it holds that position and
+// which is trivial to forget to pin the moment it no longer does. A person's
+// database does not care that this build can climb from 14; it is stamped
+// 16, and 16 is the version that has to open.
+
+// aReleasedSchema16Database writes a database a shipped build of nocx would
+// have held between the 15→16 rung retiring api_run_schema and skill_checks
+// arriving: schema_v16.sql verbatim, rows in tables an ordinary session
+// would have populated, and the stamp. It deliberately reuses the same
+// entries/authority_grants/executions shapes aReleasedSchema14Database does
+// — those tables are untouched between 14 and 16 — so a divergence would be
+// visible as a fixture that no longer builds, not a silently accepted one.
+func aReleasedSchema16Database(t *testing.T, path string) {
+	t.Helper()
+	rawExec(
+		t, path,
+		"PRAGMA auto_vacuum=INCREMENTAL",
+		"PRAGMA journal_mode=WAL",
+		releasedSchema(t, 16),
+		`INSERT INTO workspaces (id, name, colour, position, created_at, payload, digest)
+			VALUES ('ws-sixteen', 'the workspace from before the second bump', '#654321', 3, 1600, '{"kept":true}', 'digest-sixteen')`,
+		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-sixteen', 'ws-sixteen', 'the tab from schema 16')`,
+		`INSERT INTO panes (id, tab_id, cwd, kind) VALUES ('pane-sixteen', 'tab-sixteen', '/srv/sixteen', 'local')`,
+		`INSERT INTO environments (id, kind, first_seen) VALUES ('env-sixteen', 'local', 1600)`,
+		`INSERT INTO environment_observations (id, environment_id, version, observed_at, criticality)
+			VALUES (1, 'env-sixteen', 1, 1600, 'routine')`,
+		`INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, pane_id, cwd, kind, source, intent, phase, status, submitted_at)
+			VALUES ('entry-sixteen', 1, 'client-sixteen', 'digest-entry-sixteen', 'env-sixteen', 'pane-sixteen',
+			        '/srv/sixteen', 'shell', 'user', 'echo the command written under schema sixteen', 'closed', 'success', 1600)`,
+		`INSERT INTO executions (id, entry_id, environment_obs_id) VALUES (1, 'entry-sixteen', 1)`,
+		`INSERT INTO authority_grants (id, execution_id, version, issued_at, expires_at, policy)
+			VALUES (1, 1, 1, 1600, 1660000, '{"kept":"yes"}')`,
+		`INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (1, 'content', 'note/sixteen')`,
+		`UPDATE ledger_sequence SET next = 1 WHERE id = 1`,
+		`PRAGMA user_version=16`,
+	)
+}
+
+func TestReleasedSchema16FixtureHasNoAPIRunCounterTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema16Database(t, path)
+	if aTableExists(t, path, "api_run_schema") {
+		t.Fatal("released schema 16 fixture still carries api_run_schema — the 15→16 rung retired that table, and a fixture that keeps it is not describing schema 16")
+	}
+	for _, name := range []string{"api_runs", "api_run_artifacts", "api_run_artifact_chunks", "session_output", "session_output_chunks"} {
+		if !aTableExists(t, path, name) {
+			t.Fatalf("released schema 16 fixture has no %s table", name)
+		}
+	}
+}
+
+// A DATABASE WRITTEN BY SCHEMA 16 — THE VERSION THAT WAS CURRENT UNTIL THE
+// LAST RUNG LANDED — OPENS, AND ITS ROWS ARE STILL THERE.
+//
+// This is the regression itself, made concrete: before schemaShapeDigests[16]
+// was pinned, this test failed with "no expected schema shape for migratable
+// schema 16; add its pinned shape before migrating" — the exact refusal
+// production hit on every machine holding a 16 database the moment this
+// build's schemaVersion moved to 17. It is the paired positive the other
+// released-schema tests already insist on: proving the refusal paths mean
+// nothing without proving the ordinary file still opens.
+func TestAReleasedSchema16DatabaseOpensAndReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema16Database(t, path)
+
+	db, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open over a released schema 16 database: %v — the version this build was current at yesterday must migrate, not refuse", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", got, schemaVersion)
+	}
+	if got := rawStrings(t, path,
+		`SELECT id || '|' || workspace_id || '|' || name FROM tabs`); len(got) != 1 || got[0] != "tab-sixteen|ws-sixteen|the tab from schema 16" {
+		t.Fatalf("the tab from before the upgrade reads %q", got)
+	}
+	if got := rawStrings(t, path,
+		`SELECT id || '|' || intent || '|' || status FROM entries WHERE id = 'entry-sixteen'`); len(got) != 1 ||
+		got[0] != "entry-sixteen|echo the command written under schema sixteen|success" {
+		t.Fatalf("the command recorded under schema 16 reads %q", got)
+	}
+	if !aTableExists(t, path, "skill_checks") {
+		t.Fatal("skill_checks does not exist after migrating a schema 16 database forward — the 16→17 rung did not run")
+	}
+
+	// The new table is not just present, it WORKS on a database that got
+	// here by migration rather than by a fresh Open — the distinction
+	// nocx-rtg0.17 bought: a file that opens perfectly and then fails every
+	// INSERT is not open in any sense that matters.
+	if _, found, err := db.SkillChecks().Get(context.Background(), "nobody-checked-this"); err != nil || found {
+		t.Fatalf("SkillChecks().Get on a migrated schema 16 database: found=%v err=%v", found, err)
+	}
+	if err := db.SkillChecks().Put(context.Background(), SkillCheck{
+		Name: "deploy", Provenance: "installed", Verdict: "clear", Report: "r",
+		Role: "auditing", Endpoint: "local", Model: "m", Digest: "d", CheckedAt: 1,
+		Read: []string{}, Omitted: []SkillCheckOmission{}, Findings: []SkillCheckFinding{},
+	}); err != nil {
+		t.Fatalf("SkillChecks().Put on a migrated schema 16 database: %v", err)
 	}
 }

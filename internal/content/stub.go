@@ -63,6 +63,15 @@ func (s *Stub) APIRuns() APIRunRepository {
 	return &apiRunStub{log: s.log}
 }
 
+// SkillChecks returns a stub skill-check repository. A store that is not
+// there has no check for anybody — Get says so without an error, which is
+// the same true-sentence-not-a-failure stance Reconcile's empty Pending set
+// takes for a store that never opened.
+func (s *Stub) SkillChecks() SkillCheckRepository {
+	s.log.Info("content stub: SkillChecks called (no-op)")
+	return &skillCheckStub{log: s.log}
+}
+
 // SessionOutput returns a stub recorder. It is what the terminal runs with
 // when the content key could not be read: history.status already says the
 // store is not running, and the stance below says the consequence a detached
@@ -164,6 +173,30 @@ func (s *apiRunStub) Delete(_ context.Context, id int64) error {
 }
 
 var _ APIRunRepository = (*apiRunStub)(nil)
+
+type skillCheckStub struct {
+	log log.Logger
+}
+
+var _ SkillCheckRepository = (*skillCheckStub)(nil)
+
+func (s *skillCheckStub) Put(_ context.Context, check SkillCheck) error {
+	s.log.Info("content stub: SkillCheckRepository.Put", "name", check.Name)
+	return ErrNotImplemented
+}
+
+// Get answers found=false with a nil error: with no store there is no
+// check, and "nobody has checked this" is true of every name, not a
+// failure the caller must special-case away from a broken store.
+func (s *skillCheckStub) Get(_ context.Context, name string) (SkillCheck, bool, error) {
+	s.log.Info("content stub: SkillCheckRepository.Get", "name", name)
+	return SkillCheck{}, false, nil
+}
+
+func (s *skillCheckStub) Delete(_ context.Context, name string) error {
+	s.log.Info("content stub: SkillCheckRepository.Delete", "name", name)
+	return ErrNotImplemented
+}
 
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {

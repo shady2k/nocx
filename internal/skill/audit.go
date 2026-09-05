@@ -26,6 +26,8 @@ package skill
 // than no report: it reads exactly like a report about the whole thing.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -117,6 +119,24 @@ type AuditMaterial struct {
 	// sentence about a cut can name the number that made it rather than
 	// keeping a second copy of it.
 	MaxBytes int `json:"maxBytes"`
+	// Digest is the hex sha256 over Document — the bytes a model was
+	// actually given, and nothing else.
+	//
+	// IT IS NOT Digests[name], AND THE DIFFERENCE IS LOAD-BEARING. That one
+	// answers "did the bytes move since the person approved them" and exists
+	// only for managed and installed (skill.go:45). This one answers "did the
+	// bytes move since the model read them", exists for every provenance that
+	// can be audited, and is computed HERE rather than by a walk of its own —
+	// a separate walk observes different bytes under an ordinary concurrent
+	// edit, and the two walks this package already has disagree about
+	// symlinks (discover.go:315 hashes the target; files.go:130 skips it), so
+	// a digest built on either would contradict status:changed on a real
+	// edit. Hashing what was sent cannot disagree with itself.
+	//
+	// A multi-file audit is a mixed-time snapshot — the files are read one
+	// after another — and this makes no larger claim than that: it is the
+	// digest of exactly those bytes, whenever each was read.
+	Digest string `json:"digest"`
 }
 
 // auditFileHeader marks where one file's bytes begin in the composed
@@ -207,5 +227,7 @@ func Audit(roots []Root, name string) (AuditMaterial, error) {
 		return AuditMaterial{}, fmt.Errorf("skill %q: none of its files could be read", manifest.Name)
 	}
 	out.Document = doc.String()
+	sum := sha256.Sum256([]byte(out.Document))
+	out.Digest = hex.EncodeToString(sum[:])
 	return out, nil
 }

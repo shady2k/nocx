@@ -1,6 +1,8 @@
 package skill_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,5 +173,57 @@ func TestAuditReadsASkillThatIsSwitchedOff(t *testing.T) {
 	}
 	if got.Name != "weather" {
 		t.Fatalf("name = %q", got.Name)
+	}
+}
+
+// The digest is over the DOCUMENT and not over a walk (design §5): a second
+// walk observes different bytes than the one that was sent, and the two
+// existing walks disagree about symlinks (discover.go:315 hashes the target,
+// files.go:130 skips it), so a digest built on either would contradict
+// status:changed on an ordinary edit.
+func TestAuditDigestIsOverTheComposedDocument(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "deploy")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(base, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("SKILL.md", "---\nname: deploy\ndescription: Deploy it\n---\n\nRun the thing.\n")
+	roots := []skill.Root{{Provenance: skill.ProvenanceAuthored, Dir: dir}}
+
+	first, err := skill.Audit(roots, "deploy")
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if first.Digest == "" {
+		t.Fatal("Audit returned an empty digest")
+	}
+	sum := sha256.Sum256([]byte(first.Document))
+	if want := hex.EncodeToString(sum[:]); first.Digest != want {
+		t.Fatalf("digest %q is not the sha256 of the document %q", first.Digest, want)
+	}
+
+	// Unchanged bytes, same digest: this is what makes "still current" a
+	// question that can be answered by recomputing.
+	again, err := skill.Audit(roots, "deploy")
+	if err != nil {
+		t.Fatalf("Audit again: %v", err)
+	}
+	if again.Digest != first.Digest {
+		t.Fatalf("digest moved with no edit: %q then %q", first.Digest, again.Digest)
+	}
+
+	// One byte changed, different digest.
+	write("SKILL.md", "---\nname: deploy\ndescription: Deploy it\n---\n\nRun the thing!\n")
+	edited, err := skill.Audit(roots, "deploy")
+	if err != nil {
+		t.Fatalf("Audit after edit: %v", err)
+	}
+	if edited.Digest == first.Digest {
+		t.Fatal("digest did not move when a byte did")
 	}
 }

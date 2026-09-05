@@ -23,7 +23,14 @@ in its header.
 | 0033 | `auto` is the name for "not yet answered"                 | 0048     | UI state is a document, not a setting                   |
 | 0035 | The AppImage carries WebKitGTK's helper processes         | 0049     | The channel we own is the carrier, not the command line |
 
-- **0009** — never allocated; no file with that number has ever existed in this repo.
+- **0009** — reserved on 2026-07-24 by `nocx-4ff.25` and written only on 2026-09-05. For
+  fourteen months of commits the number looked unallocated while the decision it was meant
+  to hold — the frozen scrollback is DOM, not decorations over one xterm — was shipped and
+  governing. The line that used to stand here said "never allocated; no file with that
+  number has ever existed", which was true of the file and false about the decision. That
+  is the cost of a reserved number with no record: AD-6 and ADR-0004 §4 went on describing
+  a product that had stopped existing, and the gap was found only when somebody reasoned
+  from them.
 
 An `ADR-00NN` citation written before that date may still mean the moved record. The
 **Formerly** line in each moved file, and the table above, are what resolve it.
@@ -59,6 +66,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0006 | [Marker-only prompt mode](0006-marker-only-prompt-mode.md)                                                                        | Accepted                              |
 | 0007 | [Cross-platform auto-update via a platform abstraction](0007-cross-platform-auto-update.md)                                       | Accepted                              |
 | 0008 | [Command blocks are a keyboard-first ledger, not cards](0008-command-blocks-as-a-keyboard-first-ledger.md)                        | Accepted                              |
+| 0009 | [The frozen scrollback is DOM, and it declares its cell geometry](0009-dom-scrollback-with-explicit-cell-geometry.md)             | Accepted (supersedes ADR-0004 §4)     |
 | 0010 | [CodeMirror 6 as the editor core](0010-codemirror-6-as-the-editor-core.md)                                                        | Accepted                              |
 | 0011 | [Persistence: storage capabilities, secrets as opaque references](0011-persistence-storage-capabilities-and-secret-references.md) | Accepted (§7 superseded by ADR-0027)  |
 | 0012 | [SolidJS as the application UI layer](0012-solidjs-as-the-application-ui-layer.md)                                                | Accepted                              |

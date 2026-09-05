@@ -61,3 +61,13 @@ redirect
 embeddeddolt/
 backup/
 proxieddb/
+
+# Per-machine stat cache for sync.auto_import: {size, mtime_ns} of the JSONL as
+# this clone last saw it. mtime_ns is per-filesystem, so tracking it made every
+# clone rewrite the file on every import — the same churn that untracked
+# issues.jsonl in the first place. Untracked 2026-09-06.
+.auto-import-issues.jsonl
+
+# Written by the beads-superpowers plugin as a `bd prime` safety net, and it
+# recreates itself. It describes bd, which is not this repository's tracker.
+PRIME.md

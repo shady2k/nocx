@@ -274,19 +274,32 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await expect(row).toHaveCount(1, { timeout: 15_000 })
     await expect(row.locator('.ui-record-row__meta-text')).toHaveText(SKILL_DESCRIPTION)
 
+    // The card this used to open is gone (nocx-54a2c): a skill now opens in
+    // its own tab (openSkill, skill-view-content.tsx). `.pane.active
+    // .surface-host` is that tab's root — the same SolidPaneContent host
+    // element Settings and the API workbench render into — so it is
+    // narrowed with `:has(.skill-view__header)` (that header's `<h1>` is
+    // unconditional the instant the tab mounts, skill-view-header.tsx:108):
+    // without it, this locator also matches Settings' own host once the tab
+    // below is closed and Settings becomes the active pane again.
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
-    const card = page.getByRole('dialog', { name: SKILL_NAME })
+    const card = page.locator('.pane.active .surface-host:has(.skill-view__header)')
     await expect(card).toBeVisible({ timeout: 15_000 })
+    await expect(card.locator('.skill-view__name')).toHaveText(SKILL_NAME)
 
     // ── EVERY file it holds is listed, and it holds more than one ──────────
     // The count first: with the list missing, "each file opens" would be a
-    // loop over nothing, which is the one way this half could lie.
-    const manifest = card.locator('.ui-record-row__title')
+    // loop over nothing, which is the one way this half could lie. Scoped to
+    // the file list rather than the whole tab: the tab also carries a
+    // "Check" row sharing `.ui-record-row__title` (skill-view-body.tsx),
+    // which an unscoped locator would fold into this count.
+    const manifest = card.locator('.skill-view__file-list .ui-record-row__title')
     await expect(manifest).toHaveText([SKILL_FILE, SETUP_FILE], { timeout: 15_000 })
 
     // ── The document, verbatim, and marked nowhere ─────────────────────────
-    // SKILL.md is what the card opens with, so this is the state a person
-    // arrives in rather than one this spec drove them to.
+    // SKILL.md is what the tab opens with by default (skill-view-body.tsx:
+    // the first file, when no stored check exists yet), so this is the
+    // state a person arrives in rather than one this spec drove them to.
     const doc = readoutFor(card, `${SKILL_FILE} of “${SKILL_NAME}”, verbatim`)
     await expect(doc.readout).toHaveAttribute('data-state', 'text', { timeout: 15_000 })
     await expect(doc.readout).toContainText(SKILL_NAME)
@@ -324,8 +337,19 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await expect(setup.readout).toContainText('Highlighted lines below matched a static scan')
     await expect(setup.readout).toContainText(EXFIL_WORDS)
 
-    await card.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(card).toBeHidden({ timeout: 10_000 })
+    // No "Close" button on a tab — Meta+w is how every other spec in this
+    // suite leaves one (skills-management.spec.ts, focus-after-reorder.spec.ts).
+    // The tab TITLE naming this skill is what closing it removes — asserted
+    // at 1 first, so a future rename of the title (openSkill's
+    // `defaultTitle`) cannot turn this into a filter that matched nothing
+    // before OR after and silently passes either way. NOT `.pane.active
+    // .surface-host`: closing this tab activates the Settings tab
+    // underneath it, which renders into its OWN `.surface-host` — the same
+    // class, a different surface.
+    const skillTabTitle = page.locator(TITLE).filter({ hasText: SKILL_NAME })
+    await expect(skillTabTitle).toHaveCount(1)
+    await page.keyboard.press('Meta+w')
+    await expect(skillTabTitle).toHaveCount(0)
 
     // ══ HALF TWO — the script the proposed command names ═══════════════════
     await page.locator(TITLE).first().click()

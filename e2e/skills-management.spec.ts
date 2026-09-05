@@ -111,6 +111,39 @@ const SKILL_DOCUMENT = [
 const EDITED_LINE = `And page the on-call engineer twice (${nonce}).`
 const AUDIT_REPORT = `It tells the assistant to acknowledge a page and read a note (${nonce}).`
 
+// ═══════════════════════════════════════════════════════════════════════════
+// THE EPIC'S HAPPY PATH (nocx-at05r) — a SEPARATE skill, directory and
+// endpoint, on purpose. The test above ends by editing SKILL_NAME's bytes
+// and then deleting it from disk (skills.remove); this file's tests run
+// serially, so a second test appended after it must not depend on either
+// surviving. Nothing below shares a name with anything above, so nothing
+// this test does can break the assertions above it, and nothing above can
+// leave this test with a skill, an endpoint or a role assignment it didn't
+// ask for.
+// ═══════════════════════════════════════════════════════════════════════════
+const HAPPY_ENDPOINT_NAME = `E2E Happy ${nonce}`
+const HAPPY_MODEL = 'e2e-happy-model'
+const HAPPY_SKILL_NAME = `pager-happy-${nonce}`
+const HAPPY_SUPPORT_FILE = 'references/steps.md'
+/** One distinct sentence per file — "each file shows ITS OWN bytes" has to
+ *  be checkable against something no other file in the bundle also says. */
+const HAPPY_SKILL_LINE = `Run the pager drill first (${nonce}).`
+const HAPPY_SUPPORT_LINE = `Then escalate to the second responder (${nonce}).`
+const HAPPY_SKILL_DOCUMENT = [
+  '---',
+  `name: ${HAPPY_SKILL_NAME}`,
+  `description: "A second pager-drill skill, kept only for the happy path (${nonce})"`,
+  '---',
+  '',
+  `${HAPPY_SKILL_LINE} Then read ${HAPPY_SUPPORT_FILE}.`,
+  '',
+].join('\n')
+const HAPPY_SUPPORT_BODY = `# Steps\n\n${HAPPY_SUPPORT_LINE}\n`
+const HAPPY_AUDIT_REPORT = `It runs the pager drill and then escalates to the second responder (${nonce}).`
+/** What a person's editor does to the skill after it has already been
+ *  checked once. */
+const HAPPY_EDITED_LINE = `And then double-check the escalation path (${nonce}).`
+
 let backend: VaultBackend
 let fake: FakeOpenAI
 let endpoint: { port: number; token: string }
@@ -282,14 +315,27 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
       row.getByRole('button', { name: `Re-approve ${SKILL_NAME}`, exact: true }),
     ).toHaveCount(0)
 
-    // ── THE CARD, AND THE FILE VIEWER IN IT ────────────────────────────────
+    // ── THE TAB, AND THE FILE VIEWER IN IT ──────────────────────────────────
+    // The modal `Dialog` this used to open is gone (nocx-54a2c): a skill now
+    // opens in its own tab (openSkill, skill-view-content.tsx).
+    // `.pane.active .surface-host` is that tab's root — the SAME host class
+    // Settings and the API workbench render into, so it is narrowed with
+    // `:has(.skill-view__header)` (skill-view-header.tsx:108's own `<h1>`,
+    // unconditional the instant the tab mounts) — without it, this locator
+    // resolves to Settings' own `.surface-host` on every occasion this spec
+    // closes the tab and Settings becomes the active pane again (`card`
+    // keeps its name across the move: everything below is a claim about the
+    // same record and the same bytes, only the container changed).
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
-    const card = page.getByRole('dialog', { name: SKILL_NAME })
+    const card = page.locator('.pane.active .surface-host:has(.skill-view__header)')
     await expect(card).toBeVisible({ timeout: 10_000 })
-    // Where it is, and where it came from — the two facts the modal covers by
-    // being open over the row that carries them. Addressed by the list's own
-    // accessible name: the card draws a second fact list over the file below,
-    // and "the card states the source" is a claim about the first of them.
+    // Which skill this is: the header's own name, not merely "a tab exists".
+    await expect(card.locator('.skill-view__name')).toHaveText(SKILL_NAME)
+    // Where it is, and where it came from — the two facts the tab's header
+    // covers by being open over the row that carries them
+    // (skill-view-header.tsx). Addressed by the list's own accessible name,
+    // unchanged by the move: the header draws the same FactList the deleted
+    // card drew, under the same name.
     const record = card.getByLabel('Where this skill lives')
     await expect(record).toContainText(SKILL_URL)
     // AND THE REST OF WHAT RESOLVED (nocx-ojfuc.3): when the bytes were taken
@@ -306,66 +352,101 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // and the links it followed are deliberately recorded nowhere, so no
     // surface can imply they were.
     await expect(record).not.toContainText('Found via')
-    // Every file it carries, in the manifest's own order.
-    await expect(card.locator('.ui-record-row__title')).toHaveText([SKILL_FILE, NOTES_FILE], {
-      timeout: 15_000,
-    })
+    // Every file it carries, in the manifest's own order. Scoped to the file
+    // list rather than the whole tab: the tab also carries a "Check" row
+    // sharing `.ui-record-row__title` (skill-view-body.tsx), which an
+    // unscoped locator would fold into this count.
+    const files = card.locator('.skill-view__file-list .ui-record-row__title')
+    await expect(files).toHaveText([SKILL_FILE, NOTES_FILE], { timeout: 15_000 })
     const document = card.locator(
       `pre.ui-code-block[aria-label="${SKILL_FILE} of “${SKILL_NAME}”, verbatim"]`,
     )
     await expect.poll(() => exactText(document), { timeout: 15_000 }).toBe(SKILL_DOCUMENT)
     // Opening another file REPLACES the bytes, so the viewer can never show
     // one file under another's name.
-    await card.locator('.ui-record-row__title', { hasText: NOTES_FILE }).click()
+    await files.filter({ hasText: NOTES_FILE }).click()
     const notes = card.locator(
       `pre.ui-code-block[aria-label="${NOTES_FILE} of “${SKILL_NAME}”, verbatim"]`,
     )
     await expect.poll(() => exactText(notes), { timeout: 15_000 }).toBe(NOTES_BODY)
     await expect(document).toHaveCount(0)
 
-    // ── THE AUDIT, WHICH IS ASKED FOR AND CHANGES NOTHING ──────────────────
-    // Opening the card asked for bytes the person already owns, which costs
+    // ── THE CHECK, WHICH IS ASKED FOR AND CHANGES NOTHING ───────────────────
+    // Opening the tab asked for bytes the person already owns, which costs
     // nothing; the reading is a model call and waits for the button. So the
-    // count is taken HERE, with the card open and its files read, and the one
+    // count is taken HERE, with the tab open and its files read, and the one
     // request below is the button's.
+    //
+    // A FILE ROW NO LONGER DOUBLES AS THE READING (nocx-54a2c review): the
+    // deleted card's "Audit this skill" button sat beside whichever file was
+    // on screen. skill-view-body.tsx now draws the reading as a THIRD thing
+    // the right pane can show, selected the same way a file is — a "Check"
+    // row of its own, in the same list column, above Files
+    // (skill-view-check.tsx's module comment explains why it moved out of
+    // the narrow list column and into the full-width right pane). So opening
+    // it is a click on that row before the button is reachable.
+    await card.locator('#skill-view-check .ui-record-row__title').click()
     const requestBase = fake.requests().length
-    fake.setScript({ chunks: [AUDIT_REPORT] })
-    await card.getByRole('button', { name: 'Audit this skill' }).click()
+    // `skills.audit` decodes the model's reply as JSON
+    // (internal/assistant/skillaudit.go's parseSkillReading — exactly
+    // {"verdict": "clear"|"suspect", "report": "..."}), never as prose. The
+    // wire shape didn't change under this repointing; the fixture below did,
+    // to keep sending something the parser accepts.
+    fake.setScript({ chunks: [JSON.stringify({ verdict: 'clear', report: AUDIT_REPORT })] })
+    await card.getByRole('button', { name: 'Check this skill' }).click()
     await fake.waitForRequests(requestBase + 1)
     await expect(card).toContainText(AUDIT_REPORT, { timeout: 30_000 })
-    // It is the model's conclusion and not nocx's, it names the model that
-    // was billed, and it says which files it was about — a reading of a
-    // subset that did not say so would read exactly like a reading of the
-    // whole skill. It claims no safety either: the scan matched nothing
-    // here, and "nothing matched" is what the card says rather than
-    // "nothing is wrong".
-    //
-    // THE COPY CHANGED UNDER THIS ASSERTION (nocx-54a2c): the card's own
-    // "A description, not a verdict" StatusCard is gone with the card
-    // itself — the skill's tab (skill-view-check.tsx) states the same fact
-    // in its own words, in a `Caption` beside the verdict line rather than a
-    // titled card above it. `card` below still means the modal this file has
-    // not yet been pointed away from (that migration, and the button label
-    // below moving from "Audit this skill" to "Check this skill", is Task
-    // 12's — this line only had to stop asserting a string the product no
-    // longer has anywhere).
+    // It is the model's conclusion and not nocx's, and it names the model
+    // that was billed. It claims no safety either: the scan matched nothing
+    // here, and "nothing matched" is what the tab says rather than "nothing
+    // is wrong".
     await expect(card).toContainText("the model's conclusion, not nocx's")
-    await expect(card.getByLabel('Which model read this skill')).toContainText('e2e-model')
-    await expect(card.getByLabel('Which model read this skill')).toContainText(ENDPOINT_NAME)
-    await expect(card.locator('.ui-marker-list')).toContainText(SKILL_FILE)
-    await expect(card.locator('.ui-marker-list')).toContainText(NOTES_FILE)
+    // WHICH MODEL READ THIS SKILL — folded into the verdict line's own text
+    // now (skill-view-check.tsx's verdictLine: "Clear — <model> · <endpoint>
+    // · <date>") rather than a second FactList under that name. The deleted
+    // card's separate `getByLabel('Which model read this skill')` region has
+    // no replacement to address by name; the fact it read is still on
+    // screen, so the assertion moves to the panel rather than being dropped.
+    const checkPanel = card.locator('.skill-view__check')
+    await expect(checkPanel).toContainText('e2e-model')
+    await expect(checkPanel).toContainText(ENDPOINT_NAME)
     await expect(card).toContainText('The static scan matched nothing in these files')
+    // WHICH FILES IT WAS ABOUT DID NOT SURVIVE THE MOVE AS ITS OWN
+    // ASSERTION. The deleted card named the read files in a `.ui-marker-list`
+    // beside the report; skill-view-check.tsx's module comment records why
+    // that list is gone — "the files the model actually read ARE the left
+    // column now, so only the omissions still need saying"
+    // (omissionsSentence). With nothing omitted here, there is no sentence
+    // naming files at all, and no product-drawn structure left to assert
+    // against without reading the fake's own scripted prose — which the
+    // deleted card's own spec text warned against ("What is asserted about
+    // the reading is what it OWES a person... rather than a word of the
+    // report, which a fake wrote"). See the report on nocx-at05r.
+    //
     // And it moved nothing: the skill is still off, because a reading is not
     // a decision.
     const cardSwitch = card.locator('[role="switch"]')
     await expect(cardSwitch).not.toBeChecked()
 
-    // ── ENABLE, FROM THE CARD, WHERE THE EVIDENCE IS ───────────────────────
-    await expect(card).toContainText('This skill is off')
+    // ── ENABLE, FROM THE TAB, WHERE THE EVIDENCE IS ─────────────────────────
+    // "This skill is off" DID NOT SURVIVE THE MOVE either. The deleted card
+    // drew a StatusCard with that title whenever `!skill.enabled`; the
+    // tab's header (skill-view-header.tsx) kept only the "bytes changed"
+    // StatusCard and never rebuilt the plain-off one. The fact itself is
+    // still readable — the switch above is unchecked — so this line is
+    // dropped rather than pointed at text the product no longer has
+    // anywhere.
     await cardSwitch.click()
     await expect(cardSwitch).toBeChecked({ timeout: 15_000 })
-    await card.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(card).toBeHidden({ timeout: 10_000 })
+    // No "Close" button on a tab — Meta+w is how every other spec in this
+    // suite leaves one. The tab TITLE naming this skill is what closing it
+    // removes — asserted at 1 first, so a future rename of the title
+    // (openSkill's `defaultTitle`) cannot turn this into a filter that
+    // matched nothing before OR after and silently passes either way.
+    const skillTabTitle = page.locator(TITLE).filter({ hasText: SKILL_NAME })
+    await expect(skillTabTitle).toHaveCount(1)
+    await page.keyboard.press('Meta+w')
+    await expect(skillTabTitle).toHaveCount(0)
 
     // One control over one fact: the row's switch is the card's switch, and
     // the list behind the card caught up with the decision taken on it.
@@ -397,5 +478,160 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await expect(confirm).toBeVisible({ timeout: 10_000 })
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click()
     await expect(row).toHaveCount(0, { timeout: 15_000 })
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // THE EPIC'S HAPPY PATH (nocx-at05r) — the reason `skills.check` and
+  // content.db's own store exist at all: a check spends a model call
+  // exactly once, and a person can close the tab, come back, and even edit
+  // the skill on disk, without paying for a second reading they never
+  // asked for.
+  //
+  // STEP 3'S CLAIM IS ABOUT A CALL THAT MUST NOT HAPPEN, so it is measured
+  // on the fake model's own request count (`fake.requests().length`) and
+  // never inferred from the screen — an empty pane and a pane that did not
+  // need refilling look identical. `FakeOpenAI` already exposes `requests()`
+  // for this; no second counter was added.
+  // ═══════════════════════════════════════════════════════════════════════
+  test('a skill is checked once, and the verdict is there when you come back', async ({ page }) => {
+    // Written before the page loads, into THIS backend's disposable home —
+    // discovery walks the roots per call (skill.Discover), so the fixture
+    // only has to exist before the Skills section is opened.
+    const config = documentDir(backend.isolatedHome)
+    const happyDir = join(config, 'installed-skills', HAPPY_SKILL_NAME)
+    mkdirSync(join(happyDir, 'references'), { recursive: true })
+    writeFileSync(join(happyDir, SKILL_FILE), HAPPY_SKILL_DOCUMENT)
+    writeFileSync(join(happyDir, HAPPY_SUPPORT_FILE), HAPPY_SUPPORT_BODY)
+
+    await openApp(page)
+    await page.keyboard.press('Meta+,')
+    await settingsReady(page)
+
+    // A SEPARATE endpoint from `configureAssistant`'s (test above): reusing
+    // ENDPOINT_NAME would either collide or leave this test's pass/fail
+    // riding on the previous test's assistant configuration still being
+    // there. The vault itself is already unlocked backend-side by the test
+    // above, on this same shared backend — `createAiEndpoint` reads that
+    // from the DOM (no setup sheet appears) rather than assuming it.
+    await page.locator(SETTINGS_AI_NAV).click()
+    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
+    await createAiEndpoint(page, {
+      name: HAPPY_ENDPOINT_NAME,
+      baseUrl: fake.baseUrl(),
+      models: [HAPPY_MODEL],
+      key: `e2e-happy-key-${nonce}`,
+      vaultPassphrase: `vault-pass-${nonce}`,
+    })
+    await page.locator(SETTINGS_ROLES_NAV).click()
+    await setDefaultModel(page, HAPPY_ENDPOINT_NAME, HAPPY_MODEL)
+    await page.locator(`${ASSISTANT_GROUP} ${SETTINGS_SKILLS_NAV}`).click()
+
+    // ── THE TAB, AND THE BUNDLE IN IT ───────────────────────────────────
+    const row = rowFor(page, HAPPY_SKILL_NAME)
+    await expect(row).toHaveCount(1, { timeout: 15_000 })
+    await row.getByRole('button', { name: `Open ${HAPPY_SKILL_NAME}`, exact: true }).click()
+
+    // `.skill-view` names nothing in the DOM — the tab is SolidPaneContent's
+    // own `.surface-host`, the same host element every other tab-shaped
+    // surface (Settings, the API workbench) renders into; skill-view-*.tsx
+    // only names its OWN children (`.skill-view__header`,
+    // `.skill-view__body`, `.skill-view__file-list`, …). Narrowed with
+    // `:has(.skill-view__header)` — that header's `<h1>` is unconditional
+    // the instant the tab mounts (skill-view-header.tsx:108) — because an
+    // unnarrowed `.pane.active .surface-host` also matches Settings' own
+    // host once this test closes the tab and Settings becomes active again.
+    const tab = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    await expect(tab).toBeVisible({ timeout: 15_000 })
+    // Which skill this is, not merely "a tab exists".
+    await expect(tab.locator('.skill-view__name')).toHaveText(HAPPY_SKILL_NAME)
+    const files = tab.locator('.skill-view__file-list .ui-record-row__title')
+    await expect(files).toHaveText([SKILL_FILE, HAPPY_SUPPORT_FILE], { timeout: 15_000 })
+
+    // Each file shows ITS OWN bytes — a viewer that showed the first file
+    // whatever you clicked would pass a test that only opened one.
+    await files.filter({ hasText: HAPPY_SUPPORT_FILE }).click()
+    await expect(tab.locator('.ui-code-block')).toContainText(HAPPY_SUPPORT_LINE, {
+      timeout: 15_000,
+    })
+    await files.filter({ hasText: SKILL_FILE }).click()
+    await expect(tab.locator('.ui-code-block')).toContainText(HAPPY_SKILL_LINE)
+
+    // ── CHECKED ONCE ──────────────────────────────────────────────────────
+    // The reading is a third thing the right pane can show, selected the
+    // same way a file is (skill-view-body.tsx) — a "Check" row above Files,
+    // never a button floating beside whichever file happens to be open.
+    await tab.locator('#skill-view-check .ui-record-row__title').click()
+    const before = fake.requests().length
+    fake.setScript({ chunks: [JSON.stringify({ verdict: 'clear', report: HAPPY_AUDIT_REPORT })] })
+    await tab.getByRole('button', { name: 'Check this skill' }).click()
+    await expect(tab.locator('.skill-view__check-verdict')).toContainText(/clear|suspect/i, {
+      timeout: 30_000,
+    })
+    expect(fake.requests().length).toBe(before + 1)
+    const verdict = await tab.locator('.skill-view__check-verdict').textContent()
+    // AND THE REPORT — criterion 2 is "the verdict AND the report", and a
+    // regression that stored and restored the verdict while losing the
+    // report body would pass every check below that names only the verdict
+    // line. `.skill-view__check-report` is its own class
+    // (skill-view-check.tsx:251).
+    await expect(tab.locator('.skill-view__check-report')).toHaveText(HAPPY_AUDIT_REPORT)
+
+    // ── CLOSED, REOPENED, AND NOT PAID FOR TWICE ───────────────────────────
+    // The tab TITLE naming this skill is what closing it removes — asserted
+    // at 1 first, so a future rename of the title (openSkill's
+    // `defaultTitle`) cannot turn this into a filter that matched nothing
+    // before OR after and silently passes either way. NOT `.pane.active
+    // .surface-host`: closing this tab activates the Settings tab
+    // underneath it, which renders into its OWN `.surface-host` — the same
+    // class, a different surface.
+    const happySkillTabTitle = page.locator(TITLE).filter({ hasText: HAPPY_SKILL_NAME })
+    await expect(happySkillTabTitle).toHaveCount(1)
+    await page.keyboard.press('Meta+w')
+    await expect(happySkillTabTitle).toHaveCount(0)
+    await row.getByRole('button', { name: `Open ${HAPPY_SKILL_NAME}`, exact: true }).click()
+    // A stored check is the default pane on open (skill-view-body.tsx's
+    // "the check selected by default when one exists"), so the verdict is
+    // on screen with no click needed to reach it. Narrowed the same way as
+    // `tab` above, for the same reason.
+    const reopened = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    await expect(reopened.locator('.skill-view__check-verdict')).toHaveText(verdict!, {
+      timeout: 15_000,
+    })
+    await expect(reopened.locator('.skill-view__check-report')).toHaveText(HAPPY_AUDIT_REPORT)
+    // THE WHOLE POINT: no second call. Asserted on the model's own counter,
+    // because the screen cannot tell a remembered verdict from a re-earned
+    // one — an empty pane and a pane that did not need refilling look
+    // identical.
+    expect(fake.requests().length).toBe(before + 1)
+
+    // ── THE BYTES MOVE, AND THE VERDICT SAYS WHAT IT IS ABOUT ──────────────
+    writeFileSync(join(happyDir, SKILL_FILE), `${HAPPY_SKILL_DOCUMENT}${HAPPY_EDITED_LINE}\n`)
+    await page.keyboard.press('Meta+w')
+    await row.getByRole('button', { name: `Open ${HAPPY_SKILL_NAME}`, exact: true }).click()
+    const reopenedAgain = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    // Still there — a stale reading is still the reading.
+    await expect(reopenedAgain.locator('.skill-view__check-verdict')).toHaveText(verdict!, {
+      timeout: 15_000,
+    })
+    await expect(reopenedAgain.locator('.skill-view__check-report')).toHaveText(HAPPY_AUDIT_REPORT)
+    await expect(reopenedAgain).toContainText('earlier version', { timeout: 15_000 })
+    expect(fake.requests().length).toBe(before + 1)
+
+    // ── AND A BUILTIN IS NOT CHECKED AT ALL ────────────────────────────────
+    await page.keyboard.press('Meta+w')
+    const builtin = rowFor(page, 'skill-authoring')
+    await builtin.getByRole('button', { name: 'Open skill-authoring', exact: true }).click()
+    // Narrowed the same way as `tab` above. This is the one place an
+    // unnarrowed locator would have cost the most: after Meta+w, Settings
+    // is the active pane and has its own `.surface-host`, so an unnarrowed
+    // `builtinTab` would resolve to Settings — `toBeVisible()` would pass
+    // there, and "no Check button" would be trivially true on a page that
+    // never had one to begin with. Anchoring on the header's name is what
+    // proves this is the builtin's own tab before its absence means
+    // anything.
+    const builtinTab = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    await expect(builtinTab).toBeVisible({ timeout: 15_000 })
+    await expect(builtinTab.locator('.skill-view__name')).toHaveText('skill-authoring')
+    await expect(builtinTab.getByRole('button', { name: 'Check this skill' })).toHaveCount(0)
   })
 })

@@ -614,29 +614,64 @@ test.describe('a person installs a skill by asking for it (nocx-ojfuc.5)', () =>
     const rowSwitch = row.locator('.ui-record-row__state [role="switch"]')
     await expect(rowSwitch).not.toBeChecked()
 
+    // The card this used to open is gone (nocx-54a2c): a skill now opens in
+    // its own tab (openSkill, skill-view-content.tsx). `.pane.active
+    // .surface-host` is that tab's root — SolidPaneContent's own host
+    // element, the same one Settings and the API workbench render into —
+    // so it is narrowed with `:has(.skill-view__header)` (that header's
+    // `<h1>` is unconditional the instant the tab mounts,
+    // skill-view-header.tsx:108): without it, this locator also matches
+    // Settings' own host once the tab below is closed and Settings becomes
+    // the active pane again.
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
-    const card = page.getByRole('dialog', { name: SKILL_NAME })
-    await expect(card).toBeVisible({ timeout: 15_000 })
-    // The record of the install, on the card: the address, when it was taken,
-    // and the digest — THE ONE THE WINDOW SHOWED, which is what makes this a
-    // relationship rather than two constants agreeing.
-    const record = card.getByLabel('Where this skill lives')
+    const tab = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    await expect(tab).toBeVisible({ timeout: 15_000 })
+    await expect(tab.locator('.skill-view__name')).toHaveText(SKILL_NAME)
+    // The record of the install, in the tab's header: the address, when it
+    // was taken, and the digest — THE ONE THE WINDOW SHOWED, which is what
+    // makes this a relationship rather than two constants agreeing. The
+    // aria-label is unchanged: SkillViewHeader draws the same FactList under
+    // the same name the deleted card used.
+    const record = tab.getByLabel('Where this skill lives')
     await expect(record).toContainText(documentURL)
     await expect(record).toContainText('Taken on')
     await expect(record).toContainText(shownDigest)
-    // Every file it carries, in the manifest's own order.
-    await expect(card.locator('.ui-record-row__title')).toHaveText([SKILL_FILE, CHECKLIST_FILE], {
-      timeout: 15_000,
-    })
+    // Every file it carries, in the manifest's own order. Scoped to the file
+    // list rather than the whole tab: the tab now also carries a "Check"
+    // row sharing `.ui-record-row__title` (skill-view-body.tsx), which an
+    // unscoped locator would fold into this count.
+    await expect(tab.locator('.skill-view__file-list .ui-record-row__title')).toHaveText(
+      [SKILL_FILE, CHECKLIST_FILE],
+      { timeout: 15_000 },
+    )
 
     // The person looks, then decides. The skill was inert until this click.
-    await expect(card).toContainText('This skill is off')
-    const cardSwitch = card.locator('[role="switch"]')
-    await expect(cardSwitch).not.toBeChecked()
-    await cardSwitch.click()
-    await expect(cardSwitch).toBeChecked({ timeout: 15_000 })
-    await card.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(card).toBeHidden({ timeout: 10_000 })
+    //
+    // "This skill is off" DID NOT SURVIVE THE MOVE. The deleted card drew a
+    // StatusCard with that title whenever `!skill.enabled`
+    // (skills-section.tsx, pre-nocx-54a2c); SkillViewHeader
+    // (skill-view/skill-view-header.tsx) keeps only the "bytes changed"
+    // StatusCard and never rebuilt the plain-off one. The fact itself is
+    // still readable — the switch below is unchecked — so this line is
+    // dropped rather than pointed at text the product no longer has
+    // anywhere; see the report on nocx-at05r.
+    const tabSwitch = tab.locator('[role="switch"]')
+    await expect(tabSwitch).not.toBeChecked()
+    await tabSwitch.click()
+    await expect(tabSwitch).toBeChecked({ timeout: 15_000 })
+    // No "Close" button on a tab — Meta+w is how every other spec in this
+    // suite leaves one (skills-management.spec.ts, focus-after-reorder.spec.ts).
+    // The tab TITLE naming this skill is what closing it removes — asserted
+    // at 1 first, so a future rename of the title (openSkill's
+    // `defaultTitle`) cannot turn this into a filter that matched nothing
+    // before OR after and silently passes either way. NOT `.pane.active
+    // .surface-host`: closing this tab activates the Settings tab
+    // underneath it, which renders into its OWN `.surface-host` — the same
+    // class, a different surface.
+    const skillTabTitle = page.locator(TITLE).filter({ hasText: SKILL_NAME })
+    await expect(skillTabTitle).toHaveCount(1)
+    await page.keyboard.press('Meta+w')
+    await expect(skillTabTitle).toHaveCount(0)
     await expect(rowSwitch).toBeChecked({ timeout: 15_000 })
   })
 })

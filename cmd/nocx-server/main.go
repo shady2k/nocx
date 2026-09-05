@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/version"
+	"github.com/shady2k/nocx/internal/waveendpoint"
 )
 
 func main() {
@@ -91,6 +92,19 @@ func run(logger *slog.Logger) error {
 		return startErr
 	}
 	defer a.Shutdown(ctx)
+	waveSocket, err := startWaveEndpoint(a, coordinator.RuntimeDir(paths),
+		coordinator.SystemPeerCredentials{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), logger)
+	if err != nil {
+		return err
+	}
+	if waveSocket != nil {
+		defer func() {
+			if closeErr := waveSocket.Close(); closeErr != nil {
+				logger.Error("closing the wave socket", "error", closeErr)
+			}
+		}()
+	}
 
 	// After Start, so the address and the token exist to be handed out.
 	// The token is read by the socket and by nothing else on this path: it
@@ -129,6 +143,31 @@ func run(logger *slog.Logger) error {
 	<-sig
 	logger.Info("nocx-server shutting down")
 	return nil
+}
+
+// startWaveEndpoint publishes the wave socket only when the application has
+// both sides of the common wave pipeline. A missing authorizer is a deliberate
+// refusal to publish, not a socket that rejects every request.
+func startWaveEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials, owner coordinator.PathOwner, selfUID uint32, logger *slog.Logger) (*waveendpoint.Endpoint, error) {
+	if a == nil || a.WaveAuthorizer == nil || a.WaveDispatcher == nil {
+		return nil, nil
+	}
+	endpoint, err := waveendpoint.New(waveendpoint.Config{
+		Dir:      dir,
+		Peers:    peers,
+		Owner:    owner,
+		SelfUID:  selfUID,
+		Auth:     a.WaveAuthorizer,
+		Dispatch: a.WaveDispatcher,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := endpoint.Start(); err != nil {
+		return nil, err
+	}
+	return endpoint, nil
 }
 
 // wsBackend is the part of the running WS server this binary needs, which

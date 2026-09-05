@@ -148,6 +148,14 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		return transport.HostedSessionOpen{}, true, fmt.Errorf("open a pane on this machine's helper: %w", err)
 	}
 	sid := res.Session.ID()
+	if o.registry == nil {
+		_ = res.Session.Close()
+		return transport.HostedSessionOpen{}, true, errors.New("local helper opener has no session registry")
+	}
+	if err := o.registry.RecordOwnedProcessPID(sid, res.Entry.Launch.Pid); err != nil {
+		_ = res.Session.Close()
+		return transport.HostedSessionOpen{}, true, fmt.Errorf("recording local helper launch pid: %w", err)
+	}
 	shell := res.Entry.Launch.Shell
 	status, reason := localIntegrationStatus(shell, res.LifecycleLane)
 	o.watchForReplacement(res.Session, res.Entry.Launch.Pid, shell)

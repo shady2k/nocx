@@ -123,6 +123,57 @@ func newLocalPaneApp(t *testing.T, opts ...Option) *App {
 	return a
 }
 
+func TestLocalPaneRecordsOwnedLaunchPID(t *testing.T) {
+	a := newLocalPaneApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	opened, err := a.Transport.OpenSession(ctx, transport.OpenSpec{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("opening a local pane through the shipped opener: %v", err)
+	}
+	sid := opened.Session.ID()
+
+	a.localHelper.mu.Lock()
+	client := a.localHelper.client
+	a.localHelper.mu.Unlock()
+	if client == nil {
+		t.Fatal("local helper client was not retained after opening the pane")
+	}
+	entries, err := client.Sessions(ctx)
+	if err != nil {
+		t.Fatalf("reading the helper launch record: %v", err)
+	}
+	var launchPID int
+	for _, entry := range entries {
+		if entry.HostSessionID.Session == string(sid) {
+			launchPID = entry.Launch.Pid
+			break
+		}
+	}
+	if launchPID <= 0 {
+		t.Fatalf("helper returned no positive launch pid for session %s", sid)
+	}
+	if opened.OwnedProcessPID != launchPID {
+		t.Fatalf("opened session process pid = %d, want helper launch pid %d", opened.OwnedProcessPID, launchPID)
+	}
+
+	recordedPID, known := a.Session.OwnedProcessPID(sid)
+	if !known {
+		t.Fatalf("owned process pid for session %s is not known", sid)
+	}
+	if recordedPID != launchPID {
+		t.Fatalf("owned process pid = %d, want helper launch pid %d", recordedPID, launchPID)
+	}
+
+	if err := a.Session.Close(sid); err != nil {
+		t.Fatalf("closing session: %v", err)
+	}
+	if _, known := a.Session.OwnedProcessPID(sid); known {
+		t.Fatalf("owned process pid for session %s remained after close", sid)
+	}
+}
+
 // endTheDaemon ends the helper this test started, by asking the OS which
 // process is running that binary. Signalled rather than killed: a helper's
 // SIGTERM path is the one it ships with, and a test that only ever killed one

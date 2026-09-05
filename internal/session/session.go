@@ -682,6 +682,48 @@ func (r *Reg) Get(id ID) (Session, error) {
 	return s, nil
 }
 
+// RecordOwnedProcessPID records the process the backend opened for a session.
+// The launch record is the only permitted source; callers must not derive this
+// value from a request or from the session's byte stream.
+func (r *Reg) RecordOwnedProcessPID(id ID, pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("owned process pid must be positive: %d", pid)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	s.ownedProcessMu.Lock()
+	defer s.ownedProcessMu.Unlock()
+	if s.ownedProcessPID != 0 && s.ownedProcessPID != pid {
+		return fmt.Errorf("owned process pid already recorded for session: %s", id)
+	}
+	s.ownedProcessPID = pid
+	return nil
+}
+
+// OwnedProcessPID returns the process the backend opened for id. The second
+// result distinguishes an absent process from a valid PID, including for
+// sessions opened through SSH.
+func (r *Reg) OwnedProcessPID(id ID) (int, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	s, ok := r.sessions[id]
+	if !ok {
+		return 0, false
+	}
+	s.ownedProcessMu.RLock()
+	defer s.ownedProcessMu.RUnlock()
+	if s.ownedProcessPID <= 0 {
+		return 0, false
+	}
+	return s.ownedProcessPID, true
+}
+
 func (r *Reg) Close(id ID) error {
 	r.mu.Lock()
 	s, ok := r.sessions[id]
@@ -887,6 +929,9 @@ func SSHOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 //
 // Deleted profile with open session: the session holds its own Channel
 // (SSH connection or PTY) and does not reference the profile store at
+// all. The ownedProcessPID is different: it is set only when the
+// composition root records a process the backend opened for this session.
+// Zero means that this session has no backend-owned process.
 type realSession struct {
 	id           ID
 	identity     Identity // the incarnation identity: instance + epoch, immutable
@@ -899,6 +944,11 @@ type realSession struct {
 	profileID    string
 	credentialID string
 	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
+
+	// ownedProcessPID is protected separately so a transport caller can read
+	// the immutable launch fact without reaching into the registry lock.
+	ownedProcessMu  sync.RWMutex
+	ownedProcessPID int
 
 	ch        Channel
 	log       log.Logger
@@ -965,14 +1015,26 @@ type writeResult struct {
 	err error
 }
 
-func (s *realSession) ID() ID                          { return s.id }
-func (s *realSession) Identity() Identity              { return s.identity }
-func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
-func (s *realSession) Kind() Kind                      { return s.kind }
-func (s *realSession) PaneID() string                  { return s.paneID }
-func (s *realSession) OpenedAt() time.Time             { return s.openedAt }
-func (s *realSession) Host() string                    { return s.host }
-func (s *realSession) Cwd() string                     { return s.cwd }
+func (s *realSession) ID() ID              { return s.id }
+func (s *realSession) Identity() Identity  { return s.identity }
+func (s *realSession) Parent() (Ref, bool) { return s.parent, !s.parent.Zero() }
+func (s *realSession) Kind() Kind          { return s.kind }
+func (s *realSession) PaneID() string      { return s.paneID }
+func (s *realSession) OpenedAt() time.Time { return s.openedAt }
+func (s *realSession) Host() string        { return s.host }
+func (s *realSession) Cwd() string         { return s.cwd }
+
+// OwnedProcessPID exposes the launch fact to transport projections without
+// exposing a mutator on Session.
+func (s *realSession) OwnedProcessPID() (int, bool) {
+	s.ownedProcessMu.RLock()
+	defer s.ownedProcessMu.RUnlock()
+	if s.ownedProcessPID <= 0 {
+		return 0, false
+	}
+	return s.ownedProcessPID, true
+}
+
 func (s *realSession) ProfileID() string               { return s.profileID }
 func (s *realSession) CredentialID() string            { return s.credentialID }
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }

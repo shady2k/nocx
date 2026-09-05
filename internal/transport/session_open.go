@@ -88,10 +88,14 @@ type OpenSpec struct {
 // rebuilt it from the spec would be rebuilding the renderer's claim instead of
 // the backend's conclusion.
 type OpenedSession struct {
-	Session     session.Session
-	Config      session.Config
-	Hosted      *HostedSessionOpen
-	WorkspaceID string
+	Session session.Session
+	Config  session.Config
+	Hosted  *HostedSessionOpen
+	// OwnedProcessPID is the backend-owned launch pid, when this session was
+	// opened through a local helper. Zero means the session has no process
+	// owned by this backend; callers must not treat it as a valid pid.
+	OwnedProcessPID int
+	WorkspaceID     string
 }
 
 // openRefusal is an answer the open path produced ITSELF, as distinct from a
@@ -302,7 +306,19 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		o.laneRegistrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
 	}
 
-	return OpenedSession{Session: sess, Config: cfg, Hosted: hosted, WorkspaceID: workspaceID}, nil
+	ownedPID := 0
+	if lookup, ok := sess.(interface{ OwnedProcessPID() (int, bool) }); ok {
+		if pid, known := lookup.OwnedProcessPID(); known {
+			ownedPID = pid
+		}
+	}
+	return OpenedSession{
+		Session:         sess,
+		Config:          cfg,
+		Hosted:          hosted,
+		OwnedProcessPID: ownedPID,
+		WorkspaceID:     workspaceID,
+	}, nil
 }
 
 // resolveRemote fills cfg's remote half. It is phase one's whole ssh body and

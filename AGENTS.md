@@ -80,6 +80,21 @@ other rule, which is the point of having the mechanism. (`confidenceDecayHalfLif
 is a red herring for an imported memory — it decays a rule's `feedbackEvents`, and
 these have none.)
 
+**The `cm` skill's Agent Protocol is half true here, and the false half writes into
+your source.** It tells an agent to do four things: run `cm context` at the start,
+cite rule ids while working, leave `// [cass: helpful b-8f3a2c]` comments in the
+code when a rule helps or hurts, and then "just finish — learning happens
+automatically". Step one is right and is why the skill is installed. **Steps three
+and four do not apply in this repository and must not be followed.**
+
+There is no automation: no `Stop` hook, no timer, and `autoReflect` is a dead knob
+— its only occurrence in the binary is the schema default. So nothing ever runs
+`cm reflect`, and those `[cass: …]` markers are explicitly documented as "parsed
+during reflection". Written here they would be comments no reader will ever have,
+scattered through code that has to be maintained. **Do not write them.** If a rule
+helped or hurt, say so in your report; a person decides whether it becomes
+feedback.
+
 To add one, do NOT use `cm playbook add` — it writes to `~/.cass-memory/playbook.yaml`,
 which is per-machine and per-user, so nobody else ever sees it. Append to
 `.internal/memories-export.jsonl` and re-run `scripts/bd-memories-to-cass.py`; the

@@ -229,6 +229,16 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 	return lp.file.Write(p)
 }
 
+// hangupProcessGroup targets the session's process group, whose id is the
+// shell pid because pty.StartWithSize starts the shell with setsid. The
+// foreground command shares that group when job control is disabled.
+func (lp *LocalPty) hangupProcessGroup() error {
+	if lp.cmd.Process == nil {
+		return nil
+	}
+	return lp.SignalProcessGroup(lp.cmd.Process.Pid, syscall.SIGHUP)
+}
+
 func (lp *LocalPty) Close() error {
 	lp.mu.Lock()
 	defer lp.mu.Unlock()
@@ -254,9 +264,7 @@ func (lp *LocalPty) Close() error {
 	// a shell that receives it saves its history, runs its exit hooks and
 	// hangs up its own jobs. The master is closed afterwards, so a shell that
 	// wants to write on the way out still has somewhere to write.
-	if lp.cmd.Process != nil {
-		_ = lp.cmd.Process.Signal(syscall.SIGHUP)
-	}
+	_ = lp.hangupProcessGroup()
 	return lp.file.Close()
 }
 

@@ -27,6 +27,15 @@ type waveAuthEnrolments interface {
 	Enrolled(paneID string) bool
 }
 
+// The slot is the coordinator seat, not a conversation gate. M1 makes talk
+// mesh from day one; A1 says membership makes a participant addressable while
+// delegation makes it controllable. Each participant has its own session, so
+// its own calls use its own slot. The session-keyed coordinator slot therefore
+// must never mute a participant's conversation.
+//
+// D11 is intentionally not implemented here: a lost mutation response stays
+// unknown until wave.holdings reports the existing record; there is no response
+// cache or idempotency promise.
 type waveCallerSlots struct {
 	mu   sync.Mutex
 	held map[session.ID]*waveCallerSlot
@@ -37,8 +46,6 @@ type waveCallerSlot struct {
 	slots *waveCallerSlots
 	sid   session.ID
 }
-
-var errWaveCallerActive = waveendpoint.ErrSessionCallerActive
 
 func (s *waveCallerSlots) acquire(sid session.ID) (func(), bool) {
 	s.mu.Lock()
@@ -126,7 +133,7 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 
 	release, acquired := a.slots.acquire(admitted)
 	if !acquired {
-		return assistant.WaveInvocation{}, nil, errWaveCallerActive
+		return assistant.WaveInvocation{}, nil, waveendpoint.ErrSessionCallerActive
 	}
 	return assistant.WaveInvocation{
 		Context:    context.Background(),
@@ -135,15 +142,6 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 	}, release, nil
 }
 
-// The slot is the coordinator seat, not a conversation gate. M1 makes talk
-// mesh from day one; A1 says membership makes a participant addressable while
-// delegation makes it controllable. Each participant has its own session, so
-// its own calls use its own slot. The session-keyed coordinator slot therefore
-// must never mute a participant's conversation.
-//
-// D11 is intentionally not implemented here: a lost mutation response stays
-// unknown until wave.holdings reports the existing record; there is no response
-// cache or idempotency promise.
 func waveCallerGrant(sid session.ID) content.Grant {
 	permit := content.EffectRow{Decision: content.DecisionPermit}
 	refuse := content.EffectRow{Decision: content.DecisionRefuse}

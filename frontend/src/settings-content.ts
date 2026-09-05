@@ -18,6 +18,7 @@ import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
+import type { MCPServerClient } from './mcp-servers-client'
 import type { HistoryStatusStore } from './history-status'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
@@ -60,6 +61,7 @@ export class SettingsContent extends SolidPaneContent {
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
+    private readonly mcpServersClient?: MCPServerClient,
   ) {
     super()
   }
@@ -77,6 +79,7 @@ export class SettingsContent extends SolidPaneContent {
           agentClient: this.agentClient,
           policyClient: this.policyClient,
           endpointsClient: this.endpointsClient,
+          mcpServersClient: this.mcpServersClient,
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,

@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/mcp"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
 
@@ -31,6 +33,7 @@ type vaultResetPreviewResponse struct {
 	SecretCount             int  `json:"secretCount"`
 	ProfileCount            int  `json:"profileCount"`
 	EndpointCount           int  `json:"endpointCount"`
+	MCPServerCount          int  `json:"mcpServerCount"`
 	SystemKeychainReachable bool `json:"systemKeychainReachable"`
 	VaultInitialized        bool `json:"vaultInitialized"`
 }
@@ -41,10 +44,11 @@ type vaultResetResidueEntry struct {
 }
 
 type vaultResetResponse struct {
-	SecretCount   int                      `json:"secretCount"`
-	ProfileCount  int                      `json:"profileCount"`
-	EndpointCount int                      `json:"endpointCount"`
-	Residue       []vaultResetResidueEntry `json:"residue"`
+	SecretCount    int                      `json:"secretCount"`
+	ProfileCount   int                      `json:"profileCount"`
+	EndpointCount  int                      `json:"endpointCount"`
+	MCPServerCount int                      `json:"mcpServerCount"`
+	Residue        []vaultResetResidueEntry `json:"residue"`
 }
 
 // vaultResetHandlers answers vault.resetPreview and vault.reset. Reset is
@@ -53,9 +57,12 @@ type vaultResetResponse struct {
 // alone, independent of the vault lifecycle. The handler holds the operation,
 // the Responder and the vault.changed fan-out; nothing else.
 type vaultResetHandlers struct {
-	op      capability.VaultResetOperation // nil → reset not wired
-	r       Responder
-	machine vaultMachine
+	op         capability.VaultResetOperation // nil → reset not wired
+	r          Responder
+	machine    vaultMachine
+	mcpRepo    profile.MCPServerRepository
+	mcpNotify  func(mcpServersChangedParams)
+	mcpRuntime mcp.Runtime
 }
 
 func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcRequest) {
@@ -73,6 +80,7 @@ func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcR
 			SecretCount:             p.Impact.SecretCount,
 			ProfileCount:            p.Impact.ProfileCount,
 			EndpointCount:           p.Impact.EndpointCount,
+			MCPServerCount:          p.Impact.MCPServerCount,
 			SystemKeychainReachable: p.SystemKeychainReachable,
 			VaultInitialized:        p.VaultInitialized,
 		}))
@@ -103,14 +111,25 @@ func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest)
 			residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
 		}
 
-		h.machine.broadcastVaultChanged()
+		if closer, ok := h.mcpRuntime.(interface{ CloseServers() }); ok {
+			closer.CloseServers()
+		}
 
 		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
-			SecretCount:   result.Impact.SecretCount,
-			ProfileCount:  result.Impact.ProfileCount,
-			EndpointCount: result.Impact.EndpointCount,
-			Residue:       residue,
+			SecretCount:    result.Impact.SecretCount,
+			ProfileCount:   result.Impact.ProfileCount,
+			MCPServerCount: result.Impact.MCPServerCount,
+			EndpointCount:  result.Impact.EndpointCount,
+			Residue:        residue,
 		}))
+		if h.mcpRepo != nil && h.mcpNotify != nil {
+			if servers, listErr := h.mcpRepo.ListMCPServers(); listErr == nil {
+				for _, server := range servers {
+					h.mcpNotify(mcpServersChangedParams{ID: server.ID, Revision: server.Revision, Change: "vault-reset"})
+				}
+			}
+		}
+		h.machine.broadcastVaultChanged()
 		return nil
 	})
 	if err != nil {

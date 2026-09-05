@@ -9,6 +9,7 @@
     "secretCount",
     "profileCount",
     "endpointCount",
+    "mcpServerCount",
     "systemKeychainReachable",
     "vaultInitialized"
   ],
@@ -25,6 +26,11 @@
     },
     "endpointCount": {
       "description": "AI endpoints holding at least one of those secrets (ADR-0030). Endpoints that store no credential are not counted, because they lose nothing. Counted separately from profileCount: the endpoint clause is a different sentence answering a different question (ADR-0031).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "mcpServerCount": {
+      "description": "MCP server records holding at least one secret binding. Records remain after reset, but their secret-backed bindings are cleared.",
       "type": "integer",
       "minimum": 0
     },

@@ -389,8 +389,18 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	if p.Grant != nil {
 		grant := *p.Grant
 		grant.Policy = grant.Policy.WithFloor(c.floor)
-		permitted := c.tools.ForGrant(grant)
-		// The approval store is the client's own (process-lifetime, one
+		runRegistry := c.tools
+		if len(p.MCPCatalogs) > 0 {
+			var err error
+			runRegistry, err = c.tools.WithMCP(p.MCPCatalogs)
+			if err != nil {
+				return fmt.Errorf("ask: MCP tool registry: %w", err)
+			}
+			if p.Presentation == nil {
+				p.Presentation = &agenttools.PresentationConfig{}
+			}
+		}
+		permitted := runRegistry.ForGrant(grant)
 		// per client, keyed by run id — ADR-0028: checkpoints are
 		// process-lifetime state); a caller may pass one explicitly.
 		approvals := p.Approvals
@@ -406,7 +416,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		if p.Classifier != nil {
 			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
 		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
+		mw, err := newPolicyMiddleware(askLog, grant, runRegistry, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
 			noteOperation:    p.NoteOperation,
@@ -417,6 +427,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			fetcher:          p.Fetcher,
 			snapshots:        c.snapshots,
 			runID:            p.RunID,
+			mcpRuntime:       p.MCPRuntime,
 			expansions:       p.Expansions,
 		})
 		if err != nil {
@@ -438,7 +449,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		// refused. The policy middleware removes this internal anchor from
 		// ToolInfos before every model call, so it is never declared.
 		runTools = append(append([]tool.BaseTool(nil), declared...), &unknownToolAnchor{})
-		if p.Presentation != nil && p.Presentation.Lazy && len(c.searchSchema) > 0 {
+		if (len(p.MCPCatalogs) > 0 || (p.Presentation != nil && p.Presentation.Lazy)) && len(c.searchSchema) > 0 {
 			search, err := mw.searchTool()
 			if err != nil {
 				return err

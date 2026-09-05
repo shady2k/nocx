@@ -68,7 +68,8 @@ steps for you.
 
 ## Code search
 
-`grep`, `glob` and reading the file are the tools. There is no code-knowledge-graph
-index in this repo and no hook in front of a file read — see
-[AGENTS.md](AGENTS.md#code-search) for why it was removed, and for what `repowise` is
-and is not good for.
+`grep`, `glob` and reading the file are one way in; the `repowise` MCP tools are the
+other, and neither outranks the other. Use `grep` for _does this exist, and who calls
+it_, and `repowise` when the question is about history or risk. Read
+[AGENTS.md](AGENTS.md#code-search) first: it says what `repowise` may and may not be
+believed about, and why an earlier index (`graphify`) was removed outright.

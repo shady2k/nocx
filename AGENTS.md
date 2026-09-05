@@ -259,24 +259,40 @@ who calls it_ — and it beat the index on every one of those questions we measu
 > answers. Do not reintroduce an index, or any hook in front of a file read, without
 > measuring against that baseline.
 
-**`repowise` is installed, and it is NOT a replacement for `grep`.** It was measured against
-that baseline on 2026-09-04 (`nocx-14sbw`) and kept for one layer only. Five real questions,
-keyed run: two right, one partial, one honest miss, and one confidently wrong. `grep`
-answered all five in under 0.1 s each. So:
+**`repowise` is installed, and it is a second way in, not a ranked one.** Use
+whichever fits the question: `grep` for _does this exist, and who calls it_, the MCP
+tools when the question is about history, risk or how a module hangs together.
 
-- **Ask `grep` first, always.** `get_answer` and `search_codebase` lose on our questions and
-  cost seconds to minutes apiece.
-- **What it gives that `grep` cannot is history.** `get_risk` / `repowise risk`: hotspot
-  scores, defect profiles, bus factor, and CO-CHANGE PARTNERS WITH SUPPORT COUNTS — including
-  pairs with no import and no structural link, which no search can find. Verified against
-  `git log`. That is why it is here.
-- **Never take its prose as fact about the tree.** It repeats our own comments, stale ones
-  included: asked whether a write path was wired, it answered from a comment that had been
-  wrong since the wiring landed (`nocx-n5gr2`). Its line numbers drift by ten or twenty.
-  Confirm anything it claims about code by reading the code.
-- **The web Chat at `repowise serve` is broken** — its Next.js proxy on the UI port stalls
-  the SSE stream the moment the agent calls a tool, so any real question hangs forever while
-  the backend on the API port answers the same request fine. Use the MCP tools.
+There used to be a rule here that said to ask `grep` first, always, on the strength of
+one run recorded in commit `960b270e` — five questions, `repowise` two right, one
+partial, one miss, one confidently wrong. **That ordering is withdrawn**, because the
+evidence behind it cannot be checked: `nocx-14sbw` asked for the five questions and
+both tools' answers side by side, that criterion was never ticked, and neither the
+questions nor the answers were written down anywhere. A tally with no record behind
+it is not the kind of evidence the rest of this file demands, and it should not have
+been used to rank a tool. The bead is still open; whoever wants the ordering back
+measures it and records it properly.
+
+What stands, because it was checked rather than summarised:
+
+- **History is what it gives that a search cannot.** `get_risk` / `repowise risk`:
+  hotspot scores, defect profiles, bus factor, and CO-CHANGE PARTNERS WITH SUPPORT
+  COUNTS — including pairs with no import and no structural link. Verified against
+  `git log`.
+- **Never take its prose as fact about the tree.** It repeats our own comments, stale
+  ones included: asked whether a write path was wired, it answered from a comment that
+  had been wrong since the wiring landed (`nocx-n5gr2`). Its line numbers drift by ten
+  or twenty. Confirm anything it claims about code by reading the code.
+- **The web Chat at `repowise serve` is broken** — its Next.js proxy on the UI port
+  stalls the SSE stream the moment the agent calls a tool, so any real question hangs
+  forever while the backend on the API port answers the same request fine
+  (`nocx-cvd55`). Use the MCP tools.
+- **`repowise decision add` is not how a decision is recorded here.** Decisions go to
+  `docs/decisions/` as ADRs, and `repowise` indexes those itself — every entry in
+  `repowise decision list` is derived, `source: adr` or `source: pr`, not authored in
+  it. A decision written into `.repowise/` sits in a directory git does not carry,
+  visible to one clone, marked `proposed` for a person who will never see it. The
+  generated `.claude/CLAUDE.md` says otherwise; this file wins.
 
 **In a worktree it needs two commands, and one hazard needs watching.** The MCP registration
 is user-scope and path-less, so it resolves whichever repo you are in — do not pin a path

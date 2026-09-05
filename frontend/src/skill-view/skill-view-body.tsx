@@ -43,13 +43,27 @@
 // text, unreadable, or the shared scan budget spent) is drawn with the SAME
 // pending mark as "not scanned yet": both are "unknown", worded by why.
 //
-// THE MANIFEST, THE SCAN, AND WHICHEVER FILE IS ON SCREEN ARE ALL RE-READ ON
-// EVERY ACTIVATION, not only once in onMount. A skill's own module comment
-// says a tab "lives for days"; `refreshToken` is a number `SkillViewContent`
-// bumps on every `setVisible(true)` (the same re-read `SkillsStore.refresh`
-// already gets), and this component's effect re-fetches all three each time
-// it changes — otherwise a long-lived tab would show the bytes and the marks
-// exactly as they were the day it opened.
+// THE MANIFEST, THE SCAN, THE STORED CHECK, AND WHICHEVER FILE IS ON SCREEN
+// ARE ALL RE-READ ON EVERY ACTIVATION, not only once in onMount. A skill's
+// own module comment says a tab "lives for days"; `refreshToken` is a
+// number `SkillViewContent` bumps on every `setVisible(true)` (the same
+// re-read `SkillsStore.refresh` already gets), and this component's effect
+// re-fetches all four each time it changes — otherwise a long-lived tab
+// would show the bytes and the marks exactly as they were the day it
+// opened.
+//
+// THE RIGHT PANE SHOWS ONE OF THREE THINGS (nocx-dh14q, review round 2): a
+// file's bytes, or what content.db knows about this skill (the "check").
+// The check is NOT a fixed group stacked above Files in this narrow list
+// column — an earlier version of this file put it there, and a review
+// caught that a 16 KiB-bounded model report does not fit an
+// [180px, 40% of the pane] rail, and that stacking it above Files pushed
+// the tab's own primary navigation below a report a person has to scroll
+// past. The design (`.internal/specs/2026-09-05-the-skill-viewer-
+// design.md:140-169`) draws THE CHECK as one ROW in this column, selected
+// the same way a file is, with its full content in the RIGHT PANE at full
+// width — so `rightPane` below is a third state alongside "which file",
+// not a fourth component squeezed beside the other three.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js'
@@ -68,7 +82,12 @@ import { skillFileOutcome } from '../skills-presentation'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
-import { SkillViewCheck } from './skill-view-check'
+import {
+  checkRowTitle,
+  readingFromCheck,
+  SkillViewCheckPanel,
+  type CheckState,
+} from './skill-view-check'
 
 export interface SkillViewBodyProps {
   /** The RESOLVED skill's name — see skill-view-content.tsx's module
@@ -161,19 +180,34 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
   const [selectedPath, setSelectedPath] = createSignal<string | null>(null)
   const [listWidth, setListWidth] = createSignal(DEFAULT_LIST_WIDTH)
   const [paneWidth, setPaneWidth] = createSignal(FALLBACK_PANE_WIDTH)
+  const [checkState, setCheckState] = createSignal<CheckState>({ kind: 'loading' })
+  const [auditing, setAuditing] = createSignal(false)
+  const [auditError, setAuditError] = createSignal('')
+  /** Which of the two things the right pane currently shows — a third
+   *  state alongside "which file" (see the module comment). Starts at
+   *  'file': the initial default is decided once, below, by the effect
+   *  that watches both `filesState` and `checkState` settle. */
+  const [rightPane, setRightPane] = createSignal<'check' | 'file'>('file')
 
   let disposed = false
   let bodyEl: HTMLDivElement | undefined
   let listEl: HTMLDivElement | undefined
   let viewEl: HTMLDivElement | undefined
-  // Which manifest read, which scan read, and which per-file read is
-  // current — the same generation guard skills-section.tsx's
-  // `fileGeneration` uses, for the same reason: a reactivation or a second
-  // selection must not let a slower, earlier read land after a faster,
-  // later one.
+  // Which manifest read, which scan read, which check read, and which
+  // per-file read is current — the same generation guard skills-
+  // section.tsx's `fileGeneration` uses, for the same reason: a
+  // reactivation or a second selection must not let a slower, earlier
+  // read land after a faster, later one.
   let manifestGeneration = 0
   let scanGeneration = 0
   let fileGeneration = 0
+  let checkGeneration = 0
+  /** Set once the initial right-pane default has been decided (see the
+   *  effect below) — never reset, including across a reactivation:
+   *  "selected by default" is about the tab's FIRST open, and a later
+   *  reactivation must preserve whatever the person is looking at rather
+   *  than re-running the decision and yanking them back to it. */
+  let hasChosenDefaultPane = false
 
   const filePaths = (): readonly string[] => {
     const state = filesState()
@@ -287,20 +321,119 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
     }
   }
 
-  // The one place "go read the manifest and the scan" happens (see the
-  // module comment): `on` with no `defer` runs once immediately at setup —
-  // replacing a separate onMount fetch — and again every time refreshToken
-  // changes. The two calls are independent, so one failing must not stop
-  // the other from being asked.
+  /** The only place `skills.check` is called — never `skills.audit`, which
+   *  is `runAudit` below's alone. Free (content.db's own read), so it runs
+   *  on the same schedule the manifest and the scan already keep: once
+   *  immediately, and again on every reactivation. Never called for a
+   *  builtin skill — see the effect below — so a builtin never spends
+   *  even this free call. */
+  const loadCheck = async (): Promise<void> => {
+    const asked = ++checkGeneration
+    try {
+      const result = await props.store.check(props.name)
+      if (disposed || asked !== checkGeneration) return
+      if (!result.checked || result.check === undefined) {
+        setCheckState({ kind: 'none' })
+      } else {
+        setCheckState({
+          kind: 'ready',
+          reading: readingFromCheck(result.check),
+          current: result.current ?? true,
+        })
+      }
+    } catch (err) {
+      if (disposed || asked !== checkGeneration) return
+      setCheckState({ kind: 'unavailable', message: messageOf(err) })
+    }
+  }
+
+  /** THE ONLY PLACE `skills.audit` IS CALLED — from the panel's button,
+   *  never from an effect. The `auditing` guard refuses a second press
+   *  while one is in flight even if the disabled attribute has not yet
+   *  painted, so "exactly once per press" holds whichever race a test
+   *  catches it in.
+   *
+   *  BUMPS `checkGeneration` FIRST (review round 2's Important #1 fix). A
+   *  slow `loadCheck` triggered by a reactivation can still be in flight
+   *  when a press resolves — content.db is single-connection and reads
+   *  queue behind writes — and without this, that stale read would land
+   *  AFTER this function writes the fresh reading and overwrite it with
+   *  the stored value, or with `none`, silently discarding a report the
+   *  person was just billed for. Bumping here invalidates that read's
+   *  `asked !== checkGeneration` guard before it can land. */
+  const runAudit = async (): Promise<void> => {
+    if (auditing()) return
+    checkGeneration++
+    setAuditing(true)
+    setAuditError('')
+    try {
+      const result = await props.store.audit(props.name)
+      if (disposed) return
+      setCheckState({
+        kind: 'ready',
+        // Just produced, from the bytes as they are right now.
+        current: true,
+        reading: {
+          verdict: result.verdict,
+          report: result.report,
+          role: result.role,
+          endpoint: result.endpoint,
+          model: result.model,
+          // skills.audit carries no timestamp of its own — only a STORED
+          // check does — and this reading was made this instant, so that
+          // is what the line says.
+          checkedAt: new Date().toISOString(),
+          omitted: result.omitted,
+          findings: result.findings,
+          storedNote:
+            result.stored === 'no' ? (result.storedError ?? 'This reading was not saved.') : '',
+        },
+      })
+    } catch (err) {
+      if (disposed) return
+      setAuditError(messageOf(err))
+    } finally {
+      if (!disposed) setAuditing(false)
+    }
+  }
+
+  // The one place "go read the manifest, the scan, and the stored check"
+  // happens (see the module comment): `on` with no `defer` runs once
+  // immediately at setup — replacing a separate onMount fetch — and again
+  // every time refreshToken changes. The three calls are independent, so
+  // one failing must not stop the others from being asked. `loadCheck` is
+  // skipped entirely for a builtin skill: design §6 offers it no check at
+  // all, and skipping the call here (rather than only hiding its button)
+  // is what keeps a builtin from spending even the free read.
   createEffect(
     on(
       () => props.refreshToken,
       () => {
         void loadManifest()
         void loadScan()
+        if (props.provenance !== 'builtin') void loadCheck()
       },
     ),
   )
+
+  // THE INITIAL RIGHT-PANE DEFAULT (design's own testing note: "the check
+  // selected by default when one exists and the first file when none
+  // does"). Reacts to both `filesState` and `checkState` rather than
+  // threading a callback through `loadManifest`/`loadCheck`, so whichever
+  // of the two settles last is still the one that completes the decision.
+  // Decides EXACTLY ONCE (`hasChosenDefaultPane`): a builtin skill never
+  // gets a `checkState` beyond `loading` (loadCheck is never called for
+  // one), so it is treated as settled-to-`none` immediately rather than
+  // waiting forever on a signal nothing will ever move.
+  createEffect(() => {
+    if (hasChosenDefaultPane) return
+    const files = filesState()
+    const check = props.provenance === 'builtin' ? ({ kind: 'none' } as CheckState) : checkState()
+    if (files.kind === 'loading') return
+    if (check.kind === 'loading') return
+    hasChosenDefaultPane = true
+    setRightPane(check.kind === 'ready' ? 'check' : 'file')
+  })
 
   onMount(() => {
     // jsdom has no ResizeObserver — the guard leaves `paneWidth` at its
@@ -454,29 +587,31 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
       <div class="skill-view__split">
         <div class="skill-view__list-col">
           <Stack gap="loose">
-            {/* THE CHECK (nocx-dh14q) — what content.db knows about this
-                skill: SkillViewCheck reads it through `skills.check` (spends
-                nothing) and owns the one button that spends a model,
-                `skills.audit`. It reads nothing from the scan below:
-                wiring it to the scan marks would be the "stored fact
-                standing in for a live one" mistake the module comment
-                warns against — the two are different facts with different
-                sources, drawn apart on purpose (design §3, §4).
+            {/* THE CHECK (nocx-dh14q, review round 2) — ONE ROW, selected
+                the same way a file is; its full content (the verdict, the
+                prose, the scan sentence, the button) is
+                `SkillViewCheckPanel` in the RIGHT PANE at full width, never
+                stacked here (see the module comment for why an earlier
+                shape put it here and had to be moved).
 
-                GATED ON PROVENANCE, NOT JUST THE BUTTON DISABLED: a builtin
+                GATED ON PROVENANCE, NOT JUST THE ROW HIDDEN: a builtin
                 skill offers no check at all — design §6, "its bytes came
                 with the binary... a check would be theatre with a model's
-                bill attached." `Show`'s `when` false means SkillViewCheck
-                never mounts, so its effect never fires and `skills.check`
-                is never asked for a builtin either — not merely a button
-                withheld while the panel still spent a call underneath it. */}
+                bill attached." `Show`'s `when` false means this Section
+                never renders and `loadCheck` is never called for a builtin
+                either (see the refresh effect above) — not merely a row
+                withheld while the state underneath still spent a call. */}
             <Show when={props.provenance !== 'builtin'}>
-              <Section title="Check">
-                <SkillViewCheck
-                  name={props.name}
-                  store={props.store}
-                  refreshToken={props.refreshToken}
-                />
+              <Section id="skill-view-check" title="Check">
+                <Stack divided dense>
+                  <RecordRow
+                    title={checkRowTitle(checkState())}
+                    density="dense"
+                    selected={rightPane() === 'check'}
+                    actions={undefined}
+                    onActivate={() => setRightPane('check')}
+                  />
+                </Stack>
               </Section>
             </Show>
             <Section title="Files">
@@ -521,10 +656,13 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                       <RecordRow
                         title={path}
                         density="dense"
-                        selected={selectedPath() === path}
+                        selected={rightPane() === 'file' && selectedPath() === path}
                         status={matchStatus(path)}
                         actions={undefined}
-                        onActivate={() => selectFile(path)}
+                        onActivate={() => {
+                          setRightPane('file')
+                          selectFile(path)
+                        }}
                       />
                     )}
                   </For>
@@ -557,16 +695,31 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
           }}
         >
           <Show
-            when={outcome()}
+            when={rightPane() === 'check'}
             fallback={
-              <StatusCard
-                tone="neutral"
-                title="Reading this file"
-                description={readingSentence()}
-              />
+              <Show
+                when={outcome()}
+                fallback={
+                  <StatusCard
+                    tone="neutral"
+                    title="Reading this file"
+                    description={readingSentence()}
+                  />
+                }
+              >
+                {(said) => (
+                  <FileReadout facts={facts()} ariaLabel={readoutLabel()} outcome={said()} />
+                )}
+              </Show>
             }
           >
-            {(said) => <FileReadout facts={facts()} ariaLabel={readoutLabel()} outcome={said()} />}
+            <SkillViewCheckPanel
+              name={props.name}
+              state={checkState()}
+              auditing={auditing()}
+              auditError={auditError()}
+              onRunAudit={() => void runAudit()}
+            />
           </Show>
         </div>
       </div>

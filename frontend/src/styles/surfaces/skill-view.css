@@ -94,21 +94,31 @@
   min-width: 0;
 }
 
-/* ── The Check group (nocx-dh14q) ──────────────────────────────────────────
-   skill-view-check.tsx's own root: a single child of Section's Stack, so
-   the rhythm BETWEEN its own children (the verdict line, the Caption, the
-   report, the scan sentence, the button) has to come from here rather than
-   from Section — Stack only spaces its own direct children, and this div's
-   grandchildren are not those. Owned outright, not a kit component, so it
-   may carry layout freely (README's own rule for the header and its `<h1>`
-   above). */
+/* ── The check panel (nocx-dh14q) ──────────────────────────────────────────
+   SkillViewCheckPanel's own root, rendered in `.skill-view__view-col` (the
+   RIGHT pane) when the left column's "Check" row is selected — the same
+   slot a file's FileReadout occupies, never a group stacked in the narrow
+   list column (review round 2 moved it out of there: see
+   skill-view-body.tsx's module comment for why). A single child of that
+   column, so the rhythm BETWEEN its own children (the verdict line, the
+   Caption, the report, the scan sentences, the button) has to come from
+   here — the column's own padding places it, and does not space its
+   grandchildren. Owned outright, not a kit component, so it may carry
+   layout freely (README's own rule for the header and its `<h1>` above). */
 .skill-view__check {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-.skill-view__check p {
+/* `> p`, not `p`: a bare descendant selector would also win over
+   `.ui-status-card__title { margin: 0 }` on every StatusCard this panel
+   places (same value today, so nothing looks wrong — but it is the
+   surface reaching past a kit component's root into its children, which
+   is exactly what "place, never repaint" forbids). `>` stops at this
+   panel's own direct `<p>` children and never descends into a StatusCard's
+   markup. */
+.skill-view__check > p {
   margin: 0;
 }
 

@@ -656,6 +656,18 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
 // internal/profile/role.go refuses to spend one silently.
 // ═══════════════════════════════════════════════════════════════════════════
 describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
+  // The panel now renders in the RIGHT PANE, selected the same way a file
+  // is (review round 2: it was a fixed group in the narrow list column,
+  // which is the defect this suite's own fix moved it out of). Every test
+  // that inspects the panel's content selects the row first, exactly the
+  // way a person reaches it — rather than depending on the default-pane
+  // effect's race between the manifest and the stored check settling.
+  const selectCheckRow = (host: HTMLElement): void => {
+    const button = host.querySelector<HTMLButtonElement>('#skill-view-check .ui-record-row__open')
+    if (!button) throw new Error('the Check row did not render')
+    button.click()
+  }
+
   const checkPane = (host: HTMLElement): HTMLElement | null =>
     host.querySelector('.skill-view__check')
 
@@ -663,6 +675,58 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     Array.from(host.querySelectorAll<HTMLButtonElement>('.skill-view__check .ui-button')).find(
       (b) => b.textContent?.includes(label),
     )
+
+  it('THE CHECK is a row beside the files, and its panel renders in the RIGHT pane', async () => {
+    // Review round 2's structural finding: an earlier shape stacked the
+    // whole panel inside the narrow [180px, 40%] list column, above Files
+    // — the modal's own defect (several components in one column)
+    // reproduced narrower. The row lives in the left column; its content
+    // renders in `.skill-view__view-col`, the same slot a file's bytes do.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(checkFields({ verdict: 'suspect' }))),
+    })
+    const { host } = await mount(client)
+
+    // The row is in the LEFT column, and — because a check exists — it is
+    // the default selection (design's testing note: "the check selected
+    // by default when one exists").
+    const row = host.querySelector('.skill-view__list-col #skill-view-check .ui-record-row')
+    expect(row).not.toBeNull()
+    expect(row?.textContent).toContain('Suspect')
+
+    // The full panel — the verdict line, the prose — is in the RIGHT pane,
+    // never inside the narrow list column.
+    expect(host.querySelector('.skill-view__list-col .skill-view__check')).toBeNull()
+    const panel = host.querySelector('.skill-view__view-col .skill-view__check')
+    expect(panel).not.toBeNull()
+    expect(panel?.textContent).toContain('Suspect')
+
+    // Selecting a file switches the right pane back to the file's bytes.
+    const fileRow = Array.from(host.querySelectorAll('.skill-view__file-list .ui-record-row')).find(
+      (r) => r.querySelector('.ui-record-row__title')?.textContent === 'SKILL.md',
+    )
+    if (!fileRow) throw new Error('SKILL.md row did not render')
+    fileRow.querySelector<HTMLButtonElement>('.ui-record-row__open')?.click()
+    await flush()
+    expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
+    expect(host.querySelector('.skill-view__view-col .ui-code-block')).not.toBeNull()
+  })
+
+  it('defaults to the first file when there is no check to default to', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'file bytes' })),
+      check: vi.fn().mockResolvedValue(checkedResult(null)),
+    })
+    const { host } = await mount(client)
+
+    expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
+    expect(host.querySelector('.skill-view__view-col .ui-code-block')?.textContent).toBe(
+      'file bytes',
+    )
+  })
 
   it('asks what was concluded and spends nothing, on open', async () => {
     const client = fakeClient({
@@ -685,6 +749,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       check: vi.fn().mockResolvedValue(checkedResult(null)),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const pane = checkPane(host)
     expect(pane).not.toBeNull()
@@ -707,6 +772,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
         ),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const pane = checkPane(host)
     expect(pane?.textContent).toContain('Suspect')
@@ -729,6 +795,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
         .mockResolvedValue(checkedResult(checkFields({ report: 'The old report' }), false)),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const pane = checkPane(host)
     // The stale sentence appears...
@@ -747,6 +814,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       check: vi.fn().mockResolvedValue(checkedResult(checkFields({ report: hostile }))),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const pane = checkPane(host)
     expect(pane).not.toBeNull()
@@ -776,10 +844,16 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       ),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const pane = checkPane(host)
     expect(pane?.textContent).toContain('matched 1 line')
     expect(pane?.textContent).toContain('scripts/setup.sh')
+    // "absence of a match is not safety" stays even when the scan DID
+    // match something (review round 2's minor: it used to disappear the
+    // moment findings.length > 0, leaving the other, CLEAN files in the
+    // same reading unvouched-for with nothing saying so).
+    expect(pane?.textContent).toContain('not the same as safe')
   })
 
   it('names what was left out of a stored reading, as a sentence', async () => {
@@ -795,8 +869,24 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
         ),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     expect(checkPane(host)?.textContent).toContain('references/huge.md')
+  })
+
+  it('says the scan count is a fact about what was read THEN, on a stale check', async () => {
+    // Review round 2's minor: the scan sentence was present tense even on
+    // a stale check, claiming about bytes that may no longer be on disk.
+    // Design §4 says the stored count is a fact about what was read then.
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockResolvedValue(checkedResult(checkFields(), false)),
+    })
+    const { host } = await mount(client)
+    selectCheckRow(host)
+
+    expect(checkPane(host)?.textContent).toContain('When this reading was made')
   })
 
   it('shows the report even when it could not be saved', async () => {
@@ -813,6 +903,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       ),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const button = findButton(host, 'Check this skill')
     if (!button) throw new Error('Check this skill button did not render')
@@ -839,16 +930,25 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     expect(client.check).not.toHaveBeenCalled()
   })
 
-  it('a check that could not be read is shown as a refusal, never as "nobody has checked this"', async () => {
+  it('a check that could not be read is shown as a refusal, and still offers the button', async () => {
+    // Review round 2's Important #2: `skills.check` errors only on a
+    // genuine store fault (a stub or unwired store answers `checked:
+    // false` instead) — so a READ failure here is not a reason to
+    // withhold `skills.audit`, which would run happily and report
+    // `stored:'no'` per design §6. An earlier version rendered no button
+    // at all in this branch.
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
       file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
       check: vi.fn().mockRejectedValue(new Error('content.db is locked')),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     expect(checkPane(host)?.textContent).toContain('content.db is locked')
-    expect(findButton(host, 'Check this skill')).toBeUndefined()
+    const button = findButton(host, 'Check this skill')
+    expect(button).toBeDefined()
+    expect(button?.disabled).toBe(false)
   })
 
   it('a reading that fails leaves the button available again, with a sentence saying why', async () => {
@@ -859,6 +959,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       audit: vi.fn().mockRejectedValue(new Error('the model refused')),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const button = findButton(host, 'Check this skill')
     if (!button) throw new Error('button did not render')
@@ -884,6 +985,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
       ),
     })
     const { host } = await mount(client)
+    selectCheckRow(host)
 
     const button = findButton(host, 'Re-check')
     if (!button) throw new Error('button did not render')
@@ -900,5 +1002,60 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     resolveAudit?.(auditFields())
     await flush()
     expect(button.disabled).toBe(false)
+  })
+
+  it('a slow reactivation read cannot clobber a fresh Re-check result', async () => {
+    // Review round 2's Important #1: content.db is single-connection and
+    // reads queue behind writes, so a `loadCheck` from a reactivation can
+    // still be in flight when a Re-check press resolves. Without bumping
+    // `checkGeneration` at the top of `runAudit`, that stale read would
+    // land AFTER the fresh reading and silently overwrite it — the report
+    // the person was just billed for, gone with no trace.
+    let resolveSecondCheck: ((value: SkillsCheck) => void) | undefined
+    let checkCalls = 0
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      check: vi.fn().mockImplementation(() => {
+        checkCalls += 1
+        if (checkCalls === 1) {
+          return Promise.resolve(checkedResult(checkFields({ verdict: 'suspect' })))
+        }
+        // The reactivation's own read — held open until the test resolves
+        // it, standing in for a slow content.db queued behind a write.
+        return new Promise<SkillsCheck>((resolve) => {
+          resolveSecondCheck = resolve
+        })
+      }),
+      audit: vi
+        .fn()
+        .mockResolvedValue(auditFields({ verdict: 'clear', report: 'Fresh audit report' })),
+    })
+    const { host, content } = await mount(client)
+    selectCheckRow(host)
+    expect(checkPane(host)?.textContent).toContain('Suspect')
+
+    // Reactivation: bumps refreshToken, fires the SECOND (slow) skills.check.
+    content.setVisible(false)
+    content.setVisible(true)
+    await flush()
+
+    // Re-check is pressed WHILE that slow read is still in flight.
+    const button = findButton(host, 'Re-check')
+    if (!button) throw new Error('button did not render')
+    button.click()
+    await flush()
+
+    expect(checkPane(host)?.textContent).toContain('Fresh audit report')
+
+    // The stale reactivation read finally lands...
+    resolveSecondCheck?.(
+      checkedResult(checkFields({ verdict: 'suspect', report: 'The old report' })),
+    )
+    await flush()
+
+    // ...and must not have clobbered the fresh audit result.
+    expect(checkPane(host)?.textContent).toContain('Fresh audit report')
+    expect(checkPane(host)?.textContent).not.toContain('The old report')
   })
 })

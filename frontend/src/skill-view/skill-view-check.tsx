@@ -1,69 +1,64 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SkillViewCheck — what a model concluded about this skill, and the button
-// that asks for a fresh reading (nocx-dh14q). Fills the placeholder Task 9
-// left in skill-view-body.tsx's "THE CHECK" group, replacing it with the
-// real thing.
+// SkillViewCheckPanel — what a model concluded about this skill, drawn in
+// the RIGHT PANE exactly the way a file is (nocx-dh14q, review round 2).
 //
-// ONE MODEL CALL, AND IT WAITS FOR A PRESS. Opening the tab (and every
-// reactivation) reads content.db through `skills.check` — free, and what
-// makes "nobody has checked this" a fact rather than a guess. `skills.audit`
-// — the one call that spends a model — runs ONLY from this component's own
-// button, never from an effect: internal/profile/role.go refuses to spend a
-// model call silently, and an effect that fired on mount would be exactly
-// that, wearing a different shape. A test asserts `client.audit` is never
-// called merely from opening the tab.
+// PRESENTATIONAL ONLY. The state this panel draws — what `skills.check`
+// answered, whether `skills.audit` is in flight, its last failure — is
+// owned by skill-view-body.tsx, the same place that already owns the file
+// list's manifest/scan/file state: both are "what governs the right pane
+// and the left column's rows", and a second owner here would be exactly
+// the two-owners defect the file-list dots already avoid. This module
+// keeps the pure presentation and the pure helpers (date/sentence
+// formatting) that draw from that state, plus `checkRowTitle`, the short
+// summary the LEFT COLUMN's row shows, and `readingFromCheck`, the
+// reshaping `skill-view-body.tsx`'s own `loadCheck` needs.
 //
-// A STALE CHECK IS STILL THE CHECK. `current:false` means the stored
-// reading's digest no longer matches the bytes on disk — an edit, a
-// reinstall — and it is shown IN FULL below, with one sentence above it
-// saying so. Hiding it would throw away what the person paid a model for,
-// and it would make "never checked" and "checked a while ago" the same
-// state on screen, which is the defect skills.check.schema.json's own
-// module doc calls out.
+// WHY THIS MOVED OUT OF THE LEFT COLUMN (review round 2 finding). The first
+// shape put the whole panel — verdict, prose, scan sentence — inside "THE
+// CHECK" group in the left column, a [180px, 40% of the pane] list column
+// shared with Files, inside the SAME `overflow-y:auto` as the file rows.
+// The design (`.internal/specs/2026-09-05-the-skill-viewer-design.md
+// :140-169`) draws THE CHECK as one ROW in that column and the report in
+// the RIGHT PANE at full width, the same way selecting a file does — for
+// the reason a 16 KiB-bounded report does not fit a narrow rail, and
+// stacking it above Files pushed the tab's own primary navigation below a
+// report a person has to scroll past first. That was the modal's original
+// complaint — several components stacked in one column — reproduced in a
+// narrower column. `skill-view-body.tsx` now treats "the check" as a
+// THIRD kind of thing the right pane can show, selected by a `RecordRow`
+// beside the file rows, alongside a file.
 //
-// THE VERDICT GATES NOTHING HERE EITHER. There is no branch in this file on
-// `verdict` — not on ordering, not on which button renders, not on a
-// disabled state, not on tone. It is text: attributed to the model that
-// wrote it (the model and endpoint travel beside it), alongside the static
-// scan's own count, which is OURS and deterministic and drawn as a separate
-// sentence — design §3's "two claims of different kinds", never merged into
-// one judgement.
+// THE VERDICT GATES NOTHING HERE. There is no branch in this file on
+// `verdict` — not on ordering, not on which button renders, not on tone,
+// not on a disabled state. It is text: attributed to the model that wrote
+// it (the model and endpoint travel beside it), alongside the static
+// scan's own count, which is OURS and deterministic and drawn as a
+// separate sentence — design §3's "two claims of different kinds", never
+// merged into one judgement.
 //
 // THE PROSE IS DATA, NEVER MARKUP. It is a model's account of a document a
 // stranger may have written, so it reaches the DOM only through Solid's
 // text interpolation (`{report}`, which sets textContent — never
 // innerHTML), the same way status-card.tsx's own `description` does. No
 // parsing, no anchors, nothing the report's bytes could turn into a live
-// element or attribute — a test builds a report containing `<script>` and a
-// `javascript:` link and asserts neither survives as markup.
+// element or attribute.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { Show, createEffect, createSignal, on, onCleanup, type JSX } from 'solid-js'
+import { Show, type JSX } from 'solid-js'
 import { Button, Caption, StatusCard } from '../ui'
-import type { SkillsStore } from '../skills-store'
 import type { SkillsCheck } from '../generated/skills.check'
 
-export interface SkillViewCheckProps {
-  /** The RESOLVED skill's name — see skill-view-content.tsx's module comment
-   *  for why this is never the requested one. */
-  name: string
-  store: SkillsStore
-  /** Bumped by SkillViewContent on every `setVisible(true)` — this panel
-   *  re-reads the stored check on the same schedule skill-view-body.tsx's
-   *  manifest and scan already keep (its own module comment), so a
-   *  long-lived tab does not go on showing a check a second window has
-   *  since replaced or superseded. */
-  refreshToken: number
-}
-
-type Omission = { path: string; reason: 'too-large' | 'not-text' | 'budget-spent' | 'unreadable' }
-type Finding = { path: string; patternId: string; line: string; lineNumber: number }
+/** The wire's own shapes, never re-declared by hand (review round 2's
+ *  minor: a hand-rolled union is a fourth place these could drift from the
+ *  schema they came from). */
+type Omission = NonNullable<SkillsCheck['check']>['omitted'][number]
+type Finding = NonNullable<SkillsCheck['check']>['findings'][number]
 
 /** One reading, whichever call produced it — `skills.check`'s stored
  *  `check` object, or a fresh `skills.audit` result reshaped onto the same
  *  fields. Kept as one type so the render below draws from ONE shape,
  *  never two that could drift apart on what a "reading" contains. */
-interface Reading {
+export interface Reading {
   verdict: 'clear' | 'suspect'
   report: string
   role: 'auditing' | 'answering'
@@ -75,19 +70,16 @@ interface Reading {
   /** '' when the reading is stored, whatever produced it — a check read
    *  back from content.db is stored by definition. Set only by a fresh
    *  audit whose `stored` came back 'no': the model was already billed by
-   *  the time the write was attempted, and the report stays on screen with
-   *  a sentence saying it did not stick (design §6, "a stub database is a
-   *  visible state, not a degrade"). */
+   *  the time the write was attempted, and the report stays on screen
+   *  with a sentence saying it did not stick (design §6). */
   storedNote: string
 }
 
-type CheckState =
+export type CheckState =
   | { kind: 'loading' }
   | { kind: 'unavailable'; message: string }
   | { kind: 'none' }
   | { kind: 'ready'; reading: Reading; current: boolean }
-
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -101,12 +93,31 @@ function shortDate(iso: string): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`
 }
 
+const verdictWord = (verdict: Reading['verdict']): string =>
+  verdict === 'suspect' ? 'Suspect' : 'Clear'
+
 /** `Suspect — gemma-4-26b-a4b · local · 4 Sep` (design §2, §4): the verdict
  *  word, capitalised, then the three facts a reader needs before weighing
  *  it at all — which model, which endpoint, when. */
 function verdictLine(reading: Reading): string {
-  const verdict = reading.verdict === 'suspect' ? 'Suspect' : 'Clear'
-  return `${verdict} — ${reading.model} · ${reading.endpoint} · ${shortDate(reading.checkedAt)}`
+  return `${verdictWord(reading.verdict)} — ${reading.model} · ${reading.endpoint} · ${shortDate(reading.checkedAt)}`
+}
+
+/** `Suspect · 4 Sep` — the LEFT COLUMN row's own summary (review round 2:
+ *  "keep the row's summary short — the verdict word and the date are
+ *  enough for a row"). Total over `CheckState` so a fifth state fails
+ *  this switch's compile rather than leaving the row silently blank. */
+export function checkRowTitle(state: CheckState): string {
+  switch (state.kind) {
+    case 'loading':
+      return 'Checking…'
+    case 'unavailable':
+      return 'Check unavailable'
+    case 'none':
+      return 'Not checked'
+    case 'ready':
+      return `${verdictWord(state.reading.verdict)} · ${shortDate(state.reading.checkedAt)}`
+  }
 }
 
 const REASON_WORDS: Record<Omission['reason'], string> = {
@@ -132,135 +143,53 @@ function omissionsSentence(omitted: readonly Omission[]): string {
 }
 
 /** THE SCAN'S OWN COUNT, apart from the verdict — design §3's "two claims
- *  of different kinds", restated as the one sentence carrying the scan's
- *  half. Zero matches carries its own caveat rather than reading as an
- *  all-clear: the scan is a fixed set of known phrasings, and a file none
- *  of them hit is a file they had nothing to say about, not one anything
- *  vouched for — the surviving caveat design §3 keeps. */
-function scanSentence(findings: readonly Finding[]): string {
+ *  of different kinds". PAST TENSE ON A STALE CHECK (review round 2's
+ *  minor): a stale reading's scan count is a fact about what was read
+ *  THEN (design §4), not a claim about the bytes on disk right now, which
+ *  may no longer contain what it matched — or may have grown a match this
+ *  sentence never saw. */
+function scanCountSentence(findings: readonly Finding[], current: boolean): string {
   if (findings.length === 0) {
-    return 'The static scan matched nothing in these files. That is not the same as safe: the scan looks for a fixed set of known phrasings, so files it matched nothing in are files it had nothing to say about.'
+    return current
+      ? 'The static scan matched nothing in these files.'
+      : 'When this reading was made, the static scan matched nothing in these files.'
   }
   const files = [...new Set(findings.map((f) => f.path))]
   const count = findings.length
-  return `The static scan matched ${count} line${count === 1 ? '' : 's'}, in ${joinWithAnd(files)}.`
+  const clause = `matched ${count} line${count === 1 ? '' : 's'}, in ${joinWithAnd(files)}.`
+  return current
+    ? `The static scan ${clause}`
+    : `When this reading was made, the static scan ${clause}`
 }
 
-/** `skills.check`'s stored `check`, reshaped into `Reading` — the same
- *  shape a fresh `skills.audit` produces below, so the render draws from
- *  one type regardless of which call answered. */
-function readingFromCheck(check: NonNullable<SkillsCheck['check']>): Reading {
-  return {
-    verdict: check.verdict,
-    report: check.report,
-    role: check.role,
-    endpoint: check.endpoint,
-    model: check.model,
-    checkedAt: check.checkedAt,
-    omitted: check.omitted,
-    findings: check.findings,
-    storedNote: '',
-  }
+/** ABSENCE OF A MATCH IS NOT SAFETY — kept UNCONDITIONALLY (design §3),
+ *  not folded into the zero-findings branch the way an earlier version of
+ *  this file had it (review round 2's finding: with one match and three
+ *  clean files, nothing said those three were unvouched-for). The scan is
+ *  a fixed set of known phrasings; a file it matched nothing in is a file
+ *  it had nothing to say about, whether or not it said something about a
+ *  different file in the same reading. */
+const SCAN_CAVEAT =
+  'That is not the same as safe: the scan looks for a fixed set of known phrasings, so files it matched nothing in are files it had nothing to say about.'
+
+export interface SkillViewCheckPanelProps {
+  name: string
+  state: CheckState
+  auditing: boolean
+  auditError: string
+  onRunAudit: () => void
 }
 
-export function SkillViewCheck(props: SkillViewCheckProps): JSX.Element {
-  const [state, setState] = createSignal<CheckState>({ kind: 'loading' })
-  const [auditing, setAuditing] = createSignal(false)
-  const [auditError, setAuditError] = createSignal('')
+export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Element {
+  const readyResult = (): { reading: Reading; current: boolean } | null =>
+    props.state.kind === 'ready' ? props.state : null
 
-  let disposed = false
-  let generation = 0
-
-  /** The only place `skills.check` is called — never `skills.audit`, which
-   *  is the button below's alone. */
-  const loadCheck = async (): Promise<void> => {
-    const asked = ++generation
-    try {
-      const result = await props.store.check(props.name)
-      if (disposed || asked !== generation) return
-      if (!result.checked || result.check === undefined) {
-        setState({ kind: 'none' })
-      } else {
-        setState({
-          kind: 'ready',
-          reading: readingFromCheck(result.check),
-          current: result.current ?? true,
-        })
-      }
-    } catch (err) {
-      if (disposed || asked !== generation) return
-      setState({ kind: 'unavailable', message: messageOf(err) })
-    }
-  }
-
-  // On mount, and again on every `refreshToken` change (every tab
-  // reactivation) — the same schedule skill-view-body.tsx's manifest and
-  // scan already keep, for the same reason: a tab "lives for days" and must
-  // not go on showing a check a second window has since replaced.
-  createEffect(
-    on(
-      () => props.refreshToken,
-      () => void loadCheck(),
-    ),
-  )
-
-  onCleanup(() => {
-    disposed = true
-  })
-
-  /** THE ONLY PLACE `skills.audit` IS CALLED — from a press, never an
-   *  effect. The `auditing` guard at the top refuses a second press while
-   *  one is in flight even if the disabled attribute has not yet painted
-   *  (the signal write and the DOM update are not the same instant), so
-   *  "exactly once per press" holds whichever race a test catches it in. */
-  const runAudit = async (): Promise<void> => {
-    if (auditing()) return
-    setAuditing(true)
-    setAuditError('')
-    try {
-      const result = await props.store.audit(props.name)
-      if (disposed) return
-      setState({
-        kind: 'ready',
-        // Just produced, from the bytes as they are right now.
-        current: true,
-        reading: {
-          verdict: result.verdict,
-          report: result.report,
-          role: result.role,
-          endpoint: result.endpoint,
-          model: result.model,
-          // skills.audit carries no timestamp of its own — only a STORED
-          // check does — and this reading was made this instant, so that
-          // is what the line says.
-          checkedAt: new Date().toISOString(),
-          omitted: result.omitted,
-          findings: result.findings,
-          storedNote:
-            result.stored === 'no' ? (result.storedError ?? 'This reading was not saved.') : '',
-        },
-      })
-    } catch (err) {
-      if (disposed) return
-      setAuditError(messageOf(err))
-    } finally {
-      if (!disposed) setAuditing(false)
-    }
-  }
-
-  const unavailableMessage = (): string => {
-    const held = state()
-    return held.kind === 'unavailable' ? held.message : ''
-  }
-
-  const readyResult = (): { reading: Reading; current: boolean } | null => {
-    const held = state()
-    return held.kind === 'ready' ? held : null
-  }
+  const unavailableMessage = (): string =>
+    props.state.kind === 'unavailable' ? props.state.message : ''
 
   return (
     <div class="skill-view__check">
-      <Show when={state().kind === 'loading'}>
+      <Show when={props.state.kind === 'loading'}>
         <StatusCard
           tone="neutral"
           title="Reading the stored check"
@@ -273,11 +202,6 @@ export function SkillViewCheck(props: SkillViewCheckProps): JSX.Element {
           title="The stored check could not be read"
           description={unavailableMessage()}
         />
-      </Show>
-      <Show when={state().kind === 'none'}>
-        <Button onClick={() => void runAudit()} disabled={auditing()}>
-          Check this skill
-        </Button>
       </Show>
       <Show when={readyResult()}>
         {(held) => (
@@ -299,7 +223,8 @@ export function SkillViewCheck(props: SkillViewCheckProps): JSX.Element {
               instead of them.
             </Caption>
             <p class="skill-view__check-report">{held().reading.report}</p>
-            <p>{scanSentence(held().reading.findings)}</p>
+            <p>{scanCountSentence(held().reading.findings, held().current)}</p>
+            <p>{SCAN_CAVEAT}</p>
             <Show when={held().reading.omitted.length > 0}>
               <p>{omissionsSentence(held().reading.omitted)}</p>
             </Show>
@@ -310,22 +235,50 @@ export function SkillViewCheck(props: SkillViewCheckProps): JSX.Element {
                 description={held().reading.storedNote}
               />
             </Show>
-            <Button onClick={() => void runAudit()} disabled={auditing()}>
-              Re-check
-            </Button>
           </>
         )}
       </Show>
-      <Show when={auditing()}>
+      {/* ALWAYS EXACTLY ONE BUTTON, IN EVERY STATE (review round 2's
+          Important #2). A store READ failure (`unavailable`) must not
+          withhold the model call: `skills.check` errors only on a genuine
+          store fault (a stub or unwired store answers `checked:false`
+          instead), while `skills.audit` would run happily and report
+          `stored:'no'`, which design §6 says must still reach the person
+          — the model is billed before the write is even attempted. An
+          earlier version of this panel rendered no button at all in the
+          `unavailable` branch, which withheld a call the backend was
+          willing to make. */}
+      <Button onClick={props.onRunAudit} disabled={props.auditing}>
+        {props.state.kind === 'ready' ? 'Re-check' : 'Check this skill'}
+      </Button>
+      <Show when={props.auditing}>
         <StatusCard
           tone="neutral"
           title="Reading this skill"
           description={`A model is reading the files of “${props.name}” and writing a description of them.`}
         />
       </Show>
-      <Show when={auditError()}>
-        <StatusCard tone="danger" title="This skill was not read" description={auditError()} />
+      <Show when={props.auditError}>
+        <StatusCard tone="danger" title="This skill was not read" description={props.auditError} />
       </Show>
     </div>
   )
+}
+
+/** `skills.check`'s stored `check`, reshaped into `Reading` — the same
+ *  shape a fresh `skills.audit` produces, so the render above draws from
+ *  one type regardless of which call answered. Exported for
+ *  skill-view-body.tsx's own `loadCheck`. */
+export function readingFromCheck(check: NonNullable<SkillsCheck['check']>): Reading {
+  return {
+    verdict: check.verdict,
+    report: check.report,
+    role: check.role,
+    endpoint: check.endpoint,
+    model: check.model,
+    checkedAt: check.checkedAt,
+    omitted: check.omitted,
+    findings: check.findings,
+    storedNote: '',
+  }
 }

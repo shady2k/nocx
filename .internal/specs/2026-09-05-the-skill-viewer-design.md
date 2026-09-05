@@ -79,10 +79,12 @@ descriptor)`. **Three** surfaces are registered through the registry —
   enciphers whole 4096-byte blocks (`sqlite.go:65`, ADR-0043). Reads queue
   behind live ledger writes, which is why nothing here touches the database on
   the list path (§6).
-- **Durable model output is BOUNDED before it is written, and the ledger also
-  masks it.** `maskClassifierReason` (`classifier.go:252`) truncates to
-  `classifierReasonMax` and runs `masking.MaskWithSegments`, fail-closed. Only
-  the bound transfers here — see §6 for why the masking does not.
+- **The report is ALREADY bounded, upstream.**
+  `maxAuditReportBytes = 16 KiB` (`skillaudit.go:58`) is applied in
+  `skillaudit.go:109` before the prose leaves `internal/assistant`. Its stated
+  reason is the READER'S SCREEN — a hostile skill that talks the auditor into
+  echoing forever must not spend it — and not the size of any record. This
+  work adds no second bound (§6).
 - **`Skill.Offered()` is the only filter on what the assistant is given**
   (`write.go:177` → `skill.go:162`): enabled, plus approval status. Nothing
   else may enter that predicate (§3).
@@ -307,10 +309,26 @@ Consequences, all of them wanted:
   `contentkey.go:14`'s stated threat — the detached copy — the copy carries the
   skill file itself whether or not the report was masked. It is ceremony, and
   ceremony is what teaches people to click past the prompt that matters.
-- **The report IS bounded.** A model can emit any length; a row with no
-  ceiling is a small but real hazard, and `MaxAuditBytes` already bounds the
-  input for the same kind of reason. The report is truncated to a stated
-  maximum and says so when it was cut.
+- **No new bound is added, because one already exists.** The report arrives
+  capped at `maxAuditReportBytes` = 16 KiB (`skillaudit.go:58`), applied
+  before it leaves `internal/assistant`. The column is `TEXT` and carries no
+  further ceiling: a second cut measured differently would be a second answer
+  to one question, which is what that constant's own comment already says
+  about `truncateRunes`.
+
+  The storage side does not argue for a smaller one either, which is worth
+  writing down because it is the reason not to invent a defensive number.
+  SQLite `TEXT` is bounded by `SQLITE_MAX_LENGTH`, on the order of a gigabyte.
+  `Budget.RetentionBytes` — "what eviction acts on" (`budget.go:11`) — acts on
+  `entries` and `artifact_chunks`, so this table is never swept.
+  `Budget.DiskCeilingBytes` is physical and DOES count these rows, but
+  exceeding it triggers compaction rather than deletion, and 16 KiB across a
+  library of skills is under a megabyte against a multi-gigabyte ceiling.
+
+  So the 16 KiB is a SCREEN budget that happens to bound a row, and if real
+  bundles start producing truncated reports it is one constant to raise, with
+  nothing in storage objecting.
+
 - **A stub database is a visible state, not a degrade.** With no store, a
   check runs and shows its result and the tab says it was not saved. It is not
   a `slog.Warn` under a UI that claims otherwise.
@@ -426,8 +444,8 @@ let these regress would be the defect AGENTS.md's rule 2 is about.
   ones, over both an `FS` root and a `Dir` root.
 - `Skill.Offered()` has no third term — asserted structurally, so a verdict
   can never enter it.
-- A report longer than the maximum is stored truncated and says it was cut;
-  one at exactly the maximum is not marked as cut.
+- The stored report is byte-for-byte what `skills.audit` returned — the
+  storage path adds no cut of its own.
 - Builtin: `skills.audit` on a builtin is refused.
 - **Failure paths, one per external call:** the model refuses; the store is a
   stub; the store write fails; the document is unwritable; a file in the

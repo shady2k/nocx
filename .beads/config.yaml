@@ -75,5 +75,3 @@ export:
 # sync.remote: "git+https://github.com/shady2k/nocx.git"
 validation:
     on-create: error
-sync:
-    remote: "https://github.com/shady2k/nocx.git"

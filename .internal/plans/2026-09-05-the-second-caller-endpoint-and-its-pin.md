@@ -82,7 +82,7 @@ Each is a bead, not a silence.
 **Files:**
 
 - Create: `internal/coordinator/runtime.go`
-- Modify: `internal/coordinator/server.go` (the dir/socket preparation path)
+- Modify: `internal/coordinator/server.go` (the dir/socket preparation path), `internal/coordinator/peer.go` (the new `PeerProcess` interface and the method on `SystemPeerCredentials`)
 - Test: `internal/coordinator/runtime_test.go`
 
 **Interfaces:**
@@ -90,13 +90,21 @@ Each is a bead, not a silence.
 - Produces: `func PrepareRuntimeDir(dir string, owner PathOwner, selfUID uint32) error`;
   `func BindSocket(dir, name string) (*net.UnixListener, error)`. Both return the existing
   sentinels — `ErrForeignOwner`, `ErrSymlinkPath`, `ErrOccupiedPath`, `ErrPathTooLong`.
-  **Also**: `PeerCredentials` gains `PeerPID(conn *net.UnixConn) (int, error)`, and
-  `SystemPeerCredentials` implements it over the `peerPID` that already exists unexported in
-  `peer_linux.go:41` and `peer_darwin.go`. Today only the uid is exported, and the endpoint
-  needs the pid to pin. Keep `peer_linux.go`'s comment — a bare pid is racy the moment it is
-  read — and add beside it that `internal/wavepin` is what stops it being bare, by pairing it
-  with the start time the helper's own record already calls the pid-reuse guard
-  (`internal/helper/proto/session_service.go:384-390`).
+  **Also** — corrected 2026-09-05 after the first attempt was blocked, and the worker was right:
+  a SECOND, separate interface `PeerProcess { PeerPID(conn *net.UnixConn) (int, error) }` in
+  `peer.go`, which `SystemPeerCredentials` also satisfies over the `peerPID` that already exists
+  unexported in `peer_linux.go:41` and `peer_darwin.go:40`.
+  **`PeerCredentials` is NOT widened.** The first draft said to add the method to it, which is
+  wrong twice over: every existing double of that interface — `fixedPeer` in
+  `coordinator_test.go` — would stop satisfying it, contradicting this task's own
+  behaviour-preserving criterion; and `peer_linux.go` says in as many words that the discovery
+  SERVER deliberately does not use a pid, "because peerUID above says why a pid is the wrong
+  thing to make a trust decision on". Widening the interface it holds would contradict that
+  comment. Two interfaces is the honest shape: the discovery socket keeps asking only what it
+  trusts, and the party that pairs a pid with a start time asks for the pid explicitly.
+  Keep `peer_linux.go`'s comment as it stands and add beside it that `internal/wavepin` is what
+  stops the pid being bare, by pairing it with the start time the helper's own record already
+  calls the pid-reuse guard (`internal/helper/proto/session_service.go:384-390`).
 - Consumes: nothing new.
 
 **Acceptance Criteria:**

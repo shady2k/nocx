@@ -635,6 +635,7 @@ describe('SettingsContent', () => {
     expect(labels).toEqual([
       'Connections',
       'Endpoints',
+      'MCP Servers',
       'Roles',
       'Assistant permissions',
       // Beside the permissions page and not the same subject: that one

@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/mcp"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
 
@@ -31,6 +33,7 @@ type vaultResetPreviewResponse struct {
 	SecretCount             int  `json:"secretCount"`
 	ProfileCount            int  `json:"profileCount"`
 	EndpointCount           int  `json:"endpointCount"`
+	MCPServerCount          int  `json:"mcpServerCount"`
 	SystemKeychainReachable bool `json:"systemKeychainReachable"`
 	VaultInitialized        bool `json:"vaultInitialized"`
 }
@@ -41,10 +44,11 @@ type vaultResetResidueEntry struct {
 }
 
 type vaultResetResponse struct {
-	SecretCount   int                      `json:"secretCount"`
-	ProfileCount  int                      `json:"profileCount"`
-	EndpointCount int                      `json:"endpointCount"`
-	Residue       []vaultResetResidueEntry `json:"residue"`
+	SecretCount    int                      `json:"secretCount"`
+	ProfileCount   int                      `json:"profileCount"`
+	EndpointCount  int                      `json:"endpointCount"`
+	MCPServerCount int                      `json:"mcpServerCount"`
+	Residue        []vaultResetResidueEntry `json:"residue"`
 }
 
 // vaultResetHandlers answers vault.resetPreview and vault.reset. Reset is
@@ -53,9 +57,12 @@ type vaultResetResponse struct {
 // alone, independent of the vault lifecycle. The handler holds the operation,
 // the Responder and the vault.changed fan-out; nothing else.
 type vaultResetHandlers struct {
-	op      capability.VaultResetOperation // nil → reset not wired
-	r       Responder
-	machine vaultMachine
+	op         capability.VaultResetOperation // nil → reset not wired
+	r          Responder
+	machine    vaultMachine
+	mcpRepo    profile.MCPServerRepository
+	mcpNotify  func(mcpServersChangedParams)
+	mcpRuntime mcp.Runtime
 }
 
 func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcRequest) {
@@ -73,6 +80,7 @@ func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcR
 			SecretCount:             p.Impact.SecretCount,
 			ProfileCount:            p.Impact.ProfileCount,
 			EndpointCount:           p.Impact.EndpointCount,
+			MCPServerCount:          p.Impact.MCPServerCount,
 			SystemKeychainReachable: p.SystemKeychainReachable,
 			VaultInitialized:        p.VaultInitialized,
 		}))
@@ -88,32 +96,77 @@ func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
-		result, err := svc.Execute(ctx)
-		if err != nil {
-			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
-			return nil
-		}
-
-		// Empty, not nil. The contract declares an array and the renderer types it
-		// as one; `residue: null` reaching a `.length` is the same defect this
-		// project already shipped once on the inventory (nocx-25k9.14).
-		residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
-		for _, r := range result.Residue {
-			residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
-		}
-
-		h.machine.broadcastVaultChanged()
-
-		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
-			SecretCount:   result.Impact.SecretCount,
-			ProfileCount:  result.Impact.ProfileCount,
-			EndpointCount: result.Impact.EndpointCount,
-			Residue:       residue,
-		}))
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
+	if h.mcpRuntime != nil && h.mcpRepo == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "MCP server repository unavailable; cannot safely reset referenced MCP credentials"})
+		return
 	}
+
+	var targets []profile.MCPServer
+	if h.mcpRepo != nil {
+		err := h.op.Run(ctx, func(_ context.Context, _ capability.VaultResetService) error {
+			var err error
+			targets, err = mcpServersWithSecretRefs(h.mcpRepo)
+			return err
+		})
+		if err != nil {
+			answerOperationRefusal(h.r, req, err)
+			return
+		}
+	}
+
+	var result vaultreset.Result
+	mutation := func() error {
+		return h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
+			var changed []profile.MCPServer
+			if h.mcpRepo != nil {
+				current, err := mcpServersWithSecretRefs(h.mcpRepo)
+				if err != nil {
+					return err
+				}
+				if !sameMCPServerSnapshots(current, targets) {
+					return profile.ErrMCPServerConflict
+				}
+				changed = current
+			}
+			var err error
+			result, err = svc.Execute(ctx)
+			if err != nil {
+				return err
+			}
+			for i := range changed {
+				changed[i], err = h.mcpRepo.GetMCPServer(changed[i].ID)
+				if err != nil {
+					return err
+				}
+			}
+			targets = changed
+			return nil
+		})
+	}
+	if err := runMCPServerMutations(h.mcpRuntime, mcpServerIDs(targets), mutation); err != nil {
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
+		return
+	}
+
+	// Empty, not nil. The contract declares an array and the renderer types it
+	// as one; `residue: null` reaching a `.length` is the same defect this
+	// project already shipped once on the inventory (nocx-25k9.14).
+	residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
+	for _, r := range result.Residue {
+		residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
+	}
+
+	_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
+		SecretCount:    result.Impact.SecretCount,
+		ProfileCount:   result.Impact.ProfileCount,
+		MCPServerCount: result.Impact.MCPServerCount,
+		EndpointCount:  result.Impact.EndpointCount,
+		Residue:        residue,
+	}))
+	if h.mcpNotify != nil {
+		for _, server := range targets {
+			h.mcpNotify(mcpServersChangedParams{ID: server.ID, Revision: server.Revision, Change: "updated"})
+		}
+	}
+	h.machine.broadcastVaultChanged()
 }

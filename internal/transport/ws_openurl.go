@@ -67,6 +67,14 @@ type shellOpenUrlParams struct {
 	URL string `json:"url"`
 }
 
+func browserURL(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", false
+	}
+	return u.String(), true
+}
+
 // openUrlHandlers answers shell.openUrl. It holds the url opener holder and
 // its Responder; nothing else.
 type openUrlHandlers struct {
@@ -86,8 +94,8 @@ func (h openUrlHandlers) handleShellOpenUrl(ctx context.Context, req jsonrpcRequ
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: url required"})
 		return
 	}
-	u, err := url.Parse(params.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	target, ok := browserURL(params.URL)
+	if !ok {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: only http(s) URLs can be opened"})
 		return
 	}
@@ -96,7 +104,7 @@ func (h openUrlHandlers) handleShellOpenUrl(ctx context.Context, req jsonrpcRequ
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "shell.openUrl not available"})
 		return
 	}
-	if err := uo.OpenURL(ctx, u.String()); err != nil {
+	if err := uo.OpenURL(ctx, target); err != nil {
 		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "shell.openUrl: ", err))
 		return
 	}

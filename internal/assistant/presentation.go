@@ -93,7 +93,11 @@ func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (str
 			Parameters:  match.ParamsSchema,
 		})
 	}
-	return marshalSearchResult(result)
+	encoded, err := marshalSearchResult(result)
+	if err != nil {
+		return "", err
+	}
+	return agenttools.FrameUntrusted(encoded), nil
 }
 
 type searchToolResult struct {

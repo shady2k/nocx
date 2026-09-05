@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -665,6 +666,8 @@ type agentHandlers struct {
 	snippetOp  capability.SnippetOperation
 	skills     assistant.SkillLibrary
 	agentTools agenttools.Registry
+	mcpServers profile.MCPServerRepository
+	mcpRuntime mcp.Runtime
 	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
@@ -1004,6 +1007,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// to record: the ask never started).
 	var endpoint profile.Endpoint
 	var facts content.RunFacts
+	var mcpCatalogs []agenttools.MCPCatalogSnapshot
 	if !h.endpointWired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})
 		return
@@ -1019,6 +1023,21 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 			EndpointID: ep.ID,
 			BaseURL:    ep.BaseURL,
 			Model:      model,
+		}
+		if h.mcpServers == nil {
+			return nil
+		}
+		servers, err := h.mcpServers.ListMCPServers()
+		if err != nil {
+			return fmt.Errorf("load MCP catalogs: %w", err)
+		}
+		mcpCatalogs = make([]agenttools.MCPCatalogSnapshot, 0, len(servers))
+		for _, server := range servers {
+			snapshot, snapshotErr := agenttools.NewMCPCatalogSnapshot(server)
+			if snapshotErr != nil {
+				return fmt.Errorf("snapshot MCP server %q: %w", server.ID, snapshotErr)
+			}
+			mcpCatalogs = append(mcpCatalogs, snapshot)
 		}
 		return nil
 	})
@@ -1083,15 +1102,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
-		runID:      askRes.RunID,
-		control:    runControl,
-		entryID:    askRes.EntryID,
-		paneID:     in.PaneID,
-		question:   in.Question,
-		endpoint:   endpoint,
-		model:      facts.Model,
-		grant:      runGrant,
-		offerState: assistant.NewWireToolOfferState(),
+		runID:       askRes.RunID,
+		control:     runControl,
+		entryID:     askRes.EntryID,
+		paneID:      in.PaneID,
+		question:    in.Question,
+		endpoint:    endpoint,
+		model:       facts.Model,
+		grant:       runGrant,
+		offerState:  assistant.NewWireToolOfferState(),
+		mcpCatalogs: mcpCatalogs,
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -1296,6 +1316,10 @@ type askRunContext struct {
 	// offerState survives retries and approval resumes so the structural
 	// offer remains once-per-run without process-lifetime run-id storage.
 	offerState *assistant.WireToolOfferState
+	// mcpCatalogs is the immutable catalog/config snapshot captured under the
+	// ask's config operation. Resumes reuse this exact view; they never observe
+	// a repository mutation and never activate a server while rebuilding it.
+	mcpCatalogs []agenttools.MCPCatalogSnapshot
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -1441,6 +1465,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}); err != nil {
 		streamErr = err
 		emitStreamEnded()
+		h.closeMCPRun(rc.runID)
 		// The transition was refused: the run is already terminal (closed
 		// by another path). Nothing to drive; stop.
 		return
@@ -1565,6 +1590,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
+		MCPCatalogs:      rc.mcpCatalogs,
+		MCPRuntime:       h.mcpRuntime,
 		RunID:            strconv.FormatInt(rc.runID, 10),
 		SessionID:        string(rc.sessionID),
 		Attempt:          rc.attempt,
@@ -1826,10 +1853,15 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
+		h.closeMCPRun(rc.runID)
 		// The transition was refused: the run is already terminal (closed
 		// by another path). The question is moot; nothing to render.
 		return
 	}
+	// A suspended run owns no live MCP session. Approval can arrive much later,
+	// so keeping a subprocess or HTTP connection across this boundary would
+	// turn waiting for a person into unbounded runtime ownership.
+	h.closeMCPRun(rc.runID)
 	n := agentApprovalRequested{Reason: "policy"}
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
@@ -2523,6 +2555,12 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 	}
 }
 
+func (h agentHandlers) closeMCPRun(runID int64) {
+	if h.mcpRuntime != nil {
+		h.mcpRuntime.CloseRun(strconv.FormatInt(runID, 10))
+	}
+}
+
 // terminalize persists the run's terminal state AND its entries in one
 // transaction (FinishAgentRun), then notifies the wire. The notification may
 // go nowhere — the connection may be gone — but the ledger is the record,
@@ -2556,6 +2594,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		}
 		state, reason, sentence, wireError = rc.control.cancelOutcome()
 	}
+	h.closeMCPRun(rc.runID)
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
 	// engine's continuation with it (nocx-igu4y). Ask drops its own
@@ -3013,6 +3052,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
 	}
+	mcpRuntime := s.mcpRuntime
 	// buildFor is every dependency an agent handler has EXCEPT the two that
 	// only a connection can supply. It is split out because the run-stopping
 	// path has a caller that is not on the agent lane: policy.setRule and
@@ -3025,6 +3065,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
+			mcpServers: s.mcpServers, mcpRuntime: mcpRuntime,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
@@ -3251,6 +3292,19 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 		stopped = append(stopped, id)
 	}
 	return stopped, alreadyFinished
+}
+
+// WithMCPRuntime attaches the process-lifetime execution and lifecycle seam to
+// agent.ask. When a separately named management refresher is already wired,
+// refresh remains routed through it; otherwise Runtime.Refresh is the explicit
+// refresher.
+func WithMCPRuntime(runtime mcp.Runtime) WSServerOption {
+	return func(s *WSServer) {
+		s.mcpRuntime = runtime
+		if s.mcpRefresher == nil {
+			s.mcpRefresher = runtime
+		}
+	}
 }
 
 // runTrace is the id of one agent exchange — the run — as every log line

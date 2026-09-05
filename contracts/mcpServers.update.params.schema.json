@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.update.params.schema.json",
+  "title": "MCPServersUpdateParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "revision", "name", "enabled", "transport", "stdio", "http", "limits"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "enabled": { "type": "boolean" },
+    "transport": { "type": "string", "enum": ["stdio", "streamable-http"] },
+    "stdio": {
+      "oneOf": [{ "$ref": "mcpServers.create.params.schema.json#/$defs/stdio" }, { "type": "null" }]
+    },
+    "http": {
+      "oneOf": [{ "$ref": "mcpServers.create.params.schema.json#/$defs/http" }, { "type": "null" }]
+    },
+    "limits": { "$ref": "mcpServers.create.params.schema.json#/$defs/limits" }
+  }
+}

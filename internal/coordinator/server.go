@@ -163,9 +163,6 @@ func (s *Server) Start() error {
 		return errors.New("coordinator: server is already started")
 	}
 
-	if len(s.socket) > maxSocketPath {
-		return fmt.Errorf("%w: %d bytes at %s", ErrPathTooLong, len(s.socket), s.socket)
-	}
 	if err := s.prepareDir(); err != nil {
 		return err
 	}
@@ -174,8 +171,8 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	// From here every failure path releases the lock. The alternative — a
-	// lock still held by a process that decided not to serve — is a
+	// From here every failure path releases the lock. The alternative —
+	// a lock still held by a process that decided not to serve — is a
 	// directory no daemon can ever claim again until a reboot.
 	release := func(cause error) error {
 		if relErr := lock.release(); relErr != nil {
@@ -184,9 +181,6 @@ func (s *Server) Start() error {
 		return cause
 	}
 
-	if pathErr := s.checkSocketPath(); pathErr != nil {
-		return release(pathErr)
-	}
 	listener, err := s.bind()
 	if err != nil {
 		return release(err)
@@ -211,112 +205,16 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// prepareDir makes the runtime directory, forces 0700 on it and refuses it
-// if it is not ours.
-//
-// The chmod is not redundant with the MkdirAll mode: MkdirAll applies the
-// umask, and a directory left over from an earlier version — or from
-// somebody's tar — carries whatever mode it was created with. The mode is
-// asserted rather than assumed on every start.
+// prepareDir keeps the server's lifecycle seam while the shared runtime
+// primitive owns the filesystem policy.
 func (s *Server) prepareDir() error {
-	if err := os.MkdirAll(s.cfg.Dir, 0o700); err != nil {
-		return fmt.Errorf("coordinator: create runtime dir %s: %w", s.cfg.Dir, err)
-	}
-	//nolint:gosec // 0700 IS the mode this directory must carry: a directory
-	// needs its execute bit to be entered at all, and 0600 would make the
-	// socket inside unreachable to its own owner.
-	if err := os.Chmod(s.cfg.Dir, 0o700); err != nil {
-		return fmt.Errorf("coordinator: set mode on runtime dir %s: %w", s.cfg.Dir, err)
-	}
-	owner, err := s.cfg.Owner.OwnerUID(s.cfg.Dir)
-	if err != nil {
-		return err
-	}
-	if owner != s.cfg.SelfUID {
-		return fmt.Errorf("%w: %s is owned by uid %d, we are uid %d",
-			ErrForeignOwner, s.cfg.Dir, owner, s.cfg.SelfUID)
-	}
-	return nil
+	return PrepareRuntimeDir(s.cfg.Dir, s.cfg.Owner, s.cfg.SelfUID)
 }
 
-// checkSocketPath decides whether the path may be bound over.
-//
-// A socket left behind by a daemon that died is fine — we hold the lock, so
-// nothing live owns it, and the rename below replaces it. A symlink is not:
-// rename(2) replaces the link itself rather than following it, so nothing
-// would be written through it, but a path somebody else has redirected is a
-// path we have lost control of and the right answer is to stop. Anything
-// else that is not a socket is refused for the same reason.
-func (s *Server) checkSocketPath() error {
-	fi, err := os.Lstat(s.socket)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("coordinator: inspect socket path %s: %w", s.socket, err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s", ErrSymlinkPath, s.socket)
-	}
-	if fi.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%w: %s is %s", ErrOccupiedPath, s.socket, fi.Mode())
-	}
-	return nil
-}
-
-// bind creates the listener on a temporary name in the same directory and
-// renames it into place.
-//
-// Two processes racing must never leave a live daemon with no socket, which
-// is what bind-then-unlink-then-rebind would do to whichever lost. rename(2)
-// within one directory is atomic, so the path either names the previous
-// socket or this one and never nothing. The lock makes the race
-// theoretical; the atomic bind is what keeps it harmless if the lock is ever
-// wrong.
-//
-// The temporary name carries the pid so a crashed start cannot collide with
-// a live one, and it is removed on every failure path below.
+// bind keeps the server's lifecycle seam while the shared runtime primitive
+// owns temporary binding and atomic publication.
 func (s *Server) bind() (*net.UnixListener, error) {
-	tmp := filepath.Join(s.cfg.Dir, "."+socketName+"."+strconv.Itoa(os.Getpid()))
-	if len(tmp) > maxSocketPath {
-		return nil, fmt.Errorf("%w: %d bytes at %s", ErrPathTooLong, len(tmp), tmp)
-	}
-	// A previous crash may have left this exact name behind; it is ours by
-	// construction (our pid), so removing it cannot take anybody else's.
-	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("coordinator: clear stale bind name %s: %w", tmp, err)
-	}
-
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: tmp, Net: "unix"})
-	if err != nil {
-		return nil, fmt.Errorf("coordinator: bind %s: %w", tmp, err)
-	}
-	// The listener knows the temporary name, not the final one, so it must
-	// not unlink on close — that would delete a name it no longer owns
-	// while leaving the real socket behind. Close does the unlink.
-	listener.SetUnlinkOnClose(false)
-	// Bind applies the umask, so the mode is set explicitly. The window
-	// between the two is not reachable by another user: the parent
-	// directory is already 0700 and ours.
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		return nil, s.abandonBind(listener, tmp, fmt.Errorf("coordinator: set mode on socket: %w", err))
-	}
-	if err := os.Rename(tmp, s.socket); err != nil {
-		return nil, s.abandonBind(listener, tmp, fmt.Errorf("coordinator: publish socket at %s: %w", s.socket, err))
-	}
-	return listener, nil
-}
-
-// abandonBind closes a listener that will never serve and removes the name
-// it was bound to, so a failed start leaves the directory as it found it.
-func (s *Server) abandonBind(l *net.UnixListener, tmp string, cause error) error {
-	if err := l.Close(); err != nil {
-		s.cfg.Logger.Warn("coordinator: closing an abandoned listener", "error", err)
-	}
-	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
-		s.cfg.Logger.Warn("coordinator: removing an abandoned bind name", "path", tmp, "error", err)
-	}
-	return cause
+	return BindSocket(s.cfg.Dir, socketName)
 }
 
 // accept runs until the listener is closed.

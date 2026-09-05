@@ -20,6 +20,14 @@ type PeerCredentials interface {
 	PeerUID(conn *net.UnixConn) (uint32, error)
 }
 
+// PeerProcess answers which process is on the other end of an accepted
+// connection. It is separate from [PeerCredentials] because the discovery
+// server deliberately trusts only the uid; a pid is meaningful to callers
+// that pair it with a start time before using it as an identity assertion.
+type PeerProcess interface {
+	PeerPID(conn *net.UnixConn) (int, error)
+}
+
 // SystemPeerCredentials asks the kernel. The question has a different
 // spelling on each platform — SO_PEERCRED on Linux, getpeereid(3) on
 // darwin — so the answer lives in a per-OS file pair, the shape
@@ -50,6 +58,31 @@ func (SystemPeerCredentials) PeerUID(conn *net.UnixConn) (uint32, error) {
 		return 0, fmt.Errorf("coordinator: peer uid: %w", opErr)
 	}
 	return uid, nil
+}
+
+// PeerPID reports the pid the kernel recorded when the peer connected.
+//
+// A bare pid is racy the moment it is read. internal/wavepin is what stops
+// it being bare by pairing it with the start time.
+func (SystemPeerCredentials) PeerPID(conn *net.UnixConn) (int, error) {
+	if conn == nil {
+		return 0, fmt.Errorf("coordinator: peer pid: no connection")
+	}
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("coordinator: peer pid: %w", err)
+	}
+	var pid int
+	var opErr error
+	if ctrlErr := raw.Control(func(fd uintptr) {
+		pid, opErr = peerPID(fd)
+	}); ctrlErr != nil {
+		return 0, fmt.Errorf("coordinator: peer pid: %w", ctrlErr)
+	}
+	if opErr != nil {
+		return 0, fmt.Errorf("coordinator: peer pid: %w", opErr)
+	}
+	return pid, nil
 }
 
 // PathOwner reports which uid owns a filesystem path.

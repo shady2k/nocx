@@ -69,14 +69,29 @@ Concretely, the rule the DOM renderer of xterm.js itself uses, adopted deliberat
 3. The run carries that `spacing` as its `letter-spacing`, so each cell contributes
    `advance + spacing = columns × cellWidth` and the row's total is exact **without any
    declared width**.
-4. Every run is `display: inline-block; height: 100%; vertical-align: top`, so a background
-   covers the row's rectangle rather than the font's content box.
-5. The row has the grid's exact height and `overflow: hidden`.
+4. A run carrying a background also carries **measured vertical padding**, published beside
+   the cell metric as half the difference between the row's pitch and the font's content
+   box. The background then covers the cell's rectangle rather than the content box, and
+   adjacent rows meet exactly.
+5. The row keeps the box model it has. It is **not** given an exact height and **not**
+   clipped.
 6. Where `spacing` is negative — the glyph's paint is wider than its columns — the ink is
    scaled to fit; the advance is never changed to accommodate it.
 
 The global `--term-cell-delta` on `.term-line` is retired by this. Per-run measured spacing
-replaces it.
+replaces it, with a per-row default so that an ordinary row of one colour stays the single
+text node it is today.
+
+**And geometry is promised only where it means anything.** A frozen row that fits its pane
+occupies its columns exactly. A row the user asked to wrap (`terminal.wrapOutput`, ADR
+`nocx-ex636`) is text past the fold, and column alignment is not promised there — folding
+has already destroyed the alignment there is to promise. This is what lets the mechanism
+stay compatible with wrapping instead of forbidding it.
+
+**The frozen terminal row gets a class of its own.** `.term-line` is today also the class
+the assistant's prose rows are drawn with (`answer-body.ts`), so any rule written for grid
+geometry lands on wrapping markdown, tables and fenced code as well. One class carrying two
+meanings is the defect AGENTS.md names; the geometry rules attach to the grid one only.
 
 ## Rationale
 
@@ -118,13 +133,25 @@ paid for and no DOM node is saved.
 
 ## Consequences
 
-- **A ~20% render penalty on `inline-block`**, by xterm's own note beside the rule. It is
-  measured on a real transcript as part of the work, not after it.
+- **No `inline-block`, and therefore not xterm's ~20% render penalty either.** xterm makes
+  every run an `inline-block` of the row's full height to fill the background, and notes the
+  cost beside the rule. It can afford the shape because its rows never wrap; ours do. Vertical
+  padding on an ordinary inline paints on **every fragment** of a wrapped row, changes no
+  layout, and needs no `box-decoration-break`. Measured on both engines on 2026-09-05: a
+  wrapped 800-character run reported six fragments of equal height under WKWebView (row 19,
+  content box 16.5) and six under the Linux container (row 20, content box 17). The padding
+  is therefore 1.25px on one and 1.5px on the other — which is why it is published from a
+  measurement rather than written into the stylesheet.
 - **A width cache with invalidation** becomes load-bearing. That is the defect class which
   cost four adversarial rounds in `cell-fit.ts`; the cache exists and is tested, and this
   adds a reader to it.
-- **`overflow: hidden` on the row clips ink that overflows vertically** — tall emoji lose
-  their extremes. Accepted so that a row cannot paint over its neighbour.
+- **Nothing is clipped, and a wide glyph's paint may cross into its neighbour's cell.**
+  The advance is exact; the ink is scaled when it exceeds its columns, and what still
+  overhangs is left visible. Clipping was considered and rejected twice: `overflow: hidden`
+  moves an inline-block's baseline to its bottom margin edge, and a clip at the row's edge
+  would take the horizontal overflow a wide frozen line depends on — `.cmd-output` reaches
+  it with `overflow-x: auto`, and a clipped row would make the end of a long line
+  unreachable.
 - **A restored block stays approximate** until geometry is stored beside the durable body.
   `serializeRangeSGR` does not express cell widths and must not: extending it would bind
   the style parser to a private geometry protocol.

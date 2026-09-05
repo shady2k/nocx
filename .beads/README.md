@@ -40,6 +40,32 @@ which is why it is the tracked half.
 
 ## Leftovers from `bd`
 
-`embeddeddolt/` and `backup/` are the old Go tracker's Dolt store, about 1.9 GB.
-They are ignored, kept only until nobody wants a rollback, and can be deleted
-outright. See `.internal/specs/2026-09-05-bd-to-br-migration-design.md`.
+Gone on the owner's primary machine as of 2026-09-05: `embeddeddolt/` and `backup/`
+were deleted once the git copy was proved to restore (3405 issues out of the
+committed JSONL alone, in an empty directory). `.beads` went from 2.7 GB to 48 MB,
+and `bd` now fails loudly here instead of writing into a store nobody reads.
+
+**They still exist on any clone that has not migrated**, which is why
+`.beads/.gitignore` still names them. Delete them there the same way, and only
+after `br stats` on that clone agrees with everyone else's.
+
+`refs/dolt/data` and `refs/beads/snapshot` are still on origin, deliberately, as a
+cold second copy until every clone is on `br`. The first copy is the JSONL in git,
+and it is the better one: recovery is `git checkout <commit> -- .beads/issues.jsonl`
+followed by `br sync --import-only --rebuild`.
+
+## Local history is bounded, and git is the real history
+
+`.br_history/` keeps snapshots of the JSONL per machine and grew to 71 MB in one
+migration day. Git holds the same history better, so keep this small:
+
+```bash
+br history list
+br history prune --max-bytes 26214400     # 25 MB
+export BR_HISTORY_MAX_BYTES=26214400      # or cap it up front, per machine
+```
+
+`.br_recovery/` holds quarantined sidecars from recovery paths and can be deleted
+once whatever it was recovering from is resolved.
+
+Full reasoning: `.internal/specs/2026-09-05-bd-to-br-migration-design.md`.

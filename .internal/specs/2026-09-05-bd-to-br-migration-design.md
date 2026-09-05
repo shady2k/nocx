@@ -218,8 +218,12 @@ learn to pass with `--no-verify`. Also gone: `scripts/merge-slot.sh`, the two ho
 tests, `.beads/hooks/`, `PRIME.md`, `export-state.json`, `interactions.jsonl`, and
 the Dolt keys in `.beads/config.yaml`.
 
-Still on disk, deliberately: `.beads/embeddeddolt` and `.beads/backup`. They are
-ignored and kept only until nobody wants a rollback.
+Deleted on the primary machine the same day, once the git copy was proved to
+restore: 3405 issues came back out of the committed `.beads/issues.jsonl` alone, in
+an empty directory. `.beads` went from 2.7 GB to 48 MB, and `bd` now answers
+`no beads database found` instead of writing where nobody reads. `refs/dolt/data`
+and `refs/beads/snapshot` stay on origin as a cold second copy until every clone is
+on `br`; the first copy is the JSONL in git, and it is the better one.
 
 ### 7. Tooling per machine
 
@@ -263,12 +267,14 @@ and a silent write into a dead store.
 
 ## What is left
 
-1. **Watch for `bd` writes until Dolt is deleted.** Re-export and reconcile before
-   removing `embeddeddolt`; the two scripts do it in under a minute.
+1. **Take `bd` off the NixOS system config**, on all three machines. This matters
+   more than deleting data: while the binary is on PATH, a worker in any of the ~40
+   worktrees can call it out of habit. It is one line, and reversible.
 2. **The second machine and the colleague.** `git pull`, install the tooling,
-   `br sync --import-only`. Gate: `br stats` agrees across all three clones.
-3. **Delete `refs/dolt/data` and `refs/beads/snapshot` on origin**, then
-   `.beads/embeddeddolt` and `.beads/backup`, then take `bd` off the system config.
+   `br sync --import-only`, then delete their own `embeddeddolt` and `backup`.
+   Gate: `br stats` agrees across all three clones.
+3. **Delete `refs/dolt/data` and `refs/beads/snapshot` on origin** once (2) holds
+   and a week has passed uneventfully.
 4. **Close `nocx-v48vl`** noting that the defect left with the store.
 5. **A `SessionStart` hook for `cm context`**, if the memories turn out to be missed
    in practice. Deliberately not built yet: what a session start does not know is
@@ -290,7 +296,8 @@ and a silent write into a dead store.
   `Makefile`, `AGENTS.md`, `CLAUDE.md`, `README.md`). **Met** — the only remaining
   mentions are historical explanation and the `bd` → `br` table.
 - `.beads/embeddeddolt` and `.beads/backup` are gone and `du -sh .beads` is under
-  50 MB.
+  50 MB. **Met on the primary machine: 48 MB**, after also pruning `.br_history`,
+  which had reached 71 MB in a single migration day.
 
 ## Deliberately not done
 

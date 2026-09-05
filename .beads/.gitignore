@@ -55,9 +55,9 @@ redirect
 # bv (beads viewer) lock file
 .bv.lock
 
-# Наследство bd: встроенный Dolt и его бэкапы. Каталоги удаляются
-# отдельным шагом, когда br отработает достаточно, чтобы откат не
-# понадобился; до тех пор они лежат на диске и не должны попасть в git.
+# Leftovers from bd: the embedded Dolt store and its backups. Deleted on the
+# primary machine on 2026-09-05, but a clone that has not migrated still has
+# them, and they must never reach git from there either.
 embeddeddolt/
 backup/
 proxieddb/

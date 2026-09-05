@@ -129,6 +129,7 @@ import { NotificationsPanel } from './notify/notifications-panel'
 import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
 import { needsForm } from './snippets/resolve'
+import { installCellDriftApi } from './scrollback/cell-drift'
 
 const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
 
@@ -1845,6 +1846,10 @@ function main(): void {
         })
     })()
   })
+
+  // The frozen-line drift instrument (nocx-4n6sj): switched off, and the
+  // console surface is how it gets switched on for a week of dogfooding.
+  installCellDriftApi()
 
   // The dispatcher owns the first socket attempt; all stable clients, roots,
   // handlers and the connection-scoped lifecycle above are now installed.

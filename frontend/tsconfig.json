@@ -9,7 +9,11 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "esModuleInterop": true,
-    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    // ES2022.Intl is the Intl declarations ALONE — Segmenter and friends —
+    // added without moving the language target off ES2021. Grapheme
+    // clustering is a Unicode table, not something to hand-roll beside the
+    // one the engine already ships (nocx-4n6sj).
+    "lib": ["ES2021", "ES2022.Intl", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
     "noEmit": true,
     "forceConsistentCasingInFileNames": true

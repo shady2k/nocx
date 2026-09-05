@@ -4,6 +4,7 @@
 // subtle background tint on hover/select.
 
 import { serializeRange, serializeRangeSGR, serializeRangeText, fromITheme } from './serializer'
+import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
 import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -2326,7 +2327,11 @@ export class BlockManager {
   ): void {
     rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
-    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
+    // The drift instrument (nocx-4n6sj) is the only reader of the column
+    // counts, and it ships switched off: no array, no accounting, and the
+    // serializer's hot path is what it was.
+    const driftCols = driftEnabled() ? [] : undefined
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols)
     // The DURABLE bodies, from the same rows and the same walk the frozen
     // block on screen is made of — so what comes back after a restart is
     // what was there, not a second reading of the buffer taken later.
@@ -2363,6 +2368,10 @@ export class BlockManager {
 
     this._reown(rec.el, newEl)
     rec.el = newEl
+    // BEFORE decoration: terminal-links rewrites ranges over the text nodes
+    // of these very rows, so a measurement taken after it would be reading
+    // a DOM the serializer did not produce.
+    if (driftCols) recordFrozenBlock(newEl, driftCols)
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
     // shot, cleared before it runs so a callback that re-enters cannot loop.

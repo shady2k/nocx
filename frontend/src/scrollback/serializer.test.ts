@@ -615,3 +615,70 @@ describe('serializeRangeSGR and serializeRangeText', () => {
     expect(sgr.split('\n')[0].endsWith('\u001b[0m')).toBe(true)
   })
 })
+
+// ── Column accounting for the drift instrument (nocx-4n6sj) ────────────────
+//
+// The walk already steps by getWidth(); it just threw the number away. The
+// drift instrument needs it, because "is this frozen line wider than its
+// columns" cannot be asked of the DOM alone: serializeRange deliberately
+// JOINS soft-wrapped rows, so a line legitimately wider than the block is
+// indistinguishable from a mislaid one without the column count the grid
+// itself used.
+describe('serializeRange column accounting', () => {
+  it('reports one column per single-width cell', () => {
+    const lines = [makeLine('abc')]
+    const cols: number[] = []
+    serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    expect(cols).toEqual([3])
+  })
+
+  it('counts a wide cell as the two columns the grid gives it', () => {
+    // xterm hands a CJK cell over as ONE cell of width 2; the spacer that
+    // follows it is skipped by the walk. Two columns, one character — the
+    // exact case a per-character correction cannot express.
+    const lines = [lineWith({ chars: 'あ', width: 2 }, { chars: '', width: 0 }, { chars: 'x' })]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    // Two characters printed, three columns occupied. This is the pair a
+    // single letter-spacing delta cannot reconcile, and the reason the
+    // count has to come from the grid rather than from the string.
+    expect(html).toContain('あx')
+    expect(cols).toEqual([3])
+  })
+
+  it('drops the columns of the trailing spaces the walk trims', () => {
+    // The emitted text is "ab"; a count of 5 would report drift on every
+    // padded row in the buffer.
+    const lines = [makeLine('ab   ')]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0, cols)
+    expect(html).toBe('<span class="term-line">ab</span>')
+    expect(cols).toEqual([2])
+  })
+
+  it('sums the columns of soft-wrapped rows joined into one logical line', () => {
+    const lines = [makeLine('abc'), new BufferLine('de', true)]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 1, cols)
+    expect(html).toBe('<span class="term-line">abcde</span>')
+    expect(cols).toEqual([5])
+  })
+
+  it('stays aligned with the emitted rows when leading blanks are trimmed', () => {
+    // The leading empties are readline's erased echo, dropped by the walk.
+    // A cols array that still carried them would pair every line with the
+    // wrong count — the failure that makes an instrument worse than none.
+    const lines = [makeLine('   '), makeLine('   '), makeLine('xy')]
+    const cols: number[] = []
+    const html = serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 2, cols)
+    expect(html).toBe('<span class="term-line">xy</span>')
+    expect(cols).toEqual([2])
+  })
+
+  it('is optional: the shipped call sites pass nothing and get today’s HTML', () => {
+    const lines = [makeLine('abc')]
+    expect(serializeRange(DEFAULT_SNAPSHOT, (y) => lines[y], 0, 0)).toBe(
+      '<span class="term-line">abc</span>',
+    )
+  })
+})

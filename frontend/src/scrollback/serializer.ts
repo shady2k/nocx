@@ -307,11 +307,6 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
 
 // ── Run merging ────────────────────────────────────────────────────────────
 
-interface Run {
-  chars: string
-  attrs: CellAttrs
-}
-
 /**
  * Collects consecutive cells with identical attributes into runs.
  * Handles wide characters (CJK) by their cell width.
@@ -322,6 +317,18 @@ interface Run {
 interface GenericRun<A> {
   chars: string
   attrs: A
+}
+
+/** What one cell walk yields: the merged runs, and the COLUMNS they occupy
+ *  on the grid. The walk has always stepped by getWidth(); it threw the
+ *  number away, and `nocx-ec18` is what that costs — a frozen line whose
+ *  true width nothing downstream can state. Kept beside the runs rather
+ *  than recomputed from `chars`, because a character is not a column: a
+ *  CJK cell is one character over two columns and an astral glyph is two
+ *  code units over one. */
+interface Walked<A> {
+  runs: GenericRun<A>[]
+  cols: number
 }
 
 /**
@@ -344,11 +351,12 @@ function collectRunsOf<A>(
   equal: (a: A, b: A) => boolean,
   escape: boolean,
   keepTrailingSpace: boolean,
-): GenericRun<A>[] {
+): Walked<A> {
   const len = line.length
-  if (len === 0) return []
+  if (len === 0) return { runs: [], cols: 0 }
 
   const runs: GenericRun<A>[] = []
+  let cols = 0
   let i = 0
 
   while (i < len) {
@@ -368,6 +376,7 @@ function collectRunsOf<A>(
       } else {
         runs.push({ chars: ' ', attrs })
       }
+      cols += Math.max(1, width)
       i += Math.max(1, width)
       continue
     }
@@ -381,22 +390,28 @@ function collectRunsOf<A>(
     } else {
       runs.push({ chars: text, attrs })
     }
+    cols += Math.max(1, width)
     i += Math.max(1, width)
   }
 
   if (!keepTrailingSpace && runs.length > 0) {
     const last = runs[runs.length - 1]
-    last.chars = last.chars.replace(/ +$/, '')
+    const trimmed = last.chars.replace(/ +$/, '')
+    // Every trimmed character is a single-column pad cell, so the columns
+    // come off one for one. Counting them would report drift on every
+    // padded row in the buffer, which is most of them.
+    cols -= last.chars.length - trimmed.length
+    last.chars = trimmed
   }
 
-  return runs
+  return { runs, cols }
 }
 
 function collectRuns(
   snapshot: TerminalSnapshot,
   line: IBufferLine,
   keepTrailingSpace = false,
-): Run[] {
+): Walked<CellAttrs> {
   return collectRunsOf(
     line,
     (l, i) => cellAttrs(snapshot, l, i),
@@ -415,7 +430,7 @@ function collectRuns(
 export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | undefined): string {
   if (!line) return '<span class="term-line"></span>'
 
-  const runs = collectRuns(snapshot, line)
+  const { runs } = collectRuns(snapshot, line)
 
   if (runs.length === 0) {
     return '<span class="term-line"></span>'
@@ -458,7 +473,17 @@ export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | un
  * at the bottom of every block renders as stray blank space. Interior blank
  * lines are preserved — they are real output spacing.
  */
-type RowEmitter = (line: IBufferLine, keepTrailingSpace: boolean) => string
+type RowEmitter = (line: IBufferLine, keepTrailingSpace: boolean) => Emitted
+
+/** One logical line as the walk leaves it: what to print, and the GRID
+ *  COLUMNS it stood in. The two travel together through the join and both
+ *  trims, because a count that is trimmed differently from its line is
+ *  worse than no count — it names a drift that is only the pairing being
+ *  off by a row. */
+interface Emitted {
+  content: string
+  cols: number
+}
 
 /**
  * THE row walk: wrapped rows joined into one logical line, trailing empties
@@ -470,23 +495,25 @@ function walkRange(
   startLine: number,
   endLine: number,
   emit: RowEmitter,
-): string[] {
-  const groups: string[] = []
+): Emitted[] {
+  const groups: Emitted[] = []
   for (let y = startLine; y <= endLine; y++) {
     const line = getLine(y)
     const continuation = line?.isWrapped === true && groups.length > 0
     if (!line) {
-      groups.push('')
+      groups.push({ content: '', cols: 0 })
       continue
     }
-    const content = emit(line, continuation || (getLine(y + 1)?.isWrapped ?? false))
+    const emitted = emit(line, continuation || (getLine(y + 1)?.isWrapped ?? false))
     if (continuation) {
-      groups[groups.length - 1] += content
+      const last = groups[groups.length - 1]
+      last.content += emitted.content
+      last.cols += emitted.cols
     } else {
-      groups.push(content)
+      groups.push(emitted)
     }
   }
-  while (groups.length > 0 && groups[groups.length - 1] === '') {
+  while (groups.length > 0 && groups[groups.length - 1].content === '') {
     groups.pop()
   }
   // Leading empties go too, and for a stronger reason than the trailing ones.
@@ -503,7 +530,7 @@ function walkRange(
   // the same trade the trailing trim already makes, for the same reason: one
   // line of spacing is cheaper than a screenful of nothing.
   let lead = 0
-  while (lead < groups.length && groups[lead] === '') lead++
+  while (lead < groups.length && groups[lead].content === '') lead++
   groups.splice(0, lead)
   return groups
 }
@@ -513,18 +540,29 @@ export function serializeRange(
   getLine: (y: number) => IBufferLine | undefined,
   startLine: number,
   endLine: number,
+  colsOut?: number[],
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const runs = collectRuns(snapshot, line, keepTrailingSpace)
+    const { runs, cols } = collectRuns(snapshot, line, keepTrailingSpace)
     let content = ''
     for (const run of runs) {
       if (run.chars.length === 0) continue
       const style = attrsToStyle(snapshot, run.attrs)
       content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
     }
-    return content
+    return { content, cols }
   })
-  return groups.map((g) => `<span class="term-line">${g}</span>`).join('')
+  // An OUT PARAMETER rather than a second return value or a data-* on the
+  // row, because the reader is a switched-off instrument (nocx-4n6sj) and
+  // the shipped HTML must not change to carry it: the frozen block's markup
+  // is asserted verbatim in fifty-odd tests and rewritten in place by link
+  // decoration. Index i pairs with the i-th emitted term-line, which is
+  // exact — the map below is one element per group, in order.
+  if (colsOut) {
+    colsOut.length = 0
+    for (const g of groups) colsOut.push(g.cols)
+  }
+  return groups.map((g) => `<span class="term-line">${g.content}</span>`).join('')
 }
 
 /**
@@ -544,7 +582,13 @@ export function serializeRangeSGR(
 ): string {
   const empty = emptySGR()
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const runs = collectRunsOf<SGRAttrs>(line, cellSGRAttrs, sgrEqual, false, keepTrailingSpace)
+    const { runs, cols } = collectRunsOf<SGRAttrs>(
+      line,
+      cellSGRAttrs,
+      sgrEqual,
+      false,
+      keepTrailingSpace,
+    )
     let content = ''
     let current = empty
     for (const run of runs) {
@@ -554,9 +598,9 @@ export function serializeRangeSGR(
       content += run.chars
     }
     if (!sgrEqual(current, empty)) content += '\u001b[0m'
-    return content
+    return { content, cols }
   })
-  return groups.join('\n')
+  return groups.map((g) => g.content).join('\n')
 }
 
 /**
@@ -570,14 +614,14 @@ export function serializeRangeText(
   endLine: number,
 ): string {
   const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
-    const runs = collectRunsOf<null>(
+    const { runs, cols } = collectRunsOf<null>(
       line,
       () => null,
       () => true,
       false,
       keepTrailingSpace,
     )
-    return runs.map((r) => r.chars).join('')
+    return { content: runs.map((r) => r.chars).join(''), cols }
   })
-  return groups.join('\n')
+  return groups.map((g) => g.content).join('\n')
 }

@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Перенести памяти `bd remember` в репозиторный плейбук cass-memory.
+"""Move `bd remember` memories into this repository's cass-memory playbook.
 
-`br` не хранит памятей вообще — ни `remember`, ни `memories`, ни `recall`, а его
-импорт падает закрыто на строке `_type":"memory"`. 144 памяти nocx уезжают сюда.
+`br` holds no memories at all — no `remember`, no `memories`, no `recall` — and
+its import fails closed on a `_type":"memory"` line. The 144 nocx memories come
+here instead.
 
-Пишем в `.cass/playbook.yaml`, а не через `cm playbook add`: тот всегда кладёт
-правило в ГЛОБАЛЬНЫЙ `~/.cass-memory/playbook.yaml`, который живёт в домашнем
-каталоге — значит памяти про nocx всплывали бы в чужих репозиториях, а коллега и
-вторая машина не получили бы их вовсе. Репозиторный плейбук коммитится и едет с
-клоном; это его прямое назначение, и `cm init --repo` так и говорит.
+We write `.cass/playbook.yaml` directly rather than calling `cm playbook add`,
+because that command always writes `~/.cass-memory/playbook.yaml`, which lives in
+the home directory: nocx memories would surface in unrelated repositories, and
+the colleague and the second machine would never see them at all. The repo
+playbook is committed and travels with the clone — that is its stated purpose,
+and `cm init --repo` says so.
 
-Изоляцию даёт РАСПОЛОЖЕНИЕ файла, а не поле `scope` внутри него — см. комментарий
-у `scope` ниже, там это измерено.
+Isolation comes from WHERE the file is, not from the `scope` field inside it.
+See the comment on `scope` below; it is measured.
 
-Категория берётся из префикса самой памяти (`lesson (nocx, e2e): …`), потому что
-`bd remember` уже писался в этой форме. Без префикса — `general`.
+The category is taken from the memory's own prefix (`lesson (nocx, e2e): …`),
+because `bd remember` was already written in that shape. No prefix means
+`general`.
 
     scripts/bd-memories-to-cass.py .internal/memories-export.jsonl .cass/playbook.yaml
 """
@@ -25,7 +28,7 @@ import json
 import re
 import sys
 
-# Категории cass-memory; всё остальное сводится к general.
+# cass-memory categories; anything else collapses to general.
 KNOWN = {
     "lesson": "workflow",
     "rule": "workflow",
@@ -44,7 +47,7 @@ PREFIX = re.compile(r"^([a-z-]+)\s*\(")
 
 
 def quote(s: str) -> str:
-    """YAML double-quoted scalar: единственная форма, безопасная для нашего текста."""
+    """YAML double-quoted scalar: the one form that is safe for this text."""
     out = s.replace("\\", "\\\\").replace('"', '\\"')
     out = out.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{out}"'
@@ -52,7 +55,7 @@ def quote(s: str) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("src", help="JSONL с записями _type=memory")
+    p.add_argument("src", help="JSONL carrying _type=memory records")
     p.add_argument("dst", help=".cass/playbook.yaml")
     args = p.parse_args()
 
@@ -83,15 +86,15 @@ def main() -> int:
                         "    kind: workflow_rule",
                         "    type: rule",
                         "    isNegative: false",
-                        # `global`, а не напрашивающийся `workspace`, и это
-                        # измерено: cass-memory 0.2.14 МОЛЧА исключает
-                        # workspace-правила из `cm context` — при workspace
-                        # запрос точной фразой из памяти отдаёт 0 совпадений,
-                        # при global те же 144 находятся сразу. Утечки в чужие
-                        # репозитории нет: `.cass/playbook.yaml` подхватывается
-                        # по текущему каталогу, так что вне nocx этих правил не
-                        # видно вовсе (проверено: внутри 145, снаружи 1).
-                        # Изоляцию даёт расположение файла, а не это поле.
+                        # `global`, not the obvious `workspace`, and this is
+                        # measured: cass-memory 0.2.14 SILENTLY excludes
+                        # workspace rules from `cm context` — an exact phrase
+                        # out of a memory matched 0 with workspace and all 144
+                        # with global. It does not leak into other
+                        # repositories: `.cass/playbook.yaml` is found from the
+                        # working directory, so outside nocx these rules are
+                        # invisible (checked: 145 inside, 1 outside). The file's
+                        # location is what isolates them, not this field.
                         "    scope: global",
                         "    source: learned",
                         "    tags:",
@@ -109,13 +112,13 @@ def main() -> int:
                         "    harmfulCount: 0",
                         "    feedbackEvents: []",
                         "    deprecated: false",
-                        # Ничего не закрепляем и ничего не отключаем: правила
-                        # входят в cass на общих основаниях и живут по её
-                        # механике. pinned запрещает авто-депрекацию, а
-                        # confidenceDecayHalfLifeDays делит не правило, а его
-                        # feedbackEvents, которых у импортированной памяти нет —
-                        # так что здесь обе величины штатные, ровно те, что
-                        # пишет сам `cm playbook add`.
+                        # Nothing is pinned and nothing is switched off: these
+                        # rules enter cass on ordinary terms and live by its
+                        # mechanics. `pinned` would forbid auto-deprecation, and
+                        # `confidenceDecayHalfLifeDays` decays a rule's
+                        # feedbackEvents, which an imported memory has none of —
+                        # so both are left exactly as `cm playbook add` writes
+                        # them.
                         "    pinned: false",
                         "    confidenceDecayHalfLifeDays: 90",
                     ]
@@ -124,16 +127,16 @@ def main() -> int:
 
     header = "\n".join(
         [
-            "# Правила этого репозитория для cass-memory.",
-            "# Мержатся с глобальным ~/.cass-memory/playbook.yaml; репозиторные важнее.",
+            "# This repository's rules for cass-memory.",
+            "# Merged with the global ~/.cass-memory/playbook.yaml; repo rules win.",
             "#",
-            "# Здесь 144 памяти, перенесённые из `bd remember` 2026-09-05, когда трекер",
-            "# сменился на br, у которого памятей нет. Сырой экспорт лежит рядом, в",
-            "# .internal/memories-export.jsonl, и является источником при повторном прогоне",
-            "# scripts/bd-memories-to-cass.py.",
+            "# These are the memories carried over from `bd remember` on 2026-09-05,",
+            "# when the tracker became br, which has no memory store. The raw export sits",
+            "# beside them in .internal/memories-export.jsonl and is the source whenever",
+            "# scripts/bd-memories-to-cass.py runs again.",
             "schema_version: 2",
             "name: nocx-repo-playbook",
-            "description: Правила и уроки nocx, купленные конкретными провалами",
+            "description: nocx rules and lessons, each bought by a specific failure",
             "metadata:",
             f"  createdAt: {now}",
             "  totalReflections: 0",
@@ -146,7 +149,7 @@ def main() -> int:
     with open(args.dst, "w") as out:
         out.write(header + "\n" + "\n".join(bullets) + "\n")
 
-    print(f"правил записано: {len(bullets)}")
+    print(f"rules written: {len(bullets)}")
     for c, n in sorted(by_category.items(), key=lambda x: -x[1]):
         print(f"  {c:<14} {n}")
     return 0

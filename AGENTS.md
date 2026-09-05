@@ -153,6 +153,22 @@ centring) fail there and pass in CI. Use it to iterate, confirm in CI, and never
 "fix" a test that is only red in the container without checking which one is
 lying.
 
+## Language
+
+**Every document in this repository is written in English.** Code and its comments,
+`AGENTS.md`, `README.md`, `docs/`, `.internal/` specs, plans and briefs, commit
+messages, bead titles and bodies, and anything else a second person reads. The
+repository has one working language, and a file that switches is a file half the
+team skims instead of reads.
+
+**Speak to the developer in the language they used to address you.** That is a
+different surface with a different audience: a conversation has exactly one reader,
+and it is theirs. Answering a Russian question in English to satisfy the rule above
+is a misreading of it.
+
+The distinction is audience, not formality. If it is committed, it is English. If it
+is said to the person in front of you, it is their language.
+
 ## Repository layout
 
 - `docs/` — `vision.md`, `architecture.md`, `decisions/` (ADRs).

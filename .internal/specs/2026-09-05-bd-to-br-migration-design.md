@@ -1,103 +1,99 @@
-# `bd` (Go beads + Dolt) уступает место `br` (beads_rust, SQLite + JSONL)
+# `bd` (Go beads + Dolt) gives way to `br` (beads_rust, SQLite + JSONL)
 
-Дата: 2026-09-05
-Статус: спека, утверждена владельцем; план — следующим шагом
-Бид сессии: `nocx-mmptx`
+Date: 2026-09-05
+Status: designed, executed and verified on the owner's primary machine. The second
+machine and the colleague are still to do — see [What is left](#what-is-left).
+Session bead: `nocx-mmptx`
 
-## Проблема
+## The problem
 
-Хранилище бэклога — embedded Dolt — стоит дороже, чем даёт, и его отказы
-самоусиливаются. Это записано в открытом P0 `nocx-v48vl` и подтверждено там
-измерениями:
+The backlog store — embedded Dolt — cost more than it returned, and its failures
+amplified each other. This is written down in the open P0 `nocx-v48vl` and measured
+there:
 
-- `bd dolt pull` не может догнать отставший клон. Путь чтения форкает
-  `git cat-file blob <sha>` на каждый объект, 20–40 в секунду, и перечитывает
-  одни и те же многомегабайтные блобы. На отставании в 881 issue и ~55 коммитов
-  он не показал измеримого прогресса за восемь минут.
-- `.dolt/git-remote-cache` никогда не чистится. Каждая прерванная попытка
-  оставляет ещё один почти идентичный пак ~210 MB: один пак в 09:00 стал девятью
-  и 1.9 GB к вечеру, и `bd dolt push` деградировал с 3 секунд до 300. **Отказ
-  делает следующий отказ дороже.**
-- `bd dolt pull` игнорирует SIGTERM. `timeout` без `--kill-after` рапортует 124
-  и возвращает управление, пока процесс продолжает держать эксклюзивный замок
-  встроенного хранилища; четыре сессии были найдены в очереди за одним таким
-  сиротой, самая старая — 85 минут.
+- `bd dolt pull` could not catch up a clone that had fallen behind. Its read path
+  forked `git cat-file blob <sha>` per object, 20–40 a second, and re-read the same
+  multi-megabyte blobs. At 881 issues and ~55 commits behind it made no measurable
+  progress in eight minutes.
+- `.dolt/git-remote-cache` never pruned. Every aborted attempt left another
+  near-identical ~210 MB pack: one pack at 09:00 became nine and 1.9 GB by evening,
+  and `bd dolt push` degraded from 3 seconds to over 300. **Failure made the next
+  failure more expensive.**
+- `bd dolt pull` ignored SIGTERM. `timeout` without `--kill-after` reported 124 and
+  returned while the process kept the store's exclusive lock; four sessions were
+  found queued behind one such orphan, the oldest at 85 minutes.
 
-Смежное: `nocx-akfl6` (локальный Dolt потерял 881 issue, из них 284 живых) и
-`nocx-wj4` (синк односторонний: ничто не тянет данные, у коллеги бэклог свежий
-ровно настолько, насколько он сам вспомнил дёрнуть `bd dolt pull`).
+Adjacent: `nocx-akfl6` (the local Dolt store lost 881 issues, 284 of them live) and
+`nocx-wj4` (sync was one-way — nothing pulled, so a colleague's backlog was only as
+fresh as the last time they remembered to type `bd dolt pull`).
 
-Сейчас на диске: **1.4 GB** `embeddeddolt` плюс **502 MB** `backup`.
+On disk: **1.4 GB** of `embeddeddolt` plus **502 MB** of `backup`.
 
-## Что такое `br`
+## What `br` is
 
-Rust-порт beads, замороженный на «классической» архитектуре SQLite + JSONL.
-Бинарь называется `br`, чтобы не путать с `bd`. Автор — Jeffrey Emanuel, портировал
-с одобрения Стива Йегги, потому что его собственный тулинг построен вокруг именно
-этой архитектуры, а upstream-beads уходит в сторону GasTown.
+A Rust port of beads, frozen at the "classic" SQLite + JSONL architecture. The
+binary is `br`, to keep it apart from `bd`. Jeffrey Emanuel wrote it with Steve
+Yegge's endorsement, because his own tooling is built around exactly that
+architecture while upstream beads moves toward GasTown.
 
-Ключевое отличие в поведении: **`br` никогда не запускает git сам.** Мутирующие
-команды пишут в SQLite и по умолчанию авто-экспортируют `issues.jsonl`; обычные
-команды перед запуском проверяют, не стал ли JSONL новее, и импортируют его.
-Коммит и пуш — целиком наша ответственность.
+The behavioural difference that matters: **`br` never runs git.** Mutating commands
+write SQLite and auto-export `issues.jsonl`; ordinary commands check whether the
+JSONL got newer and import it first. Committing and pushing are ours.
 
-## Что измерено на живых данных
+## What was measured on live data
 
-Прогон 2026-09-05, `br` 0.5.10 (musl, checksum проверен), scratch-каталог,
-экспорт рабочей базы `bd` 1.1.0 (3399 issue, 144 памяти).
+2026-09-05, `br` 0.5.10 (musl, checksum verified), against an export of the working
+`bd` 1.1.0 database (3401 issues, 144 memories).
 
-### Импорт полный и точный
+### The import is complete and exact
 
 ```
-{"created":3399,"updated":0,"skipped":0,"tombstone_skipped":0,
- "orphans_removed":0,"blocked_cache_rebuilt":true}      # 17.7 с
+{"created":3401,"updated":0,"skipped":0,"tombstone_skipped":0,
+ "orphans_removed":0,"blocked_cache_rebuilt":true}      # 17.7 s
 ```
 
-Круговая сверка `bd export` против `br sync --flush-only`:
+Round-trip check, `bd export` against `br sync --flush-only`:
 
-| Что                                                                                                                              | `bd` | `br`               |
-| -------------------------------------------------------------------------------------------------------------------------------- | ---- | ------------------ |
-| issue                                                                                                                            | 3399 | 3399               |
-| id отсутствующих / лишних                                                                                                        | —    | 0 / 0              |
-| рёбра зависимостей                                                                                                               | 3330 | 3330               |
-| метки                                                                                                                            | 2791 | 2791               |
-| комментарии                                                                                                                      | 96   | 96                 |
-| статусы / типы / приоритеты                                                                                                      | —    | совпадают поштучно |
-| `title`, `description`, `acceptance_criteria`, `close_reason`, `design`, `notes`, `owner`, `assignee`, `created_at`, `closed_at` | —    | 0 расхождений      |
+|                                                                                                                                  | `bd` | `br`                      |
+| -------------------------------------------------------------------------------------------------------------------------------- | ---- | ------------------------- |
+| issues                                                                                                                           | 3401 | 3401                      |
+| ids lost / extra                                                                                                                 | —    | 0 / 0                     |
+| dependency edges                                                                                                                 | 3330 | 3330                      |
+| labels                                                                                                                           | 2791 | 2791                      |
+| comments                                                                                                                         | 96   | 96                        |
+| statuses / types / priorities                                                                                                    | —    | identical, count by count |
+| `title`, `description`, `acceptance_criteria`, `close_reason`, `design`, `notes`, `owner`, `assignee`, `created_at`, `closed_at` | —    | 0 differences             |
 
-**Id `nocx-*` сохраняются.** `br` переписывает префикс только по явному
-`--rename-prefix`, смешанные префиксы поддерживаются штатно. Значит все ссылки
-на `nocx-*` в коммитах, в `.internal/plans/`, в `AGENTS.md` и в самих беадах
-остаются валидными.
+**The `nocx-*` ids survive.** `br` rewrites a prefix only on an explicit
+`--rename-prefix`, and mixed prefixes are supported. Every reference to `nocx-*` in
+commits, in `.internal/plans/`, in `AGENTS.md` and in the beads themselves stays
+valid.
 
-### Экспорт `bd` требует ровно двух правок
+### The `bd` export needs exactly two fixes
 
-Обе найдены на живых данных, обе механические:
+Both found on live records, both mechanical, both done by
+`scripts/bd-to-br-transform.py`:
 
-1. **`comments[].id`** — `bd` 1.1.0 пишет UUIDv7-строку, `br` ждёт `i64`
-   (в bd 0.46, с которым `br` сверен, id комментариев были целыми). 96 записей.
-   `br` падает закрыто: `invalid type: string "01a04a05-…", expected i64`.
-2. **`external_ref` у `br` уникален.** Одна группа: `gh-pr-91` висит на пяти
-   issue (`nocx-a0qhd.8`, `nocx-a0qhd.6`, `nocx-6ftmj`, `nocx-zs278`,
-   `nocx-a0qhd.7`). `br` падает: `Duplicate external_ref: gh-pr-91`.
+1. **`comments[].id`** — `bd` 1.1.0 writes a UUIDv7 string where `br` expects an
+   `i64` (comment ids were integers in bd 0.46, which `br` checked its conformance
+   against). 96 records. `br` fails closed:
+   `invalid type: string "01a04a05-…", expected i64`.
+2. **`br` requires `external_ref` to be unique.** One group: `gh-pr-91` on five
+   issues (`nocx-a0qhd.8`, `nocx-a0qhd.6`, `nocx-6ftmj`, `nocx-zs278`,
+   `nocx-a0qhd.7`). `br` fails closed: `Duplicate external_ref: gh-pr-91`. The
+   losers keep the value in `metadata.external_ref_duplicate`.
 
-Решение: одноразовый трансформер (`scripts/bd-to-br-transform.py`), который
-перенумеровывает id комментариев и оставляет `external_ref` ровно на одном
-issue, пряча значение проигравших в `metadata.external_ref_duplicate`.
+### `br` will not take memories at all
 
-### Памяти `br` не принимает вообще
+A `_type":"memory"` line kills the import: `Invalid JSON at line 3400: missing
+field 'id'`. There is no `remember`, no `memories`, no `recall`. The 144 memories
+had to leave the tracker — that is a requirement, not an oversight.
 
-На строке с `_type":"memory"` импорт падает закрыто:
-`Invalid JSON at line 3400: missing field 'id'`. Команд `remember` / `memories`
-/ `recall` у `br` нет ни одной. 144 памяти обязаны уйти отдельным маршрутом —
-это не опция и не деградация, а жёсткое требование.
+### `br` understands git worktrees
 
-### `br` знает про git worktree
-
-Это опровергло главный риск, который был у спеки до измерения. Из worktree,
-у которого в дереве лежит собственный чекаут `.beads/` (наш случай:
-`config.yaml` и `metadata.json` закоммичены), `br where` отвечает путём
-**главного** чекаута:
+This falsified the design's biggest assumed risk. From a worktree that has its own
+checked-out `.beads/` in the tree (our case: `config.yaml` and `metadata.json` were
+committed), `br where` answers with the **main** checkout's path:
 
 ```
 $ cd ../brtrial-wt && br where
@@ -106,209 +102,204 @@ $ cd ../brtrial-wt && br where
   jsonl:    /…/brtrial/.beads/issues.jsonl
 ```
 
-В собственном `.gitignore`, который `br init` кладёт в `.beads/`, для этого есть
-строка `redirect`. Одна база на машину, все ~40 worktree её делят — ровно как
-сейчас с `bd`.
+Its own `.gitignore`, written by `br init`, carries a `redirect` entry for exactly
+this. One database per machine, shared by all ~40 worktrees — as it was under `bd`.
 
-### Ветки файл не трогают
+### Branches do not touch the file
 
-Это второе, что решает судьбу дизайна, и это тоже измерено, а не выведено.
-Агент в worktree создал issue и правил другой:
+The second thing that decides the design, and also measured rather than reasoned.
+An agent in a worktree created an issue and edited another:
 
 ```
-$ br create "работа из worktree" -t task -p 2
+$ br create "work from a worktree" -t task -p 2
 ✓ Created nocx-s1840
-$ git status --porcelain          # в worktree
-                                  # ← пусто
+$ git status --porcelain          # in the worktree
+                                  # ← empty
 $ ls -l ../brtrial/.beads/issues.jsonl
-9153090                           # ← запись ушла в главный чекаут
+9153090                           # ← the write landed in the main checkout
 ```
 
-`br` пишет в базу главного worktree, а хука, который бы сам стейджил файл, у него
-нет вообще. Значит фича-ветка физически не может тронуть `issues.jsonl`, и
-конфликт из `nocx-5xgrn` не воспроизводится: для конфликта нужно, чтобы файл
-поменяли обе стороны.
+`br` writes the main worktree's database, and there is no hook to stage the file.
+A feature branch therefore cannot change `issues.jsonl`, and the conflict from
+`nocx-5xgrn` cannot recur: it needs both sides to have changed the file.
 
-### 8.8 MB в истории стоят 1 KB на коммит
+### 8.8 MB in the history costs 1 KB per commit
 
-Десять коммитов бэклога (создание, правка заметок, закрытие, переоткрытие, экспорт)
-после `git gc`:
+Ten backlog commits (create, edit notes, close, reopen, export), after `git gc`:
 
 ```
-baseline .git:               2984 KB
-после 10 коммитов бэклога:   2996 KB
-на коммит:                      1 KB
+baseline .git:                    2984 KB
+after 10 backlog commits:         2996 KB
+per commit:                          1 KB
 ```
 
-JSONL отсортирован по id, различаются только изменённые строки — дельта-сжатие
-работает практически идеально.
+The JSONL is sorted by id, so only changed lines differ and delta compression is
+nearly perfect.
 
-### Скорость и размер
+### Speed and size
 
-|                   | `bd` + Dolt            | `br`                        |
-| ----------------- | ---------------------- | --------------------------- |
-| хранилище         | 1.4 GB + 502 MB backup | 13 MB SQLite + 8.8 MB JSONL |
-| `ready`           | —                      | 0.23 с                      |
-| импорт 3399 issue | —                      | 17.7 с                      |
+|                       | `bd` + Dolt            | `br`                        |
+| --------------------- | ---------------------- | --------------------------- |
+| store                 | 1.4 GB + 502 MB backup | 13 MB SQLite + 8.8 MB JSONL |
+| `ready`               | —                      | 0.23 s                      |
+| import of 3401 issues | —                      | 17.7 s                      |
 
-## Решение
+## The decisions
 
-### 1. `.beads/` возвращается в git
+### 1. `.beads/` goes back into git
 
-Ровно как документирует `br`. Три возражения против этого измерены выше и не
-подтвердились: worktree безопасны, ветки файл не трогают, рост истории — 1 KB
-на коммит.
+Exactly as `br` documents. The three objections to this were measured above and none
+held: worktrees are safe, branches do not touch the file, and the history grows 1 KB
+per commit.
 
-- Из `.gitignore` уходит строка `.beads/issues.jsonl`.
-- `.beads/.gitignore` заменяется тем, что генерирует `br init` (он покрывает
-  `*.db*`, fsqlite-сайдкары, `.br_history/`, `.br_recovery/`, `beads.base.jsonl`
-  и прочие merge-артефакты, `redirect`, `.write.lock`).
-- Синк вниз: `git pull` → `br sync --import-only`.
-- Синк вверх: `br sync --flush-only` → `git add .beads/` → коммит.
-- Расхождение между машинами лечится `br sync --reconcile-additive` — план
-  привязан к `plan_sha256`, ничего не удаляет, JSONL не переписывает.
+- `.beads/issues.jsonl` left `.gitignore`.
+- `.beads/.gitignore` is now the one `br init` generates (`*.db*`, the fsqlite
+  sidecars, `.br_history/`, `.br_recovery/`, `beads.base.jsonl` and the other merge
+  artefacts, `redirect`, `.write.lock`), plus the Dolt leftovers.
+- Down: `git pull`, then `br sync --import-only` (usually automatic).
+- Up: `br sync --flush-only`, `git add .beads/issues.jsonl`, commit.
+- Divergence between machines: `br sync --reconcile-additive`, whose plan is bound
+  to a `plan_sha256`, deletes nothing and does not rewrite the JSONL.
 
-**Явно вне рамок:** отдельная ветка или отдельный репозиторий под бэклог. Они
-решали бы проблему, которой, как показало измерение, нет.
+**Explicitly out of scope:** a dedicated branch or a separate repository for the
+backlog. Both would solve a problem the measurements show we do not have.
 
-### 2. Памяти уходят в cass-memory
+### 2. Memories move to cass-memory
 
-144 памяти конвертируются из `bd export --include-memories` в
-`cm playbook add --file -` (он принимает JSON-массив со stdin). Одновременно
-сырой экспорт кладётся в репозиторий как `.internal/memories-export.jsonl` —
-страховка на случай, если `cm` (alpha) не отдаст то, что нужно.
+They are `.cass/playbook.yaml`, a tracked file, generated from the raw export in
+`.internal/memories-export.jsonl` by `scripts/bd-memories-to-cass.py`. Read them
+with `cm context "<task>" --json`.
 
-Меняется способ доставки: сейчас памяти сами приезжают в контекст сессии хуком
-плагина, у `cm` выдача — `cm context "<задача>" --json`, то есть нужен свой хук
-на `SessionStart`.
+Two things measured while doing it, both counter-intuitive:
 
-Зависимости: `cass` (индексатор сессий, готовый бинарь `cass-linux-x86_64`,
-rustup не нужен) и опционально LLM-ключ для авто-рефлексии.
+- The rules carry `scope: global` rather than the obvious `workspace`, because
+  **`cm context` silently returns nothing for workspace rules** — an exact phrase
+  from a memory matched 0 with `workspace` and all 144 with `global`. They do not
+  leak: `.cass/` is found from the working directory, so `cm playbook list` shows
+  145 rules inside nocx and 1 outside.
+- Nothing is `pinned` and nothing is exempted. `confidenceDecayHalfLifeDays` decays
+  a rule's `feedbackEvents`, of which an imported memory has none, so the field does
+  nothing here whatever it says.
 
-### 3. `merge-slot` выбрасывается
+Adding a memory means appending to the JSONL and re-running the generator — never
+`cm playbook add`, which writes the per-user global playbook nobody else sees.
 
-`bd merge-slot` исчезает вместе с `bd`, замена не делается. `scripts/merge-slot.sh`
-удаляется, раздел про очередь мержей уходит из `AGENTS.md`. Решение владельца.
+### 3. The merge slot is dropped
 
-### 4. `beads-superpowers` остаётся, перекрывается через `AGENTS.md`
+`bd merge-slot` went with `bd` and gets no replacement. `scripts/merge-slot.sh` is
+deleted and the AGENTS.md section with it. The owner's call. What it guarded still
+exists, and AGENTS.md now says so plainly — including that the slot was never a lock
+either, by that file's own account.
 
-Процессные скиллы плагина (brainstorming, writing-plans, TDD,
-systematic-debugging) ценнее его bd-части. По правилам самого плагина инструкции
-репозитория побеждают, поэтому в `AGENTS.md` пишется карта `bd` → `br` и чем
-заменён каждый отсутствующий глагол:
+### 4. `beads-superpowers` stays, overridden through `AGENTS.md`
 
-| `bd`                                                                                          | `br`                                                                 |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `bd ready` / `list` / `show` / `create` / `update` / `close` / `dep add` / `search` / `stats` | те же с `br`                                                         |
-| `bd prime`                                                                                    | нет; вводный контекст даёт `AGENTS.md` и `br robot-docs guide`       |
-| `bd remember` / `memories` / `recall`                                                         | `cm playbook add` / `cm context`                                     |
-| `bd purge`                                                                                    | `br delete` (tombstone)                                              |
-| `bd batch`                                                                                    | `br sync --import-only` из JSONL; массовые `br update <id1> <id2> …` |
-| `bd import -`                                                                                 | `br sync --import-only` (файл, не stdin)                             |
-| `bd dolt push` / `pull`                                                                       | `git push` / `git pull` + `br sync`                                  |
-| `bd merge-slot`                                                                               | ничего, выброшен                                                     |
-| `bd export -o`                                                                                | `br sync --flush-only`                                               |
+Its process skills are worth more than its `bd` half costs. By the plugin's own rule
+repository instructions win over skills, so AGENTS.md carries the whole `bd` → `br`
+table and that table is the instruction.
 
-### 5. Очередь «что делать дальше» переписывается
+### 5. The queue is a script now
 
-У `br ready` нет `--parent` и `--exclude-type`, а `ready --json` отдаёт голый
-массив без родителя. Протокол из `AGENTS.md` собирается из того, что есть, и
-проверен на 3399 issue:
+`br ready` has no `--parent` and no `--exclude-type`, and `ready --json` carries no
+parent. `scripts/br-queue.sh` computes both: an epic's children from `br show <epic>
+--json` (`dependents` carry `dependency_type: "parent-child"`), and "no parent" from
+the parent-child edge set read once out of `.beads/issues.jsonl`. 3.9 s over 3401
+issues.
 
-- Исключение эпиков — `jq 'map(select(.issue_type!="epic"))'`.
-- Дети взятого эпика — `br show <epic> --json` отдаёт `dependents` с
-  `dependency_type: "parent-child"`. 49 эпиков в работе — 8.5 с.
-- Standalone-баги — набор рёбер `parent-child` читается один раз из
-  `.beads/issues.jsonl` (1971 issue с родителем из 3399), пересечение — 0.5 с.
+`br show --json` also returns a `rollup` of descendants by status, which replaces the
+`jq max` over children that AGENTS.md used for "is this epic actually live".
 
-Взамен `br show --json` даёт `rollup` с посчитанными потомками
-(`{"status":"in_progress","descendants":{"closed":3,"in_progress":1,"open":3}}`).
-Это прямо закрывает абзац `AGENTS.md` про «таймстамп эпика не есть его живость»,
-где сейчас на это отдельная команда с `jq max`.
+### 6. Deleted
 
-Сейчас очередь живёт в `AGENTS.md` как inline-портянка из двух команд. На `br`
-она длиннее, поэтому уезжает в новый `scripts/br-queue.sh`, а `AGENTS.md`
-цитирует одну строку.
+`.githooks/beads-hook.sh` entirely, with `post-merge` and `post-rewrite`: git moves
+the backlog now, and `br` imports it before the next command. `pre-push` pushes
+nothing and only warns when code is about to leave without the backlog — warns,
+never blocks, for the reason this repository already recorded about gates people
+learn to pass with `--no-verify`. Also gone: `scripts/merge-slot.sh`, the two hook
+tests, `.beads/hooks/`, `PRIME.md`, `export-state.json`, `interactions.jsonl`, and
+the Dolt keys in `.beads/config.yaml`.
 
-### 6. Что удаляется
+Still on disk, deliberately: `.beads/embeddeddolt` and `.beads/backup`. They are
+ignored and kept only until nobody wants a rollback.
 
-- `.githooks/beads-hook.sh` целиком: обе функции (`bd dolt push` / `pull`) и
-  публикация `refs/beads/snapshot`. `br` синхронизируется обычным git.
-- Вызовы из `.githooks/pre-commit`, `pre-push`, `post-merge`.
-- Их тесты: `scripts/test-beads-pull-hook.sh`, `scripts/test-beads-snapshot-hook.sh`.
-- `.beads/embeddeddolt/`, `.beads/backup/`, `.beads/hooks/` (шимы `bd`),
-  `.beads/PRIME.md`, `export-state.json`, `interactions.jsonl`.
-- Удалённые ссылки `refs/dolt/data` и `refs/beads/snapshot` на origin.
-- `scripts/merge-slot.sh`.
-- `sync.remote` и остальная Dolt-специфика из `.beads/config.yaml`; остаётся
-  `issue_prefix: nocx`.
+### 7. Tooling per machine
 
-### 7. Что ставится на машины
+| What                         | How                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------ |
+| `br` 0.5.10                  | `install.sh --dest ~/.local/bin --skip-skills --verify` (musl, static)                     |
+| the agent-instruction plugin | `/plugin marketplace add Dicklesworthstone/beads_rust`, `/plugin install beads@beads-rust` |
+| `cass`                       | the prebuilt `cass-linux-x86_64.tar.gz`; rustup is not needed                              |
+| `cm`                         | `install.sh --easy-mode --verify` (a bun binary, runs through nix-ld)                      |
+| `minisign`                   | **into the NixOS system config** — verifies `br`'s release signatures                      |
+| `sqlite3`                    | **into the NixOS system config** — for reading the database by hand                        |
 
-На обе машины владельца и коллеге:
+`nix-ld` is enabled and `/lib64/ld-linux-x86-64.so.2` is present, so glibc binaries
+run. `bd` comes off the system config last, once `br` has run for a week.
 
-| Что               | Как                                                                                        |
-| ----------------- | ------------------------------------------------------------------------------------------ |
-| `br` 0.5.10       | `install.sh --dest ~/.local/bin --skip-skills --verify` (musl, статический)                |
-| плагин инструкций | `/plugin marketplace add Dicklesworthstone/beads_rust`, `/plugin install beads@beads-rust` |
-| `cass`            | готовый `cass-linux-x86_64.tar.gz`                                                         |
-| `cm`              | `install.sh --easy-mode --verify` (bun-бинарь, идёт через nix-ld)                          |
-| `minisign`        | **в системный конфиг NixOS** — проверять подписи релизов `br`                              |
-| `sqlite3`         | **в системный конфиг NixOS** — смотреть базу руками                                        |
+## What actually happened, including the part that went wrong
 
-`nix-ld` включён, `/lib64/ld-linux-x86-64.so.2` на месте, так что glibc-бинарники
-запускаются. `bd` убирается из системного конфига последним шагом, после того как
-`br` проработает неделю.
+Executed in this order on the primary machine: transform and verify, `br init`,
+import, clean-up of the layout, hooks and documentation, memories, then the worker
+notice.
 
-## Порядок работ
+**`br init` inherited a database name from `bd`.** It read the old
+`metadata.json` (`"database": "dolt"`) and created its SQLite in a file literally
+named `dolt`. Caught immediately, and the fix is to write both `metadata.json` and
+`config.yaml` in `br`'s own shape before importing, not after.
 
-Резать одним коммитом нельзя: живая работа в ~40 worktree, 3399 issue и два
-рабочих места. Порядок:
+**Workers kept using `bd`, and it kept working.** The Dolt store is still on disk,
+so a `bd` command from any of the ~40 worktrees succeeds and looks normal while
+writing where nobody reads. One close was lost that way — `nocx-rowqt.10`, closed in
+`bd` at 16:42:13Z, 36 minutes after the migration export — and `bd` also
+auto-committed `sync.remote` back into `.beads/config.yaml`. Both were recovered:
+re-exporting `bd` through the transform and importing it into `br` upserts by
+`updated_at`, which restored the close with its original reason and touched nothing
+else (`{"created":0,"updated":1,"skipped":3401}`).
 
-1. **Трансформер и сверка.** `scripts/bd-to-br-transform.py` + скрипт сверки,
-   который печатает таблицу из раздела «Импорт полный и точный». Гейт: 3399/3399,
-   0 потерянных рёбер, 0 расхождений в тексте.
-2. **Установка** на первой машине, `br init`, `issue_prefix: nocx`, импорт,
-   сверка. `bd` пока жив и остаётся источником истины.
-3. **Памяти:** экспорт, конвертация в `cm`, `.internal/memories-export.jsonl`
-   в репозиторий, хук `SessionStart`. Гейт: `cm context` на трёх реальных
-   запросах возвращает то же, что `bd memories` по тем же словам.
-4. **Заморозка `bd`.** Владелец объявляет стоп записи в `bd`, делает финальный
-   экспорт, импортирует его в `br` поверх (`br sync --import-only` — upsert по
-   `updated_at`), сверяет ещё раз.
-5. **Один коммит cutover:** `.gitignore`, `.beads/.gitignore`, хуки, скрипты,
-   `AGENTS.md`, `CLAUDE.md`, `README.md`, `.beads/config.yaml`, удаление
-   `merge-slot.sh`. Плюс первый коммит `.beads/issues.jsonl`.
-6. **Вторая машина и коллега:** `git pull` + установка + `br sync --import-only`.
-   Гейт: `br stats` совпадает на всех трёх клонах.
-7. **Уборка:** удалить `refs/dolt/data` и `refs/beads/snapshot` на origin,
-   `.beads/embeddeddolt`, `.beads/backup`, снять `bd` с системного конфига.
-   Закрыть `nocx-v48vl` с указанием, что дефект унесён вместе с Dolt.
+The lesson is the one this repository already knows in other forms: **a migration
+that leaves the old tool executable has not finished.** Removing `embeddeddolt` is
+what actually ends it, and until then the notice in
+`.internal/TRACKER-MIGRATION-NOTICE.md` is the only thing standing between a worker
+and a silent write into a dead store.
 
-## Критерии приёмки
+## What is left
 
-- `br stats` на трёх клонах даёт одинаковые числа, и id всех 3399 issue
-  начинаются с `nocx-`.
-- Сверка `bd export` против `br sync --flush-only` печатает 0 расхождений
-  по issue, рёбрам, меткам, комментариям и десяти текстовым полям.
-- Агент в worktree создаёт и закрывает бид; `git status` в worktree пуст,
-  изменение видно в `.beads/issues.jsonl` главного чекаута.
-- PR из ветки, в которой шла работа с бэклогом, приходит на GitHub без
-  конфликта по `.beads/issues.jsonl`.
-- `cm context` на трёх реальных запросах возвращает памяти, которые `bd memories`
-  находил по тем же словам.
-- В дереве не осталось ни одного вызова `bd` (`grep -rn '\bbd '` по хукам,
-  скриптам, `Makefile`, `AGENTS.md`, `CLAUDE.md`, `README.md`).
-- `.beads/embeddeddolt` и `.beads/backup` удалены; `du -sh .beads` < 50 MB.
+1. **Watch for `bd` writes until Dolt is deleted.** Re-export and reconcile before
+   removing `embeddeddolt`; the two scripts do it in under a minute.
+2. **The second machine and the colleague.** `git pull`, install the tooling,
+   `br sync --import-only`. Gate: `br stats` agrees across all three clones.
+3. **Delete `refs/dolt/data` and `refs/beads/snapshot` on origin**, then
+   `.beads/embeddeddolt` and `.beads/backup`, then take `bd` off the system config.
+4. **Close `nocx-v48vl`** noting that the defect left with the store.
+5. **A `SessionStart` hook for `cm context`**, if the memories turn out to be missed
+   in practice. Deliberately not built yet: what a session start does not know is
+   the task, and injecting 144 rules blind is noise.
 
-## Что осознанно не делается
+## Acceptance criteria
 
-- **Отдельная ветка или репозиторий под бэклог** — решали бы несуществующую
-  проблему (см. измерения).
-- **Замена `merge-slot`** — решение владельца выбросить.
-- **Форк `beads-superpowers`** — вместо этого перекрытие через `AGENTS.md`.
-- **Правка исторических документов** в `.internal/plans/` и `.internal/briefs/`,
-  где встречается `bd` — это архив, он описывает то, что было.
-- **Миграционный скилл `bd-to-br-migration`** от автора `br` — он переписывает
-  только документацию и написан для классического bd без Dolt; наши два реальных
-  расхождения формата в нём не упомянуты вовсе.
+- `br stats` agrees on all three clones, and every one of the 3401+ ids starts with
+  `nocx-`.
+- `scripts/bd-to-br-verify.py` prints no divergence across issues, edges, labels,
+  comments and the ten text fields. **Met on the primary machine.**
+- An agent in a worktree creates and closes a bead; `git status` there stays empty
+  and the change appears in the main checkout's `.beads/issues.jsonl`. **Met.**
+- A PR from a branch where backlog work happened arrives on GitHub with no conflict
+  in `.beads/issues.jsonl`.
+- `cm context` returns, for three real queries, the memories `bd memories` found for
+  the same words. **Met** (headless e2e, keychain, docker in pre-commit).
+- No call to `bd` is left in the tree (`grep -rn '\bbd '` over hooks, scripts,
+  `Makefile`, `AGENTS.md`, `CLAUDE.md`, `README.md`). **Met** — the only remaining
+  mentions are historical explanation and the `bd` → `br` table.
+- `.beads/embeddeddolt` and `.beads/backup` are gone and `du -sh .beads` is under
+  50 MB.
+
+## Deliberately not done
+
+- **A dedicated branch or repository for the backlog** — it would solve a problem
+  the measurements show does not exist.
+- **A replacement for the merge slot** — the owner's decision to drop it.
+- **Forking `beads-superpowers`** — overriding it through `AGENTS.md` instead.
+- **Editing the historical documents** in `.internal/plans/` and `.internal/briefs/`
+  that mention `bd`. That is an archive; it describes what was.
+- **The author's own `bd-to-br-migration` skill** — it rewrites documentation only,
+  assumes classic bd without Dolt, and does not mention either of the two format
+  divergences we actually hit.

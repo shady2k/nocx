@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Сверить бэклог в `br` с экспортом `bd` поштучно.
+"""Check the backlog in `br` against a `bd` export, record by record.
 
-Гейт миграции: ни одного потерянного issue, ребра, метки или комментария и
-ни одного расхождения в текстовых полях. Печатает таблицу и возвращает
-ненулевой код, если хоть что-то разошлось.
+The migration gate: not one lost issue, edge, label or comment, and not one
+difference in the text fields. Prints a table and exits nonzero if anything
+diverged.
 
     bd export --all -o /tmp/bd.jsonl
     scripts/bd-to-br-transform.py /tmp/bd.jsonl /tmp/br.jsonl
@@ -58,8 +58,8 @@ def count(m: dict[str, dict], field: str) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("expected", help="JSONL от bd, прогнанный через трансформер")
-    p.add_argument("actual", help=".beads/issues.jsonl после br sync --flush-only")
+    p.add_argument("expected", help="bd JSONL, run through the transform")
+    p.add_argument("actual", help=".beads/issues.jsonl after br sync --flush-only")
     args = p.parse_args()
 
     a, b = load(args.expected), load(args.actual)
@@ -72,13 +72,13 @@ def main() -> int:
         if not ok:
             bad.append(name)
 
-    check("issue", len(a), len(b))
-    check("id потеряно", 0, len(set(a) - set(b)))
-    check("id лишних", 0, len(set(b) - set(a)))
+    check("issues", len(a), len(b))
+    check("ids lost", 0, len(set(a) - set(b)))
+    check("ids extra", 0, len(set(b) - set(a)))
 
     ea, eb = edges(a), edges(b)
-    check("рёбра зависимостей", len(ea), len(eb))
-    check("рёбра потеряно", 0, len(ea - eb))
+    check("dependency edges", len(ea), len(eb))
+    check("edges lost", 0, len(ea - eb))
     for f in ("labels", "comments"):
         check(f, count(a, f), count(b, f))
 
@@ -89,14 +89,14 @@ def main() -> int:
 
     for field in TEXT_FIELDS:
         differ = [i for i in a if i in b and (a[i].get(field) or "") != (b[i].get(field) or "")]
-        check(f"поле {field}", 0, len(differ))
+        check(f"field {field}", 0, len(differ))
         for i in differ[:3]:
             print(f"        {i}")
 
     if bad:
-        print(f"\nРАСХОЖДЕНИЯ: {', '.join(bad)}")
+        print(f"\nDIVERGED: {', '.join(bad)}")
         return 1
-    print("\nСверка чистая.")
+    print("\nClean.")
     return 0
 
 

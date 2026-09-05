@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Привести экспорт `bd` 1.1.0 к тому, что принимает `br` (beads_rust).
+"""Make a `bd` 1.1.0 export something `br` (beads_rust) will accept.
 
-Ровно два расхождения, оба найдены на живой базе nocx (3399 issue) и оба
-заставляют `br sync --import-only` упасть закрыто:
+Exactly two divergences, both found on the live nocx backlog (3401 issues) and
+both of which make `br sync --import-only` fail closed:
 
-1. `comments[].id` — `bd` пишет UUIDv7-строку, `br` ждёт `i64`. В bd 0.46,
-   с которым `br` сверял конформанс, id комментариев были целыми.
-2. `external_ref` у `br` уникален. У нас `gh-pr-91` висел на пяти issue.
-   Значение проигравших не выбрасывается, а уезжает в
-   `metadata.external_ref_duplicate`, чтобы ссылка на PR не потерялась.
+1. `comments[].id` — `bd` writes a UUIDv7 string where `br` expects an `i64`.
+   In bd 0.46, the version br checked its conformance against, comment ids were
+   integers. 96 records here.
+2. `br` requires `external_ref` to be unique. Ours had `gh-pr-91` on five
+   issues. The losers' value is not thrown away — it moves to
+   `metadata.external_ref_duplicate`, so the pointer at the PR survives.
 
-Памяти (`_type":"memory"`) `br` не понимает вообще — на них импорт падает с
-`missing field id`. Они здесь отбрасываются и уходят своим маршрутом
-(cass-memory); см. --memories-out.
+Memories (`_type":"memory"`) `br` does not understand at all: the import dies on
+them with `missing field id`. They are separated out here and take their own
+route into cass-memory — see --memories-out and scripts/bd-memories-to-cass.py.
 
     scripts/bd-to-br-transform.py bd-export.jsonl br-issues.jsonl \
         --memories-out .internal/memories-export.jsonl
@@ -25,9 +26,9 @@ import sys
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("src", help="JSONL от `bd export --all`")
-    p.add_argument("dst", help="куда положить JSONL для `br sync --import-only`")
-    p.add_argument("--memories-out", help="куда сложить записи _type=memory")
+    p.add_argument("src", help="JSONL from `bd export --all`")
+    p.add_argument("dst", help="where to write the JSONL for `br sync --import-only`")
+    p.add_argument("--memories-out", help="where to put the _type=memory records")
     args = p.parse_args()
 
     comment_id = 0
@@ -72,10 +73,10 @@ def main() -> int:
     if mem_out:
         mem_out.close()
 
-    print(f"issue:              {issues}")
-    print(f"id комментариев:    {comment_id} перенумеровано")
-    print(f"памяти:             {memories} отложено в {args.memories_out or '(никуда)'}")
-    print(f"external_ref снят:  {len(dropped_refs)}")
+    print(f"issues:             {issues}")
+    print(f"comment ids:        {comment_id} renumbered")
+    print(f"memories:           {memories} set aside in {args.memories_out or '(nowhere)'}")
+    print(f"external_ref clear: {len(dropped_refs)}")
     for iid, ref in dropped_refs:
         print(f"    {iid}  {ref}")
     return 0

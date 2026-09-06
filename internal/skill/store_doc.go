@@ -153,24 +153,29 @@ type document struct {
 // are all OBSERVATIONS — what this process asked for, what came back, and the
 // clock — so nothing on the Skills page is ever the model's word for itself.
 //
-// WHERE THE RESOLUTION NAMES A REPOSITORY, A PATH AND A COMMIT, THE ADDRESS
-// IS WHERE THEY ARE RECORDED. A raw address on a forge encodes all three —
-// org, repo, ref and path in-order in the URL — and URL is stored whole and
-// verbatim, so the record names them wherever the resolution did. What is
-// deliberately NOT done is parsing them out into fields of their own: that
-// needs a per-host adapter and a ref-to-commit resolution step, which is the
-// machinery this design exists to delete, and it would let a host we have not
-// taught the parser turn a genuine repository into three empty fields on the
-// page. An address nocx does not understand is still an address a person and
-// a forge both do.
+// A resolved forge source records both the update ref and the immutable commit
+// alongside the original address. The ref says what a future update follows;
+// the commit says what these bytes actually were. Plain URLs retain only URL,
+// which is the complete source identity they provide.
 type Source struct {
-	// URL is the address that was FETCHED and that an update stays pinned to
-	// — the one the person approved, not whatever a redirect chain ended at.
-	// The fetch may follow up to ten hops (preview.go), and the last of them
-	// is not what anybody agreed to: pinning an update to it would let one
-	// redirect quietly move where a skill comes from, which is precisely what
-	// planInstall refuses to allow.
+	// URL is the raw candidate address that was FETCHED and that an update
+	// stays pinned to. It is not EntryURL: a resolved repository can contain
+	// several candidates, and the fetched candidate is what update collision
+	// checks compare.
 	URL string `json:"url"`
+	// EntryURL is the address the person started from and gave to Resolve.
+	// It is retained alongside URL so an audit can see the transition from a
+	// page or repository to the repository candidate that supplied the bytes.
+	EntryURL string `json:"entryUrl,omitempty"`
+	// Path is the candidate path inside the resolved repository. Plain URL
+	// installs leave it empty because they have no repository path.
+	Path string `json:"path,omitempty"`
+	// Ref is the requested update channel when the source was resolved by a
+	// forge adapter. It is retained separately from Commit because a ref can
+	// move while the installed bytes remain pinned.
+	Ref string `json:"ref,omitempty"`
+	// Commit is the immutable forge object the installed bytes came from.
+	Commit string `json:"commit,omitempty"`
 	// InstalledAt is when the bytes were taken, RFC3339 in UTC — the "when"
 	// of the record, and what makes the other two mean something a year
 	// later. An address and a digest with no date attached cannot be argued
@@ -620,23 +625,23 @@ func (s *Store) writeDocumentLocked(d document) error {
 }
 
 // acquisition is what an install resolved to, as recordApprovalDigest is
-// handed it: the address that was fetched and the digest of what that address
-// served. It travels as ONE value rather than as two string parameters so a
-// source row cannot be written half-made — there is no call shape in which a
-// caller supplies an address without the digest that came with it.
-//
-// The install time is NOT a field here, deliberately. It is minted at the
-// write below, from the clock, so no caller can assert when a skill was
-// installed — the same reason skills.install takes an address and nothing
-// else (see Source's header).
+// handed it: the candidate address that was fetched, the address the person
+// started from when resolution was requested, the path inside that repository,
+// and the digest of what the candidate address served. It travels as ONE value
+// rather than as string parameters so a source row cannot be written half-made.
 type acquisition struct {
-	url    string
-	digest string
+	url      string
+	entryURL string
+	path     string
+	digest   string
+	ref      string
+	commit   string
 }
 
 // recordApprovalDigest writes down what the person approved: the digest of the
-// bytes now on disk, and — when the skill was acquired from an address — the
-// whole record of what that acquisition resolved to, in ONE document write.
+// bytes now on disk, and — when the skill was acquired from an address — both
+// the fetched candidate and the entry address that led to it, in ONE document
+// write.
 //
 // The two halves are not separable and there is no second call that adds the
 // source afterwards. An installed skill whose digest is recorded and whose
@@ -684,6 +689,10 @@ func (s *Store) recordApprovalDigest(name, dir string, from *acquisition) error 
 		}
 		d.Sources[name] = Source{
 			URL:         from.url,
+			EntryURL:    from.entryURL,
+			Path:        from.path,
+			Ref:         from.ref,
+			Commit:      from.commit,
 			InstalledAt: time.Now().UTC().Format(time.RFC3339),
 			Digest:      from.digest,
 		}

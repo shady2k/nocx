@@ -79,12 +79,13 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// Nothing is installed that has not been read. The order of the pipeline
 	// IS the argument (design §5), and this is the step that enforces it from
 	// the server rather than trusting the dialog to have shown anything.
-	approved, read := s.approvedPreview(rawURL)
+	source, read := s.approvedAcquisition(rawURL)
 	if !read {
 		return InstallResult{}, errors.New(
 			"nothing has been read from that address in this session, so there is nothing to install: " +
 				"read the document first, then install what you read")
 	}
+	approved := source.digest
 
 	text, err := s.fetchDocument(ctx, rawURL)
 	if err != nil {
@@ -128,7 +129,10 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	}
 	// Asked again under the lock, because the preview's answer was given
 	// before it and the disk is allowed to have moved.
-	update, err := s.planInstall(document.Name, rawURL)
+	// The collision check compares the fetched candidate URL, not EntryURL:
+	// updates stay pinned to the exact candidate that supplied these bytes,
+	// while EntryURL remains the audit trail for how the person got there.
+	update, err := s.planInstall(document.Name, source.url)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -187,7 +191,7 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// the value the second fetch above had to match. Recording it here is
 	// what makes the row auditable later: a person can re-fetch the address
 	// and hash it, and compare against what they said yes to.
-	if err := s.recordApprovalDigest(document.Name, dir, &acquisition{url: rawURL, digest: approved}); err != nil {
+	if err := s.recordApprovalDigest(document.Name, dir, &source); err != nil {
 		return InstallResult{}, s.undoInstall(document.Name, dir, previous, err)
 	}
 
@@ -208,7 +212,7 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// printed. A log line naming the address without naming what that address
 	// gave is a record of an intention rather than of a result.
 	slog.Info("skill: installed from a URL",
-		"skill", document.Name, "url", rawURL, "digest", approved,
+		"skill", document.Name, "url", source.url, "digest", approved,
 		"findings", len(document.Findings)+len(scanBundleFiles(files)), "files", len(files)+1)
 	return InstallResult{Name: document.Name, Provenance: ProvenanceInstalled}, nil
 }

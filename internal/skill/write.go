@@ -128,10 +128,11 @@ type Store struct {
 	docMu      sync.Mutex
 	docFailure error
 
-	// previewed is the one document Preview last showed, which is the only
-	// thing Install compares its second fetch against (preview.go).
+	// previewed is the one document or resolution last shown, which is the
+	// only thing Install compares its second fetch against (preview.go).
 	previewMu sync.Mutex
 	previewed *previewedDocument
+	resolver  *GitHubAdapter
 }
 
 // StoreOption configures a Store at construction. It is variadic rather than
@@ -146,7 +147,24 @@ type StoreOption func(*Store)
 // guarded transport" — the same seam internal/assistant and internal/transport
 // already hold.
 func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
-	return func(s *Store) { s.fetcher = fetcher }
+	return func(s *Store) {
+		s.fetcher = fetcher
+		if s.resolver == nil {
+			s.resolver = NewGitHubAdapter(fetcher)
+		}
+	}
+}
+
+// WithGitHubAdapter replaces the default public-GitHub resolver. The
+// composition root uses the default; tests and future forge wiring can inject
+// an adapter without introducing another network seam.
+func WithGitHubAdapter(adapter *GitHubAdapter) StoreOption {
+	return func(s *Store) {
+		s.resolver = adapter
+		if s.fetcher == nil && adapter != nil {
+			s.fetcher = adapter.fetcher
+		}
+	}
 }
 
 // NewStore builds a skill store. The roots must include one managed directory;
@@ -155,6 +173,9 @@ func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore, opt
 	s := newStore(fsys, roots, docStore)
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.resolver == nil && s.fetcher != nil {
+		s.resolver = NewGitHubAdapter(s.fetcher)
 	}
 	return s
 }

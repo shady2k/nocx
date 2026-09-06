@@ -107,8 +107,12 @@ type PreviewResult struct {
 // document a second time, only to answer whether the document that comes back
 // is the one the person read.
 type previewedDocument struct {
-	url    string
-	digest string
+	url        string
+	digest     string
+	resolution *githubResolutionPlan
+	selected   []string
+	activePath string
+	digests    map[string]string
 }
 
 // rememberPreview records what was just shown. Only a successful preview is
@@ -126,15 +130,91 @@ func (s *Store) rememberPreview(rawURL, digest string) {
 	s.previewed = &previewedDocument{url: rawURL, digest: digest}
 }
 
-// approvedPreview answers with the digest of the document Preview showed for
-// this exact URL, if that is still the document being looked at.
-func (s *Store) approvedPreview(rawURL string) (string, bool) {
+// rememberResolution replaces the one approval slot with a resolution. The
+// address and bytes stay in this server-side plan; the returned handle is the
+// only value a caller may carry into InstallResolved.
+func (s *Store) rememberResolution(plan *githubResolutionPlan, handle string) {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	plan.Resolution.Handle = handle
+	s.previewed = &previewedDocument{resolution: plan}
+}
+
+func (s *Store) approvedAcquisition(rawURL string) (acquisition, bool) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
 	if s.previewed == nil || s.previewed.url != rawURL {
-		return "", false
+		return acquisition{}, false
 	}
-	return s.previewed.digest, true
+	from := acquisition{url: rawURL, digest: s.previewed.digest}
+	if s.previewed.resolution != nil {
+		from.entryURL = s.previewed.resolution.address
+		from.path = s.previewed.activePath
+		from.ref = s.previewed.resolution.Ref
+		from.commit = s.previewed.resolution.Commit
+	}
+	return from, true
+}
+
+func (s *Store) approvedResolution(handle string, paths []string) (*githubResolutionPlan, string, bool) {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+		return nil, "", false
+	}
+	if len(s.previewed.selected) > 0 && !samePaths(s.previewed.selected, paths) {
+		return nil, "", false
+	}
+	return s.previewed.resolution, s.previewed.digest, true
+}
+
+func (s *Store) rememberResolvedDigests(handle string, paths []string, digests map[string]string) bool {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+		return false
+	}
+	s.previewed.selected = append([]string(nil), paths...)
+	s.previewed.activePath = ""
+	s.previewed.url = ""
+	s.previewed.digest = ""
+	s.previewed.digests = make(map[string]string, len(digests))
+	for path, digest := range digests {
+		s.previewed.digests[path] = digest
+	}
+	return true
+}
+
+func (s *Store) approvedResolvedDigests(handle string, paths []string) (map[string]string, bool) {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle || !samePaths(s.previewed.selected, paths) {
+		return nil, false
+	}
+	if len(s.previewed.digests) != len(paths) {
+		return nil, false
+	}
+	digests := make(map[string]string, len(paths))
+	for _, path := range paths {
+		digest := s.previewed.digests[path]
+		if digest == "" {
+			return nil, false
+		}
+		digests[path] = digest
+	}
+	return digests, true
+}
+
+func (s *Store) armResolvedPath(handle, activePath, rawURL, digest string) bool {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+		return false
+	}
+	s.previewed.activePath = activePath
+	s.previewed.url = rawURL
+	s.previewed.digest = digest
+	return true
 }
 
 // forgetPreview spends the approval. An approval is for one document on one
@@ -143,9 +223,35 @@ func (s *Store) approvedPreview(rawURL string) (string, bool) {
 func (s *Store) forgetPreview(rawURL string) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed != nil && s.previewed.url == rawURL {
-		s.previewed = nil
+	if s.previewed == nil || s.previewed.url != rawURL {
+		return
 	}
+	if s.previewed.resolution != nil && len(s.previewed.selected) > 1 {
+		remaining := s.previewed.selected[:0]
+		for _, path := range s.previewed.selected {
+			if path != s.previewed.activePath {
+				remaining = append(remaining, path)
+			}
+		}
+		s.previewed.selected = append([]string(nil), remaining...)
+		s.previewed.activePath = ""
+		s.previewed.url = ""
+		s.previewed.digest = ""
+		return
+	}
+	s.previewed = nil
+}
+
+func samePaths(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Preview acquires the document at rawURL and answers with what a person needs

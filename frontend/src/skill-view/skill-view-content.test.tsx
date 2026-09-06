@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { within } from '@solidjs/testing-library'
 import type { PaneHost } from '../pane-content'
 import { SkillsStore, type SkillsClientLike } from '../skills-store'
 import type { SkillsList } from '../generated/skills.list'
@@ -1364,6 +1365,33 @@ describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
     )
     expect(SURFACE_CSS).toMatch(/\.skill-view__identity/)
   })
+
+  it('renders the changed warning and sends Re-approve to the store', async () => {
+    const approve = vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' })
+    const client = fakeClient({
+      approve,
+      list: vi.fn().mockResolvedValue({
+        documentPath: '/tmp/nocx/skills.json',
+        skills: [{ ...A_SKILL, status: 'changed' }],
+      }),
+    })
+    const { host } = await mount(client)
+
+    expect(host.textContent).toContain('The bytes under this skill have changed')
+    const reapprove = within(host).getByRole('button', { name: 'Re-approve' })
+    reapprove.click()
+    await flush()
+
+    expect(approve).toHaveBeenCalledWith('deploy')
+  })
+
+  it('does not render the changed warning or Re-approve for an approved skill', async () => {
+    const { host } = await mount(fakeClient())
+
+    expect(host.textContent).not.toContain('The bytes under this skill have changed')
+    expect(within(host).queryByRole('button', { name: 'Re-approve' })).toBeNull()
+  })
+
   it('repeats nothing the header and the file list already say', async () => {
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['scripts/setup.sh'])),

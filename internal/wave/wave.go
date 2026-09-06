@@ -42,11 +42,28 @@
 // # What this package does not claim
 //
 // A wave call carries NO authority the session does not already have (A12).
-// Participant authenticity has no mechanism in this tree — there is no pidfd
-// anywhere, start-time is read only remotely and only as a diagnostic, and a
-// socketpair has no peer credential to stamp. An authority we cannot enforce
-// is one we do not claim, so nothing here says "only the enrolled tree may
-// speak for this participant".
+//
+// Amended 2026-09-06 (nocx-rowqt.8), because the sentence this replaced —
+// "participant authenticity has no mechanism in this tree" — stopped being
+// true and a stale disclaimer is worse than none. It is now true of ONE
+// channel and false of the other, and the difference is the carrier:
+//
+//   - The lifecycle channel is a socketpair, so there is no connect(2) and no
+//     per-peer credential to stamp. nocx's own in-process agent still reaches
+//     the dispatcher with no participant authenticity whatsoever.
+//   - The wave endpoint is a real unix socket, so the kernel stamps each peer.
+//     internal/wavepin pins the enrolled root as (pid, startTime) and walks a
+//     caller's ancestry to it, which separates a stale pid, a replacement
+//     process and an unrelated process that found the socket from the tree
+//     that was enrolled.
+//
+// The ceiling did not move. The pin is NOT a defence against a same-uid
+// actor, who can read our descriptors or type into the session anyway, and
+// the principal is the TREE rather than the process. Nor is any of it human
+// approval: D13's "a person admits an agent once, seeing the executable and
+// the scope" is nocx-rowqt.12 and is not built, so nothing in the product may
+// describe the endpoint as human-approved. An authority we cannot enforce is
+// one we do not claim.
 package wave
 
 import (

@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // SkillViewContent — the skill tab (nocx-btg7d, nocx-4m1n1, nocx-dh14q): the
-// HEADER (name, provenance, path, the enable switch) plus the BODY below it
-// — every file the bundle carries, the chosen one's bytes, and the Check
-// group with what content.db knows about this skill plus the Check/Re-check
-// button that spends the one model call.
+// changed warning above the split, then the identity rail beside the BODY —
+// every file the bundle carries, the chosen one's bytes, and the Check group
+// with what content.db knows about this skill plus the Check/Re-check button
+// that spends the one model call.
 //
 // SkillViewHeader and SkillViewBody live in their own modules
 // (skill-view-header.tsx, skill-view-body.tsx): this class owns none of
@@ -56,14 +56,14 @@ export interface SkillViewDeps {
 }
 
 /**
- * The tab's whole content: the header always, the body once the skill has
- * resolved. Kept as one small component (rather than two calls at the
- * render() site below) so the "which name does the body get" question has
- * one answer, read out of the same `state` the header already narrows.
+ * The tab's whole content: the full-width warning slot always, then the body
+ * once the skill has resolved. The resolved identity is rendered by the body
+ * at the top of the left rail, beside Check and Files; the right side is
+ * reserved for the selected document or check report.
  *
  * The body is not remounted by an unrelated store refresh (toggling the
  * switch, say): `Show`'s render function runs once per false→true
- * transition, not on every truthy update, so `SkillViewBody` keeps its own
+ * transition, not on every truthy update, so `SkillViewBody` keeps its
  * fetched files and its selection across a state change that leaves the
  * skill's PATH the same — only losing the skill (the tab closing) or a
  * fresh mount rebuilds it.
@@ -79,29 +79,30 @@ function SkillView(props: {
 }): JSX.Element {
   // The whole resolved skill, not only its name: the body's Check group
   // (nocx-dh14q) gates on `provenance` — a builtin offers no check at all —
-  // and reading that back out of the same `state` the header already
-  // narrows keeps one answer to "which skill is this" rather than two.
+  // and the identity rail reads the same resolved object the warning does.
   const readySkill = (): Skill | null => (props.state.kind === 'ready' ? props.state.skill : null)
   return (
-    <>
+    <div class="skill-view__header">
       <SkillViewHeader
         name={props.name}
         state={props.state}
         busy={props.busy}
-        onToggle={props.onToggle}
         onApprove={props.onApprove}
       />
       <Show when={readySkill()}>
         {(skill) => (
           <SkillViewBody
             name={skill().name}
+            skill={skill()}
+            busy={props.busy}
+            onToggle={props.onToggle}
             provenance={skill().provenance}
             store={props.deps.store}
             refreshToken={props.refreshToken}
           />
         )}
       </Show>
-    </>
+    </div>
   )
 }
 

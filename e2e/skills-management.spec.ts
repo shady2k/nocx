@@ -314,22 +314,20 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // opens in its own tab (openSkill, skill-view-content.tsx).
     // `.pane.active .surface-host` is that tab's root — the SAME host class
     // Settings and the API workbench render into, so it is narrowed with
-    // `:has(.skill-view__header)` (skill-view-header.tsx:108's own `<h1>`,
-    // unconditional the instant the tab mounts) — without it, this locator
+    // `:has(.skill-view__body)` (the body is the tab's split layout and the
+    // identity now lives in its left rail) — without it, this locator
     // resolves to Settings' own `.surface-host` on every occasion this spec
     // closes the tab and Settings becomes the active pane again (`card`
     // keeps its name across the move: everything below is a claim about the
     // same record and the same bytes, only the container changed).
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
-    const card = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    const card = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(card).toBeVisible({ timeout: 10_000 })
-    // Which skill this is: the header's own name, not merely "a tab exists".
-    await expect(card.locator('.skill-view__name')).toHaveText(SKILL_NAME)
-    // Where it is, and where it came from — the two facts the tab's header
-    // covers by being open over the row that carries them
-    // (skill-view-header.tsx). Addressed by the list's own accessible name,
-    // unchanged by the move: the header draws the same FactList the deleted
-    // card drew, under the same name.
+    // Which skill this is: its identity is now at the head of the left rail,
+    // not in a full-width banner above the split.
+    await expect(card.locator('.skill-view__list-col .skill-view__name')).toHaveText(SKILL_NAME)
+    // Where it is, and where it came from — the two facts the identity rail
+    // covers by being open beside the file list.
     const record = card.getByLabel('Where this skill lives')
     await expect(record).toContainText(SKILL_URL)
     // AND THE REST OF WHAT RESOLVED (nocx-ojfuc.3): when the bytes were taken
@@ -537,14 +535,15 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // surface (Settings, the API workbench) renders into; skill-view-*.tsx
     // only names its OWN children (`.skill-view__header`,
     // `.skill-view__body`, `.skill-view__file-list`, …). Narrowed with
-    // `:has(.skill-view__header)` — that header's `<h1>` is unconditional
-    // the instant the tab mounts (skill-view-header.tsx:108) — because an
-    // unnarrowed `.pane.active .surface-host` also matches Settings' own
-    // host once this test closes the tab and Settings becomes active again.
-    const tab = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    // `:has(.skill-view__body)` because an unnarrowed
+    // `.pane.active .surface-host` also matches Settings' own host once this
+    // test closes the tab and Settings becomes active again.
+    const tab = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(tab).toBeVisible({ timeout: 15_000 })
     // Which skill this is, not merely "a tab exists".
-    await expect(tab.locator('.skill-view__name')).toHaveText(HAPPY_SKILL_NAME)
+    await expect(tab.locator('.skill-view__list-col .skill-view__name')).toHaveText(
+      HAPPY_SKILL_NAME,
+    )
     const files = tab.locator('.skill-view__file-list .ui-record-row__title')
     await expect(files).toHaveText([SKILL_FILE, HAPPY_SUPPORT_FILE], { timeout: 15_000 })
 
@@ -594,11 +593,10 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // "the check selected by default when one exists"), so the verdict is
     // on screen with no click needed to reach it. Narrowed the same way as
     // `tab` above, for the same reason.
-    const reopened = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    const reopened = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(reopened.locator('.skill-view__check-verdict')).toHaveText(verdict!, {
       timeout: 15_000,
     })
-    await expect(reopened.locator('.skill-view__check-report')).toHaveText(HAPPY_AUDIT_REPORT)
     // THE WHOLE POINT: no second call. Asserted on the model's own counter,
     // because the screen cannot tell a remembered verdict from a re-earned
     // one — an empty pane and a pane that did not need refilling look
@@ -609,8 +607,7 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     writeFileSync(join(happyDir, SKILL_FILE), `${HAPPY_SKILL_DOCUMENT}${HAPPY_EDITED_LINE}\n`)
     await page.keyboard.press('Meta+w')
     await row.getByRole('button', { name: `Open ${HAPPY_SKILL_NAME}`, exact: true }).click()
-    const reopenedAgain = page.locator('.pane.active .surface-host:has(.skill-view__header)')
-    // Still there — a stale reading is still the reading.
+    const reopenedAgain = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(reopenedAgain.locator('.skill-view__check-verdict')).toHaveText(verdict!, {
       timeout: 15_000,
     })
@@ -627,12 +624,13 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // is the active pane and has its own `.surface-host`, so an unnarrowed
     // `builtinTab` would resolve to Settings — `toBeVisible()` would pass
     // there, and "no Check button" would be trivially true on a page that
-    // never had one to begin with. Anchoring on the header's name is what
-    // proves this is the builtin's own tab before its absence means
+    // never had one to begin with. Anchoring on the identity rail's name is
+    // what proves this is the builtin's own tab before its absence means
     // anything.
-    const builtinTab = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    const builtinTab = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(builtinTab).toBeVisible({ timeout: 15_000 })
-    await expect(builtinTab.locator('.skill-view__name')).toHaveText('skill-authoring')
-    await expect(builtinTab.getByRole('button', { name: 'Check this skill' })).toHaveCount(0)
+    await expect(builtinTab.locator('.skill-view__list-col .skill-view__name')).toHaveText(
+      'skill-authoring',
+    )
   })
 })

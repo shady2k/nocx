@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { within } from '@solidjs/testing-library'
 import type { PaneHost } from '../pane-content'
 import { SkillsStore, type SkillsClientLike } from '../skills-store'
 import type { SkillsList } from '../generated/skills.list'
@@ -1332,6 +1333,65 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
 // sides: the pane was drawn as if it were one block on a page, when it is the
 // whole of a column whose only job is the file.
 describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
+  it('puts the skill identity in the left rail above the file list', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockResolvedValue(fileResult({ path: 'scripts/setup.sh', text: 'the whole skill' })),
+    })
+    const { host } = await mount(client)
+
+    const listCol = host.querySelector('.skill-view__list-col')
+    if (!listCol) throw new Error('the skill rail did not render')
+    expect(listCol.querySelector('.skill-view__name')?.textContent).toContain('deploy')
+    expect(listCol.querySelector('.ui-badge')?.textContent).toContain('authored')
+    expect(listCol.querySelector('[aria-label="Where this skill lives"]')).not.toBeNull()
+    expect(listCol.querySelector('input[type="checkbox"]')).not.toBeNull()
+
+    const identity = listCol.querySelector('.skill-view__identity')
+    const files = listCol.querySelector('.skill-view__file-list')
+    expect(identity).not.toBeNull()
+    expect(files).not.toBeNull()
+    expect(
+      identity!.compareDocumentPosition(files!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(viewCol(host).querySelector('.skill-view__name')).toBeNull()
+  })
+
+  it('stacks the identity before the file list below the narrow breakpoint', () => {
+    expect(SURFACE_CSS).toMatch(
+      /@container skill-view \(max-width: 640px\)[\s\S]*?\.skill-view__split \{[\s\S]*?grid-template-areas:\s*'list'\s+'view'/,
+    )
+    expect(SURFACE_CSS).toMatch(/\.skill-view__identity/)
+  })
+
+  it('renders the changed warning and sends Re-approve to the store', async () => {
+    const approve = vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' })
+    const client = fakeClient({
+      approve,
+      list: vi.fn().mockResolvedValue({
+        documentPath: '/tmp/nocx/skills.json',
+        skills: [{ ...A_SKILL, status: 'changed' }],
+      }),
+    })
+    const { host } = await mount(client)
+
+    expect(host.textContent).toContain('The bytes under this skill have changed')
+    const reapprove = within(host).getByRole('button', { name: 'Re-approve' })
+    reapprove.click()
+    await flush()
+
+    expect(approve).toHaveBeenCalledWith('deploy')
+  })
+
+  it('does not render the changed warning or Re-approve for an approved skill', async () => {
+    const { host } = await mount(fakeClient())
+
+    expect(host.textContent).not.toContain('The bytes under this skill have changed')
+    expect(within(host).queryByRole('button', { name: 'Re-approve' })).toBeNull()
+  })
+
   it('repeats nothing the header and the file list already say', async () => {
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['scripts/setup.sh'])),

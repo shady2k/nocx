@@ -89,13 +89,13 @@ import {
   SkillViewCheckPanel,
   type CheckState,
 } from './skill-view-check'
+import { SkillViewIdentity, type SkillViewIdentityProps } from './skill-view-header'
 
-export interface SkillViewBodyProps {
-  /** The RESOLVED skill's name — see skill-view-content.tsx's module
-   *  comment for why this is never the requested one. Stable for the life
-   *  of this component: SkillViewContent mounts a body once per resolved
-   *  skill and disposes it when the skill leaves, rather than handing an
-   *  existing instance a new name. */
+export interface SkillViewBodyProps extends Omit<SkillViewIdentityProps, 'skill'> {
+  /** The RESOLVED skill — its identity is rendered at the top of the left
+   *  rail, above Check and Files, while its name and provenance also gate the
+   *  existing body reads below. */
+  skill: Skill
   name: string
   /** Gates the Check group below (nocx-dh14q): a builtin's bytes came with
    *  the binary, so a check would be theatre with a model's bill attached
@@ -632,6 +632,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
     >
       <div class="skill-view__split">
         <div class="skill-view__list-col">
+          <SkillViewIdentity skill={props.skill} busy={props.busy} onToggle={props.onToggle} />
           <Stack gap="loose">
             {/* THE CHECK (nocx-dh14q, review round 2) — ONE ROW, selected
                 the same way a file is; its full content (the verdict, the

@@ -278,15 +278,15 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     // its own tab (openSkill, skill-view-content.tsx). `.pane.active
     // .surface-host` is that tab's root — the same SolidPaneContent host
     // element Settings and the API workbench render into — so it is
-    // narrowed with `:has(.skill-view__header)` (that header's `<h1>` is
-    // unconditional the instant the tab mounts, skill-view-header.tsx:108):
+    // narrowed with `:has(.skill-view__body)` (the body is the tab's
+    // split layout, and the skill identity now lives in its left rail):
     // without it, this locator also matches Settings' own host once the tab
     // below is closed and Settings becomes the active pane again.
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
-    const card = page.locator('.pane.active .surface-host:has(.skill-view__header)')
+    const card = page.locator('.pane.active .surface-host:has(.skill-view__body)')
     await expect(card).toBeVisible({ timeout: 15_000 })
     const doc = card.locator(`.ui-document-surface[aria-label="${SKILL_FILE} of “${SKILL_NAME}”"]`)
-    await expect(card.locator('.skill-view__name')).toHaveText(SKILL_NAME)
+    await expect(card.locator('.skill-view__list-col .skill-view__name')).toHaveText(SKILL_NAME)
 
     // ── EVERY file it holds is listed, and it holds more than one ──────────
     // The count first: with the list missing, "each file opens" would be a

@@ -1,78 +1,75 @@
 # CLAUDE.md
 
 Agent working rules for this repo live in **[AGENTS.md](AGENTS.md)** — it is the operating
-contract, including the git authority rules. It is imported here, so it is always in context:
+contract, including the git authority rules and the tracker. It is imported here, so it is
+always in context:
 
 @AGENTS.md
 
 Sources of truth: [`docs/vision.md`](docs/vision.md) (what & why) and
 [`docs/architecture.md`](docs/architecture.md) (the binding architecture spine).
-The task backlog lives in beads — run `bd ready`.
+The task backlog lives in beads — run `br ready`, or `scripts/br-queue.sh` when the
+question is "what next".
 
 **Fresh clone?** The [README setup](README.md#agent-tooling) lists the tooling to
-install per machine — `bd` and the `beads-superpowers` Claude Code plugin.
-`make init` wires up the repo but does not install these.
+install per machine — `br`, `cm`, and the `beads-superpowers` Claude Code plugin.
+`make init` wires up the repo but installs none of them.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
+## The tracker is `br`, and the plugin still says `bd`
 
-## Beads Issue Tracker
+Since 2026-09-05 the tracker is **`br` (beads_rust)**: SQLite plus a tracked
+`.beads/issues.jsonl`, no Dolt, no daemon, and **no git — `br` never runs it.**
+Memories left the tracker with `bd`; they live in cass-memory (`cm`).
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
+The `beads-superpowers` plugin is kept for its process skills and still speaks `bd`.
+**AGENTS.md carries the full `bd` → `br` table, and it wins over any skill that says
+otherwise** — that is the plugin's own rule about repository instructions. The ones
+you will hit first:
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+scripts/br-queue.sh                # what to work on next  (was: bare `bd ready`)
+br show <id>                       # view an issue
+br update <id> --claim             # claim work
+br close <id> --reason "..."       # complete work, with evidence a stranger can check
+cm context "<what you are doing>"  # memories  (was: `bd memories`)
 ```
 
-### Rules
+Still forbidden, unchanged: TodoWrite, TaskCreate and markdown TODO lists. `br` is the
+tracker for all work, including your own checklists.
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+## Session completion
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+Subordinate to whatever the user actually asked for. `br` will not do any of the git
+steps for you.
 
-## Agent Context Profiles
+1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
+2. **Run the quality gates** if code changed. Which ones, and whose job they are, is in
+   AGENTS.md under Git authority: a worker runs the unit tests for what it touched, the
+   coordinator runs `make ci-full` on the merged tree.
+3. **Update issue status** — close what is finished, and set anything you stopped holding
+   back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
+   `br ready` and to every colleague looking for work.
+4. **Send the backlog out with the code:**
 
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
-
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
-
-## Session Completion
-
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
-
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Handle git/sync by active profile**:
    ```bash
-   # Conservative/minimal/default: report status and proposed commands; wait for approval.
-   git status
-
-   # Team-maintainer opt-in only, unless current instructions forbid it:
-   git pull --rebase
+   br sync --flush-only
+   git add .beads/issues.jsonl
+   git commit          # same commit as the code it describes, or one right beside it
    git push
-   git status
    ```
-5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
 
-**Critical rules:**
-
-- Explicit user or orchestrator instructions override this Beads block.
-- Do not commit or push without clear authority from the active profile or the current user request.
-- If a required sync or push is blocked, stop and report the exact command and error.
-
-<!-- END BEADS INTEGRATION -->
+5. **Write down anything that was bought.** If something in this session cost a
+   measurement or a wrong turn and is not derivable from the repository, it goes in
+   `.cass/playbook.yaml` — AGENTS.md has the three tests and the `import --repo`
+   route. Nothing does this for you: there is no reflection hook, and `cm reflect`
+   never runs on its own.
+6. **Hand off** — changed files, what you validated, bead status, and anything you left
+   blocked, in those words.
 
 ## Code search
 
-`grep`, `glob` and reading the file are the tools. There is no code-knowledge-graph
-index in this repo and no hook in front of a file read — see
-[AGENTS.md](AGENTS.md#code-search) for why it was removed.
+`grep`, `glob` and reading the file are one way in; the `repowise` MCP tools are the
+other, and neither outranks the other. Use `grep` for _does this exist, and who calls
+it_, and `repowise` when the question is about history or risk. Read
+[AGENTS.md](AGENTS.md#code-search) first: it says what `repowise` may and may not be
+believed about, and why an earlier index (`graphify`) was removed outright.

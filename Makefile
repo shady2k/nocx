@@ -185,33 +185,33 @@ clean:
 
 # Everything a fresh clone needs, in one command. Safe to re-run.
 #
-# The issue database is the part people miss: git carries neither the Dolt
-# database nor the ref it lives on, so without bootstrap a clone has no backlog
-# at all — `bd ready` just reports that no database was found.
+# The issue database no longer needs bootstrapping: `.beads/issues.jsonl` is a
+# tracked file, so the clone already has the backlog and `br` builds its SQLite
+# from it on the first command. What a clone can still lack is `br` itself —
+# git carries the data, not the tool.
 init: hooks
-	@if ! command -v bd >/dev/null 2>&1; then \
-		echo "=== issue tracker: bd not installed, skipping (see README) ==="; \
-	elif bd ready >/dev/null 2>&1; then \
-		echo "=== issue tracker: database already present ==="; \
+	@if ! command -v br >/dev/null 2>&1; then \
+		echo "=== issue tracker: br not installed, skipping (see README) ==="; \
 	else \
-		echo "=== issue tracker: bootstrapping ==="; \
-		bd bootstrap --yes; \
+		echo "=== issue tracker: importing .beads/issues.jsonl ==="; \
+		br sync --import-only; \
 	fi
 	@echo "=== e2e dependencies ==="
 	npm ci
 	@echo "=== frontend dependencies ==="
 	cd frontend && npm ci
 	@echo ""
-	@echo "Ready. Run 'make dev' to start the app, 'bd ready' for the backlog."
+	@echo "Ready. Run 'make dev' to start the app, 'br ready' for the backlog."
 
 # Per-clone git configuration: git behaviour this repo needs that a clone cannot
 # carry by itself.
 #
 # The --unset lines clean up after the beads merge driver, which used to resolve
-# `.beads/issues.jsonl` by regenerating it. The file is untracked now, so there
-# is nothing left to merge — and the driver never helped where it hurt most
-# anyway: GitHub computes a pull request's mergeability server-side and does not
-# run custom merge drivers at all.
+# `.beads/issues.jsonl` by regenerating it with `bd export`. Both the driver and
+# `bd` are gone; the line stays because an old clone still carries the config,
+# and a driver pointing at a binary that no longer exists fails every merge that
+# touches the file — which, now that it is tracked again, is a merge that can
+# actually happen.
 hooks:
 	git config core.hooksPath .githooks
 	-@git config --unset merge.beads-export.driver 2>/dev/null || true

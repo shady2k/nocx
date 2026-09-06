@@ -1,7 +1,5 @@
 
 .beads-credential-key
-.beads/issues.jsonl
-.beads/proxieddb/
 .claude/settings.local.json
 .dolt/
 .DS_Store
@@ -99,3 +97,4 @@ internal/helper/deploy/artifacts/*.gz
 
 # repowise API keys (local)
 .repowise/.env
+

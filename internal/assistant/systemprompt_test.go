@@ -579,3 +579,54 @@ func TestSystemPromptSaysASkillIsAProcedureThatCanBeStale(t *testing.T) {
 		t.Errorf("the skills paragraph still calls a skill data:\n%s", paragraph)
 	}
 }
+
+// TestSystemPrompt_AnswersInThePersonsLanguage pins the one instruction that
+// cannot be a setting (nocx-lang1).
+//
+// nocx has no "answer in Russian" preference and should not grow one: the
+// person who types in Russian and then pastes an English stack trace is one
+// person having one conversation, and a stored language would answer the
+// second message in the wrong one. The rule is therefore about the message
+// in hand, not about the account — which is also what makes it right for a
+// terminal, where half the text on screen is English whatever the person
+// speaks.
+//
+// It lives in "How to answer" because that is the section about the shape of
+// a reply, and it is asserted here rather than left to prose because a line
+// nothing checks is a line the next edit silently drops.
+func TestSystemPrompt_AnswersInThePersonsLanguage(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+	})
+
+	answer := sectionOf(t, got, "How to answer")
+	for _, want := range []string{"language", "asked"} {
+		if !strings.Contains(strings.ToLower(answer), want) {
+			t.Errorf("the How-to-answer section never mentions %q:\n%s", want, answer)
+		}
+	}
+	// The names of things stay as they are. A translated flag is a flag that
+	// does not exist, and a translated path is a path nothing will open.
+	if !strings.Contains(answer, "Commands, paths and flags") {
+		t.Errorf("the section stopped saying commands and paths keep their own form:\n%s", answer)
+	}
+}
+
+// sectionOf returns one headed block of the prompt — from its heading to the
+// next blank-line-separated heading — so a test asserts about the section it
+// means rather than about the whole document, where a phrase can appear
+// anywhere and prove nothing about where it was read.
+func sectionOf(t *testing.T, prompt, heading string) string {
+	t.Helper()
+	start := strings.Index(prompt, "\n"+heading+"\n")
+	if start < 0 {
+		t.Fatalf("prompt has no %q section:\n%s", heading, prompt)
+	}
+	rest := prompt[start+len(heading)+2:]
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}

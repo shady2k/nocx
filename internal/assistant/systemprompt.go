@@ -239,6 +239,19 @@ func SystemPrompt(f SystemPromptFacts) string {
 	}
 
 	b.WriteString("\nHow to answer\n")
+	// THE LANGUAGE IS THE MESSAGE'S, NEVER A SETTING. It is stated here and
+	// not offered as a preference on purpose: a person who asks in Russian
+	// and then pastes an English stack trace is one person having one
+	// conversation, and a stored language would answer the second message in
+	// the wrong one. Following the message in hand is also the only rule that
+	// works in a terminal, where half of what is on screen is English
+	// whatever the person speaks — so the sentence is careful to say that the
+	// NAMES of things do not move, which is the failure the rule would
+	// otherwise invite: a translated flag is a flag that does not exist, and
+	// a translated path is a path nothing will open.
+	b.WriteString("Answer in the language you were asked in, and change language when the person " +
+		"does. Commands, paths, flags, file names and error text stay exactly as they are, " +
+		"whatever language the sentence around them is in.\n")
 	b.WriteString("Short and concrete, in the register of a terminal. No preamble and no restating " +
 		"the question. Commands, paths and flags in backticks. If you do not know something, say so " +
 		"or go and look; if you need one thing from the person, ask for that one thing.\n")

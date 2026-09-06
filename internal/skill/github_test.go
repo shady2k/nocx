@@ -182,7 +182,8 @@ func TestGitHubAdapter_EachForgeCallFailureIsNamed(t *testing.T) {
 }
 
 func TestStore_UnsupportedResolutionFallsBackWithoutError(t *testing.T) {
-	store := NewStore(nil, nil, nil, WithGitHubAdapter(newFakeGitHubAdapter(&resolverTextFetcher{})))
+	fetcher := &resolverTextFetcher{}
+	store := NewStore(nil, nil, nil, WithFetcher(fetcher))
 	resolution, err := store.Resolve(context.Background(), "https://gitlab.com/acme/tools")
 	if err != nil || resolution != nil {
 		t.Fatalf("Resolve unsupported = %+v, %v; want nil result and nil error", resolution, err)
@@ -197,7 +198,8 @@ func TestStore_ResolutionHandleIsReplacedAndSpentByResolvedInstall(t *testing.T)
 
 	configDir := t.TempDir()
 	installedDir := filepath.Join(configDir, "installed-skills")
-	store := NewStore(OSFileSystem{}, []Root{{Dir: installedDir, Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithGitHubAdapter(adapter))
+	store := NewStore(OSFileSystem{}, []Root{{Dir: installedDir, Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithFetcher(fetcher))
+	store.resolver = adapter
 	first, err := store.Resolve(context.Background(), "acme/tools")
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
@@ -240,7 +242,8 @@ func TestStore_ResolvedInstallAcceptsAnExplicitSet(t *testing.T) {
 		"two/SKILL.md": "---\nname: two\ndescription: Second skill\n---\nsecond\n",
 	})
 	configDir := t.TempDir()
-	store := NewStore(OSFileSystem{}, []Root{{Dir: filepath.Join(configDir, "installed-skills"), Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithGitHubAdapter(adapter))
+	store := NewStore(OSFileSystem{}, []Root{{Dir: filepath.Join(configDir, "installed-skills"), Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithFetcher(fetcher))
+	store.resolver = adapter
 	resolution, err := store.Resolve(context.Background(), "acme/tools")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -273,7 +276,8 @@ func TestStore_ResolvedInstallReportsLandedCandidatesOnFailure(t *testing.T) {
 	})
 	configDir := t.TempDir()
 	installedDir := filepath.Join(configDir, "installed-skills")
-	store := NewStore(OSFileSystem{}, []Root{{Dir: installedDir, Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithGitHubAdapter(adapter))
+	store := NewStore(OSFileSystem{}, []Root{{Dir: installedDir, Provenance: ProvenanceInstalled}}, storage.NewDocumentStore(configDir), WithFetcher(fetcher))
+	store.resolver = adapter
 	resolution, err := store.Resolve(context.Background(), "acme/tools")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)

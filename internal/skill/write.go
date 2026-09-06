@@ -155,18 +155,6 @@ func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
 	}
 }
 
-// WithGitHubAdapter replaces the default public-GitHub resolver. The
-// composition root uses the default; tests and future forge wiring can inject
-// an adapter without introducing another network seam.
-func WithGitHubAdapter(adapter *GitHubAdapter) StoreOption {
-	return func(s *Store) {
-		s.resolver = adapter
-		if s.fetcher == nil && adapter != nil {
-			s.fetcher = adapter.fetcher
-		}
-	}
-}
-
 // NewStore builds a skill store. The roots must include one managed directory;
 // authored and builtin roots are retained for collision checks and precedence.
 func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore, opts ...StoreOption) *Store {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/pty"
 )
 
 // HostSessionID is the coordinator's view of a helper-owned session identity.
@@ -857,11 +858,7 @@ func (a *AttachedSession) ForegroundJob() (int, error) {
 		if entries[i].HostSessionID != id {
 			continue
 		}
-		obs := entries[i].Observed
-		if obs == nil || obs.ForegroundPgid <= 0 {
-			return 0, ErrNoForegroundJob
-		}
-		return obs.ForegroundPgid, nil
+		return classifyForegroundObservation(entries[i].Observed, entries[i].Launch.Pid)
 	}
 	// The helper answered and does not hold this session. Said as its own
 	// sentence rather than as ErrNoForegroundJob: "there is no job in front"
@@ -869,6 +866,41 @@ func (a *AttachedSession) ForegroundJob() (int, error) {
 	// same way would let a stop button report a quiet pane about one that has
 	// ended.
 	return 0, fmt.Errorf("helper: this generation no longer holds session %s", a.hostID().Session)
+}
+
+// classifyForegroundObservation turns the helper's evidence into the answer
+// the run-lease ladder is written against. It is a function of its own because
+// it is a DECISION and the rest of ForegroundJob is transport — and because
+// what broke was this, not the wire (nocx-nekvj).
+//
+// THE THREE ANSWERS ARE THREE DIFFERENT FACTS and collapsing any two is how
+// the stop button lies:
+//
+//   - a group that is NOT the shell's own is a job, and it is returned to be
+//     signalled;
+//   - the SHELL'S OWN group in front is protected. It is not an absence: under
+//     ADR-0024 nocx runs commands with job control off, so this is the state a
+//     running command produces for its whole life, and the ladder answers it
+//     by writing the terminal's interrupt rather than by signalling a group
+//     that contains the shell;
+//   - no group at all means nobody could look, which is a diagnosis. It must
+//     not read as ErrNoForeground, or a caller reports a quiet pane about a
+//     command that is plainly running.
+//
+// This mirrors pty.LocalPty.ForegroundJob exactly, and deliberately: the local
+// pty reads the raw group and compares it against the shell it forked. Before
+// nocx-ie23r.3 that was the only implementation, and every local pane now goes
+// through this one instead. Two implementations of one predicate is the
+// regression with a delay fuse AGENTS.md warns about, so this one is written
+// to give the same answers rather than its own.
+func classifyForegroundObservation(obs *Observation, launchPID int) (int, error) {
+	if obs == nil || obs.ForegroundPgid <= 0 {
+		return 0, ErrNoForegroundJob
+	}
+	if launchPID > 0 && obs.ForegroundPgid == launchPID {
+		return 0, pty.ErrProtectedForeground
+	}
+	return obs.ForegroundPgid, nil
 }
 
 // SignalProcessGroup signals the exact group a previous ForegroundJob named.

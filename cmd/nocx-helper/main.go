@@ -42,12 +42,23 @@ import (
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/mcpstdio"
 )
 
 func main() {
 	// stdout is the wire — for the bridge it is literally the ssh channel —
 	// so every diagnostic goes to stderr (D22).
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	args := os.Args[1:]
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
+		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2]); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("mcp", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -72,17 +83,13 @@ func main() {
 	}
 	dir := endpoint.Dir(home)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	args := os.Args[1:]
 	switch {
 	case len(args) == 1 && args[0] == endpoint.ServeCommand:
 		os.Exit(serve(ctx, log, dir, generation, contentHash, exe))
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:
-		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation>\n",
+		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path>\n",
 			endpoint.ServeCommand, endpoint.BridgeCommand)
 		os.Exit(2)
 	}

@@ -100,7 +100,7 @@ describe('AnswerMarkdown — table rows', () => {
 
   it('lets CSS own the cross-row sizing and removes only each row box', () => {
     const css = readFileSync('src/styles/components/answer-markdown.css', 'utf8')
-    expect(css).toMatch(/\.term-line\.ui-md-table-row\s*\{[^}]*display:\s*contents/s)
+    expect(css).toMatch(/\.ui-md-table-row\s*\{[^}]*display:\s*contents/s)
     expect(css).toMatch(/grid-template-columns:\s*repeat\([^;]*max-content/s)
   })
 })
@@ -174,7 +174,7 @@ describe('AnswerMarkdown — the marker sits inside the block (nocx-gxr9w.1)', (
     // .cmd-children's border-left into the gutter. Neither the row nor
     // the marker may declare it: the row's would inherit into the marker,
     // and the marker's would re-shift the glyph it positions by margin.
-    const liBlock = css.match(/\.term-line\[data-md='li'\]\s*\{([^}]*)\}/)?.[1]
+    const liBlock = css.match(/\[data-md='li'\]\s*\{([^}]*)\}/)?.[1]
     expect(liBlock).toBeDefined()
     expect(liBlock).not.toMatch(/text-indent/)
     const markerBlock = css.match(/\.ui-md-marker\s*\{([^}]*)\}/)?.[1]
@@ -242,5 +242,41 @@ describe('AnswerMarkdown — the model’s text is DATA, never markup', () => {
     const row = paint('**a & b**')
     expect(row.textContent).toBe('a & b')
     expect(row.innerHTML).toContain('&amp;')
+  })
+})
+
+// A TABLE ROW KEEPS THE CLASS ITS BUILDER GAVE IT (nocx-okee0). This function
+// used to write `row.className` outright, with `term-line` spelled into it —
+// a second place that decided what a row is called, beside the assembler that
+// had just created it. Now that the assembler's row class is its caller's
+// (a skill document does not want the terminal's cell metrics), the two would
+// disagree the moment a table appeared.
+describe('paintTableRow and the row it was handed', () => {
+  it('adds the table classes rather than replacing what the row already is', () => {
+    const row = document.createElement('span')
+    row.className = 'ui-md-line'
+    paintTableRow(row, '| a | b |', ['left', 'left'], true)
+
+    expect(row.classList.contains('ui-md-line')).toBe(true)
+    expect(row.classList.contains('ui-md-table-row')).toBe(true)
+    expect(row.classList.contains('term-line')).toBe(false)
+  })
+
+  it('marks a delimiter row without losing the caller’s class', () => {
+    const row = document.createElement('span')
+    row.className = 'term-line'
+    paintTableRow(row, '|---|---|', ['left', 'left'], false, true)
+
+    expect(row.classList.contains('term-line')).toBe(true)
+    expect(row.classList.contains('ui-md-table-delimiter')).toBe(true)
+  })
+
+  it('lets the markdown look reach any row class, not only the scrollback’s', () => {
+    const css = readFileSync('src/styles/components/answer-markdown.css', 'utf8')
+    // `data-md` and the `ui-md-` classes are written by this module alone —
+    // its own header says so — so qualifying on `.term-line` bought nothing
+    // and kept the look inside the scrollback.
+    expect(css).not.toMatch(/\.term-line\[data-md=/)
+    expect(css).toMatch(/\[data-md='h1'\]/)
   })
 })

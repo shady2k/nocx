@@ -81,6 +81,7 @@ import { skillFileOutcome } from '../skills-presentation'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
+import { isMarkdownPath, SkillViewDocument } from './skill-view-document'
 import {
   checkRowTitle,
   readingFromCheck,
@@ -517,6 +518,35 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
   // The facts are NOT deleted from the kit: the approval prompt is the other
   // caller, and it has no header and no list to have said them already.
 
+  /**
+   * The markdown to RENDER, or null when this file is shown as bytes
+   * (nocx-okee0).
+   *
+   * Two files are not documents. A bundled `scripts/setup.sh` is not
+   * markdown at all, and drawing it as prose would say it was. And a file
+   * the STATIC SCAN MATCHED is shown verbatim even when it is markdown,
+   * because a finding is a LINE NUMBER over exactly these bytes
+   * (nocx-872jc.4) and the rendered form has no such line to point at — a
+   * heading loses its markers, a fence is re-parented into its own
+   * container. Reading and auditing want different views of one file, and
+   * this is the single place they diverge: the moment the scan has something
+   * to show, the bytes are what shows it, with the match where it sits.
+   *
+   * Empty text is still a document — an empty FILE, drawn as an empty
+   * document, for the same reason FileReadout draws an empty block rather
+   * than nothing.
+   */
+  const documentText = (said: FileReadoutOutcome): { text: string } | null => {
+    const path = selectedPath()
+    if (path === null || !isMarkdownPath(path)) return null
+    if (said.kind !== 'text') return null
+    if ((said.marks?.length ?? 0) > 0) return null
+    // Wrapped, not bare: `Show` gates on truthiness, and an empty markdown
+    // file's `''` would fall through to the byte view — the one case this
+    // whole predicate is meant to keep as a document.
+    return { text: said.text }
+  }
+
   const outcome = (): FileReadoutOutcome | null => {
     const entry = fileState()
     if (entry === null) return null
@@ -532,6 +562,13 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
   }
 
   const readoutLabel = (): string => `${selectedPath() ?? ''} of “${props.name}”, verbatim`
+
+  /** The DOCUMENT's accessible name, and it deliberately does not say
+   *  "verbatim" the way the byte view's does (nocx-okee0): a rendered
+   *  markdown document is the file READ, not the file quoted — its markers
+   *  are not on screen — and a name claiming otherwise would be the one
+   *  thing a screen-reader user could not check for themselves. */
+  const documentLabel = (): string => `${selectedPath() ?? ''} of “${props.name}”`
 
   /** The row buttons in DOM order — RecordRow's title IS the row's tab stop
    *  (record-row.tsx: "the name is the control"), so this is the one place
@@ -741,7 +778,14 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 }
               >
                 {(said) => (
-                  <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
+                  <Show
+                    when={documentText(said())}
+                    fallback={
+                      <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
+                    }
+                  >
+                    {(doc) => <SkillViewDocument text={doc().text} ariaLabel={documentLabel()} />}
+                  </Show>
                 )}
               </Show>
             }

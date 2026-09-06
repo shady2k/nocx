@@ -257,7 +257,14 @@ export function paintTableRow(
     paintAnswerLine(row, text)
     return
   }
-  row.className = `term-line ui-md-table-row${delimiter ? ' ui-md-table-delimiter' : ''}`
+  // ADDED, never assigned: the row already carries whatever class the
+  // assembler that created it chose, and since nocx-okee0 that is the
+  // CALLER's — `term-line` in the scrollback, a document class in the skill
+  // tab. Writing `className` here was a second decision about what a row is
+  // called, and it would have silently reinstated the terminal's cell
+  // metrics on any table in a document pane.
+  row.classList.add('ui-md-table-row')
+  if (delimiter) row.classList.add('ui-md-table-delimiter')
   row.setAttribute('role', 'row')
   row.replaceChildren()
   if (delimiter) {

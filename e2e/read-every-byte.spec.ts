@@ -246,7 +246,7 @@ function exactText(pre: Locator): Promise<string> {
  *  the block of bytes — which is also the assertion that the reader is
  *  labelling the file it is showing rather than the one that was asked for. */
 function readoutFor(scope: Locator, ariaLabel: string): { readout: Locator; pre: Locator } {
-  const selector = `pre.ui-code-block[aria-label="${ariaLabel}"]`
+  const selector = `pre.ui-code-block[aria-label="${ariaLabel}, verbatim"]`
   // The `has:` locator is resolved RELATIVE to each candidate, so it is built
   // off the page rather than off `scope` — a scoped one would carry its own
   // ancestor chain into the filter and match nothing.
@@ -254,6 +254,24 @@ function readoutFor(scope: Locator, ariaLabel: string): { readout: Locator; pre:
     readout: scope.locator('.ui-file-readout').filter({ has: scope.page().locator(selector) }),
     pre: scope.locator(selector),
   }
+}
+
+/** The same file when it is MARKDOWN, which the tab renders as a document
+ *  rather than quoting as bytes (nocx-okee0). Its accessible name omits
+ *  "verbatim" for the reason the surface omits it: the markers are not on
+ *  screen, so nothing here is quoted. */
+function documentFor(scope: Locator, ariaLabel: string): Locator {
+  return scope.locator(`.skill-view__doc[aria-label="${ariaLabel}"]`)
+}
+
+/** One rendered row's text per source line, in order — the document's
+ *  answer to `exactText`. The rows are block elements with no separator
+ *  between them, so `textContent` on the container runs the lines together
+ *  and cannot be compared against the file. */
+function documentLines(doc: Locator): Promise<string[]> {
+  return doc.evaluate((el) =>
+    Array.from(el.querySelectorAll('.ui-md-line')).map((row) => row.textContent ?? ''),
+  )
 }
 
 test.describe('a person reads every byte they are being asked about (nocx-872jc)', () => {
@@ -300,17 +318,26 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     // SKILL.md is what the tab opens with by default (skill-view-body.tsx:
     // the first file, when no stored check exists yet), so this is the
     // state a person arrives in rather than one this spec drove them to.
-    const doc = readoutFor(card, `${SKILL_FILE} of “${SKILL_NAME}”, verbatim`)
-    await expect(doc.readout).toHaveAttribute('data-state', 'text', { timeout: 15_000 })
-    await expect(doc.readout).toContainText(SKILL_NAME)
-    await expect(doc.readout).toContainText(SKILL_FILE)
-    await expect(doc.readout).toContainText('authored')
-    await expect.poll(() => exactText(doc.pre), { timeout: 15_000 }).toBe(SKILL_DOCUMENT)
+    // SKILL.md IS MARKDOWN, so the tab renders it as a document (nocx-okee0)
+    // rather than quoting its bytes. Every line is still on screen and in
+    // order — that is what this asserts, line for line against the file —
+    // and the pane no longer repeats the name, the path and the provenance
+    // the header and the file list are already showing (nocx-xj1l6).
+    const doc = documentFor(card, `${SKILL_FILE} of “${SKILL_NAME}”`)
+    await expect(doc).toBeVisible({ timeout: 15_000 })
+    await expect
+      .poll(() => documentLines(doc), { timeout: 15_000 })
+      .toEqual(SKILL_DOCUMENT.replace(/\n$/, '').split('\n'))
+    await expect(card.locator('.ui-fact-list')).toHaveCount(0)
     // Read-only: there is nothing in the reader a person could type into.
-    await expect(doc.readout.locator('input, textarea, [contenteditable="true"]')).toHaveCount(0)
+    await expect(doc.locator('input, textarea, [contenteditable="true"]')).toHaveCount(0)
+    // A rendered document is still somebody else's bytes: the renderer never
+    // builds an anchor out of them (ui/answer-markdown.ts), so a link a skill
+    // wrote can never become a navigation target a person can click.
+    await expect(doc.locator('a')).toHaveCount(0)
     // Nothing in this file matched, so nothing in it is marked. This is what
     // makes the mark below a fact about the FILE it was found in.
-    await expect(doc.readout.locator('mark.ui-file-readout__match')).toHaveCount(0)
+    await expect(card.locator('mark.ui-file-readout__match')).toHaveCount(0)
 
     // ── The support file, opened from the list, showing ITS OWN bytes ──────
     await card.locator('.ui-record-row__title', { hasText: SETUP_FILE }).click()
@@ -318,9 +345,9 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await expect(setup.readout).toHaveAttribute('data-state', 'text', { timeout: 15_000 })
     await expect(setup.readout).toContainText(SETUP_FILE)
     await expect.poll(() => exactText(setup.pre), { timeout: 15_000 }).toBe(SETUP_SCRIPT)
-    // The document is no longer on screen: opening a file REPLACES the bytes,
+    // The document is no longer on screen: opening a file REPLACES the view,
     // so the reader can never be showing one file under another's name.
-    await expect(doc.pre).toHaveCount(0)
+    await expect(doc).toHaveCount(0)
 
     // ── THE FINDING IS MARKED IN PLACE ────────────────────────────────────
     // One mark, inside the bytes of this file, on the line the scan matched —

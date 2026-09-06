@@ -260,3 +260,77 @@ describe('createAnswerBody fenced markdown and final rows', () => {
     expect(row?.querySelector('[class^="tok-"]')).toBeNull()
   })
 })
+
+// THE ROW CLASS IS THE CALLER'S, AND THE DEFAULT IS THE SCROLLBACK'S
+// (nocx-okee0). This module is nocx's one owner of rendered markdown, and it
+// grew a second caller: a skill's SKILL.md, read as a document in the skill
+// tab's right pane. Everything it does is right for that — headings, hung
+// list markers, quotes, inline code, fences, and the safety it was built
+// with, where every byte is escaped and `[text](url)` never becomes an
+// anchor. The one thing that is NOT right for it is `.term-line`, which
+// style.css pins to the terminal's measured cell metrics (`min-height` and
+// `line-height` both `--term-cell-height`, plus a per-character
+// letter-spacing correction) so a frozen block lines up with the grid. A
+// document pane has no grid to line up with.
+//
+// So the class is a parameter with the scrollback's own value as its default:
+// nothing about an answer changes, and no second renderer exists.
+describe('createAnswerBody row class (nocx-okee0)', () => {
+  const rowsOf = (output: HTMLElement, selector: string): HTMLElement[] =>
+    Array.from(output.querySelectorAll<HTMLElement>(selector))
+
+  it('names rows .term-line when the caller says nothing, as the scrollback always has', () => {
+    const output = document.createElement('div')
+    const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
+    body.append('# Title\n\n- one\n')
+    body.finish()
+    expect(rowsOf(output, ':scope > .term-line')).toHaveLength(3)
+  })
+
+  it('names them what the caller asked, and never .term-line as well', () => {
+    const output = document.createElement('div')
+    const body = createAnswerBody(output, {
+      store: new CommandSnapshotStore(),
+      rowClass: 'ui-md-line',
+    })
+    body.append('# Title\n\n- one\n')
+    body.finish()
+
+    expect(rowsOf(output, ':scope > .ui-md-line')).toHaveLength(3)
+    // The whole point: no terminal cell metric reaches a document pane.
+    expect(rowsOf(output, '.term-line')).toHaveLength(0)
+  })
+
+  it('carries the caller’s class into a fence and a table, where rows are re-parented', () => {
+    const output = document.createElement('div')
+    const body = createAnswerBody(output, {
+      store: new CommandSnapshotStore(),
+      rowClass: 'ui-md-line',
+    })
+    body.append('| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\necho hi\n```\n')
+    body.finish()
+
+    expect(rowsOf(output, '.ui-md-table > .ui-md-line').length).toBeGreaterThan(0)
+    expect(rowsOf(output, '.cmd-output-code > .ui-md-line').length).toBeGreaterThan(0)
+    expect(rowsOf(output, '.term-line')).toHaveLength(0)
+  })
+
+  it('still trims the trailing blank row a newline-terminated text leaves', () => {
+    // The trimming reads rows back by class. A seam that changed the class on
+    // the way in and not on the way out would leave one empty row at the foot
+    // of every document — visible, and exactly the kind of miss a default
+    // parameter hides.
+    const output = document.createElement('div')
+    const body = createAnswerBody(output, {
+      store: new CommandSnapshotStore(),
+      rowClass: 'ui-md-line',
+    })
+    body.append('before\n\nafter\n')
+    body.finish()
+    expect(rowsOf(output, ':scope > .ui-md-line').map((r) => r.textContent)).toEqual([
+      'before',
+      '',
+      'after',
+    ])
+  })
+})

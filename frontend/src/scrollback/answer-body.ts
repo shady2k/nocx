@@ -97,11 +97,31 @@ export interface AnswerBodyOpts {
   /** Clipboard seam for the code-only button on each fenced region. */
   copy?: (text: string) => Promise<void>
   onContent?: () => void
+  /**
+   * What one completed row is CALLED. Defaults to the scrollback's own
+   * `term-line`, which is what every answer has always been.
+   *
+   * It is a parameter because this module gained a second caller
+   * (nocx-okee0): the skill tab renders a SKILL.md as a document through the
+   * same assembler, and everything it does is right for that except the
+   * class. `.term-line` is pinned in style.css to the terminal's measured
+   * cell metrics — `min-height` and `line-height` both `--term-cell-height`,
+   * plus a per-character letter-spacing correction — so that a frozen block
+   * occupies exactly the grid rows it did while live. A document pane has no
+   * grid to line up with, and inheriting that pitch would size a heading to
+   * a terminal cell.
+   *
+   * Every read-back inside this module goes through the same value, so a
+   * caller's rows are found again by the trimming and by the fence's copy
+   * text.
+   */
+  rowClass?: string
 }
 
 /** Start writing an answer body into `outputEl`. */
 export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): AnswerBody {
   const { store, onContent } = opts
+  const rowClass = opts.rowClass ?? 'term-line'
 
   // The streamed chunks split MID-LINE, so the body keeps one persistent
   // partial row: a chunk's final segment stays on it and the next chunk
@@ -128,7 +148,7 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
   /** Delimiters remain in the DOM for answer Copy output and selection, but
    * the fence button copies only code rows — never markers, info, or prose. */
   const codeText = (container: HTMLElement): string =>
-    Array.from(container.querySelectorAll<HTMLElement>('.term-line'))
+    Array.from(container.querySelectorAll<HTMLElement>('.' + rowClass))
       .filter((row) => row.dataset.fenceDelim === undefined)
       .map((row) => row.textContent ?? '')
       .join('\n')
@@ -258,7 +278,7 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
 
   const makeRow = (): HTMLSpanElement => {
     const span = document.createElement('span')
-    span.className = 'term-line'
+    span.className = rowClass
     ;(inFence ? codeContainer() : (tableEl ?? outputEl)).appendChild(span)
     return span
   }
@@ -323,12 +343,12 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           removeEmptyTextBlock()
           return
         }
-        if (last.classList.contains('term-line') && last.textContent?.trim() === '') {
+        if (last.classList.contains(rowClass) && last.textContent?.trim() === '') {
           last.remove()
           continue
         }
         if (last.classList.contains('cmd-output-code') || last.classList.contains('ui-md-table')) {
-          const rows = last.querySelectorAll<HTMLElement>(':scope > .term-line')
+          const rows = last.querySelectorAll<HTMLElement>(':scope > .' + rowClass)
           const row = rows[rows.length - 1]
           if (row?.textContent?.trim() === '') {
             row.remove()

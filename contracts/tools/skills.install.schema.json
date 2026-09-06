@@ -10,7 +10,7 @@
     "url": {
       "type": "string",
       "format": "uri",
-      "description": "The complete http:// or https:// address of the SKILL.md document to adopt. It must be the address that answers with the document itself, not a page that links to it; a redirect off that address's origin is refused rather than followed."
+      "description": "The http:// or https:// address the person gave you, exactly as they gave it. You are not expected to know whether it answers with a skill file, and you must not withhold the call because it looks like documentation: nocx fetches what is there and says what it found, so a page about a skill earns a refusal naming what to look for instead — which is a better answer for the person than not calling. A refusal returns that sentence and nothing from the page, so this is not a way to read one. Everything nocx keeps about an installed skill is derived from this address, which is why a redirect off its origin is refused rather than followed."
     }
   },
   "$defs": {

@@ -229,6 +229,23 @@ func (s *Store) Preview(ctx context.Context, rawURL string) (PreviewResult, erro
 	return result, nil
 }
 
+// nextStepForAPage is what every refusal a DOCUMENTATION PAGE can earn owes
+// its reader, and it is one constant because three refusals that name the
+// next step three different ways is the same defect wearing better clothes.
+//
+// A person pastes the page they were reading; the SKILL.md address is what
+// they are asking the assistant to find. So a page is the ordinary first
+// attempt at this tool, not a mistake, and the ceiling, the decoder and the
+// parser are simply the three ways it comes back. Each said what was wrong
+// and stopped there — and a model reading "too large" went to the page for
+// instructions instead, found `npx skills add …` on it and proposed running
+// that (nocx-e28cw). The redirect refusal in fetchDocument has always named
+// its remedy; these three now do too.
+//
+// It names the FILE rather than an actor because both a person and a model
+// read these, and a next step addressed to one of them is noise to the other.
+const nextStepForAPage = "; what nocx needs is the address that answers with the SKILL.md file itself — a page about the skill is not it"
+
 // fetchDocument acquires one skill document through the guarded seam. It is
 // shared with Install rather than copied there, because the second fetch has
 // to be the SAME fetch under the same bounds — a second acquisition path
@@ -263,8 +280,8 @@ func (s *Store) fetchDocument(ctx context.Context, rawURL string) (string, error
 	if err != nil {
 		if errors.Is(err, apifetch.ErrTooLarge) {
 			return "", fmt.Errorf(
-				"that document is larger than the %d KiB a skill file may be, so it was refused before it was parsed",
-				maxSkillFileBytes>>10)
+				"that document is larger than the %d KiB a skill file may be, so it was refused before it was parsed%s",
+				maxSkillFileBytes>>10, nextStepForAPage)
 		}
 		return "", fmt.Errorf("that skill could not be fetched: %w", err)
 	}
@@ -273,7 +290,7 @@ func (s *Store) fetchDocument(ctx context.Context, rawURL string) (string, error
 	// with replacement characters in them are not the instructions anybody
 	// wrote.
 	if doc.Lossy {
-		return "", errors.New("that document is not UTF-8 text, so it is not a skill file")
+		return "", errors.New("that document is not UTF-8 text, so it is not a skill file" + nextStepForAPage)
 	}
 	return doc.Text, nil
 }
@@ -290,7 +307,8 @@ func documentPreview(text, rawURL string) (PreviewResult, error) {
 	fm, offset, ok := parseFrontmatter([]byte(text))
 	if !ok {
 		return PreviewResult{}, errors.New(
-			"that document is not a SKILL.md: it must open with a YAML frontmatter block delimited by --- and close it again")
+			"that document is not a SKILL.md: it must open with a YAML frontmatter block delimited by --- and close it again" +
+				nextStepForAPage)
 	}
 
 	// The name comes from the frontmatter, never from the URL's last path

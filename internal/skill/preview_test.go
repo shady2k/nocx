@@ -398,3 +398,52 @@ func TestPreview_IsUnavailableWithoutAFetcher(t *testing.T) {
 		t.Errorf("refusal = %q", err)
 	}
 }
+
+// The three refusals a DOCUMENTATION PAGE earns, and the one sentence all
+// three owe the reader.
+//
+// A person pasted https://www.agentmail.to/docs/integrations/skills — a page
+// about a skill, not a skill. It is what a person has: you only hold the
+// SKILL.md address if you already know where the skill lives, which is the
+// thing being asked of the assistant. So this address is not an edge case,
+// it is the ordinary first attempt, and every way it can fail has to leave
+// the reader knowing what to look for instead.
+//
+// It did not. The ceiling refusal said the document was too large and
+// stopped; the model that read it went and found `npx skills add …` on the
+// page and proposed running that instead (nocx-e28cw). The refusal above
+// these in fetchDocument, for a redirect, has always named its remedy — so
+// the inconsistency was inside one function.
+//
+// Each case below is a real answer that address can give depending on which
+// page it is: an HTML page over the ceiling, a page that is not text, and a
+// page that is text and has no frontmatter.
+func TestPreview_EveryRefusalAPageEarnsNamesTheNextStep(t *testing.T) {
+	store, configDir := previewStore(t)
+	assertUnchanged := unchanged(t, configDir)
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "a page over the ceiling", body: strings.Repeat("<p>docs</p>", maxSkillFileBytes)},
+		{name: "a page that is not text", body: "<html>\xff\xfe</html>"},
+		{name: "a page with no frontmatter", body: "# Skills\n\nInstall it with `npx skills add someone/their-skills`.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := serveDocument(t, "text/html; charset=utf-8", tc.body)
+			_, err := store.Preview(context.Background(), srv.URL)
+			if err == nil {
+				t.Fatalf("want a refusal for %s", tc.name)
+			}
+			// The next step, in the words fetchDocument and documentPreview
+			// share. Asserted as one string rather than as keywords, because
+			// three refusals that name the next step three different ways is
+			// the same defect wearing better clothes.
+			if !strings.Contains(err.Error(), nextStepForAPage) {
+				t.Errorf("refusal = %q\nwant it to end with %q — a refusal that does not name the next step is where the model starts improvising one", err, nextStepForAPage)
+			}
+		})
+	}
+	assertUnchanged()
+}

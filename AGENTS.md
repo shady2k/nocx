@@ -430,6 +430,27 @@ git diff origin/main...HEAD -- <path> | grep '^-'
 > Playwright click timing out on a visible button. Hours of geometry reasoning; the
 > removed-lines diff found it in a minute.
 
+**And when a gate fails only for you, suspect how you launched it before you suspect the
+code.** A long run wants detaching, and the reflex is `nohup` — which sets SIGHUP to
+`SIG_IGN`. That disposition survives `exec`, and Go deliberately preserves signals ignored
+at program entry, so it reaches the test binary, the shell an `internal/pty` test spawns
+and everything that shell runs. `LocalPty.Close` then cannot hang its program up; the
+program keeps the slave open; the master's `Read` never returns; Go defers the real
+`close(2)` behind that in-flight read, so the kernel's own last-close hangup never fires
+either — and the package deadlocks to its ten-minute panic. **Detach with `setsid` alone.**
+It does not touch signal dispositions.
+
+`grep SigIgn /proc/<pid>/status` settles it in one line: bit 0 set means SIGHUP is ignored
+in that process, and the mask is inherited, so reading it on a leaked child names the
+ancestor that did it.
+
+> 2026-09-06 (`nocx-pibr3`). Three `make ci` runs red on `internal/pty`, 600 s each, on
+> `origin/main` and on a branch alike — while the package was green run by hand every
+> time. Two causes were written down and committed before the third was measured: five
+> leaked `tail -f` from five runs all carried `SigIgn 0x1`, survived an explicit
+> `kill -HUP` and died instantly on `kill -TERM`. Removing `nohup` and changing nothing
+> else: `ok internal/pty 1.510s`. A worker had already been dispatched to fix the pty.
+
 ## What to work on next
 
 Asked to "keep going" with no further instruction, this is the whole answer:

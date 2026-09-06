@@ -1410,7 +1410,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
 	draftTurns = append(draftTurns, content.PriorTurn{Question: rc.question})
 	if rc.draft == nil && h.skills != nil && h.configOp != nil {
-		rc.draft = assistant.NewSkillDraftRequest(assistant.ComposeDraftInput(draftTurns, nil), h.skillDraftResolver())
+		rc.draft = assistant.NewSkillDraftRequest(draftTurns, h.skillDraftResolver())
 		h.pendingRunsMu.Lock()
 		if stored, ok := h.pendingRuns[rc.runID]; ok {
 			stored.draft = rc.draft

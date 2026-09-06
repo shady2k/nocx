@@ -1594,25 +1594,36 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
 	}
 	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
-		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
-		var notCapturable *skillNotCapturableError
-		switch {
-		case errors.As(err, &notCapturable):
-			// The summarizer judged the conversation to hold nothing worth
-			// keeping, which is a verdict and not a breakage — so it reaches
-			// the person in its own words and is logged at info, where a
-			// warning would put a routine decision in the same column as an
-			// endpoint that fell over.
-			k.info("agent tool: skill draft declined", "reason", notCapturable.reason)
-			return modelResult{text: notCapturable.Error(), kind: modelNocxMessage}, nil
-		case err != nil:
-			k.warn("agent tool: skill draft could not be generated", "error", err)
-			return modelResult{
-				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
-				kind: modelNocxMessage,
-			}, nil
+		// The person's own bytes go through untouched. Not an exemption
+		// from the interception below — the same rule reaching its base
+		// case: the summarizer exists to keep a model from writing a
+		// procedure out of what it read, and a quotation of the person is
+		// not something the model wrote. verbatim proves the quotation
+		// against nocx's record of the conversation, so the claim costs
+		// the model nothing and buys it nothing.
+		if quoted, ok := k.runSeams.skillDraft.verbatim(rawArgs); ok {
+			rawArgs = quoted
+		} else {
+			generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
+			var notCapturable *skillNotCapturableError
+			switch {
+			case errors.As(err, &notCapturable):
+				// The summarizer judged the conversation to hold nothing worth
+				// keeping, which is a verdict and not a breakage — so it reaches
+				// the person in its own words and is logged at info, where a
+				// warning would put a routine decision in the same column as an
+				// endpoint that fell over.
+				k.info("agent tool: skill draft declined", "reason", notCapturable.reason)
+				return modelResult{text: notCapturable.Error(), kind: modelNocxMessage}, nil
+			case err != nil:
+				k.warn("agent tool: skill draft could not be generated", "error", err)
+				return modelResult{
+					text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
+					kind: modelNocxMessage,
+				}, nil
+			}
+			rawArgs = generated
 		}
-		rawArgs = generated
 	}
 
 	// 2. Parameter validation against the tool's schema: the file the

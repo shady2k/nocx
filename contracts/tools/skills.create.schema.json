@@ -6,7 +6,11 @@
   "properties": {
     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
     "description": { "type": "string" },
-    "body": { "type": "string", "minLength": 1 }
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The procedure the skill records. If the person wrote the procedure themselves, pass their text back exactly as they typed it and it is kept unchanged, word for word — do not tidy, reorder or summarize it. Anything else you send here is replaced: the skill is written from the conversation instead, and the person approves that text before it is stored."
+    }
   },
   "$defs": {
     "result": {

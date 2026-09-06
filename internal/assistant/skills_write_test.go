@@ -133,7 +133,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	params.KnownMaterial = &fakeKnownMaterial{}
 	params.Skills = store
 	params.SkillDraft = NewSkillDraftRequest(
-		"Person: remember how to release\nAssistant: Run make release.\n",
+		[]content.PriorTurn{{EntryID: "e1", Question: "remember how to release", Prose: content.TurnProse{Text: "Run make release."}}},
 		SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
 			return SkillDraftTarget{
 				Key:     credential.NewSecret("sk-draft-test"),

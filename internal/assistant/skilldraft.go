@@ -163,19 +163,85 @@ func (f SkillDraftResolverFunc) ResolveSkillDraft(ctx context.Context) (SkillDra
 // SkillDraftRequest carries one run's immutable transcript and memoizes the
 // generated create arguments. A resumed approval must see the same proposal,
 // not call the summarizer a second time.
+//
+// It holds the person's turns SEPARATELY from the composed transcript, and
+// that is not a convenience: verbatim below asks whether some bytes are the
+// person's, and asking the composed string would answer a different question,
+// because a body could span the line where one turn ends and the assistant's
+// prose begins. One field per question.
 type SkillDraftRequest struct {
 	input    string
+	person   []string
 	resolver SkillDraftResolver
 	once     sync.Once
 	args     string
 	err      error
 }
 
-func NewSkillDraftRequest(input string, resolver SkillDraftResolver) *SkillDraftRequest {
+// NewSkillDraftRequest takes the TURNS rather than a composed string, because
+// composing them and reading the person's half of them are two readings of one
+// transcript and a second owner of that whitelist is how the two drift apart
+// (AD-8).
+func NewSkillDraftRequest(turns []content.PriorTurn, resolver SkillDraftResolver) *SkillDraftRequest {
 	if resolver == nil {
 		return nil
 	}
-	return &SkillDraftRequest{input: input, resolver: resolver}
+	person := make([]string, 0, len(turns))
+	for _, turn := range turns {
+		if strings.TrimSpace(turn.Question) != "" {
+			person = append(person, turn.Question)
+		}
+	}
+	return &SkillDraftRequest{input: ComposeDraftInput(turns, nil), person: person, resolver: resolver}
+}
+
+// verbatim answers one question about a proposed skills.create: is this body
+// text the person typed? When it is, the summarizer has nothing to add and the
+// proposal stands as the model sent it.
+//
+// THE INTERCEPTION IS NOT LIFTED BY THIS. It exists because a model can compose
+// a body out of bytes it read from a tool result, which is the contamination
+// path; what it cannot do is quote a person who never said the thing. So the
+// model does the selecting — it knows which part of a message was the procedure
+// and which was "remember this" — and nocx does the PROVING, against its own
+// record rather than against the model's word for it. That is the same division
+// the resolver uses for an address: the model points, nocx carries.
+//
+// The comparison is byte-exact and unnormalized on purpose. Every relaxation —
+// folding whitespace, trimming, comparing case-insensitively — widens the set
+// of bodies that can claim to be a quotation, and the guarantee is worth
+// exactly as much as the comparison is strict.
+//
+// Deliberately included in "what the person typed": text the person PASTED from
+// somewhere else. It arrived through their message, they chose to send it, and
+// they see the whole body again in the approval window. Deliberately excluded:
+// the assistant's own prose, which is the model's words however true they are.
+func (r *SkillDraftRequest) verbatim(rawArgs string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	var params struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(rawArgs), &params); err != nil {
+		return "", false
+	}
+	// A blank body is not a quotation of anything; strings.Contains would
+	// say every turn holds it.
+	if strings.TrimSpace(params.Body) == "" {
+		return "", false
+	}
+	if strings.TrimSpace(params.Name) == "" || strings.TrimSpace(params.Description) == "" {
+		return "", false
+	}
+	for _, question := range r.person {
+		if strings.Contains(question, params.Body) {
+			return rawArgs, true
+		}
+	}
+	return "", false
 }
 
 func (r *SkillDraftRequest) arguments(ctx context.Context, httpClient *http.Client) (string, error) {

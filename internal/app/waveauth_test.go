@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +233,21 @@ func TestWaveAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 		t.Fatalf("admit after withdrawal error = %v, want ErrNotEnrolled", err)
 	}
 }
+func TestWaveAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
+	reg, sess, grid := openWaveAuthSession(t)
+	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+		t.Fatalf("enrol session grid: %v", err)
+	}
+	pinner := &waveAuthPinner{
+		root:   wavepin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
+		member: map[int]bool{9001: true},
+	}
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
+	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
+	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
+		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)
+	}
+}
 
 func TestWaveAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
 	_, local, grid := openWaveAuthSession(t)
@@ -255,6 +271,72 @@ func TestWaveAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
 	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("remote session admission error = %v, want ErrNotEnrolled", err)
+	}
+}
+
+func TestWaveDispatcherRefusesSpawnOutsideCoordinatorEnvironment(t *testing.T) {
+	registry, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	const (
+		availableEnvironment = "env-available"
+		askedEnvironment     = "env-asked"
+	)
+	dispatcher, err := assistant.NewWaveDispatcher(
+		registry,
+		emptyWaveRecord(),
+		availableEnvironment,
+	)
+	if err != nil {
+		t.Fatalf("new wave dispatcher: %v", err)
+	}
+	_, err = dispatcher.Dispatch(assistant.WaveInvocation{
+		Context:    context.Background(),
+		Method:     "wave.spawn",
+		RunContext: agenttools.RunContext{Session: "sess-coordinator"},
+		Grant:      waveCallerGrant(session.ID("sess-coordinator"), askedEnvironment),
+		RawParams:  []byte(`{"command":"claude","task":"read it"}`),
+	})
+	if err == nil {
+		t.Fatal("a spawn outside the coordinator environment was accepted")
+	}
+	if !strings.Contains(err.Error(), availableEnvironment) ||
+		!strings.Contains(err.Error(), askedEnvironment) {
+		t.Fatalf("err = %v, want it to name asked %q and available %q",
+			err, askedEnvironment, availableEnvironment)
+	}
+}
+
+func TestRefusedWaveInvocationOffersNoWaveTools(t *testing.T) {
+	reg, sess, grid := openWaveAuthSession(t)
+	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+		t.Fatalf("enrol session grid: %v", err)
+	}
+	pinner := &waveAuthPinner{
+		root:   wavepin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
+		member: map[int]bool{9001: true},
+	}
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
+	inv, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
+	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
+		t.Fatalf("unadmitted peer error = %v, want ErrNotEnrolled", err)
+	}
+	if inv.Context != nil || inv.Method != "" || inv.RunContext.RunID != "" ||
+		inv.RunContext.Workspace != "" || inv.RunContext.Session != "" ||
+		inv.RunContext.Participant != "" || len(inv.RawParams) != 0 ||
+		len(inv.Grant.Effects) != 0 || len(inv.Grant.Scopes) != 0 {
+		t.Fatalf("refused admission returned non-zero invocation: %+v", inv)
+	}
+
+	registry, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	for _, tool := range registry.ForGrant(inv.Grant) {
+		if strings.HasPrefix(tool.Name, "wave.") {
+			t.Fatalf("unadmitted grant offered %q", tool.Name)
+		}
 	}
 }
 

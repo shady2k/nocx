@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { basenameOf, extensionOf, languageForPath } from './language-registry'
+import { basenameOf, extensionOf, languageForPath } from './document-language'
 
 describe('extensionOf', () => {
   it('returns the lowercased final extension', () => {

@@ -1,5 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// Language registry for the read-only file viewer (fm-w7).
+// Language registry — WHICH CM6 GRAMMAR A SURFACE GETS, for the whole product.
+//
+// It lived in `file-viewer/` because the file viewer was its only caller. It
+// is in the kit now (nocx-qfdy7) because `DocumentSurface` needs it and a kit
+// component may not import from a surface directory — that is the dependency
+// running the wrong way, and it would have made every future caller of the
+// kit depend on one tab. Nothing about the mapping changed in the move; the
+// callers' imports did, mechanically.
+//
+// Originally: the read-only file viewer (fm-w7).
 //
 // A SMALL set of formats that actually turn up in terminal work — JSON, YAML,
 // Markdown, shell, Go, TypeScript/JavaScript, Python — with plain text as the

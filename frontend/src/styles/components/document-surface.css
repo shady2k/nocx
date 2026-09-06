@@ -1,0 +1,222 @@
+/* DocumentSurface (nocx-qfdy7) — one canvas for a text document: its source
+   in a CodeMirror host, its rendered form beside or instead of it.
+
+   THE WHOLE FILE IS LAYOUT AND TYPE. The CM6 host paints itself through
+   `cm-host.ts`'s theme (colours only, resolved through --color-* so a theme
+   switch reaches it, ADR-0013); the preview's own vocabulary is below and
+   uses the same tokens. Nothing here is a literal colour.
+
+   The preview is NOT a card. It has no border and no background of its own,
+   because a read-only document IS the surface it fills — the same sentence
+   `cm-host.ts` writes about its read-only theme, and the reason the bordered
+   CodeBlock that used to sit here read as floating in an empty column. */
+
+.ui-document-surface {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Three heights, and never a number from a caller. `fill` takes what the
+   parent gave; `field` is the kit's editor-field height for a control inside
+   somebody's form; `readout` is the kit's cap for read-only output nobody
+   types into. */
+.ui-document-surface[data-height='fill'] {
+  flex: 1 1 auto;
+}
+
+.ui-document-surface[data-height='field'] {
+  flex: 0 0 auto;
+  height: 220px;
+}
+
+.ui-document-surface[data-height='readout'] {
+  flex: 0 0 auto;
+  max-height: 320px;
+}
+
+/* Side by side only in split; otherwise the one visible pane is the whole
+   surface. `[hidden]` is base.css's, and it is what keeps the source view
+   MOUNTED while off screen — unmounting it would throw away the caret, the
+   selection and the undo history. */
+.ui-document-surface[data-view='split'] {
+  gap: var(--space-3);
+}
+
+.ui-document-surface__source,
+.ui-document-surface__preview {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ui-document-surface__preview:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* The CM host fills its column rather than sizing to its content. */
+.ui-document-surface__source > .cm-editor {
+  height: 100%;
+}
+
+/* ── The rendered document (ui/markdown-preview.ts) ───────────────────────
+   Sized for a DOCUMENT, deliberately unlike the scrollback's markdown rules
+   in styles/components/answer-markdown.css: those keep a heading barely
+   larger than body text, and say why — an answer lives in a scrollback row
+   eight lines from a command, and a 2rem <h1> there reads as a different
+   application. This is a pane whose entire content is one document, and the
+   argument does not carry across. */
+
+.ui-md-body {
+  color: var(--color-text);
+  line-height: 1.55;
+}
+
+.ui-md-body > *:first-child {
+  margin-top: 0;
+}
+
+.ui-md-body h1,
+.ui-md-body h2,
+.ui-md-body h3,
+.ui-md-body h4,
+.ui-md-body h5,
+.ui-md-body h6 {
+  margin: var(--space-4) 0 var(--space-2);
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ui-md-body h1 {
+  font-size: 1.5em;
+}
+
+.ui-md-body h2 {
+  font-size: 1.25em;
+}
+
+.ui-md-body h3 {
+  font-size: 1.1em;
+}
+
+/* h4-h6 are body size in bold. A document nesting six deep does not need
+   four more sizes; it needs the small ones to stay legible. */
+
+.ui-md-body p {
+  margin: 0 0 var(--space-3);
+}
+
+.ui-md-body ul,
+.ui-md-body ol {
+  margin: 0 0 var(--space-3);
+  padding-left: 1.6em;
+}
+
+.ui-md-body li {
+  margin: 0 0 var(--space-1);
+}
+
+.ui-md-body li > ul,
+.ui-md-body li > ol {
+  margin-top: var(--space-1);
+  margin-bottom: 0;
+}
+
+.ui-md-body blockquote {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.ui-md-body hr {
+  margin: var(--space-4) 0;
+  border: none;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Inline code inside a sentence must read as code without becoming a box —
+   the same pair the kit's CodeBlock uses. */
+.ui-md-body code {
+  padding: 0 4px;
+  background: var(--color-canvas);
+  border-radius: var(--control-radius-sm);
+  font-family: var(--font-family-mono);
+  font-size: 0.92em;
+}
+
+.ui-md-body pre {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
+  border-radius: var(--control-radius-sm);
+  overflow-x: auto;
+}
+
+/* A fenced block is a DOCUMENT: wrapping it would put what the reader sees
+   out of step with what the file says, and its indentation would stop
+   marking depth. Reached by scrolling sideways in the box above — the same
+   answer this product gives everywhere else for a long line of code. */
+.ui-md-body pre > code {
+  padding: 0;
+  background: none;
+  white-space: pre;
+}
+
+.ui-md-body table {
+  margin: 0 0 var(--space-3);
+  border-collapse: collapse;
+}
+
+.ui-md-body th,
+.ui-md-body td {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.ui-md-body th {
+  font-weight: 600;
+}
+
+/* A link's target and an image's source, shown as TEXT because neither ever
+   becomes an element (markdown-preview.ts). Dimmed: it is there so a person
+   auditing a skill can see where it points, not to be read as prose. */
+.ui-md-inert {
+  color: var(--color-text-dim);
+}
+
+/* ── The file's frontmatter ───────────────────────────────────────────────
+   The envelope, not the letter. Set apart so `name: deploy` cannot read as
+   the document's opening sentence — which is exactly what it did when the
+   renderer had no opinion about it. Drawn, never hidden: this is a reader. */
+.ui-md-front {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.ui-md-front__row {
+  display: flex;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.ui-md-front__key {
+  flex: 0 0 auto;
+  color: var(--color-text-dim);
+}
+
+.ui-md-front__value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

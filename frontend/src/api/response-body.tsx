@@ -20,7 +20,7 @@
 
 import { createEffect, createMemo, on, onCleanup } from 'solid-js'
 import { ReadOnlyHost } from '../cm-host'
-import { jsonEditing, viewerHighlighting } from '../file-viewer/language-registry'
+import { jsonEditing, viewerHighlighting } from '../ui/document-language'
 import { lineNumbers } from '@codemirror/view'
 
 export interface ResponseBodyProps {

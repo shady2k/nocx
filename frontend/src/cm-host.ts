@@ -31,6 +31,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import { openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { EditorState, type Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 
@@ -123,9 +124,13 @@ class CMHost {
 
   protected constructor(
     private readonly editable: boolean,
-    /** Whether a long line wraps. See EditableContent — the read-only modes
-     *  never wrap, and the editable one is told by its caller. */
+    /** Whether a long line wraps. See EditableContent — a diff and a file
+     *  viewer say no, a prose field says yes. */
     private readonly wraps: boolean,
+    /** Whether CM's find panel and its keymap are installed. Off by default,
+     *  so every surface that had no search before this existed still has
+     *  none and none of them grew a keybinding they did not ask for. */
+    private readonly searchable: boolean = false,
   ) {}
 
   /**
@@ -161,6 +166,10 @@ class CMHost {
           themeFor(this.editable),
           ...(this.editable ? editingExtensions : []),
           ...(this.wraps ? [EditorView.lineWrapping] : []),
+          // AFTER the editability facets and before the caller's, so a
+          // search panel can never be the thing that re-enables input, and a
+          // caller extension can still decorate what it finds.
+          ...(this.searchable ? [search({ top: true }), keymap.of(searchKeymap)] : []),
           ...(onDocChange
             ? [
                 EditorView.updateListener.of((u) => {
@@ -194,6 +203,35 @@ class CMHost {
   /** Focus the content. Inert before mount or after dispose. */
   focus(): void {
     this.view?.focus()
+  }
+
+  /**
+   * Open CM's own find panel (nocx-qfdy7).
+   *
+   * It is a METHOD rather than only a keybinding because a surface may want
+   * a control for it — a person who has never learnt the chord still has to
+   * be able to search a document they are being asked to trust. The panel
+   * and its keymap are installed by `searchExtensions` below, which a host
+   * takes at construction: a surface that did not ask for search has no
+   * panel to open and this is inert, rather than half-installing one.
+   */
+  openSearch(): void {
+    const view = this.view
+    if (!view) return
+    openSearchPanel(view)
+  }
+
+  /**
+   * Tell CM to re-measure itself.
+   *
+   * CM caches geometry, and an editor that was mounted while its container
+   * was `display: none` measured a box of zero. A surface that HIDES rather
+   * than unmounts — which is the right thing to do, since unmounting throws
+   * away the caret, the selection and the undo history — must say so when it
+   * comes back, or the first scroll and every click land on the wrong line.
+   */
+  requestMeasure(): void {
+    this.view?.requestMeasure()
   }
 
   /**
@@ -235,8 +273,13 @@ class CMHost {
 /** The mode for a surface that only paints: no keystroke can reach the
  *  document, and no caller extension can re-enable editing. */
 export class ReadOnlyHost extends CMHost {
-  constructor() {
-    super(false, false)
+  /** `content` defaults to `code`, which is what the file viewer and the git
+   *  diff are and what this mode has always been: a diff whose rows stop
+   *  aligning row-for-row has stopped being a diff. A read-only surface
+   *  showing PROSE says so and gets wrapping, which is the same distinction
+   *  EditableHost already draws for the surfaces a person types into. */
+  constructor(content: EditableContent = 'code', searchable = false) {
+    super(false, content === 'prose', searchable)
   }
 }
 
@@ -248,7 +291,7 @@ export class ReadOnlyHost extends CMHost {
  *  here first are; a surface holding a document says `code` and gets the
  *  sideways scroll the read-only modes already have. */
 export class EditableHost extends CMHost {
-  constructor(content: EditableContent = 'prose') {
-    super(true, content === 'prose')
+  constructor(content: EditableContent = 'prose', searchable = false) {
+    super(true, content === 'prose', searchable)
   }
 }

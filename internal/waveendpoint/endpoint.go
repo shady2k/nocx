@@ -19,6 +19,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/wave"
 )
 
 const (
@@ -460,6 +461,14 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		return rpcDomainError, "wave request refused", "method is not reachable for the bound grant"
 	case errors.Is(err, assistant.ErrInvalidResult):
 		return rpcDomainError, "wave request refused", "dispatcher returned an invalid result"
+	case errors.Is(err, wave.ErrNotDelegated):
+		// A row this caller's capability never held. It belongs with the
+		// grant refusal above and not in the default: the two are one class —
+		// the request was understood and the authority for it is absent — and
+		// answering it as an internal error would tell a caller the backend
+		// had fallen over, which is the one reading that invites a retry of a
+		// call that must never succeed.
+		return rpcDomainError, "wave request refused", "the caller's session does not hold that participant"
 	case errors.Is(err, ErrSessionCallerActive):
 		return rpcPeerRefused, "wave caller refused", ErrSessionCallerActive.Error()
 	case errors.Is(err, ErrNotEnrolled):

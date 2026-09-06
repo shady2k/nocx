@@ -233,22 +233,26 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 // shell pid because pty.StartWithSize starts the shell with setsid. The
 // foreground command shares that group when job control is disabled.
 //
-// Measured 2026-09-06, because the obvious claim for this is wrong and the
-// next reader will make it: signalling the shell pid alone did NOT leak the
-// foreground program here. Bash keeps a job record even under `set +m` and
-// hangs its children up on the way out, so `tail -f` died either way — with
-// the master's last close held open by a dup, which is the only arrangement
-// where the kernel's own hangup cannot mask the difference. So this is not a
-// demonstrated fix for an observed leak, and nocx-pibr3's 600 s hang is NOT
-// closed by it: that hang has never reproduced outside a loaded `go test
-// ./...`, and reverting this line does not bring it back.
+// Why the group and not the pid, measured 2026-09-06 (nocx-pibr3). On an idle
+// machine the difference is invisible — signalling the shell pid alone kills
+// `tail -f` under `set +m` too, because after Close the kernel hangs up the
+// foreground group on the master's LAST close, and bash hangs up its own jobs
+// besides. Both of those rescues are conditional, and under load neither
+// arrives:
 //
-// It stays because the target was wrong in principle. The line below it says
-// the SIGHUP exists so the shell "hangs up its own jobs" — which makes the
-// program's death a favour from bash, granted by bookkeeping bash is free to
-// change and that dash, a shell killed some other way, or a program that
-// escapes the job table would not do. The group is what the kernel hangs up
-// on a real terminal loss, so the group is what Close should name.
+// The reader of a pty master sits in a blocking read that no Close can
+// interrupt, because the fd is not registered with the runtime poller. Go
+// therefore DEFERS the real close(2) until that read returns — so the master
+// never reaches its last close, the kernel's hangup never fires, and the read
+// ends only when the peer does. The peer is the program this line has to
+// kill. That is a deadlock with itself, and it is what the whole-tree gate
+// reported as a 600 s timeout while the package was green run alone.
+//
+// So the target was wrong twice over: it made the program's death a favour
+// from bash, granted by bookkeeping that dash, a shell killed some other way,
+// or a program outside the job table would not grant — and it left the one
+// path that does not depend on a favour, the group the kernel itself hangs
+// up on a real terminal loss, unused.
 func (lp *LocalPty) hangupProcessGroup() error {
 	if lp.cmd.Process == nil {
 		return nil

@@ -1548,7 +1548,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 		return true, nil, nil
 	}
-	request := WaveInvocation{
+	request := ToolInvocation{
 		Context:    ctx,
 		Method:     name,
 		RunContext: k.runCtx,

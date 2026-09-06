@@ -111,8 +111,8 @@ import (
 // wrote there, and sends it as agent_report inside the enrolment's interval.
 // Until this, agent_report had a complete receiving half and no sender
 // anywhere, so a worker could be started and could never say what it produced
-// and every wave terminalized as abandoned. Two shells carry it, because a
-// wave whose completions depended on the person's login shell is not a
+// and every worker terminalized as abandoned. Two shells carry it, because a
+// worker whose completions depended on the person's login shell is not a
 // mechanism.
 //
 // 2026-09-03, seventh move (nocx-aqz7o): 73,090 -> 73,326, +236 across the

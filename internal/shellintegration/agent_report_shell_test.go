@@ -2,7 +2,7 @@ package shellintegration
 
 // THE DECLARATION, from the agent that made it (nocx-dkawo.12).
 //
-// The receiving half of agent_report shipped with the wave record and nothing
+// The receiving half of agent_report shipped with the worker record and nothing
 // in the product could send one: nocx.bash sent agent_enrol and
 // agent_withdraw and nothing else, so only one of the two facts ever arrived
 // and every worker terminalized as abandoned. These tests are the sender, and
@@ -32,7 +32,7 @@ func TestBashAnAgentCanDeclareWhatItsWorkProduced(t *testing.T) {
 }
 
 // The zsh twin, for the enrolment pair's reason: a worker that could declare
-// in bash and not in zsh would be a wave whose completions depended on which
+// in bash and not in zsh would be a worker whose completions depended on which
 // login shell the person happens to have.
 func TestZshAnAgentCanDeclareWhatItsWorkProduced(t *testing.T) {
 	anAgentCanDeclareWhatItsWorkProduced(t, startNestedZshParent)
@@ -159,7 +159,7 @@ func TestBashAnAgentCanDeclareThatItFailed(t *testing.T) {
 func TestBashADeclarationThatWasNotRecordedIsSaidInThePane(t *testing.T) {
 	k := newNestedKernel(t)
 	k.refuseReport = true
-	k.reportReason = "this pane is not part of a wave"
+	k.reportReason = "this pane is not part of a worker"
 	s := startNestedBashParent(t, k, "claude", declaringAgent("ok", "did the thing"))
 	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
 		t.Fatalf("type claude: %v", err)
@@ -169,7 +169,7 @@ func TestBashADeclarationThatWasNotRecordedIsSaidInThePane(t *testing.T) {
 	waitUntil(t, "the pane to say the declaration was not recorded", func() bool {
 		return strings.Contains(s.output(), "was not recorded")
 	})
-	if !strings.Contains(s.output(), "not part of a wave") {
+	if !strings.Contains(s.output(), "not part of a worker") {
 		t.Fatalf("the pane does not say WHY: output=%q", s.output())
 	}
 }

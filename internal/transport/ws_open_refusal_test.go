@@ -126,7 +126,7 @@ func TestARefusedOpenLeavesNoSession(t *testing.T) {
 // The second caller (nocx-dkawo.6): the backend opens a session with no
 // renderer connected at all.
 //
-// This is the property the wave record needs and the thing the old handler
+// This is the property the worker record needs and the thing the old handler
 // could not do, because every step of it was written against a request id and
 // a connection. It is asserted with no WebSocket open — not merely with the
 // connection unused — since a test that dialed one first would pass even if
@@ -215,7 +215,7 @@ func TestTheBackendCallerMeetsTheSameRefusals(t *testing.T) {
 }
 
 // The opener is ready as soon as the server is constructed, which is what a
-// composition root needs: it wires the wave record before anything serves.
+// composition root needs: it wires the worker record before anything serves.
 func TestTheBackendCallerIsReadyBeforeTheServerServes(t *testing.T) {
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	opened, err := ws.OpenSession(context.Background(), OpenSpec{Cols: 80, Rows: 24})

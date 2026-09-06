@@ -590,10 +590,10 @@ type agentHandlers struct {
 	// today, and why the honest refusal is the product's own outcome rather
 	// than a stub.
 	expansions assistant.ExpansionSource
-	// waves is the wave record a coordinator run may start workers in and ask
+	// workerStore is the worker record a coordinator run may start workers in and ask
 	// about (nocx-dkawo.8). Nil until the composition root wires one, which
 	// is what an unopened content store leaves.
-	waves assistant.WaveRecord
+	workerStore assistant.WorkerRecord
 	// knownMaterial is the egress gate's vault comparison (design §7.1,
 	// assistant.KnownMaterial) — the seam that answers "does this tool
 	// result contain a value the vault holds", in the backend, nothing
@@ -1400,22 +1400,22 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
 		Expansions:    h.expansions,
-		Waves:         h.waves,
+		Workers:       h.workerStore,
 		// The one environment a spawn can reach in this slice: the machine
 		// nocx itself runs on. Derived through content's own id rule so the
 		// run fence and the tool's resolver name the same string without
 		// either restating the other.
-		WaveEnvironment:  content.EnvironmentIDFor(content.EnvLocal, ""),
-		NoteOperation:    h.noteOp,
-		SnippetOperation: h.snippetOp,
-		Skills:           h.skills,
-		SkillDraft:       rc.draft,
-		Fetcher:          h.fetcher,
-		KnownMaterial:    h.knownMaterial,
-		Approvals:        h.approvals,
-		RunID:            strconv.FormatInt(rc.runID, 10),
-		SessionID:        string(rc.sessionID),
-		Attempt:          rc.attempt,
+		WorkerEnvironment: content.EnvironmentIDFor(content.EnvLocal, ""),
+		NoteOperation:     h.noteOp,
+		SnippetOperation:  h.snippetOp,
+		Skills:            h.skills,
+		SkillDraft:        rc.draft,
+		Fetcher:           h.fetcher,
+		KnownMaterial:     h.knownMaterial,
+		Approvals:         h.approvals,
+		RunID:             strconv.FormatInt(rc.runID, 10),
+		SessionID:         string(rc.sessionID),
+		Attempt:           rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were
 		// set from one SubmitAgentAsk result — so the relation is written
@@ -2601,8 +2601,8 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, knownMaterial: s.agentKnownMaterial,
-			waves:     s.waves,
-			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
+			workerStore: s.workerStore,
+			approvals:   s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
 			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,

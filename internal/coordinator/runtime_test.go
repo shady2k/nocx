@@ -24,7 +24,7 @@ func TestBindSocketRefusesSymlinkPath(t *testing.T) {
 	if err := coordinator.PrepareRuntimeDir(dir, coordinator.SystemPathOwner{}, coordinator.SelfUID()); err != nil {
 		t.Fatalf("PrepareRuntimeDir: %v", err)
 	}
-	path := filepath.Join(dir, "wave.sock")
+	path := filepath.Join(dir, "tool.sock")
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
@@ -33,7 +33,7 @@ func TestBindSocketRefusesSymlinkPath(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	if _, err := coordinator.BindSocket(dir, "wave.sock"); !errors.Is(err, coordinator.ErrSymlinkPath) {
+	if _, err := coordinator.BindSocket(dir, "tool.sock"); !errors.Is(err, coordinator.ErrSymlinkPath) {
 		t.Fatalf("BindSocket error = %v, want ErrSymlinkPath", err)
 	}
 }
@@ -43,19 +43,19 @@ func TestBindSocketRefusesNonSocketOccupant(t *testing.T) {
 	if err := coordinator.PrepareRuntimeDir(dir, coordinator.SystemPathOwner{}, coordinator.SelfUID()); err != nil {
 		t.Fatalf("PrepareRuntimeDir: %v", err)
 	}
-	path := filepath.Join(dir, "wave.sock")
+	path := filepath.Join(dir, "tool.sock")
 	if err := os.WriteFile(path, []byte("occupied"), 0o600); err != nil {
 		t.Fatalf("write occupant: %v", err)
 	}
 
-	if _, err := coordinator.BindSocket(dir, "wave.sock"); !errors.Is(err, coordinator.ErrOccupiedPath) {
+	if _, err := coordinator.BindSocket(dir, "tool.sock"); !errors.Is(err, coordinator.ErrOccupiedPath) {
 		t.Fatalf("BindSocket error = %v, want ErrOccupiedPath", err)
 	}
 }
 
 func TestBindSocketRefusesOverlongPath(t *testing.T) {
 	dir := filepath.Join(string(os.PathSeparator), strings.Repeat("x", 110))
-	if _, err := coordinator.BindSocket(dir, "wave.sock"); !errors.Is(err, coordinator.ErrPathTooLong) {
+	if _, err := coordinator.BindSocket(dir, "tool.sock"); !errors.Is(err, coordinator.ErrPathTooLong) {
 		t.Fatalf("BindSocket error = %v, want ErrPathTooLong", err)
 	}
 }

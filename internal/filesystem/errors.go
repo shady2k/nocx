@@ -161,7 +161,7 @@ type ErrHandleReleased struct{}
 func (e *ErrHandleReleased) Error() string { return "filesystem: handle released" }
 
 // ErrWatchUnavailable — Watch is declared by the Provider contract (spec
-// §5.1) but the watching wave — fsnotify locally, polling over SFTP — is a
+// §5.1) but the watching worker — fsnotify locally, polling over SFTP — is a
 // later step of the design's sequence (§6 step 5). Until then the local
 // provider refuses with this error rather than returning a watch that would
 // never fire, which would be a silent lie the product could not surface.

@@ -33,7 +33,7 @@
             "transfer.finished",
             "program.notify",
             "bell",
-            "wave.undispatched",
+            "workers.undispatched",
             "pane.workFinished"
           ]
         },

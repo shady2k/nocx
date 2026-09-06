@@ -18,9 +18,9 @@ import (
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/version"
-	"github.com/shady2k/nocx/internal/waveendpoint"
 )
 
 type stubPTYFactory struct{ stub pty.Pty }
@@ -134,65 +134,65 @@ type fakeWS struct{ addr, token string }
 func (f fakeWS) Addr() string  { return f.addr }
 func (f fakeWS) Token() string { return f.token }
 
-type waveTestAuthorizer struct {
-	invocation assistant.WaveInvocation
+type workerTestAuthorizer struct {
+	invocation assistant.ToolInvocation
 }
 
-func (a waveTestAuthorizer) Admit(waveendpoint.Peer) (assistant.WaveInvocation, func(), error) {
+func (a workerTestAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
 	return a.invocation, func() {}, nil
 }
 
-type waveTestDispatcher struct {
+type workerTestDispatcher struct {
 	result string
 }
 
-func (d waveTestDispatcher) Dispatch(assistant.WaveInvocation) (string, error) {
+func (d workerTestDispatcher) Dispatch(assistant.ToolInvocation) (string, error) {
 	return d.result, nil
 }
 
-type waveTestPeers struct{}
+type workerTestPeers struct{}
 
-func (waveTestPeers) PeerUID(*net.UnixConn) (uint32, error) {
+func (workerTestPeers) PeerUID(*net.UnixConn) (uint32, error) {
 	return coordinator.SelfUID(), nil
 }
 
-func TestWaveEndpointWiringPublishesAndServesHoldings(t *testing.T) {
+func TestGroupEndpointWiringPublishesAndServesHoldings(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
 	appRoot := &app.App{
-		WaveAuthorizer: waveTestAuthorizer{
-			invocation: assistant.WaveInvocation{},
+		ToolAuthorizer: workerTestAuthorizer{
+			invocation: assistant.ToolInvocation{},
 		},
-		WaveDispatcher: waveTestDispatcher{result: `{"held":[{"id":"p-1"}]}`},
+		ToolDispatcher: workerTestDispatcher{result: `{"held":[{"id":"p-1"}]}`},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	endpoint, err := startWaveEndpoint(
-		appRoot, dir, waveTestPeers{}, coordinator.SystemPathOwner{},
+	endpoint, err := startToolEndpoint(
+		appRoot, dir, workerTestPeers{}, coordinator.SystemPathOwner{},
 		coordinator.SelfUID(), logger,
 	)
 	if err != nil {
-		t.Fatalf("start wave endpoint: %v", err)
+		t.Fatalf("start worker endpoint: %v", err)
 	}
 	if endpoint == nil {
-		t.Fatal("startWaveEndpoint returned nil for a composed authorizer and dispatcher")
+		t.Fatal("startToolEndpoint returned nil for a composed authorizer and dispatcher")
 	}
 
-	socketPath := filepath.Join(dir, "wave.sock")
+	socketPath := filepath.Join(dir, "tool.sock")
 	info, err := os.Stat(socketPath)
 	if err != nil {
-		t.Fatalf("stat wave socket: %v", err)
+		t.Fatalf("stat worker socket: %v", err)
 	}
 	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("wave socket mode = %o, want 600", info.Mode().Perm())
+		t.Fatalf("worker socket mode = %o, want 600", info.Mode().Perm())
 	}
 
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		t.Fatalf("dial wave socket: %v", err)
+		t.Fatalf("dial worker socket: %v", err)
 	}
-	request := `{"jsonrpc":"2.0","id":"holdings-1","method":"wave.holdings","params":{}}` + "\n"
+	request := `{"jsonrpc":"2.0","id":"holdings-1","method":"workers.holdings","params":{}}` + "\n"
 	if _, err := io.WriteString(conn, request); err != nil {
 		_ = conn.Close()
-		t.Fatalf("write wave request: %v", err)
+		t.Fatalf("write worker request: %v", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	var response struct {
@@ -202,42 +202,42 @@ func TestWaveEndpointWiringPublishesAndServesHoldings(t *testing.T) {
 	}
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
 		_ = conn.Close()
-		t.Fatalf("decode wave response: %v", err)
+		t.Fatalf("decode worker response: %v", err)
 	}
 	_ = conn.Close()
 	if len(response.Error) != 0 && string(response.Error) != "null" {
-		t.Fatalf("wave holdings error: %s", response.Error)
+		t.Fatalf("worker holdings error: %s", response.Error)
 	}
 	if string(response.ID) != `"holdings-1"` || string(response.Result) != `{"held":[{"id":"p-1"}]}` {
-		t.Fatalf("wave holdings response = id %s result %s", response.ID, response.Result)
+		t.Fatalf("worker holdings response = id %s result %s", response.ID, response.Result)
 	}
 
 	if err := endpoint.Close(); err != nil {
-		t.Fatalf("close wave endpoint: %v", err)
+		t.Fatalf("close worker endpoint: %v", err)
 	}
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("wave socket after close: err = %v, want not exists", err)
+		t.Fatalf("worker socket after close: err = %v, want not exists", err)
 	}
 }
 
-func TestWaveEndpointWiringRefusesToPublishWithoutAuthorizer(t *testing.T) {
+func TestGroupEndpointWiringRefusesToPublishWithoutAuthorizer(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
 	appRoot := &app.App{
-		WaveDispatcher: waveTestDispatcher{result: `{"held":[]}`},
+		ToolDispatcher: workerTestDispatcher{result: `{"held":[]}`},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	endpoint, err := startWaveEndpoint(
-		appRoot, dir, waveTestPeers{}, coordinator.SystemPathOwner{},
+	endpoint, err := startToolEndpoint(
+		appRoot, dir, workerTestPeers{}, coordinator.SystemPathOwner{},
 		coordinator.SelfUID(), logger,
 	)
 	if err != nil {
-		t.Fatalf("start wave endpoint without authorizer: %v", err)
+		t.Fatalf("start worker endpoint without authorizer: %v", err)
 	}
 	if endpoint != nil {
 		_ = endpoint.Close()
-		t.Fatal("startWaveEndpoint published an endpoint without an authorizer")
+		t.Fatal("startToolEndpoint published an endpoint without an authorizer")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "wave.sock")); !os.IsNotExist(err) {
-		t.Fatalf("wave socket without authorizer: err = %v, want not exists", err)
+	if _, err := os.Stat(filepath.Join(dir, "tool.sock")); !os.IsNotExist(err) {
+		t.Fatalf("worker socket without authorizer: err = %v, want not exists", err)
 	}
 }

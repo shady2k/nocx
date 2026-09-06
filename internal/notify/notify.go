@@ -40,13 +40,13 @@ import (
 type Kind string
 
 const (
-	KindBlockFinished    Kind = "block.finished"    // block ledger (attested)
-	KindSessionEnded     Kind = "session.ended"     // session registry (attested)
-	KindTransferFinished Kind = "transfer.finished" // transfer registry (attested)
-	KindProgramNotify    Kind = "program.notify"    // OSC 9 / OSC 777 (programRequest)
-	KindBell             Kind = "bell"              // BEL (programRequest)
-	KindPaneWorkFinished Kind = "pane.workFinished" // title-transition inference (heuristic)
-	KindWaveUndispatched Kind = "wave.undispatched" // the wave record's backstop (attested)
+	KindBlockFinished       Kind = "block.finished"       // block ledger (attested)
+	KindSessionEnded        Kind = "session.ended"        // session registry (attested)
+	KindTransferFinished    Kind = "transfer.finished"    // transfer registry (attested)
+	KindProgramNotify       Kind = "program.notify"       // OSC 9 / OSC 777 (programRequest)
+	KindBell                Kind = "bell"                 // BEL (programRequest)
+	KindPaneWorkFinished    Kind = "pane.workFinished"    // title-transition inference (heuristic)
+	KindWorkersUndispatched Kind = "workers.undispatched" // the worker record's backstop (attested)
 )
 
 // Trust is the trust class of an event, stamped by its source adapter —

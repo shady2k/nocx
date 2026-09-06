@@ -130,7 +130,7 @@ func TestRoundTripAllKinds(t *testing.T) {
 		env(lifecycle.KindAgentWithdrawn, lifecycle.Event{Kind: lifecycle.KindAgentWithdrawn, AgentWithdrawn: &lifecycle.AgentWithdrawn{
 			RequestID: "r-agent-1-0",
 		}}, 0),
-		// The declaration a wave participant sends, both verdicts. A failure
+		// The declaration a worker participant sends, both verdicts. A failure
 		// carries no summary here on purpose: the two halves are independent
 		// fields and a decoder that only ever saw them together would not
 		// prove either.
@@ -144,7 +144,7 @@ func TestRoundTripAllKinds(t *testing.T) {
 			RequestID: "r-agent-1-1", Recorded: true,
 		}}, 0),
 		env(lifecycle.KindAgentReported, lifecycle.Event{Kind: lifecycle.KindAgentReported, AgentReported: &lifecycle.AgentReported{
-			RequestID: "r-agent-1-1", Reason: "this pane is not part of a wave",
+			RequestID: "r-agent-1-1", Reason: "this pane is not part of a worker",
 		}}, 0),
 	}
 

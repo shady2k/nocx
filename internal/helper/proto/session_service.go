@@ -221,7 +221,7 @@ type SpawnParams struct {
 	// than forking a second shell.
 	//
 	// That is what lets the claim precede the first irreversible effect, which
-	// is the wave record's own rule and was bought by the same failure: a
+	// is the worker record's own rule and was bought by the same failure: a
 	// coordinator that dies between the helper's spawn and the durable binding
 	// leaves a live PTY no pane claims, and — with the daemon lifecycle
 	// unimplemented — the helper holds it forever.

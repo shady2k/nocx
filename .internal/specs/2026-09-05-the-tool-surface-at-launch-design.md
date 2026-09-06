@@ -1,3 +1,5 @@
+> Vocabulary note — the “wave” vocabulary was retired on 2026-09-06; live names below use workers/tools.
+
 # DRAFT — NOT APPROVED
 
 # The tool surface at launch: Claude Code without config contamination
@@ -14,18 +16,18 @@ A shell function that brackets `claude` creates a launch-owned MCP configuration
 private temporary directory, points Claude Code at one local stdio bridge, and removes
 the directory after the declaration and withdrawal; the bridge translates Claude's
 MCP tool calls into the already-decided JSON-RPC 2.0 calls on
-`coordinator.RuntimeDir(paths)/wave.sock`.
+`coordinator.RuntimeDir(paths)/tool.sock`.
 
 The user-visible result is that a coordinator typed in a nocx pane can see and invoke
-`wave.spawn`, `wave.say`, `wave.wait`, `wave.holdings`, and `wave.close` without any
+`workers.spawn`, `workers.say`, `workers.wait`, `workers.holdings`, and `workers.close` without any
 `.claude`, `.mcp.json`, or other user-owned configuration being edited. A coordinator
 started outside a nocx pane remains an ordinary Claude Code invocation.
 
 ## 2. What this crosses, and what is already decided
 
 This design crosses the shell integration bundle, a vendor tool-provider protocol, the
-assistant tool declaration table, and the external wave endpoint. It does not redesign
-the endpoint, enrollment protocol, wave dispatcher, or declaration record.
+assistant tool declaration table, and the external tool endpoint. It does not redesign
+the endpoint, enrollment protocol, tool dispatcher, or declaration record.
 
 The **2026-09-05 amendment to §7.1 of
 `.internal/specs/2026-08-24-orchestration-mechanism-design.md`** settles the delivery
@@ -35,7 +37,7 @@ ordering contract in `docs/lifecycle-protocol.md` §16: the shell must send the
 participant's declaration after the agent returns and before `agent_withdraw`.
 `exec` removes the shell process that must send that declaration. The consequence for
 this design is direct: the shell owns launch staging, and the process reaching the
-wave endpoint is the agent's child, not the shell itself.
+tool endpoint is the agent's child, not the shell itself.
 
 The same amendment carries **D5 step 4**: the tool surface and any supported hooks are
 staged in temporary launch-owned files. The owner's **§3.1 constraint** is sharper:
@@ -46,22 +48,22 @@ to one invocation, but may not call `claude mcp add`, write `.mcp.json`, or upda
 `~/.claude/settings.json`.
 
 **D6** says that no vendor-specific route carries anything required. MCP is an
-unavoidable vendor-shaped route for exposing a tool list to Claude Code, but the wave's
+unavoidable vendor-shaped route for exposing a tool list to Claude Code, but the worker's
 authority, supervision, state, declaration, and mail facts do not depend on MCP hooks,
 MCP inboxes, prompt text, or a model following an instruction. If MCP disappears or
-changes, the adapter fails closed and the wave remains governed by the endpoint and
+changes, the adapter fails closed and the worker remains governed by the endpoint and
 lifecycle facts, not by a vendor callback.
 
 **AD-8** in `docs/architecture.md` requires interface-first boundaries and dependency
 injection at one composition root. This design therefore names one agent-adapter seam,
 with one Claude implementation today. A second agent gets another implementation of
-that seam; it does not get a second shell staging path or a second wave protocol.
+that seam; it does not get a second shell staging path or a second worker protocol.
 
 The endpoint is already decided by **`.internal/specs/2026-09-05-the-second-caller-design.md`
 D1–D5 and §4.1**. `nocx-server` owns a private listening Unix socket at
-`coordinator.RuntimeDir(paths)/wave.sock`; it carries bounded newline-delimited
+`coordinator.RuntimeDir(paths)/tool.sock`; it carries bounded newline-delimited
 JSON-RPC 2.0, and the endpoint's authorizer binds the authenticated caller to a
-server-authoritative session. The endpoint is not a second wave server. It is not
+server-authoritative session. The endpoint is not a second worker server. It is not
 published as an admitting endpoint while the enrollment authorizer is absent. The
 bridge must use that endpoint as-is and must not send a caller-supplied session id or
 invent a bearer token.
@@ -187,9 +189,9 @@ MCP server "vanish" Failed to fetch tools: Not connected
 
 The vendor retries a missing stdio provider and eventually reports that it could not
 fetch tools, but this experiment did not request a real tool call. The bridge must
-not treat a successful `initialize` as proof that the wave endpoint remains available.
+not treat a successful `initialize` as proof that the tool endpoint remains available.
 
-An SSE configuration with `url: "unix:///tmp/nocx-wave.sock"` was rejected by the
+An SSE configuration with `url: "unix:///tmp/nocx-tool.sock"` was rejected by the
 vendor with:
 
 ```
@@ -216,7 +218,7 @@ A separate inline `--settings` probe also executed a `SessionStart` command. Hoo
 therefore configurable per launch, and these three events fire at the measured points.
 This design does not make any hook load-bearing. In particular, the `Stop` hook fires
 when a turn ends; it cannot wake a session that is already idle, and it cannot carry
-wave authority or declaration state.
+worker authority or declaration state.
 
 ### 3.5 Ordinary-run side effects
 
@@ -248,7 +250,7 @@ effects from forbidden launch staging in a user-owned settings file.
 > **Confirmed independently by the coordinator, 2026-09-05.** §3.3's measurement is the most
 > consequential fact in this document, so it was re-run rather than taken on report. With a
 > config naming a provider that does not exist —
-> `{"mcpServers":{"nocxwave":{"type":"stdio","command":"/nonexistent/nocx-wave-bridge"}}}` —
+> `{"mcpServers":{"nocxworker":{"type":"stdio","command":"/nonexistent/nocx-worker-bridge"}}}` —
 > `claude --print --strict-mcp-config --mcp-config <file>` answered the prompt normally, exited
 > **0**, and wrote **nothing to stderr**. The coordinator's entire tool surface can be absent
 > and no exit status, no stream and no pane says so. That is why `D8` refuses to read a
@@ -260,15 +262,15 @@ effects from forbidden launch staging in a user-owned settings file.
 | #       | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Rejected alternative, and why                                                                                                                                                                                                                                                                                                                 |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **D1**  | **The shell function remains the only launch and staging owner.** It performs enrollment, creates the private launch directory, invokes Claude, reads the declaration, sends it before `agent_withdraw`, removes the report and launch directory, and returns Claude's status.                                                                                                                                                                                                  | A new `nocx agent run` launcher would duplicate the shell's lifecycle capability and would be unable to send the §16 declaration after an `exec`. The 2026-09-05 §7.1 amendment explicitly settled this against the former D5 shape.                                                                                                          |
-| **D2**  | **Use one local stdio MCP bridge.** The staged MCP server has `type: "stdio"`, an absolute bridge command, and arguments naming the wave socket and launch lease. The bridge speaks MCP on its stdin/stdout pipes and speaks bounded JSON-RPC 2.0 to `wave.sock`.                                                                                                                                                                                                               | Pointing Claude at `unix:///.../wave.sock` through SSE or HTTP was measured to fail because the SSE transport accepts only `http:`, `https:`, or `s3:`. Teaching Claude's process to speak the wave socket directly is impossible through the vendor's accepted provider interface and would couple the endpoint to Claude's protocol.        |
+| **D2**  | **Use one local stdio MCP bridge.** The staged MCP server has `type: "stdio"`, an absolute bridge command, and arguments naming the worker socket and launch lease. The bridge speaks MCP on its stdin/stdout pipes and speaks bounded JSON-RPC 2.0 to `tool.sock`.                                                                                                                                                                                                               | Pointing Claude at `unix:///.../tool.sock` through SSE or HTTP was measured to fail because the SSE transport accepts only `http:`, `https:`, or `s3:`. Teaching Claude's process to speak the worker socket directly is impossible through the vendor's accepted provider interface and would couple the endpoint to Claude's protocol.        |
 | **D3**  | **Use `--strict-mcp-config` with a launch-owned config file.** Claude receives `--mcp-config "$launchDir/mcp.json"` and `--strict-mcp-config`; the file contains exactly the nocx bridge. No user, project, or local MCP server is loaded into this invocation.                                                                                                                                                                                                                 | Calling `claude mcp add` or writing `.mcp.json` would contaminate a shared or user-owned config, and omitting strict mode would let unrelated configured providers enter an orchestrated launch. An inline JSON argument is supported, but a file avoids shell quoting and gives the launch a named lifetime that can be audited and removed. |
-| **D4**  | **The bridge is a translation adapter, not a second authority.** Its `tools/list` response is the five existing declarations, and each `tools/call` validates and forwards the declared params to the wave endpoint. It does not mint grants, choose sessions, infer lifecycle state, parse PTY bytes, or implement wave storage.                                                                                                                                               | Adding five Claude-only endpoint handlers would create a second declaration table and a second validation path. Letting the bridge accept a `sessionId` or bearer token would violate the second-caller D6/D7 shape and turn a local child into an authority source.                                                                          |
-| **D5**  | **The tool surface is the only vendor-shaped mechanism; hooks are optional and non-load-bearing.** The first Claude adapter stages MCP only. A future hook may be staged through `--settings` if it improves presentation, but no hook may be required for enrollment, wave mutation, delivery, declaration, or terminalization.                                                                                                                                                | Using `Stop`, an inbox socket, or prompt instructions as the coordination carrier would make a vendor callback decide a fact that D6 leaves to nocx. The measured `Stop` hook fires at turn end and cannot wake an already-idle coordinator.                                                                                                  |
+| **D4**  | **The bridge is a translation adapter, not a second authority.** Its `tools/list` response is the five existing declarations, and each `tools/call` validates and forwards the declared params to the tool endpoint. It does not mint grants, choose sessions, infer lifecycle state, parse PTY bytes, or implement worker storage.                                                                                                                                               | Adding five Claude-only endpoint handlers would create a second declaration table and a second validation path. Letting the bridge accept a `sessionId` or bearer token would violate the second-caller D6/D7 shape and turn a local child into an authority source.                                                                          |
+| **D5**  | **The tool surface is the only vendor-shaped mechanism; hooks are optional and non-load-bearing.** The first Claude adapter stages MCP only. A future hook may be staged through `--settings` if it improves presentation, but no hook may be required for enrollment, worker mutation, delivery, declaration, or terminalization.                                                                                                                                                | Using `Stop`, an inbox socket, or prompt instructions as the coordination carrier would make a vendor callback decide a fact that D6 leaves to nocx. The measured `Stop` hook fires at turn end and cannot wake an already-idle coordinator.                                                                                                  |
 | **D6**  | **One adapter interface owns vendor-specific launch details.** Conceptually, `AgentAdapter.Stage(LaunchContext) -> StagedInvocation` returns the vendor argv additions, bridge declaration, and cleanup handle. `ClaudeAdapter` is the one implementation today; the shell lifecycle and launch directory remain shared.                                                                                                                                                        | A Claude branch inside generic shell code would make a second agent a second staging path. A generic MCP abstraction in the endpoint would instead make the backend know a vendor protocol it does not own.                                                                                                                                   |
 | **D7**  | **Enrollment refusal happens before staging and falls back to the ordinary command.** If `agent_enrol` is absent, malformed, times out, or refuses, the shell prints the backend's reason in the pane and runs `command claude "$@"` without MCP arguments. The person sees the refusal; the model sees no nocx tools.                                                                                                                                                          | Refusing to run Claude would turn an optional orchestration feature into a terminal outage. Staging anyway would expose a surface without an authenticated interval, the fail-open defect D4 exists to prevent.                                                                                                                               |
 | **D8**  | **A successful lifecycle enrollment is not treated as a successful MCP connection.** The bridge must establish its endpoint connection and return a named refusal for endpoint loss or an unauthorized call. The model sees the MCP tool error or missing tool; the person must receive a pane-visible bridge-status sentence through a separately verified monitor, not through Claude's provider stderr.                                                                      | Relying on Claude's provider error is rejected by measurement: a failed stdio provider was logged in `--debug-file` while the print pane still returned `ready`, and a provider's stderr was not printed. Silently continuing as if the tools existed is the wrong side of D4.                                                                |
 | **D9**  | **The launch directory has a normal cleanup path and a crash cleanup path.** The shell installs an `EXIT`/interrupt cleanup around its bracket. The private directory carries a launch lease keyed by the shell process identity; a bridge-side watcher removes it when the shell dies, and the next nocx launch sweeps stale lease directories before creating one. The directory is mode `0700`, files are mode `0600`, and stale contents are never loaded as a live launch. | Leaving files in the repository, `.claude`, or `.mcp.json` survives the launch and violates §3.1. Depending only on a shell `EXIT` trap fails for `SIGKILL` and abrupt parent death. A global temporary-file sweep without a nocx prefix and lease could delete another program's files.                                                      |
-| **D10** | **Vendor upgrades are accepted only through an adapter conformance check.** The check runs the real installed Claude CLI with a staged config and a scripted bridge, proves the five tools are requested and invoked, proves strict mode excludes configured servers, proves failure is surfaced by the chosen pane monitor, and proves cleanup after normal and killed launches. A changed MCP contract blocks orchestration rather than silently exposing an empty list.      | Treating a successful Claude exit or a model's prose as proof would miss the measured failure where Claude returned `ready` with a dead provider. Pinning one vendor version forever is not a design; allowing any version without a wire check lets a provider rename or schema drift break the wave invisibly.                              |
+| **D10** | **Vendor upgrades are accepted only through an adapter conformance check.** The check runs the real installed Claude CLI with a staged config and a scripted bridge, proves the five tools are requested and invoked, proves strict mode excludes configured servers, proves failure is surfaced by the chosen pane monitor, and proves cleanup after normal and killed launches. A changed MCP contract blocks orchestration rather than silently exposing an empty list.      | Treating a successful Claude exit or a model's prose as proof would miss the measured failure where Claude returned `ready` with a dead provider. Pinning one vendor version forever is not a design; allowing any version without a wire check lets a provider rename or schema drift break the worker invisibly.                              |
 
 ## 5. Launch and data flow
 
@@ -280,11 +282,11 @@ starting `claude`, with one server named by the adapter, for example:
 ```
 {
   "mcpServers": {
-    "nocx-wave": {
+    "nocx-worker": {
       "type": "stdio",
       "command": "/path/to/nocx-agenttools-bridge",
       "args": [
-        "--socket", "/.../run/wave.sock",
+        "--socket", "/.../run/tool.sock",
         "--launch-lease", "/.../nocx-agent-.../lease"
       ]
     }
@@ -308,7 +310,7 @@ claude --strict-mcp-config --mcp-config "$launchDir/mcp.json" <original argument
 Claude launches the stdio bridge as a child and owns its MCP stdin/stdout pipes. The
 bridge answers MCP `initialize` and `tools/list` from the same five declaration rows
 used by the in-process assistant. When Claude issues `tools/call`, the bridge converts
-the MCP call to one bounded newline-delimited JSON-RPC 2.0 request on `wave.sock`, keeps
+the MCP call to one bounded newline-delimited JSON-RPC 2.0 request on `tool.sock`, keeps
 the request id correlation local to the bridge, and converts the endpoint result or
 named domain error back to an MCP tool result. The bridge never sees PTY bytes; the
 shell and backend lifecycle channel remain the owners of those bytes and facts.
@@ -337,7 +339,7 @@ does not authorize a tool call.
 
 With no enrollment, the shell prints `nocx: not orchestrated — <backend reason>` and
 runs ordinary Claude. No launch directory and no MCP config are created. Claude has no
-nocx MCP server and therefore no five wave tools. This is the ordinary fallback and
+nocx MCP server and therefore no five worker tools. This is the ordinary fallback and
 satisfies D4 without refusing the user's requested agent.
 
 If staging the directory or config fails, the shell prints a named staging refusal and
@@ -358,14 +360,14 @@ vendor measurement proves only that MCP stderr is not a pane guarantee.
 
 If the endpoint is not published, the second-caller design says the server does not
 admit the endpoint while its authorizer is absent. Enrollment of the grid therefore
-cannot be used as a substitute for wave authorization. The bridge reports a named
-endpoint refusal, the model receives no usable wave result, and the monitor supplies
-the pane sentence. No wave mutation occurs.
+cannot be used as a substitute for worker authorization. The bridge reports a named
+endpoint refusal, the model receives no usable worker result, and the monitor supplies
+the pane sentence. No worker mutation occurs.
 
 If the vendor ignores the staged surface, the acceptance check fails before the feature
 is considered wired. The adapter must not silently fall back to configured MCP servers,
 prompt text, or an empty tool list. The model either receives all five declarations
-from `nocx-wave` or receives none; the person sees the adapter refusal if the vendor
+from `nocx-worker` or receives none; the person sees the adapter refusal if the vendor
 cannot provide that result. The actual Claude tool-name namespace and the exact
 observable failure surface remain to be measured with a scripted five-tool bridge.
 
@@ -451,24 +453,24 @@ These are holes in the design, not assumptions hidden for the implementation wor
    reach hooks and that ordinary startup writes `.claude.json`; they do not establish a
    complete allowlist of environment variables Claude passes to an MCP child. The
    bridge must be tested with a sentinel environment value and must prove that no
-   inherited secret reaches the wave request or a persistent file.
+   inherited secret reaches the worker request or a persistent file.
 
 ## 9. Assertions
 
 These are acceptance assertions, not implementation suggestions.
 
 1. Starting `claude` in a positively enrolled nocx pane causes Claude's real MCP client
-   to request exactly the five wave declarations from the staged `nocx-wave` server;
+   to request exactly the five worker declarations from the staged `nocx-worker` server;
    each declaration's name, params schema, and result schema is the corresponding
    existing `agenttools` row.
 
 2. A scripted model/tool-call turn invokes all five declarations through the real
    stdio bridge, and the bridge sends the corresponding JSON-RPC 2.0 requests to the
-   real `wave.sock`; no request carries a caller-supplied session id or bearer token.
+   real `tool.sock`; no request carries a caller-supplied session id or bearer token.
 
 3. `--strict-mcp-config` prevents the invocation from starting the project's or user's
    configured MCP servers. Removing the wrapper leaves no staged MCP file and a later
-   ordinary `claude` invocation does not list `nocx-wave`.
+   ordinary `claude` invocation does not list `nocx-worker`.
 
 4. With no enrollment, the pane contains the backend refusal sentence, the model has no
    nocx tool declarations, Claude still runs the user's ordinary command, and no launch
@@ -478,19 +480,19 @@ These are acceptance assertions, not implementation suggestions.
    orchestration, and no partial config remains.
 
 6. If the bridge cannot start or the endpoint is unpublished, the person sees one
-   bounded pane-visible refusal, the model receives no successful wave result, and the
-   endpoint records no wave mutation caused by the refusal.
+   bounded pane-visible refusal, the model receives no successful worker result, and the
+   endpoint records no worker mutation caused by the refusal.
 
 7. If the bridge disappears after `initialize`, the adapter does not report tool
    success. A subsequent call receives a named transport failure, the monitor closes
    the tool-availability interval, and no vendor retry is mistaken for a successful
-   wave response.
+   worker response.
 
 8. If the vendor changes or ignores the staged MCP surface, the conformance check
    fails and the wrapper falls back to an ordinary, explicitly not-orchestrated agent;
    it does not load a user/project server as a substitute.
 
-9. A child process launched by Claude cannot authenticate as a wave caller merely by
+9. A child process launched by Claude cannot authenticate as a worker caller merely by
    sharing the uid or inheriting `NOCX_AGENT_REPORT`; only the enrolled, pinned process
    tree is admitted, and the bridge forwards no environment value as authority.
 
@@ -516,9 +518,9 @@ authentication contract.
 It is falsified operationally if a provider failure is the only refusal path and the
 person cannot see it, if an absent authorizer still permits a tool call, if a dead or
 same-UID child can call the endpoint, or if a model can receive a successful-looking
-wave result after the tool-availability interval closes. It is falsified by any launch
+worker result after the tool-availability interval closes. It is falsified by any launch
 that writes `.mcp.json`, `~/.claude/settings.json`, or a persistent equivalent to stage
-the surface, or by a later ordinary invocation that retains `nocx-wave` after cleanup.
+the surface, or by a later ordinary invocation that retains `nocx-worker` after cleanup.
 
 Finally, it is falsified if the normal shell path sends `agent_withdraw` before the
 participant declaration, treats the Claude exit code as the declaration, or lets a

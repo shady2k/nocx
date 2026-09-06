@@ -336,7 +336,7 @@ type wireEnvelope struct {
 	Rows     *int    `json:"rows,omitempty"`
 	Enrolled bool    `json:"enrolled,omitempty"`
 	Reason   *string `json:"reason,omitempty"`
-	// Agent report (nocx-dkawo.7): what a wave participant says its own work
+	// Agent report (nocx-dkawo.7): what a worker participant says its own work
 	// produced, and the answer saying it was recorded. OK and Recorded are
 	// VALUES rather than pointers for the reason Enrolled is: a missing field
 	// decodes to false, so a truncated or hostile frame reads as "not

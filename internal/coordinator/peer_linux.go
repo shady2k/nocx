@@ -47,7 +47,7 @@ func ownerUID(path string) (uint32, error) {
 // different job: a coordinator that must be replaced has to be named to the
 // kernel somehow, and a pid the kernel stamped is the only name a launcher
 // can get that the daemon could not have made up.
-// internal/wavepin pairs that pid with the process start time before treating
+// internal/peerpin pairs that pid with the process start time before treating
 // it as an identity assertion.
 func peerPID(fd uintptr) (int, error) {
 	cred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)

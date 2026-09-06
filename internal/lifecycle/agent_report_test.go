@@ -13,7 +13,7 @@ func reportEvt(rid RequestID, ok bool, summary string) Event {
 // A participant's declaration, as the wire sees it. Like the enrolment beside
 // it, an authenticated agent_report produces exactly one answer addressed back
 // to the asking domain and carries NO verdict of its own: the seam that
-// actually writes the fact into the wave record is the one that decides, and
+// actually writes the fact into the worker record is the one that decides, and
 // the kernel neither holds a record nor knows what one is.
 func TestAgentReportProducesAnAnswerEcho(t *testing.T) {
 	k, _, _ := newTestKernel()
@@ -56,7 +56,7 @@ func TestAgentReportProducesAnAnswerEcho(t *testing.T) {
 // What the kernel refuses, and it is only what it can judge from the frame:
 // the request id's shape and the summary's length. Whether the pane is a
 // participant, and whether the record accepted the fact, are the seam's to
-// answer — a kernel that decided either would be a second owner of the wave.
+// answer — a kernel that decided either would be a second owner of the workers.
 func TestAgentReportRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name string

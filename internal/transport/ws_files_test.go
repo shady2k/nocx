@@ -31,7 +31,7 @@ import (
 
 // filesLocalFactory is the composition-root shape the tests share: local
 // sessions get a real local provider rooted at the caller's verified cwd
-// when one is sent; remote sessions refuse (the SFTP wave has not landed).
+// when one is sent; remote sessions refuse (the SFTP worker has not landed).
 func filesLocalFactory(sess session.Session, rootPath string) (filesystem.Provider, error) {
 	if sess.Kind() != session.KindLocal {
 		return nil, errors.New("remote filesystems are not available yet")
@@ -871,8 +871,8 @@ func TestFilesReveal_RemoteBindingRefused(t *testing.T) {
 	sid := e.openSession(t, 1)
 	bid := e.openBinding(t, sid, t.TempDir(), 2)
 
-	// The SFTP wave stamps the attestation at files.open; inject it the
-	// way that wave would, to prove the guard reads it.
+	// The SFTP worker stamps the attestation at files.open; inject it the
+	// way that worker would, to prove the guard reads it.
 	e.ws.filesMu.Lock()
 	e.ws.filesBindings[bid].endpointID = "v1:attestation"
 	e.ws.filesMu.Unlock()
@@ -946,7 +946,7 @@ func TestFilesReveal_LocalBindingSucceeds(t *testing.T) {
 }
 
 // TestFilesWatch_DegradesToPollingHonestly: the local provider cannot
-// watch yet (the watching wave is later), so files.watch must report the
+// watch yet (the watching worker is later), so files.watch must report the
 // degradation — mode polling with a reason — never a silent lie about
 // watching being live.
 func TestFilesWatch_DegradesToPollingHonestly(t *testing.T) {
@@ -975,7 +975,7 @@ func TestFilesWatch_DegradesToPollingHonestly(t *testing.T) {
 	if got.Mode != "polling" {
 		t.Errorf("mode = %q, want %q (watching is not available yet)", got.Mode, "polling")
 	}
-	// And NO reason: polling is the designed mode until the watching wave
+	// And NO reason: polling is the designed mode until the watching worker
 	// lands, so there is nothing to warn about. A reason here would light
 	// the §5.5 badge permanently, for everyone. The badge's premise is that
 	// watching normally works and this binding fell back from it — a premise

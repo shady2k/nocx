@@ -13,10 +13,10 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// WaveInvocation is the caller-neutral input to the wave dispatcher. The
+// ToolInvocation is the caller-neutral input to the worker dispatcher. The
 // session and grant are already bound by the caller adapter; method params
 // cannot add authority to either one.
-type WaveInvocation struct {
+type ToolInvocation struct {
 	Context    context.Context
 	Method     string
 	RunContext agenttools.RunContext
@@ -24,11 +24,11 @@ type WaveInvocation struct {
 	RawParams  json.RawMessage
 }
 
-// WaveDispatcher is the common operation used by the in-process assistant and
+// ToolDispatcher is the common operation used by the in-process assistant and
 // the future external endpoint. Both callers enter the same declaration,
 // validation, resource, capability, executor and result-contract pipeline.
-type WaveDispatcher interface {
-	Dispatch(WaveInvocation) (string, error)
+type ToolDispatcher interface {
+	Dispatch(ToolInvocation) (string, error)
 }
 
 var (
@@ -56,7 +56,7 @@ func (e *DispatchRefusalError) Error() string {
 	return fmt.Sprintf("assistant dispatch: %s: %s", e.Method, e.Reason)
 }
 
-func dispatchAbortedError(invocation WaveInvocation, result *modelResult) error {
+func dispatchAbortedError(invocation ToolInvocation, result *modelResult) error {
 	reason := ""
 	if result != nil {
 		reason = result.text
@@ -71,7 +71,7 @@ type (
 )
 
 type preparedInvocation struct {
-	request             WaveInvocation
+	request             ToolInvocation
 	decl                agenttools.Tool
 	args                map[string]any
 	invocation          content.Invocation
@@ -115,16 +115,16 @@ func compileDispatchSchemas(registry agenttools.Registry) (map[string]*jsonschem
 	return validators, results, nil
 }
 
-// NewWaveDispatcher builds the wave-only adapter over the common operation.
-// Its public surface accepts only the assembled wave declarations; the
+// NewToolDispatcher builds the worker-only adapter over the common operation.
+// Its public surface accepts only the assembled worker declarations; the
 // record and environment are infrastructure seams, never caller parameters.
-func NewWaveDispatcher(registry agenttools.Registry, waves WaveRecord, environment string) (WaveDispatcher, error) {
+func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, environment string) (ToolDispatcher, error) {
 	validators, results, err := compileDispatchSchemas(registry)
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]struct{}, len(waveMethodNames))
-	for _, name := range waveMethodNames {
+	allowed := make(map[string]struct{}, len(workerMethodNames))
+	for _, name := range workerMethodNames {
 		allowed[name] = struct{}{}
 	}
 	return &dispatchOperation{
@@ -134,45 +134,45 @@ func NewWaveDispatcher(registry agenttools.Registry, waves WaveRecord, environme
 		allowed:    allowed,
 		executor: func(ctx context.Context, decl agenttools.Tool, cap agenttools.Capability, raw []byte) (string, error) {
 			return runDeclaredTool(ctx, decl, cap, raw, toolSeams{
-				waves:           waves,
-				waveEnvironment: environment,
+				workerStore:       workerStore,
+				workerEnvironment: environment,
 			})
 		},
 	}, nil
 }
 
-// waveMethodNames describes the current wave surface, not a general authority
+// workerMethodNames describes the current worker surface, not a general authority
 // allowlist. Applying the reachability gate to every tool was measured to make
 // 11 existing tests fail: git.status and skill mutations deliberately record
 // the execution attempt before capability refusal so the refusal stays
-// auditable, while wave methods have no such requirement today. The general
+// auditable, while worker methods have no such requirement today. The general
 // case remains undecided; this list must not become a second effect/name policy.
-var waveMethodNames = [...]string{
-	"wave.spawn",
-	"wave.say",
-	"wave.wait",
-	"wave.holdings",
-	"wave.close",
+var workerMethodNames = [...]string{
+	"workers.spawn",
+	"workers.say",
+	"workers.wait",
+	"workers.holdings",
+	"workers.close",
 	// The participant's one call (nocx-rowqt.9). It belongs on this list for
-	// the same reason the other five do — it is part of the wave surface the
+	// the same reason the other five do — it is part of the worker surface the
 	// endpoint exposes — and NOT because it shares their authority: it
 	// narrows to the other capability entirely, and no grant that reaches
 	// those five reaches this one.
-	"wave.inbox",
+	"workers.inbox",
 }
 
-// isWaveMethod selects the current wave surface for the reachability behavior;
+// isWorkerMethod selects the current worker surface for the reachability behavior;
 // it does not decide authority, which remains declaration- and grant-owned.
-func isWaveMethod(name string) bool {
-	for _, waveName := range waveMethodNames {
-		if name == waveName {
+func isWorkerMethod(name string) bool {
+	for _, workerName := range workerMethodNames {
+		if name == workerName {
 			return true
 		}
 	}
 	return false
 }
 
-func (d *dispatchOperation) Dispatch(invocation WaveInvocation) (string, error) {
+func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) {
 	outcome, err := d.dispatch(invocation, nil, nil, nil, nil)
 	if err != nil {
 		return "", err
@@ -186,7 +186,7 @@ func (d *dispatchOperation) Dispatch(invocation WaveInvocation) (string, error) 
 	return outcome.output, nil
 }
 
-func (d *dispatchOperation) dispatch(invocation WaveInvocation, transform dispatchTransform, gate dispatchGate, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
+func (d *dispatchOperation) dispatch(invocation ToolInvocation, transform dispatchTransform, gate dispatchGate, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {
 	prepared, err := d.prepare(invocation, transform)
 	if err != nil {
 		return dispatchOutcome{}, err
@@ -227,7 +227,7 @@ func (d *dispatchOperation) dispatch(invocation WaveInvocation, transform dispat
 	return dispatchOutcome{prepared: &prepared, output: output, runErr: runErr}, nil
 }
 
-func (d *dispatchOperation) prepare(invocation WaveInvocation, transform dispatchTransform) (preparedInvocation, error) {
+func (d *dispatchOperation) prepare(invocation ToolInvocation, transform dispatchTransform) (preparedInvocation, error) {
 	decl, ok := d.registry.Lookup(invocation.Method)
 	if !ok {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnknownMethod, invocation.Method)
@@ -256,12 +256,12 @@ func (d *dispatchOperation) prepare(invocation WaveInvocation, transform dispatc
 	}
 	prepared.resources = resources
 	prepared.resourceDeclaration = resourceDeclaration
-	// The external wave adapter and in-process wave calls require the
-	// declaration projection here. Non-wave model calls intentionally keep
+	// The external worker adapter and in-process worker calls require the
+	// declaration projection here. Non-worker model calls intentionally keep
 	// their historical attempt-before-capability behavior (notably
 	// git.status and skill mutations), so this shared operation only applies
-	// the reachability gate to the wave surface in this refactor.
-	if isWaveMethod(prepared.decl.Name) && !methodReachable(d.registry, invocation.Grant, prepared.decl.Name) {
+	// the reachability gate to the worker surface in this refactor.
+	if isWorkerMethod(prepared.decl.Name) && !methodReachable(d.registry, invocation.Grant, prepared.decl.Name) {
 		return preparedInvocation{}, fmt.Errorf("%w: %q", ErrUnreachableMethod, prepared.decl.Name)
 	}
 	return prepared, nil
@@ -355,4 +355,4 @@ func runDeclaredTool(ctx context.Context, decl agenttools.Tool, capability agent
 	return executor(runContext, capability, raw, seams)
 }
 
-var _ WaveDispatcher = (*dispatchOperation)(nil)
+var _ ToolDispatcher = (*dispatchOperation)(nil)

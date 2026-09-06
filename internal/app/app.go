@@ -55,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/reveal"
@@ -66,6 +67,7 @@ import (
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
@@ -74,9 +76,7 @@ import (
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
-	"github.com/shady2k/nocx/internal/wave"
-	"github.com/shady2k/nocx/internal/waveendpoint"
-	"github.com/shady2k/nocx/internal/wavepin"
+	"github.com/shady2k/nocx/internal/workers"
 	"github.com/shady2k/nocx/internal/workspace"
 )
 
@@ -100,8 +100,8 @@ type App struct {
 	Logger           log.Logger
 	Session          *session.Reg
 	Transport        *transport.WSServer
-	WaveDispatcher   assistant.WaveDispatcher
-	WaveAuthorizer   waveendpoint.Authorizer
+	ToolDispatcher   assistant.ToolDispatcher
+	ToolAuthorizer   toolendpoint.Authorizer
 	ShellIntegration shellintegration.ShellIntegration
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
@@ -429,7 +429,7 @@ func WithLogFilePath(path string) Option {
 // before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
 
-// waveFactDeadline is how long a worker's fact may sit undispatched before
+// workerFactDeadline is how long a worker's fact may sit undispatched before
 // the person is told (D2 of the 2026-08-24 orchestration mechanism design).
 //
 // It is a placeholder with both ends of the interval named, and deliberately
@@ -438,23 +438,23 @@ const notifyDebounceWindow = 8 * time.Second
 // long and the person learns late — and that it probably differs by fact
 // class, which needs the fan-out nocx-dkawo.4 brings to measure at all. Five
 // minutes is chosen to be longer than an agent turn and shorter than the
-// interval in which a person forgets they started a wave.
-const waveFactDeadline = 5 * time.Minute
+// interval in which a person forgets they started a worker.
+const workerFactDeadline = 5 * time.Minute
 
-// waveParticipantBound is how many non-terminal participants one wave may
-// hold, and waveEnrolmentDeadline is how long a registration waits for the
+// workerParticipantBound is how many non-terminal participants one worker may
+// hold, and workerEnrolmentDeadline is how long a registration waits for the
 // launcher's enrolment before it is terminalized.
 //
 // Both are named here for the reason the fact deadline is: they are the
-// product's numbers, and internal/wave names the interval rather than
-// choosing its length. The bound is deliberately small for one-worker waves
+// product's numbers, and internal/worker names the interval rather than
+// choosing its length. The bound is deliberately small for one-worker workerStore
 // (D15) and is one of the nine open in §10.9; the enrolment deadline has to
 // cover a shell drawing its first prompt and an agent binary starting, and
 // nothing longer, because every second past that is a registration holding a
 // record open for a launcher that is never going to arrive.
 const (
-	waveParticipantBound  = 8
-	waveEnrolmentDeadline = 30 * time.Second
+	workerParticipantBound  = 8
+	workerEnrolmentDeadline = 30 * time.Second
 )
 
 // The bounds of that setting, as durations, because a duration is what the
@@ -1356,18 +1356,18 @@ func New(opts ...Option) (*App, error) {
 	// publisher opens and closes intervals through it, and the transport feeds
 	// it from the session read path.
 	paneGrid := panegrid.New(logger)
-	// The wave's rendezvous, built before the enroller because it is what the
+	// The worker's rendezvous, built before the enroller because it is what the
 	// enroller notifies (nocx-dkawo.7). An enrolment is the ONE moment nocx
 	// knows an agent started rather than inferring it, so a registration
 	// waits on this and on nothing else — not on a dispatch returning, which
 	// is not delivery.
-	waveEnrol := newWaveEnrolments(logger, sess)
+	workerEnrol := newWorkerEnrolments(logger, sess)
 	// The declaration's carrier, built beside the rendezvous and wired into
 	// the same publisher: a participant says what its work produced over the
 	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
 	// Its destination is bound after the record exists, for the same reason
 	// the supervisor's is.
-	waveReport := &waveReporter{lanes: childSessions, enrol: waveEnrol, now: time.Now, log: logger}
+	workerReport := &workerReporter{lanes: childSessions, enrol: workerEnrol, now: time.Now, log: logger}
 	// One driver per agent (AD-8), validated once, here. NewRegistry fails
 	// only on a wiring mistake — a driver that cannot name its agent, or two
 	// for one agent — and a wiring mistake belongs to process start rather
@@ -1379,7 +1379,7 @@ func New(opts ...Option) (*App, error) {
 	if driversErr != nil {
 		return nil, fmt.Errorf("pane drivers: %w", driversErr)
 	}
-	// What turns a grid into something a person or a wave can act on
+	// What turns a grid into something a person or a worker can act on
 	// (nocx-szb40.3): it classifies a watched pane and reports only the
 	// CHANGES. Built here because both ends need it — the enroller opens an
 	// observation beside the grid's interval, and the transport touches it
@@ -1424,10 +1424,10 @@ func New(opts ...Option) (*App, error) {
 		// answers. Wired here rather than defaulted anywhere, because an
 		// unwired enroller refuses every enrolment — the fail-closed half of
 		// D4, and the opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(waveEnrol.hookInto(newPaneEnroller(logger, childSessions, paneGrid, paneWatch))),
+		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(newPaneEnroller(logger, childSessions, paneGrid, paneWatch))),
 		// The second fact's carrier. Unwired it refuses every report and says
 		// so, which is the same fail-closed stance as the enroller above.
-		lifecyclepub.WithAgentReporter(waveReport))
+		lifecyclepub.WithAgentReporter(workerReport))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1745,7 +1745,7 @@ func New(opts ...Option) (*App, error) {
 	// registry, which is where a pane's input queue is. A second grid or a
 	// second registry here would be a second answer to the question a
 	// keystroke is decided on.
-	// Named rather than inlined, because the wave's wake reaches THIS one
+	// Named rather than inlined, because the worker's wake reaches THIS one
 	// (nocx-dkawo.3). A second typist would be a second answer to "may nocx
 	// write into this pane", decided against a second grid.
 	paneTyping := newPaneTypist(logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)
@@ -1827,7 +1827,7 @@ func New(opts ...Option) (*App, error) {
 	// the hosted open path binds the lane to its session through
 	// laneRegistrar, and what is left is the child-domain half — which
 	// transport a nested sudo/su rides, and which session a lane speaks for
-	// when the wave record and the pane enroller ask (nocx-u7uh.11). The
+	// when the worker record and the pane enroller ask (nocx-u7uh.11). The
 	// shell inherits the daemon's descriptor exactly as it inherited this
 	// process's before, so the parent transport is still a local one.
 	localOpener.noteChildDomainParent = func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string) {
@@ -1920,7 +1920,7 @@ func New(opts ...Option) (*App, error) {
 	// set of helpers this process already holds, which on a cold start is none,
 	// and writing it out is what keeps the two sources of an inventory — held
 	// and re-adopted — visibly the same argument.
-	// THE WAVE RECORD (nocx-dkawo.2). Built here because every seam it needs
+	// THE WORKER RECORD (nocx-dkawo.2). Built here because every seam it needs
 	// exists only now: the pane and the session from the layout chain and the
 	// one session opener, the enrolment from the rendezvous above, and the
 	// process exit from the registry.
@@ -1929,7 +1929,7 @@ func New(opts ...Option) (*App, error) {
 	// participants of this backend's own making, and under D5 every one of
 	// them dies with this process, so the record's lifetime and its
 	// participants' lifetime are the same interval by construction — see
-	// internal/wave/memory.go. Nothing is carried across a start, and there
+	// internal/workers/memory.go. Nothing is carried across a start, and there
 	// is nothing to sweep at one.
 	//
 	// The supervisor's destination is bound AFTER the registrar, because the
@@ -1938,7 +1938,7 @@ func New(opts ...Option) (*App, error) {
 	// registrar exists. Two-phase wiring at the composition root, which is
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
-	waveSup := &waveSupervisor{sessions: sess, log: logger}
+	workerSup := &workerSupervisor{sessions: sess, log: logger}
 	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
 	// coordinator by a wake through the SAME typist agent.type reaches, the
 	// human by a deadline through the notification pipeline built above. The
@@ -1946,15 +1946,15 @@ func New(opts ...Option) (*App, error) {
 	// the product's real values live — and it is a placeholder with both ends
 	// named, not a measurement: §10.8 of the orchestration design puts that in
 	// nocx-dkawo.4, where fan-out makes the escalated fraction measurable.
-	waveBackstop := wave.NewBackstop(logger,
-		&waveWaker{typist: paneTyping, log: logger},
-		&waveEscalation{raise: notifyIngress, log: logger},
-		wave.WithFactDeadline(waveFactDeadline))
-	waveRecord := wave.NewRegistrar(
-		wave.NewMemoryStore(),
-		&waveSpawner{
+	workerBackstop := workers.NewBackstop(logger,
+		&workerWaker{typist: paneTyping, log: logger},
+		&workerEscalation{raise: notifyIngress, log: logger},
+		workers.WithFactDeadline(workerFactDeadline))
+	workerRecord := workers.NewRegistrar(
+		workers.NewMemoryStore(),
+		&workerSpawner{
 			layout: contentDB.Layout(), opener: tp, sessions: sess,
-			enrolments: waveEnrol,
+			enrolments: workerEnrol,
 			// Participants are minted in the default workspace until a
 			// coordinator names its own. It is the workspace the ledger
 			// already records every session nobody named one for, so this
@@ -1962,42 +1962,42 @@ func New(opts ...Option) (*App, error) {
 			workspace: string(workspace.Default),
 			log:       logger,
 		},
-		waveEnrol,
-		waveSup,
-		wave.WithBackstop(waveBackstop),
-		// The seam a coordinator's wave.close reaches. Unwired it refuses,
+		workerEnrol,
+		workerSup,
+		workers.WithBackstop(workerBackstop),
+		// The seam a coordinator's workers.close reaches. Unwired it refuses,
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
-		wave.WithCloser(&waveCloser{sessions: sess, log: logger}),
-		wave.WithBound(waveParticipantBound),
-		wave.WithEnrolmentDeadline(waveEnrolmentDeadline),
+		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
+		workers.WithBound(workerParticipantBound),
+		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)
-	waveDispatcher, waveDispatcherErr := assistant.NewWaveDispatcher(
-		agentToolRegistry, waveRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
+		agentToolRegistry, workerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
 	)
-	if waveDispatcherErr != nil {
-		return nil, fmt.Errorf("wave dispatcher: %w", waveDispatcherErr)
+	if toolDispatcherErr != nil {
+		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)
 	}
 	// The record is handed in so the authorizer can tell the two callers
 	// apart: a session it holds a live participant for is a WORKER calling
 	// about itself, and every other admitted session is a coordinator
 	// (nocx-rowqt.9). The workspace is the one a worker's pane lives in, and
 	// it is the scope its grant names.
-	waveAuthorizer := newWaveAuthorizer(
-		wavepin.SystemPinner{}, sess, paneGrid, waveRecord, string(workspace.Default),
+	toolAuthorizer := newToolAuthorizer(
+		peerpin.SystemPinner{}, sess, paneGrid, workerRecord, string(workspace.Default),
 	)
-	waveSup.exited = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, e wave.Exit) {
-		if _, err := waveRecord.Exited(ctx, id, l, e); err != nil {
-			logger.Warn("wave: a participant's exit was not recorded",
+	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
+		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
+			logger.Warn("worker: a participant's exit was not recorded",
 				"participant", string(id), "error", err)
 		}
 	}
 	// The coordinator's own two calls reach the record through the transport
 	// (nocx-dkawo.8). Bound post-construction for the same reason the emitter
 	// is: the server is built above, and the record needs it.
-	tp.SetWaveRecord(waveRecord)
-	waveReport.declare = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, d wave.Declaration) error {
-		_, err := waveRecord.Declared(ctx, id, l, d)
+	tp.SetWorkerRecord(workerRecord)
+	workerReport.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
+		_, err := workerRecord.Declared(ctx, id, l, d)
 		return err
 	}
 	reconcileSessions(ctx, contentDB.Reconcile(),
@@ -2009,8 +2009,8 @@ func New(opts ...Option) (*App, error) {
 		Logger:           logger,
 		Session:          sess,
 		Transport:        tp,
-		WaveDispatcher:   waveDispatcher,
-		WaveAuthorizer:   waveAuthorizer,
+		ToolDispatcher:   toolDispatcher,
+		ToolAuthorizer:   toolAuthorizer,
 		UploadSources:    tp.UploadSources(),
 		ShellIntegration: shint,
 		Profiles:         profileStore,

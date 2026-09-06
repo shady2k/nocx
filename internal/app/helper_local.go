@@ -77,7 +77,7 @@ type localHelperOpener struct {
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
-	// (nocx-u7uh.11, and the wave record's pane enroller reads the second).
+	// (nocx-u7uh.11, and the worker record's pane enroller reads the second).
 	// It is a SEPARATE seam from the transport's own lane registration
 	// because the transport already owns that half — the hosted open path
 	// binds lane to session through laneRegistrar — and one closure doing

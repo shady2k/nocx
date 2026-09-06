@@ -400,7 +400,7 @@ func mustCatalogue() *Catalogue {
 				Trusts:      []Trust{TrustProgramRequest},
 			},
 			{
-				// The wave record's backstop (D2, nocx-dkawo.3). A worker
+				// The worker record's backstop (D2, nocx-dkawo.3). A worker
 				// declared or exited, the coordinator that must judge it was
 				// not reached inside the deadline, and the person is the
 				// only one left who can act.
@@ -413,12 +413,12 @@ func mustCatalogue() *Catalogue {
 				// pane.workFinished one row below.
 				//
 				// Both channels on by default, for the reason session.ended
-				// has them: it fires a handful of times a wave, and the only
+				// has them: it fires a handful of times a worker, and the only
 				// moment it matters is the one where the person is not
 				// looking at the tab.
-				Kind: KindWaveUndispatched, ID: "waveUndispatched",
+				Kind: KindWorkersUndispatched, ID: "workerUndispatched",
 				Label: "A worker is waiting for judgement",
-				Description: "nocx's own wave record has a worker's result that its " +
+				Description: "nocx's own worker record has a worker's result that its " +
 					"coordinator was not reached about.",
 				Trusts:          []Trust{TrustAttested},
 				DefaultChannels: []string{ChannelBanner, ChannelToast},

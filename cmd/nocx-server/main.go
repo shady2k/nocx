@@ -27,8 +27,8 @@ import (
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/version"
-	"github.com/shady2k/nocx/internal/waveendpoint"
 )
 
 func main() {
@@ -92,16 +92,16 @@ func run(logger *slog.Logger) error {
 		return startErr
 	}
 	defer a.Shutdown(ctx)
-	waveSocket, err := startWaveEndpoint(a, coordinator.RuntimeDir(paths),
+	workerSocket, err := startToolEndpoint(a, coordinator.RuntimeDir(paths),
 		coordinator.SystemPeerCredentials{}, coordinator.SystemPathOwner{},
 		coordinator.SelfUID(), logger)
 	if err != nil {
 		return err
 	}
-	if waveSocket != nil {
+	if workerSocket != nil {
 		defer func() {
-			if closeErr := waveSocket.Close(); closeErr != nil {
-				logger.Error("closing the wave socket", "error", closeErr)
+			if closeErr := workerSocket.Close(); closeErr != nil {
+				logger.Error("closing the worker socket", "error", closeErr)
 			}
 		}()
 	}
@@ -145,20 +145,20 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// startWaveEndpoint publishes the wave socket only when the application has
-// both sides of the common wave pipeline. A missing authorizer is a deliberate
+// startToolEndpoint publishes the worker socket only when the application has
+// both sides of the common worker pipeline. A missing authorizer is a deliberate
 // refusal to publish, not a socket that rejects every request.
-func startWaveEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials, owner coordinator.PathOwner, selfUID uint32, logger *slog.Logger) (*waveendpoint.Endpoint, error) {
-	if a == nil || a.WaveAuthorizer == nil || a.WaveDispatcher == nil {
+func startToolEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials, owner coordinator.PathOwner, selfUID uint32, logger *slog.Logger) (*toolendpoint.Endpoint, error) {
+	if a == nil || a.ToolAuthorizer == nil || a.ToolDispatcher == nil {
 		return nil, nil
 	}
-	endpoint, err := waveendpoint.New(waveendpoint.Config{
+	endpoint, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      dir,
 		Peers:    peers,
 		Owner:    owner,
 		SelfUID:  selfUID,
-		Auth:     a.WaveAuthorizer,
-		Dispatch: a.WaveDispatcher,
+		Auth:     a.ToolAuthorizer,
+		Dispatch: a.ToolDispatcher,
 		Logger:   logger,
 	})
 	if err != nil {

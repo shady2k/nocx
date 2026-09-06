@@ -85,7 +85,7 @@ func TestAnAuthenticatedReportReachesTheSeamAndIsRecorded(t *testing.T) {
 // Every silent path is a REFUSAL, and each one says why in a sentence the
 // participant can print. This is D4 at the second fact's carrier: a
 // declaration that looked accepted while nothing wrote it is exactly the
-// silent degrade the wave record exists to prevent.
+// silent degrade the worker record exists to prevent.
 func TestEverySilentReportPathIsARefusalThatSaysWhy(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -99,8 +99,8 @@ func TestEverySilentReportPathIsARefusalThatSaysWhy(t *testing.T) {
 		},
 		{
 			name:     "a seam that refused",
-			reporter: &fakeReporter{err: errors.New("this pane is not part of a wave")},
-			want:     "this pane is not part of a wave",
+			reporter: &fakeReporter{err: errors.New("this pane is not part of a worker")},
+			want:     "this pane is not part of a worker",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -706,7 +706,7 @@ __nocx_agent_geometry() {
 
 # THE DECLARATION DROP: how a worker says what its work produced.
 #
-# The declaration is one of the two facts that may decide a wave participant's
+# The declaration is one of the two facts that may decide a worker participant's
 # state (D9), and it must come from the AGENT rather than from the shell: a
 # declaration synthesised from the agent's exit status would collapse two
 # facts the design keeps independent and make "completed" mean nothing beyond

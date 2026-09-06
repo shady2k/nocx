@@ -108,7 +108,7 @@ func TestResourceKindSetMatchesTheLedger(t *testing.T) {
 
 // TestAssemble_AcceptsEveryLedgerResourceKind is the same criterion at the
 // seam a tool author reaches: every kind the ledger declares survives
-// assembly, so a workspace- or wave-scoped tool can be declared at all.
+// assembly, so a workspace- or worker-scoped tool can be declared at all.
 func TestAssemble_AcceptsEveryLedgerResourceKind(t *testing.T) {
 	for _, kind := range ledgerResourceKinds(t) {
 		t.Run(string(kind), func(t *testing.T) {

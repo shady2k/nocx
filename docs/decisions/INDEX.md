@@ -116,6 +116,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0056 | [Supervision outlives the coordinator, not the backend](0056-supervision-outlives-the-coordinator-not-the-backend.md)             | Accepted (2026-09-04)                 |
 | 0057 | [On your own machine there is no Tier A fallback](0057-on-your-own-machine-there-is-no-tier-a-fallback.md)                        | Accepted (2026-09-04)                 |
 | 0058 | [Authority is bound to a unit of work, never to a container](0058-authority-is-bound-to-a-unit-of-work.md)                        | Proposed (2026-09-06)                 |
+| 0059 | [Retire the wave vocabulary from the worker tool surface](0059-retire-wave-vocabulary.md)                                      | Accepted (2026-09-06)              |
 
 ## Adding one
 

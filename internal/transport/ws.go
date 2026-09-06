@@ -639,11 +639,11 @@ type WSServer struct {
 	// that is where the admission gates it runs under exist — which is
 	// NewWSServer, so it is ready before the server serves anything.
 	opener *sessionOpener
-	// waves is the wave record a coordinator run reaches through its tools
-	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two wave
+	// workerStore is the worker record a coordinator run reaches through its tools
+	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two worker
 	// tools refusing with a sentence rather than starting a worker into
 	// nothing.
-	waves assistant.WaveRecord
+	workerStore assistant.WorkerRecord
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -1261,7 +1261,7 @@ func WithFilesystemRegistry(r *filesystem.Registry) WSServerOption {
 
 // WithFilesystemProviderFactory attaches the provider builder files.open
 // uses. The composition root decides which sessions get which providers —
-// local.New for local sessions today, the SFTP provider with the SFTP wave
+// local.New for local sessions today, the SFTP provider with the SFTP worker
 // (design §6 step 4) — and the transport never constructs a provider
 // itself (AD-8). When absent, files.open returns an error.
 func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
@@ -3903,8 +3903,8 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 	return tag
 }
 
-// SetWaveRecord wires the wave record a coordinator run reaches through
-// wave.spawn and wave.holdings. Without it those tools refuse and say why: a
+// SetWorkerRecord wires the worker record a coordinator run reaches through
+// workers.spawn and workers.holdings. Without it those tools refuse and say why: a
 // spawn accepted into a record that does not exist is exactly the unaccounted
 // agent the record was built to prevent.
 //
@@ -3912,4 +3912,4 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 // record is built from seams this server provides — its own session opener
 // among them — so it cannot exist before the server does. The window before
 // this line is empty, because no run can have been asked yet.
-func (s *WSServer) SetWaveRecord(w assistant.WaveRecord) { s.waves = w }
+func (s *WSServer) SetWorkerRecord(w assistant.WorkerRecord) { s.workerStore = w }

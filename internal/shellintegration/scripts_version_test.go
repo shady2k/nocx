@@ -185,7 +185,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// agent_report — inside the enrolment's interval and before the
 		// withdraw. Every installed copy must be rewritten: a shell still
 		// sourcing 44 can enrol a worker and can never say what it produced,
-		// so every wave it takes part in terminalizes as abandoned.
+		// so every worker it takes part in terminalizes as abandoned.
 		"45": "f1ae91b06be337ea944586139c77e1261bdf7fc1d325678e65ed405e153b0b02",
 	}
 

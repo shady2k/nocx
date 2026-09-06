@@ -6,7 +6,7 @@ package transport
 // it was written for the only caller it had: a renderer that already created
 // the pane row, that is waiting on a response frame, and that will be
 // attached to the session's ring the moment it exists. None of those hold for
-// the second caller. A wave participant is spawned by the BACKEND — there is
+// the second caller. A worker participant is spawned by the BACKEND — there is
 // no request id to answer, no connection to attach, and the pane is one the
 // backend is creating rather than one it was handed.
 //
@@ -570,7 +570,7 @@ func (o *sessionOpener) close(ctx context.Context, id session.ID) {
 //
 // The opener exists from construction, not from Start: the control plane —
 // and with it the admission gates the two phases run under — is built by
-// NewWSServer. That is what lets a composition root hand this to the wave
+// NewWSServer. That is what lets a composition root hand this to the worker
 // record while it is still wiring, rather than having to wait for a server
 // that is already serving. The nil guard is for a zero-value server, which is
 // reachable only in-package and would otherwise panic inside the operation
@@ -591,7 +591,7 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// ack to order against, so there is nothing to wait for.
 	//
 	// It was missing entirely until nocx-ie23r.3, and it did not show: the
-	// only backend-opened sessions were wave participants, and until this
+	// only backend-opened sessions were worker participants, and until this
 	// machine's panes became helper sessions none of them was hosted. A
 	// hosted session whose bridge is never pumped integrates never — its
 	// shell says hello into a pipe nobody reads and the handshake bound

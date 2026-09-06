@@ -24,7 +24,7 @@
 //
 // # What it may never do, enforced by what it cannot name
 //
-// A grid may not open, complete, alter or assign status to a wave state, a
+// A grid may not open, complete, alter or assign status to a worker state, a
 // lifecycle attempt or an execution attempt. That is not a rule this package
 // follows, it is a rule it cannot break: it imports no lifecycle, session,
 // content or notify package, and nothing in its exported surface names one.

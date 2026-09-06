@@ -865,7 +865,7 @@ func (k *Kernel) applyAgentWithdraw(d *Domain, ls *laneState, env Envelope) ([]O
 // 1) — and a kernel that held it would be a second place where "what did this
 // participant produce" is answered. What only the kernel can do is say the
 // frame really came from this domain in this epoch; after that the fact
-// belongs to whoever owns the wave record, which is not this package.
+// belongs to whoever owns the worker record, which is not this package.
 //
 // The summary is bounded HERE and not at the seam, because the bound is a
 // property of the frame: a report longer than this could not be sent at all,

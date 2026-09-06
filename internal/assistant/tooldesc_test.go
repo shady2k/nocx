@@ -60,7 +60,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 		// A grant that reaches EVERYTHING, which is what makes the count
 		// below an assertion about descriptions rather than about
 		// eligibility. delegate and the environment scope are here for
-		// wave.spawn; without them the grant would silently stop covering
+		// workers.spawn; without them the grant would silently stop covering
 		// one tool and the test would be measuring the wrong set.
 		Effects: []content.Effect{
 			content.EffectObserve, content.EffectMutateReversible,
@@ -74,7 +74,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 			{Kind: content.ResourceDestination, ID: "*"},
 			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 			// The participant's kind (A11). No ordinary run's fence carries
-			// one — which is exactly what keeps wave.inbox off a
+			// one — which is exactly what keeps workers.inbox off a
 			// coordinator's offer — so this grant names it deliberately, to
 			// keep "every declared tool has a sentence" a claim about ALL of
 			// them rather than about the coordinator's set.

@@ -138,10 +138,10 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: "lane-1"}},
 	})
 	got = toolNames(t, requestTools(t, f.body()))
-	// wave.holdings is here for the same reason session.wait is: it is an
+	// workers.holdings is here for the same reason session.wait is: it is an
 	// observe tool over the session this grant already named, and asking
 	// what your own session is responsible for reaches nothing else.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say", "wave.wait"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
 	if !reflect.DeepEqual(got, wantSession) {
 		t.Fatalf("session grant declared tools %v, want exactly %v", got, wantSession)
 	}

@@ -342,7 +342,7 @@ type AgentEnroller interface {
 	Withdraw(lane lifecycle.LaneID)
 }
 
-// AgentReporter records what a wave participant says its own work produced
+// AgentReporter records what a worker participant says its own work produced
 // (nocx-dkawo.7). It is a SEPARATE seam from the enroller above, not a third
 // method on it, because the two answer different questions and one of them is
 // almost always absent: every integrated shell may enrol, and only a pane the

@@ -89,7 +89,7 @@ const (
 	// KindAgentWithdrawn answers a withdraw, so a caller can tell a close that
 	// happened from one that never arrived.
 	KindAgentWithdrawn EventKind = "agent_withdrawn"
-	// KindAgentReport is a wave participant saying what its own work
+	// KindAgentReport is a worker participant saying what its own work
 	// produced. It is one of exactly TWO things permitted to decide a
 	// participant's state — the other is its process exit — and it rides this
 	// channel for the reason the enrolment does: ADR-0024 decision 2 makes
@@ -412,7 +412,7 @@ type (
 		RequestID RequestID `json:"request"`
 	}
 
-	// AgentReport is what a wave participant says its work produced.
+	// AgentReport is what a worker participant says its work produced.
 	AgentReport struct {
 		RequestID RequestID `json:"request"`
 		// OK is the participant's OWN verdict, and there is no third value.

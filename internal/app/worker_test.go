@@ -1,0 +1,543 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/waittest"
+	"github.com/shady2k/nocx/internal/workers"
+	"github.com/shady2k/nocx/internal/workspace"
+)
+
+// workerTestPTYFactory gives every participant a stub PTY, so the test drives
+// the real session registry rather than a double of it: what is being asserted
+// is that a real session's exit reaches the record, and a fake session would
+// assert only that the fake was called.
+type workerTestPTYFactory struct {
+	log  log.Logger
+	mu   sync.Mutex
+	made []*recordingPTY
+}
+
+// last is the pty of the most recently opened session, which in these tests is
+// the one the caller just opened.
+func (f *workerTestPTYFactory) last() *recordingPTY {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.made) == 0 {
+		return nil
+	}
+	return f.made[len(f.made)-1]
+}
+
+// A FRESH pty per session, not one shared: a pty is what a session IS, so a
+// shared one would make closing any participant's session close every other
+// participant's too, and the exit assertions below would pass for the wrong
+// reason.
+//
+// It RECORDS what is written to it, because one thing the product does is
+// write into a pane a person is not looking at — the participant's first
+// command line, and the wake that starts an idle coordinator's turn — and a
+// stub that discarded them could only be asserted against by asking the code
+// what it believed it had done.
+func (f *workerTestPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error) {
+	p := &recordingPTY{Stub: pty.NewStub(f.log)}
+	f.mu.Lock()
+	f.made = append(f.made, p)
+	f.mu.Unlock()
+	return p, nil
+}
+
+// recordingPTY is a pty.Stub that keeps what was written to it.
+type recordingPTY struct {
+	*pty.Stub
+	mu      sync.Mutex
+	written []byte
+}
+
+func (p *recordingPTY) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	p.written = append(p.written, b...)
+	p.mu.Unlock()
+	return p.Stub.Write(b)
+}
+
+func (p *recordingPTY) read() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return string(p.written)
+}
+
+// workerStand is the composition this file asserts: the real record, the real
+// content store behind the layout chain, the real session registry, the real
+// session opener, and the two adapters that carry the facts.
+type workerStand struct {
+	db          content.ContentDB
+	workerStore workers.Store
+	// workerIDs is every worker this stand opened. The record answers "what is
+	// still open" per WORKER — there is no record-wide read, because nothing
+	// in the product asks that question — so teardown has to know which
+	// workerStore it made. ensureWorker is the one place a worker is opened, which is
+	// what keeps the list from drifting from the record.
+	workerIDs []workers.ID
+	dir       string
+	ptys      *workerTestPTYFactory
+	tp        *transport.WSServer
+	reg       *session.Reg
+	enrol     *workerEnrolments
+	lanes     *sessionRegistry
+	report    *workerReporter
+	record    *workers.Registrar
+	mu        sync.Mutex
+}
+
+func newWorkerStand(t *testing.T, opts ...workers.Option) *workerStand {
+	t.Helper()
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+
+	// Declared before the cleanup below, which reads the workerStore it opened;
+	// the fields are filled in at the end of this function.
+	stand := &workerStand{}
+
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	db, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    key,
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// The record, empty: it holds this backend's own participants and they
+	// die with it, so there is nothing to load and nothing to sweep.
+	workerStore := workers.NewMemoryStore()
+
+	ptys := &workerTestPTYFactory{log: logger}
+	reg := session.New(logger, ptys)
+	tp := transport.NewWSServer(logger, reg)
+	// Registered AFTER the store's cleanup so it runs BEFORE it: a session
+	// torn down by the harness reports its exit on its own goroutine, and a
+	// store already closed underneath that report turns an ordinary teardown
+	// into a log line that reads like a defect.
+	t.Cleanup(func() {
+		for _, s := range reg.List() {
+			_ = reg.Close(s.ID())
+		}
+		// The condition is the RECORD settling, not the registry emptying:
+		// Close returns before the supervisor's watcher has seen Done and
+		// reported the exit, so waiting on the registry would still leave a
+		// write racing the store's own teardown.
+		waittest.WaitFor(t, "every participant to reach a terminal state", func() bool {
+			for _, id := range stand.openedWorkers() {
+				open, err := workerStore.NonTerminal(ctx, id)
+				if err == nil && len(open) > 0 {
+					return false
+				}
+			}
+			return true
+		})
+		_ = tp.Stop(ctx)
+	})
+
+	enrol := newWorkerEnrolments(logger, reg)
+	lanes := newSessionRegistry()
+	report := &workerReporter{
+		lanes: lanes, enrol: enrol, log: logger,
+		now: func() time.Time { return time.UnixMilli(1_700_000_000_000).UTC() },
+	}
+	sup := &workerSupervisor{sessions: reg, log: logger}
+	record := workers.NewRegistrar(
+		workerStore,
+		&workerSpawner{
+			layout: db.Layout(), opener: tp, sessions: reg,
+			enrolments: enrol, workspace: string(workspace.Default), log: logger,
+		},
+		enrol, sup,
+		append([]workers.Option{
+			// Short, because every test here supplies the enrolment itself or
+			// deliberately withholds it; the number bounds the withheld case
+			// and decides nothing about the others.
+			workers.WithEnrolmentDeadline(2 * time.Second),
+			// The product's closer, over the real registry: a close here has
+			// to end a real session and let the exit reach the record by the
+			// ordinary path, which is the only thing that makes "close
+			// writes no state" checkable.
+			workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
+		}, opts...)...,
+	)
+	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
+		_, err := record.Declared(ctx, id, l, d)
+		return err
+	}
+	sup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
+		if _, err := record.Exited(ctx, id, l, e); err != nil {
+			t.Logf("recording exit for %s: %v", id, err)
+		}
+	}
+
+	*stand = workerStand{
+		db: db, workerStore: workerStore, dir: dir, ptys: ptys, tp: tp, reg: reg,
+		enrol: enrol, lanes: lanes, report: report, record: record,
+	}
+	stand.ensureWorker(t, "worker-1", "sess-coordinator")
+	return stand
+}
+
+// ensureWorker opens a worker and remembers it, so teardown can ask that worker
+// whether everything in it has settled.
+func (w *workerStand) ensureWorker(t *testing.T, id workers.ID, coordinatorSession string) {
+	t.Helper()
+	if err := w.workerStore.EnsureGroup(context.Background(), id, coordinatorSession); err != nil {
+		t.Fatalf("ensure worker %q: %v", id, err)
+	}
+	w.mu.Lock()
+	w.workerIDs = append(w.workerIDs, id)
+	w.mu.Unlock()
+}
+
+// openedWorkers is what teardown reads. Under the lock because a worker may be
+// opened from a test goroutine while the cleanup runs on the test's own.
+func (w *workerStand) openedWorkers() []workers.ID {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]workers.ID(nil), w.workerIDs...)
+}
+
+// registerWithEnrolment runs a registration and supplies the enrolment the
+// launcher would have sent, as soon as the session exists.
+//
+// It waits on an observable STATE — the session appearing in the registry —
+// and never on a duration, because a registration that needed a sleep to be
+// seen would be one whose ordering is not actually guaranteed.
+func (w *workerStand) registerWithEnrolment(t *testing.T, task string) workers.Participant {
+	t.Helper()
+	ctx := context.Background()
+
+	type outcome struct {
+		p   workers.Participant
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		p, err := w.record.Register(ctx, workers.RegisterRequest{
+			Group: "worker-1", CoordinatorSession: "sess-coordinator",
+			Role: workers.RoleWorker, Task: task, Command: "claude",
+		})
+		done <- outcome{p, err}
+	}()
+
+	var sid session.ID
+	waittest.WaitFor(t, "the participant's session to exist", func() bool {
+		for _, s := range w.reg.List() {
+			sid = s.ID()
+			return true
+		}
+		return false
+	})
+	w.lanes.register("lane-participant", string(sid))
+	w.enrol.enrolled(sid, "lane-participant")
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("register: %v", got.err)
+	}
+	return got.p
+}
+
+// The register interval, end to end through the real seams: a participant gets
+// a pane of its own, a session in it, and reaches live only once the enrolment
+// arrived.
+func TestAParticipantGetsAPaneASessionAndGoesLiveOnItsEnrolment(t *testing.T) {
+	ctx := context.Background()
+	stand := newWorkerStand(t)
+
+	p := stand.registerWithEnrolment(t, "read AGENTS.md and report")
+	if p.State != workers.StateLive {
+		t.Fatalf("state = %q, want %q", p.State, workers.StateLive)
+	}
+
+	// The pane is real and the session is the pipe of it, which is what makes
+	// the participant something a person can switch to and a block can be
+	// anchored on.
+	sess, err := stand.reg.Get(session.ID(p.Liveness.SessionID))
+	if err != nil {
+		t.Fatalf("the participant's session is not in the registry: %v", err)
+	}
+	if sess.PaneID() == "" {
+		t.Fatalf("the participant's session is the pipe of no pane")
+	}
+	snap, err := stand.db.Layout().Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("layout snapshot: %v", err)
+	}
+	found := false
+	for _, pane := range snap.Panes {
+		if pane.ID == sess.PaneID() {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the pane the session names is not in the layout chain")
+	}
+
+	// And the record holds it: what the registrar returned is what a reader
+	// of the record is told afterwards.
+	stored, err := stand.workerStore.Participant(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if stored.State != workers.StateLive || stored.Task != "read AGENTS.md and report" {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+// Live is entered on an enrolment that ARRIVED. A launcher that never enrols
+// leaves no participant anything may address, and no session behind it.
+func TestAParticipantThatNeverEnrolsIsTerminalizedAndItsSessionClosed(t *testing.T) {
+	ctx := context.Background()
+	stand := newWorkerStand(t)
+
+	p, err := stand.record.Register(ctx, workers.RegisterRequest{
+		Group: "worker-1", CoordinatorSession: "sess-coordinator",
+		Role: workers.RoleWorker, Task: "never starts", Command: "claude",
+	})
+	if !errors.Is(err, workers.ErrEnrolmentNeverArrived) {
+		t.Fatalf("register err = %v, want ErrEnrolmentNeverArrived", err)
+	}
+	stored, err := stand.workerStore.Participant(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !stored.State.Terminal() {
+		t.Fatalf("state = %q, want terminal", stored.State)
+	}
+	waittest.WaitFor(t, "the participant's session to be closed", func() bool {
+		return len(stand.reg.List()) == 0
+	})
+}
+
+// THE TWO FACTS, through the real carriers. The session exiting is the
+// observed one; nothing on a screen took part.
+func TestTheRealSessionExitReachesTheRecord(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an exit with no declaration is abandoned", func(t *testing.T) {
+		stand := newWorkerStand(t)
+		p := stand.registerWithEnrolment(t, "exits without saying anything")
+
+		if err := stand.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
+			t.Fatalf("close session: %v", err)
+		}
+		waittest.WaitFor(t, "the exit to reach the record", func() bool {
+			stored, err := stand.workerStore.Participant(ctx, p.ID)
+			return err == nil && stored.State == workers.StateAbandoned
+		})
+	})
+
+	t.Run("a declaration then an exit completes", func(t *testing.T) {
+		stand := newWorkerStand(t)
+		p := stand.registerWithEnrolment(t, "says what it did")
+
+		// The declaration alone must NOT terminalize: the agent said it
+		// finished and its process is still there.
+		declared, err := stand.record.Declared(ctx, p.ID, p.Liveness,
+			workers.Declaration{OK: true, Summary: "read it", At: time.Now()})
+		if err != nil {
+			t.Fatalf("declare: %v", err)
+		}
+		if declared.State != workers.StateLive {
+			t.Fatalf("state after a declaration alone = %q, want %q", declared.State, workers.StateLive)
+		}
+
+		if err := stand.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
+			t.Fatalf("close session: %v", err)
+		}
+		waittest.WaitFor(t, "the conjunction to complete", func() bool {
+			stored, perr := stand.workerStore.Participant(ctx, p.ID)
+			return perr == nil && stored.State == workers.StateCompleted
+		})
+	})
+}
+
+// D3, through the real store: the coordinator asks its SESSION and is told
+// what it holds, by name and with the task it was given.
+func TestAFreshCoordinatorIsToldWhatItsSessionHolds(t *testing.T) {
+	ctx := context.Background()
+	stand := newWorkerStand(t)
+	p := stand.registerWithEnrolment(t, "read AGENTS.md and report")
+
+	held, err := stand.record.HeldBy(ctx, "sess-coordinator")
+	if err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if len(held) != 1 || held[0].ID != p.ID {
+		t.Fatalf("held = %v, want exactly %q", held, p.ID)
+	}
+	if held[0].Task != "read AGENTS.md and report" {
+		t.Fatalf("the coordinator is told an id and not a task: %q", held[0].Task)
+	}
+}
+
+// An enrolment for a session no worker is waiting on is the ORDINARY case — a
+// person running an agent in their own tab — and must not be mistaken for a
+// participant.
+func TestAnEnrolmentNobodyIsWaitingForIsIgnored(t *testing.T) {
+	stand := newWorkerStand(t)
+	stand.enrol.enrolled(session.ID("some-other-session"), "lane-x")
+	if _, err := stand.enrol.Await(context.Background(), "no-such-participant"); err == nil {
+		t.Fatalf("an unrelated enrolment satisfied a participant that was never expected")
+	}
+}
+
+// The declaration reaches the record over the authenticated channel, and the
+// two facts still refuse to complete on their own.
+func TestADeclarationOverTheChannelReachesTheRecord(t *testing.T) {
+	ctx := context.Background()
+	stand := newWorkerStand(t)
+	p := stand.registerWithEnrolment(t, "says what it did")
+
+	if err := stand.report.Report("lane-participant", true, "read it"); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	stored, err := stand.workerStore.Participant(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if stored.Declared == nil {
+		t.Fatalf("the declaration did not reach the record")
+	}
+	if !stored.Declared.OK || stored.Declared.Summary != "read it" {
+		t.Fatalf("declaration = %+v", *stored.Declared)
+	}
+	// Still live: the agent said it finished and its process is still there.
+	if stored.State != workers.StateLive {
+		t.Fatalf("state = %q, want %q", stored.State, workers.StateLive)
+	}
+
+	if err := stand.reg.Close(session.ID(p.Liveness.SessionID)); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	waittest.WaitFor(t, "the conjunction to complete", func() bool {
+		got, perr := stand.workerStore.Participant(ctx, p.ID)
+		return perr == nil && got.State == workers.StateCompleted
+	})
+}
+
+// A pane that is not a participant is told so, rather than having its
+// declaration accepted into nowhere. This is the ordinary case: a person's own
+// agent may be integrated and enrolled and belongs to no workers.
+func TestAReportFromAPaneThatIsNotAParticipantIsRefused(t *testing.T) {
+	stand := newWorkerStand(t)
+	stand.lanes.register("lane-someones-own-tab", "some-session")
+
+	err := stand.report.Report("lane-someones-own-tab", true, "done")
+	if err == nil {
+		t.Fatalf("a report from a pane in no worker was accepted")
+	}
+	if !strings.Contains(err.Error(), "not part of a worker") {
+		t.Fatalf("err = %v, want a sentence naming the cause", err)
+	}
+}
+
+// A lane that maps to no session at all is refused with the sentence the
+// enroller uses for the same state, because it IS the same state.
+func TestAReportOnALaneThatNamesNoSessionIsRefused(t *testing.T) {
+	stand := newWorkerStand(t)
+	if err := stand.report.Report("lane-nobody", true, "done"); err == nil {
+		t.Fatalf("a report on an unmapped lane was accepted")
+	}
+}
+
+// THE EPIC'S HAPPY PATH, in one sequence and in order (nocx-dkawo.2).
+//
+// It runs on the product's own objects — the real encrypted store, the real
+// session registry, the real session opener, the real record and both real
+// carriers — rather than on a harness beside them. What it does not have is a
+// model: a coordinator RUN needs an endpoint, so the coordinator's two calls
+// are exercised where they live (internal/assistant) and the sequence they
+// drive is exercised here.
+func TestOneCoordinatorStartsOneWorkerAndIsToldWhatItCameTo(t *testing.T) {
+	ctx := context.Background()
+	stand := newWorkerStand(t)
+
+	// 1. The coordinator starts one worker and gives it a task.
+	worker := stand.registerWithEnrolment(t, "read AGENTS.md and report")
+	if worker.State != workers.StateLive {
+		t.Fatalf("the worker is %q, want %q", worker.State, workers.StateLive)
+	}
+
+	// 2. The coordinator goes idle. Nothing here stands in for that, and
+	//    that is the assertion: no lease is renewed, no call is outstanding,
+	//    and the steps below hold anyway because the BACKEND is what watches.
+
+	// 3. A fresh coordinator — a new run of the same session, holding none of
+	//    the previous run's context — asks what its session holds and is told
+	//    by name and by task.
+	held, err := stand.record.HeldBy(ctx, "sess-coordinator")
+	if err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if len(held) != 1 || held[0].ID != worker.ID {
+		t.Fatalf("held = %v, want exactly the worker %q", held, worker.ID)
+	}
+	if held[0].Task != "read AGENTS.md and report" {
+		t.Fatalf("the coordinator is told an id and not a task: %q", held[0].Task)
+	}
+	if held[0].State != workers.StateLive {
+		t.Fatalf("the worker reads %q to a fresh coordinator", held[0].State)
+	}
+
+	// 4. The worker declares what it produced. Still live: it said it
+	//    finished and its process is still there.
+	if reportErr := stand.report.Report("lane-participant", true, "read it; nothing to change"); reportErr != nil {
+		t.Fatalf("report: %v", reportErr)
+	}
+	after, err := stand.workerStore.Participant(ctx, worker.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if after.State != workers.StateLive {
+		t.Fatalf("a declaration alone moved the worker to %q", after.State)
+	}
+
+	// 5. Its process exits. Only now, and only because BOTH facts are in, is
+	//    it complete.
+	if closeErr := stand.reg.Close(session.ID(worker.Liveness.SessionID)); closeErr != nil {
+		t.Fatalf("close the worker's session: %v", closeErr)
+	}
+	waittest.WaitFor(t, "the worker to complete", func() bool {
+		got, perr := stand.workerStore.Participant(ctx, worker.ID)
+		return perr == nil && got.State == workers.StateCompleted
+	})
+
+	// 6. And the coordinator is told what it came to, in the worker's own
+	//    words, without having held anything across the turn.
+	held, err = stand.record.HeldBy(ctx, "sess-coordinator")
+	if err != nil {
+		t.Fatalf("held by: %v", err)
+	}
+	if len(held) != 1 || held[0].State != workers.StateCompleted {
+		t.Fatalf("held = %v, want the worker completed", held)
+	}
+	if held[0].Declared == nil || held[0].Declared.Summary != "read it; nothing to change" {
+		t.Fatalf("the coordinator was not told what the worker produced: %+v", held[0].Declared)
+	}
+}

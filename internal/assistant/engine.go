@@ -409,17 +409,17 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
-			noteOperation:    p.NoteOperation,
-			snippetOperation: p.SnippetOperation,
-			skills:           p.Skills,
-			skillDraft:       p.SkillDraft,
-			skillDraftHTTP:   c.http,
-			fetcher:          p.Fetcher,
-			snapshots:        c.snapshots,
-			runID:            p.RunID,
-			expansions:       p.Expansions,
-			waves:            p.Waves,
-			waveEnvironment:  p.WaveEnvironment,
+			noteOperation:     p.NoteOperation,
+			snippetOperation:  p.SnippetOperation,
+			skills:            p.Skills,
+			skillDraft:        p.SkillDraft,
+			skillDraftHTTP:    c.http,
+			fetcher:           p.Fetcher,
+			snapshots:         c.snapshots,
+			runID:             p.RunID,
+			expansions:        p.Expansions,
+			workerStore:       p.Workers,
+			workerEnvironment: p.WorkerEnvironment,
 		})
 		if err != nil {
 			return err

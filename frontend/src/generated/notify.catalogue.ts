@@ -32,7 +32,7 @@ export interface Kind {
     | 'transfer.finished'
     | 'program.notify'
     | 'bell'
-    | 'wave.undispatched'
+    | 'workers.undispatched'
     | 'pane.workFinished'
   /**
    * The noun phrase shown wherever the notification kind is named.

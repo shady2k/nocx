@@ -239,7 +239,7 @@ type Base struct {
 	// NeedsReview marks a profile whose identity was resolved from local
 	// state during import. Such profiles must be reviewed by a human before
 	// they can be resolved for connection. The resolver refuses profiles
-	// with this flag set; the UI for clearing it belongs to a later wave.
+	// with this flag set; the UI for clearing it belongs to a later workers.
 	NeedsReview bool `json:"needsReview,omitempty"`
 }
 
@@ -662,7 +662,7 @@ type FieldSource string
 const (
 	FieldSourceProfile FieldSource = "profile" // explicitly set on the stored profile
 	FieldSourceGroup   FieldSource = "group:"  // prefix — actual source is "group:<id>"
-	FieldSourceGlobal  FieldSource = "global"  // global defaults (Wave 2a: not yet wired to a store)
+	FieldSourceGlobal  FieldSource = "global"  // global defaults (Group 2a: not yet wired to a store)
 	FieldSourceDefault FieldSource = "default" // hardcoded application default
 )
 

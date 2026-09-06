@@ -1029,7 +1029,7 @@ func TestBroker_UndecodableResultIsAnError(t *testing.T) {
 	}
 }
 
-// ── review findings (nocx-e2j1z wave 2) ──────────────────────────────────
+// ── review findings (nocx-e2j1z worker 2) ──────────────────────────────────
 
 // TestBroker_PreCancelledContextPerformsNoDelivery is finding 1's first end:
 // a context cancelled BEFORE the call performs no delivery at all — the

@@ -439,30 +439,30 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.create":    {content.EffectMutateReversible},
 		"skills.update":    {content.EffectMutateReversible},
 		"skills.delete":    {content.EffectMutateReversible},
-		"wave.holdings":    {content.EffectObserve},
+		"workers.holdings": {content.EffectObserve},
 		// DELEGATE and nothing else. Handing work to another agent is what
 		// the seventh member of the closed lattice already names, so a
 		// `spawn` effect would be an eighth expressing the same thing.
-		"wave.spawn": {content.EffectDelegate},
+		"workers.spawn": {content.EffectDelegate},
 		// OBSERVE and not SEND-INPUT, and the distinction is load-bearing.
 		// Send-input is typing into a pane and is what a human takeover
 		// suspends; leaving a message in a mailbox reaches nobody's
 		// keyboard, cannot answer a modal, and must go on working while a
 		// person helps their own worker past a prompt.
-		"wave.say": {content.EffectObserve},
+		"workers.say": {content.EffectObserve},
 		// OBSERVE for the wait, for session.wait's reason: waiting starts
 		// nothing, ends nothing, and names nothing outside the session the
 		// grant already named.
-		"wave.wait": {content.EffectObserve},
+		"workers.wait": {content.EffectObserve},
 		// MUTATE-DESTRUCTIVE for the close, and it is NOT session.wait's
 		// `stop`. That one withdraws an authority already in flight; this
 		// ends a process the person may never have watched start, whose work
 		// is lost with it.
-		"wave.close": {content.EffectMutateDestructive},
-		// OBSERVE for the inbox, read from the other end of wave.say: taking
+		"workers.close": {content.EffectMutateDestructive},
+		// OBSERVE for the inbox, read from the other end of workers.say: taking
 		// a message out of your own mailbox exercises no authority over
 		// anything but your own reading position.
-		"wave.inbox": {content.EffectObserve},
+		"workers.inbox": {content.EffectObserve},
 	}
 	if len(declarations) != 28 {
 		t.Fatalf("declaration count = %d, want 28", len(declarations))
@@ -582,12 +582,12 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
-		"wave.holdings.schema.json":    waveHoldingsSchema,
-		"wave.say.schema.json":         waveSaySchema,
-		"wave.wait.schema.json":        waveWaitSchema,
-		"wave.close.schema.json":       waveCloseSchema,
-		"wave.spawn.schema.json":       waveSpawnSchema,
-		"wave.inbox.schema.json":       waveInboxSchema,
+		"workers.holdings.schema.json": workerHoldingsSchema,
+		"workers.say.schema.json":      workerSaySchema,
+		"workers.wait.schema.json":     workerWaitSchema,
+		"workers.close.schema.json":    workerCloseSchema,
+		"workers.spawn.schema.json":    workerSpawnSchema,
+		"workers.inbox.schema.json":    workerInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -635,26 +635,26 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// session.wait joins the list: it is an observe tool over a session, and
 	// the right to keep waiting on a command travels with the right to have
 	// started one (nocx-6dzxq).
-	// wave.holdings joins them for the same reason session.wait did: it is
+	// workers.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "wave.holdings", "wave.say", "wave.wait"}
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
 	// The session.run row's set includes mutate-destructive + session. A grant
 	// carrying exactly that effect and kind offers exactly session.run and
-	// wave.close; an observe grant also offers session.run because observe is
-	// another reachable member, and does NOT offer wave.close, which declares
+	// workers.close; an observe grant also offers session.run because observe is
+	// another reachable member, and does NOT offer workers.close, which declares
 	// mutate-destructive alone. That asymmetry is the point: ending a worker
 	// is not something a run permitted only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	wantDestructive := []string{"session.run", "wave.close"}
+	wantDestructive := []string{"session.run", "workers.close"}
 	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
 	}
-	if containsName(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)), "wave.close") {
-		t.Fatalf("an observe grant offers wave.close; ending a worker is not looking at one")
+	if containsName(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)), "workers.close") {
+		t.Fatalf("an observe grant offers workers.close; ending a worker is not looking at one")
 	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
@@ -742,12 +742,12 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.create.schema.json":    skillsReadSchema,
 		"skills.update.schema.json":    skillsReadSchema,
 		"skills.delete.schema.json":    skillsReadSchema,
-		"wave.holdings.schema.json":    waveHoldingsSchema,
-		"wave.say.schema.json":         waveSaySchema,
-		"wave.wait.schema.json":        waveWaitSchema,
-		"wave.close.schema.json":       waveCloseSchema,
-		"wave.spawn.schema.json":       waveSpawnSchema,
-		"wave.inbox.schema.json":       waveInboxSchema,
+		"workers.holdings.schema.json": workerHoldingsSchema,
+		"workers.say.schema.json":      workerSaySchema,
+		"workers.wait.schema.json":     workerWaitSchema,
+		"workers.close.schema.json":    workerCloseSchema,
+		"workers.spawn.schema.json":    workerSpawnSchema,
+		"workers.inbox.schema.json":    workerInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1407,11 +1407,11 @@ func TestSessionRunDefersToRunLease(t *testing.T) {
 	}
 }
 
-// The wave tools' schemas, as this package's tests need them: a params shape
+// The worker tools' schemas, as this package's tests need them: a params shape
 // and a result shape. The real ones live in contracts/tools and are asserted
 // against the wire elsewhere; these exist so an assembly test does not depend
 // on the whole directory.
-const waveHoldingsSchema = `{
+const workerHoldingsSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -1424,7 +1424,7 @@ const waveHoldingsSchema = `{
   }}
 }`
 
-const waveInboxSchema = `{
+const workerInboxSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -1441,7 +1441,7 @@ const waveInboxSchema = `{
   }}
 }`
 
-const waveWaitSchema = `{
+const workerWaitSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -1454,7 +1454,7 @@ const waveWaitSchema = `{
   }}
 }`
 
-const waveCloseSchema = `{
+const workerCloseSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["worker"],
@@ -1467,7 +1467,7 @@ const waveCloseSchema = `{
   }}
 }`
 
-const waveSaySchema = `{
+const workerSaySchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["worker", "message"],
@@ -1480,7 +1480,7 @@ const waveSaySchema = `{
   }}
 }`
 
-const waveSpawnSchema = `{
+const workerSpawnSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["command", "task"],

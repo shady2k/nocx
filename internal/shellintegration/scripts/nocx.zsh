@@ -496,7 +496,7 @@ __nocx_agent_geometry() {
 
 # The declaration drop. See nocx.bash for the argument; the shape is the same
 # because the two scripts are two implementations of one protocol, and a
-# worker that could declare in bash and not in zsh would be a wave whose
+# worker that could declare in bash and not in zsh would be a worker group whose
 # completions depended on the person's login shell.
 __nocx_agent_report_path=
 __nocx_agent_report_open() {

@@ -33,7 +33,7 @@ package transport
 //
 // The AD-6 amendment grants an enrolled pane's grid exactly two powers, and
 // this exercises the first of them by name: whether nocx may write into this
-// pane. It opens no enrolment, moves no wave state, lights no indicator, and
+// pane. It opens no enrolment, moves no worker state, lights no indicator, and
 // decides nothing here — the decision is internal/agenttyping's, twice, on two
 // frames it reads itself.
 

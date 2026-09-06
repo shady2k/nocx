@@ -62,7 +62,7 @@ func (SystemPeerCredentials) PeerUID(conn *net.UnixConn) (uint32, error) {
 
 // PeerPID reports the pid the kernel recorded when the peer connected.
 //
-// A bare pid is racy the moment it is read. internal/wavepin is what stops
+// A bare pid is racy the moment it is read. internal/peerpin is what stops
 // it being bare by pairing it with the start time.
 func (SystemPeerCredentials) PeerPID(conn *net.UnixConn) (int, error) {
 	if conn == nil {

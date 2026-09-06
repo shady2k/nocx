@@ -141,6 +141,64 @@ registry adapters. The assistant already searches, reads a page, follows it to a
 repository and lists a directory. "The person does not hunt for a raw URL"
 arrives without a machine built for it.
 
+**Corrected 2026-09-06 (`nocx-y30kd`). Two of those four verbs are false about
+this product, and the paragraph above is left standing only so the next reader
+recognises the sentence and stops rather than deriving the same deletion
+again.**
+
+The assistant does not search. Its registry is 23 tools
+(`internal/agenttools/session_registry_test.go:17`) and exactly one of them
+looks outward: `fetch.url` (`internal/agenttools/registry.go:348`) takes one
+address and returns bounded UTF-8 text. There is no second outward tool, and no
+search of any kind. The assistant also cannot list a directory —
+`internal/skill/bundle.go:12` states it as the reason bundles are enumerated
+from the body: "A bare URL cannot list a directory — there is no directory,
+only" one HTTP address. So the machine was removed by citing capabilities that
+do not exist, and what the deletion actually buys is the behaviour measured on
+2026-09-06: given `https://www.agentmail.to/docs/integrations/skills`, one run
+read the page and proposed running `npx skills add …` off it, and another
+declined to call the installer at all. Neither installed anything. A person who
+holds a link to a repository of nine skills gets, at best, one of them, and is
+never told the other eight exist.
+
+Two of the six therefore stay deleted and four come back.
+
+**Deleted, and rightly.** The HTML parser and the candidate extractor: reading a
+page is what `fetch.url` plus a model is for, and a parser of arbitrary marketing
+HTML is a machine we would maintain forever for a job the model does adequately.
+
+**Restored, because nothing in the product does them.** The GitHub adapter,
+ref-to-commit resolution, the origin-transition display, and registry adapters
+when a registry is added. These are not reading — they are enumeration and
+pinning, and they are exactly what an address alone cannot do.
+
+The shape that follows is one the two halves each do what they are good at: the
+agent finds the SOURCE, nocx mechanically turns it into an immutable install
+plan, the person approves the plan. The unit of acquisition is a repository; the
+unit of installation is a skill or an explicitly chosen set. Mechanically means
+a new read-only `skills.resolve`: canonical repository, requested ref, the
+**resolved commit**, the candidates with path, name and description, and a
+short-lived token. `skills.install` then takes the token and explicit paths, and
+the backend fetches from that commit — the model does not carry the bytes. Both
+facts are recorded: the ref as the update channel, the commit as the immutable
+one.
+
+**The rule that makes walking a page safe: from a page you may take a FACT and
+never a COMMAND.** "The skill lives in repository X" is evidence, and we go and
+check it. "Run `npx skills add …`" is an instruction, and it is never executed.
+That is precisely what the measured run walked into.
+
+First version: public GitHub and GitLab. Private repositories are deferred
+**explicitly** — somebody else's git credentials are a design about secrets, not
+another shape of address.
+
+And this changes nothing about authenticity, which the next two paragraphs
+already say plainly: a mechanical resolver is not evidence that a repository is
+official, and a substituted page leads mechanically to a hostile repository just
+as well as a real one leads to a real one. What the resolver buys is that the
+source is shown, the transition between sources is shown, the person chose
+explicitly, and the skill lands disabled (§8).
+
 **Settings keeps management and loses acquisition.** The list, the enable switch,
 deletion and change detection have no conversational substitute and stay. The
 paste box, the parse and the candidate picker go.
@@ -285,7 +343,12 @@ them.
 ## 9. What is still open
 
 Nothing from the original five. §2's wording question was answered and shipped
-(`nocx-5vztb`); §5's acquisition and §7's `scripts/` are settled above.
+(`nocx-5vztb`); §7's `scripts/` is settled above.
+
+§5's acquisition is **partly reopened** by the 2026-09-06 correction: the
+principle stands — the agent acquires, Settings keeps management and loses the
+paste box — but the resolver it deleted has to be built, and it is an epic with
+a spec of its own rather than a paragraph here.
 
 ## 10. Provenance of this document
 

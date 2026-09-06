@@ -307,7 +307,7 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await expect(doc.locator('.ui-md-body p')).toHaveText(
       `Acknowledge the page, then follow the helper in ${SETUP_FILE} (${nonce}).`,
     )
-    await expect(card.locator('.ui-fact-list')).toHaveCount(0)
+    await expect(doc.locator('.ui-fact-list')).toHaveCount(0)
     // Read-only: there is nothing in the reader a person could type into.
     await expect(doc.locator('input, textarea, [contenteditable="true"]')).toHaveCount(0)
     // A rendered document is still somebody else's bytes: the renderer never

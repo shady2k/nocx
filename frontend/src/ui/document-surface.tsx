@@ -183,14 +183,24 @@ export function DocumentSurface(props: DocumentSurfaceProps): JSX.Element {
    *  preview-only document is not an editor with its editor hidden. */
   const hasSource = (): boolean => sourceOptions() !== null
 
+  let currentOnChange: ((text: string) => void) | undefined
+  createEffect(() => {
+    currentOnChange = props.readOnly ? undefined : props.onChange
+  })
+
   const buildHost = (): void => {
     const options = sourceOptions()
     if (!options || !sourceEl) return
     controller = new AbortController()
     const readOnly = props.readOnly
+    currentOnChange = readOnly ? undefined : props.onChange
     const searchable = props.search === 'enabled'
     const content = options.wrap === 'soft' ? 'prose' : 'code'
-    const onChange = readOnly ? undefined : props.onChange
+    const onChange = readOnly
+      ? undefined
+      : (text: string): void => {
+          currentOnChange?.(text)
+        }
     host = readOnly ? new ReadOnlyHost(content, searchable) : new EditableHost(content, searchable)
     host.mount(
       sourceEl,

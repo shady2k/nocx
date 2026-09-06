@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { EditorView } from '@codemirror/view'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DocumentSurface,
   type DocumentSurfaceHandle,
@@ -152,5 +153,35 @@ describe('DocumentSurface', () => {
     expect(document.querySelector('.ui-document-surface__source')?.hasAttribute('hidden')).toBe(
       false,
     )
+  })
+  it('uses the current editable change handler after the prop changes', () => {
+    const first = vi.fn()
+    const second = vi.fn()
+    const [handler, setHandler] = createSignal<(text: string) => void>(first)
+    render(() => (
+      <DocumentSurface
+        text={'one\ntwo'}
+        documentKey="document"
+        ariaLabel="Document source"
+        search="enabled"
+        height="field"
+        readOnly={false}
+        language="plain"
+        presentation={{
+          kind: 'source',
+          source: { wrap: 'none', lineNumbers: false },
+        }}
+        onChange={handler()}
+      />
+    ))
+
+    first.mockClear()
+    setHandler(() => second)
+    const content = document.querySelector('.cm-content') as HTMLElement
+    const editor = EditorView.findFromDOM(content)!
+    editor.dispatch({ changes: { from: editor.state.doc.length, insert: '!' } })
+
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledWith('one\ntwo!')
   })
 })

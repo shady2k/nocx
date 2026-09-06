@@ -347,15 +347,39 @@ What stands, because it was checked rather than summarised:
   visible to one clone, marked `proposed` for a person who will never see it. The
   generated `.claude/CLAUDE.md` says otherwise; this file wins.
 
-**In a worktree it needs two commands, and one hazard needs watching.** The MCP registration
-is user-scope and path-less, so it resolves whichever repo you are in — do not pin a path
-into it, or every worktree silently answers about `main`, stale on exactly the files you are
-there to change. The agent read-hooks follow the repo path already. What does not come free:
+**The MCP registration is path-less on purpose, and it lives in two places.** It resolves
+whichever repo you are in — do not pin a path into it, or every worktree silently answers
+about `main`, stale on exactly the files you are there to change. The two places are not
+interchangeable: `~/.claude.json` is user-scope and **only Claude Code reads it**, while
+the tracked `.mcp.json` at the repo root is what every other agent reads. omp loads the
+project root's `.mcp.json` (`mcp.enableProjectConfig`, on by default) and has no user-level
+`~/.omp/agent/mcp.json` at all — so before 2026-09-06, when `.mcp.json` carried only
+`playwright-test`, every omp worker ran blind and reported it could not connect
+(`nocx-yftjl`). A new agent gets repowise by being added to `.mcp.json`, not to the Claude
+config.
+
+**In a worktree the index does not come free, and we build it on demand.** Owner's
+decision, 2026-09-06: a worktree gets its index when somebody is about to work in it, not
+in advance. An unindexed worktree still STARTS the MCP server — every tool then answers
+"no index, run repowise init", which reads to a worker as a broken connection rather than
+as a missing index, so know the difference before you debug it.
 
 ```bash
-repowise init -y        # seeds from the base checkout: ~1m47s, $0, and 359 MB of its own
+REPOWISE_SKIP_EDITOR_SETUP=1 repowise init -y --no-prose --no-editor-setup
 repowise hook install   # post-commit sync; per worktree
 ```
+
+Measured 2026-09-06 on the `nocx-8nktm-why-trace` worktree: **6m48s, 373 MB, $0** — no
+provider, no key, 0 tokens, 3719 pages. This paragraph used to promise ~1m47s and 359 MB;
+that number is withdrawn, it does not survive the repo's current size. Budget seven
+minutes, and do not start it in a worktree you are about to throw away. `--no-editor-setup`
+is what keeps `init` from writing `.claude/CLAUDE.md`, `.vscode/mcp.json` and the managed
+`AGENTS.md` into a branch that may not ignore them; `--no-prose` is what keeps it free.
+
+An empty `.repowise/` is not an index. Seven worktrees carry a ~700 KB `wiki.db` with **0
+pages** from an init that never finished; `repowise status` prints `Total pages 0` and every
+tool behaves exactly as if the directory were absent. Check the page count, not the
+directory.
 
 **Do not `git add -A` in a worktree whose branch predates this.** `.repowise/` and
 `.claude/CLAUDE.md` are ignored on `main` only; on an older branch they show up untracked,

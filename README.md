@@ -423,6 +423,24 @@ not install them:
   per-agent variant. (Inside a running session the same two steps are
   `/plugin marketplace add …` and `/plugin install …`.)
 
+#### repowise
+
+Optional, and local to your clone — it is the second way into the code, for
+questions about history and risk rather than "does this exist". `AGENTS.md`
+says what it may and may not be believed about.
+
+```bash
+repowise init -y        # in a worktree add --no-prose --no-editor-setup; ~7 min, 373 MB, $0
+repowise serve          # web UI on http://127.0.0.1:3000, API on :7337
+```
+
+`serve` prints its own ports and records them in `.repowise/serve.lock.json`;
+they are **not** fixed, so read the lock file rather than trusting a port you
+remember. Nothing starts it for you and there is no service — run it when you
+want the wiki, Ctrl-C when you are done. Its **Chat is broken** (`nocx-cvd55`):
+the UI proxy stalls the moment the agent calls a tool, so any real question
+hangs there while the MCP tools answer it fine.
+
 ## License
 
 TBD. Dependencies are MIT and Apache 2.0 — preserve their copyright notices:

@@ -3,6 +3,11 @@
     "playwright-test": {
       "command": "npx",
       "args": ["playwright", "run-test-mcp-server"]
+    },
+    "repowise": {
+      "command": "repowise",
+      "args": ["mcp", "--transport", "stdio"],
+      "description": "repowise: codebase intelligence — docs, graph, git signals, dead code, decisions"
     }
   }
 }

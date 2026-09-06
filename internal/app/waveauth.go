@@ -125,6 +125,7 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 	}
 
 	var admitted session.ID
+	var admittedSession session.Session
 	for _, sess := range a.sessions.List() {
 		sid := sess.ID()
 		if sid == "" || !a.enrolments.Enrolled(string(sid)) {
@@ -151,6 +152,7 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 			return assistant.WaveInvocation{}, nil, waveendpoint.ErrNotEnrolled
 		}
 		admitted = sid
+		admittedSession = sess
 	}
 	if admitted == "" {
 		return assistant.WaveInvocation{}, nil, waveendpoint.ErrNotEnrolled
@@ -190,7 +192,7 @@ func (a *waveAuthorizer) Admit(peer waveendpoint.Peer) (assistant.WaveInvocation
 			Session:   string(admitted),
 			Workspace: a.workspace,
 		},
-		Grant: waveCallerGrant(admitted),
+		Grant: waveCallerGrant(admitted, waveEnvironmentForSession(admittedSession)),
 	}, release, nil
 }
 
@@ -234,7 +236,18 @@ func waveParticipantGrant(workspace string) content.Grant {
 	})
 }
 
-func waveCallerGrant(sid session.ID) content.Grant {
+func waveEnvironmentForSession(sess session.Session) string {
+	// Admit currently refuses sessions whose root process the backend did not
+	// launch, so every admitted session is local today; derive this identity
+	// from the admitted session for when remote admission exists.
+	environmentKind := content.EnvLocal
+	if sess.Kind() == session.KindRemote {
+		environmentKind = content.EnvSSH
+	}
+	return content.EnvironmentIDFor(environmentKind, sess.Host())
+}
+
+func waveCallerGrant(sid session.ID, environmentID string) content.Grant {
 	permit := content.EffectRow{Decision: content.DecisionPermit}
 	refuse := content.EffectRow{Decision: content.DecisionRefuse}
 	return content.EffectPolicy{
@@ -247,7 +260,7 @@ func waveCallerGrant(sid session.ID) content.Grant {
 		Delegate:          permit,
 	}.AsGrant([]content.GrantScope{
 		{Kind: content.ResourceSession, ID: string(sid)},
-		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+		{Kind: content.ResourceEnvironment, ID: environmentID},
 	})
 }
 

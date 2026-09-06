@@ -285,7 +285,7 @@ func inProcessInvocation(sid session.ID, method, params string) assistant.WaveIn
 	return assistant.WaveInvocation{
 		Context:    context.Background(),
 		RunContext: agenttools.RunContext{RunID: "run-in-process", Session: string(sid)},
-		Grant:      waveCallerGrant(sid),
+		Grant:      waveCallerGrant(sid, content.EnvironmentIDFor(content.EnvLocal, "")),
 		Method:     method,
 		RawParams:  []byte(params),
 	}

@@ -72,6 +72,27 @@ func openWaveAuthSession(t *testing.T) (*session.Reg, session.Session, *panegrid
 	return reg, sess, grid
 }
 
+type waveAuthSessionOverride struct {
+	session.Session
+	kind session.Kind
+	host string
+}
+
+func (s waveAuthSessionOverride) Kind() session.Kind { return s.kind }
+func (s waveAuthSessionOverride) Host() string       { return s.host }
+
+type waveAuthSessionSet struct {
+	sessions []session.Session
+	owned    map[session.ID]int
+}
+
+func (s waveAuthSessionSet) List() []session.Session { return s.sessions }
+
+func (s waveAuthSessionSet) OwnedProcessPID(id session.ID) (int, bool) {
+	pid, ok := s.owned[id]
+	return pid, ok
+}
+
 func TestWaveAuthorizerAdmitsEnrolledOwnedTreeThroughRealWaveRecord(t *testing.T) {
 	reg, sess, grid := openWaveAuthSession(t)
 	const ownedPID = 4242
@@ -104,11 +125,17 @@ func TestWaveAuthorizerAdmitsEnrolledOwnedTreeThroughRealWaveRecord(t *testing.T
 	}
 
 	localEnv := content.EnvironmentIDFor(content.EnvLocal, "")
+	var environmentScopes []content.GrantScope
+	for _, scope := range inv.Grant.Scopes {
+		if scope.Kind == content.ResourceEnvironment {
+			environmentScopes = append(environmentScopes, scope)
+		}
+	}
+	if len(environmentScopes) != 1 || environmentScopes[0].ID != localEnv {
+		t.Fatalf("environment scopes = %+v, want exactly one local scope %q", environmentScopes, localEnv)
+	}
 	if !containsGrantScope(inv.Grant, content.ResourceSession, string(sess.ID())) {
 		t.Fatalf("grant has no session scope: %+v", inv.Grant.Scopes)
-	}
-	if !containsGrantScope(inv.Grant, content.ResourceEnvironment, localEnv) {
-		t.Fatalf("grant has no local environment scope: %+v", inv.Grant.Scopes)
 	}
 	if inv.Grant.Policy.DecisionFor(content.EffectDelegate) != content.DecisionPermit {
 		t.Fatalf("delegate effect = %q, want permit", inv.Grant.Policy.DecisionFor(content.EffectDelegate))
@@ -134,6 +161,30 @@ func TestWaveAuthorizerAdmitsEnrolledOwnedTreeThroughRealWaveRecord(t *testing.T
 	}
 	if result == "" {
 		t.Fatal("dispatch returned an empty holdings result")
+	}
+}
+
+func TestWaveCallerGrantDerivesEnvironmentFromSession(t *testing.T) {
+	_, local, _ := openWaveAuthSession(t)
+	remote := waveAuthSessionOverride{
+		Session: local,
+		kind:    session.KindRemote,
+		host:    "build.example.com",
+	}
+	environmentID := waveEnvironmentForSession(remote)
+	grant := waveCallerGrant(remote.ID(), environmentID)
+	want := content.EnvironmentIDFor(content.EnvSSH, remote.Host())
+	var environments []content.GrantScope
+	for _, scope := range grant.Scopes {
+		if scope.Kind == content.ResourceEnvironment {
+			environments = append(environments, scope)
+		}
+	}
+	if len(environments) != 1 {
+		t.Fatalf("environment scopes = %+v, want exactly one", environments)
+	}
+	if environments[0].ID != want {
+		t.Fatalf("environment scope = %q, want session environment %q", environments[0].ID, want)
 	}
 }
 
@@ -182,19 +233,28 @@ func TestWaveAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 	}
 }
 
-func TestWaveAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
-	reg, sess, grid := openWaveAuthSession(t)
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+func TestWaveAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
+	_, local, grid := openWaveAuthSession(t)
+	remote := waveAuthSessionOverride{
+		Session: local,
+		kind:    session.KindRemote,
+		host:    "build.example.com",
+	}
+	if err := grid.Enrol(string(remote.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
+	}
+	sessions := waveAuthSessionSet{
+		sessions: []session.Session{remote},
+		owned:    map[session.ID]int{},
 	}
 	pinner := &waveAuthPinner{
 		root:   wavepin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
+	auth := newWaveAuthorizer(pinner, sessions, grid, emptyWaveRecord(), waveTestWorkspace)
 	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
-		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)
+		t.Fatalf("remote session admission error = %v, want ErrNotEnrolled", err)
 	}
 }
 

@@ -191,6 +191,158 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestGroupEndpoint_CatalogueUsesAdmittedGrantAndIgnoresParams(t *testing.T) {
+	registry, err := agenttools.Assemble(tools.Schemas)
+	if err != nil {
+		t.Fatalf("assemble worker tools: %v", err)
+	}
+	dispatcher, err := assistant.NewToolDispatcher(
+		registry,
+		contractWorkerRecord{},
+		content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if err != nil {
+		t.Fatalf("new worker dispatcher: %v", err)
+	}
+	grant := contractGrant()
+	auth := &testAuthorizer{inv: assistant.ToolInvocation{
+		Context:    context.Background(),
+		RunContext: agenttools.RunContext{RunID: "run-1", Session: "session-1"},
+		Grant:      grant,
+	}}
+	endpoint := startEndpoint(t, Config{
+		Dir:      t.TempDir(),
+		Peers:    testPeers{uid: 1000, pid: 1234},
+		Owner:    testOwner{uid: 1000},
+		SelfUID:  1000,
+		Auth:     auth,
+		Dispatch: dispatcher,
+		Logger:   testLogger(),
+	})
+
+	conn := dialEndpoint(t, endpoint)
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"tools.catalogue","params":{"name":"workers.inbox"}}`+"\n"); err != nil {
+		t.Fatalf("write catalogue request: %v", err)
+	}
+	response := readResponse(t, conn)
+	if response.Error != nil {
+		t.Fatalf("catalogue response error = %+v", response.Error)
+	}
+	assertCatalogueToolKeys(t, response.Result)
+	var result struct {
+		Tools []struct {
+			Name    string          `json:"name"`
+			Summary string          `json:"summary"`
+			Params  json.RawMessage `json:"params"`
+			Result  json.RawMessage `json:"result"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatalf("decode catalogue result: %v", err)
+	}
+	expected := registry.ForGrant(grant)
+	if len(result.Tools) != len(expected) {
+		t.Fatalf("catalogue has %d tools, want %d", len(result.Tools), len(expected))
+	}
+	for i, tool := range expected {
+		got := result.Tools[i]
+		if got.Name != tool.Name || got.Summary != tool.Description {
+			t.Fatalf("catalogue tool %d = %#v, want name %q summary %q", i, got, tool.Name, tool.Description)
+		}
+		if !bytes.Equal(compactJSON(got.Params), compactJSON(tool.ParamsSchema)) {
+			t.Fatalf("catalogue tool %q params = %s, want %s", tool.Name, got.Params, tool.ParamsSchema)
+		}
+		if !bytes.Equal(compactJSON(got.Result), compactJSON(tool.ResultSchema)) {
+			t.Fatalf("catalogue tool %q result = %s, want %s", tool.Name, got.Result, tool.ResultSchema)
+		}
+	}
+}
+
+func TestGroupEndpoint_EmptyCatalogueIsSuccessful(t *testing.T) {
+	registry, err := agenttools.Assemble(tools.Schemas)
+	if err != nil {
+		t.Fatalf("assemble worker tools: %v", err)
+	}
+	dispatcher, err := assistant.NewToolDispatcher(
+		registry,
+		contractWorkerRecord{},
+		content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if err != nil {
+		t.Fatalf("new worker dispatcher: %v", err)
+	}
+	auth := &testAuthorizer{inv: assistant.ToolInvocation{
+		Context:    context.Background(),
+		RunContext: agenttools.RunContext{RunID: "run-1", Session: "session-1"},
+		Grant:      content.Grant{},
+	}}
+	endpoint := startEndpoint(t, Config{
+		Dir:      t.TempDir(),
+		Peers:    testPeers{uid: 1000, pid: 1234},
+		Owner:    testOwner{uid: 1000},
+		SelfUID:  1000,
+		Auth:     auth,
+		Dispatch: dispatcher,
+		Logger:   testLogger(),
+	})
+
+	conn := dialEndpoint(t, endpoint)
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"tools.catalogue","params":{"name":"workers.spawn"}}`+"\n"); err != nil {
+		t.Fatalf("write catalogue request: %v", err)
+	}
+	response := readResponse(t, conn)
+	if response.Error != nil {
+		t.Fatalf("catalogue response error = %+v", response.Error)
+	}
+	var result struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatalf("decode catalogue result: %v", err)
+	}
+	if result.Tools == nil {
+		t.Fatal("catalogue tools is null, want an empty array")
+	}
+	if len(result.Tools) != 0 {
+		t.Fatalf("catalogue has %d tools, want empty", len(result.Tools))
+	}
+}
+
+func assertCatalogueToolKeys(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var result struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode catalogue shape: %v", err)
+	}
+	want := []string{"name", "summary", "params", "result"}
+	for i, rawTool := range result.Tools {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawTool, &fields); err != nil {
+			t.Fatalf("decode catalogue tool %d: %v", i, err)
+		}
+		if len(fields) != len(want) {
+			t.Fatalf("catalogue tool %d has fields %v, want exactly %v", i, fields, want)
+		}
+		for _, key := range want {
+			if _, ok := fields[key]; !ok {
+				t.Fatalf("catalogue tool %d lacks %q: %s", i, key, rawTool)
+			}
+		}
+	}
+}
+
+func compactJSON(raw []byte) []byte {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return raw
+	}
+	return compact.Bytes()
+}
+
 func TestGroupEndpoint_ParamsUseTheReferencedToolSchemas(t *testing.T) {
 	registry, err := agenttools.Assemble(tools.Schemas)
 	if err != nil {

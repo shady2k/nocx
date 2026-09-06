@@ -31,6 +31,12 @@ type ToolDispatcher interface {
 	Dispatch(ToolInvocation) (string, error)
 }
 
+// ToolCatalogue projects the executable declarations admitted by a grant.
+// Callers use it to offer only methods the same dispatcher can reach.
+type ToolCatalogue interface {
+	Catalogue(content.Grant) []agenttools.Tool
+}
+
 var (
 	// ErrUnknownMethod means no assembled declaration has this method name.
 	ErrUnknownMethod = errors.New("assistant dispatch: unknown method")
@@ -184,6 +190,13 @@ func (d *dispatchOperation) Dispatch(invocation ToolInvocation) (string, error) 
 		return "", outcome.runErr
 	}
 	return outcome.output, nil
+}
+
+// Catalogue returns the executable tools admitted by grant. It is kept beside
+// Dispatch so an external caller can ask the same registry projection that
+// the dispatcher enforces, without sending authority in request params.
+func (d *dispatchOperation) Catalogue(grant content.Grant) []agenttools.Tool {
+	return d.registry.ForGrant(grant)
 }
 
 func (d *dispatchOperation) dispatch(invocation ToolInvocation, transform dispatchTransform, gate dispatchGate, beforeExecute func(*preparedInvocation, agenttools.Capability) error, executor dispatchExecutor) (dispatchOutcome, error) {

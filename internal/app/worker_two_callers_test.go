@@ -720,3 +720,57 @@ func TestWorkerCoordinatorIsOfferedNoParticipantCall(t *testing.T) {
 			response.Error.Code, response.Error.Message, workerRPCDomainError)
 	}
 }
+
+func catalogueToolNames(t *testing.T, raw json.RawMessage) map[string]struct{} {
+	t.Helper()
+	var result struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode tools.catalogue result %s: %v", raw, err)
+	}
+	if result.Tools == nil {
+		t.Fatalf("tools.catalogue result has null tools: %s", raw)
+	}
+	names := make(map[string]struct{}, len(result.Tools))
+	for _, tool := range result.Tools {
+		names[tool.Name] = struct{}{}
+	}
+	return names
+}
+
+func TestGroupCatalogueUsesDisjointAuthorizerGrants(t *testing.T) {
+	worker := prepareGroupWorkerSetup(t)
+	workerResponse := callExternally(t, worker.socket, "tools.catalogue", `{"name":"workers.spawn"}`)
+	if workerResponse.Error != nil {
+		t.Fatalf("worker tools.catalogue: %+v", workerResponse.Error)
+	}
+	workerTools := catalogueToolNames(t, workerResponse.Result)
+	if _, ok := workerTools["workers.inbox"]; !ok {
+		t.Fatalf("worker catalogue lacks workers.inbox: %s", workerResponse.Result)
+	}
+	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
+		if _, ok := workerTools[name]; ok {
+			t.Fatalf("worker catalogue contains coordinator call %q: %s", name, workerResponse.Result)
+		}
+	}
+
+	reg, _, grid := prepareGroupCaller(t)
+	record, _ := newGroupTwoCallersRecord()
+	socket := publishGroupEndpoint(t, reg, grid, record, newSharedToolDispatcher(t, record))
+	coordinatorResponse := callExternally(t, socket, "tools.catalogue", `{"name":"workers.inbox"}`)
+	if coordinatorResponse.Error != nil {
+		t.Fatalf("coordinator tools.catalogue: %+v", coordinatorResponse.Error)
+	}
+	coordinatorTools := catalogueToolNames(t, coordinatorResponse.Result)
+	if _, ok := coordinatorTools["workers.inbox"]; ok {
+		t.Fatalf("coordinator catalogue contains workers.inbox: %s", coordinatorResponse.Result)
+	}
+	for _, name := range []string{"workers.spawn", "workers.say", "workers.wait", "workers.holdings", "workers.close"} {
+		if _, ok := coordinatorTools[name]; !ok {
+			t.Fatalf("coordinator catalogue lacks %q: %s", name, coordinatorResponse.Result)
+		}
+	}
+}

@@ -329,7 +329,15 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 			requestInvocation.Context = requestCtx
 			requestInvocation.Method = request.Method
 			requestInvocation.RawParams = append(json.RawMessage(nil), request.Params...)
-			result, dispatchErr := e.cfg.Dispatch.Dispatch(requestInvocation)
+			var result string
+			var dispatchErr error
+			if request.Method == "tools.catalogue" {
+				var catalogueResult []byte
+				catalogueResult, dispatchErr = buildCatalogue(e.cfg.Dispatch, requestInvocation.Grant)
+				result = string(catalogueResult)
+			} else {
+				result, dispatchErr = e.cfg.Dispatch.Dispatch(requestInvocation)
+			}
 			if dispatchErr != nil {
 				code, message, reason := rpcErrorFor(dispatchErr)
 				e.writeError(conn, request.ID, code, message, reason)

@@ -292,6 +292,26 @@ contains no participant ids outside the wave record reachable from that session.
 record has no wave for the session, the call refuses; it does not create one as a side
 effect of an external connection.
 
+**Shown end to end, 2026-09-06 (`nocx-rowqt.14`).** Everything above was the design;
+`internal/app/wave_two_callers_test.go` is where it is watched happening. A second OS
+process — the test binary re-executed, so its pid is genuinely not the backend's —
+connects to the published socket, is admitted by the shipped `newWaveAuthorizer` over
+`wavepin.SystemPinner`'s real ancestry walk and the kernel's own `SO_PEERCRED` stamp,
+and spawns a worker. The in-process caller then lists that worker, leaves it a message
+the external caller's own holdings reports as undelivered, and closes it; the external
+caller is told it is terminal. Three crossings, both directions, one `wave.Registrar`.
+
+Two things about that test are worth knowing before trusting it. Its record is real and
+only the three seams that fork and watch an OS process are fakes, which is the cut the
+claim needs — the question is whether two callers move one row, not whether `claude`
+starts. And it carries its own falsifier: `TestWaveEndpointHasNoExecutionPathOfItsOwn`
+publishes the endpoint over a dispatcher backed by a SECOND record and requires the
+in-process caller to see nothing, so a second execution path added later breaks it. A
+copy and the row itself behave identically until something mutates one and reads back
+the other, which is exactly why the stub record in
+`internal/waveendpoint/contract_test.go` could not prove this and this test shares
+nothing with it.
+
 ## 6. The wire and contracts
 
 The agent-facing request is the same JSON-RPC 2.0 vocabulary as the control plane, but

@@ -42,10 +42,17 @@
  * and is deleted from here in nocx-54a2c: a modal is for "answer this now",
  * and reading a skill is the opposite, since nobody is blocked on it, and a
  * tab does not even cover the page underneath it. Acquisition is
- * conversational: the assistant searches, follows a page to a repository and
- * calls `skills.install`, and the person decides in the approval window —
- * which names the RESOLVED source, the description, the digest and every
- * file that would land, with its bytes. The paste box that used to sit in
+ * conversational: the person gives the assistant a link of any kind, nocx
+ * resolves it and `skills.install` writes what came back, and the person
+ * decides in the approval window — which names the RESOLVED source, the
+ * description, the digest and every file that would land, with its bytes.
+ * (An earlier version of this comment said the assistant "searches, follows
+ * a page to a repository and lists a directory". It does none of those: the
+ * registry is 23 tools and only `fetch.url` looks outward, at one address,
+ * and `internal/skill/bundle.go` says a bare URL cannot list a directory.
+ * The same sentence deleted the resolver from the 09-04 spec §5, which is
+ * why it is corrected here rather than quietly rewritten.) The paste box
+ * that used to sit in
  * this Section's heading slot asked a person to go and find a raw address by
  * hand, which is exactly the labour the assistant removes; two surfaces
  * owning one input is the defect AGENTS.md names most often, and the one

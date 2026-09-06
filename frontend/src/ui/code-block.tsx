@@ -72,8 +72,12 @@ export interface CodeBlockProps {
   /** Whether a long line wraps. Default true; see the note above for when a
    *  block says false. */
   wrap?: boolean
-  /** Surface-specific bordered form used by streamed assistant answers and dumps. */
-  variant?: 'answer' | 'dump'
+  /** Surface-specific bordered form used by streamed assistant answers and
+   *  dumps, plus `fill` — the block whose HEIGHT is its caller's. `fill` is
+   *  for a caller whose own element is already the scroll container and
+   *  whose whole job is this block: the kit's 200px cap exists so machine
+   *  output cannot push a page off screen, and there is no page to push. */
+  variant?: 'answer' | 'dump' | 'fill'
   /** Text represented by highlighted JSX children, for a safe copy operation. */
   copyText?: string
   /** Injected platform clipboard operation. Existing callers with their own copy
@@ -199,6 +203,10 @@ export function CodeBlock(props: CodeBlockProps) {
   return (
     <div
       class="ui-code-block-wrap"
+      // The variant reaches the wrap as well as the `<pre>`: the cap sits on
+      // the inner element, but a `<pre>` can only fill a parent that is
+      // itself filling, so `fill` has to be readable on both.
+      data-variant={props.variant}
       classList={{ 'ui-code-block-wrap--copy': Boolean(props.copy) && getCopyText() !== undefined }}
     >
       <Show when={props.copy && getCopyText() !== undefined ? props.copy : undefined}>

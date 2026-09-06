@@ -54,3 +54,20 @@
   text-decoration: underline wavy var(--color-warning);
   text-underline-offset: 2px;
 }
+
+/* The readout whose HEIGHT is its caller's (nocx-xj1l6). Nothing here is a
+   height: the only rule is the flex floor that lets the block inside actually
+   receive one. A flex item's minimum is its content, so without `min-height:
+   0` a long file grows this column instead of scrolling inside the block that
+   already owns a scroll box — the same pair `min-width: 0` above buys in the
+   other axis, for the same reason.
+
+   The FILLING is CodeBlock's, via its `fill` variant, and deliberately not
+   restated here: a second declaration of how tall a code block is would agree
+   with the kit's until the day one of them changed. Above the block, the
+   sentences (a refusal, the scan legend) keep their natural height and the
+   bytes take what is left. */
+.ui-file-readout[data-fill='true'] {
+  flex: 1 1 auto;
+  min-height: 0;
+}

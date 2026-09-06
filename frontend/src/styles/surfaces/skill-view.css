@@ -78,12 +78,25 @@
   min-width: 0;
 }
 
+/* The column IS the pane's right half, and its single child fills it
+   (nocx-xj1l6). It was `overflow-y: auto` and nothing else, which made it a
+   scroll box whose child could only be as tall as its own content — so a file
+   stopped at CodeBlock's 200px page cap a fifth of the way down, with the
+   rest of the column empty beneath it.
+
+   A flex column that CLIPS instead: the height is now a real one the child
+   can be handed, and the scrolling belongs to whichever single child is in
+   the column — the file readout through CodeBlock's `fill` variant, the check
+   panel on its own root below. One scroll box, owned by the thing that knows
+   what is being scrolled; nesting a second one here would put a scrollbar
+   around a scrollbar the day a file was long. */
 .skill-view__view-col {
   grid-area: view;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   padding: var(--space-4);
 }
 
@@ -107,8 +120,14 @@
    layout freely (README's own rule for the header and its `<h1>` above). */
 .skill-view__check {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--space-3);
+  /* The panel scrolls itself now that the column clips (nocx-xj1l6). A long
+     model report has no length anybody promised, and the column above no
+     longer catches it. */
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* `> p`, not `p`: a bare descendant selector would also win over

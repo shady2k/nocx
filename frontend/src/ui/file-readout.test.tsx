@@ -206,3 +206,56 @@ describe('FileReadout', () => {
     })
   })
 })
+
+// THE HEIGHT IS THE CALLER'S, AND SO IS THE DECISION TO SAY NOTHING (nocx-xj1l6).
+//
+// Both cases below exist because the skill tab found the same wall from two
+// sides: it draws this component in a column that is ALREADY the scroll
+// container and whose whole job is the file, next to a header that names the
+// skill and a list whose selected row IS the path. It had nothing left to put
+// in `facts`, and the kit's 200px cap for machine output left the bytes
+// stopping a fifth of the way down an empty column.
+describe('FileReadout in a caller that owns the height', () => {
+  it('says nothing above the bytes when the caller has nothing left to say', () => {
+    const { container } = render(() => (
+      <FileReadout
+        facts={[]}
+        ariaLabel="The whole of SKILL.md"
+        outcome={{ kind: 'text', text: '# Skill\n' }}
+      />
+    ))
+    const el = container.querySelector<HTMLElement>('.ui-file-readout')
+    expect(el).not.toBeNull()
+    // No empty `<dl>`, no bordered strip of nothing — the file, and the file
+    // alone. FactList already refuses to draw an empty list; this pins that
+    // the readout puts nothing of its own in front of it either.
+    expect(el?.querySelector('.ui-fact-list')).toBeNull()
+    expect(bytesIn(el as HTMLElement)).toBe('# Skill\n')
+  })
+
+  it('hands the height to the block when the caller says it owns one', () => {
+    const { container } = render(() => (
+      <FileReadout
+        facts={[]}
+        fill
+        ariaLabel="The whole of SKILL.md"
+        outcome={{ kind: 'text', text: '# Skill\n' }}
+      />
+    ))
+    const el = container.querySelector<HTMLElement>('.ui-file-readout')
+    expect(el?.dataset.fill).toBe('true')
+    // The variant reaches the BLOCK, which is the element carrying the cap:
+    // the readout cannot lift a max-height that is not its to lift.
+    expect(el?.querySelector<HTMLElement>('.ui-code-block')?.dataset.variant).toBe('fill')
+  })
+
+  it('leaves the cap in place for every caller that did not ask', () => {
+    const el = draw({ kind: 'text', text: '# Skill\n' })
+    expect(el.dataset.fill).toBeUndefined()
+    expect(el.querySelector<HTMLElement>('.ui-code-block')?.dataset.variant).toBeUndefined()
+  })
+
+  it('declares the fill in its own stylesheet, so it is layout and not a prop nothing reads', () => {
+    expect(CSS).toMatch(/\.ui-file-readout\[data-fill='true'\]/)
+  })
+})

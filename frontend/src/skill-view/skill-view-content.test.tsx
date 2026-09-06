@@ -15,6 +15,8 @@
 // render at all. Every test below that exercises a dot builds it into the
 // `skills.scan` FIXTURE, and the "no fan-out" test asserts `client.file` is
 // called ONLY for the one file actually selected, never for the others.
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { PaneHost } from '../pane-content'
 import { SkillsStore, type SkillsClientLike } from '../skills-store'
@@ -212,6 +214,14 @@ const viewText = (host: HTMLElement): string =>
 
 const filePaths = (client: SkillsClientLike): string[] =>
   (client.file as Mock).mock.calls.map((call: unknown[]) => call[1] as string)
+
+/** The surface's own stylesheet, read the way the kit's suites read theirs:
+ *  a layout decision that lives only in CSS has no other seam a test can
+ *  reach, and a prop nothing paints is worse than no prop. */
+const SURFACE_CSS = readFileSync(
+  resolve(process.cwd(), 'src/styles/surfaces/skill-view.css'),
+  'utf8',
+)
 
 afterEach(() => {
   document.body.innerHTML = ''
@@ -1297,5 +1307,59 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     // ...and must not have clobbered the fresh audit result.
     expect(checkPane(host)?.textContent).toContain('Fresh audit report')
     expect(checkPane(host)?.textContent).not.toContain('The old report')
+  })
+})
+
+// THE RIGHT PANE SHOWS THE FILE, AND ONLY THE FILE (nocx-xj1l6).
+//
+// The pane opened saying three things a person could already read on the same
+// screen — the skill's name and its provenance are in the header's title
+// line, and the path IS the selected row two columns to the left — and then
+// stopped the bytes at the kit's 200px cap, a fifth of the way down a column
+// that is itself the scroll container. Both are the same mistake from two
+// sides: the pane was drawn as if it were one block on a page, when it is the
+// whole of a column whose only job is the file.
+describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
+  it('repeats nothing the header and the file list already say', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'the whole skill' })),
+    })
+    const { host } = await mount(client)
+
+    // The three facts the pane used to draw. Each is still on screen — that
+    // is the point — so this asserts they are not drawn a SECOND time inside
+    // the view column, rather than that they are gone from the tab.
+    expect(viewCol(host).querySelector('.ui-fact-list')).toBeNull()
+    const header = host.querySelector('.skill-view__header')?.textContent ?? ''
+    expect(header).toContain('deploy')
+    expect(header).toContain('authored')
+    expect(rowTitle(fileListRows(host)[0])).toBe('SKILL.md')
+    // And the file itself is still there, which is the whole column now.
+    expect(viewText(host)).toBe('the whole skill')
+  })
+
+  it('gives the bytes the column’s height rather than the kit’s page cap', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'the whole skill' })),
+    })
+    const { host } = await mount(client)
+
+    const readout = viewCol(host).querySelector<HTMLElement>('.ui-file-readout')
+    expect(readout?.dataset.fill).toBe('true')
+    expect(viewCol(host).querySelector<HTMLElement>('.ui-code-block')?.dataset.variant).toBe('fill')
+  })
+
+  it('lets the column hand a height down, and leaves the scrolling to one owner', () => {
+    // The column was `overflow-y: auto` and nothing else, so a child asking
+    // for a height got the content's. It becomes a flex column that clips,
+    // and whichever single child is in it owns its own scrolling — the
+    // readout through CodeBlock's fill variant, the check panel on its own
+    // root. Two scroll boxes nested inside one another is the failure this
+    // replaces, not a second safety net.
+    expect(SURFACE_CSS).toMatch(/\.skill-view__view-col \{[^}]*display:\s*flex/s)
+    expect(SURFACE_CSS).toMatch(/\.skill-view__view-col \{[^}]*overflow:\s*hidden/s)
+    expect(SURFACE_CSS).toMatch(/\.skill-view__check \{[^}]*overflow-y:\s*auto/s)
   })
 })

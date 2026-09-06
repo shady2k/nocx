@@ -73,7 +73,6 @@ import {
   Section,
   Stack,
   StatusCard,
-  type Fact,
   type FileReadoutOutcome,
   type StatusDotTone,
 } from '../ui'
@@ -504,18 +503,19 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
     return `The list stops at the first ${state.maxFiles} files, and this skill carries more files than that. They are still on disk, still in a backup, and still readable — this list just does not name them, and the scan runs only over the files shown.`
   }
 
-  const facts = (): Fact[] => {
-    const path = selectedPath()
-    if (path === null) return []
-    const entry = fileState()
-    const resolved = entry?.kind === 'ready' ? entry.result : null
-    const said: Fact[] = [
-      { name: 'Skill', value: resolved?.name ?? props.name },
-      { name: 'File', value: resolved?.path ?? path },
-    ]
-    if (resolved) said.push({ name: 'Provenance', value: resolved.provenance })
-    return said
-  }
+  // THE PANE HAS NOTHING TO SAY THAT THE TAB HAS NOT SAID (nocx-xj1l6).
+  //
+  // This used to hand FileReadout three facts — Skill, File and Provenance —
+  // and all three were already on the same screen: the name and the
+  // provenance badge are SkillViewHeader's title line, and the path IS the
+  // selected row in the list two columns to the left. The kit component's
+  // own doc calls `facts` "what this file IS, in the caller's own words";
+  // the words this caller has are the ones it already spent, so it spends
+  // none. FileReadout draws no list for an empty one (FactList's own
+  // `Show`), so the column is the file and nothing else.
+  //
+  // The facts are NOT deleted from the kit: the approval prompt is the other
+  // caller, and it has no header and no list to have said them already.
 
   const outcome = (): FileReadoutOutcome | null => {
     const entry = fileState()
@@ -741,7 +741,7 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                 }
               >
                 {(said) => (
-                  <FileReadout facts={facts()} ariaLabel={readoutLabel()} outcome={said()} />
+                  <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
                 )}
               </Show>
             }

@@ -110,6 +110,20 @@ export interface FileReadoutProps {
    */
   ariaLabel: string
   outcome: FileReadoutOutcome
+  /**
+   * The caller owns a height and wants the bytes to fill it (nocx-xj1l6).
+   *
+   * Off by default, because the default caller is a page: there the block's
+   * 200px cap is what keeps a long file from pushing everything below it off
+   * screen. A caller says `fill` when its OWN element is already the scroll
+   * container and holds nothing but this readout — the skill tab's right
+   * column — where the cap instead stops the bytes partway down an empty
+   * column. It is a request to hand the height down, never a height of this
+   * component's own: what actually fills is CodeBlock's `fill` variant, so
+   * there is still exactly one place that knows what a code block's height
+   * is.
+   */
+  fill?: boolean
 }
 
 interface Refusal {
@@ -216,7 +230,11 @@ export function FileReadout(props: FileReadoutProps) {
   }
 
   return (
-    <div class="ui-file-readout" data-state={props.outcome.kind}>
+    <div
+      class="ui-file-readout"
+      data-state={props.outcome.kind}
+      data-fill={props.fill ? 'true' : undefined}
+    >
       <FactList facts={props.facts} ariaLabel="What this file is" />
       <Show when={refusal()}>
         {(said) => (
@@ -233,7 +251,7 @@ export function FileReadout(props: FileReadoutProps) {
         )}
       </Show>
       <Show when={bytes() !== null}>
-        <CodeBlock ariaLabel={props.ariaLabel}>
+        <CodeBlock ariaLabel={props.ariaLabel} variant={props.fill ? 'fill' : undefined}>
           {marks().length === 0 ? (bytes() ?? '') : markedText(bytes() ?? '', marks())}
         </CodeBlock>
       </Show>

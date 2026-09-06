@@ -68,6 +68,7 @@
 
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js'
 import {
+  DocumentSurface,
   FileReadout,
   RecordRow,
   Section,
@@ -81,7 +82,7 @@ import { skillFileOutcome } from '../skills-presentation'
 import type { SkillsFile } from '../generated/skills.file'
 import type { SkillsScan } from '../generated/skills.scan'
 import type { Skill, SkillsStore } from '../skills-store'
-import { isMarkdownPath, SkillViewDocument } from './skill-view-document'
+import { isMarkdownPath } from '../ui/document-language'
 import {
   checkRowTitle,
   readingFromCheck,
@@ -784,7 +785,18 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                       <FileReadout facts={[]} fill ariaLabel={readoutLabel()} outcome={said()} />
                     }
                   >
-                    {(doc) => <SkillViewDocument text={doc().text} ariaLabel={documentLabel()} />}
+                    {(doc) => (
+                      <DocumentSurface
+                        text={doc().text}
+                        documentKey={`${props.name}:${selectedPath() ?? ''}`}
+                        ariaLabel={documentLabel()}
+                        search="disabled"
+                        height="fill"
+                        readOnly
+                        language="markdown"
+                        presentation={{ kind: 'preview' }}
+                      />
+                    )}
                   </Show>
                 )}
               </Show>

@@ -5,25 +5,17 @@
    Every selector here is qualified by `data-md` or a `ui-md-` class, both of
    which only ui/answer-markdown.ts writes. An answer line with no structure
    carries neither, so a plain answer is untouched by this whole file — which
-   is the criterion, expressed in the cascade.
-
-   AND ONLY BY THOSE, since nocx-okee0. The selectors also named `.term-line`,
-   which was redundant on the line above's own argument and was the thing
-   keeping this look inside the scrollback: a skill's SKILL.md is rendered by
-   the same assembler into rows that must NOT be `.term-line`, because that
-   class is pinned to the terminal's measured cell metrics (style.css) and a
-   document pane has no grid to line up with. Dropping the qualifier is what
-   lets one markdown look serve both, with no second stylesheet to drift. */
+   is the criterion, expressed in the cascade. */
 
 /* Headings. Weight carries the level, size barely does: an answer lives in a
    scrollback row eight lines from a command, and a 2rem <h1> in that column
    reads as a different application rather than as a title. */
-[data-md='h1'],
-[data-md='h2'],
-[data-md='h3'],
-[data-md='h4'],
-[data-md='h5'],
-[data-md='h6'] {
+.term-line[data-md='h1'],
+.term-line[data-md='h2'],
+.term-line[data-md='h3'],
+.term-line[data-md='h4'],
+.term-line[data-md='h5'],
+.term-line[data-md='h6'] {
   font-weight: 600;
   color: var(--color-text);
   margin-top: 8px;
@@ -36,11 +28,11 @@
   min-height: 0;
 }
 
-[data-md='h1'] {
+.term-line[data-md='h1'] {
   font-size: 1.15em;
 }
 
-[data-md='h2'] {
+.term-line[data-md='h2'] {
   font-size: 1.08em;
 }
 
@@ -55,19 +47,19 @@
    container — so a text-indent here would apply a second time to the
    marker's first line and drag the glyph out through .cmd-children's
    border-left into the gutter. */
-[data-md='li'] {
+.term-line[data-md='li'] {
   padding-left: calc(1.2em + var(--md-depth, 0) * 1.2em);
 }
 
-[data-md='li'][data-md-depth='1'] {
+.term-line[data-md='li'][data-md-depth='1'] {
   --md-depth: 1;
 }
 
-[data-md='li'][data-md-depth='2'] {
+.term-line[data-md='li'][data-md-depth='2'] {
   --md-depth: 2;
 }
 
-[data-md='li'][data-md-depth='3'] {
+.term-line[data-md='li'][data-md-depth='3'] {
   --md-depth: 3;
 }
 
@@ -97,7 +89,7 @@
 
 /* A quote. The rule on the left is the whole signal — a quote in an answer
    is usually the model repeating something the person already wrote. */
-[data-md='quote'] {
+.term-line[data-md='quote'] {
   padding-left: 10px;
   border-left: 2px solid var(--color-border);
   color: var(--color-text-muted);
@@ -132,7 +124,7 @@
   width: 100%;
 }
 
-.ui-md-table-row {
+.term-line.ui-md-table-row {
   display: contents;
 }
 
@@ -157,24 +149,4 @@
 
 .ui-md-table-source {
   display: none;
-}
-
-/* ── The DOCUMENT row (nocx-okee0) ─────────────────────────────────────────
-   The other value `createAnswerBody`'s `rowClass` takes. `.term-line` is the
-   scrollback's, and it is pinned in style.css to the terminal's measured
-   cell metrics — `min-height` and `line-height` both `--term-cell-height`,
-   plus a per-character letter-spacing correction — so that a frozen block
-   occupies exactly the grid rows it did while live. A skill's SKILL.md is
-   read in a settings-shaped pane with no grid to line up with, and a heading
-   sized to a terminal cell is not a heading.
-
-   So the pitch is prose's and the face is the surface's; every rule ABOVE
-   this one — headings, hung markers, quotes, inline code, tables — applies
-   to both row classes unchanged, which is the whole reason they stopped
-   naming `.term-line`. */
-.ui-md-line {
-  display: block;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
 }

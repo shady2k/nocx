@@ -233,26 +233,23 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 // shell pid because pty.StartWithSize starts the shell with setsid. The
 // foreground command shares that group when job control is disabled.
 //
-// Why the group and not the pid, measured 2026-09-06 (nocx-pibr3). On an idle
-// machine the difference is invisible — signalling the shell pid alone kills
-// `tail -f` under `set +m` too, because after Close the kernel hangs up the
-// foreground group on the master's LAST close, and bash hangs up its own jobs
-// besides. Both of those rescues are conditional, and under load neither
-// arrives:
+// Why the group and not the pid. NOT because of nocx-pibr3, whose 600 s
+// deadlock turned out to be an artifact of how the gate was launched: `nohup`
+// sets SIGHUP to SIG_IGN, that disposition survives exec and Go deliberately
+// preserves signals ignored at entry, so every process below it — the test
+// binary, the shell, the program — ignored SIGHUP too. Measured: the leaked
+// `tail -f` processes carried SigIgn 0x1 and survived SIGHUP while dying at
+// once on SIGTERM. No signal target could have helped there, and an ordinary
+// foreground run has never reproduced it.
 //
-// The reader of a pty master sits in a blocking read that no Close can
-// interrupt, because the fd is not registered with the runtime poller. Go
-// therefore DEFERS the real close(2) until that read returns — so the master
-// never reaches its last close, the kernel's hangup never fires, and the read
-// ends only when the peer does. The peer is the program this line has to
-// kill. That is a deadlock with itself, and it is what the whole-tree gate
-// reported as a 600 s timeout while the package was green run alone.
-//
-// So the target was wrong twice over: it made the program's death a favour
-// from bash, granted by bookkeeping that dash, a shell killed some other way,
-// or a program outside the job table would not grant — and it left the one
-// path that does not depend on a favour, the group the kernel itself hangs
-// up on a real terminal loss, unused.
+// The reason that survives is the macOS one the block below already records
+// (nocx-wwz0): there the kernel does not hang up the foreground group when
+// the master closes, so a pid-only SIGHUP leaves the running program's fate
+// entirely to whether the shell hangs up its own jobs on the way out. That is
+// a favour bash grants and dash, a shell killed some other way, or a program
+// outside the job table do not. The group is what the kernel itself signals
+// on a real terminal loss, so it is what Close names, and the program's death
+// stops depending on anyone's bookkeeping.
 func (lp *LocalPty) hangupProcessGroup() error {
 	if lp.cmd.Process == nil {
 		return nil

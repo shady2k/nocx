@@ -92,6 +92,15 @@ func New(cfg Config) (*Endpoint, error) {
 		return nil, errors.New("toolendpoint: no authorizer")
 	case isNilDependency(cfg.Dispatch):
 		return nil, errors.New("toolendpoint: no worker dispatcher")
+	// The catalogue is what lets a caller obey "an unreachable tool is not
+	// offered": without it the endpoint can execute calls it cannot enumerate,
+	// and a caller has to guess its own eligibility. Required at composition
+	// rather than discovered on the first tools.catalogue, because a
+	// capability found missing at call time is a soft degrade nobody sees —
+	// the caller gets one refused method and goes on believing the surface is
+	// whole.
+	case !implementsCatalogue(cfg.Dispatch):
+		return nil, errors.New("toolendpoint: dispatcher cannot enumerate what a grant admits")
 	case cfg.Logger == nil:
 		return nil, errors.New("toolendpoint: no logger")
 	}

@@ -38,3 +38,13 @@ func buildCatalogue(dispatch assistant.ToolDispatcher, grant content.Grant) ([]b
 	}
 	return json.Marshal(result)
 }
+
+// implementsCatalogue is the composition-time half of errCatalogueUnavailable.
+// New refuses a dispatcher that cannot enumerate a grant, so the runtime error
+// below is reachable only for a dispatcher that changed shape after
+// construction — which nothing does — and is kept as the honest answer rather
+// than a panic.
+func implementsCatalogue(dispatch assistant.ToolDispatcher) bool {
+	_, ok := dispatch.(assistant.ToolCatalogue)
+	return ok
+}

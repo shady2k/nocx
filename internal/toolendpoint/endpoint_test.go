@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/coordinator"
 )
 
@@ -95,6 +97,12 @@ func (d *testDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) 
 	}
 	return out, err
 }
+
+// Catalogue makes the fake carry the capability New now requires. It answers
+// the empty catalogue rather than a canned list: the tests around it are about
+// dispatch, framing and refusal, and a fake that invented tools would let one
+// of them pass on a surface the real dispatcher never offers.
+func (d *testDispatcher) Catalogue(content.Grant) []agenttools.Tool { return nil }
 
 func (d *testDispatcher) callCount() int {
 	d.mu.Lock()
@@ -407,3 +415,26 @@ var (
 	_ coordinator.PeerCredentials = testPeers{}
 	_ coordinator.PeerProcess     = testPeers{}
 )
+
+// TestNewRefusesADispatcherThatCannotEnumerateAGrant is the composition-time
+// guard for the offer rule. A dispatcher that executes calls it cannot
+// enumerate leaves the caller to guess its own eligibility, which is the
+// opposite of "an unreachable tool is not offered"; discovering that on the
+// first tools.catalogue would be a soft degrade with no product-visible sign.
+func TestNewRefusesADispatcherThatCannotEnumerateAGrant(t *testing.T) {
+	cfg := endpointConfig(t, &testAuthorizer{}, &testDispatcher{})
+	cfg.Dispatch = dispatcherWithoutCatalogue{}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("New accepted a dispatcher that cannot enumerate a grant")
+	} else if !strings.Contains(err.Error(), "enumerate") {
+		t.Fatalf("err = %v, want it to name what the dispatcher cannot do", err)
+	}
+}
+
+// dispatcherWithoutCatalogue is a ToolDispatcher and nothing more: it can
+// execute a call and cannot say which calls a grant admits.
+type dispatcherWithoutCatalogue struct{}
+
+func (dispatcherWithoutCatalogue) Dispatch(assistant.ToolInvocation) (string, error) {
+	return "", nil
+}

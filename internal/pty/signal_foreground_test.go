@@ -24,58 +24,30 @@ import (
 
 // waitForOutput waits until the pty has produced `want`. The pty is read on a
 // goroutine of its own because Read blocks: a test that read inline would
-// hang past its own bound rather than fail with what it did see. Polling gives
-// cleanup its own bounded stop path instead of waiting for a peer to close.
+// hang past its own bound rather than fail with what it did see. The bound is
+// a failure detector, never the thing being waited on — the condition is the
+// marker's arrival.
 func waitForOutput(t testing.TB, lp *LocalPty, want string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen strings.Builder
 	done := make(chan struct{})
-	stop := make(chan struct{})
-	fd := int(lp.file.Fd())
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
 		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-
-			pollfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}} //nolint:gosec // the descriptor is an OS-owned fd
-			if _, err := unix.Poll(pollfd, 100); err != nil {
-				if errors.Is(err, unix.EINTR) {
-					continue
-				}
-				return
-			}
-			if pollfd[0].Revents&unix.POLLNVAL != 0 {
-				return
-			}
-			if pollfd[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) == 0 {
-				continue
-			}
-
 			n, err := lp.Read(buf)
 			if n > 0 {
 				mu.Lock()
 				seen.Write(buf[:n])
-				found := strings.Contains(seen.String(), want)
 				mu.Unlock()
-				if found {
-					return
-				}
 			}
 			if err != nil {
 				return
 			}
 		}
 	}()
-	t.Cleanup(func() {
-		close(stop)
-		<-done
-	})
+	t.Cleanup(func() { <-done })
 	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("the pty to produce %q", want), 20*time.Second,
 		func() string {
 			mu.Lock()
@@ -299,15 +271,7 @@ func TestLocalPty_ProtectedShellGroupIsItsOwnAnswer(t *testing.T) {
 // running", and why nothing here may infer otherwise from the byte stream.
 func TestLocalPty_ProtectedGroupHoldsARunningProgram(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
-	cleanupFinished := false
-	t.Cleanup(func() {
-		if cleanupFinished {
-			return
-		}
-		if lp.cmd.Process != nil {
-			_ = unix.Kill(-lp.cmd.Process.Pid, syscall.SIGKILL)
-		}
-	})
+	defer func() { _ = lp.Close() }()
 
 	waitForeground(t, lp)
 	dir := t.TempDir()
@@ -331,17 +295,7 @@ func TestLocalPty_ProtectedGroupHoldsARunningProgram(t *testing.T) {
 	if pgid != lp.Pid() {
 		t.Fatalf("foreground pgid = %d, want the shell's own pid %d — job control was not off", pgid, lp.Pid())
 	}
-
-	// Exercise the exact signal path Close owns while the master remains open;
-	// otherwise Linux's master-close hangup can hide a pid-only signal.
-	if err := lp.hangupProcessGroup(); err != nil {
-		t.Fatalf("hang up pty process group: %v", err)
+	if err := lp.SignalForeground(syscall.SIGINT); !errors.Is(err, ErrProtectedForeground) {
+		t.Fatalf("SignalForeground over a shared group = %v, want ErrProtectedForeground", err)
 	}
-	waittest.WaitFor(t, "the foreground process group to exit after pty Close", func() bool {
-		return errors.Is(unix.Kill(-pgid, 0), unix.ESRCH)
-	})
-	if err := lp.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	cleanupFinished = true
 }

@@ -232,6 +232,23 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 // hangupProcessGroup targets the session's process group, whose id is the
 // shell pid because pty.StartWithSize starts the shell with setsid. The
 // foreground command shares that group when job control is disabled.
+//
+// Measured 2026-09-06, because the obvious claim for this is wrong and the
+// next reader will make it: signalling the shell pid alone did NOT leak the
+// foreground program here. Bash keeps a job record even under `set +m` and
+// hangs its children up on the way out, so `tail -f` died either way — with
+// the master's last close held open by a dup, which is the only arrangement
+// where the kernel's own hangup cannot mask the difference. So this is not a
+// demonstrated fix for an observed leak, and nocx-pibr3's 600 s hang is NOT
+// closed by it: that hang has never reproduced outside a loaded `go test
+// ./...`, and reverting this line does not bring it back.
+//
+// It stays because the target was wrong in principle. The line below it says
+// the SIGHUP exists so the shell "hangs up its own jobs" — which makes the
+// program's death a favour from bash, granted by bookkeeping bash is free to
+// change and that dash, a shell killed some other way, or a program that
+// escapes the job table would not do. The group is what the kernel hangs up
+// on a real terminal loss, so the group is what Close should name.
 func (lp *LocalPty) hangupProcessGroup() error {
 	if lp.cmd.Process == nil {
 		return nil

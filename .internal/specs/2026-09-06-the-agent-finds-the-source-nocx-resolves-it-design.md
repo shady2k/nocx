@@ -165,9 +165,18 @@ written are the bytes shown.
 
 ### What resolve may reach
 
-Public **GitHub** and **GitLab** in the first version. Two mechanical steps per
-forge — ref → commit, and commit → the paths in the tree — plus a bounded
-prefix read of each candidate's frontmatter for its name and description.
+Public **GitHub**, and nothing else until something asks. Two mechanical steps —
+ref → commit, and commit → the paths in the tree — plus a bounded prefix read of
+each candidate's frontmatter for its name and description.
+
+An earlier version of this section said "GitHub and GitLab", and the owner asked
+where GitLab came from. The answer was nowhere: the measured failure is a GitHub
+page leading to a GitHub repository, no case in this repository needs a second
+forge, and a second adapter is capability landing ahead of its consumer — the
+shape AGENTS.md names, and the shape a worker on this same epic was made to
+delete from `internal/skill` on the same afternoon. The adapter seam is one
+interface wide, so the day a person arrives with a GitLab link it is a second
+implementation and not a redesign. That day has not arrived.
 
 - Everything goes through `internal/apifetch` and therefore
   `internal/httppolicy`, like every other HTTP client in nocx. Nothing here

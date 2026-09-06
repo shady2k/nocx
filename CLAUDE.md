@@ -12,14 +12,14 @@ The task backlog lives in beads — run `br ready`, or `scripts/br-queue.sh` whe
 question is "what next".
 
 **Fresh clone?** The [README setup](README.md#agent-tooling) lists the tooling to
-install per machine — `br`, `cm`, and the `beads-superpowers` Claude Code plugin.
+install per machine — `br`, `deja`, and the `beads-superpowers` Claude Code plugin.
 `make init` wires up the repo but installs none of them.
 
 ## The tracker is `br`, and the plugin still says `bd`
 
 Since 2026-09-05 the tracker is **`br` (beads_rust)**: SQLite plus a tracked
 `.beads/issues.jsonl`, no Dolt, no daemon, and **no git — `br` never runs it.**
-Memories left the tracker with `bd`; they live in cass-memory (`cm`).
+Memories left the tracker with `bd`; recall is `deja` over the session transcripts.
 
 The `beads-superpowers` plugin is kept for its process skills and still speaks `bd`.
 **AGENTS.md carries the full `bd` → `br` table, and it wins over any skill that says
@@ -31,7 +31,7 @@ scripts/br-queue.sh                # what to work on next  (was: bare `bd ready`
 br show <id>                       # view an issue
 br update <id> --claim             # claim work
 br close <id> --reason "..."       # complete work, with evidence a stranger can check
-cm context "<what you are doing>"  # memories  (was: `bd memories`)
+deja "<what you are doing>"        # recall  (was: `bd memories`)
 ```
 
 Still forbidden, unchanged: TodoWrite, TaskCreate and markdown TODO lists. `br` is the
@@ -60,9 +60,8 @@ steps for you.
 
 5. **Write down anything that was bought.** If something in this session cost a
    measurement or a wrong turn and is not derivable from the repository, it goes in
-   `.cass/playbook.yaml` — AGENTS.md has the three tests and the `import --repo`
-   route. Nothing does this for you: there is no reflection hook, and `cm reflect`
-   never runs on its own.
+   AGENTS.md, which has the three tests. Nothing does this for you: the transcript
+   `deja` indexes is a record of what you did, not a rule anybody will review.
 6. **Hand off** — changed files, what you validated, bead status, and anything you left
    blocked, in those words.
 

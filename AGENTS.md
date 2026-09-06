@@ -83,78 +83,43 @@ what it cost rather than reviving the slot.
 **TodoWrite, TaskCreate and markdown TODO lists are forbidden.** `br` is the tracker for
 all work, including your own checklists.
 
-## Memories: `cm`, not the tracker
+## Recall: `deja`, not the tracker
 
-`br` has no memory store. Memories live in cass-memory, in the tracked `.cass/playbook.yaml`,
-so they travel with the clone the way the backlog does. Reading them is pull-based —
-nothing surfaces them for you:
+`br` has no memory store, and neither does this repository any more. What every agent here
+already produces is a session transcript on disk, and `deja` indexes those — claude, omp,
+codex and pi in one machine-wide index at `~/.cache/deja`. Reading it is pull-based:
 
 ```bash
-cm context "<what you are about to do>" --json
+deja "<what you are about to do>"          # across every agent, every worktree
+deja --harness omp --since 30d "<query>"   # narrow it
+deja fix "<error text>"                    # what was run after this error before
+deja how "<what>"                          # commands this machine actually ran
 ```
 
-Rules there carry `scope: global`, not the obvious `workspace`: **`cm context` silently
-returns nothing for `workspace` rules.** They do not leak between repositories — `.cass/`
-is found from the working directory.
+**Nothing is written, so nothing conflicts.** Six workers in six worktrees produce six
+transcripts and one reader sees all of them. This is the whole reason it replaced a
+git-tracked playbook: a rule committed on a branch reaches only that branch, and by
+measurement it reached 3 worktrees out of 45.
 
-**Write a rule only when it was BOUGHT** — when something cost you a measurement, a wrong
-turn or an hour, and the next person would pay it again. Three tests, all of which must
-hold:
+**Install it without hooks.** `deja install --auto` wires `PreToolUse`/`PostToolUse` hooks,
+which is a hook in front of a file read — see Code search below for why we do not do that
+here. Call it on demand instead.
+
+**A transcript is evidence of what somebody did, not of what is true now.** It carries the
+wrong turn as faithfully as the fix, and the fix may be three sessions later. Read the date,
+and confirm against the tree before acting on it.
+
+**Durable rules go in this file, not in a recall index.** If a lesson is worth carrying, it
+is worth reviewing, and this file is what gets read. Three tests, all of which must hold:
 
 - **Not derivable from the repository.** Code structure, git history and what this file
-  already says are not memories.
+  already says are not rules.
 - **Evidence a stranger can check** — a number, a command with its output, a date, a file.
   "Indexing is heavy" is not a rule.
 - **It would change what somebody does.** Otherwise it is trivia.
 
-Write it the moment you finish paying, not at session close when the detail has gone. Write
-the finding, not the story. And **never write a memory the code should carry instead** — if
-the lesson is "this must be called before that", the fix is an assertion or a test.
-
-**Add rules with `import --repo`, never `add`.** `cm playbook add` always writes the
-personal playbook in `$HOME`, where a rule about this repository is invisible to everybody
-else.
-
-```bash
-cm playbook import rules.json --repo     # --repo targets .cass/playbook.yaml
-```
-
-`import` wants whole bullet records, not the `{content, category}` pair `add --file`
-accepts.
-
-**Do not put an explanation inside `.cass/playbook.yaml`.** `cm` reserialises that file
-from its own model on every write and comments do not survive it. Reasoning goes in this
-file; the YAML holds rules and nothing else.
-
-**Ignore two steps of the `cm` skill's Agent Protocol.** Running `cm context` at the start
-is right and is why the skill is installed. Leaving `// [cass: helpful …]` markers in the
-source is **not** — those are parsed only during reflection, and we do not run reflection,
-so they would be comments no reader will ever have in code somebody has to maintain. If a
-rule helped or hurt, say so in your report and let a person decide.
-
-**We do not run `cm reflect`, and the agent writes its own rules.** Paying an LLM to read a
-transcript back and recover a lesson the agent already held is the wrong trade, and
-reflection can only write to the personal playbook in `$HOME` — invisible to a colleague
-and visible in every unrelated repository on the machine. Anyone who does want it must
-first point `CASS_CLI_COMMAND` at a binary that does not exist: left unset, `cm` resolves
-the Claude CLI and spends the owner's subscription silently. The subscription route is
-forbidden outright.
-
-**`cm` needs no API key and no model here.** `cm context` and the playbook read a file and
-the local index.
-
-**What of `cm` belongs in git**, checked against the binary rather than its README:
-`.cass/playbook.yaml`, `.cass/blocked.log`, `.cass/traumas.jsonl` and `.cass/config.yaml`
-are shared knowledge and are committed. `.cass/context-log.jsonl` is this machine's usage
-accounting and is ignored. Everything under `~/.cass-memory/` stays on the machine, and one
-file there holds an API key.
-
-`blocked.log` is the one to be careful with: its name argues against its contents. It is
-not a diagnostic log — it holds the rule ids this repository refuses. Deleting it to tidy
-up a log file throws away shared knowledge.
-
-**The upstream README and the installed skill name two of those paths wrong.** Believe the
-binary, and check it with `strings` when a document names a path.
+And **never write down what the code should carry instead** — if the lesson is "this must be
+called before that", the fix is an assertion or a test.
 
 ## Code search
 
@@ -434,7 +399,7 @@ how two agents ship two answers to one question.
    ```bash
    br list --label <area> --status all
    br search <phrase>                    # then words, for the bead filed in other words
-   cm context "<keyword>" --json         # what a past session learned the hard way
+   deja "<keyword>"                      # what a past session already hit
    ```
 
    A hit is not automatically your task — read it. It may be claimed, blocked, or record
@@ -498,12 +463,12 @@ rule.
 
 ## Before you investigate: two checks that beat reasoning
 
-**Search the memories before fighting the environment.** `cm context "<what you are doing>"
---json` costs seconds.
+**Search the transcripts before fighting the environment.** `deja "<what you are doing>"`
+costs seconds and reads what every agent on this machine already tried.
 
 > A session spent installing Xvfb and rebuilding the OS twice to run Playwright ended when a
-> memory lookup turned up the headless backend — a path needing no display, in the repo the
-> whole time.
+> lookup turned up the headless backend — a path needing no display, in the repo the whole
+> time.
 
 **When a branch behaves differently from `main`, diff it against `main` first** — before
 measuring, instrumenting or theorising:
@@ -808,7 +773,7 @@ writing-plans, test-driven-development, systematic-debugging — and they are wo
 Its tracker half is not: those skills were written for an older tracker under a different
 binary name, and by the plugin's own rule repository instructions win over skills.
 **Translate every tracker command in a skill to `br`.** Three do not survive a rename:
-"what next" is `scripts/br-queue.sh`, memories are `cm` and not the tracker at all, and
+"what next" is `scripts/br-queue.sh`, recall is `deja` and not the tracker at all, and
 export is `br sync --flush-only` to `.beads/issues.jsonl`.
 
 The official `br` skill is installed too and carries the same kind of leftovers — config

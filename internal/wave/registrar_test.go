@@ -322,6 +322,23 @@ func (m *memStore) CoordinatorSession(_ context.Context, id ID) (string, error) 
 	return coord, nil
 }
 
+func (m *memStore) ParticipantBySession(_ context.Context, sessionID string) (Participant, error) {
+	if err := m.hit("participantbysession"); err != nil {
+		return Participant{}, err
+	}
+	if sessionID == "" {
+		return Participant{}, fmt.Errorf("no such session %q: %w", sessionID, ErrNoSuchParticipant)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.parts {
+		if p.Liveness.SessionID == sessionID && !p.State.Terminal() {
+			return p, nil
+		}
+	}
+	return Participant{}, fmt.Errorf("no such session %q: %w", sessionID, ErrNoSuchParticipant)
+}
+
 func (m *memStore) HeldBy(_ context.Context, coord string) ([]Participant, error) {
 	if err := m.hit("heldby"); err != nil {
 		return nil, err

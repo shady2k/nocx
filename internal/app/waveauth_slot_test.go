@@ -23,7 +23,7 @@ func TestWaveAuthorizerRefusesASecondLiveCallerForTheSameSession(t *testing.T) {
 		root:   wavepin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 	peer := waveendpoint.Peer{UID: 1000, PID: 9001}
 	if _, _, err := auth.Admit(peer); err != nil {
 		t.Fatalf("first caller admission: %v", err)
@@ -50,7 +50,7 @@ func TestWaveAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 		root:   wavepin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 	peer := waveendpoint.Peer{UID: 1000, PID: 9001}
 	first, release, err := auth.Admit(peer)
 	if err != nil {

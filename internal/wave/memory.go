@@ -218,6 +218,46 @@ func (s *MemoryStore) CoordinatorSession(_ context.Context, id ID) (string, erro
 	return coord, nil
 }
 
+// ParticipantBySession names the participant running in one session.
+//
+// It is the record's question and not the caller's. A worker calling in from
+// its own process knows its session and nothing else — the participant id is
+// backend-owned (A9) and never travels to the agent — so the lookup that
+// turns one into the other has to live where the records are. Answering it
+// from outside would mean scanning HeldBy, which needs a COORDINATOR session
+// the worker does not have and must never be handed.
+//
+// A session nobody is running in is refused rather than answered with a zero
+// participant: an empty ParticipantID names mailbox "", which belongs to no
+// one, and handing that back would turn a failed lookup into a mailbox.
+//
+// The LIVE incarnation wins. A session id is reused across incarnations, so
+// the record can hold a terminal participant from an earlier epoch beside the
+// live one; the caller asking is the process running now, and the dead row's
+// mailbox is one nothing will write to again.
+func (s *MemoryStore) ParticipantBySession(_ context.Context, sessionID string) (Participant, error) {
+	if sessionID == "" {
+		return Participant{}, fmt.Errorf("wave: session %q: %w", sessionID, ErrNoSuchParticipant)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := s.selectParticipants(func(p Participant) bool {
+		return p.Liveness.SessionID == sessionID
+	})
+	if len(found) == 0 {
+		return Participant{}, fmt.Errorf("wave: session %q: %w", sessionID, ErrNoSuchParticipant)
+	}
+	// selectParticipants orders by registration, so the last non-terminal row
+	// is the newest incarnation.
+	for i := len(found) - 1; i >= 0; i-- {
+		if !found[i].State.Terminal() {
+			return found[i], nil
+		}
+	}
+	return Participant{}, fmt.Errorf("wave: session %q holds only terminal participants: %w",
+		sessionID, ErrNoSuchParticipant)
+}
+
 func (s *MemoryStore) NonTerminal(_ context.Context, id ID) ([]Participant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

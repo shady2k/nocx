@@ -1978,7 +1978,14 @@ func New(opts ...Option) (*App, error) {
 	if waveDispatcherErr != nil {
 		return nil, fmt.Errorf("wave dispatcher: %w", waveDispatcherErr)
 	}
-	waveAuthorizer := newWaveAuthorizer(wavepin.SystemPinner{}, sess, paneGrid)
+	// The record is handed in so the authorizer can tell the two callers
+	// apart: a session it holds a live participant for is a WORKER calling
+	// about itself, and every other admitted session is a coordinator
+	// (nocx-rowqt.9). The workspace is the one a worker's pane lives in, and
+	// it is the scope its grant names.
+	waveAuthorizer := newWaveAuthorizer(
+		wavepin.SystemPinner{}, sess, paneGrid, waveRecord, string(workspace.Default),
+	)
 	waveSup.exited = func(ctx context.Context, id wave.ParticipantID, l wave.Liveness, e wave.Exit) {
 		if _, err := waveRecord.Exited(ctx, id, l, e); err != nil {
 			logger.Warn("wave: a participant's exit was not recorded",

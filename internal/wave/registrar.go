@@ -527,6 +527,20 @@ func (r *Registrar) member(ctx context.Context, wave ID, who ReaderID) error {
 	return nil
 }
 
+// ParticipantOf names the participant running in one session, for the caller
+// that has a session and needs the participant: the endpoint authorizer, which
+// establishes a peer's session from its process tree and must then decide
+// whether that session is a worker's rather than a coordinator's.
+//
+// It is a passthrough and deliberately not more. Nothing is decided here about
+// what that participant may do — that is the grant the authorizer mints and
+// the capability the declaration narrows to — because a record that also
+// answered "and may it" would be the second owner of an authority question
+// this design keeps in one place.
+func (r *Registrar) ParticipantOf(ctx context.Context, sessionID string) (Participant, error) {
+	return r.store.ParticipantBySession(ctx, sessionID)
+}
+
 // Inbox hands a reader the next page of a mailbox and advances ITS OWN
 // fetched mark, and nobody else's.
 //

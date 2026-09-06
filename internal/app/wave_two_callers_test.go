@@ -20,6 +20,8 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	coordsock "github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/wave"
 	"github.com/shady2k/nocx/internal/waveendpoint"
@@ -54,6 +56,10 @@ const waveExternalSocketEnv = "NOCX_TEST_WAVE_EXTERNAL_SOCKET"
 // waveRPCDomainError is waveendpoint's -32000: the request was understood and
 // refused, as against -32603, which says the backend failed.
 const waveRPCDomainError = -32000
+
+// waveTestWorkspace is the workspace a worker's pane lives in, as the
+// composition root passes it.
+const waveTestWorkspace = "workspace:default"
 
 // TestWaveExternalCallerHelper is not a test. It is the external process: the
 // go test binary re-executed with the socket named in the environment, so that
@@ -147,6 +153,11 @@ type waveExternalResponse struct {
 type waveTwoCallersSpawner struct {
 	mu   sync.Mutex
 	live map[wave.ParticipantID]wave.Liveness
+	// session is the session id a spawned participant runs in. Empty means
+	// "the participant's own id", which is enough for a test that only needs
+	// a distinct liveness; a test whose caller must RESOLVE from a session to
+	// this participant sets the real one.
+	session string
 }
 
 func (s *waveTwoCallersSpawner) Spawn(_ context.Context, req wave.SpawnRequest) (wave.Spawned, error) {
@@ -155,9 +166,13 @@ func (s *waveTwoCallersSpawner) Spawn(_ context.Context, req wave.SpawnRequest) 
 	if s.live == nil {
 		s.live = make(map[wave.ParticipantID]wave.Liveness)
 	}
+	sessionID := s.session
+	if sessionID == "" {
+		sessionID = string(req.Participant)
+	}
 	live := wave.Liveness{
 		BackendInstance: "test-instance",
-		SessionID:       string(req.Participant),
+		SessionID:       sessionID,
 		Epoch:           1,
 	}
 	s.live[req.Participant] = live
@@ -217,7 +232,14 @@ func (c *waveTwoCallersCloser) endedParticipants() []wave.ParticipantID {
 
 // newWaveTwoCallersRecord builds the real record over the seams above.
 func newWaveTwoCallersRecord() (*wave.Registrar, *waveTwoCallersCloser) {
-	spawner := &waveTwoCallersSpawner{}
+	return newWaveTwoCallersRecordInSession("")
+}
+
+// newWaveTwoCallersRecordInSession is the same record, with every participant
+// it registers running in one named session — what a caller from that pane
+// must resolve to in order to be a participant rather than a coordinator.
+func newWaveTwoCallersRecordInSession(sessionID string) (*wave.Registrar, *waveTwoCallersCloser) {
+	spawner := &waveTwoCallersSpawner{session: sessionID}
 	closer := &waveTwoCallersCloser{}
 	record := wave.NewRegistrar(
 		wave.NewMemoryStore(),
@@ -233,14 +255,14 @@ func newWaveTwoCallersRecord() (*wave.Registrar, *waveTwoCallersCloser) {
 
 // publishWaveEndpoint starts the shipped endpoint over the shipped authorizer
 // with the real kernel-stamped peer credentials, and returns its socket path.
-func publishWaveEndpoint(t *testing.T, reg *session.Reg, grid waveAuthEnrolments, dispatch assistant.WaveDispatcher) string {
+func publishWaveEndpoint(t *testing.T, reg *session.Reg, grid waveAuthEnrolments, record *wave.Registrar, dispatch assistant.WaveDispatcher) string {
 	t.Helper()
 	endpoint, err := waveendpoint.New(waveendpoint.Config{
 		Dir:      t.TempDir(),
 		Peers:    coordsock.SystemPeerCredentials{},
 		Owner:    coordsock.SystemPathOwner{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // a uid is not a signed quantity
-		Auth:     newWaveAuthorizer(wavepin.SystemPinner{}, reg, grid),
+		Auth:     newWaveAuthorizer(wavepin.SystemPinner{}, reg, grid, record, waveTestWorkspace),
 		Dispatch: dispatch,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -388,7 +410,7 @@ func TestWaveExternalCallerMutationIsTheInProcessCallersRow(t *testing.T) {
 	reg, sess, grid := prepareWaveCaller(t)
 	record, closer := newWaveTwoCallersRecord()
 	dispatcher := newSharedWaveDispatcher(t, record)
-	socket := publishWaveEndpoint(t, reg, grid, dispatcher)
+	socket := publishWaveEndpoint(t, reg, grid, record, dispatcher)
 
 	// The external caller starts the worker.
 	spawn := callExternally(t, socket, "wave.spawn",
@@ -465,7 +487,7 @@ func TestWaveExternalCallerCannotMoveARowItsCapabilityNeverHeld(t *testing.T) {
 	reg, _, grid := prepareWaveCaller(t)
 	record, _ := newWaveTwoCallersRecord()
 	dispatcher := newSharedWaveDispatcher(t, record)
-	socket := publishWaveEndpoint(t, reg, grid, dispatcher)
+	socket := publishWaveEndpoint(t, reg, grid, record, dispatcher)
 
 	// A worker in a DIFFERENT session's wave, registered directly on the
 	// record so that nothing about the caller's own path created it.
@@ -518,7 +540,7 @@ func TestWaveEndpointHasNoExecutionPathOfItsOwn(t *testing.T) {
 	reg, sess, grid := prepareWaveCaller(t)
 	endpointRecord, _ := newWaveTwoCallersRecord()
 	inProcessRecord, _ := newWaveTwoCallersRecord()
-	socket := publishWaveEndpoint(t, reg, grid, newSharedWaveDispatcher(t, endpointRecord))
+	socket := publishWaveEndpoint(t, reg, grid, endpointRecord, newSharedWaveDispatcher(t, endpointRecord))
 	inProcess := newSharedWaveDispatcher(t, inProcessRecord)
 
 	spawn := callExternally(t, socket, "wave.spawn",
@@ -539,5 +561,162 @@ func TestWaveEndpointHasNoExecutionPathOfItsOwn(t *testing.T) {
 	}
 	if ids := waveHoldingIDs(t, holdings); contains(ids, spawnResult.ID) {
 		t.Fatalf("two records shared a row %q: %v — the readback in the happy path proves nothing", spawnResult.ID, ids)
+	}
+}
+
+// waveWorkerSetup is a wave whose enrolled session is the WORKER's, not the
+// coordinator's. Only one session may be enrolled at a time here, and that is
+// the product's rule rather than a test convenience: waveAuthorizer refuses a
+// peer matching two live enrolled roots, because a pid inside both trees has
+// no unambiguous session authority. The coordinator in these tests therefore
+// speaks through the in-process path only, which is all it needs.
+type waveWorkerSetup struct {
+	coordinator session.ID
+	participant wave.ParticipantID
+	socket      string
+	dispatcher  assistant.WaveDispatcher
+}
+
+func prepareWaveWorkerSetup(t *testing.T) waveWorkerSetup {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	reg := session.New(logger, waveAuthPTYFactory{log: logger})
+	grid := panegrid.New(logger)
+
+	// The coordinator's session exists and is deliberately NOT enrolled: it
+	// reaches the record in process, and enrolling it would make the peer's
+	// tree ambiguous between two roots.
+	coordinator, err := reg.Open(context.Background(), session.Config{Kind: session.KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("open coordinator session: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close(coordinator.ID()) })
+
+	worker, err := reg.Open(context.Background(), session.Config{Kind: session.KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("open worker session: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close(worker.ID()) })
+	if pidErr := reg.RecordOwnedProcessPID(worker.ID(), os.Getpid()); pidErr != nil {
+		t.Fatalf("record worker owned pid: %v", pidErr)
+	}
+	if enrolErr := grid.Enrol(string(worker.ID()), 80, 24); enrolErr != nil {
+		t.Fatalf("enrol worker pane: %v", enrolErr)
+	}
+	t.Cleanup(func() { grid.Withdraw(string(worker.ID())) })
+
+	// The participant's liveness carries the WORKER's session, which is what
+	// ParticipantBySession resolves and therefore what makes the caller from
+	// that pane a participant rather than a coordinator.
+	record, _ := newWaveTwoCallersRecordInSession(string(worker.ID()))
+	dispatcher := newSharedWaveDispatcher(t, record)
+	p, err := record.Register(context.Background(), wave.RegisterRequest{
+		CoordinatorSession: string(coordinator.ID()),
+		Role:               wave.RoleWorker,
+		Task:               "read your own mail",
+		Command:            "claude",
+		Environment:        content.EnvironmentIDFor(content.EnvLocal, ""),
+	})
+	if err != nil {
+		t.Fatalf("register the worker: %v", err)
+	}
+	if resolved, rerr := record.ParticipantOf(context.Background(), string(worker.ID())); rerr != nil {
+		t.Logf("PROBE ParticipantOf(%s) failed: %v", worker.ID(), rerr)
+	} else {
+		t.Logf("PROBE ParticipantOf(%s) = %s", worker.ID(), resolved.ID)
+	}
+	return waveWorkerSetup{
+		coordinator: coordinator.ID(),
+		participant: p.ID,
+		socket:      publishWaveEndpoint(t, reg, grid, record, dispatcher),
+		dispatcher:  dispatcher,
+	}
+}
+
+// TestWaveWorkerReadsTheMailItsCoordinatorLeft is nocx-rowqt.9's happy path:
+// wave.say had a writer and no reader, so a coordinator could commit a message
+// into a mailbox nothing could open. This watches a worker open it.
+func TestWaveWorkerReadsTheMailItsCoordinatorLeft(t *testing.T) {
+	w := prepareWaveWorkerSetup(t)
+
+	// The coordinator says something, through the in-process path.
+	if _, err := w.dispatcher.Dispatch(inProcessInvocation(
+		w.coordinator, "wave.say",
+		`{"worker":"`+string(w.participant)+`","message":"read this and report"}`,
+	)); err != nil {
+		t.Fatalf("coordinator wave.say: %v", err)
+	}
+
+	// And the WORKER reads it, over the socket, as itself.
+	inbox := callExternally(t, w.socket, "wave.inbox", `{}`)
+	if inbox.Error != nil {
+		t.Fatalf("worker wave.inbox: %+v", inbox.Error)
+	}
+	var result struct {
+		Messages []struct {
+			From    string `json:"from"`
+			Message string `json:"message"`
+		} `json:"messages"`
+		Cursor int64 `json:"cursor"`
+	}
+	if err := json.Unmarshal(inbox.Result, &result); err != nil {
+		t.Fatalf("decode inbox result %s: %v", inbox.Result, err)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("worker read %d messages, want the 1 its coordinator left: %s",
+			len(result.Messages), inbox.Result)
+	}
+	if result.Messages[0].Message != "read this and report" {
+		t.Fatalf("worker read %q, want what the coordinator said", result.Messages[0].Message)
+	}
+	if result.Messages[0].From != string(w.coordinator) {
+		t.Fatalf("message from = %q, want the coordinator session %q",
+			result.Messages[0].From, w.coordinator)
+	}
+	if result.Cursor == 0 {
+		t.Fatalf("cursor did not move: %s", inbox.Result)
+	}
+}
+
+// TestWaveWorkerIsOfferedNoCoordinatorCall is the other half of the AC: a
+// worker holds a capability that cannot perform an act reserved to the
+// coordinator. It is refused because its grant never made the call reachable,
+// not because an executor checked a role.
+func TestWaveWorkerIsOfferedNoCoordinatorCall(t *testing.T) {
+	w := prepareWaveWorkerSetup(t)
+	for _, tc := range []struct{ method, params string }{
+		{"wave.spawn", `{"command":"claude","task":"a worker starting a worker"}`},
+		{"wave.holdings", `{}`},
+		{"wave.close", `{"worker":"nobody"}`},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			response := callExternally(t, w.socket, tc.method, tc.params)
+			if response.Error == nil {
+				t.Fatalf("a worker performed %s: %s", tc.method, response.Result)
+			}
+			if response.Error.Code != waveRPCDomainError {
+				t.Fatalf("%s answered %d %q, want the domain refusal %d",
+					tc.method, response.Error.Code, response.Error.Message, waveRPCDomainError)
+			}
+		})
+	}
+}
+
+// TestWaveCoordinatorIsOfferedNoParticipantCall is its mirror, and the pair is
+// what makes "disjoint by construction" checkable rather than asserted: if a
+// later grant change made one set reach the other, exactly one of these two
+// tests goes red.
+func TestWaveCoordinatorIsOfferedNoParticipantCall(t *testing.T) {
+	reg, _, grid := prepareWaveCaller(t)
+	record, _ := newWaveTwoCallersRecord()
+	socket := publishWaveEndpoint(t, reg, grid, record, newSharedWaveDispatcher(t, record))
+
+	response := callExternally(t, socket, "wave.inbox", `{}`)
+	if response.Error == nil {
+		t.Fatalf("a coordinator read a participant's mailbox: %s", response.Result)
+	}
+	if response.Error.Code != waveRPCDomainError {
+		t.Fatalf("wave.inbox answered %d %q, want the domain refusal %d",
+			response.Error.Code, response.Error.Message, waveRPCDomainError)
 	}
 }

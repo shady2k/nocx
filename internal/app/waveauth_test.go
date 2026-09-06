@@ -50,6 +50,14 @@ func (p *waveAuthPinner) Member(child int, root wavepin.Root) (bool, error) {
 	return p.member[child], nil
 }
 
+// emptyWaveRecord is a real record holding nobody. The coordinator tests use
+// it rather than a nil so they exercise the real "is this session a
+// participant" lookup and take the coordinator branch because the ANSWER is
+// no, not because the seam was missing.
+func emptyWaveRecord() *wave.Registrar {
+	return wave.NewRegistrar(wave.NewMemoryStore(), nil, nil, nil)
+}
+
 func openWaveAuthSession(t *testing.T) (*session.Reg, session.Session, *panegrid.Store) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
@@ -76,7 +84,7 @@ func TestWaveAuthorizerAdmitsEnrolledOwnedTreeThroughRealWaveRecord(t *testing.T
 
 	root := wavepin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)}
 	pinner := &waveAuthPinner{root: root, member: map[int]bool{9001: true}}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 
 	inv, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if err != nil {
@@ -143,7 +151,7 @@ func TestWaveAuthorizerRefusesCallerOutsideEveryEnrolledTree(t *testing.T) {
 		root:   wavepin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: false},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("outside-tree admission error = %v, want ErrNotEnrolled", err)
@@ -164,7 +172,7 @@ func TestWaveAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 		root:   wavepin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 	if _, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001}); err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}
@@ -183,7 +191,7 @@ func TestWaveAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
 		root:   wavepin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newWaveAuthorizer(pinner, reg, grid)
+	auth := newWaveAuthorizer(pinner, reg, grid, emptyWaveRecord(), waveTestWorkspace)
 	_, _, err := auth.Admit(waveendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, waveendpoint.ErrNotEnrolled) {
 		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)

@@ -459,9 +459,13 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// ends a process the person may never have watched start, whose work
 		// is lost with it.
 		"wave.close": {content.EffectMutateDestructive},
+		// OBSERVE for the inbox, read from the other end of wave.say: taking
+		// a message out of your own mailbox exercises no authority over
+		// anything but your own reading position.
+		"wave.inbox": {content.EffectObserve},
 	}
-	if len(declarations) != 27 {
-		t.Fatalf("declaration count = %d, want 27", len(declarations))
+	if len(declarations) != 28 {
+		t.Fatalf("declaration count = %d, want 28", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -583,6 +587,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"wave.wait.schema.json":        waveWaitSchema,
 		"wave.close.schema.json":       waveCloseSchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
+		"wave.inbox.schema.json":       waveInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -742,6 +747,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"wave.wait.schema.json":        waveWaitSchema,
 		"wave.close.schema.json":       waveCloseSchema,
 		"wave.spawn.schema.json":       waveSpawnSchema,
+		"wave.inbox.schema.json":       waveInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1415,6 +1421,23 @@ const waveHoldingsSchema = `{
     "additionalProperties": false,
     "required": ["participants"],
     "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const waveInboxSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {"acknowledge": {"type": "integer"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["messages", "cursor"],
+    "properties": {
+      "messages": {"type": "array", "items": {"type": "object"}},
+      "cursor": {"type": "integer"},
+      "more": {"type": "boolean"}
+    }
   }}
 }`
 

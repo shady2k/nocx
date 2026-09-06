@@ -1,15 +1,19 @@
 package agenttools
 
-// The wave coordinator's capability (nocx-dkawo.8).
+// The wave capabilities (nocx-dkawo.8, nocx-rowqt.9).
 //
-// TWO TYPES AND NOT ONE WITH A ROLE FLAG. A coordinator and a participant hold
+// TWO TYPES AND NOT ONE WITH A ROLE FLAG, and since nocx-rowqt.9 both of them
+// exist: WaveCoordinator is what a run holds over its own wave, WaveParticipant
+// is what a worker holds over itself. Until then only the first was built, and
+// the consequence was a writer with no reader — wave.say dropped mail into a
+// box nothing could open, which is a soft degrade visible nowhere. A coordinator and a participant hold
 // different authorities over the same objects, and the type switch at the
 // dispatcher is what proves the distinction is exhaustive. A boolean inside
 // one type proves nothing and is one refactor away from being read wrong —
 // which is why Runner and RunWatcher are already two types for two
 // authorities over the same sessions.
 //
-// THE HOLDER'S OWN RESOURCES LIVE INSIDE THE OBJECT. Neither call here takes a
+// THE HOLDER'S OWN RESOURCES LIVE INSIDE THE OBJECT. No call here takes a
 // participant argument, and that is the design rather than an economy: the
 // mailbox read, the inbox check, the report and this holdings call all name
 // the holder's own resources, and passing an id to be checked is the ambient
@@ -17,7 +21,11 @@ package agenttools
 // local proof it is avoidable — it has no session parameter at all, so the
 // model cannot express "run in another pane".
 
-import "github.com/shady2k/nocx/internal/content"
+import (
+	"errors"
+
+	"github.com/shady2k/nocx/internal/content"
+)
 
 // WaveCoordinator is the narrowed authority a run holds over its own wave: it
 // may ask what its SESSION holds, and it may spawn into an environment its
@@ -79,6 +87,68 @@ func (c *WaveCoordinator) Environments() []string {
 	return out
 }
 
+// WaveParticipant is the other authority over the same objects: what a WORKER
+// holds over itself. It may read the mailbox that is its own and nothing else.
+//
+// The participant id is inside the object for the coordinator session's
+// reason, and the consequence is stronger here: a worker asking for its mail
+// has no way to EXPRESS another worker's mailbox, so "cannot read a
+// neighbour's mail" is a property of the type rather than of a check somebody
+// has to remember to write. The id itself is backend-owned (A9) and never
+// travels to the agent — the worker knows its session, and the record turns
+// that into this.
+//
+// It deliberately holds no environments and no coordinator session. A worker
+// that could name either would hold half of a coordinator's authority, and
+// the type would then be a coordinator with fields left empty rather than a
+// different authority.
+type WaveParticipant struct {
+	participant string
+}
+
+// NewWaveParticipant binds the capability to one participant.
+func NewWaveParticipant(participant string) *WaveParticipant {
+	return &WaveParticipant{participant: participant}
+}
+
+// Participant is who this capability is, and the only participant it can name.
+func (p *WaveParticipant) Participant() string {
+	if p == nil {
+		return ""
+	}
+	return p.participant
+}
+
+// Mailbox is the box this capability may read. It is the participant's own id
+// because that is how a worker is named as a reader (internal/wave.ReaderID),
+// and it is a method rather than a second field so the two cannot drift.
+func (p *WaveParticipant) Mailbox() string {
+	if p == nil {
+		return ""
+	}
+	return p.participant
+}
+
+// errNoParticipant is what a narrow returns for a run the authorizer did not
+// establish as a worker's.
+var errNoParticipant = errors.New("agenttools: this run is not a wave participant")
+
+// narrowWaveParticipant builds the participant capability from the run's own
+// identity. The id comes from the run context and never from the call's
+// arguments: a call that could name a participant would be the ambient
+// dispatcher API ADR-0028 decision 4 rejects, and it would let one worker read
+// another's mail by typing its id.
+//
+// A run with no participant is REFUSED here rather than narrowed to an empty
+// capability. An empty participant names mailbox "", which belongs to nobody,
+// and a mailbox belonging to nobody must not be reachable at all.
+func narrowWaveParticipant(_ content.Grant, _ []ResourceRef, runCtx RunContext) (Capability, error) {
+	if runCtx.Participant == "" {
+		return nil, errNoParticipant
+	}
+	return NewWaveParticipant(runCtx.Participant), nil
+}
+
 // narrowWave builds the coordinator capability from the run's grant. Both wave
 // tools share it: they are two acts of one authority, and a second constructor
 // would be a second answer to "what may this run do to its own wave".
@@ -90,6 +160,44 @@ func narrowWave(grant content.Grant, _ []ResourceRef, runCtx RunContext) (Capabi
 		}
 	}
 	return NewWaveCoordinator(runCtx.Session, scopes), nil
+}
+
+// resourceParticipantWorkspace names the resource a participant's call is
+// about, as A11 of the authority model decided it: a participant is addressed
+// as a SUB-SCOPE OF ResourceWorkspace, not as a ninth ResourceKind. The kind
+// set is closed at eight and guarded twice — validResourceKind and the
+// grant_scopes CHECK — and ResourceContent already carries "note/<id>" and
+// "skill/<id>", so sub-scoping inside a kind is the established move.
+//
+// It is the workspace and not the pane, and that is a smaller claim than it
+// looks. What narrows a participant to ITS OWN mailbox is the capability
+// (A9's rule: the holder's own resources live inside the object), never this
+// scope; the scope's only job is offer-eligibility — whether Registry.ForGrant
+// hands this declaration to the run at all. A pane-depth id would need the tab
+// the worker's pane sits in, which the authorizer does not have and would have
+// to invent, and it would buy nothing the capability does not already give.
+//
+// This kind is what keeps the two capabilities' offer sets disjoint. Nothing
+// else in the tree mints a ResourceWorkspace scope — an ordinary run's fence
+// is session, path, content, destination and environment — so no coordinator
+// is ever offered a participant's call, and the participant's own grant names
+// no session or environment, so it is offered none of the coordinator's four.
+func resourceParticipantWorkspace(_ map[string]any, runCtx RunContext) ([]ResourceRef, error) {
+	if runCtx.Workspace == "" {
+		return nil, errNoParticipant
+	}
+	return []ResourceRef{{
+		Kind: content.ResourceWorkspace,
+		ID:   ParticipantWorkspaceScopeID(runCtx.Workspace),
+	}}, nil
+}
+
+// ParticipantWorkspaceScopeID builds the canonical scope id a participant's
+// call names. It is exported because the authorizer mints the grant and this
+// resolver names the resource, and the two must agree — a second spelling in
+// either place is a tool that assembles and is never offered.
+func ParticipantWorkspaceScopeID(workspace string) string {
+	return "workspace/" + workspace
 }
 
 // resourceLocalEnvironment names the environment a spawn would reach.

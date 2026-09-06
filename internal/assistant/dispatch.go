@@ -116,7 +116,7 @@ func compileDispatchSchemas(registry agenttools.Registry) (map[string]*jsonschem
 }
 
 // NewWaveDispatcher builds the wave-only adapter over the common operation.
-// Its public surface accepts only the five assembled wave declarations; the
+// Its public surface accepts only the assembled wave declarations; the
 // record and environment are infrastructure seams, never caller parameters.
 func NewWaveDispatcher(registry agenttools.Registry, waves WaveRecord, environment string) (WaveDispatcher, error) {
 	validators, results, err := compileDispatchSchemas(registry)
@@ -153,6 +153,12 @@ var waveMethodNames = [...]string{
 	"wave.wait",
 	"wave.holdings",
 	"wave.close",
+	// The participant's one call (nocx-rowqt.9). It belongs on this list for
+	// the same reason the other five do — it is part of the wave surface the
+	// endpoint exposes — and NOT because it shares their authority: it
+	// narrows to the other capability entirely, and no grant that reaches
+	// those five reaches this one.
+	"wave.inbox",
 }
 
 // isWaveMethod selects the current wave surface for the reachability behavior;

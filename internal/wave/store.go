@@ -82,6 +82,14 @@ type Store interface {
 	// is needed.
 	CoordinatorSession(ctx context.Context, id ID) (string, error)
 
+	// ParticipantBySession names the participant running in one session, and
+	// refuses a session that is nobody's. It is here rather than derived by a
+	// caller because the only outside route to it is HeldBy, which needs a
+	// COORDINATOR session — and the caller who needs this answer is the
+	// worker, which has neither its own participant id (backend-owned, A9)
+	// nor its coordinator's session.
+	ParticipantBySession(ctx context.Context, sessionID string) (Participant, error)
+
 	// Commit writes one message into a mailbox and stamps its Seq, which is
 	// the store's to mint: a sequence a caller chose could collide, and the
 	// order of a mailbox is the only thing a cursor can point at.

@@ -73,6 +73,12 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 			{Kind: content.ResourceContent, ID: "content"},
 			{Kind: content.ResourceDestination, ID: "*"},
 			{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
+			// The participant's kind (A11). No ordinary run's fence carries
+			// one — which is exactly what keeps wave.inbox off a
+			// coordinator's offer — so this grant names it deliberately, to
+			// keep "every declared tool has a sentence" a claim about ALL of
+			// them rather than about the coordinator's set.
+			{Kind: content.ResourceWorkspace, ID: "workspace/workspace:default"},
 		},
 	})
 	got := toolDescriptions(t, f.body())

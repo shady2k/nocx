@@ -60,6 +60,14 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
+	// Participant is the wave participant this run IS, when the run belongs
+	// to a worker rather than to a coordinator. Empty for every ordinary run,
+	// and that emptiness is what narrowWaveParticipant refuses on.
+	//
+	// It is an identity of the run and belongs here for the reason the others
+	// do: it is established once, by the authorizer, from the session the
+	// peer's process tree resolved to — never by anything the caller sends.
+	Participant string
 	// AutomaticSessionItems are renderer-owned screen attachments. They are
 	// immutable ids carried by this run so session.read can route them to the
 	// renderer even when the shell-originated attempt has no ledger row.
@@ -792,6 +800,36 @@ var declarations = []Declaration{
 		Executes:         InGo,
 		Params:           "wave.wait.schema.json",
 		Narrow:           narrowWave,
+	},
+	{
+		Name:        "wave.inbox",
+		Description: "Read the mail your coordinator has left you. It takes no arguments beyond the position you are confirming: the mailbox is yours, and there is no way to name another. Reach for it when you start a turn and when you have finished a piece of work — mail waits, it does not interrupt, so what you were told is only told to you when you look.",
+		// OBSERVE, and for wave.say's reason read from the other end. Taking a
+		// message out of your own mailbox exercises no authority over anything
+		// but your own reading position: it starts nothing, ends nothing, and
+		// names nothing outside the participant the run already is.
+		Effect: []content.Effect{content.EffectObserve},
+		// A COORDINATOR wrote it, which is an agent, so it is untrusted for
+		// exactly the reason the coordinator's own view of a worker is.
+		OutputTrust:  OutputTrustUntrusted,
+		ResultBound:  ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		Deadline:     10 * time.Second,
+		Cancellation: CancellationReturnError,
+		// A PARTICIPANT, addressed as a sub-scope of ResourceWorkspace per
+		// A11 — see resourceParticipantWorkspace for why that is the kind and
+		// why it is the workspace rather than the pane. It is also what keeps
+		// this declaration off every coordinator's offer: nothing else mints a
+		// workspace scope, so only the grant the endpoint authorizer builds
+		// for a worker reaches this tool at all.
+		ResourceKinds:    []content.ResourceKind{content.ResourceWorkspace},
+		ResolveResources: resourceParticipantWorkspace,
+		Executes:         InGo,
+		Params:           "wave.inbox.schema.json",
+		// The OTHER capability. This is the only declaration that narrows to a
+		// participant, and it is what makes A8's two types load-bearing rather
+		// than decorative: a coordinator's run has no participant identity, so
+		// this narrow refuses it.
+		Narrow: narrowWaveParticipant,
 	},
 	{
 		Name:        "wave.close",

@@ -172,6 +172,83 @@ func waveCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.Wa
 	return c, nil
 }
 
+// waveParticipantFrom is the other half of the type switch A8 asks for. It
+// exists beside waveCoordinatorFrom rather than inside it because the two
+// capabilities are two types: a function that accepted either and returned a
+// role would be the boolean the design rejected, one refactor from being read
+// wrong.
+func waveParticipantFrom(cap agenttools.Capability, tool string) (*agenttools.WaveParticipant, error) {
+	p, ok := cap.(*agenttools.WaveParticipant)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, not *agenttools.WaveParticipant", tool, cap)
+	}
+	if p.Mailbox() == "" {
+		// A participant with no mailbox is a caller the authorizer did not
+		// establish as a worker. Answering it an empty inbox would be
+		// indistinguishable from a worker whose coordinator has said nothing.
+		return nil, fmt.Errorf("%s: this run is not a wave participant", tool)
+	}
+	return p, nil
+}
+
+type waveInboxParams struct {
+	Acknowledge int64 `json:"acknowledge"`
+}
+
+type waveInboxResult struct {
+	Messages []waveMailResult `json:"messages"`
+	Cursor   int64            `json:"cursor"`
+	More     bool             `json:"more"`
+}
+
+// executeWaveInbox hands a worker the mail its coordinator left it.
+//
+// This is the reader wave.say was always writing for. Until it existed the
+// coordinator could commit a message into a mailbox nothing could open — a
+// writer with no reader, which is a soft degrade visible nowhere (nocx-rowqt.9).
+//
+// It names no mailbox. The box is the participant's own id, taken from the
+// capability, so a worker has no way to EXPRESS another worker's mail — A9's
+// rule, and the reason this is a property of the type rather than of a check.
+func executeWaveInbox(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	participant, err := waveParticipantFrom(cap, "wave.inbox")
+	if err != nil {
+		return "", err
+	}
+	if seams.waves == nil {
+		return "", errors.New("wave.inbox: this backend keeps no wave record")
+	}
+	var p waveInboxParams
+	if len(args) > 0 {
+		if argErr := json.Unmarshal(args, &p); argErr != nil {
+			return "", fmt.Errorf("wave.inbox: %w", argErr)
+		}
+	}
+	box := wave.ReaderID(participant.Mailbox())
+	// Acknowledge BEFORE fetching, for the coordinator's reason: the mark
+	// being sent back is about the PREVIOUS answer, and doing it after would
+	// let this call's own page slide under an acknowledgement of mail the
+	// worker has not seen yet.
+	if p.Acknowledge > 0 {
+		if ackErr := seams.waves.Acknowledge(ctx, box, box, p.Acknowledge); ackErr != nil {
+			return "", fmt.Errorf("wave.inbox: acknowledge: %w", ackErr)
+		}
+	}
+	fetched, err := seams.waves.Inbox(ctx, box, box, 0)
+	if err != nil {
+		return "", fmt.Errorf("wave.inbox: %w", err)
+	}
+	out := waveInboxResult{Messages: []waveMailResult{}, Cursor: fetched.Cursor.Fetched, More: fetched.More}
+	for _, m := range fetched.Messages {
+		out.Messages = append(out.Messages, waveMailResult{From: string(m.Sender), Message: m.Body})
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("wave.inbox: result: %w", err)
+	}
+	return string(raw), nil
+}
+
 // executeWaveHoldings answers D3: a coordinator asks what its SESSION holds
 // and is told by name.
 //

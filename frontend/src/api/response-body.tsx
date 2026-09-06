@@ -19,7 +19,7 @@
 // header, and the raw view is one tab away for exactly that case.
 
 import { createEffect, createMemo, on, onCleanup } from 'solid-js'
-import { ReadOnlyHost } from '../cm-host'
+import { ReadOnlyHost } from '../ui/cm-host'
 import { jsonEditing, viewerHighlighting } from '../ui/document-language'
 import { lineNumbers } from '@codemirror/view'
 

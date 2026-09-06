@@ -256,24 +256,6 @@ function readoutFor(scope: Locator, ariaLabel: string): { readout: Locator; pre:
   }
 }
 
-/** The same file when it is MARKDOWN, which the tab renders as a document
- *  rather than quoting as bytes (nocx-okee0). Its accessible name omits
- *  "verbatim" for the reason the surface omits it: the markers are not on
- *  screen, so nothing here is quoted. */
-function documentFor(scope: Locator, ariaLabel: string): Locator {
-  return scope.locator(`.skill-view__doc[aria-label="${ariaLabel}"]`)
-}
-
-/** One rendered row's text per source line, in order — the document's
- *  answer to `exactText`. The rows are block elements with no separator
- *  between them, so `textContent` on the container runs the lines together
- *  and cannot be compared against the file. */
-function documentLines(doc: Locator): Promise<string[]> {
-  return doc.evaluate((el) =>
-    Array.from(el.querySelectorAll('.ui-md-line')).map((row) => row.textContent ?? ''),
-  )
-}
-
 test.describe('a person reads every byte they are being asked about (nocx-872jc)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
@@ -303,6 +285,7 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await row.getByRole('button', { name: `Open ${SKILL_NAME}`, exact: true }).click()
     const card = page.locator('.pane.active .surface-host:has(.skill-view__header)')
     await expect(card).toBeVisible({ timeout: 15_000 })
+    const doc = card.locator(`.ui-document-surface[aria-label="${SKILL_FILE} of “${SKILL_NAME}”"]`)
     await expect(card.locator('.skill-view__name')).toHaveText(SKILL_NAME)
 
     // ── EVERY file it holds is listed, and it holds more than one ──────────
@@ -318,16 +301,12 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     // SKILL.md is what the tab opens with by default (skill-view-body.tsx:
     // the first file, when no stored check exists yet), so this is the
     // state a person arrives in rather than one this spec drove them to.
-    // SKILL.md IS MARKDOWN, so the tab renders it as a document (nocx-okee0)
-    // rather than quoting its bytes. Every line is still on screen and in
-    // order — that is what this asserts, line for line against the file —
-    // and the pane no longer repeats the name, the path and the provenance
-    // the header and the file list are already showing (nocx-xj1l6).
-    const doc = documentFor(card, `${SKILL_FILE} of “${SKILL_NAME}”`)
-    await expect(doc).toBeVisible({ timeout: 15_000 })
-    await expect
-      .poll(() => documentLines(doc), { timeout: 15_000 })
-      .toEqual(SKILL_DOCUMENT.replace(/\n$/, '').split('\n'))
+    // Markdown is rendered as semantic document structure: frontmatter is a
+    // metadata header and the hard-wrapped body is one flowing paragraph.
+    await expect(doc.locator('.ui-md-front')).toHaveCount(1)
+    await expect(doc.locator('.ui-md-body p')).toHaveText(
+      `Acknowledge the page, then follow the helper in ${SETUP_FILE} (${nonce}).`,
+    )
     await expect(card.locator('.ui-fact-list')).toHaveCount(0)
     // Read-only: there is nothing in the reader a person could type into.
     await expect(doc.locator('input, textarea, [contenteditable="true"]')).toHaveCount(0)

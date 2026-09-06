@@ -89,6 +89,61 @@ export const viewerHighlighting = syntaxHighlighting(viewerHighlight)
 
 // ── Language selection ──────────────────────────────────────────────────────
 
+/**
+ * A language by NAME — the vocabulary a kit caller speaks (nocx-qfdy7).
+ *
+ * `languageForPath` below asks the same question of a FILE, and answers it
+ * by extension. A component in the kit has no path to look at: it is handed
+ * a document and told what it is. Both funnel into the same modules, so
+ * "which grammar" stays one decision with one owner; a caller that has a
+ * path uses the path form and one that has a name uses this.
+ *
+ * A CLOSED UNION rather than a string, because an unknown name must be a
+ * compile error and not a silently-plain document.
+ */
+export type DocumentLanguage =
+  | 'plain'
+  | 'markdown'
+  | 'json'
+  | 'yaml'
+  | 'shell'
+  | 'go'
+  | 'typescript'
+  | 'tsx'
+  | 'javascript'
+  | 'jsx'
+  | 'python'
+
+/** The CM6 language extension for a named language. No `default`: the union
+ *  is closed, so a new member fails this switch's return type rather than
+ *  quietly rendering as plain text. */
+export function languageForName(language: DocumentLanguage): Extension {
+  switch (language) {
+    case 'plain':
+      return []
+    case 'markdown':
+      return markdown()
+    case 'json':
+      return json()
+    case 'yaml':
+      return yaml()
+    case 'shell':
+      return StreamLanguage.define(shell)
+    case 'go':
+      return go()
+    case 'typescript':
+      return javascript({ typescript: true })
+    case 'tsx':
+      return javascript({ typescript: true, jsx: true })
+    case 'javascript':
+      return javascript()
+    case 'jsx':
+      return javascript({ jsx: true })
+    case 'python':
+      return python()
+  }
+}
+
 const LAST_SEGMENT = /([^/\\]+)$/
 
 /** Basename of a provider path, whatever the platform's separator is. */
@@ -104,6 +159,13 @@ export function extensionOf(path: string): string {
   // A leading dot (".bashrc", ".gitignore") is a hidden file, not an extension.
   if (dot <= 0) return ''
   return base.slice(dot).toLowerCase()
+}
+
+/** Whether a path names a markdown document. The skill pane uses this before
+ * choosing rendered output; all other extensions remain byte-oriented there. */
+export function isMarkdownPath(path: string): boolean {
+  const extension = extensionOf(path)
+  return extension === '.md' || extension === '.markdown'
 }
 
 /** Markdown by NAME rather than by path — the snippet body is authored as

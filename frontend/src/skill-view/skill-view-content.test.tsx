@@ -215,8 +215,12 @@ const viewCol = (host: HTMLElement): HTMLElement => host.querySelector('.skill-v
  *  question — "is this file's text on screen" — not about which renderer
  *  answered it. The two tests that ARE about the renderer say so by
  *  querying for it directly. */
-const viewText = (host: HTMLElement): string =>
-  viewCol(host).querySelector('.skill-view__doc, .ui-code-block')?.textContent ?? ''
+const viewText = (host: HTMLElement): string => {
+  const view = viewCol(host)
+  const document = view.querySelector('.ui-document-surface')
+  if (document) return (document.textContent ?? '').replace(/\n$/, '')
+  return view.querySelector('.ui-code-block')?.textContent ?? ''
+}
 
 const filePaths = (client: SkillsClientLike): string[] =>
   (client.file as Mock).mock.calls.map((call: unknown[]) => call[1] as string)
@@ -381,7 +385,7 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     // Whichever way the pane drew this file — a document since nocx-okee0,
     // bytes for anything that is not markdown — it is a READER: nothing in
     // it takes a keystroke that could change what is on disk.
-    const view = viewCol(host).querySelector('.skill-view__doc, .ui-file-readout')!
+    const view = viewCol(host).querySelector('.ui-document-surface, .ui-file-readout')!
     expect(view.querySelector('textarea')).toBeNull()
     expect(view.querySelector('input')).toBeNull()
     expect(view.querySelector('[contenteditable]')).toBeNull()
@@ -873,7 +877,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     fileRow.querySelector<HTMLButtonElement>('.ui-record-row__open')?.click()
     await flush()
     expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
-    expect(host.querySelector('.skill-view__view-col .skill-view__doc')).not.toBeNull()
+    expect(host.querySelector('.skill-view__view-col .ui-document-surface')).not.toBeNull()
   })
 
   it('defaults to the first file when there is no check to default to', async () => {
@@ -885,9 +889,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     const { host } = await mount(client)
 
     expect(host.querySelector('.skill-view__view-col .skill-view__check')).toBeNull()
-    expect(host.querySelector('.skill-view__view-col .skill-view__doc')?.textContent).toBe(
-      'file bytes',
-    )
+    expect(viewText(host)).toBe('file bytes')
   })
 
   it('does not yank a person off a file they already chose once a slow check finally answers', async () => {
@@ -1391,7 +1393,7 @@ describe('SkillViewContent — the right pane is the file (nocx-xj1l6)', () => {
 // becomes an anchor.
 describe('SkillViewContent — a skill reads as a document (nocx-okee0)', () => {
   const documentIn = (host: HTMLElement): HTMLElement | null =>
-    viewCol(host).querySelector<HTMLElement>('.skill-view__doc')
+    viewCol(host).querySelector<HTMLElement>('.ui-document-surface')
 
   const openWith = async (file: SkillsFile, paths = [file.path]) =>
     mount(
@@ -1408,7 +1410,7 @@ describe('SkillViewContent — a skill reads as a document (nocx-okee0)', () => 
 
     const doc = documentIn(host)
     expect(doc).not.toBeNull()
-    const heading = doc?.querySelector<HTMLElement>('[data-md="h1"]')
+    const heading = doc?.querySelector<HTMLElement>('.ui-md-body h1')
     expect(heading?.textContent).toBe('Writing a skill')
     // The whole of the second complaint: no markup characters on screen.
     expect(doc?.textContent).not.toContain('#')
@@ -1433,7 +1435,7 @@ describe('SkillViewContent — a skill reads as a document (nocx-okee0)', () => 
     const doc = documentIn(host)
     expect(doc).not.toBeNull()
     expect(viewCol(host).querySelector('.term-line')).toBeNull()
-    expect(doc?.querySelector('.ui-md-line')).not.toBeNull()
+    expect(doc?.querySelector('.ui-md-body')).not.toBeNull()
   })
 
   it('shows a bundled script as bytes — only markdown is a document', async () => {

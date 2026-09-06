@@ -353,25 +353,23 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     const files = card.locator('.skill-view__file-list .ui-record-row__title')
     await expect(files).toHaveText([SKILL_FILE, NOTES_FILE], { timeout: 15_000 })
     // BOTH FILES ARE MARKDOWN, so the tab renders each as a document
-    // (nocx-okee0) — every line on screen, in order, with its markers
-    // rendered rather than quoted. `.ui-md-line` rows are block elements
-    // with no separator between them, so the lines are read back one row at
-    // a time; a `textContent` of the container would run the file together.
-    const linesOf = (doc: Locator): Promise<string[]> =>
-      doc.evaluate((el) =>
-        Array.from(el.querySelectorAll('.ui-md-line')).map((row) => row.textContent ?? ''),
-      )
-    const document = card.locator(`.skill-view__doc[aria-label="${SKILL_FILE} of “${SKILL_NAME}”"]`)
-    await expect
-      .poll(() => linesOf(document), { timeout: 15_000 })
-      .toEqual(SKILL_DOCUMENT.replace(/\n$/, '').split('\n'))
+    // (nocx-qfdy7). Semantic elements prove the markers are rendered and
+    // hard-wrapped prose remains one flowing paragraph.
+    const document = card.locator(
+      `.ui-document-surface[aria-label="${SKILL_FILE} of “${SKILL_NAME}”"]`,
+    )
+    await expect(document.locator('.ui-md-front')).toHaveCount(1)
+    await expect(document.locator('.ui-md-body p')).toHaveText(SKILL_BODY)
     // Opening another file REPLACES the view, so the viewer can never show
     // one file under another's name.
     await files.filter({ hasText: NOTES_FILE }).click()
-    const notes = card.locator(`.skill-view__doc[aria-label="${NOTES_FILE} of “${SKILL_NAME}”"]`)
-    await expect
-      .poll(() => linesOf(notes), { timeout: 15_000 })
-      .toEqual(NOTES_BODY.replace(/\n$/, '').split('\n'))
+    const notes = card.locator(
+      `.ui-document-surface[aria-label="${NOTES_FILE} of “${SKILL_NAME}”"]`,
+    )
+    await expect(notes.locator('.ui-md-body h1')).toHaveText('Notes')
+    await expect(notes.locator('.ui-md-body p')).toHaveText(
+      `The pager rota lives in the runbook (${nonce}).`,
+    )
     await expect(document).toHaveCount(0)
 
     // ── THE CHECK, WHICH IS ASKED FOR AND CHANGES NOTHING ───────────────────
@@ -553,11 +551,11 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // Each file shows ITS OWN bytes — a viewer that showed the first file
     // whatever you clicked would pass a test that only opened one.
     await files.filter({ hasText: HAPPY_SUPPORT_FILE }).click()
-    await expect(tab.locator('.skill-view__doc')).toContainText(HAPPY_SUPPORT_LINE, {
+    await expect(tab.locator('.ui-document-surface')).toContainText(HAPPY_SUPPORT_LINE, {
       timeout: 15_000,
     })
     await files.filter({ hasText: SKILL_FILE }).click()
-    await expect(tab.locator('.skill-view__doc')).toContainText(HAPPY_SKILL_LINE)
+    await expect(tab.locator('.ui-document-surface')).toContainText(HAPPY_SKILL_LINE)
 
     // ── CHECKED ONCE ──────────────────────────────────────────────────────
     // The reading is a third thing the right pane can show, selected the

@@ -174,30 +174,3 @@
     display: none;
   }
 }
-
-/* ── A skill's markdown, read as a document (nocx-okee0) ───────────────────
-   SkillViewDocument's own root. It IS the pane: no border and no background
-   of its own, so the column's canvas is what a person reads on — the
-   bordered CodeBlock that used to sit here read as a card floating in an
-   empty column, which is what the owner reported twice.
-
-   It owns its scrolling, because `.skill-view__view-col` above clips: one
-   scroll box, belonging to the thing that knows what is being scrolled.
-
-   The rows inside carry `data-md` and the `ui-md-*` classes, and every rule
-   for those lives in styles/components/answer-markdown.css — one markdown
-   look for the whole product, which is the reason the renderer was reused
-   rather than rewritten. Nothing here repaints them. */
-.skill-view__doc {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  color: var(--color-text);
-}
-
-.skill-view__doc:focus-visible {
-  outline: 1px solid var(--color-accent);
-  outline-offset: 2px;
-}

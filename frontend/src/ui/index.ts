@@ -64,6 +64,16 @@ export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
 export { CodeBlock, type CodeBlockProps } from './code-block'
 export {
+  DocumentSurface,
+  type DocumentLanguage,
+  type DocumentSurfaceHandle,
+  type DocumentSurfaceProps,
+  type DocumentSearch,
+  type DocumentSourceOptions,
+  type DocumentWrap,
+  type MarkdownView,
+} from './document-surface'
+export {
   createFormValidation,
   required,
   hostname,

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -592,8 +593,32 @@ func TestResolveSkillInstall_WritesNothing(t *testing.T) {
 
 // --- the capability --------------------------------------------------------
 
+// installCapability builds the capability a test acts through, from the
+// destinations the read may reach and the family the write may touch.
+//
+// The source half is ENDPOINTS now, not resolved URLs (nocx-5nkm7): a
+// redirect lands on a URL nobody resolved, so a capability holding only
+// resolved URLs has nothing to judge it against. A test still names plain
+// URLs, which is what the stand hands it, and this reduces each to the
+// endpoint a person's grant over that address now IS — scheme, host and
+// port, with the path dropped, because a destination scope stopped being a
+// whole URL and `destinationContains` parses it as an endpoint.
 func installCapability(sources, family []agenttools.ResourceRef) *agenttools.SkillInstallScope {
-	return agenttools.NewSkillInstallScope(sources, family)
+	endpoints := make([]content.GrantScope, 0, len(sources))
+	for _, ref := range sources {
+		if ref.Kind != content.ResourceDestination || ref.ID == "" {
+			continue
+		}
+		parsed, err := url.Parse(ref.ID)
+		if err != nil || parsed.Host == "" {
+			continue
+		}
+		endpoints = append(endpoints, content.GrantScope{
+			Kind: ref.Kind,
+			ID:   parsed.Scheme + "://" + parsed.Host,
+		})
+	}
+	return agenttools.NewSkillInstallScope(endpoints, family)
 }
 
 func skillFamilyRefs() []agenttools.ResourceRef {

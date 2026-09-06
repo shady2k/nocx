@@ -201,8 +201,28 @@ func narrowSession(grant content.Grant, resources []ResourceRef, runCtx RunConte
 // actually cover a resolved destination are carried, so an endpoint this
 // call never reached stays out of the capability.
 func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
-	endpoints := make([]content.GrantScope, 0, len(grant.Scopes))
-	for _, scope := range grant.Scopes {
+	return &URLScope{Endpoints: destinationEndpoints(grant.Scopes, resources)}, nil
+}
+
+// destinationEndpoints keeps the destination scopes of `scopes` that cover a
+// destination this call actually resolved — the grant's own endpoints, whole,
+// with the subdomain marker still on them.
+//
+// It is one function because two capabilities carry destinations and both
+// must carry them the same way: fetch.url through narrowURL above, and
+// skills.install through NewSkillInstallScope, whose source half is a fetch
+// by another name. A second selection written beside this one would agree
+// with it until the day somebody taught one of them a new kind of endpoint —
+// which is exactly the drift the endpoint marker was added to survive
+// (nocx-5nkm7), since rebuilding a scope from its kind and id silently drops
+// it.
+//
+// Bounded by the call in the way narrowSession is: an endpoint of the grant
+// that covered nothing this call resolved is not carried, so one grant naming
+// two endpoints cannot let a call reach the one it never asked for.
+func destinationEndpoints(scopes []content.GrantScope, resources []ResourceRef) []content.GrantScope {
+	endpoints := make([]content.GrantScope, 0, len(scopes))
+	for _, scope := range scopes {
 		if scope.Kind != content.ResourceDestination {
 			continue
 		}
@@ -216,7 +236,7 @@ func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capa
 			}
 		}
 	}
-	return &URLScope{Endpoints: endpoints}, nil
+	return endpoints
 }
 
 // narrowRun is the run row's capability constructor. It carries only the

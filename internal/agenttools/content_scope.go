@@ -179,22 +179,23 @@ type SkillInstallScope struct {
 }
 
 // NewSkillInstallScope builds the capability from the two already-narrowed
-// resource sets — the destinations the read is permitted to reach, and the
+// halves — the destination ENDPOINTS the read is permitted to reach, and the
 // content scopes the write is permitted to touch.
-func NewSkillInstallScope(sources, family []ResourceRef) *SkillInstallScope {
-	urls := make([]string, 0, len(sources))
-	for _, ref := range sources {
-		if ref.Kind == content.ResourceDestination && ref.ID != "" {
-			urls = append(urls, ref.ID)
-		}
-	}
+//
+// The source half takes endpoints rather than resolved URLs for the reason
+// URLScope's own comment gives (nocx-5nkm7): a redirect lands on a URL nobody
+// resolved, and a capability holding only resolved URLs has nothing to judge
+// it against. Installing a skill from a URL is a fetch followed by a write,
+// so the fetch half is bounded exactly as fetch.url's is, by the same
+// selection — see destinationEndpoints in narrow.go.
+func NewSkillInstallScope(sourceEndpoints []content.GrantScope, family []ResourceRef) *SkillInstallScope {
 	scopes := make([]content.GrantScope, 0, len(family))
 	for _, ref := range family {
 		if ref.Kind == content.ResourceContent && ref.ID != "" {
 			scopes = append(scopes, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
 		}
 	}
-	return &SkillInstallScope{source: &URLScope{URLs: urls}, family: scopes}
+	return &SkillInstallScope{source: &URLScope{Endpoints: sourceEndpoints}, family: scopes}
 }
 
 // AllowsSource reports whether this address is one the run may fetch.
@@ -241,8 +242,20 @@ func (s *SkillInstallScope) AllowsInstall() bool {
 // ADR-0028 decision 4 says it is — the tool never holds authority the row
 // that governs the act did not give.
 func narrowSkillsInstall(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	// The source half is selected from the CROSS-BOUNDARY ROW's own scopes,
+	// not the grant's union, for the same reason the rest of this function
+	// reads per row: the union carries what some other row granted, and the
+	// row that governs reaching another machine is the only one that may
+	// bound it.
+	var sourceEndpoints []content.GrantScope
+	if grant.Policy.DecisionFor(content.EffectCrossBoundary) != content.DecisionRefuse {
+		sourceEndpoints = destinationEndpoints(
+			grant.Policy.RowScopes(content.EffectCrossBoundary),
+			resources,
+		)
+	}
 	return NewSkillInstallScope(
-		rowGrantedResources(grant, content.EffectCrossBoundary, resources),
+		sourceEndpoints,
 		rowGrantedResources(grant, content.EffectMutateReversible, resources),
 	), nil
 }

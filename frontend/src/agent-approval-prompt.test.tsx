@@ -1764,6 +1764,114 @@ describe('AgentApprovalPrompt — the skill an install resolved to (nocx-ojfuc.2
       ],
     },
   }
+  const RESOLVED_SOURCE = 'https://www.agentmail.to/docs/integrations/skills'
+  const RESOLVED_DESTINATION = 'https://github.com/agentmail-to/agentmail-skills'
+  const RESOLVED_COMMIT = 'b'.repeat(40)
+
+  function resolvedInstall(
+    overrides: Partial<NonNullable<AgentApprovalRequested['install']>> = {},
+  ): AgentApprovalRequested {
+    return {
+      ...INSTALL_ASK,
+      install: {
+        ...INSTALL_ASK.install!,
+        source: RESOLVED_SOURCE,
+        destination: RESOLVED_DESTINATION,
+        originsDiffer: true,
+        ref: 'main',
+        commit: RESOLVED_COMMIT,
+        ...overrides,
+      },
+    }
+  }
+
+  /** The set is a NON-EMPTY tuple on the wire, so it is built as one here
+   *  rather than cast from an array: a cast would be the assertion that this
+   *  fixture matches the contract, and building it is the proof. */
+  function oneOfNine(
+    index: number,
+  ): NonNullable<AgentApprovalRequested['install']>['skills'][number] {
+    return {
+      ...INSTALL_ASK.install!.skills[0],
+      path: `skills/skill-${index + 1}`,
+      name: `skill-${index + 1}`,
+      description: `Description ${index + 1}`,
+      files: [{ path: 'SKILL.md', text: `# skill-${index + 1}\n`, findings: [] }],
+    }
+  }
+
+  function nineSkills(): NonNullable<AgentApprovalRequested['install']>['skills'] {
+    return [oneOfNine(0), ...Array.from({ length: 8 }, (_, index) => oneOfNine(index + 1))]
+  }
+
+  it('states a route that stayed at its origin without transition wording', () => {
+    const { container } = renderPrompt({
+      ask: resolvedInstall({ originsDiffer: false }),
+    })
+    expect(rowValue(container, 'source')).toBe(RESOLVED_SOURCE)
+    expect(rowValue(container, 'destination')).toBe(RESOLVED_DESTINATION)
+    expect(rowValue(container, 'ref')).toBe('main')
+    expect(rowValue(container, 'commit')).toBe(RESOLVED_COMMIT)
+    expect(container.textContent).not.toContain('started somewhere else')
+  })
+
+  it('states when a resolved route changed origin', () => {
+    const { container } = renderPrompt({ ask: resolvedInstall() })
+    expect(rowValue(container, 'destination')).toBe(RESOLVED_DESTINATION)
+    const destination = Array.from(container.querySelectorAll('.ui-fact-list__row')).find(
+      (row) => row.querySelector('.ui-fact-list__name')?.textContent === 'destination',
+    )
+    expect(destination?.textContent).toContain('started somewhere else')
+  })
+
+  it('renders one and nine skills through the same repeated skill view', () => {
+    const one = renderPrompt({ ask: resolvedInstall() })
+    expect(
+      Array.from(one.container.querySelectorAll('.ui-status-card__title')).filter(
+        (title) =>
+          title.textContent === 'Description 1' || title.textContent === 'Deploy the service',
+      ),
+    ).toHaveLength(1)
+
+    cleanup()
+
+    const nine = renderPrompt({
+      ask: resolvedInstall({
+        skills: nineSkills(),
+      }),
+    })
+    expect(
+      Array.from(nine.container.querySelectorAll('.ui-status-card__title')).filter((title) =>
+        title.textContent?.startsWith('Description '),
+      ),
+    ).toHaveLength(9)
+    expect(
+      Array.from(nine.container.querySelectorAll('.ui-status-card__title')).map(
+        (title) => title.textContent,
+      ),
+    ).toEqual(Array.from({ length: 9 }, (_, index) => `Description ${index + 1}`))
+    expect(rows(nine.container).filter(([name]) => name === 'name')).toHaveLength(9)
+    expect(nine.container.querySelectorAll('.ui-marker-list__item')).toHaveLength(9)
+    expect(nine.container.querySelectorAll('.ui-file-readout')).toHaveLength(9)
+  })
+
+  it('keeps a plain URL install on the existing route-free window', () => {
+    const { container } = renderPrompt({ ask: INSTALL_ASK })
+    expect(rows(container).slice(0, 3)).toEqual([
+      ['name', 'deploy'],
+      ['source', SOURCE],
+      ['digest', DIGEST],
+    ])
+    expect(rowValue(container, 'destination')).toBeUndefined()
+    expect(rowValue(container, 'ref')).toBeUndefined()
+    expect(rowValue(container, 'commit')).toBeUndefined()
+    expect(container.textContent).not.toContain('started somewhere else')
+    expect(
+      Array.from(container.querySelectorAll('.ui-status-card__title')).filter(
+        (title) => title.textContent === 'Deploy the service',
+      ),
+    ).toHaveLength(1)
+  })
 
   function readouts(container: HTMLElement): HTMLElement[] {
     return Array.from(container.querySelectorAll<HTMLElement>('.ui-file-readout'))

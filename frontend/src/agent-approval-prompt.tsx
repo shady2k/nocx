@@ -110,10 +110,9 @@
  * what it resolved to is the thing the person is actually deciding, so a
  * question that named only the ask would let somebody approve a page they
  * read and receive a repository they never saw. The backend therefore sends
- * the resolution's fetched address, the selected skill's own name and
- * description, the digest the write is bound to, and every file that will
- * land WITH ITS BYTES for that skill — and this window draws the first skill's
- * details.
+ * the resolution's fetched address, every selected skill's own name and
+ * description, the digest each write is bound to, and every file that will
+ * land WITH ITS BYTES — and this window draws all of those details.
  *
  * THE DESCRIPTION IS THE PROMINENT PART, and that is not typography. It is
  * the one part of a skill that lives in the assistant's system prompt
@@ -223,7 +222,7 @@ type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
 /** One file the proposed command names, read as the question was asked. */
 type ScriptReading = NonNullable<AgentApprovalRequested['scripts']>[number]
 
-/** The first skill in a skills.install proposal, which this window renders. */
+/** The install proposal and one candidate skill from its set. */
 type SkillInstallProposal = NonNullable<AgentApprovalRequested['install']>
 type SkillInstallSkill = SkillInstallProposal['skills'][number]
 type SkillInstallFile = SkillInstallSkill['files'][number]
@@ -604,35 +603,33 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    */
   const scripts = (): readonly ScriptReading[] => ask().scripts ?? []
   /**
-   * The first skill in an install proposal, or null. The FIELD is the
-   * discriminator and not the tool name: the backend fills it for
-   * `skills.install` and for nothing else, and a branch that compared names
-   * would be one more literal to go stale on a rename (see
-   * TOOLS_THIS_WINDOW_NAMES). The proposal carries a SET, because one answer
-   * covers every skill a person picked out of a repository; this window still
-   * renders one, so its name, description, digest and file reads all use the
-   * first item. Drawing the whole set, and the route it travelled, is
-   * nocx-295uk.4.
+   * The skills covered by an install proposal. A question carries a SET, so
+   * the surface always renders this collection rather than growing a
+   * single-skill mode beside it.
    */
-  const install = (): SkillInstallSkill | null => ask().install?.skills[0] ?? null
+  const installSkills = (): readonly SkillInstallSkill[] => ask().install?.skills ?? []
+
+  /** The first skill is only the discriminator for the install presentation
+   * branch; all skill details below are rendered by the same collection. */
+  const install = (): SkillInstallSkill | null => installSkills()[0] ?? null
 
   /**
-   * THE MANIFEST: every file the first skill would land, in the order the
-   * backend sent them — SKILL.md first, because it is the document the others
-   * were named by. A skill is not one file, and a person told only about
-   * SKILL.md while `references/` and `scripts/` land beside it is approving a
-   * name rather than an act (design §5, §8). `included` is exactly what the
-   * tone means: this comes with it.
+   * THE MANIFEST: every file a skill would land, in the order the backend
+   * sent them — SKILL.md first, because it is the document the others were
+   * named by. A skill is not one file, and a person told only about SKILL.md
+   * while `references/` and `scripts/` land beside it is approving a name
+   * rather than an act (design §5, §8). `included` is exactly what the tone
+   * means: this comes with it.
    * There is no `excluded` row and there never will be — a file the backend
    * could not fetch refuses the whole preview, so a bundle with a gap in it
    * never reaches a question at all.
    *
    * It sits above the bytes rather than instead of them: the list is a fact
-   * about the skill, like its name, and the readouts below are the reading.
-   * Both are projections of the one array, so they cannot drift apart.
+   * about one skill, like its name, and the readouts below are that skill's
+   * reading. Both are projections of the one array, so they cannot drift apart.
    */
-  const installManifest = (): MarkerListItem[] =>
-    (install()?.files ?? []).map((file) => ({ text: file.path, tone: 'included' }))
+  const installManifest = (skill: SkillInstallSkill): MarkerListItem[] =>
+    skill.files.map((file) => ({ text: file.path, tone: 'included' }))
 
   /**
    * One file that would land, as the viewer's own answer to "what is on
@@ -772,18 +769,32 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         })
       }
     }
-    // WHAT THE ADDRESS RESOLVED TO, as rows of the one fact list
-    // (nocx-ojfuc.2). The name and the source are what a person checks before
-    // adopting anything; the description is not here, because a row states a
-    // value beside a name and this window owes that sentence more than a row.
-    const skill = install()
-    if (skill !== null) {
-      rows.push({ name: 'name', value: skill.name })
+    const route = ask().install
+    if (route?.source) {
+      rows.push({ name: 'source', value: route.source })
+    }
+    if (route?.destination) {
       rows.push({
-        name: 'source',
-        value: skill.url,
-        note: 'the address that was fetched, and what an update would re-read',
+        name: 'destination',
+        value: route.destination,
+        note: route.originsDiffer
+          ? 'it started somewhere else and this is where it ended up'
+          : undefined,
       })
+    }
+    if (route?.ref) rows.push({ name: 'ref', value: route.ref })
+    if (route?.commit) rows.push({ name: 'commit', value: route.commit })
+
+    for (const skill of installSkills()) {
+      if (skill.path) rows.push({ name: 'path', value: skill.path })
+      rows.push({ name: 'name', value: skill.name })
+      if (!route?.source) {
+        rows.push({
+          name: 'source',
+          value: skill.url,
+          note: 'the address that was fetched, and what an update would re-read',
+        })
+      }
       rows.push({
         name: 'digest',
         value: skill.digest,
@@ -959,41 +970,39 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             when={proposedCommand()}
             fallback={
               <Show
-                when={install()}
+                when={ask().install}
                 fallback={
                   <p>
                     The assistant is asking to call <strong>{ask().tool}</strong>.
                   </p>
                 }
               >
-                {(skill) => (
-                  <>
-                    <p>
-                      The assistant read a skill at an address it resolved, and is asking to install
-                      it. What it read is below — the name, the source and every file that would
-                      land.
-                    </p>
-                    {/*
-                      THE DESCRIPTION, PROMINENT, AND WHY IT IS. It is a
-                      StatusCard rather than a row because a row states a
-                      value beside a name, and this sentence is not a value:
-                      it is the one part of a skill that lives in the
-                      assistant's system prompt after the install, so it is
-                      what decides when these instructions get reached for on
-                      every ask from now on. `neutral`, because it is a fact
-                      about the skill and not a condition — nothing here is
-                      wrong, and a tone that said otherwise would be this
-                      window making a judgement the person is here to make.
-                      The description is the TITLE so it is verbatim, the way
-                      the source address is verbatim on its row.
-                    */}
-                    <StatusCard
-                      tone="neutral"
-                      title={skill().description}
-                      description="This is what the assistant is offered on every ask once this skill is installed — the one part of a skill that lives in its system prompt, so it is the sentence that decides when these instructions get reached for."
-                    />
-                  </>
-                )}
+                <>
+                  <p>
+                    The assistant read a skill at an address it resolved, and is asking to install
+                    it. What it read is below — the name, the source and every file that would land.
+                  </p>
+                  <For each={installSkills()}>
+                    {(skill) => (
+                      <>
+                        {/*
+                          THE DESCRIPTION, PROMINENT, AND WHY IT IS. It is a
+                          StatusCard rather than a row because a row states a
+                          value beside a name, and this sentence is not a value:
+                          it is the one part of a skill that lives in the
+                          assistant's system prompt after the install, so it is
+                          what decides when these instructions get reached for
+                          on every ask from now on.
+                        */}
+                        <StatusCard
+                          tone="neutral"
+                          title={skill.description}
+                          description="This is what the assistant is offered on every ask once this skill is installed — the one part of a skill that lives in its system prompt, so it is the sentence that decides when these instructions get reached for."
+                        />
+                      </>
+                    )}
+                  </For>
+                </>
               </Show>
             }
           >
@@ -1072,28 +1081,32 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           sentence — a command's file can change before it runs — and the two
           must not be confused, which is why neither is worded generically.
         */}
-        <Show when={install()}>
-          {(skill) => (
-            <>
-              <p>
-                Every file this would write, and what each holds. Installing writes exactly these
-                bytes: the address is read again and anything that has changed since is refused.
-              </p>
-              <MarkerList items={installManifest()} />
-              <For each={skill().files}>
-                {(file) => (
-                  <FileReadout
-                    // The path is where the file would SIT, which is what the
-                    // manifest above names it. Mono key, like every other row
-                    // in this window.
-                    facts={[{ name: 'path', value: file.path }]}
-                    ariaLabel={`${file.path}, which installing “${skill().name}” would write`}
-                    outcome={installFileOutcome(file)}
-                  />
-                )}
-              </For>
-            </>
-          )}
+        <Show when={ask().install}>
+          <>
+            <p>
+              Every file this would write, and what each holds. Installing writes exactly these
+              bytes: the address is read again and anything that has changed since is refused.
+            </p>
+            <For each={installSkills()}>
+              {(skill) => (
+                <>
+                  <MarkerList items={installManifest(skill)} />
+                  <For each={skill.files}>
+                    {(file) => (
+                      <FileReadout
+                        // The path is where the file would SIT, which is what the
+                        // manifest above names it. Mono key, like every other row
+                        // in this window.
+                        facts={[{ name: 'path', value: file.path }]}
+                        ariaLabel={`${file.path}, which installing “${skill.name}” would write`}
+                        outcome={installFileOutcome(file)}
+                      />
+                    )}
+                  </For>
+                </>
+              )}
+            </For>
+          </>
         </Show>
         {/*
           The file the command NAMES, after the facts, because a person reads

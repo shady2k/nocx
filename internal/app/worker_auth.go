@@ -41,6 +41,10 @@ type workerAuthParticipants interface {
 	ParticipantOf(ctx context.Context, sessionID string) (workers.Participant, error)
 }
 
+type workerAuthApproval interface {
+	Approved(pid int, scope string) bool
+}
+
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
 // mesh from day one; A1 says membership makes a participant addressable while
 // delegation makes it controllable. Each participant has its own session, so
@@ -92,6 +96,7 @@ type toolAuthorizer struct {
 	sessions     workerAuthSessions
 	enrolments   workerAuthEnrolments
 	participants workerAuthParticipants
+	approval     workerAuthApproval
 	workspace    string
 	slots        workerCallerSlots
 }
@@ -99,24 +104,23 @@ type toolAuthorizer struct {
 // newToolAuthorizer builds the one external caller authorizer. It binds a
 // peer only to a session whose pane is currently enrolled and whose root pid
 // came from a process nocx opened itself. The peer's uid and pid never supply
-// the root identity.
-//
-// This is not D13's human approval. It admits the caller whose tree root is
-// the session that enrolled through the lifecycle channel: a real act tied to
-// a pane a person opened, and exactly the A12 ceiling recorded by
-// nocx-rowqt.12. The interval has two ends: agent_enrol opens it and
-// agent_withdraw closes it; a call from that tree after withdraw is refused.
+// the root identity. The durable executable/scope decision is required in
+// addition to the live process-tree pin.
 func newToolAuthorizer(
 	pinner peerpin.Pinner,
 	sessions workerAuthSessions,
 	enrolments workerAuthEnrolments,
 	participants workerAuthParticipants,
 	workspace string,
-) toolendpoint.Authorizer {
+	approval workerAuthApproval,
+) (toolendpoint.Authorizer, error) {
+	if approval == nil {
+		return nil, errors.New("tool authorizer: no agent approval")
+	}
 	return &toolAuthorizer{
 		pinner: pinner, sessions: sessions, enrolments: enrolments,
-		participants: participants, workspace: workspace,
-	}
+		participants: participants, approval: approval, workspace: workspace,
+	}, nil
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, bool) {
@@ -143,6 +147,9 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		}
 		member, err := a.pinner.Member(peer.PID, root)
 		if err != nil || !member {
+			continue
+		}
+		if !a.approval.Approved(rootPID, agentToolEndpointScopePrefix+a.workspace) {
 			continue
 		}
 		if admitted != "" {

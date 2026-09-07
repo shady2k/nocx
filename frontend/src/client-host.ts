@@ -43,6 +43,7 @@ export interface HostBindings {
   badge(count: number): Promise<void>
   bounce(): Promise<void>
   focusWindow(): Promise<void>
+  approveAgent(executable: string, scope: string): Promise<boolean>
 }
 
 /** The one binding name the reachability probe is asked about. All seven live
@@ -69,6 +70,7 @@ const wailsBindings: HostBindings = {
   badge: (count) => HostBadge(count),
   bounce: () => HostBounce(),
   focusWindow: () => HostFocusWindow(),
+  approveAgent: () => Promise.reject(new Error('no agent approval surface is mounted')),
 }
 
 const wailsEvents: HostEvents = {
@@ -81,23 +83,25 @@ const wailsEvents: HostEvents = {
  *
  * bindings and events default to the real Wails runtime; both are injected so
  * the exchange can be exercised without one. A client with no reachable
- * bindings still mounts and still answers -- failed, saying so -- because the
+ * bindings still mounts and still answers — failed, saying so — because the
  * coordinator must never be left waiting on a client that cannot act.
  */
 export function mountClientHost(
   dispatcher: Dispatcher,
   bindings: HostBindings = wailsBindings,
   events: HostEvents = wailsEvents,
+  approveAgent?: HostBindings['approveAgent'],
 ): () => void {
+  const activeBindings = approveAgent ? { ...bindings, approveAgent } : bindings
   const unsubscribeRequests = dispatcher.subscribe('host.request', (params) => {
     const p = params as HostRequest
     if (!p || !p.requestId || !p.capability) return
-    void answer(dispatcher, bindings, p)
+    void answer(dispatcher, activeBindings, p)
   })
   const unsubscribeEvents = events.on(ATTENTION_ACTIVATED_EVENT, (data) => {
     // The click half: the shell tells this renderer that a banner it
     // presented was activated, and the renderer tells the coordinator.
-    // Nothing is done about it here -- where the focus lands is the
+    // Nothing is done about it here — where the focus lands is the
     // coordinator's, because only it knows which connection holds the
     // session.
     const sessionId = activatedSessionId(data)
@@ -130,6 +134,7 @@ function activatedSessionId(data: unknown): string {
 interface Performed {
   path: string
   cancelled: boolean
+  approved: boolean
 }
 
 async function answer(
@@ -171,7 +176,9 @@ async function answer(
       dispatcher,
       done.path
         ? { requestId: p.requestId, outcome: 'ok', path: done.path }
-        : { requestId: p.requestId, outcome: 'ok' },
+        : p.capability === 'agent.approval'
+          ? { requestId: p.requestId, outcome: 'ok', approved: done.approved }
+          : { requestId: p.requestId, outcome: 'ok' },
     )
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -205,21 +212,29 @@ async function perform(bindings: HostBindings, p: HostRequest): Promise<Performe
     case 'window.focus':
       await bindings.focusWindow()
       return done
+    case 'agent.approval':
+      return {
+        path: '',
+        cancelled: false,
+        approved: await bindings.approveAgent(p.executable ?? '', p.scope ?? ''),
+      }
     default:
       // A capability this client does not know. The vocabulary is the
-      // server's and closed, so this is a version skew -- answered, never
+      // server's and closed, so this is a version skew — answered, never
       // dropped.
       throw new Error(`unknown host capability: ${String(p.capability)}`)
   }
 }
 
 /** The effect happened and produced nothing to report. */
-const done: Performed = { path: '', cancelled: false }
+const done: Performed = { path: '', cancelled: false, approved: false }
 
 /** An empty path from a picker is a dismissal, which is the contract the
  *  Wails open dialog has always had. */
 function picked(path: string): Performed {
-  return path === '' ? { path: '', cancelled: true } : { path, cancelled: false }
+  return path === ''
+    ? { path: '', cancelled: true, approved: false }
+    : { path, cancelled: false, approved: false }
 }
 
 function resolve(dispatcher: Dispatcher, params: HostResolved): void {

@@ -20,9 +20,9 @@ type Peer struct {
 // release function closes exactly the admission interval opened by this call;
 // it is nil when admission is refused and is idempotent when returned.
 //
-// Enrollment is the admission act here, not D13 human approval. That
-// product-level approval remains deliberately out of this endpoint
-// (nocx-rowqt.12); the authority ceiling is the existing A12 session grant.
+// Enrollment and the human approval are separate admission acts. Enrollment
+// binds this call to a live process tree; the composition root checks the
+// durable executable-and-scope approval before it supplies an invocation.
 type Authorizer interface {
 	Admit(Peer) (assistant.ToolInvocation, func(), error)
 }

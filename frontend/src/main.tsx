@@ -106,8 +106,8 @@ import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { SkillsClient } from './skills-client'
@@ -376,6 +376,33 @@ function main(): void {
   const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
   const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
 
+  type AgentHostApproval = {
+    executable: string
+    scope: string
+    resolve: (approved: boolean) => void
+  }
+  const pendingAgentHostApprovals: AgentHostApproval[] = []
+  const [activeAgentHostApproval, setActiveAgentHostApproval] =
+    createSignal<AgentHostApproval | null>(null)
+  const [agentHostApprovalBusy, setAgentHostApprovalBusy] = createSignal(false)
+  const nextAgentHostApproval = () => {
+    setActiveAgentHostApproval(pendingAgentHostApprovals.shift() ?? null)
+  }
+  const requestAgentHostApproval = (executable: string, scope: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      pendingAgentHostApprovals.push({ executable, scope, resolve })
+      if (!untrack(() => activeAgentHostApproval())) nextAgentHostApproval()
+    })
+  const decideAgentHostApproval = (approved: boolean) => {
+    const ask = activeAgentHostApproval()
+    if (!ask || agentHostApprovalBusy()) return
+    setAgentHostApprovalBusy(true)
+    ask.resolve(approved)
+    setActiveAgentHostApproval(null)
+    setAgentHostApprovalBusy(false)
+    nextAgentHostApproval()
+  }
+
   const acceptOpenHostKey = async (request: OpenHostKeyRequest) => {
     setOpenHostKeyBusy(true)
     try {
@@ -495,6 +522,15 @@ function main(): void {
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
+  // -- The client host (nocx-uo1k6, design D3) -------------------------
+  // The coordinator runs as a daemon with no window of its own, so the
+  // native-host capabilities it cannot perform — a file picker, a browser
+  // open, a desktop banner, a window raise or a process-tree approval —
+  // are asked of this client and performed through the Wails bindings.
+  // Mounted unconditionally: a client with no Wails runtime still answers,
+  // saying so, because the coordinator must never be left waiting on a
+  // client that cannot act.
+  mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
@@ -1728,6 +1764,16 @@ function main(): void {
               onDone={() => {
                 setPendingConnectionPassword(null)
               }}
+            />
+          )}
+        </Show>
+        <Show when={activeAgentHostApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalDialog
+              executable={ask.executable}
+              scope={ask.scope}
+              busy={agentHostApprovalBusy()}
+              onDecide={decideAgentHostApproval}
             />
           )}
         </Show>

@@ -82,6 +82,10 @@ function scriptedBindings(overrides: Partial<HostBindings> = {}): HostBindings &
       seen.push('focusWindow')
       return Promise.resolve()
     }),
+    approveAgent: vi.fn((executable: string, scope: string) => {
+      seen.push(`approveAgent:${executable}|${scope}`)
+      return Promise.resolve(true)
+    }),
     ...overrides,
   }
 }
@@ -189,6 +193,20 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
     await request(d, { requestId: 'r7', capability: 'window.focus' })
     expect(b.seen).toEqual(['focusWindow'])
     expect(lastResolution(d)).toEqual({ requestId: 'r7', outcome: 'ok' })
+  })
+
+  it('asks the person to admit the executable tree and reports the answer', async () => {
+    const d = scriptedDispatcher()
+    const b = scriptedBindings()
+    mount(d, b)
+    await request(d, {
+      requestId: 'r-approval',
+      capability: 'agent.approval',
+      executable: '/usr/local/bin/agent',
+      scope: 'tool-endpoint:workspace-1',
+    })
+    expect(b.seen).toEqual(['approveAgent:/usr/local/bin/agent|tool-endpoint:workspace-1'])
+    expect(lastResolution(d)).toEqual({ requestId: 'r-approval', outcome: 'ok', approved: true })
   })
 
   it('reports a dismissed picker as cancelled, not as a failure', async () => {

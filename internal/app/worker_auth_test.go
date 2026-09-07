@@ -64,6 +64,25 @@ func emptyWorkerRecord() *workers.Registrar {
 	return workers.NewRegistrar(workers.NewMemoryStore(), nil, nil, nil)
 }
 
+type allowWorkerApproval struct{}
+
+func (allowWorkerApproval) Approved(int, string) bool { return true }
+
+func mustToolAuthorizer(t *testing.T, pinner peerpin.Pinner, sessions workerAuthSessions, enrolments workerAuthEnrolments, participants workerAuthParticipants, workspace string, approval workerAuthApproval) toolendpoint.Authorizer {
+	t.Helper()
+	auth, err := newToolAuthorizer(pinner, sessions, enrolments, participants, workspace, approval)
+	if err != nil {
+		t.Fatalf("tool authorizer: %v", err)
+	}
+	return auth
+}
+
+func TestNewToolAuthorizerRejectsMissingApproval(t *testing.T) {
+	if _, err := newToolAuthorizer(nil, nil, nil, nil, "", nil); err == nil {
+		t.Fatal("newToolAuthorizer accepted a missing approval dependency")
+	}
+}
+
 func openWorkerAuthSession(t *testing.T) (*session.Reg, session.Session, *panegrid.Store) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
@@ -111,7 +130,7 @@ func TestToolAuthorizerAdmitsEnrolledOwnedTreeThroughRealWorkerRecord(t *testing
 
 	root := peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)}
 	pinner := &workerAuthPinner{root: root, member: map[int]bool{9001: true}}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 
 	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
 	if err != nil {
@@ -208,7 +227,7 @@ func TestToolAuthorizerRefusesCallerOutsideEveryEnrolledTree(t *testing.T) {
 		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: false},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("outside-tree admission error = %v, want ErrNotEnrolled", err)
@@ -229,7 +248,7 @@ func TestToolAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}); err != nil {
 		t.Fatalf("admit before withdrawal: %v", err)
 	}
@@ -264,7 +283,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, record, workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, record, workerTestWorkspace, allowWorkerApproval{})
 	registry, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
 	if err != nil {
 		t.Fatalf("assemble tools: %v", err)
@@ -356,7 +375,7 @@ func TestToolAuthorizerRefusesEnrolledSessionWithoutOwnedProcess(t *testing.T) {
 		root:   peerpin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("unknown-owned-pid admission error = %v, want ErrNotEnrolled", err)
@@ -381,7 +400,7 @@ func TestToolAuthorizerRefusesRemoteSessionWithoutOwnedProcess(t *testing.T) {
 		root:   peerpin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, sessions, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, sessions, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	_, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("remote session admission error = %v, want ErrNotEnrolled", err)
@@ -431,7 +450,7 @@ func TestRefusedToolInvocationOffersNoWorkerTools(t *testing.T) {
 		root:   peerpin.Root{PID: 4242, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	inv, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001})
 	if !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("unadmitted peer error = %v, want ErrNotEnrolled", err)

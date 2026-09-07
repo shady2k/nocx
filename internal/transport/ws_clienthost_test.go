@@ -86,6 +86,8 @@ type hostRequestWire struct {
 	Body       string `json:"body"`
 	SessionID  string `json:"sessionId"`
 	Count      *int   `json:"count"`
+	Executable string `json:"executable"`
+	Scope      string `json:"scope"`
 }
 
 // askAsync issues one RequestHost on a goroutine and hands back its outcome.
@@ -188,6 +190,16 @@ var hostCapabilityCases = []struct {
 		noHost: ErrNoWindowHost,
 		answer: map[string]any{"outcome": "ok"},
 	},
+	{
+		name: "agent approval",
+		ask: HostAsk{
+			Capability: HostCapAgentApproval,
+			Executable: "/usr/local/bin/agent (sha256:abc)",
+			Scope:      "tool-endpoint:default",
+		},
+		noHost: ErrNoApprovalHost,
+		answer: map[string]any{"outcome": "ok", "approved": true},
+	},
 }
 
 // TestClientHost_EachCapabilityReachesAnAttachedClient — the happy path, once
@@ -207,6 +219,11 @@ func TestClientHost_EachCapabilityReachesAnAttachedClient(t *testing.T) {
 			}
 			if req.URL != tc.wantURL {
 				t.Errorf("url = %q, want %q", req.URL, tc.wantURL)
+			}
+			if tc.ask.Capability == HostCapAgentApproval &&
+				(req.Executable != tc.ask.Executable || req.Scope != tc.ask.Scope) {
+				t.Fatalf("approval args = (%q,%q), want (%q,%q)",
+					req.Executable, req.Scope, tc.ask.Executable, tc.ask.Scope)
 			}
 			if tc.ask.Capability == HostCapBanner {
 				if req.Title != "done" || req.Body != "the build finished" || req.SessionID != "s-1" {

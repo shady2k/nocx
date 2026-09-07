@@ -23,7 +23,7 @@ func TestToolAuthorizerRefusesASecondLiveCallerForTheSameSession(t *testing.T) {
 		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	peer := toolendpoint.Peer{UID: 1000, PID: 9001}
 	if _, _, err := auth.Admit(peer); err != nil {
 		t.Fatalf("first caller admission: %v", err)
@@ -50,7 +50,7 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
 		member: map[int]bool{9001: true},
 	}
-	auth := newToolAuthorizer(pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace)
+	auth := mustToolAuthorizer(t, pinner, reg, grid, emptyWorkerRecord(), workerTestWorkspace, allowWorkerApproval{})
 	peer := toolendpoint.Peer{UID: 1000, PID: 9001}
 	first, release, err := auth.Admit(peer)
 	if err != nil {

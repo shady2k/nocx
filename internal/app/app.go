@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
@@ -103,6 +104,7 @@ type App struct {
 	ToolDispatcher      assistant.ToolDispatcher
 	ToolAuthorizer      toolendpoint.Authorizer
 	ToolSurfaceObserver toolendpoint.Observer
+	agentEnroller       *paneEnroller
 	ShellIntegration    shellintegration.ShellIntegration
 	Updater             update.Updater
 	Profiles            profile.ProfileRepository
@@ -763,6 +765,7 @@ func New(opts ...Option) (*App, error) {
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
+	agentApprovals := agentapproval.NewStore(logger, docStore, "agent-approvals.json")
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots, docStore)
 	// The snippet library is the same document family: one versioned
@@ -1364,6 +1367,7 @@ func New(opts ...Option) (*App, error) {
 	// waits on this and on nothing else — not on a dispatch returning, which
 	// is not delivery.
 	workerEnrol := newWorkerEnrolments(logger, sess)
+	agentApprovalService := newAgentApprovalService(sess, agentApprovals, string(workspace.Default))
 	// The declaration's carrier, built beside the rendezvous and wired into
 	// the same publisher: a participant says what its work produced over the
 	// authenticated channel it is already enrolled on (ADR-0024 decision 2).
@@ -1411,6 +1415,12 @@ func New(opts ...Option) (*App, error) {
 	// a product decision, and the composition root is where product
 	// decisions belong. It is the shell's own handshake budget, so the
 	// backend never outwaits the shell it is gating.
+	paneEnrol, paneEnrolErr := newPaneEnroller(
+		logger, childSessions, paneGrid, paneWatch, agentApprovalService,
+	)
+	if paneEnrolErr != nil {
+		return nil, fmt.Errorf("pane enroller: %w", paneEnrolErr)
+	}
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
 		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout),
@@ -1423,10 +1433,9 @@ func New(opts ...Option) (*App, error) {
 			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
-		// answers. Wired here rather than defaulted anywhere, because an
-		// unwired enroller refuses every enrolment — the fail-closed half of
-		// D4, and the opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(newPaneEnroller(logger, childSessions, paneGrid, paneWatch))),
+		// an unwired enroller refuses: the fail-closed half of D4, and the
+		// opposite of the grant builder above it.
+		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)),
 		// The second fact's carrier. Unwired it refuses every report and says
 		// so, which is the same fail-closed stance as the enroller above.
 		lifecyclepub.WithAgentReporter(workerReport))
@@ -1756,6 +1765,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAgentCalibration(paneCalibration),
 		transport.WithAgentTypist(paneTyping))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	agentApprovalService.SetRequester(tp)
 	toolSurface := newToolSurfaceMonitor(toolSurfaceDeadline, func(fact toolSurfaceFact) {
 		status := "unavailable"
 		if fact.Available {
@@ -1989,12 +1999,13 @@ func New(opts ...Option) (*App, error) {
 	}
 	// The record is handed in so the authorizer can tell the two callers
 	// apart: a session it holds a live participant for is a WORKER calling
-	// about itself, and every other admitted session is a coordinator
-	// (nocx-rowqt.9). The workspace is the one a worker's pane lives in, and
-	// it is the scope its grant names.
-	toolAuthorizer := newToolAuthorizer(
+	toolAuthorizer, toolAuthorizerErr := newToolAuthorizer(
 		peerpin.SystemPinner{}, sess, paneGrid, workerRecord, string(workspace.Default),
+		agentApprovalService,
 	)
+	if toolAuthorizerErr != nil {
+		return nil, fmt.Errorf("tool authorizer: %w", toolAuthorizerErr)
+	}
 	workerSup.exited = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit) {
 		if _, err := workerRecord.Exited(ctx, id, l, e); err != nil {
 			logger.Warn("worker: a participant's exit was not recorded",
@@ -2021,6 +2032,7 @@ func New(opts ...Option) (*App, error) {
 		ToolDispatcher:      toolDispatcher,
 		ToolAuthorizer:      toolAuthorizer,
 		ToolSurfaceObserver: toolSurface,
+		agentEnroller:       paneEnrol,
 		toolSurfaceCloser:   toolSurface,
 		UploadSources:       tp.UploadSources(),
 		ShellIntegration:    shint,

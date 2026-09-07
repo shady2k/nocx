@@ -262,7 +262,7 @@ func publishGroupEndpoint(t *testing.T, reg *session.Reg, grid workerAuthEnrolme
 		Peers:    coordsock.SystemPeerCredentials{},
 		Owner:    coordsock.SystemPathOwner{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // a uid is not a signed quantity
-		Auth:     newToolAuthorizer(peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace),
+		Auth:     mustToolAuthorizer(t, peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{}),
 		Dispatch: dispatch,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

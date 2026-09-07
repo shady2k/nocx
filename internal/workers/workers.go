@@ -59,11 +59,9 @@
 //
 // The ceiling did not move. The pin is NOT a defence against a same-uid
 // actor, who can read our descriptors or type into the session anyway, and
-// the principal is the TREE rather than the process. Nor is any of it human
-// approval: D13's "a person admits an agent once, seeing the executable and
-// the scope" is nocx-rowqt.12 and is not built, so nothing in the product may
-// describe the endpoint as human-approved. An authority we cannot enforce is
-// one we do not claim.
+// the principal is the TREE rather than the process. Human approval is a
+// separate durable executable-and-scope decision; the composition root
+// requires both that decision and this live pin before admitting a call.
 package workers
 
 import (

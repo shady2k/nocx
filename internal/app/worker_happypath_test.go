@@ -441,7 +441,11 @@ func newHappyStand(t *testing.T) *happyStand {
 	factory := &happyRealPTYFactory{log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID)}
 	reg := session.New(logger, factory)
 	enrol := newWorkerEnrolments(logger, reg)
-	paneEnrol := enrol.hookInto(newPaneEnroller(logger, lanes, grid, watch))
+	paneEnrol, err := newPaneEnroller(logger, lanes, grid, watch, allowPaneApproval{})
+	if err != nil {
+		t.Fatalf("pane enroller: %v", err)
+	}
+	paneEnrol = enrol.hookInto(paneEnrol)
 	report := &workerReporter{lanes: lanes, enrol: enrol, log: logger, now: time.Now}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
@@ -472,6 +476,7 @@ func newHappyStand(t *testing.T) *happyStand {
 	}
 
 	registry := toolRegistry(t)
+	auth := mustToolAuthorizer(t, peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace, allowWorkerApproval{})
 	dispatcher, err := assistant.NewToolDispatcher(registry, record, content.EnvironmentIDFor(content.EnvLocal, ""))
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
@@ -482,7 +487,7 @@ func newHappyStand(t *testing.T) *happyStand {
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:     newToolAuthorizer(peerpin.SystemPinner{}, reg, grid, record, workerTestWorkspace),
+		Auth:     auth,
 		Dispatch: dispatcher,
 	})
 	if err != nil {

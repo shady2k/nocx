@@ -491,8 +491,15 @@ ci-e2e:
 
 lint-ci:
 	@echo "=== gofumpt check ==="
-	$(GOFUMPT) -l .
-	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
+	@# Tracked files, not the filesystem walk. `gofumpt -l .` descends into
+	@# anything sitting in the working directory, and an agent worktree under
+	@# .claude/worktrees/ is a whole second checkout: the gate then reports
+	@# another branch's formatting and cannot be made green from here, while CI
+	@# — which only ever has tracked files — stays green. git ls-files is what
+	@# CI actually sees, and it keeps platform-tagged files a `go list` on this
+	@# host would drop (nocx-04noc).
+	$(GOFUMPT) -l $$(git ls-files '*.go')
+	@test -z "$$($(GOFUMPT) -l $$(git ls-files '*.go'))" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
 	@# The platform tags every other Go target here carries. Without them

@@ -83,89 +83,127 @@ what it cost rather than reviving the slot.
 **TodoWrite, TaskCreate and markdown TODO lists are forbidden.** `br` is the tracker for
 all work, including your own checklists.
 
-## Memories: `cm`, not the tracker
+## Recall: `deja`, not the tracker
 
-`br` has no memory store. Memories live in cass-memory, in the tracked `.cass/playbook.yaml`,
-so they travel with the clone the way the backlog does. Reading them is pull-based —
-nothing surfaces them for you:
+`br` has no memory store, and neither does this repository any more. What every agent here
+already produces is a session transcript on disk, and `deja` indexes those — claude, omp,
+codex and pi in one machine-wide index at `~/.cache/deja`. Reading it is pull-based:
 
 ```bash
-cm context "<what you are about to do>" --json
+deja "<what you are about to do>"          # across every agent, every worktree
+deja --harness omp --since 30d "<query>"   # narrow it
+deja fix "<error text>"                    # what was run after this error before
+deja how "<what>"                          # commands this machine actually ran
 ```
 
-Rules there carry `scope: global`, not the obvious `workspace`: **`cm context` silently
-returns nothing for `workspace` rules.** They do not leak between repositories — `.cass/`
-is found from the working directory.
+**The recall path writes nothing, so nothing conflicts.** Six workers in six worktrees
+produce six transcripts and one reader sees all of them. This is the whole reason it
+replaced a git-tracked playbook: a rule committed on a branch reaches only that branch, and
+by measurement it reached 3 worktrees out of 45.
 
-**Write a rule only when it was BOUGHT** — when something cost you a measurement, a wrong
-turn or an hour, and the next person would pay it again. Three tests, all of which must
-hold:
+**The mechanism is shared, the database is not.** That is the owner's decision, and it
+settles what everything below is for. Everyone working in this repository — maintainers and
+contributors alike — sets deja up the same way, because the setup is part of the contract
+and lives in git: the install line, the hooks, the trust policy. What each of them then
+accumulates is theirs. Nobody's index or notes reach anybody else, there is no team store
+and no shared memory to keep in step, and a clone arrives with the instructions and an
+empty index that fills from that machine's own history.
+
+The consequence is worth stating plainly, because it is the whole reason this file still
+exists: **nothing you write into deja can be relied on by a colleague.** Recall is how you
+stop re-deriving what you personally already worked out. A rule the next person must follow
+is not that; it goes in this file, where a pull request makes somebody read it.
+
+**Writing to it.** `remember` is the sixth MCP tool, alongside recall, context, blame, fix
+and how. It appends one line to `~/.local/share/deja/notes.jsonl` — timestamp, project,
+text, tags — searchable at the next index pass, and then surfacing like any other session,
+scoped to its project. Use it as you see fit: it is your database. Two properties to know
+rather than obey. A note reaches another machine only if you run `deja sync` yourself,
+which is your machines and not the team's. And with the hooks on, a note is injected at the
+start of every session in that project, so a wrong one keeps arriving until you delete it —
+by hand or with `deja forget`.
+
+`deja promote <id> --state accepted|rejected|superseded|stale` marks a record deja already
+holds rather than writing a new one, and it too changes only your own copy. Upstream #2976
+is open — recall can hand back a session's older fact after the same session reversed it —
+and `superseded` is the lever against that.
+
+**Installed with `--auto`, so recall does not wait to be asked.** Five hooks per agent:
+
+| event              | what it does                                                               |
+| ------------------ | -------------------------------------------------------------------------- |
+| `SessionStart`     | `hook-context` — a new window opens knowing the project's recent decisions |
+| `UserPromptSubmit` | `hook-prompt` — a prompt that matches earlier work pulls it in             |
+| `PreToolUse`       | `hook-tool` — one line on what this command or file already has            |
+| `PostToolUse`      | `hook-tool-after` — after a command fails, what was run after it last time |
+| `PreCompact`       | `hook-precompact` — memory goes in before the context is squeezed          |
+
+```bash
+deja install --auto --no-index    # MCP and hooks everywhere; --no-index keeps the index
+deja uninstall --auto             # and it is reversible
+```
+
+`--no-index` matters: without it the install rebuilds, which is minutes on this corpus.
+
+**Its registration lives in two places, like repowise's.** `deja install --all` writes
+per-agent config under `$HOME` — this machine only. The tracked `.mcp.json` at the repo
+root is what a fresh clone gets, and what every non-Claude-Code agent reads. Both name the
+server `deja`, and Claude keys MCP servers by name, so the two collapse rather than
+double-register. Both are path-less on purpose: the index is machine-wide.
+
+**A worktree needs no setup.** The index is at `~/.cache/deja`, outside git, so a worktree
+answers the moment it is cut — no per-worktree init, unlike repowise below. Verified from a
+worktree that had never seen deja.
+
+**Settle the trust policy BEFORE the first `deja sync`, because the default is open.** Sync
+is peer-to-peer over your own ssh — `deja sync ssh <host>` records the peer, bare `deja
+sync` then exchanges with all of them, incrementally by watermark. What arrives is another
+machine's indexed sessions, and recall injects into agents, so an imported session is text
+your agent may act on. The guide says imported memory "stays searchable but never injects
+itself". **That is not what the binary does**: with no `~/.config/deja/policy.json` it
+reports "every origin activates everywhere", and `internal/policy` says so outright —
+"Defaults allow everything, matching prior behavior". Believe the binary, as with the paths
+elsewhere in this file.
+
+So this machine carries the policy the guide describes, and a new machine needs it written
+before it pairs with anything:
+
+```json
+{
+  "activations": {
+    "mcp": { "local": true, "imported": false },
+    "auto": { "local": true, "imported": false }
+  }
+}
+```
+
+`deja doctor` must then print `search local+imported`, `mcp local-only`, `auto local-only`.
+Check it, because **a malformed policy file fails open**: any parse error falls back to
+allow-everything and only doctor complains. Egress is derived rather than declared —
+content leaves the machine only if all three activations pass it — which is what stops a
+box refusing a session to its own agent while shipping the same text to an embedding
+endpoint.
+
+**A transcript is evidence of what somebody did, not of what is true now.** It carries the
+wrong turn as faithfully as the fix, and the fix may be three sessions later. Read the date,
+and confirm against the tree before acting on it.
+
+**Durable rules go in this file, not in a recall index.** If a lesson is worth carrying, it
+is worth reviewing, and this file is what gets read. Three tests, all of which must hold:
 
 - **Not derivable from the repository.** Code structure, git history and what this file
-  already says are not memories.
+  already says are not rules.
 - **Evidence a stranger can check** — a number, a command with its output, a date, a file.
   "Indexing is heavy" is not a rule.
 - **It would change what somebody does.** Otherwise it is trivia.
 
-Write it the moment you finish paying, not at session close when the detail has gone. Write
-the finding, not the story. And **never write a memory the code should carry instead** — if
-the lesson is "this must be called before that", the fix is an assertion or a test.
-
-**Add rules with `import --repo`, never `add`.** `cm playbook add` always writes the
-personal playbook in `$HOME`, where a rule about this repository is invisible to everybody
-else.
-
-```bash
-cm playbook import rules.json --repo     # --repo targets .cass/playbook.yaml
-```
-
-`import` wants whole bullet records, not the `{content, category}` pair `add --file`
-accepts.
-
-**Do not put an explanation inside `.cass/playbook.yaml`.** `cm` reserialises that file
-from its own model on every write and comments do not survive it. Reasoning goes in this
-file; the YAML holds rules and nothing else.
-
-**Ignore two steps of the `cm` skill's Agent Protocol.** Running `cm context` at the start
-is right and is why the skill is installed. Leaving `// [cass: helpful …]` markers in the
-source is **not** — those are parsed only during reflection, and we do not run reflection,
-so they would be comments no reader will ever have in code somebody has to maintain. If a
-rule helped or hurt, say so in your report and let a person decide.
-
-**We do not run `cm reflect`, and the agent writes its own rules.** Paying an LLM to read a
-transcript back and recover a lesson the agent already held is the wrong trade, and
-reflection can only write to the personal playbook in `$HOME` — invisible to a colleague
-and visible in every unrelated repository on the machine. Anyone who does want it must
-first point `CASS_CLI_COMMAND` at a binary that does not exist: left unset, `cm` resolves
-the Claude CLI and spends the owner's subscription silently. The subscription route is
-forbidden outright.
-
-**`cm` needs no API key and no model here.** `cm context` and the playbook read a file and
-the local index.
-
-**What of `cm` belongs in git**, checked against the binary rather than its README:
-`.cass/playbook.yaml`, `.cass/blocked.log`, `.cass/traumas.jsonl` and `.cass/config.yaml`
-are shared knowledge and are committed. `.cass/context-log.jsonl` is this machine's usage
-accounting and is ignored. Everything under `~/.cass-memory/` stays on the machine, and one
-file there holds an API key.
-
-`blocked.log` is the one to be careful with: its name argues against its contents. It is
-not a diagnostic log — it holds the rule ids this repository refuses. Deleting it to tidy
-up a log file throws away shared knowledge.
-
-**The upstream README and the installed skill name two of those paths wrong.** Believe the
-binary, and check it with `strings` when a document names a path.
+And **never write down what the code should carry instead** — if the lesson is "this must be
+called before that", the fix is an assertion or a test.
 
 ## Code search
 
 **`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
-it_, and it beat an index on every one of those questions we measured.
-
-> A graph index was removed after one measured session: it answered none of the queries put
-> to it, while every finding that mattered came from `grep`. It cost a large committed
-> artifact and a hook that made a graph query mandatory before every read. Do not
-> reintroduce an index, or any hook in front of a file read, without measuring against that
-> baseline.
+it_.
 
 **`repowise` is installed, and it is a second way in, not a ranked one.** Use whichever
 fits the question: `grep` for _does this exist, and who calls it_, the MCP tools when the
@@ -434,7 +472,7 @@ how two agents ship two answers to one question.
    ```bash
    br list --label <area> --status all
    br search <phrase>                    # then words, for the bead filed in other words
-   cm context "<keyword>" --json         # what a past session learned the hard way
+   deja "<keyword>"                      # what a past session already hit
    ```
 
    A hit is not automatically your task — read it. It may be claimed, blocked, or record
@@ -498,12 +536,12 @@ rule.
 
 ## Before you investigate: two checks that beat reasoning
 
-**Search the memories before fighting the environment.** `cm context "<what you are doing>"
---json` costs seconds.
+**Search the transcripts before fighting the environment.** `deja "<what you are doing>"`
+costs seconds and reads what every agent on this machine already tried.
 
 > A session spent installing Xvfb and rebuilding the OS twice to run Playwright ended when a
-> memory lookup turned up the headless backend — a path needing no display, in the repo the
-> whole time.
+> lookup turned up the headless backend — a path needing no display, in the repo the whole
+> time.
 
 **When a branch behaves differently from `main`, diff it against `main` first** — before
 measuring, instrumenting or theorising:
@@ -808,7 +846,7 @@ writing-plans, test-driven-development, systematic-debugging — and they are wo
 Its tracker half is not: those skills were written for an older tracker under a different
 binary name, and by the plugin's own rule repository instructions win over skills.
 **Translate every tracker command in a skill to `br`.** Three do not survive a rename:
-"what next" is `scripts/br-queue.sh`, memories are `cm` and not the tracker at all, and
+"what next" is `scripts/br-queue.sh`, recall is `deja` and not the tracker at all, and
 export is `br sync --flush-only` to `.beads/issues.jsonl`.
 
 The official `br` skill is installed too and carries the same kind of leftovers — config

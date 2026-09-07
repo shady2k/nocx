@@ -97,20 +97,22 @@ func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
 }
 
 type App struct {
-	Logger           log.Logger
-	Session          *session.Reg
-	Transport        *transport.WSServer
-	ToolDispatcher   assistant.ToolDispatcher
-	ToolAuthorizer   toolendpoint.Authorizer
-	ShellIntegration shellintegration.ShellIntegration
-	Updater          update.Updater
-	Profiles         profile.ProfileRepository
-	Credentials      credential.SecretStore
-	skills           assistant.SkillLibrary
+	Logger              log.Logger
+	Session             *session.Reg
+	Transport           *transport.WSServer
+	ToolDispatcher      assistant.ToolDispatcher
+	ToolAuthorizer      toolendpoint.Authorizer
+	ToolSurfaceObserver toolendpoint.Observer
+	ShellIntegration    shellintegration.ShellIntegration
+	Updater             update.Updater
+	Profiles            profile.ProfileRepository
+	Credentials         credential.SecretStore
+	skills              assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
-	vaultCloser interface{ Close() }
+	vaultCloser       interface{ Close() }
+	toolSurfaceCloser interface{ Close() }
 	// noteCloser closes the notes database on shutdown; nil when the store
 	// never opened.
 	noteCloser interface{ Close() error }
@@ -1754,6 +1756,13 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAgentCalibration(paneCalibration),
 		transport.WithAgentTypist(paneTyping))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	toolSurface := newToolSurfaceMonitor(toolSurfaceDeadline, func(fact toolSurfaceFact) {
+		status := "unavailable"
+		if fact.Available {
+			status = "available"
+		}
+		tp.BroadcastToolSurface(fact.SessionID, status, fact.Reason)
+	})
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries
 	// the revision only, so it rides the refreshable outbound queue and a
@@ -2006,33 +2015,35 @@ func New(opts ...Option) (*App, error) {
 		content.DefaultUnreconciledRetention, slogger)
 
 	app := &App{
-		Logger:           logger,
-		Session:          sess,
-		Transport:        tp,
-		ToolDispatcher:   toolDispatcher,
-		ToolAuthorizer:   toolAuthorizer,
-		UploadSources:    tp.UploadSources(),
-		ShellIntegration: shint,
-		Profiles:         profileStore,
-		Credentials:      v,
-		skills:           skills,
-		vaultCloser:      v,
-		noteCloser:       noteCloser,
-		discoverySched:   discoverySched,
-		gitFactory:       gitFactory,
-		helperRegistry:   helperReg,
-		helperArtifacts:  localHelperArtifacts(o),
-		localHelper:      localOpener,
-		logFilePath:      logFilePath,
-		logFile:          logFile,
-		procs:            procs,
-		attentionHost:    attentionHost,
-		notifyToast:      notifyToast,
-		notifyFeed:       notifyFeed,
-		notifyIngress:    notifyIngress,
-		notifyWindow:     notifyWindow,
-		UIState:          uiStateStore,
-		slogger:          slogger,
+		Logger:              logger,
+		Session:             sess,
+		Transport:           tp,
+		ToolDispatcher:      toolDispatcher,
+		ToolAuthorizer:      toolAuthorizer,
+		ToolSurfaceObserver: toolSurface,
+		toolSurfaceCloser:   toolSurface,
+		UploadSources:       tp.UploadSources(),
+		ShellIntegration:    shint,
+		Profiles:            profileStore,
+		Credentials:         v,
+		skills:              skills,
+		vaultCloser:         v,
+		noteCloser:          noteCloser,
+		discoverySched:      discoverySched,
+		gitFactory:          gitFactory,
+		helperRegistry:      helperReg,
+		helperArtifacts:     localHelperArtifacts(o),
+		localHelper:         localOpener,
+		logFilePath:         logFilePath,
+		logFile:             logFile,
+		procs:               procs,
+		attentionHost:       attentionHost,
+		notifyToast:         notifyToast,
+		notifyFeed:          notifyFeed,
+		notifyIngress:       notifyIngress,
+		notifyWindow:        notifyWindow,
+		UIState:             uiStateStore,
+		slogger:             slogger,
 	}
 
 	// ── the client host (nocx-uo1k6, design D3) ────────────────────────
@@ -2429,6 +2440,9 @@ func (a *App) Shutdown(ctx context.Context) {
 	// After the transport, so no pane can still be opening. The daemon and
 	// every session on it survive this — closing the connection is this
 	// coordinator leaving, not the sessions ending.
+	if a.toolSurfaceCloser != nil {
+		a.toolSurfaceCloser.Close()
+	}
 	if a.localHelper != nil {
 		a.localHelper.close()
 	}

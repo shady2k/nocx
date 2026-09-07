@@ -51,6 +51,7 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
 import type { DriverState, PaneChild } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import {
@@ -59,9 +60,11 @@ import {
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
+  subscribeToolSurfaceChanged,
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountToolSurfaceNotice } from './tool-surface-notice'
 import { mountRecoveryNotice } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
@@ -1030,6 +1033,10 @@ export class TerminalContent extends BasePaneContent {
   private _integration: SessionIntegrationChanged | null = null
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** The launch-owned worker tool-surface result, independent of shell integration. */
+  private _toolSurface: SessionToolSurfaceChanged | null = null
+  private _toolSurfaceUnsub: (() => void) | null = null
+  private _toolSurfaceNoticeDispose: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
   /** The disposer for the reclaimed-pane card that names the output this
@@ -3570,6 +3577,10 @@ export class TerminalContent extends BasePaneContent {
       this._lifecycleUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
+      this._toolSurfaceUnsub?.()
+      this._toolSurfaceUnsub = null
+      this._dropToolSurfaceNotice()
+      this._toolSurface = null
       this.session?.close()
       this.session = null
 
@@ -3862,6 +3873,10 @@ export class TerminalContent extends BasePaneContent {
     this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
       if (fact.sessionId !== session.sessionId) return
       this._applyIntegration(fact)
+    })
+    this._toolSurfaceUnsub = subscribeToolSurfaceChanged(this.client.dispatcher, (fact) => {
+      if (fact.sessionId !== session.sessionId) return
+      this._applyToolSurface(fact)
     })
     // The statement is OBSERVED: until the first marker arrives, an auto
     // session honestly reads "Native input" — the launcher may be
@@ -4897,6 +4912,28 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  private _applyToolSurface(fact: SessionToolSurfaceChanged): void {
+    if (this._disposed || this._sessionExited) return
+    this._toolSurface = fact
+    if (fact.status === 'available') {
+      this._dropToolSurfaceNotice()
+      return
+    }
+    if (!this._paneTarget || this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose = mountToolSurfaceNotice(this._paneTarget, {
+      fact,
+      onDismiss: () => this._dropToolSurfaceNotice(),
+    })
+    this.scheduleLiveResize()
+  }
+
+  private _dropToolSurfaceNotice(): void {
+    if (!this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose()
+    this._toolSurfaceNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Where this pane reads the recording fact, with the honest fallback for
@@ -6555,6 +6592,10 @@ export class TerminalContent extends BasePaneContent {
     this._lifecycleUnsub = null
     this._integrationUnsub?.()
     this._integrationUnsub = null
+    this._toolSurfaceUnsub?.()
+    this._toolSurfaceUnsub = null
+    this._toolSurfaceNoticeDispose?.()
+    this._toolSurfaceNoticeDispose = null
     this._noticeDispose?.()
     this._noticeDispose = null
     this._recoveryNoticeDispose?.()

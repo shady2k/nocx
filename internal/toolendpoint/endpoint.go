@@ -43,6 +43,39 @@ const (
 	rpcPeerRefused    = -32001
 )
 
+// ObservationKind names the endpoint event that the composition root may
+// project onto a user-visible session fact.
+type ObservationKind string
+
+const (
+	ObservationAdmitted  ObservationKind = "admitted"
+	ObservationCatalogue ObservationKind = "catalogue"
+	ObservationRefusal   ObservationKind = "refusal"
+)
+
+// Observation is what the endpoint saw on one launch's tool-surface path.
+// SessionID is empty when a peer was refused before the authorizer could bind
+// it to a session; an authorizer may implement PeerSessionResolver to provide
+// that binding for refusal observations.
+type Observation struct {
+	SessionID string
+	Kind      ObservationKind
+	Reason    string
+}
+
+// Observer receives endpoint observations. The endpoint reports facts only;
+// the composition root owns deadlines, deduplication and presentation.
+type Observer interface {
+	Observe(Observation)
+}
+
+// PeerSessionResolver optionally supplies the session a refused peer was
+// attempting to reach. It is separate from Authorizer so existing authorizers
+// remain valid and refusals stay fail-closed when no binding is available.
+type PeerSessionResolver interface {
+	SessionForPeer(Peer) (string, bool)
+}
+
 // Config is everything the endpoint needs, supplied by the composition root.
 // A nil dependency is an error rather than a permissive default: an endpoint
 // without an authorizer would turn same-uid membership into authority.
@@ -59,6 +92,9 @@ type Config struct {
 	Auth Authorizer
 	// Dispatch runs the common worker declaration and executor pipeline.
 	Dispatch assistant.ToolDispatcher
+	// Observer receives admission, refusal and catalogue observations for the
+	// composition root's session-level tool-surface monitor.
+	Observer Observer
 	// Logger receives lifecycle diagnostics and never receives request payloads.
 	Logger *slog.Logger
 }
@@ -203,12 +239,14 @@ func (e *Endpoint) accept(listener *net.UnixListener) {
 		// until both uid and (when available) pid are established.
 		peer, err := e.peer(conn)
 		if err != nil {
+			e.observePeerRefusal(Peer{}, "peer credentials unavailable")
 			e.writeError(conn, nil, rpcPeerRefused, "peer credentials unavailable", "peer credentials unavailable")
 			_ = conn.Close()
 			continue
 		}
 		if peer.UID != e.cfg.SelfUID {
 			e.cfg.Logger.Warn("toolendpoint: refusing foreign peer")
+			e.observePeerRefusal(peer, "peer uid is not permitted")
 			e.writeError(conn, nil, rpcPeerRefused, "peer uid is not permitted", "peer uid is not permitted")
 			_ = conn.Close()
 			continue
@@ -259,6 +297,22 @@ func (e *Endpoint) untrack(conn *net.UnixConn) {
 	e.mu.Unlock()
 }
 
+func (e *Endpoint) observe(observation Observation) {
+	if e.cfg.Observer != nil {
+		e.cfg.Observer.Observe(observation)
+	}
+}
+
+func (e *Endpoint) observePeerRefusal(peer Peer, reason string) {
+	observation := Observation{Kind: ObservationRefusal, Reason: reason}
+	if resolver, ok := e.cfg.Auth.(PeerSessionResolver); ok {
+		if sid, found := resolver.SessionForPeer(peer); found {
+			observation.SessionID = sid
+		}
+	}
+	e.observe(observation)
+}
+
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	defer e.untrack(conn)
 	defer func() { _ = conn.Close() }()
@@ -266,6 +320,7 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	invocation, release, err := e.cfg.Auth.Admit(peer)
 	if err != nil {
 		code, message, reason := rpcErrorFor(err)
+		e.observePeerRefusal(peer, reason)
 		e.writeError(conn, nil, code, message, reason)
 		return
 	}
@@ -273,6 +328,10 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	if base == nil {
 		base = context.Background()
 	}
+	e.observe(Observation{
+		SessionID: invocation.RunContext.Session,
+		Kind:      ObservationAdmitted,
+	})
 	connectionCtx, cancel := context.WithCancel(base)
 
 	reader := bufio.NewReaderSize(conn, maxEnvelopeBytes)
@@ -355,6 +414,12 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 			if !json.Valid([]byte(result)) {
 				e.writeError(conn, request.ID, rpcInternalError, "internal error", "dispatcher returned an invalid result")
 				return
+			}
+			if request.Method == "tools.catalogue" {
+				e.observe(Observation{
+					SessionID: requestInvocation.RunContext.Session,
+					Kind:      ObservationCatalogue,
+				})
 			}
 			e.writeResult(conn, request.ID, json.RawMessage(result))
 		}(request)

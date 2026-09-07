@@ -36,13 +36,18 @@ func (o testOwner) OwnerUID(string) (uint32, error) { return o.uid, nil }
 type testContextKey struct{}
 
 type testAuthorizer struct {
-	mu      sync.Mutex
-	peer    Peer
-	calls   int
-	inv     assistant.ToolInvocation
-	err     error
-	release func()
-	invoked chan struct{}
+	mu        sync.Mutex
+	peer      Peer
+	calls     int
+	inv       assistant.ToolInvocation
+	err       error
+	release   func()
+	invoked   chan struct{}
+	sessionID string
+}
+
+func (a *testAuthorizer) SessionForPeer(Peer) (string, bool) {
+	return a.sessionID, a.sessionID != ""
 }
 
 func (a *testAuthorizer) Admit(peer Peer) (assistant.ToolInvocation, func(), error) {
@@ -108,6 +113,14 @@ func (d *testDispatcher) callCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.calls)
+}
+
+type observationSink struct {
+	events chan Observation
+}
+
+func (s observationSink) Observe(observation Observation) {
+	s.events <- observation
 }
 
 func endpointConfig(t *testing.T, auth *testAuthorizer, dispatch *testDispatcher) Config {
@@ -219,6 +232,65 @@ func TestEndpointDispatchesWithAuthorizerInvocationAndAtomicSocket(t *testing.T)
 	auth.mu.Unlock()
 	if gotPeer != (Peer{UID: 1000, PID: 1234}) {
 		t.Fatalf("authorizer peer = %+v, want uid and pid", gotPeer)
+	}
+}
+
+func nextObservation(t *testing.T, sink observationSink) Observation {
+	t.Helper()
+	select {
+	case observation := <-sink.events:
+		return observation
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for endpoint observation")
+		return Observation{}
+	}
+}
+
+func TestEndpointObservesAdmissionAndCatalogue(t *testing.T) {
+	sink := observationSink{events: make(chan Observation, 2)}
+	auth := &testAuthorizer{inv: assistant.ToolInvocation{
+		RunContext: agenttools.RunContext{Session: "session-1"},
+	}}
+	dispatch := &testDispatcher{}
+	cfg := endpointConfig(t, auth, dispatch)
+	cfg.Observer = sink
+	ep := startEndpoint(t, cfg)
+	conn := dialEndpoint(t, ep)
+	if _, err := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"tools.catalogue","params":{}}`+"\n"); err != nil {
+		t.Fatalf("write catalogue request: %v", err)
+	}
+	if response := readResponse(t, conn); response.Error != nil {
+		t.Fatalf("catalogue response error = %+v", response.Error)
+	}
+	admitted := nextObservation(t, sink)
+	if admitted.Kind != ObservationAdmitted || admitted.SessionID != "session-1" {
+		t.Fatalf("admission observation = %+v", admitted)
+	}
+	catalogue := nextObservation(t, sink)
+	if catalogue.Kind != ObservationCatalogue || catalogue.SessionID != "session-1" {
+		t.Fatalf("catalogue observation = %+v", catalogue)
+	}
+	select {
+	case extra := <-sink.events:
+		t.Fatalf("unexpected extra observation = %+v", extra)
+	default:
+	}
+}
+
+func TestEndpointObservesNamedRefusal(t *testing.T) {
+	sink := observationSink{events: make(chan Observation, 1)}
+	auth := &testAuthorizer{err: ErrSessionCallerActive, sessionID: "session-1"}
+	cfg := endpointConfig(t, auth, &testDispatcher{})
+	cfg.Observer = sink
+	ep := startEndpoint(t, cfg)
+	conn := dialEndpoint(t, ep)
+	_ = conn
+	observation := nextObservation(t, sink)
+	if observation.Kind != ObservationRefusal || observation.SessionID != "session-1" {
+		t.Fatalf("refusal observation = %+v", observation)
+	}
+	if observation.Reason != ErrSessionCallerActive.Error() {
+		t.Fatalf("refusal reason = %q, want %q", observation.Reason, ErrSessionCallerActive.Error())
 	}
 }
 

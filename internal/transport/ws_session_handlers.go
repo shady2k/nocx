@@ -74,6 +74,9 @@ type sessionMachine interface {
 	// handshake expired must learn it is in a conventional terminal, and no
 	// further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
+	// replayToolSurface re-sends the retained tool-surface launch result on
+	// reattach, alongside the other session-scoped state projections.
+	replayToolSurface(sid session.ID)
 	// replayPaneObservation re-sends an enrolled pane's current
 	// classification on reattach (nocx-szb40.3). Beside replayIntegration
 	// and for the identical reason: only changes are pushed, so a renderer
@@ -102,6 +105,7 @@ type openMachine interface {
 	// must happen AFTER the open ack (AD-7).
 	registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen)
 	emitIntegration(sid session.ID)
+	replayToolSurface(sid session.ID)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -837,6 +841,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// last saw this session.
 		h.machine.replayLifecycleFacts(sid)
 		h.machine.replayIntegration(sid)
+		h.machine.replayToolSurface(sid)
 		h.machine.replayPaneObservation(sid)
 
 		sidBytes, _ := session.IDToBytes(sid)

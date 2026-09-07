@@ -593,7 +593,7 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
 		return policyRefuse, RefusedByFloor, reason
 	}
-	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
+	decision := m.decisionFor(t, invocation)
 	if decision == content.DecisionRefuse {
 		return policyRefuse, RefusedByDecision, ""
 	}
@@ -607,6 +607,49 @@ func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources [
 		return policyPermit, "", ""
 	}
 	return policyAsk, "", ""
+}
+
+// decisionFor is the policy decision in the declaration's own terms. An
+// ALTERNATIVE set has one selected row and that row decides — ADR-0053's whole
+// mechanism, and the reason refusing mutate-destructive does not take lsblk
+// away with rm. A CONJUNCTION reaches every row on every successful call, so
+// the strictest of them decides: one refusal refuses the call, and one ask
+// asks about it, whatever the other rows say.
+//
+// Taking it on WorstEffect alone was wrong in both directions and only looked
+// right for skills.install by accident. Refusing the write while permitting
+// the fetch still asked, because cross-boundary is the higher row and the
+// higher row was permitting; and had the rows been the other way round, an ask
+// on the lower row would have been silently upgraded to a permit.
+func (m *effectKernel) decisionFor(t agenttools.Tool, invocation content.Invocation) content.Decision {
+	if t.EffectRelation != agenttools.EffectsConjunctive {
+		return m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
+	}
+	strictest := content.DecisionPermit
+	for _, effect := range t.Declaration.Effect {
+		strictest = stricterDecision(strictest, m.grant.Policy.DecisionForInvocation(effect, invocation))
+	}
+	return strictest
+}
+
+// stricterDecision orders the three answers by how little they allow. It is
+// spelled out rather than derived from the lattice because it is a different
+// order: the lattice ranks ACTS by severity, this ranks ANSWERS by permission.
+func stricterDecision(left, right content.Decision) content.Decision {
+	rank := func(d content.Decision) int {
+		switch d {
+		case content.DecisionRefuse:
+			return 2
+		case content.DecisionAsk:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return right
+	}
+	return left
 }
 
 func isSkillMutationTool(tool agenttools.Tool) bool {
@@ -689,7 +732,7 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 	}
 	for _, resource := range resources {
 		inside := false
-		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
+		for _, scope := range m.rowScopesFor(t) {
 			// The row's scope is asked WHOLE: rebuilding it from kind and id
 			// drops a destination's subdomain marker (design §5.4), and a
 			// row that grants a host with its subdomains would then refuse
@@ -706,6 +749,30 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 		}
 	}
 	return true
+}
+
+// rowScopesFor is which rows' scopes a call is measured against. For an
+// alternative set it is the SELECTED row, unchanged: consulting the others
+// would let one effect's scopes answer another effect's call, which is the
+// leak the comment above forbids.
+//
+// A CONJUNCTION is measured against every row it reaches, and their scopes
+// are taken TOGETHER rather than intersected — because the rows do not govern
+// the same resources. skills.install names a destination and a content item:
+// the destination is the fetch's, the content item is the write's, and each
+// belongs to the row that performs it. Intersecting would demand the fetched
+// address be inside the write row's scopes, refusing an install a person had
+// granted both halves of. What the union does NOT do is let a resource in
+// that no reached row admits, which is the check that matters.
+func (m *effectKernel) rowScopesFor(t agenttools.Tool) []content.GrantScope {
+	if t.EffectRelation != agenttools.EffectsConjunctive {
+		return m.grant.Policy.RowScopes(t.Effect)
+	}
+	var scopes []content.GrantScope
+	for _, effect := range t.Declaration.Effect {
+		scopes = append(scopes, m.grant.Policy.RowScopes(effect)...)
+	}
+	return scopes
 }
 
 // matchedResource is the singular wire projection of the first resolved

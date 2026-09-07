@@ -416,6 +416,8 @@ func requireClaude(t *testing.T) string {
 	return path
 }
 
+// All vendor assertions use --print. The design's eager tools/list measurement
+// was interactive; this check does not prove interactive and --print equivalent.
 func runClaude(t *testing.T, claude, dir string, env []string, config, prompt string) (string, string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

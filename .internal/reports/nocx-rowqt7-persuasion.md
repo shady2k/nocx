@@ -71,10 +71,19 @@ enforced guarantee.
 
 ## Repeatability and limits
 
-A stranger can repeat the measurement with the exact vendor version, prompt, command,
-private MCP JSON config, and a compliant local fixture that serves the four worker tools.
-The temporary fixture source was intentionally not committed because it is test harness
-scaffolding, not a product path. The result is an empirical count, not a guarantee about
-all future prompts, models, or Claude versions. The five-turn cap bounds the paid run; it
-means the measurement proves worker-surface selection, not completion of the requested
-repository work.
+A stranger can repeat the measurement with the committed manual check:
+
+```text
+$ NOCX_MANUAL_REAL_PERSUASION=1 go test ./internal/claudeconformance -run '^TestManualClaudeSelectsWorkersUnprompted$' -count=1 -v
+```
+
+`TestManualClaudeSelectsWorkersUnprompted` stages the same in-process MCP bridge and
+catalogue fixture used by the other conformance tests. The fixture derives each worker
+summary, parameter schema, and result schema from the assembled
+`internal/agenttools/registry.go` rows, so a registry description change cannot silently
+leave a second test copy behind. The test is manual-gated and does not spend an account
+unless `NOCX_MANUAL_REAL_PERSUASION=1` is explicitly set.
+
+The result is an empirical count, not a guarantee about all future prompts, models, or
+Claude versions. The five-turn cap bounds the paid run; it means the measurement proves
+worker-surface selection, not completion of the requested repository work.

@@ -318,7 +318,7 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 func (k *nestedKernel) sendMalformedAgentAnswerLocked() {
 	body := []byte(`{"evt":`)
 	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	binary.BigEndian.PutUint32(hdr[:], 7)
 	if _, err := k.conn.Write(append(hdr[:], body...)); err != nil {
 		k.t.Fatalf("write malformed agent answer: %v", err)
 	}

@@ -159,6 +159,7 @@ func startToolEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials
 		SelfUID:  selfUID,
 		Auth:     a.ToolAuthorizer,
 		Dispatch: a.ToolDispatcher,
+		Observer: a.ToolSurfaceObserver,
 		Logger:   logger,
 	})
 	if err != nil {

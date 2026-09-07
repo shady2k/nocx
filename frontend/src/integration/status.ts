@@ -18,6 +18,7 @@
 
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
+import type { SessionToolSurfaceChanged } from '../generated/session.toolSurfaceChanged'
 
 export type IntegrationReason = NonNullable<SessionIntegrationChanged['reason']>
 
@@ -83,6 +84,27 @@ export function subscribeIntegrationChanged(
  *  seconds. */
 export function isDegraded(fact: SessionIntegrationChanged | null): boolean {
   return fact !== null && (fact.status === 'conventional' || fact.status === 'lost')
+}
+
+export type ToolSurfaceFactHandler = (fact: SessionToolSurfaceChanged) => void
+
+/** Subscribe to the endpoint's settled worker tool-surface result. */
+export function subscribeToolSurfaceChanged(
+  dispatcher: Dispatcher,
+  handler: ToolSurfaceFactHandler,
+): () => void {
+  return dispatcher.subscribe('session.toolSurfaceChanged', (params: unknown) => {
+    const p = params as SessionToolSurfaceChanged
+    if (
+      p &&
+      typeof p.sessionId === 'string' &&
+      typeof p.instanceId === 'string' &&
+      typeof p.sessionEpoch === 'number' &&
+      (p.status === 'available' || (p.status === 'unavailable' && typeof p.reason === 'string'))
+    ) {
+      handler(p)
+    }
+  })
 }
 
 // ── which shell nocx started ──────────────────────────────────────────────

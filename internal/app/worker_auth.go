@@ -119,11 +119,10 @@ func newToolAuthorizer(
 	}
 }
 
-func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, bool) {
 	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil || peer.PID <= 0 {
-		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+		return "", nil, false
 	}
-
 	var admitted session.ID
 	var admittedSession session.Session
 	for _, sess := range a.sessions.List() {
@@ -149,12 +148,22 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation
 		if admitted != "" {
 			// A peer matching two live enrolled roots has no unambiguous
 			// session authority. Refuse rather than selecting map order.
-			return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
+			return "", nil, false
 		}
 		admitted = sid
 		admittedSession = sess
 	}
-	if admitted == "" {
+	return admitted, admittedSession, admitted != ""
+}
+
+func (a *toolAuthorizer) SessionForPeer(peer toolendpoint.Peer) (string, bool) {
+	admitted, _, ok := a.admittedPeer(peer)
+	return string(admitted), ok
+}
+
+func (a *toolAuthorizer) Admit(peer toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+	admitted, admittedSession, ok := a.admittedPeer(peer)
+	if !ok {
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
 	}
 

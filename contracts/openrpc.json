@@ -10446,6 +10446,9 @@
       "$ref": "https://nocx.local/contracts/session.signal.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/session.toolSurfaceChanged.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/sessions.inventory.schema.json"
     },
     {

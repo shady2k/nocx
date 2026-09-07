@@ -750,6 +750,11 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
+	// toolSurfaces is the retained launch result for the worker tool path.
+	// It is separate from integration because it answers a different question:
+	// whether the external coordinator can actually reach its tools.
+	toolSurfaceMu sync.Mutex
+	toolSurfaces  map[session.ID]toolSurfaceStatus
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -1514,6 +1519,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		laneCapacity:               DefaultControlLaneCapacity,
 		heartbeatReadWindow:        DefaultHeartbeatReadWindow,
 		domainWaitTimeout:          DefaultDomainConflictWaitTimeout,
+		toolSurfaces:               make(map[session.ID]toolSurfaceStatus),
 		domainMaxQueue:             DefaultDomainMaxQueue,
 		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,

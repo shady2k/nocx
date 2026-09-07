@@ -428,8 +428,6 @@ func startChannelShellCfgMode(t *testing.T, shell, scriptName, script string, op
 	if fakeBinDir != "" {
 		cmd.Env = append(cmd.Env, "PATH="+fakeBinDir+":"+os.Getenv("PATH"))
 	}
-	// The gate line sources the hooks, and the capability bootstrap first
-	// when this fixture has a lifecycle channel.
 	gate := filepath.Join(t.TempDir(), "gate")
 	gateBody := ". " + ShellQuote(scriptPath) + "\n"
 	if withLifecycle {

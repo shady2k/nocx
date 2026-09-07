@@ -786,8 +786,10 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		shell = ShellAuto
 	}
 	opts := LaunchOptions{
-		SessionID: cfg.SessionID,
-		Enhanced:  cfg.Enhanced,
+		SessionID:           cfg.SessionID,
+		Enhanced:            cfg.Enhanced,
+		AgentHelperPath:     cfg.AgentHelperPath,
+		AgentToolSocketPath: cfg.AgentToolSocketPath,
 	}
 	// The lifecycle channel config addresses the carrier: lane, domain,
 	// epoch and port are names and travel in the command. The

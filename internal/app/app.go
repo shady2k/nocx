@@ -2539,8 +2539,10 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 	cmd, reason, ok := a.inner.StartCommand(
 		shellintegration.ShellKind(shell),
 		shellintegration.LaunchOptions{
-			SessionID: opts.SessionID,
-			Enhanced:  opts.Enhanced,
+			SessionID:           opts.SessionID,
+			Enhanced:            opts.Enhanced,
+			AgentHelperPath:     opts.AgentHelperPath,
+			AgentToolSocketPath: opts.AgentToolSocketPath,
 			// The lifecycle channel (ADR-0024 decision 2 "Over SSH"): the
 			// port becomes NOCX_LIFECYCLE_PORT and the capability the
 			// rcfile's @CAP@. Empty when no channel was established — the
@@ -2622,14 +2624,16 @@ func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOpti
 		return "", nil, nil, false
 	}
 	sopts := shellintegration.LaunchOptions{
-		SessionID:     opts.SessionID,
-		Enhanced:      opts.Enhanced,
-		Capability:    opts.Capability,
-		Recovery:      opts.Recovery,
-		Lane:          opts.Lane,
-		Domain:        opts.Domain,
-		Epoch:         opts.Epoch,
-		LifecyclePort: opts.LifecyclePort,
+		SessionID:           opts.SessionID,
+		Enhanced:            opts.Enhanced,
+		AgentHelperPath:     opts.AgentHelperPath,
+		AgentToolSocketPath: opts.AgentToolSocketPath,
+		Capability:          opts.Capability,
+		Recovery:            opts.Recovery,
+		Lane:                opts.Lane,
+		Domain:              opts.Domain,
+		Epoch:               opts.Epoch,
+		LifecyclePort:       opts.LifecyclePort,
 	}
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellKind(shell), sopts)
 	if err != nil {

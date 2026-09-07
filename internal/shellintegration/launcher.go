@@ -33,6 +33,11 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths used by the
+	// launch-owned MCP bridge. They are exported only when supplied; the
+	// lifecycle capability and report rendezvous remain outside this config.
+	AgentHelperPath     string
+	AgentToolSocketPath string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
 	// reaches the shell through an inherited, already-unlinked descriptor
@@ -110,6 +115,12 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
 		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
 	}
+	if opts.AgentHelperPath != "" {
+		b.WriteString("NOCX_AGENT_HELPER_PATH=" + ShellQuote(opts.AgentHelperPath) + "\n")
+	}
+	if opts.AgentToolSocketPath != "" {
+		b.WriteString("NOCX_TOOL_SOCKET=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
+	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
 	// is deliberately NOT here: it reaches the shell by one of the two forms
 	// in capability_source.go and must never appear in /proc/<pid>/environ.
@@ -127,6 +138,12 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
+	}
+	if opts.AgentHelperPath != "" {
+		b.WriteString(" NOCX_AGENT_HELPER_PATH")
+	}
+	if opts.AgentToolSocketPath != "" {
+		b.WriteString(" NOCX_TOOL_SOCKET")
 	}
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")

@@ -433,6 +433,10 @@ __nocx_lc_json_unescape() {
 __nocx_agent_n=0
 __nocx_agent_enrolled=0
 __nocx_agent_reason=
+__nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
+__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-}}"
+__nocx_agent_launch_dir=
+__nocx_agent_launch_lease=
 
 __nocx_lc_read_agent_answer() {
     local __rid="$1" __t=0 __reason
@@ -534,12 +538,86 @@ __nocx_agent_report_send() {
     esac
 }
 
+__nocx_agent_stage_reason=
+__nocx_agent_sweep() {
+    local __root="${TMPDIR:-/tmp}" __dir __pid
+    for __dir in "$__root"/nocx-agent-launch.*(N); do
+        [[ -d "$__dir" ]] || continue
+        [[ "$__dir" == "$__nocx_agent_launch_dir" ]] && continue
+        __pid=
+        if [[ -r "$__dir/lease" ]]; then
+            IFS= read -r __pid < "$__dir/lease" || __pid=
+        fi
+        if [[ -z "$__pid" ]] || ! kill -0 "$__pid" 2>/dev/null; then
+            command rm -rf -- "$__dir" 2>/dev/null || true
+        fi
+    done
+}
+
+__nocx_agent_cleanup() {
+    if [[ -n "$__nocx_agent_launch_dir" ]]; then
+        command rm -rf -- "$__nocx_agent_launch_dir" 2>/dev/null || true
+        typeset -g __nocx_agent_launch_dir=
+        typeset -g __nocx_agent_launch_lease=
+    fi
+}
+
+__nocx_agent_stage() {
+    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config
+    typeset -g __nocx_agent_stage_reason=
+    typeset -g __nocx_agent_launch_dir=
+    typeset -g __nocx_agent_launch_lease=
+    if [[ -z "$__helper" ]]; then
+        __nocx_agent_stage_reason='nocx helper path is not configured'
+        return 1
+    fi
+    if [[ -z "$__socket" ]]; then
+        __nocx_agent_stage_reason='nocx tool socket path is not configured'
+        return 1
+    fi
+    __nocx_agent_sweep
+    __dir="$(command mktemp -d "$__root/nocx-agent-launch.XXXXXX" 2>/dev/null)" || {
+        __nocx_agent_stage_reason='could not create the private launch directory'
+        return 1
+    }
+    if ! command chmod 700 "$__dir" 2>/dev/null; then
+        command rm -rf -- "$__dir" 2>/dev/null || true
+        __nocx_agent_stage_reason='could not secure the private launch directory'
+        return 1
+    fi
+    __lease="$__dir/lease"
+    __config="$__dir/mcp.json"
+    if ! (
+        umask 077
+        printf '%s\n' "$$" > "$__lease" || exit 1
+        __nocx_lc_json_escape "$__helper" || exit 1
+        __helper_json="$__nocx_lc_json_escaped"
+        __nocx_lc_json_escape "$__socket" || exit 1
+        __socket_json="$__nocx_lc_json_escaped"
+        printf '{"mcpServers":{"nocx":{"type":"stdio","command":"%s","args":["mcp","--socket","%s"]}}}\n' \
+            "$__helper_json" "$__socket_json" > "$__config" || exit 1
+        command chmod 600 "$__lease" "$__config"
+    ); then
+        command rm -rf -- "$__dir" 2>/dev/null || true
+        __nocx_agent_stage_reason='could not write the private MCP configuration'
+        return 1
+    fi
+    typeset -g __nocx_agent_launch_dir="$__dir"
+    typeset -g __nocx_agent_launch_lease="$__lease"
+    return 0
+}
+
+
+__nocx_agent_restore_traps() {
+    trap - EXIT INT TERM HUP
+}
+
 # Run agent $1 with the pane enrolled for its lifetime. The refusal is visible
 # and the agent still runs: "failure is closed" means no enrolment implies no
 # orchestration, not that a terminal declines to start the program it was asked
 # for.
 __nocx_agent_run() {
-    local __agent="$1" __rid __rc
+    local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
     if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
         builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
@@ -558,18 +636,37 @@ __nocx_agent_run() {
         command "$__agent" "$@"
         return $?
     fi
+    if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
+        "${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-$__nocx_agent_tool_socket}}"; then
+        __staged=1
+        trap '__nocx_agent_cleanup; exit 130' INT
+        trap '__nocx_agent_cleanup; exit 143' TERM HUP
+        trap '__nocx_agent_cleanup' EXIT
+    else
+        __stage_reason="$__nocx_agent_stage_reason"
+        builtin printf 'nocx: not orchestrated — %s\n' "$__stage_reason" >&2
+    fi
     # Opened before the agent starts, and the declaration goes before the
     # withdraw — inside the interval the enrolment opened.
     __nocx_agent_report_open || true
-    NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
+    if (( __staged )); then
+        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
+            --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+    else
+        NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@"
+    fi
     __rc=$?
     __nocx_agent_report_send "$__rid"
     if [[ -n "$__nocx_agent_report_path" ]]; then
         command rm -f -- "$__nocx_agent_report_path" 2>/dev/null
         __nocx_agent_report_path=
     fi
-    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || return $__rc
+    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || true
     __nocx_lc_read_agent_answer "$__rid" || true
+    if (( __staged )); then
+        __nocx_agent_cleanup
+        __nocx_agent_restore_traps
+    fi
     return $__rc
 }
 

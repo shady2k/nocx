@@ -163,7 +163,10 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 > The tracker was `bd` (Go beads, embedded Dolt) until 2026-09-05 and is `br`
 > now. `br` is a single static binary with no daemon and no Dolt; it never runs
 > git. `br` has no memory store at all, and neither does the repo: `deja` indexes
-> the session transcripts every agent already writes. See AGENTS.md.
+> the session transcripts every agent already writes. Everyone here installs it
+> the same way and **each keeps their own database** — no index or note travels
+> between contributors, and a clone arrives with these instructions and an empty
+> index that fills from your own history. See AGENTS.md.
 
 **On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
 latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,

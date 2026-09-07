@@ -101,17 +101,32 @@ produce six transcripts and one reader sees all of them. This is the whole reaso
 replaced a git-tracked playbook: a rule committed on a branch reaches only that branch, and
 by measurement it reached 3 worktrees out of 45.
 
+**The mechanism is shared, the database is not.** That is the owner's decision, and it
+settles what everything below is for. Everyone working in this repository — maintainers and
+contributors alike — sets deja up the same way, because the setup is part of the contract
+and lives in git: the install line, the hooks, the trust policy. What each of them then
+accumulates is theirs. Nobody's index or notes reach anybody else, there is no team store
+and no shared memory to keep in step, and a clone arrives with the instructions and an
+empty index that fills from that machine's own history.
+
+The consequence is worth stating plainly, because it is the whole reason this file still
+exists: **nothing you write into deja can be relied on by a colleague.** Recall is how you
+stop re-deriving what you personally already worked out. A rule the next person must follow
+is not that; it goes in this file, where a pull request makes somebody read it.
+
 **Writing to it.** `remember` is the sixth MCP tool, alongside recall, context, blame, fix
 and how. It appends one line to `~/.local/share/deja/notes.jsonl` — timestamp, project,
-text, tags — which becomes searchable at the next index pass and then surfaces like any
-other session, scoped to its project. The file is under `$HOME`, so it stays on this
-machine unless `deja sync` carries it, and nothing reviews it the way a pull request
-reviews this file.
+text, tags — searchable at the next index pass, and then surfacing like any other session,
+scoped to its project. Use it as you see fit: it is your database. Two properties to know
+rather than obey. A note reaches another machine only if you run `deja sync` yourself,
+which is your machines and not the team's. And with the hooks on, a note is injected at the
+start of every session in that project, so a wrong one keeps arriving until you delete it —
+by hand or with `deja forget`.
 
 `deja promote <id> --state accepted|rejected|superseded|stale` marks a record deja already
-holds rather than writing a new one. Upstream #2976 is open — recall can hand back a
-session's older fact after the same session reversed it — and `superseded` is the lever
-against that.
+holds rather than writing a new one, and it too changes only your own copy. Upstream #2976
+is open — recall can hand back a session's older fact after the same session reversed it —
+and `superseded` is the lever against that.
 
 **Installed with `--auto`, so recall does not wait to be asked.** Five hooks per agent:
 

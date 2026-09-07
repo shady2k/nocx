@@ -137,6 +137,35 @@ double-register. Both are path-less on purpose: the index is machine-wide.
 answers the moment it is cut — no per-worktree init, unlike repowise below. Verified from a
 worktree that had never seen deja.
 
+**Settle the trust policy BEFORE the first `deja sync`, because the default is open.** Sync
+is peer-to-peer over your own ssh — `deja sync ssh <host>` records the peer, bare `deja
+sync` then exchanges with all of them, incrementally by watermark. What arrives is another
+machine's indexed sessions, and recall injects into agents, so an imported session is text
+your agent may act on. The guide says imported memory "stays searchable but never injects
+itself". **That is not what the binary does**: with no `~/.config/deja/policy.json` it
+reports "every origin activates everywhere", and `internal/policy` says so outright —
+"Defaults allow everything, matching prior behavior". Believe the binary, as with the paths
+elsewhere in this file.
+
+So this machine carries the policy the guide describes, and a new machine needs it written
+before it pairs with anything:
+
+```json
+{
+  "activations": {
+    "mcp": { "local": true, "imported": false },
+    "auto": { "local": true, "imported": false }
+  }
+}
+```
+
+`deja doctor` must then print `search local+imported`, `mcp local-only`, `auto local-only`.
+Check it, because **a malformed policy file fails open**: any parse error falls back to
+allow-everything and only doctor complains. Egress is derived rather than declared —
+content leaves the machine only if all three activations pass it — which is what stops a
+box refusing a session to its own agent while shipping the same text to an embedding
+endpoint.
+
 **A transcript is evidence of what somebody did, not of what is true now.** It carries the
 wrong turn as faithfully as the fix, and the fix may be three sessions later. Read the date,
 and confirm against the tree before acting on it.

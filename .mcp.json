@@ -8,6 +8,11 @@
       "command": "repowise",
       "args": ["mcp", "--transport", "stdio"],
       "description": "repowise: codebase intelligence — docs, graph, git signals, dead code, decisions"
+    },
+    "deja": {
+      "command": "deja",
+      "args": ["mcp"],
+      "description": "deja: recall across every agent's session transcripts, machine-wide"
     }
   }
 }

@@ -101,9 +101,26 @@ transcripts and one reader sees all of them. This is the whole reason it replace
 git-tracked playbook: a rule committed on a branch reaches only that branch, and by
 measurement it reached 3 worktrees out of 45.
 
-**Install it without hooks.** `deja install --auto` wires `PreToolUse`/`PostToolUse` hooks,
-which is a hook in front of a file read — see Code search below for why we do not do that
-here. Call it on demand instead.
+**`--all`, never `--auto`.** `deja install --all` wires the MCP server for every agent it
+finds and writes no hook at all; `--auto` is the same plus session-start and
+`PreToolUse`/`PostToolUse` hooks, and a hook in front of a file read is what Code search
+below forbids. Upstream measures that hook at 172 ms a call for zero decisions in 48, so
+this costs us nothing. Add `--no-index` when the index already exists, or it rebuilds:
+
+```bash
+deja install --all --no-index     # MCP everywhere, no hooks
+deja uninstall --all              # and it is reversible
+```
+
+**Its registration lives in two places, like repowise's.** `deja install --all` writes
+per-agent config under `$HOME` — this machine only. The tracked `.mcp.json` at the repo
+root is what a fresh clone gets, and what every non-Claude-Code agent reads. Both name the
+server `deja`, and Claude keys MCP servers by name, so the two collapse rather than
+double-register. Both are path-less on purpose: the index is machine-wide.
+
+**A worktree needs no setup.** The index is at `~/.cache/deja`, outside git, so a worktree
+answers the moment it is cut — no per-worktree init, unlike repowise below. Verified from a
+worktree that had never seen deja.
 
 **A transcript is evidence of what somebody did, not of what is true now.** It carries the
 wrong turn as faithfully as the fix, and the fix may be three sessions later. Read the date,

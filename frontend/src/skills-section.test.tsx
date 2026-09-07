@@ -63,6 +63,7 @@ const ONE_FILE: SkillsFiles = {
 }
 
 const SKILLS: SkillsList = {
+  refused: [],
   documentPath: '/tmp/nocx/skills.json',
   skills: [
     {
@@ -439,6 +440,7 @@ describe('SkillsSection', () => {
 
   it('shows a corrupt document as an actionable failure with its path', async () => {
     const result: SkillsList = {
+      refused: [],
       skills: [],
       documentPath: '/tmp/nocx/skills.json',
       documentError: 'parse skills.json: invalid character',
@@ -632,3 +634,59 @@ const INSTALLED: SkillsList = {
     },
   ],
 }
+
+/**
+ * nocx-j0lei: a skill-shaped directory discovery refused used to be ABSENT
+ * from this page, with only a slog line to say why. A person who put a
+ * SKILL.md on disk and cannot find it in the product could not tell that from
+ * a directory nobody had created.
+ */
+describe('a directory nocx would not index', () => {
+  const WITH_REFUSAL: SkillsList = {
+    documentPath: '/tmp/nocx/skills.json',
+    skills: SKILLS.skills,
+    refused: [
+      {
+        directory: 'verbose',
+        provenance: 'authored',
+        path: '/tmp/nocx/skills/verbose/SKILL.md',
+        reason: 'descriptionTooLong',
+        detail: 'its description is 2500 characters and the limit is 2048: shorten it in the file',
+      },
+    ],
+  }
+
+  it('is named on the page, with the reason and the file to open', async () => {
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(WITH_REFUSAL) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(rowFor(container, 'verbose')).toBeTruthy())
+    const row = rowFor(container, 'verbose')!
+    expect(row.textContent).toContain('2500')
+    expect(row.textContent).toContain('2048')
+    expect(row.textContent).toContain('/tmp/nocx/skills/verbose/SKILL.md')
+    // The short label, so a column of these can be scanned for what KIND of
+    // problem each directory has.
+    expect(row.textContent).toContain('Description too long')
+  })
+
+  it('offers no control that could act on it', async () => {
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(WITH_REFUSAL) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(rowFor(container, 'verbose')).toBeTruthy())
+    const row = rowFor(container, 'verbose')!
+    // It is not a skill: it cannot be switched on, deleted or opened. A
+    // control here would be one that can only fail.
+    expect(row.querySelector('input[type="checkbox"]')).toBeNull()
+    expect(row.querySelectorAll('button').length).toBe(0)
+  })
+
+  it('is absent when nothing was refused, rather than an empty heading', async () => {
+    const store = new SkillsStore(fakeClient())
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(rowFor(container, 'deploy')).toBeTruthy())
+    expect(container.textContent).not.toContain('Not indexed')
+  })
+})

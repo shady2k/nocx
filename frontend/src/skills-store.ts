@@ -1,4 +1,4 @@
-import type { Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
+import type { Refusal, Skill as GeneratedSkill, SkillsList } from './generated/skills.list'
 import type { SkillsFile } from './generated/skills.file'
 import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsAudit } from './generated/skills.audit'
@@ -6,6 +6,9 @@ import type { SkillsCheck } from './generated/skills.check'
 import type { SkillsScan } from './generated/skills.scan'
 
 export type Skill = GeneratedSkill
+// Not exported: the state type below is how a surface reaches it, and a second
+// exported name for one shape is a second thing to keep in step.
+type SkillRefusal = Refusal
 
 export interface SkillsClientLike {
   list(): Promise<SkillsList>
@@ -21,7 +24,17 @@ export interface SkillsClientLike {
 
 export type SkillsState =
   | { kind: 'loading' }
-  | { kind: 'ready'; skills: readonly Skill[]; documentPath: string }
+  | {
+      kind: 'ready'
+      skills: readonly Skill[]
+      // The skill-shaped directories discovery would not index (nocx-j0lei).
+      // They sit BESIDE the skills rather than among them, because nothing
+      // here can be switched on and none of it reaches the assistant — a
+      // refused directory rendered as a skill row would offer controls that
+      // cannot do anything.
+      refused: readonly SkillRefusal[]
+      documentPath: string
+    }
   | { kind: 'unavailable'; message: string; documentPath: string }
 
 export class SkillsStore {
@@ -54,7 +67,17 @@ export class SkillsStore {
           documentPath: result.documentPath,
         })
       } else {
-        this.set({ kind: 'ready', skills: result.skills, documentPath: result.documentPath })
+        this.set({
+          kind: 'ready',
+          skills: result.skills,
+          // Normalised HERE, at the one place the payload is read. The
+          // contract requires the key, so an absent one is a backend that
+          // does not match its own schema — and the honest failure for that
+          // is an empty section, not a Skills page that throws and shows
+          // nothing at all, switches included.
+          refused: result.refused ?? [],
+          documentPath: result.documentPath,
+        })
       }
     } catch (err) {
       if (generation !== this.generation) return

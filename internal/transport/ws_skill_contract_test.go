@@ -57,6 +57,22 @@ func TestSkillsList_DTOConformsToContract(t *testing.T) {
 			},
 			Check: &skillsListCheck{At: "2026-09-03T12:00:00Z", Verdict: "suspect", Model: "qwen3"},
 		},
+	}, Refused: []skill.Refusal{
+		// Two of the six reasons, chosen to exercise both halves of the
+		// refusal shape: one whose sentence carries numbers and one whose
+		// sentence quotes what it refused (nocx-j0lei).
+		{
+			Directory: "verbose", Provenance: skill.ProvenanceAuthored,
+			Path:   "/skills/verbose/SKILL.md",
+			Reason: skill.RefusedDescriptionTooLong,
+			Detail: "its description is 2500 characters and the limit is 2048",
+		},
+		{
+			Directory: "Shouty", Provenance: skill.ProvenanceInstalled,
+			Path:   "/installed-skills/Shouty/SKILL.md",
+			Reason: skill.RefusedName,
+			Detail: `its frontmatter names the skill "Shouty", which is not a usable name`,
+		},
 	}, DocumentPath: "/skills.json"})
 	if err != nil {
 		t.Fatal(err)
@@ -207,6 +223,73 @@ func TestSkillsList_OverTheWireConformsToContract(t *testing.T) {
 
 // writeSkillFile puts one SKILL.md on disk the way a person would, so a test
 // can name a state the shipped handlers never create for themselves.
+// A REFUSED DIRECTORY, OFF THE REAL SOCKET (nocx-j0lei). The directory is
+// written to disk and the SHIPPED discovery is what refuses it: a payload the
+// test built itself would prove the struct marshals, not that the server sends
+// what a person needs in order to find and fix their own file.
+func TestSkillsList_ARefusedDirectoryReachesThePersonOverTheWire(t *testing.T) {
+	configDir := t.TempDir()
+	writeSkillFile(t, filepath.Join(configDir, "skills", "deploy"), "deploy", "Deploy the service")
+
+	// A skill-shaped directory with no description: discovery refuses it and
+	// used to drop it, leaving a person with a SKILL.md on disk, nothing in
+	// the product, and a log line they will never see.
+	broken := filepath.Join(configDir, "skills", "silent")
+	if err := os.MkdirAll(broken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "SKILL.md"), []byte("---\nname: silent\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// And an ordinary folder with no SKILL.md, which is NOT a refusal and
+	// must not become one — a row per folder is how a list stops being read.
+	if err := os.MkdirAll(filepath.Join(configDir, "skills", "notaskill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, _, _, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+
+	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("unexpected error: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "skills.list wire")
+
+	var got skillsListResult
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, listed := range got.Skills {
+		if listed.Name == "silent" {
+			t.Fatal("a refused directory was listed as a usable skill")
+		}
+	}
+	if len(got.Refused) != 1 {
+		t.Fatalf("refused = %+v, want exactly the one broken directory", got.Refused)
+	}
+	refused := got.Refused[0]
+	if refused.Directory != "silent" {
+		t.Errorf("directory = %q, want the folder name a person sees", refused.Directory)
+	}
+	if refused.Reason != skill.RefusedNoDescription {
+		t.Errorf("reason = %q, want %q", refused.Reason, skill.RefusedNoDescription)
+	}
+	if !strings.Contains(refused.Detail, "description") {
+		t.Errorf("detail = %q, want a sentence naming what is missing", refused.Detail)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(refused.Path), "skills/silent/SKILL.md") {
+		t.Errorf("path = %q, want the SKILL.md to open and fix", refused.Path)
+	}
+	if refused.Provenance != skill.ProvenanceAuthored {
+		t.Errorf("provenance = %q, want the root it was found in", refused.Provenance)
+	}
+}
+
 func writeSkillFile(t *testing.T, dir, name, description string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {

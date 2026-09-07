@@ -6,6 +6,7 @@ import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsScan } from './generated/skills.scan'
 
 const SKILLS: SkillsList = {
+  refused: [],
   documentPath: '/tmp/nocx/skills.json',
   skills: [
     {

@@ -414,6 +414,7 @@ describe('openSkill — the tab a skill is read in', () => {
   it('says the bytes changed, with a Re-approve action, for a skill whose status is changed', async () => {
     const approve = vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' })
     const changed: SkillsList = {
+      refused: [],
       documentPath: '/tmp/nocx/skills.json',
       skills: [{ ...A_SKILL, status: 'changed' }],
     }

@@ -111,9 +111,15 @@ type skillsListEntry struct {
 
 // skillsListResult is skill.ListResult with each row's check attached.
 type skillsListResult struct {
-	Skills        []skillsListEntry `json:"skills"`
-	DocumentPath  string            `json:"documentPath"`
-	DocumentError string            `json:"documentError,omitempty"`
+	Skills []skillsListEntry `json:"skills"`
+	// Refused travels straight through: a refused directory has no check to
+	// attach and nothing to enable, and it is on the wire so a person can
+	// SEE the directory nocx would not index (nocx-j0lei). Never nil — the
+	// contract requires the key, and an absent array and an empty one would
+	// be two ways to say nothing was refused.
+	Refused       []skill.Refusal `json:"refused"`
+	DocumentPath  string          `json:"documentPath"`
+	DocumentError string          `json:"documentError,omitempty"`
 }
 
 // withStoredChecks attaches each row's check by name. One content.db read
@@ -142,8 +148,12 @@ type skillsListResult struct {
 func withStoredChecks(ctx context.Context, result skill.ListResult, checks skillCheckStore, logger log.Logger) skillsListResult {
 	out := skillsListResult{
 		Skills:        make([]skillsListEntry, 0, len(result.Skills)),
+		Refused:       result.Refused,
 		DocumentPath:  result.DocumentPath,
 		DocumentError: result.DocumentError,
+	}
+	if out.Refused == nil {
+		out.Refused = []skill.Refusal{}
 	}
 	for _, listed := range result.Skills {
 		entry := skillsListEntry{ListedSkill: listed}

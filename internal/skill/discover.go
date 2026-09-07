@@ -36,7 +36,7 @@ type discovered struct {
 // candidate SKILL.md. Broken entries are logged and skipped so one bad file
 // cannot make an ask fail.
 func Discover(roots []Root) []Skill {
-	detailed := discoverDetailed(roots, false)
+	detailed, _ := discoverAll(roots, false)
 	out := make([]Skill, 0, len(detailed))
 	for _, candidate := range detailed {
 		out = append(out, candidate.Skill)
@@ -48,7 +48,19 @@ func Discover(roots []Root) []Skill {
 // validation, diagnostics, name deduplication, and enablement. Read selects
 // from this same result so a skill cannot be indexed differently from how it
 // is read.
+// discoverDetailed is the projection every caller but the list wants: the
+// skills, without the directories that are not skills.
 func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
+	found, _ := discoverAll(roots, includeDisabled)
+	return found
+}
+
+// discoverAll is the one walk. It answers with what it INDEXED and with what
+// it REFUSED, because both are things a person put on disk and only one of
+// them used to be tellable from an empty root (nocx-j0lei). Refusals are
+// returned rather than logged-and-forgotten; the log lines stay, since they
+// carry the operator's detail and this carries the person's.
+func discoverAll(roots []Root, includeDisabled bool) ([]discovered, []Refusal) {
 	set := switches{off: map[string]struct{}{}, on: map[string]struct{}{}}
 	digests := map[string]string{}
 	for _, root := range roots {
@@ -56,14 +68,14 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 			var err error
 			set, err = root.switches()
 			if err != nil {
-				return nil
+				return nil, nil
 			}
 		}
 		if root.digests != nil {
 			var err error
 			digests, err = root.digests()
 			if err != nil {
-				return nil
+				return nil, nil
 			}
 		}
 		if root.switches != nil || root.digests != nil {
@@ -72,6 +84,7 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 	}
 	seen := make(map[string]struct{})
 	out := make([]discovered, 0)
+	refused := make([]Refusal, 0)
 	for _, root := range roots {
 		entries, cut, err := rootEntries(root)
 		if err != nil {
@@ -87,6 +100,7 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 			name := entry.Name()
 			if entry.Type()&fs.ModeSymlink != 0 {
 				slog.Warn("skill: skill directory is a symlink", "skill", name)
+				refused = append(refused, refusalAt(root, name, RefusedSymlink, refusedSymlink("skill folder")))
 				continue
 			}
 			if !entry.IsDir() {
@@ -97,24 +111,31 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 				// #nosec G304 -- path is a discovered skill file under a configured root.
 				info, statErr := os.Lstat(filepath.Join(root.Dir, name, "SKILL.md"))
 				if statErr != nil {
+					// A directory with NO SKILL.md is not a refusal, it is a
+					// directory: the roots hold ordinary folders and a row
+					// for each would teach people to ignore the list.
 					if !errors.Is(statErr, fs.ErrNotExist) {
 						slog.Warn("skill: SKILL.md unavailable", "skill", name, "error", statErr)
+						refused = append(refused, refusalAt(root, name, RefusedUnreadable, refusedUnreadable(statErr)))
 					}
 					continue
 				}
 				if info.Mode()&os.ModeSymlink != 0 {
 					slog.Warn("skill: SKILL.md is a symlink", "skill", name)
+					refused = append(refused, refusalAt(root, name, RefusedSymlink, refusedSymlink("SKILL.md")))
 					continue
 				}
 			}
 			data, readErr := readRootFile(root, name, "SKILL.md", MaxFrontmatterBytes)
 			if readErr != nil {
 				slog.Warn("skill: SKILL.md unreadable", "skill", name, "error", readErr)
+				refused = append(refused, refusalAt(root, name, RefusedUnreadable, refusedUnreadable(readErr)))
 				continue
 			}
 			fm, _, ok := parseFrontmatter(data)
 			if !ok {
 				slog.Warn("skill: invalid frontmatter", "skill", name)
+				refused = append(refused, refusalAt(root, name, RefusedFrontmatter, refusedFrontmatterDetail))
 				continue
 			}
 			skName := strings.TrimSpace(fm.Name)
@@ -123,11 +144,13 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 			}
 			if !skillNamePattern.MatchString(skName) {
 				slog.Warn("skill: invalid name", "skill", name, "name", skName)
+				refused = append(refused, refusalAt(root, name, RefusedName, refusedNameDetail(skName)))
 				continue
 			}
 			description := strings.TrimSpace(fm.Description)
 			if description == "" {
 				slog.Warn("skill: missing description", "skill", name)
+				refused = append(refused, refusalAt(root, name, RefusedNoDescription, refusedNoDescriptionDetail))
 				continue
 			}
 			// The read path is where a description no write of ours ever saw
@@ -141,13 +164,14 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 			// model, so half of one is not a lesser version of the skill, it
 			// is a different one.
 			//
-			// The cost is that the skill leaves the Settings list with only a
-			// log line to say why, which is the same visibility every other
-			// refusal in this loop has and is less than this repo would like.
-			// The person's remedy is to shorten the description in the file,
-			// so the warning names both numbers rather than only the fact.
+			// The skill does not leave the list in silence any more: it
+			// gets a refused row naming both numbers, like every other
+			// refusal in this loop (nocx-j0lei). The person's remedy is to
+			// shorten the description in the file, which is a thing they can
+			// only do if they are told.
 			if length, over := descriptionOverCap(description); over {
 				slog.Warn("skill: description too long", "skill", name, "characters", length, "limit", maxDescriptionRunes)
+				refused = append(refused, refusalAt(root, name, RefusedDescriptionTooLong, refusedTooLongDetail(length, maxDescriptionRunes)))
 				continue
 			}
 			if _, exists := seen[skName]; exists {
@@ -189,7 +213,18 @@ func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
 			}, root: root})
 		}
 	}
-	return out
+	return out, refused
+}
+
+// refusalAt names the folder, the root it sits in and the file to open.
+func refusalAt(root Root, dir string, reason RefusalReason, detail string) Refusal {
+	return Refusal{
+		Directory:  dir,
+		Provenance: root.Provenance,
+		Path:       filepath.Join(joinRootPath(root, dir), "SKILL.md"),
+		Reason:     reason,
+		Detail:     detail,
+	}
 }
 
 func rootEntries(root Root) ([]fs.DirEntry, bool, error) {

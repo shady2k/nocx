@@ -14,6 +14,10 @@
  */
 export interface SkillsList {
   skills: Skill[]
+  /**
+   * Every skill-shaped directory discovery would not index — a THIRD thing a row can be, and not a kind of skill: nothing here can be switched on and none of it reaches the assistant. It exists because a person who puts a SKILL.md on disk and cannot find it in the product had nothing to read but a log line they would never see (nocx-j0lei), which is the soft degrade AGENTS.md refuses. A directory with no SKILL.md is NOT here: the roots hold ordinary folders, and a row for each would teach people to ignore the list. Required and never absent — an empty array and a missing one would be two ways to say nothing was refused.
+   */
+  refused: Refusal[]
   documentPath: string
   documentError?: string
 }
@@ -46,4 +50,23 @@ export interface Skill {
     verdict: 'clear' | 'suspect'
     model: string
   }
+}
+export interface Refusal {
+  /**
+   * The folder's name in its root — what the person sees in a file manager. It is NOT the frontmatter's name: half these refusals are refusals of that name, and the rest may have none to report.
+   */
+  directory: string
+  provenance: 'authored' | 'builtin' | 'installed' | 'managed'
+  /**
+   * The SKILL.md that was refused — the file to open and fix.
+   */
+  path: string
+  /**
+   * The closed vocabulary a surface keys on. Closed for the reason every other vocabulary on this wire is: an unrecognised value must be a failure rather than a row rendered with a blank explanation.
+   */
+  reason: 'symlink' | 'unreadable' | 'frontmatter' | 'name' | 'noDescription' | 'descriptionTooLong'
+  /**
+   * The sentence a person reads, with the number in it where there is one. nocx writes it, so it is the product's words rather than an error string from a library: a refusal is not a stack trace.
+   */
+  detail: string
 }

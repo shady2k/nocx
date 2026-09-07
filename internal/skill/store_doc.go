@@ -239,9 +239,15 @@ type ListedSkill struct {
 // visible result rather than an empty successful list, and its path tells the
 // person which file needs repair.
 type ListResult struct {
-	Skills        []ListedSkill `json:"skills"`
-	DocumentPath  string        `json:"documentPath"`
-	DocumentError string        `json:"documentError,omitempty"`
+	Skills []ListedSkill `json:"skills"`
+	// Refused is every skill-shaped directory discovery would not index, with
+	// the reason in the person's words (refused.go). It is a THIRD thing a
+	// row can be, not a kind of skill: nothing here can be switched on and
+	// none of it reaches the assistant. Never nil — an empty list and a
+	// missing one would be two ways to say nothing was refused.
+	Refused       []Refusal `json:"refused"`
+	DocumentPath  string    `json:"documentPath"`
+	DocumentError string    `json:"documentError,omitempty"`
 }
 
 func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *Store {
@@ -457,9 +463,10 @@ func (s *Store) List() (ListResult, error) {
 	if s == nil {
 		return ListResult{}, errUnavailable
 	}
-	detailed := discoverDetailed(s.roots, true)
+	detailed, refused := discoverAll(s.roots, true)
 	result := ListResult{
 		Skills:       make([]ListedSkill, 0, len(detailed)),
+		Refused:      refused,
 		DocumentPath: s.DocumentPath(),
 	}
 	if err := s.documentError(); err != nil {

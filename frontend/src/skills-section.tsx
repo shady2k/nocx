@@ -75,7 +75,7 @@ import { EyeIcon, RefreshIcon, TrashIcon } from './ui/icons'
 import { showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import { openSkill } from './skill-view'
-import { provenanceTone, shortDate } from './skills-presentation'
+import { provenanceTone, refusalLabel, shortDate } from './skills-presentation'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
 export interface SkillsSectionProps {
@@ -217,55 +217,63 @@ export function SkillsSection(props: SkillsSectionProps) {
     const current = state()
     return current.kind === 'ready' ? current.skills : []
   }
+  const refused = () => {
+    const current = state()
+    return current.kind === 'ready' ? current.refused : []
+  }
   const unavailable = () => {
     const current = state()
     return current.kind === 'unavailable' ? current : null
   }
 
+  // The Section is NOT divided: its children are the status cards and the
+  // list, and the list draws its own separators. Two nested divided stacks
+  // put the dense rhythm on the whole list as one child and again on every
+  // row inside it.
+  //
+  // The FRAGMENT is here because refused directories are a second Section
+  // rather than rows in this one — see the comment on it below.
   return (
-    /* The Section is NOT divided: its children are the status cards and the
-       list, and the list draws its own separators. Two nested divided stacks
-       put the dense rhythm on the whole list as one child and again on every
-       row inside it. */
-    <Section title="Discovered skills">
-      <Show when={state().kind === 'loading'}>
-        <StatusCard
-          tone="neutral"
-          title="Loading skills"
-          description="Reading the discovered skills."
-        />
-      </Show>
-      <Show when={unavailable()}>
-        <StatusCard
-          tone="danger"
-          title="Skills could not be read"
-          description={`${unavailable()?.message ?? 'Unknown error'} Path: ${unavailable()?.documentPath || 'skills.json'}`}
-        />
-      </Show>
-      <Show when={state().kind === 'ready'}>
-        <Show
-          when={readySkills().length > 0}
-          fallback={
-            <EmptyState
-              title="No skills discovered"
-              description="Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure."
-            />
-          }
-        >
-          <Stack divided dense>
-            <For each={readySkills()}>
-              {(skill) => (
-                <RecordRow
-                  title={skill.name}
-                  kind={{ label: skill.provenance, tone: provenanceTone(skill.provenance) }}
-                  meta={skill.description}
-                  detail={evidence(skill)}
-                  status={
-                    skill.status === 'changed'
-                      ? { tone: 'error', text: 'Changed since installation' }
-                      : undefined
-                  }
-                  /* Enabling a skill is the record's STATE, not an action on
+    <>
+      <Section title="Discovered skills">
+        <Show when={state().kind === 'loading'}>
+          <StatusCard
+            tone="neutral"
+            title="Loading skills"
+            description="Reading the discovered skills."
+          />
+        </Show>
+        <Show when={unavailable()}>
+          <StatusCard
+            tone="danger"
+            title="Skills could not be read"
+            description={`${unavailable()?.message ?? 'Unknown error'} Path: ${unavailable()?.documentPath || 'skills.json'}`}
+          />
+        </Show>
+        <Show when={state().kind === 'ready'}>
+          <Show
+            when={readySkills().length > 0}
+            fallback={
+              <EmptyState
+                title="No skills discovered"
+                description="Add a SKILL.md under your skills directory, or ask the assistant to remember a procedure."
+              />
+            }
+          >
+            <Stack divided dense>
+              <For each={readySkills()}>
+                {(skill) => (
+                  <RecordRow
+                    title={skill.name}
+                    kind={{ label: skill.provenance, tone: provenanceTone(skill.provenance) }}
+                    meta={skill.description}
+                    detail={evidence(skill)}
+                    status={
+                      skill.status === 'changed'
+                        ? { tone: 'error', text: 'Changed since installation' }
+                        : undefined
+                    }
+                    /* Enabling a skill is the record's STATE, not an action on
                      it, and the kit's state cell is where the row keeps it
                      (nocx-xa0cq). It used to be the first child of the action
                      group below, where the group's own contents decided its
@@ -273,16 +281,16 @@ export function SkillsSection(props: SkillsSectionProps) {
                      one has Delete, a changed one has Re-approve and Delete —
                      so the same switch stood in three places down a list that
                      is read by scanning. */
-                  state={
-                    <Checkbox
-                      variant="switch"
-                      checked={skill.enabled}
-                      disabled={busy() === skill.name}
-                      ariaLabel={`${skill.name} enabled`}
-                      onChange={(enabled) => void toggle(skill, enabled)}
-                    />
-                  }
-                  /* The group used to be drawn only when the row had an
+                    state={
+                      <Checkbox
+                        variant="switch"
+                        checked={skill.enabled}
+                        disabled={busy() === skill.name}
+                        ariaLabel={`${skill.name} enabled`}
+                        onChange={(enabled) => void toggle(skill, enabled)}
+                      />
+                    }
+                    /* The group used to be drawn only when the row had an
                      action to put in it: with the switch moved into the state
                      cell, a builtin approved row had none, and a named
                      `role="group"` around nothing announces a boundary with
@@ -290,9 +298,9 @@ export function SkillsSection(props: SkillsSectionProps) {
                      row can be read, so the group always has at least one
                      control and the guard would now be a condition that is
                      true on every row the product can produce. */
-                  actions={
-                    <ActionGroup ariaLabel={`${skill.name} actions`}>
-                      {/* EVERY row, every provenance. Reading is not
+                    actions={
+                      <ActionGroup ariaLabel={`${skill.name} actions`}>
+                        {/* EVERY row, every provenance. Reading is not
                           writing, so a builtin is as readable as a skill the
                           person wrote — and the builtin is the row that needs
                           it most, because its path names a file nothing on
@@ -318,53 +326,90 @@ export function SkillsSection(props: SkillsSectionProps) {
                           pointer and on `ariaLabel` for the screen reader,
                           and it names its ROW, since identical glyphs down a
                           list need to say which record they belong to. */}
-                      <IconButton
-                        size="sm"
-                        title="Open"
-                        ariaLabel={`Open ${skill.name}`}
-                        onClick={() => openSkill(skill.name)}
-                      >
-                        <EyeIcon />
-                      </IconButton>
-                      {/* Only when the bytes moved. A permanent Re-approve
+                        <IconButton
+                          size="sm"
+                          title="Open"
+                          ariaLabel={`Open ${skill.name}`}
+                          onClick={() => openSkill(skill.name)}
+                        >
+                          <EyeIcon />
+                        </IconButton>
+                        {/* Only when the bytes moved. A permanent Re-approve
                             would invite re-approving a skill nobody changed,
                             which is a person clicking past the one prompt that
                             is load-bearing. */}
-                      <Show when={skill.status === 'changed'}>
-                        <IconButton
-                          size="sm"
-                          title="Re-approve"
-                          ariaLabel={`Re-approve ${skill.name}`}
-                          disabled={busy() === skill.name}
-                          onClick={() => void approve(skill)}
-                        >
-                          <RefreshIcon />
-                        </IconButton>
-                      </Show>
-                      {/* A builtin ships inside the binary, so there is
+                        <Show when={skill.status === 'changed'}>
+                          <IconButton
+                            size="sm"
+                            title="Re-approve"
+                            ariaLabel={`Re-approve ${skill.name}`}
+                            disabled={busy() === skill.name}
+                            onClick={() => void approve(skill)}
+                          >
+                            <RefreshIcon />
+                          </IconButton>
+                        </Show>
+                        {/* A builtin ships inside the binary, so there is
                             nothing on disk to delete and no button to explain
                             away. The sentence that used to say so sat in the
                             row's body as loose text on every builtin row; the
                             absence says it once and says it everywhere. */}
-                      <Show when={skill.provenance !== 'builtin'}>
-                        <IconButton
-                          size="sm"
-                          title="Delete"
-                          ariaLabel={`Delete ${skill.name}`}
-                          disabled={busy() === skill.name}
-                          onClick={() => void remove(skill)}
-                        >
-                          <TrashIcon />
-                        </IconButton>
-                      </Show>
-                    </ActionGroup>
-                  }
+                        <Show when={skill.provenance !== 'builtin'}>
+                          <IconButton
+                            size="sm"
+                            title="Delete"
+                            ariaLabel={`Delete ${skill.name}`}
+                            disabled={busy() === skill.name}
+                            onClick={() => void remove(skill)}
+                          >
+                            <TrashIcon />
+                          </IconButton>
+                        </Show>
+                      </ActionGroup>
+                    }
+                  />
+                )}
+              </For>
+            </Stack>
+          </Show>
+        </Show>
+      </Section>
+      <Show when={refused().length > 0}>
+        {/* A SECOND SECTION, not a badge on a row in the first (nocx-j0lei).
+          These are not skills: nothing here can be enabled, deleted or
+          opened, and none of it reaches the assistant. Putting them among
+          the skills would give each a switch that governs nothing and a
+          provenance badge that implies it is in use, which is the "soft
+          degrade the UI contradicts" AGENTS.md names — the same defect as
+          the silence it replaces, wearing better clothes.
+
+          The row is the kit's RecordRow like every other row on this page.
+          Its `status` is the closed reason, so a scan down the column says
+          what KIND of problem each is; the sentence in `detail` is what the
+          person acts on, and the path beside it is the file to open. There
+          are no actions: nocx cannot fix any of these, and a button that
+          could only fail is the shape this page removes elsewhere. */}
+        <Section title="Not indexed">
+          <Stack divided dense>
+            <For each={refused()}>
+              {(entry) => (
+                <RecordRow
+                  title={entry.directory}
+                  kind={{ label: entry.provenance, tone: provenanceTone(entry.provenance) }}
+                  meta={entry.detail}
+                  detail={entry.path}
+                  status={{ tone: 'error', text: refusalLabel(entry.reason) }}
+                  /* NULL, which is the kit's own vocabulary rather than a
+                     forgotten prop: `actions` is required so a row cannot
+                     lose its controls by accident, and null is how a row
+                     says it HAS none. */
+                  actions={null}
                 />
               )}
             </For>
           </Stack>
-        </Show>
+        </Section>
       </Show>
-    </Section>
+    </>
   )
 }

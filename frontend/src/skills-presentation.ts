@@ -91,3 +91,32 @@ export function shortDate(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`
 }
+
+/**
+ * The words for a refusal's closed reason (nocx-j0lei). The SENTENCE a person
+ * acts on is the server's — nocx knows which file and which number — and this
+ * is only the short label the row's status cell shows, so a column of them
+ * can be scanned for what KIND of problem each directory has.
+ *
+ * An unrecognised value falls back to a label rather than rendering blank: a
+ * status cell with nothing in it reads as "no problem", which is the one
+ * thing a refused row must never say.
+ */
+export function refusalLabel(reason: string): string {
+  switch (reason) {
+    case 'symlink':
+      return 'Symbolic link'
+    case 'unreadable':
+      return 'Unreadable'
+    case 'frontmatter':
+      return 'No frontmatter'
+    case 'name':
+      return 'Unusable name'
+    case 'noDescription':
+      return 'No description'
+    case 'descriptionTooLong':
+      return 'Description too long'
+    default:
+      return 'Not indexed'
+  }
+}

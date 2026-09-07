@@ -23,7 +23,7 @@ const DocumentName = "skills.json"
 // named constant rather than a literal in Module because the migration rung
 // below has to stamp the same number, and a func referencing Module inside
 // Module's own initializer is an initialization cycle.
-const skillsSchemaVersion storage.SchemaVersion = 4
+const skillsSchemaVersion storage.SchemaVersion = 5
 
 // Module declares the skill settings document's schema version. The document
 // owns dynamic per-skill enablement, the digest recorded when the person
@@ -37,6 +37,7 @@ var Module = storage.Module{
 		{From: 1, To: 2, Up: restampTo(2)},
 		{From: 2, To: 3, Up: restampTo(3)},
 		{From: 3, To: 4, Up: restampTo(4)},
+		{From: 4, To: 5, Up: restampTo(5)},
 	},
 }
 
@@ -44,9 +45,9 @@ var Module = storage.Module{
 // anything. Every one of this module's version steps is that shape, and every
 // one is PURELY ADDITIVE: version 2 is version 1 plus an optional `sources`
 // map, version 3 is version 2 plus an optional `enabled` list, and version 4
-// is version 3 plus an optional `digest` INSIDE each source row — so a
-// document written before any of them existed simply has none of them, and an
-// absent map, list or field reads as "nothing was recorded".
+// is version 3 plus an optional `digest` INSIDE each source row, and version 5
+// is version 4 plus an optional `usage` map and an optional `pins` map, so a
+// document written before either simply has neither.
 //
 // The version 4 step is worth its bump even though nothing about it needs
 // converting, and the reason is the OTHER direction. encoding/json drops a
@@ -108,6 +109,7 @@ type document struct {
 	Enabled  []string          `json:"enabled,omitempty"`
 	Digests  map[string]string `json:"digests,omitempty"`
 	Sources  map[string]Source `json:"sources,omitempty"`
+	Usage    map[string]Usage  `json:"usage,omitempty"`
 }
 
 // Source is what an install RESOLVED TO, keyed by skill name like Digests:

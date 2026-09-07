@@ -288,3 +288,49 @@ func mustList(t *testing.T, store *Store) ListResult {
 	}
 	return result
 }
+
+func TestDocumentCarriesUsageAcrossAWrite(t *testing.T) {
+	configDir := t.TempDir()
+	store := NewStore(OSFileSystem{},
+		[]Root{{Dir: filepath.Join(configDir, "skills"), Provenance: ProvenanceAuthored}},
+		storage.NewDocumentStore(configDir))
+
+	if err := store.recordUsageForTest("deploy", Usage{
+		Count: 3, LastUsedAt: "2026-03-03T10:00:00Z", FirstSeenAt: "2026-01-01T10:00:00Z",
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	reopened := NewStore(OSFileSystem{},
+		[]Root{{Dir: filepath.Join(configDir, "skills"), Provenance: ProvenanceAuthored}},
+		storage.NewDocumentStore(configDir))
+	got, err := reopened.usageFor("deploy")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.Count != 3 || got.LastUsedAt != "2026-03-03T10:00:00Z" || got.FirstSeenAt != "2026-01-01T10:00:00Z" {
+		t.Fatalf("usage = %+v, want the three fields intact", got)
+	}
+}
+
+func TestAVersionFourDocumentStillOpensAndHasNoUsage(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(configDir, "skills"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"schemaVersion":4,"disabled":["deploy"],"digests":{"deploy":"` + strings.Repeat("a", 64) + `"}}`
+	if err := os.WriteFile(filepath.Join(configDir, DocumentName), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(OSFileSystem{},
+		[]Root{{Dir: filepath.Join(configDir, "skills"), Provenance: ProvenanceAuthored}},
+		storage.NewDocumentStore(configDir))
+
+	got, err := store.usageFor("deploy")
+	if err != nil {
+		t.Fatalf("a version 4 document did not open: %v", err)
+	}
+	if got.Count != 0 || got.LastUsedAt != "" || got.FirstSeenAt != "" {
+		t.Fatalf("usage = %+v, want the zero record: nothing was ever recorded", got)
+	}
+}

@@ -168,7 +168,7 @@ func TestServeReconnectsAfterIdle(t *testing.T) {
 	var mu sync.Mutex
 	connections := 0
 	listener := listenEndpoint(t)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -179,7 +179,7 @@ func TestServeReconnectsAfterIdle(t *testing.T) {
 			connections++
 			mu.Unlock()
 			go func() {
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				request, err := readJSONLine(conn)
 				if err == nil {
 					if request.Method == "tools.catalogue" {
@@ -270,7 +270,7 @@ func startEndpoint(t *testing.T, handler func(net.Conn, rpcEnvelope)) string {
 				return
 			}
 			go func() {
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				request, err := readJSONLine(conn)
 				if err == nil {
 					handler(conn, request)

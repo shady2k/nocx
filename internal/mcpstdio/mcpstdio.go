@@ -391,8 +391,8 @@ func (s *Server) handleList(ctx context.Context, writer *lineWriter, state *sess
 		tools = append(tools, map[string]any{
 			"name":         item.Name,
 			"description":  item.Summary,
-			"inputSchema":  json.RawMessage(item.Params),
-			"outputSchema": json.RawMessage(item.Result),
+			"inputSchema":  item.Params,
+			"outputSchema": item.Result,
 		})
 	}
 	return writer.result(id, map[string]any{"tools": tools})
@@ -478,19 +478,19 @@ func (s *Server) endpointCall(ctx context.Context, method string, params json.Ra
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  method,
-		"params":  json.RawMessage(params),
+		"params":  params,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := conn.Write(append(request, '\n')); err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, err)
+	if _, writeErr := conn.Write(append(request, '\n')); writeErr != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, writeErr)
 	}
 	line, err := readLine(bufio.NewReaderSize(conn, maxMessageBytes))
 	if err != nil {
@@ -532,7 +532,7 @@ func (w *lineWriter) write(value any) error {
 }
 
 func (w *lineWriter) result(id json.RawMessage, result any) error {
-	return w.write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": result})
+	return w.write(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 
 func (w *lineWriter) errorResponse(id json.RawMessage, code int, message, reason string) error {
@@ -543,13 +543,13 @@ func (w *lineWriter) errorResponse(id json.RawMessage, code int, message, reason
 	if reason != "" {
 		errValue["data"] = map[string]string{"reason": reason}
 	}
-	return w.write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "error": errValue})
+	return w.write(map[string]any{"jsonrpc": "2.0", "id": id, "error": errValue})
 }
 
 func (w *lineWriter) toolError(id json.RawMessage, reason string) error {
 	return w.write(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      json.RawMessage(id),
+		"id":      id,
 		"result": map[string]any{
 			"content": []map[string]string{{"type": "text", "text": reason}},
 			"isError": true,
@@ -560,14 +560,16 @@ func (w *lineWriter) toolError(id json.RawMessage, reason string) error {
 func (w *lineWriter) toolResult(id json.RawMessage, result json.RawMessage, structured bool) error {
 	value := map[string]any{
 		"jsonrpc": "2.0",
-		"id":      json.RawMessage(id),
+		"id":      id,
 		"result": map[string]any{
 			"content": []map[string]string{{"type": "text", "text": string(result)}},
 			"isError": false,
 		},
 	}
 	if structured {
-		value["result"].(map[string]any)["structuredContent"] = json.RawMessage(result)
+		if payload, ok := value["result"].(map[string]any); ok {
+			payload["structuredContent"] = result
+		}
 	}
 	return w.write(value)
 }

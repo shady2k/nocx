@@ -1,8 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -231,6 +236,114 @@ func TestToolAuthorizerWithdrawClosesAdmissionInterval(t *testing.T) {
 	grid.Withdraw(string(sess.ID()))
 	if _, _, err := auth.Admit(toolendpoint.Peer{UID: 1000, PID: 9001}); !errors.Is(err, toolendpoint.ErrNotEnrolled) {
 		t.Fatalf("admit after withdrawal error = %v, want ErrNotEnrolled", err)
+	}
+}
+
+type workerAuthEndpointPeers struct{}
+
+func (workerAuthEndpointPeers) PeerUID(*net.UnixConn) (uint32, error) { return 1000, nil }
+func (workerAuthEndpointPeers) PeerPID(*net.UnixConn) (int, error)    { return 9001, nil }
+
+type workerAuthEndpointOwner struct{}
+
+func (workerAuthEndpointOwner) OwnerUID(string) (uint32, error) { return 1000, nil }
+
+func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.T) {
+	reg, sess, grid := openWorkerAuthSession(t)
+	const ownedPID = 4242
+	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
+		t.Fatalf("record owned process pid: %v", err)
+	}
+	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+		t.Fatalf("enrol session grid: %v", err)
+	}
+
+	workerStore := workers.NewMemoryStore()
+	record := workers.NewRegistrar(workerStore, nil, nil, nil)
+	pinner := &workerAuthPinner{
+		root:   peerpin.Root{PID: ownedPID, StartTime: time.Unix(123, 0)},
+		member: map[int]bool{9001: true},
+	}
+	auth := newToolAuthorizer(pinner, reg, grid, record, workerTestWorkspace)
+	registry, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	dispatcher, err := assistant.NewToolDispatcher(
+		registry, record, content.EnvironmentIDFor(content.EnvLocal, ""),
+	)
+	if err != nil {
+		t.Fatalf("new worker dispatcher: %v", err)
+	}
+	ep, err := toolendpoint.New(toolendpoint.Config{
+		Dir:      t.TempDir(),
+		Peers:    workerAuthEndpointPeers{},
+		Owner:    workerAuthEndpointOwner{},
+		SelfUID:  1000,
+		Auth:     auth,
+		Dispatch: dispatcher,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("new tool endpoint: %v", err)
+	}
+	if err := ep.Start(); err != nil {
+		t.Fatalf("start tool endpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = ep.Close() })
+
+	call := func(id string, send bool) (int, string, string) {
+		t.Helper()
+		conn, err := net.Dial("unix", ep.SocketPath())
+		if err != nil {
+			t.Fatalf("dial tool endpoint: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		if send {
+			if _, writeErr := io.WriteString(conn, `{"jsonrpc":"2.0","id":"`+id+`","method":"workers.holdings","params":{}}`+"\n"); writeErr != nil {
+				t.Fatalf("write workers.holdings: %v", writeErr)
+			}
+		}
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(time.Second)); deadlineErr != nil {
+			t.Fatalf("set response deadline: %v", deadlineErr)
+		}
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
+		if err != nil {
+			t.Fatalf("read workers.holdings response: %v", err)
+		}
+		var response struct {
+			Error *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Data    struct {
+					Reason string `json:"reason"`
+				} `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(line, &response); err != nil {
+			t.Fatalf("decode workers.holdings response %q: %v", line, err)
+		}
+		if response.Error == nil {
+			return 0, "", ""
+		}
+		return response.Error.Code, response.Error.Message, response.Error.Data.Reason
+	}
+
+	if code, message, reason := call("before-loss", true); code != 0 || message != "" || reason != "" {
+		t.Fatalf("healthy workers.holdings = %d/%q/%q, want success", code, message, reason)
+	}
+
+	// This is the lifecycle channel's death while the caller process remains
+	// alive: the pane's enrolment interval closes, but no worker record exists.
+	grid.Withdraw(string(sess.ID()))
+	code, message, reason := call("after-loss", false)
+	if code != -32001 || message != "worker caller refused" ||
+		reason != "caller is not in an enrolled process tree" {
+		t.Fatalf("workers.holdings after lifecycle loss = %d/%q/%q, want the named refusal",
+			code, message, reason)
+	}
+	if _, err := record.ParticipantOf(context.Background(), string(sess.ID())); !errors.Is(err, workers.ErrNoSuchParticipant) {
+		t.Fatalf("lifecycle loss created a participant: err = %v", err)
 	}
 }
 

@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // paneEnroller answers the agent_enrol / agent_withdraw pair by opening and
@@ -27,7 +29,8 @@ type paneEnroller struct {
 	// with the grid and never before or after it: a pane nocx reports a
 	// state for but declined to watch would be a claim with no evidence
 	// behind it, and one it watches without reporting is the silent degrade.
-	watch paneWatcher
+	watch    paneWatcher
+	approval agentApproval
 	// onEnrol is told when an enrolment actually opened a grid, so a worker
 	// registration blocked on that enrolment can proceed (nocx-dkawo.7). It
 	// is a NOTIFICATION and not a second enroller: it is called after the act
@@ -45,8 +48,22 @@ type paneWatcher interface {
 	Exited(paneID string)
 }
 
-func newPaneEnroller(lg log.Logger, sessions *sessionRegistry, grid panegrid.Observer, watch paneWatcher) *paneEnroller {
-	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch}
+type agentApproval interface {
+	Approve(context.Context, session.ID, string) error
+}
+
+func newPaneEnroller(
+	lg log.Logger,
+	sessions *sessionRegistry,
+	grid panegrid.Observer,
+	watch paneWatcher,
+	approvals ...agentApproval,
+) *paneEnroller {
+	var approval agentApproval
+	if len(approvals) != 0 {
+		approval = approvals[0]
+	}
+	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch, approval: approval}
 }
 
 // Enrol opens the interval for the pane the lane belongs to.
@@ -66,6 +83,13 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 		e.log.Warn("agent enrolment refused: the lane maps to no session",
 			"lane", string(lane), "agent", agent)
 		return errors.New("nocx does not know which pane this shell is")
+	}
+	if e.approval != nil {
+		if err := e.approval.Approve(context.Background(), session.ID(sid), agent); err != nil {
+			e.log.Warn("agent enrolment refused: human approval was not granted",
+				"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
+			return err
+		}
 	}
 	if err := e.grid.Enrol(sid, cols, rows); err != nil {
 		switch {

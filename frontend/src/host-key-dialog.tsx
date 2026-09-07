@@ -75,3 +75,48 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
     </Dialog>
   )
 }
+
+interface AgentApprovalDialogProps {
+  executable: string
+  scope: string
+  busy: boolean
+  onDecide: (approved: boolean) => void
+}
+
+/** One consent surface for admitting an executable process tree to tools. */
+export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
+  return (
+    <Dialog
+      open
+      onClose={() => props.onDecide(false)}
+      title="Allow agent access?"
+      footer={
+        <>
+          <Button variant="primary" disabled={props.busy} onClick={() => props.onDecide(true)}>
+            {props.busy ? 'Saving…' : 'Allow this agent and commands it launches'}
+          </Button>
+          <Button
+            variant="default"
+            disabled={props.busy}
+            onClick={() => props.onDecide(false)}
+            autofocus
+          >
+            Deny
+          </Button>
+        </>
+      }
+    >
+      <Stack>
+        <p>
+          Allow this agent <strong>and commands it launches</strong> to use the tool endpoint?
+        </p>
+        <p>
+          Executable: <code>{props.executable}</code>
+        </p>
+        <p>
+          Scope: <code>{props.scope}</code>
+        </p>
+      </Stack>
+    </Dialog>
+  )
+}

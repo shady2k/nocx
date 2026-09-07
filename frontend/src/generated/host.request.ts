@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the host.request notification (nocx-uo1k6, design D3): the coordinator asks an attached client to perform one native-host capability it cannot perform itself. The coordinator is a daemon with no window (design §1), so a native file picker, a browser open, a desktop banner and a window raise are all reached by asking a client. requestId is the broker-minted correlation id the client echoes back in host.resolved; capability names which effect is asked for, from a closed server vocabulary. The remaining members are that capability's arguments and are absent for capabilities that take none: url for shell.openUrl; title, body and sessionId for attention.banner; count for attention.badge.
+ * Params of the host.request notification (nocx-uo1k6, design D3): the coordinator asks an attached client to perform one native-host capability it cannot perform itself. The coordinator is a daemon with no window (design §1), so a native file picker, a browser open, a desktop banner and a window raise are all reached by asking a client. requestId is the broker-minted correlation id the client echoes back in host.resolved; capability names which effect is asked for, from a closed server vocabulary. The remaining members are that capability's arguments and are absent for capabilities that take none: url for shell.openUrl; title, body and sessionId for attention.banner; count for attention.badge; executable and scope for agent.approval.
  */
 export interface HostRequest {
   /**
@@ -28,6 +28,7 @@ export interface HostRequest {
     | 'attention.badge'
     | 'attention.bounce'
     | 'window.focus'
+    | 'agent.approval'
   /**
    * shell.openUrl: the http(s) URL to open. Already validated by the transport.
    */
@@ -48,4 +49,12 @@ export interface HostRequest {
    * attention.badge: the dock badge count; 0 clears it.
    */
   count?: number
+  /**
+   * agent.approval: the executable path and digest the person is being asked to admit.
+   */
+  executable?: string
+  /**
+   * agent.approval: the exact process-tree scope being granted.
+   */
+  scope?: string
 }

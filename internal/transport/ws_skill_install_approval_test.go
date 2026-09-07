@@ -51,6 +51,18 @@ func installSuspension(facts **assistant.ApprovalInstall, url string) func(runID
 	}
 }
 
+func installSetSuspension(facts **assistant.ApprovalInstall, arguments string) func(runID string) error {
+	return func(runID string) error {
+		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+			RunID: runID, Attempt: 1, Tool: "skills.install", CallID: "call_1",
+			Arguments: arguments,
+			ArgHash:   "hash-a",
+			Effect:    content.EffectCrossBoundary,
+			Install:   *facts,
+		}}
+	}
+}
+
 // resolvedInstall previews a real origin through the shipped store and turns
 // the result into the question's own shape with the product's own function.
 // Nothing here is a fixture: the bytes come off an HTTP server, through
@@ -98,6 +110,28 @@ func resolvedInstall(t *testing.T) (*assistant.ApprovalInstall, string) {
 	return assistant.InstallFactsFor(&preview), url
 }
 
+func resolvedInstallSet(t *testing.T) *assistant.ApprovalInstall {
+	t.Helper()
+	one, url := resolvedInstall(t)
+	resolution := &skill.Resolution{
+		Handle:     "resolution-1",
+		Repository: "github.com/acme/skills",
+		Ref:        "main",
+		Commit:     "abc123",
+		Candidates: []skill.ResolutionCandidate{{
+			Path: one.Skills[0].Name + "/SKILL.md", Name: one.Skills[0].Name, Description: one.Skills[0].Description,
+		}},
+	}
+	preview := skill.PreviewResult{
+		Name: one.Skills[0].Name, Description: one.Skills[0].Description, URL: url, Digest: one.Skills[0].Digest,
+	}
+	for _, file := range one.Skills[0].Files {
+		preview.Bundle = append(preview.Bundle, skill.BundleFile{Path: file.Path, Text: file.Text})
+		preview.Findings = append(preview.Findings, file.Findings...)
+	}
+	return assistant.InstallFactsForResolved(resolution, url, []string{"deploy/SKILL.md"}, []skill.PreviewResult{preview})
+}
+
 func TestAgentApprovalRequested_InstallDTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 	facts, url := resolvedInstall(t)
@@ -116,6 +150,64 @@ func TestAgentApprovalRequested_InstallDTOConformsToContract(t *testing.T) {
 	validateJSON(t, schema, raw, "agent.approvalRequested DTO with a resolved install")
 }
 
+func TestAgentApprovalRequested_InstallSetOverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.approvalRequested.schema.json")
+	facts := resolvedInstallSet(t)
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: installSetSuspension(&facts, `{"handle":"resolution-1","paths":["deploy/SKILL.md"]}`)},
+	}}
+	h := newScriptHarness(t, client)
+
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-set", "sessionId": h.sid, "question": "install selected skills", "cwd": h.dir,
+	}, 1); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.approvalRequested params with a resolved skill set")
+
+	var got struct {
+		Install *struct {
+			Source        string `json:"source"`
+			Destination   string `json:"destination"`
+			OriginsDiffer bool   `json:"originsDiffer"`
+			Ref           string `json:"ref"`
+			Commit        string `json:"commit"`
+			Skills        []struct {
+				Path        string `json:"path"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+				Digest      string `json:"digest"`
+				Files       []struct {
+					Path string `json:"path"`
+					Text string `json:"text"`
+				} `json:"files"`
+			} `json:"skills"`
+		} `json:"install"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if got.Install == nil {
+		t.Fatal("install = nil, want the resolution route")
+	}
+	route := got.Install
+	if route.Source != facts.Source || route.Destination != facts.Destination ||
+		route.OriginsDiffer != *facts.OriginsDiffer ||
+		route.Ref != facts.Ref || route.Commit != facts.Commit {
+		t.Fatalf("route = %+v, want pinned facts and the source-to-destination distinction", route)
+	}
+	if len(route.Skills) != 1 || route.Skills[0].Path != "deploy/SKILL.md" ||
+		route.Skills[0].Name != "deploy" || route.Skills[0].Description != "Deploy the service" ||
+		len(route.Skills[0].Files) != 2 {
+		t.Fatalf("skills = %+v, want selected skill and complete bundle", route.Skills)
+	}
+	if route.Skills[0].Files[0].Text != approvalInstallDocument {
+		t.Fatalf("SKILL.md = %q, want the fetched document", route.Skills[0].Files[0].Text)
+	}
+}
+
 // The real notification off the real socket, carrying a skill that was really
 // fetched. A payload the test itself built proves the struct is well-formed,
 // not that the server sends it.
@@ -128,12 +220,12 @@ func TestAgentApprovalRequested_InstallOverTheWireConformsToContract(t *testing.
 	h := newScriptHarness(t, client)
 
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "ask-1", "sessionId": h.sid, "question": "install it", "cwd": h.dir,
+		"askId": "ask-install", "sessionId": h.sid, "question": "install skill", "cwd": h.dir,
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
 	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
-	validateJSON(t, schema, raw, "agent.approvalRequested params with an install (real socket)")
+	validateJSON(t, schema, raw, "agent.approvalRequested params with a resolved install")
 
 	var got struct {
 		Arguments string `json:"arguments"`
@@ -141,74 +233,62 @@ func TestAgentApprovalRequested_InstallOverTheWireConformsToContract(t *testing.
 			PatternID string `json:"patternId"`
 		} `json:"finding"`
 		Install *struct {
-			URL         string `json:"url"`
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			Digest      string `json:"digest"`
-			Files       []struct {
-				Path     string `json:"path"`
-				Text     string `json:"text"`
-				Findings []struct {
-					Path       string `json:"path"`
-					PatternID  string `json:"patternId"`
-					Line       string `json:"line"`
-					LineNumber int    `json:"lineNumber"`
-				} `json:"findings"`
-			} `json:"files"`
+			Skills []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+				Digest      string `json:"digest"`
+				Files       []struct {
+					Path     string `json:"path"`
+					Text     string `json:"text"`
+					Findings []struct {
+						Path       string `json:"path"`
+						PatternID  string `json:"patternId"`
+						Line       string `json:"line"`
+						LineNumber int    `json:"lineNumber"`
+					} `json:"findings"`
+				} `json:"files"`
+			} `json:"skills"`
 		} `json:"install"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode notification: %v", err)
 	}
-	if got.Install == nil {
-		t.Fatal("the question reached the wire with no resolution: the person is asked about an address")
+	if got.Install == nil || len(got.Install.Skills) != 1 {
+		t.Fatalf("install = %+v, want one resolved skill", got.Install)
 	}
-	// THE RESOLVED SOURCE, and not the string in the arguments blob.
-	if got.Install.URL != url {
-		t.Fatalf("url = %q, want the address that was fetched %q", got.Install.URL, url)
+	one := got.Install.Skills[0]
+	if one.URL != url {
+		t.Fatalf("url = %q, want the address that was fetched %q", one.URL, url)
 	}
-	if got.Install.Name != "deploy" || got.Install.Description != "Deploy the service" {
-		t.Fatalf("install = %+v, want the document's own name and description", got.Install)
+	if one.Name != "deploy" || one.Description != "Deploy the service" {
+		t.Fatalf("skill = %+v, want the document's own name and description", one)
 	}
-	if len(got.Install.Digest) != 64 {
-		t.Fatalf("digest = %q, want the sha256 the write is bound to", got.Install.Digest)
+	if len(one.Digest) != 64 {
+		t.Fatalf("digest = %q, want the sha256 the write is bound to", one.Digest)
 	}
-	// EVERY file that will land, with its bytes — the same manifest
-	// skills.preview names, never a shorter one.
-	if len(got.Install.Files) != 2 {
-		t.Fatalf("files = %+v, want SKILL.md and the file it refers to", got.Install.Files)
+	if len(one.Files) != 2 {
+		t.Fatalf("files = %+v, want SKILL.md and the file it refers to", one.Files)
 	}
-	if got.Install.Files[0].Path != "SKILL.md" || got.Install.Files[0].Text != approvalInstallDocument {
-		t.Fatalf("SKILL.md = %+v, want the whole served document, frontmatter included", got.Install.Files[0])
+	if one.Files[0].Path != "SKILL.md" || one.Files[0].Text != approvalInstallDocument {
+		t.Fatalf("SKILL.md = %+v, want the whole served document, frontmatter included", one.Files[0])
 	}
-	if got.Install.Files[1].Path != "references/checklist.md" ||
-		got.Install.Files[1].Text != approvalInstallSupport {
-		t.Fatalf("support file = %+v, want the bytes the origin served", got.Install.Files[1])
+	if one.Files[1].Path != "references/checklist.md" || one.Files[1].Text != approvalInstallSupport {
+		t.Fatalf("support file = %+v, want the bytes the origin served", one.Files[1])
 	}
-	// The finding travels WITH the file it matched in, on the line it sits
-	// on, so a viewer can mark it there rather than quote it elsewhere.
-	if len(got.Install.Files[0].Findings) != 1 {
-		t.Fatalf("SKILL.md findings = %+v, want the injection line", got.Install.Files[0].Findings)
+	if len(one.Files[0].Findings) != 1 {
+		t.Fatalf("SKILL.md findings = %+v, want the injection line", one.Files[0].Findings)
 	}
-	finding := got.Install.Files[0].Findings[0]
-	// Line 6 of the SERVED FILE, not line 2 of the body: the finding names a
-	// file, so its line number counts that file from its first byte —
-	// frontmatter included — and the text above is the same whole file, so
-	// the number lands on the line a reader can see.
+	finding := one.Files[0].Findings[0]
 	if finding.Path != "SKILL.md" || finding.PatternID != "prompt_injection" || finding.LineNumber != 6 {
 		t.Fatalf("finding = %+v, want line 6 of SKILL.md counted from its first byte", finding)
 	}
-	if len(got.Install.Files[1].Findings) != 0 {
-		t.Fatalf("support findings = %+v, want none", got.Install.Files[1].Findings)
+	if len(one.Files[1].Findings) != 0 {
+		t.Fatalf("support findings = %+v, want none", one.Files[1].Findings)
 	}
-	// The one-finding row is NOT also filled: every finding is on the file
-	// it matched in, and a row repeating the first would be a second surface
-	// owning one fact.
 	if got.Finding != nil {
 		t.Fatalf("finding = %+v, want none on an install question", got.Finding)
 	}
-	// BESIDE, NEVER INSTEAD: what the person answers about still carries the
-	// model's own arguments, untouched by anything that was read.
 	if got.Arguments != `{"url":"`+url+`"}` {
 		t.Fatalf("arguments = %q, want the model's own proposal untouched", got.Arguments)
 	}

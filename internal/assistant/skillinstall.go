@@ -1,6 +1,5 @@
 package assistant
 
-// What an install proposal RESOLVED to (nocx-ojfuc.2).
 //
 // skills.install's arguments are one address, and an address is not something
 // anybody can decide about. The model was asked to install a skill from a
@@ -45,34 +44,41 @@ package assistant
 // by the file they matched in so the surface can mark each one on the line it
 // sits on rather than quoting it underneath. The scan ran once, before the
 // question, over the same bytes this carries.
+import (
+	"net/url"
+	"strings"
 
-import "github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/skill"
+)
 
-// ApprovalInstall is the skill an install proposal resolved to, as the person
-// reads it before answering.
+// ApprovalInstall is the route and skill set an install proposal carries as
+// the person reads it before answering.
 type ApprovalInstall struct {
-	// URL is the address that was FETCHED — the one the digest, the manifest
-	// and every byte below came from. It is stated here rather than left to
-	// the arguments blob because it is the resolution the question is about;
-	// the surface never re-derives it by parsing the model's arguments.
-	URL string `json:"url"`
-	// Name is the skill's name as its own frontmatter gives it. A URL cannot
-	// name a skill (internal/skill/preview.go).
-	Name string `json:"name"`
-	// Description is the frontmatter description, and it is the field this
-	// question is most obliged to show: it is the one part of a skill that
-	// lives in the assistant's system prompt afterwards, so it is what
-	// decides when these instructions get reached for (design §5).
-	Description string `json:"description"`
-	// Digest is the sha256 over the whole bundle, which Install compares its
-	// second fetch against — the value that makes "what was approved is what
-	// is written" a property rather than a claim. It is CHANGE DETECTION AND
-	// NEVER PROVENANCE: bytes a stranger served hash to this, and nobody has
-	// vouched for them. The surface says so.
-	Digest string `json:"digest"`
-	// Files is every file that will land, SKILL.md first — the same manifest
-	// skills.preview names, never a shorter one, with the bytes of each.
-	Files []ApprovalInstallFile `json:"files"`
+	// Source is the address that started a resolved route. It is absent for a
+	// direct install, where there is no repository route to explain.
+	Source string `json:"source,omitempty"`
+	// Destination is the canonical repository reached by a resolved route.
+	Destination string `json:"destination,omitempty"`
+	// OriginsDiffer states whether the source and destination hosts differ.
+	// A pointer distinguishes an absent direct-install route from false.
+	OriginsDiffer *bool `json:"originsDiffer,omitempty"`
+	// Ref and Commit are the repository version facts covered by approval.
+	Ref    string `json:"ref,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	// Skills is always a non-empty set. A direct URL install is a set of one.
+	Skills []ApprovalInstallSkill `json:"skills"`
+}
+
+// ApprovalInstallSkill is one skill covered by an install approval.
+type ApprovalInstallSkill struct {
+	// Path is the candidate's path inside the resolved repository. It is
+	// absent for a direct URL install, which has no repository path.
+	Path        string                `json:"path,omitempty"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	URL         string                `json:"url"`
+	Digest      string                `json:"digest"`
+	Files       []ApprovalInstallFile `json:"files"`
 }
 
 // ApprovalInstallFile is one file that will land, with what the static scan
@@ -102,13 +108,17 @@ type ApprovalInstallFile struct {
 // its notification from the product's own derivation rather than from a
 // payload the test wrote — the same reason ScriptReadingsFor is.
 func InstallFactsFor(preview *skill.PreviewResult) *ApprovalInstall {
-	if preview == nil {
+	item, ok := installSkillFacts(preview)
+	if !ok {
 		return nil
 	}
-	// The findings are grouped ONCE, here, rather than by the surface: the
-	// preview's list is flat and each entry names its file, and a renderer
-	// that re-derived the grouping would be a second answer to "which file
-	// is this finding about".
+	return &ApprovalInstall{Skills: []ApprovalInstallSkill{item}}
+}
+
+func installSkillFacts(preview *skill.PreviewResult) (ApprovalInstallSkill, bool) {
+	if preview == nil {
+		return ApprovalInstallSkill{}, false
+	}
 	byPath := make(map[string][]skill.Finding, len(preview.Bundle))
 	for _, finding := range preview.Findings {
 		byPath[finding.Path] = append(byPath[finding.Path], finding)
@@ -125,11 +135,52 @@ func InstallFactsFor(preview *skill.PreviewResult) *ApprovalInstall {
 			Findings: findings,
 		})
 	}
-	return &ApprovalInstall{
+	return ApprovalInstallSkill{
 		URL:         preview.URL,
 		Name:        preview.Name,
 		Description: preview.Description,
 		Digest:      preview.Digest,
 		Files:       files,
+	}, true
+}
+
+func InstallFactsForResolved(resolution *skill.Resolution, source string, paths []string, previews []skill.PreviewResult) *ApprovalInstall {
+	if resolution == nil || len(paths) != len(previews) || len(paths) == 0 {
+		return nil
 	}
+	skills := make([]ApprovalInstallSkill, 0, len(previews))
+	for i := range previews {
+		item, ok := installSkillFacts(&previews[i])
+		if !ok {
+			return nil
+		}
+		item.Path = paths[i]
+		skills = append(skills, item)
+	}
+	destination := resolution.Repository
+	destinationURL := destination
+	if !strings.HasPrefix(destinationURL, "http://") && !strings.HasPrefix(destinationURL, "https://") {
+		destinationURL = "https://" + destinationURL
+	}
+	originsDiffer := routeOriginsDiffer(source, destinationURL)
+	return &ApprovalInstall{
+		Source:        source,
+		Destination:   destination,
+		OriginsDiffer: &originsDiffer,
+		Ref:           resolution.Ref,
+		Commit:        resolution.Commit,
+		Skills:        skills,
+	}
+}
+
+func routeOriginsDiffer(source, destination string) bool {
+	sourceURL, err := url.Parse(source)
+	if err != nil || sourceURL.Host == "" {
+		return true
+	}
+	destinationURL, err := url.Parse(destination)
+	if err != nil || destinationURL.Host == "" {
+		return true
+	}
+	return !strings.EqualFold(sourceURL.Host, destinationURL.Host)
 }

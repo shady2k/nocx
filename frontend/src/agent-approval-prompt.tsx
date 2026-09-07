@@ -110,9 +110,10 @@
  * what it resolved to is the thing the person is actually deciding, so a
  * question that named only the ask would let somebody approve a page they
  * read and receive a repository they never saw. The backend therefore sends
- * the resolution — the fetched address, the skill's own name and description,
- * the digest the write is bound to, and every file that will land WITH ITS
- * BYTES — and this window draws all of it.
+ * the resolution's fetched address, the selected skill's own name and
+ * description, the digest the write is bound to, and every file that will
+ * land WITH ITS BYTES for that skill — and this window draws the first skill's
+ * details.
  *
  * THE DESCRIPTION IS THE PROMINENT PART, and that is not typography. It is
  * the one part of a skill that lives in the assistant's system prompt
@@ -222,9 +223,10 @@ type ExpansionPart = NonNullable<ExpansionFacts['parts']>[number]
 /** One file the proposed command names, read as the question was asked. */
 type ScriptReading = NonNullable<AgentApprovalRequested['scripts']>[number]
 
-/** What a skills.install proposal resolved to, and one file it would write. */
-type SkillInstall = NonNullable<AgentApprovalRequested['install']>
-type SkillInstallFile = SkillInstall['files'][number]
+/** The first skill in a skills.install proposal, which this window renders. */
+type SkillInstallProposal = NonNullable<AgentApprovalRequested['install']>
+type SkillInstallSkill = SkillInstallProposal['skills'][number]
+type SkillInstallFile = SkillInstallSkill['files'][number]
 
 /**
  * What the command DOES with the file, in a person's words (nocx-872jc.3).
@@ -601,25 +603,29 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    * that names none is not a command anything was looked for in.
    */
   const scripts = (): readonly ScriptReading[] => ask().scripts ?? []
-
   /**
-   * The skill an install proposal resolved to, or null. The FIELD is the
+   * The first skill in an install proposal, or null. The FIELD is the
    * discriminator and not the tool name: the backend fills it for
    * `skills.install` and for nothing else, and a branch that compared names
    * would be one more literal to go stale on a rename (see
-   * TOOLS_THIS_WINDOW_NAMES).
+   * TOOLS_THIS_WINDOW_NAMES). The proposal carries a SET, because one answer
+   * covers every skill a person picked out of a repository; this window still
+   * renders one, so its name, description, digest and file reads all use the
+   * first item. Drawing the whole set, and the route it travelled, is
+   * nocx-295uk.4.
    */
-  const install = (): SkillInstall | null => ask().install ?? null
+  const install = (): SkillInstallSkill | null => ask().install?.skills[0] ?? null
 
   /**
-   * THE MANIFEST: every file that would land, in the order the backend sent
-   * them — SKILL.md first, because it is the document the others were named
-   * by. A skill is not one file, and a person told only about SKILL.md while
-   * `references/` and `scripts/` land beside it is approving a name rather
-   * than an act (design §5, §8). `included` is exactly what the tone means:
-   * this comes with it. There is no `excluded` row and there never will be —
-   * a file the backend could not fetch refuses the whole preview, so a bundle
-   * with a gap in it never reaches a question at all.
+   * THE MANIFEST: every file the first skill would land, in the order the
+   * backend sent them — SKILL.md first, because it is the document the others
+   * were named by. A skill is not one file, and a person told only about
+   * SKILL.md while `references/` and `scripts/` land beside it is approving a
+   * name rather than an act (design §5, §8). `included` is exactly what the
+   * tone means: this comes with it.
+   * There is no `excluded` row and there never will be — a file the backend
+   * could not fetch refuses the whole preview, so a bundle with a gap in it
+   * never reaches a question at all.
    *
    * It sits above the bytes rather than instead of them: the list is a fact
    * about the skill, like its name, and the readouts below are the reading.

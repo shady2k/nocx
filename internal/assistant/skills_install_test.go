@@ -230,22 +230,24 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 func assertResolvedInstall(t *testing.T, req *ApprovalRequest, url string) *ApprovalInstall {
 	t.Helper()
 	if req.Install == nil {
-		t.Fatal("the question carries no resolution: the person is being asked about an address")
+		t.Fatal("the question carries no install facts")
 	}
 	got := req.Install
-	if got.Name != "deploy" || got.Description != "Deploy the service" {
-		t.Fatalf("install = %+v, want the document's own name and description", got)
+	if len(got.Skills) != 1 {
+		t.Fatalf("install skills = %+v, want one skill", got.Skills)
 	}
-	// The RESOLVED address, off the resolution rather than off the arguments
-	// blob — which is the whole point of the field.
-	if got.URL != url {
-		t.Fatalf("install url = %q, want the address that was fetched %q", got.URL, url)
+	item := got.Skills[0]
+	if item.Name != "deploy" || item.Description != "Deploy the service" {
+		t.Fatalf("install skill = %+v, want the document's own name and description", item)
 	}
-	if !sha256Hex.MatchString(got.Digest) {
-		t.Fatalf("install digest = %q, want the sha256 the write is bound to", got.Digest)
+	if item.URL != url {
+		t.Fatalf("install skill url = %q, want the address that was fetched %q", item.URL, url)
 	}
-	paths := make([]string, 0, len(got.Files))
-	for _, file := range got.Files {
+	if !sha256Hex.MatchString(item.Digest) {
+		t.Fatalf("install skill digest = %q, want the sha256 the write is bound to", item.Digest)
+	}
+	paths := make([]string, 0, len(item.Files))
+	for _, file := range item.Files {
 		paths = append(paths, file.Path)
 	}
 	want := []string{"SKILL.md", "references/checklist.md"}
@@ -257,32 +259,21 @@ func assertResolvedInstall(t *testing.T, req *ApprovalRequest, url string) *Appr
 			t.Fatalf("install files = %v, want %v in that order", paths, want)
 		}
 	}
-	// THE BYTES, not the names. SKILL.md carries the WHOLE served document,
-	// frontmatter included, because a finding counts lines from the first
-	// byte of the file it names.
-	if got.Files[0].Text != installableSkill {
-		t.Fatalf("SKILL.md text = %q, want the whole document that was served", got.Files[0].Text)
+	if item.Files[0].Text != installableSkill {
+		t.Fatalf("SKILL.md text = %q, want the whole document that was served", item.Files[0].Text)
 	}
-	if got.Files[1].Text != installableSupportFile {
-		t.Fatalf("support file text = %q, want the bytes that were served", got.Files[1].Text)
+	if item.Files[1].Text != installableSupportFile {
+		t.Fatalf("support file text = %q, want the bytes that were served", item.Files[1].Text)
 	}
-	// The scan's findings ride WITH the file they matched in, so a surface
-	// can mark each on its own line rather than quoting it elsewhere.
-	if len(got.Files[0].Findings) == 0 || got.Files[0].Findings[0].PatternID != "prompt_injection" {
-		t.Fatalf("SKILL.md findings = %+v, want the scan of the fetched document", got.Files[0].Findings)
+	if len(item.Files[0].Findings) == 0 || item.Files[0].Findings[0].PatternID != "prompt_injection" {
+		t.Fatalf("SKILL.md findings = %+v, want the scan of the fetched document", item.Files[0].Findings)
 	}
-	if got.Files[0].Findings[0].Path != "SKILL.md" {
-		t.Fatalf("finding path = %q, want the file it matched in", got.Files[0].Findings[0].Path)
+	if item.Files[0].Findings[0].Path != "SKILL.md" {
+		t.Fatalf("finding path = %q, want the file it matched in", item.Files[0].Findings[0].Path)
 	}
-	// A file nothing matched carries an empty list and not a nil one: the
-	// wire says an array, and an absent one would be a second way to say
-	// the same thing.
-	if got.Files[1].Findings == nil {
+	if item.Files[1].Findings == nil {
 		t.Fatal("a file with no findings carries nil, which the wire contract does not allow")
 	}
-	// AND THE ONE-FINDING ROW IS NOT ALSO FILLED. It is one finding wide and
-	// the files above carry every one of them, marked where it sits; a row
-	// repeating the first would be a second surface owning one fact.
 	if req.Finding != nil {
 		t.Fatalf("finding = %+v, want none: an install's findings belong to the files they matched in", req.Finding)
 	}
@@ -414,7 +405,7 @@ func TestAskSkillsInstall_BytesThatMovedSinceTheQuestionAreRefused(t *testing.T)
 
 	moved := "---\nname: deploy\ndescription: Deploy the service\n---\nSomething else entirely.\n"
 	stand.serve("/skills/deploy/SKILL.md", moved)
-	if shown.Files[0].Text == moved {
+	if shown.Skills[0].Files[0].Text == moved {
 		t.Fatal("the test changed nothing")
 	}
 
@@ -778,7 +769,7 @@ func TestAskSkillsInstall_AFindingInASupportFileArrivesUnderThatFile(t *testing.
 		t.Fatal("the question carries no resolution")
 	}
 	byPath := map[string][]skill.Finding{}
-	for _, file := range req.Install.Files {
+	for _, file := range req.Install.Skills[0].Files {
 		byPath[file.Path] = file.Findings
 	}
 	support := byPath["references/checklist.md"]
@@ -815,16 +806,16 @@ func TestInstallFactsFor_NamesTheSameManifestThePreviewDoes(t *testing.T) {
 	if facts == nil {
 		t.Fatal("a resolved install produced no facts to ask about")
 	}
-	if len(facts.Files) != len(preview.Files) {
+	if len(facts.Skills) != 1 || len(facts.Skills[0].Files) != len(preview.Files) {
 		t.Fatalf("question names %d files, preview names %d: the person is shown a shorter manifest",
-			len(facts.Files), len(preview.Files))
+			len(facts.Skills[0].Files), len(preview.Files))
 	}
-	for i, file := range facts.Files {
+	for i, file := range facts.Skills[0].Files {
 		if file.Path != preview.Files[i] {
 			t.Fatalf("question file %d = %q, preview names %q", i, file.Path, preview.Files[i])
 		}
 	}
-	if facts.Digest != preview.Digest || facts.URL != preview.URL {
+	if facts.Skills[0].Digest != preview.Digest || facts.Skills[0].URL != preview.URL {
 		t.Fatalf("facts = %+v, want the preview's own digest and address", facts)
 	}
 	// Nil in, nil out: a proposal that resolved nothing carries no block, and

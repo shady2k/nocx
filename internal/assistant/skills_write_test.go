@@ -43,6 +43,10 @@ func (s *skillsWriteLibrary) Delete(name string) error {
 	return nil
 }
 
+func (s *skillsWriteLibrary) Resolve(context.Context, string) (*skill.Resolution, error) {
+	return nil, errors.New("not used")
+}
+
 // Refusing rather than recording: this fake is the WRITE seam, and an
 // install that answered here would let a test about skills.create pass
 // while silently exercising a fetch path nobody wired.

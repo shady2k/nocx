@@ -72,6 +72,7 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"skills.create":    executeSkillsCreate,
 	"skills.update":    executeSkillsUpdate,
 	"skills.delete":    executeSkillsDelete,
+	"skills.resolve":   executeSkillsResolve,
 	"skills.install":   executeSkillsInstall,
 }
 
@@ -685,6 +686,55 @@ func executeSkillsWrite(_ context.Context, tool, status string, cap agenttools.C
 	return marshalResult(result)
 }
 
+type skillResolver interface {
+	Resolve(context.Context, string) (*skill.Resolution, error)
+}
+
+type resolvedSkillLibrary interface {
+	SkillLibrary
+	PreviewResolved(context.Context, string, []string) ([]skill.PreviewResult, error)
+	InstallResolved(context.Context, string, []string) ([]skill.InstallResult, error)
+}
+
+type skillResolveUnavailableResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func executeSkillsResolve(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, ok := cap.(*agenttools.URLScope)
+	if !ok {
+		return "", fmt.Errorf("skills.resolve: capability is %T, not *agenttools.URLScope", cap)
+	}
+	var params struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", fmt.Errorf("skills.resolve: args: %w", err)
+	}
+	if !scope.Allows(params.URL) {
+		return "", fmt.Errorf("skills.resolve: %q is outside this run's grant", params.URL)
+	}
+	library, ok := seams.skills.(skillResolver)
+	if !ok || library == nil {
+		return marshalResult(skillResolveUnavailableResult{
+			Status:  "unsupported",
+			Message: "this backend cannot resolve that address into a pinned repository",
+		})
+	}
+	resolution, err := library.Resolve(ctx, params.URL)
+	if err != nil {
+		return "", fmt.Errorf("skills.resolve: %w", err)
+	}
+	if resolution == nil {
+		return marshalResult(skillResolveUnavailableResult{
+			Status:  "unsupported",
+			Message: "that address is not a supported public forge repository",
+		})
+	}
+	return marshalResult(resolution)
+}
+
 // skillInstallResult is what the model is told an approved install produced.
 //
 // It is four small fields and deliberately not the manifest, the digest or
@@ -707,6 +757,17 @@ type skillInstallResult struct {
 	Enabled bool `json:"enabled"`
 }
 
+type skillInstallSetItem struct {
+	Name       string `json:"name"`
+	Provenance string `json:"provenance"`
+	Enabled    bool   `json:"enabled"`
+}
+
+type skillInstallSetResult struct {
+	Status string                `json:"status"`
+	Skills []skillInstallSetItem `json:"skills"`
+}
+
 // executeSkillsInstall adopts the document the person has just been shown.
 //
 // THE SECOND HALF OF A TWO-STEP, and the first half already happened: the
@@ -726,24 +787,45 @@ func executeSkillsInstall(ctx context.Context, cap agenttools.Capability, args j
 		return "", fmt.Errorf("skills.install: capability is %T, not *agenttools.SkillInstallScope", cap)
 	}
 	var params struct {
-		URL string `json:"url"`
+		URL    string   `json:"url"`
+		Handle string   `json:"handle"`
+		Paths  []string `json:"paths"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("skills.install: args: %w", err)
 	}
-	if !scope.AllowsSource(params.URL) {
-		return "", fmt.Errorf("skills.install: %q is outside this run's grant", params.URL)
-	}
-	// The write half of the call, asked separately from the read half. The
-	// gate decided this call on its worst class, which is the fetch; this is
-	// where the class that governs the WRITE gets its say, and it is asked
-	// before anything is fetched a second time rather than after.
 	if !scope.AllowsInstall() {
 		return "", errors.New("skills.install: this run may not write a skill, so the document was not fetched again and nothing was installed")
 	}
 	library := seams.skills
 	if library == nil {
 		return "", errors.New("skills.install: no skill library is wired for this run")
+	}
+	if params.Handle != "" {
+		if len(params.Paths) == 0 {
+			return "", errors.New("skills.install: a resolution handle requires at least one selected path")
+		}
+		resolved, ok := library.(resolvedSkillLibrary)
+		if !ok {
+			return "", errors.New("skills.install: this backend cannot install a resolved skill set")
+		}
+		installed, err := resolved.InstallResolved(ctx, params.Handle, params.Paths)
+		if err != nil {
+			return "", fmt.Errorf("skills.install: %w", err)
+		}
+		result := skillInstallSetResult{
+			Status: "installed",
+			Skills: make([]skillInstallSetItem, 0, len(installed)),
+		}
+		for _, item := range installed {
+			result.Skills = append(result.Skills, skillInstallSetItem{
+				Name: item.Name, Provenance: string(item.Provenance), Enabled: false,
+			})
+		}
+		return marshalResult(result)
+	}
+	if !scope.AllowsSource(params.URL) {
+		return "", fmt.Errorf("skills.install: %q is outside this run's grant", params.URL)
 	}
 	installed, err := library.Install(ctx, params.URL)
 	if err != nil {

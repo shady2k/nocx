@@ -46,6 +46,10 @@ func (fixedSkills) Delete(string) error {
 	return errors.New("not used")
 }
 
+func (fixedSkills) Resolve(context.Context, string) (*skill.Resolution, error) {
+	return nil, errors.New("not used")
+}
+
 func (fixedSkills) Preview(context.Context, string) (skill.PreviewResult, error) {
 	return skill.PreviewResult{}, errors.New("not used")
 }

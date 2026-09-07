@@ -223,6 +223,8 @@ type SkillLibrary interface {
 	// there is no field in which a caller could assert what the bytes were.
 	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
 	Install(ctx context.Context, url string) (skill.InstallResult, error)
+	// Resolve enumerates a supported public repository without writing.
+	Resolve(ctx context.Context, address string) (*skill.Resolution, error)
 }
 
 // AskParams is one ask's model call: the resolved endpoint's facts plus the

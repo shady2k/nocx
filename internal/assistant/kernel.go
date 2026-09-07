@@ -323,6 +323,11 @@ type AttemptLedger interface {
 // design §6.2. A path is a few hundred bytes; anything larger is malformed.
 const maxArgsBytes = 64 << 10
 
+type resolvedSkillPlan struct {
+	resolution *skill.Resolution
+	source     string
+}
+
 // effectKernel is the pipeline for ONE run (one Ask): it holds the run's
 // grant, the assembled registry, the ledger seam, the approval store, the
 // egress vault comparison and the run's identity — everything the
@@ -384,7 +389,8 @@ type effectKernel struct {
 	// send back, and the two exist for the same reason: the description
 	// the model was shown has to be true, and the only way to keep a
 	// description true is to check it (nocx-d6gn4.8.1).
-	results map[string]*jsonschema.Schema
+	results     map[string]*jsonschema.Schema
+	resolutions map[string]resolvedSkillPlan
 }
 
 // newEffectKernel builds the pipeline for one run. A schema that does
@@ -438,10 +444,11 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 		},
-		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
-		results:    make(map[string]*jsonschema.Schema, len(registry.All())),
-		onCall:     onCall,
-		runSeams:   runSeams,
+		resolutions: make(map[string]resolvedSkillPlan),
+		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
+		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
+		onCall:      onCall,
+		runSeams:    runSeams,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -814,7 +821,7 @@ func (m *effectKernel) bindApprovalScripts(ctx context.Context, req *ApprovalReq
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, preview *skill.PreviewResult) error {
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation, install *ApprovalInstall) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	bindApprovalFileVersions(&ap, decl, resources)
@@ -826,7 +833,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 		}
 		entryID = id
 	}
-	req := m.request(decl, callID, rawArgs, resources, preview)
+	req := m.request(decl, callID, rawArgs, resources, install)
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
@@ -882,7 +889,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 // the effect and the resource come off the declaration the gate just decided
 // with: one builder is what keeps a classifier ask from reaching the surface
 // without an effect, which the notification's schema requires.
-func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef, preview *skill.PreviewResult) *ApprovalRequest {
+func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef, install *ApprovalInstall) *ApprovalRequest {
 	req := &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
@@ -910,23 +917,12 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, res
 				req.Finding = &finding
 			}
 		}
-	case preview != nil:
-		// AN INSTALL IS ASKED ABOUT AS A SKILL, NOT AS AN ADDRESS
-		// (nocx-ojfuc.2). Its arguments are one URL; everything a person
-		// decides on — the resolved address, the name, the description, the
-		// digest and every file that will land, with its bytes — comes out
-		// of the resolution the kernel ran before this ask was built.
-		//
-		// AND IT DOES NOT ALSO FILL Finding. That field is one finding
-		// wide, and nocx-ojfuc.1 filled it here as a placeholder for this
-		// bead. Now that every file travels with its own findings, marked
-		// on the line each matched, a row repeating the first of them would
-		// be a second surface owning one fact — and the loser of that pair
-		// goes on advertising what it can no longer deliver. The skill
-		// WRITE tools above keep the row: they propose one file's body,
-		// nothing carries its bytes for them, and there is nothing else on
-		// their question for a finding to be marked in.
-		req.Install = InstallFactsFor(preview)
+	case install != nil:
+		// An install carries the complete resolved facts produced before the
+		// question: either one fetched skill or the selected candidates from
+		// one pinned repository. The surface never re-derives these values
+		// from the model's address or handle.
+		req.Install = install
 	}
 	return req
 }
@@ -959,6 +955,68 @@ func (k *effectKernel) resolveSkillInstall(ctx context.Context, decl agenttools.
 		return nil, err
 	}
 	return &result, nil
+}
+
+func (k *effectKernel) resolveSkillInstallFacts(ctx context.Context, decl agenttools.Tool, args map[string]any) (*ApprovalInstall, error) {
+	if handle, ok := args["handle"].(string); ok && handle != "" {
+		library, ok := k.runSeams.skills.(resolvedSkillLibrary)
+		if !ok || library == nil {
+			return nil, errors.New("resolved skill installs are unavailable: this backend has no resolver seam wired")
+		}
+		plan, ok := k.resolutions[handle]
+		if !ok || plan.resolution == nil {
+			return nil, errors.New("that resolution was not produced by this run: resolve the repository again before installing")
+		}
+		resolution := plan.resolution
+		paths, err := resolvedInstallPaths(args["paths"])
+		if err != nil {
+			return nil, err
+		}
+		if decl.Deadline > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, decl.Deadline)
+			defer cancel()
+		}
+		previews, err := library.PreviewResolved(ctx, handle, paths)
+		if err != nil {
+			return nil, err
+		}
+		facts := InstallFactsForResolved(resolution, plan.source, paths, previews)
+		if facts == nil {
+			return nil, errors.New("resolved skill preview did not produce a complete approval payload")
+		}
+		return facts, nil
+	}
+	preview, err := k.resolveSkillInstall(ctx, decl, args)
+	if err != nil {
+		return nil, err
+	}
+	return InstallFactsFor(preview), nil
+}
+
+func resolvedInstallPaths(raw any) ([]string, error) {
+	switch paths := raw.(type) {
+	case []string:
+		if len(paths) == 0 {
+			return nil, errors.New("the resolved install named no skill paths")
+		}
+		return append([]string(nil), paths...), nil
+	case []any:
+		out := make([]string, 0, len(paths))
+		for _, rawPath := range paths {
+			path, ok := rawPath.(string)
+			if !ok || path == "" {
+				return nil, errors.New("the resolved install named an invalid skill path")
+			}
+			out = append(out, path)
+		}
+		if len(out) == 0 {
+			return nil, errors.New("the resolved install named no skill paths")
+		}
+		return out, nil
+	default:
+		return nil, errors.New("the resolved install named no skill paths")
+	}
 }
 
 func approvalClassifier(fact *classifierFact) *ApprovalClassifier {
@@ -1749,9 +1807,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// the document as it is NOW and remember THAT digest, so Install would
 	// compare the current bytes against themselves and the "the bytes moved
 	// between the question and the answer" refusal would never fire again.
-	var installPreview *skill.PreviewResult
+	var installFacts *ApprovalInstall
 	if decl.Name == "skills.install" && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		resolved, resolveErr := k.resolveSkillInstall(ctx, decl, args)
+		resolved, resolveErr := k.resolveSkillInstallFacts(ctx, decl, args)
 		if resolveErr != nil {
 			// The store's refusals are already sentences that name the step
 			// that refused, in the person's words, and nothing was written
@@ -1763,7 +1821,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 				kind: modelNocxMessage,
 			}, nil
 		}
-		installPreview = resolved
+		installFacts = resolved
 	}
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
@@ -1774,7 +1832,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// path where a person is already waiting.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installPreview)
+		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources, installFacts)
 		if classifyErr != nil {
 			// The classifier's INPUT gate could not see (the recognizer
 			// failed closed): nothing decides this call unseen and
@@ -1790,9 +1848,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	if skillMutation && !k.proposalApproved(decl.Name, callID, rawArgs) {
 		if classifierFact != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources, installPreview), classifierFact, resources, invocation)
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, k.request(decl, callID, rawArgs, resources, installFacts), classifierFact, resources, invocation)
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, installPreview)
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation, installFacts)
 	}
 
 	// An approved proposal may reach here through either policyAsk or the
@@ -1896,6 +1954,16 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 				"tool", decl.Name, "call", callID, "error", err)
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: err}
+		}
+	}
+	if runErr == nil && decl.Name == "skills.resolve" {
+		var resolution skill.Resolution
+		source, _ := args["url"].(string)
+		if err := json.Unmarshal([]byte(out), &resolution); err == nil && resolution.Handle != "" {
+			k.resolutions[resolution.Handle] = resolvedSkillPlan{
+				resolution: &resolution,
+				source:     source,
+			}
 		}
 	}
 
@@ -2184,7 +2252,7 @@ func (k *effectKernel) proposalApproved(toolName, callID, rawArgs string) bool {
 //
 // The returned ask is the suspension's approval request; the returned fact
 // is what the ledger records. A nil ask means the verdict was clear.
-func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, preview *skill.PreviewResult) (*ApprovalRequest, *classifierFact, error) {
+func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, install *ApprovalInstall) (*ApprovalRequest, *classifierFact, error) {
 	findings, err := k.screenResult(ctx, rawArgs, nil)
 	if err != nil {
 		return nil, nil, err
@@ -2194,14 +2262,14 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Findings: findings,
 			Reason:   "the classifier could not be consulted: " + findingsSentence(findings),
 		}
-		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
+		return k.request(decl, callID, rawArgs, resources, install), fact, nil
 	}
 	classification, err := k.classifier.Classify(ctx, ClassifyInput{Tool: decl.Name, CallID: callID, Arguments: rawArgs})
 	if err != nil {
 		fact := &classifierFact{
 			Reason: maskClassifierReason("the classifier could not be consulted: " + summarizeClassifierError(err)),
 		}
-		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
+		return k.request(decl, callID, rawArgs, resources, install), fact, nil
 	}
 	if classification.Verdict != ClassifierClear {
 		fact := &classifierFact{
@@ -2210,7 +2278,7 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Model:     classification.Model,
 			Reason:    maskClassifierReason(classification.Reason),
 		}
-		return k.request(decl, callID, rawArgs, resources, preview), fact, nil
+		return k.request(decl, callID, rawArgs, resources, install), fact, nil
 	}
 	return nil, &classifierFact{
 		Consulted: true,

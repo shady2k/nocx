@@ -1,6 +1,7 @@
 package agenttools
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -99,14 +100,20 @@ func skillResource(arg string) ResolveResources {
 func skillInstallResources(arg string) ResolveResources {
 	destination := resourceURL(arg)
 	return func(args map[string]any, runCtx RunContext) ([]ResourceRef, error) {
-		refs, err := destination(args, runCtx)
-		if err != nil {
-			return nil, err
+		if _, ok := args[arg]; ok {
+			refs, err := destination(args, runCtx)
+			if err != nil {
+				return nil, err
+			}
+			// The destination is FIRST because it is the singular wire
+			// projection of the ask (kernel.matchedResource): the address is
+			// what the person is being asked about.
+			return append(refs, ResourceRef{Kind: content.ResourceContent, ID: "skill"}), nil
 		}
-		// The destination is FIRST because it is the singular wire
-		// projection of the ask (kernel.matchedResource): the address is
-		// what the person is being asked about.
-		return append(refs, ResourceRef{Kind: content.ResourceContent, ID: "skill"}), nil
+		if _, ok := args["handle"]; ok {
+			return []ResourceRef{{Kind: content.ResourceContent, ID: "skill"}}, nil
+		}
+		return nil, fmt.Errorf("resource argument %q is absent", arg)
 	}
 }
 

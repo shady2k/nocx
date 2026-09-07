@@ -52,8 +52,9 @@ const DESCRIPTION = `Ageing e2e skill ${nonce}`
 const ENDPOINT_NAME = `Ageing e2e endpoint ${nonce}`
 const UPDATED_DESCRIPTION = `Updated ordinary skill ${nonce}`
 const UPDATED_BODY = `The ordinary skill was updated by the assistant ${nonce}.`
-const OLD_DATE = '2026-01-01T00:00:00Z'
-const NOW_DATE = '2026-09-07T00:00:00Z'
+const RUN_NOW = new Date()
+const OLD_DATE = new Date(RUN_NOW.getTime() - 100 * 24 * 60 * 60 * 1000).toISOString()
+const NOW_DATE = RUN_NOW.toISOString()
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -108,6 +109,7 @@ test.beforeAll(async () => {
         usage: {
           [QUIET_NAME]: { count: 0, firstSeenAt: OLD_DATE },
           [KEEP_ENABLED_NAME]: { count: 0, firstSeenAt: OLD_DATE },
+          'skill-authoring': { count: 0, firstSeenAt: OLD_DATE },
           [GUARDED_NAME]: { count: 0, firstSeenAt: NOW_DATE },
           [ORDINARY_NAME]: { count: 0, firstSeenAt: NOW_DATE },
         },

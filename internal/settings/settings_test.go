@@ -179,6 +179,26 @@ func TestDeclarations(t *testing.T) {
 	}
 }
 
+func TestSkillsIdleDaysIsRegisteredWithAZeroThatMeansNever(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	var found settings.Declaration
+	for _, declaration := range reg.Declarations() {
+		if declaration.Key == "skills.idleDays" {
+			found = declaration
+			break
+		}
+	}
+	if found.Key == "" {
+		t.Fatal("skills.idleDays is not registered")
+	}
+	if found.Default != float64(90) {
+		t.Fatalf("default = %v, want 90", found.Default)
+	}
+	if found.ZeroLabel == "" {
+		t.Fatal("zero has no label: a person setting 0 must be told what it does")
+	}
+}
+
 // The wire declaration carries the unit a number setting is measured in, and
 // the three History settings declare the units the owner reads (nocx-w7h.7).
 func TestNumberUnitOnTheWire(t *testing.T) {

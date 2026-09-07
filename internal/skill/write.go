@@ -142,6 +142,7 @@ type Store struct {
 	githubRawBase string
 
 	now          func() time.Time
+	idleDays     func() int
 	usageMu      sync.Mutex
 	pendingUsage map[string]pendingUse
 }
@@ -166,6 +167,12 @@ func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
 // WithClock replaces the clock. Production passes nothing and gets time.Now.
 func WithClock(now func() time.Time) StoreOption {
 	return func(s *Store) { s.now = now }
+}
+
+// WithIdleDays supplies the threshold as a function so a setting change takes
+// effect without rebuilding the Store. Zero, and no option, mean never.
+func WithIdleDays(days func() int) StoreOption {
+	return func(s *Store) { s.idleDays = days }
 }
 
 // WithGitHubBases names the forge endpoints used by the GitHub resolver.

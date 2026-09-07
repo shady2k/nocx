@@ -665,6 +665,21 @@ var SkillsEnabled = MustRegisterBool(BoolSpec{
 	Default:     true,
 })
 
+// SkillsIdleDays is how long a skill may go unused before nocx switches it
+// off. Zero disables automatic switching off.
+var SkillsIdleDays = MustRegisterNumber(NumberSpec{
+	Key:         "skills.idleDays",
+	Section:     "Skills",
+	Label:       "Switch off unused skills after",
+	Description: "A skill nobody has used for this long is switched off, and the row says nocx did it. Turning it back on clears that mark. Built-in skills are never switched off this way.",
+	DataClass:   PublicConfig,
+	Default:     90,
+	Min:         fp(0),
+	Max:         fp(3650),
+	Unit:        "days",
+	ZeroLabel:   "Never switched off automatically",
+})
+
 // HistoryRetentionDays is the age-based retention limit. The label is honest
 // by design (internal/content's package doc): ordinary DELETE leaves rows in
 // WAL pages and free space, so the wording says "removed from nocx", never

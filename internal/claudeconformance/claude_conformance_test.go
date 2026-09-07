@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/mcpstdio"
 	"github.com/shady2k/nocx/internal/pty"
@@ -34,6 +35,8 @@ var workerTools = []string{
 	"workers.wait",
 	"workers.close",
 }
+
+const unpromptedPersuasionPrompt = "You are responsible for completing a repository task. It has three independent deliverables that can proceed concurrently: backend validation, frontend behavior, and acceptance evidence. Start the work immediately and finish by reporting your plan and progress."
 
 // TestMCPBridgeProcess is the child process named by the staged MCP config.
 // It deliberately lives in the test binary so this check exercises the real
@@ -95,6 +98,36 @@ func TestClaudeOffersAndInvokesEveryWorkerSurface(t *testing.T) {
 	if string(call.result) != `{"held":[]}` {
 		t.Fatalf("workers.holdings result = %s, want the real bridge answer", call.result)
 	}
+}
+
+func TestManualClaudeSelectsWorkersUnprompted(t *testing.T) {
+	if os.Getenv("NOCX_MANUAL_REAL_PERSUASION") != "1" {
+		t.Skip("set NOCX_MANUAL_REAL_PERSUASION=1 to spend a real Claude run")
+	}
+	claude := requireClaude(t)
+	endpoint := startCatalogueEndpoint(t)
+	config := writeMCPConfig(t, endpoint.socket, "")
+
+	stdout, stderr, err := runClaudeArgs(t, claude, filepath.Dir(config), os.Environ(), []string{
+		"--print",
+		"--no-session-persistence",
+		"--dangerously-skip-permissions",
+		"--tools", "",
+		"--setting-sources", "",
+		"--strict-mcp-config",
+		"--mcp-config", config,
+		"--max-turns", "5",
+		"--output-format", "stream-json",
+		"--verbose",
+		"-p", unpromptedPersuasionPrompt,
+	})
+	if err != nil {
+		t.Fatalf("claude failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+
+	endpoint.waitForMethod(t, "tools.catalogue")
+	spawn := endpoint.waitForMethod(t, "workers.spawn")
+	t.Logf("unprompted workers.spawn result: %s", spawn.result)
 }
 
 func TestClaudeStrictMCPConfigExcludesDeveloperServer(t *testing.T) {
@@ -256,6 +289,7 @@ type catalogueEndpoint struct {
 	close    chan struct{}
 	once     sync.Once
 	socket   string
+	tools    []map[string]any
 }
 
 func startCatalogueEndpoint(t *testing.T) *catalogueEndpoint {
@@ -270,6 +304,7 @@ func startCatalogueEndpoint(t *testing.T) *catalogueEndpoint {
 		calls:    make(chan mcpCall, 32),
 		close:    make(chan struct{}),
 		socket:   path,
+		tools:    catalogueTools(t),
 	}
 	t.Cleanup(endpoint.shutdown)
 	go endpoint.accept()
@@ -304,11 +339,15 @@ func (e *catalogueEndpoint) serve(conn net.Conn) {
 		}
 		switch request.Method {
 		case "tools.catalogue":
-			result := map[string]any{"tools": catalogueTools()}
+			result := map[string]any{"tools": e.tools}
 			raw, _ := json.Marshal(result)
 			e.calls <- mcpCall{method: request.Method, result: raw}
 			e.write(conn, request.ID, raw)
-		case "workers.holdings", "workers.spawn", "workers.say", "workers.wait", "workers.close":
+		case "workers.spawn":
+			raw := json.RawMessage(`{"id":"manual-worker","state":"live"}`)
+			e.calls <- mcpCall{method: request.Method, result: raw}
+			e.write(conn, request.ID, raw)
+		case "workers.holdings", "workers.say", "workers.wait", "workers.close":
 			raw := json.RawMessage(`{"held":[]}`)
 			e.calls <- mcpCall{method: request.Method, result: raw}
 			e.write(conn, request.ID, raw)
@@ -357,14 +396,29 @@ func (e *catalogueEndpoint) shutdown() {
 	})
 }
 
-func catalogueTools() []map[string]any {
+func catalogueTools(t *testing.T) []map[string]any {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller did not identify the conformance test")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+	registry, err := agenttools.Assemble(os.DirFS(filepath.Join(repoRoot, "contracts", "tools")))
+	if err != nil {
+		t.Fatalf("assemble worker catalogue: %v", err)
+	}
+
 	tools := make([]map[string]any, 0, len(workerTools))
 	for _, name := range workerTools {
+		tool, ok := registry.Lookup(name)
+		if !ok {
+			t.Fatalf("worker tool %q is not in the assembled registry", name)
+		}
 		tools = append(tools, map[string]any{
 			"name":    name,
-			"summary": "A coordinator worker operation.",
-			"params":  json.RawMessage(`{"type":"object"}`),
-			"result":  json.RawMessage(`{"type":"object"}`),
+			"summary": tool.Description,
+			"params":  tool.ParamsSchema,
+			"result":  tool.ResultSchema,
 		})
 	}
 	return tools
@@ -419,12 +473,17 @@ func requireClaude(t *testing.T) string {
 // All vendor assertions use --print. The design's eager tools/list measurement
 // was interactive; this check does not prove interactive and --print equivalent.
 func runClaude(t *testing.T, claude, dir string, env []string, config, prompt string) (string, string, error) {
+	return runClaudeArgs(t, claude, dir, env, []string{
+		"--print", "--no-session-persistence", "--dangerously-skip-permissions",
+		"--strict-mcp-config", "--mcp-config", config, "-p", prompt,
+	})
+}
+
+func runClaudeArgs(t *testing.T, claude, dir string, env, args []string) (string, string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, claude,
-		"--print", "--no-session-persistence", "--dangerously-skip-permissions",
-		"--strict-mcp-config", "--mcp-config", config, "-p", prompt) // #nosec G204 — claude is LookPath-validated and config/prompt are test-owned.
+	cmd := exec.CommandContext(ctx, claude, args...) // #nosec G204 — claude is LookPath-validated and args are test-owned.
 	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer

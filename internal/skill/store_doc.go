@@ -112,6 +112,7 @@ type document struct {
 	AutoOff  map[string]AutoOff `json:"autoOff,omitempty"`
 	Sources  map[string]Source  `json:"sources,omitempty"`
 	Usage    map[string]Usage   `json:"usage,omitempty"`
+	Pins     map[string]Pins    `json:"pins,omitempty"`
 }
 
 // Source is what an install RESOLVED TO, keyed by skill name like Digests:
@@ -226,6 +227,7 @@ type ListedSkill struct {
 	Enabled     bool       `json:"enabled"`
 	Status      Status     `json:"status"`
 	Usage       Usage      `json:"usage"`
+	Pins        Pins       `json:"pins"`
 	// AutoOff is present only when nocx switched this skill off.
 	AutoOff *AutoOff `json:"autoOff,omitempty"`
 	// Source is present only when the document records an installed source.
@@ -486,7 +488,7 @@ func (s *Store) List() (ListResult, error) {
 	if autoErr != nil {
 		slog.Debug("skill: idle skills were not evaluated", "error", autoErr)
 	}
-	usage, recordedAutoOff, usageErr := s.usageAndAutoOff()
+	usage, recordedAutoOff, pins, usageErr := s.usageAndAutoOff()
 	if usageErr != nil {
 		result.DocumentError = usageErr.Error()
 		return result, nil
@@ -509,6 +511,7 @@ func (s *Store) List() (ListResult, error) {
 			Enabled:     found.Enabled,
 			Status:      found.Status,
 			Usage:       usage[found.Name],
+			Pins:        pins[found.Name],
 		}
 		if mark, ok := recordedAutoOff[found.Name]; ok {
 			row := mark

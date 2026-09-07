@@ -341,6 +341,16 @@ func (s *Store) Create(name, description, body string) error {
 
 // Update replaces an existing managed skill atomically.
 func (s *Store) Update(name, description, body string) error {
+	var err error
+	name, err = normalizeName(name)
+	if err != nil {
+		return err
+	}
+	if pinned, pinErr := s.pinned(name); pinErr != nil {
+		return pinErr
+	} else if pinned.KeepUnchanged {
+		return fmt.Errorf("skill %q is pinned unchanged, so it is not yours to edit: turn that off on the skill's own tab first", name)
+	}
 	name, data, err := prepareSkill(name, description, body)
 	if err != nil {
 		return err
@@ -381,6 +391,11 @@ func (s *Store) Delete(name string) error {
 	name, err := normalizeName(name)
 	if err != nil {
 		return err
+	}
+	if pinned, pinErr := s.pinned(name); pinErr != nil {
+		return pinErr
+	} else if pinned.KeepUnchanged {
+		return fmt.Errorf("skill %q is pinned unchanged, so it is not yours to delete: turn that off on the skill's own tab first", name)
 	}
 	unlock, err := s.lockName(name)
 	if err != nil {

@@ -1,6 +1,9 @@
 package skill
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Usage is what nocx knows about how a skill has been reached for. It lives
 // in skills.json beside digests and sources rather than in the skill's own
@@ -20,6 +23,18 @@ type AutoOff struct {
 	At          string `json:"at"`
 	SilentSince string `json:"silentSince"`
 	Days        int    `json:"days"`
+}
+
+type PinKind string
+
+const (
+	PinKeepEnabled   PinKind = "keepEnabled"
+	PinKeepUnchanged PinKind = "keepUnchanged"
+)
+
+type Pins struct {
+	KeepEnabled   bool `json:"keepEnabled,omitempty"`
+	KeepUnchanged bool `json:"keepUnchanged,omitempty"`
 }
 
 // usageFor answers what the document records about one skill. A skill with no
@@ -198,6 +213,9 @@ func (s *Store) applyAutoOff(found []discovered) (map[string]AutoOff, error) {
 		if candidate.Provenance == ProvenanceBuiltin {
 			continue
 		}
+		if d.Pins[candidate.Name].KeepEnabled {
+			continue
+		}
 		since, idle := idleBeyond(d.Usage[candidate.Name], days, now)
 		if !idle {
 			continue
@@ -216,12 +234,54 @@ func (s *Store) applyAutoOff(found []discovered) (map[string]AutoOff, error) {
 	return d.AutoOff, nil
 }
 
-func (s *Store) usageAndAutoOff() (map[string]Usage, map[string]AutoOff, error) {
+func (s *Store) usageAndAutoOff() (map[string]Usage, map[string]AutoOff, map[string]Pins, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
 	d, err := s.loadDocumentLocked()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return d.Usage, d.AutoOff, nil
+	return d.Usage, d.AutoOff, d.Pins, nil
+}
+
+func (s *Store) SetPin(name string, pin PinKind, on bool) error {
+	name, err := normalizeName(name)
+	if err != nil {
+		return err
+	}
+	if pin != PinKeepEnabled && pin != PinKeepUnchanged {
+		return fmt.Errorf("skill %q: unknown pin %q", name, pin)
+	}
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return err
+	}
+	row := d.Pins[name]
+	switch pin {
+	case PinKeepEnabled:
+		row.KeepEnabled = on
+	case PinKeepUnchanged:
+		row.KeepUnchanged = on
+	}
+	if row.KeepEnabled || row.KeepUnchanged {
+		if d.Pins == nil {
+			d.Pins = make(map[string]Pins, 1)
+		}
+		d.Pins[name] = row
+	} else {
+		delete(d.Pins, name)
+	}
+	return s.writeDocumentLocked(d)
+}
+
+func (s *Store) pinned(name string) (Pins, error) {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return Pins{}, err
+	}
+	return d.Pins[name], nil
 }

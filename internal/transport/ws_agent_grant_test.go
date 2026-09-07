@@ -34,6 +34,8 @@ func (fixedSkills) Read(string, string) (skill.Content, error) {
 	return skill.Content{}, errors.New("not used")
 }
 
+func (fixedSkills) RecordUse(string) {}
+
 func (fixedSkills) Create(string, string, string) error {
 	return errors.New("not used")
 }

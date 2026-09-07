@@ -28,6 +28,8 @@ func (s *skillsWriteLibrary) Read(string, string) (skill.Content, error) {
 	return skill.Content{}, errors.New("not used")
 }
 
+func (s *skillsWriteLibrary) RecordUse(string) {}
+
 func (s *skillsWriteLibrary) Create(name, description, body string) error {
 	s.calls = append(s.calls, "create:"+name+":"+description+":"+body)
 	return nil

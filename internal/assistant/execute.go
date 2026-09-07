@@ -553,6 +553,8 @@ func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json
 	if err != nil {
 		return "", fmt.Errorf("skills.read: %w", err)
 	}
+	// Record only after the read succeeded. A refused read is not a use.
+	seams.skills.RecordUse(p.Name)
 	result := skillReadResult{Name: p.Name, Path: got.Path, Content: string(got.Bytes)}
 	if got.Provenance != skill.ProvenanceBuiltin {
 		// The RESOLVED path, which is the file these bytes actually are —

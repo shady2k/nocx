@@ -1,5 +1,7 @@
 package skill
 
+import "time"
+
 // Usage is what nocx knows about how a skill has been reached for. It lives
 // in skills.json beside digests and sources rather than in the skill's own
 // frontmatter, because frontmatter contributes to the digest used to detect
@@ -39,4 +41,79 @@ func (s *Store) recordUsageForTest(name string, u Usage) error {
 	}
 	d.Usage[name] = u
 	return s.writeDocumentLocked(d)
+}
+
+type pendingUse struct {
+	count int
+	last  time.Time
+}
+
+// RecordUse notes that a skill was read. It returns nothing so a usage write
+// can never make the successful read fail.
+func (s *Store) RecordUse(name string) {
+	if s == nil || name == "" {
+		return
+	}
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.pendingUsage == nil {
+		s.pendingUsage = make(map[string]pendingUse, 1)
+	}
+	held := s.pendingUsage[name]
+	held.count++
+	held.last = s.now().UTC()
+	s.pendingUsage[name] = held
+}
+
+// FlushUsage folds what has accumulated into the document. A failed write
+// restores pending counts so the next flush can retry them.
+func (s *Store) FlushUsage() error {
+	if s == nil {
+		return nil
+	}
+	s.usageMu.Lock()
+	pending := s.pendingUsage
+	s.pendingUsage = nil
+	s.usageMu.Unlock()
+	if len(pending) == 0 {
+		return nil
+	}
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		s.restorePending(pending)
+		return err
+	}
+	if d.Usage == nil {
+		d.Usage = make(map[string]Usage, len(pending))
+	}
+	for name, held := range pending {
+		row := d.Usage[name]
+		row.Count += held.count
+		row.LastUsedAt = held.last.Format(time.RFC3339)
+		d.Usage[name] = row
+	}
+	if writeErr := s.writeDocumentLocked(d); writeErr != nil {
+		s.restorePending(pending)
+		return writeErr
+	}
+	return nil
+}
+
+func (s *Store) restorePending(pending map[string]pendingUse) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.pendingUsage == nil {
+		s.pendingUsage = pending
+		return
+	}
+	for name, held := range pending {
+		merged := s.pendingUsage[name]
+		merged.count += held.count
+		if held.last.After(merged.last) {
+			merged.last = held.last
+		}
+		s.pendingUsage[name] = merged
+	}
 }

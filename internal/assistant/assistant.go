@@ -225,6 +225,9 @@ type SkillLibrary interface {
 	Install(ctx context.Context, url string) (skill.InstallResult, error)
 	// Resolve enumerates a supported public repository without writing.
 	Resolve(ctx context.Context, address string) (*skill.Resolution, error)
+	// RecordUse notes successful skills.read calls. It returns nothing on
+	// purpose: usage telemetry must never make a read fail.
+	RecordUse(name string)
 }
 
 // AskParams is one ask's model call: the resolved endpoint's facts plus the

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -139,6 +140,10 @@ type Store struct {
 	resolver      *GitHubAdapter
 	githubAPIBase string
 	githubRawBase string
+
+	now          func() time.Time
+	usageMu      sync.Mutex
+	pendingUsage map[string]pendingUse
 }
 
 // StoreOption configures a Store at construction. It is variadic rather than
@@ -156,6 +161,11 @@ func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
 	return func(s *Store) {
 		s.fetcher = fetcher
 	}
+}
+
+// WithClock replaces the clock. Production passes nothing and gets time.Now.
+func WithClock(now func() time.Time) StoreOption {
+	return func(s *Store) { s.now = now }
 }
 
 // WithGitHubBases names the forge endpoints used by the GitHub resolver.

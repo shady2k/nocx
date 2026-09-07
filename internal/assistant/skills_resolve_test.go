@@ -16,6 +16,7 @@ type resolveTestLibrary struct {
 
 func (r *resolveTestLibrary) Index() []skill.Skill                       { return nil }
 func (r *resolveTestLibrary) Read(string, string) (skill.Content, error) { return skill.Content{}, nil }
+func (r *resolveTestLibrary) RecordUse(string)                           {}
 func (r *resolveTestLibrary) Create(string, string, string) error        { return nil }
 func (r *resolveTestLibrary) Update(string, string, string) error        { return nil }
 func (r *resolveTestLibrary) Delete(string) error                        { return nil }

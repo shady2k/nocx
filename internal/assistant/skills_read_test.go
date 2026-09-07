@@ -22,6 +22,8 @@ import (
 type skillsReadSource struct {
 	content    skill.Content
 	indexCalls int
+	recorded   []string
+	readErr    error
 }
 
 func (s *skillsReadSource) Index() []skill.Skill {
@@ -30,7 +32,14 @@ func (s *skillsReadSource) Index() []skill.Skill {
 }
 
 func (s *skillsReadSource) Read(string, string) (skill.Content, error) {
+	if s.readErr != nil {
+		return skill.Content{}, s.readErr
+	}
 	return s.content, nil
+}
+
+func (s *skillsReadSource) RecordUse(name string) {
+	s.recorded = append(s.recorded, name)
 }
 
 func (s *skillsReadSource) Create(string, string, string) error {

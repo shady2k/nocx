@@ -15,6 +15,13 @@ type Usage struct {
 	FirstSeenAt string `json:"firstSeenAt,omitempty"`
 }
 
+// AutoOff records that nocx switched a skill off for going unused.
+type AutoOff struct {
+	At          string `json:"at"`
+	SilentSince string `json:"silentSince"`
+	Days        int    `json:"days"`
+}
+
 // usageFor answers what the document records about one skill. A skill with no
 // row reads as a zero Usage rather than an error.
 func (s *Store) usageFor(name string) (Usage, error) {
@@ -147,4 +154,74 @@ func (s *Store) stampFirstSeen(names []string) error {
 		return nil
 	}
 	return s.writeDocumentLocked(d)
+}
+
+func silentSince(u Usage) string {
+	if u.LastUsedAt != "" {
+		return u.LastUsedAt
+	}
+	return u.FirstSeenAt
+}
+
+func idleBeyond(u Usage, days int, now time.Time) (string, bool) {
+	if days <= 0 {
+		return "", false
+	}
+	since := silentSince(u)
+	if since == "" {
+		return "", false
+	}
+	at, err := time.Parse(time.RFC3339, since)
+	if err != nil || now.Sub(at) <= time.Duration(days)*24*time.Hour {
+		return "", false
+	}
+	return since, true
+}
+
+func (s *Store) applyAutoOff(found []discovered) (map[string]AutoOff, error) {
+	days := 0
+	if s.idleDays != nil {
+		days = s.idleDays()
+	}
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UTC()
+	changed := false
+	for _, candidate := range found {
+		if _, already := d.AutoOff[candidate.Name]; already {
+			continue
+		}
+		if candidate.Provenance == ProvenanceBuiltin {
+			continue
+		}
+		since, idle := idleBeyond(d.Usage[candidate.Name], days, now)
+		if !idle {
+			continue
+		}
+		if d.AutoOff == nil {
+			d.AutoOff = make(map[string]AutoOff, 1)
+		}
+		d.AutoOff[candidate.Name] = AutoOff{At: now.Format(time.RFC3339), SilentSince: since, Days: days}
+		changed = true
+	}
+	if changed {
+		if err := s.writeDocumentLocked(d); err != nil {
+			return nil, err
+		}
+	}
+	return d.AutoOff, nil
+}
+
+func (s *Store) usageAndAutoOff() (map[string]Usage, map[string]AutoOff, error) {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return nil, nil, err
+	}
+	return d.Usage, d.AutoOff, nil
 }

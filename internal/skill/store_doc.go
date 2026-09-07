@@ -106,11 +106,12 @@ type document struct {
 	// rewritten for every skill on the machine the first time anything moved
 	// a default, and would turn "the person has never touched this" into a
 	// row that says they turned it off.
-	Disabled []string          `json:"disabled"`
-	Enabled  []string          `json:"enabled,omitempty"`
-	Digests  map[string]string `json:"digests,omitempty"`
-	Sources  map[string]Source `json:"sources,omitempty"`
-	Usage    map[string]Usage  `json:"usage,omitempty"`
+	Disabled []string           `json:"disabled"`
+	Enabled  []string           `json:"enabled,omitempty"`
+	Digests  map[string]string  `json:"digests,omitempty"`
+	AutoOff  map[string]AutoOff `json:"autoOff,omitempty"`
+	Sources  map[string]Source  `json:"sources,omitempty"`
+	Usage    map[string]Usage   `json:"usage,omitempty"`
 }
 
 // Source is what an install RESOLVED TO, keyed by skill name like Digests:
@@ -224,17 +225,10 @@ type ListedSkill struct {
 	Path        string     `json:"path"`
 	Enabled     bool       `json:"enabled"`
 	Status      Status     `json:"status"`
-	// Source is where these bytes came from, and it is a POINTER because the
-	// answer "nothing recorded" has to be tellable apart from the answer "an
-	// empty address": a skill somebody moved into the installed root by hand
-	// has no source row, and a row of two empty strings would put an empty
-	// line on the page claiming to say where it came from.
-	//
-	// Present only when the document records one, which — since install is
-	// the only writer — means only for an installed skill. It is not a second
-	// way to ask what a skill's provenance is, and cannot become one: the
-	// implication runs one way only, because installed WITHOUT a source is a
-	// state a person can create with `mv`.
+	Usage       Usage      `json:"usage"`
+	// AutoOff is present only when nocx switched this skill off.
+	AutoOff *AutoOff `json:"autoOff,omitempty"`
+	// Source is present only when the document records an installed source.
 	Source *Source `json:"source,omitempty"`
 }
 
@@ -289,8 +283,6 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 
 // loadSwitches hands discovery both of the document's departure lists in one
 // read. One call rather than two, because a second read is a second chance
-// for the two halves of one answer to come from two different versions of the
-// file.
 func (s *Store) loadSwitches() (switches, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
@@ -298,7 +290,11 @@ func (s *Store) loadSwitches() (switches, error) {
 	if err != nil {
 		return switches{}, err
 	}
-	return switches{off: nameSet(d.Disabled), on: nameSet(d.Enabled)}, nil
+	off := nameSet(d.Disabled)
+	for name := range d.AutoOff {
+		off[name] = struct{}{}
+	}
+	return switches{off: off, on: nameSet(d.Enabled)}, nil
 }
 
 func nameSet(names []string) map[string]struct{} {
@@ -486,14 +482,24 @@ func (s *Store) List() (ListResult, error) {
 	if stampErr := s.stampFirstSeen(names); stampErr != nil {
 		slog.Debug("skill: first-seen dates were not stamped", "error", stampErr)
 	}
-	// Read AFTER discovery and outside it, because discovery is the roots'
-	// answer and this is the document's: recordedSources takes docMu, which
-	// discoverDetailed's own disabled/digests callbacks take for themselves.
+	autoOff, autoErr := s.applyAutoOff(detailed)
+	if autoErr != nil {
+		slog.Debug("skill: idle skills were not evaluated", "error", autoErr)
+	}
+	usage, recordedAutoOff, usageErr := s.usageAndAutoOff()
+	if usageErr != nil {
+		result.DocumentError = usageErr.Error()
+		return result, nil
+	}
+	if autoErr == nil {
+		recordedAutoOff = autoOff
+	}
 	sources, err := s.recordedSources()
 	if err != nil {
 		result.DocumentError = err.Error()
 		return result, nil
 	}
+	// Read AFTER discovery and outside it, because discovery is the roots'
 	for _, found := range detailed {
 		listed := ListedSkill{
 			Name:        found.Name,
@@ -502,6 +508,12 @@ func (s *Store) List() (ListResult, error) {
 			Path:        filepath.Join(found.BaseDir, "SKILL.md"),
 			Enabled:     found.Enabled,
 			Status:      found.Status,
+			Usage:       usage[found.Name],
+		}
+		if mark, ok := recordedAutoOff[found.Name]; ok {
+			row := mark
+			listed.AutoOff = &row
+			listed.Enabled = false
 		}
 		// The provenance gate is the shadowing defence restated on the wire:
 		// a source row is content in a file anything able to write skills.json
@@ -575,6 +587,15 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 	d, err := s.loadDocumentLocked()
 	if err != nil {
 		return err
+	}
+	if enabled {
+		delete(d.AutoOff, name)
+		if d.Usage == nil {
+			d.Usage = make(map[string]Usage, 1)
+		}
+		row := d.Usage[name]
+		row.FirstSeenAt = s.now().UTC().Format(time.RFC3339)
+		d.Usage[name] = row
 	}
 	// Which list the switch is recorded in is settled by the ROOT, exactly as
 	// discovery settles which one it reads. A skill that arrives inert is

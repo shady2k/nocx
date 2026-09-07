@@ -67,8 +67,8 @@ steps for you.
 
 ## Code search
 
-`grep`, `glob` and reading the file are one way in; the `repowise` MCP tools are the
-other, and neither outranks the other. Use `grep` for _does this exist, and who calls
-it_, and `repowise` when the question is about history or risk. Read
+`grep`, `glob` and reading the file are the answer for _does this exist, and who calls
+it_ — measured against `repowise`, not assumed (ADR-0056). The `repowise` MCP tools are
+for the layer underneath: history, risk and co-change. Read
 [AGENTS.md](AGENTS.md#code-search) first: it says what `repowise` may and may not be
-believed about.
+believed about, and why its semantic half needs `REPOWISE_EMBEDDING_DIMS`.

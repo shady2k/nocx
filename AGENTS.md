@@ -96,10 +96,25 @@ deja fix "<error text>"                    # what was run after this error befor
 deja how "<what>"                          # commands this machine actually ran
 ```
 
-**Nothing is written, so nothing conflicts.** Six workers in six worktrees produce six
-transcripts and one reader sees all of them. This is the whole reason it replaced a
-git-tracked playbook: a rule committed on a branch reaches only that branch, and by
-measurement it reached 3 worktrees out of 45.
+**The recall path writes nothing, so nothing conflicts.** Six workers in six worktrees
+produce six transcripts and one reader sees all of them. This is the whole reason it
+replaced a git-tracked playbook: a rule committed on a branch reaches only that branch, and
+by measurement it reached 3 worktrees out of 45.
+
+**Do not call `remember`.** deja does have a write path — `remember` is one of the six MCP
+tools every wired agent gets, alongside recall, context, blame, fix and how, and it appends
+to `~/.local/share/deja/notes.jsonl`. Two reasons it is not ours to use. That file is under
+`$HOME`: it does not travel with the clone, so a "durable decision" written there is
+invisible to a colleague and to CI — the same invisibility that made the personal cass
+playbook worthless, arriving by a different road. And nobody reviews it, while every line
+of this file was read by somebody before it landed. A rule worth keeping is worth a pull
+request; write it here.
+
+`deja promote <id> --state accepted|rejected|superseded|stale` is the exception worth
+knowing about, because it is curation rather than authorship: it marks a record deja
+already has. Upstream #2976 is open — recall can hand back a session's older fact after the
+same session reversed it — and `superseded` is the lever against exactly that. Reach for it
+when you catch recall quoting something the tree has since disproved.
 
 **`--all`, never `--auto`.** `deja install --all` wires the MCP server for every agent it
 finds and writes no hook at all; `--auto` is the same plus session-start and

@@ -294,6 +294,10 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
 	}
+	dispatcher, err = assistant.NewAttemptRecordingDispatcher(registry, dispatcher, attemptLedgerForTest(t))
+	if err != nil {
+		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
+	}
 	ep, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      t.TempDir(),
 		Peers:    workerAuthEndpointPeers{},

@@ -481,6 +481,10 @@ func newHappyStand(t *testing.T) *happyStand {
 	if err != nil {
 		t.Fatalf("new worker dispatcher: %v", err)
 	}
+	dispatcher, err = assistant.NewAttemptRecordingDispatcher(registry, dispatcher, db.Ledger())
+	if err != nil {
+		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
+	}
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      filepath.Join(t.TempDir(), "runtime"),
 		Peers:    coordsock.SystemPeerCredentials{},

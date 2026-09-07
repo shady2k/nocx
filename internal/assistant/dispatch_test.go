@@ -149,3 +149,77 @@ func TestToolDispatcher_ReachesEveryWorkerExecutor(t *testing.T) {
 		})
 	}
 }
+
+type refusingToolDispatcher struct {
+	err error
+}
+
+func (d refusingToolDispatcher) Dispatch(ToolInvocation) (string, error) {
+	return "", d.err
+}
+
+func (d refusingToolDispatcher) Catalogue(content.Grant) []agenttools.Tool {
+	return nil
+}
+
+func TestAttemptRecordingDispatcherRecordsRefusedDispatch(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	ledger := &fakeLedger{}
+	dispatcher, err := NewAttemptRecordingDispatcher(
+		reg,
+		refusingToolDispatcher{err: ErrUnreachableMethod},
+		ledger,
+	)
+	if err != nil {
+		t.Fatalf("new attempt-recording dispatcher: %v", err)
+	}
+
+	invocation := workerInvocationForTest(
+		"workers.holdings",
+		workerGrantForTest(),
+		`{}`,
+	)
+	invocation.RunContext.RunID = ""
+	_, err = dispatcher.Dispatch(invocation)
+	if !errors.Is(err, ErrUnreachableMethod) {
+		t.Fatalf("dispatch error = %v, want ErrUnreachableMethod", err)
+	}
+	if got := ledger.started(); got != 1 {
+		t.Fatalf("started attempts = %d, want 1 for the refused call", got)
+	}
+	submissions := ledger.recordedSubmissions()
+	if len(submissions) != 1 {
+		t.Fatalf("submissions = %+v, want one attempt entry", submissions)
+	}
+	var payload struct {
+		Tool   string         `json:"tool"`
+		Effect content.Effect `json:"effect"`
+		RunID  string         `json:"runId"`
+	}
+	if err := json.Unmarshal([]byte(submissions[0].payload), &payload); err != nil {
+		t.Fatalf("attempt payload = %q: %v", submissions[0].payload, err)
+	}
+	if payload.Tool != "workers.holdings" || payload.Effect != content.EffectObserve || payload.RunID != "" {
+		t.Fatalf("attempt payload = %+v, want holdings/observe with no run id", payload)
+	}
+
+	calls := ledger.calls()
+	want := []string{
+		"ensure-env",
+		"observe",
+		"submit:workers.holdings",
+		"start:entry-workers.holdings",
+		"finish:failure",
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("ledger calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("ledger call %d = %q, want %q; all calls = %v", i, calls[i], want[i], calls)
+		}
+	}
+}

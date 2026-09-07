@@ -1120,15 +1120,8 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
-	envID := content.EnvironmentIDFor(content.EnvLocal, "")
-	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
-		return 0, "", fmt.Errorf("environment: %w", err)
-	}
-	if _, err := m.ledger.RecordObservation(ctx, content.Observation{
-		EnvironmentID: envID,
-		Criticality:   content.CriticalityRoutine,
-	}); err != nil {
-		return 0, "", fmt.Errorf("observation: %w", err)
+	if err := prepareAttemptEnvironment(ctx, m.ledger); err != nil {
+		return 0, "", err
 	}
 
 	entryID := ""
@@ -1140,61 +1133,11 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		}
 	}
 	if entryID == "" {
-		payloadBody := map[string]any{
-			"tool":   decl.Name,
-			"effect": decl.Effect,
-			"args":   json.RawMessage(rawArgs),
-		}
-		// The run id joins the attempt to its run (nocx-dw3.4). Where the
-		// grant permits the call and nobody is asked, the ledger is the
-		// ONLY account of what happened — so the attempt carries the run it
-		// happened in, and a reader joins question, run, attempt and answer
-		// into one thread exactly as the approval block does for an
-		// escalated call. Empty (the un-bound caller shape, AskParams) is
-		// recorded as no link rather than a misleading empty one.
-		if m.runID != "" {
-			payloadBody["runId"] = m.runID
-		}
-		// The complete resolved resource list is stored with the attempt.
-		// Keep the singular first-resource field for existing readers.
-		if len(resources) > 0 {
-			payloadBody["resources"] = resources
-			payloadBody["resource"] = matchedResource(resources)
-		}
-		// Whether this call's work becomes a top-level BLOCK — the
-		// declaration's own fact (nocx-9sqii). Stored with the attempt so a
-		// restored turn knows the block is the account of this call and
-		// draws no line beside it; the reader must not match the tool name,
-		// which would be a second copy of the tool table.
-		if decl.OpensBlock {
-			payloadBody["opensBlock"] = true
-		}
-		// The classifier block (bead nocx-kpy23, criterion 6): when the
-		// classifier was consulted and cleared the call, the attempt's own
-		// record carries the verdict and the model, so the audit shows
-		// which model saw the call and said clear. Without a classifier the
-		// payload is tool, effect, args and the run id — nothing else.
-		if classifierFact != nil {
-			payloadBody["classifier"] = classifierFact
-		}
-		payload, err := json.Marshal(payloadBody)
+		var err error
+		entryID, err = submitAttemptEntry(ctx, m.ledger, m.grant, decl, decl.Effect, m.runID, rawArgs, resources, classifierFact)
 		if err != nil {
-			return 0, "", fmt.Errorf("payload: %w", err)
+			return 0, "", err
 		}
-		res, err := m.ledger.Submit(ctx, content.SubmitEntry{
-			ID:            uuid.NewString(),
-			Client:        "agent",
-			EnvironmentID: envID,
-			Cwd:           "/",
-			Kind:          content.EntryAction,
-			Source:        content.SourceAssistant,
-			Intent:        decl.Name,
-			Payload:       string(payload),
-		})
-		if err != nil {
-			return 0, "", fmt.Errorf("submit: %w", err)
-		}
-		entryID = res.ID
 		// A new intent is a new cause of this turn. An APPROVED call is
 		// NOT: it runs as a subsequent attempt of the proposal's entry,
 		// which took its position when the person was asked — joining it
@@ -1203,14 +1146,9 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		// and braces rather than the only guard.)
 		m.noteCause(ctx, entryID)
 	}
-	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
-		EntryID:  entryID,
-		Attempt:  attempt,
-		Executor: new("agent"),
-		Grant:    &m.grant,
-	})
+	execID, err := startAttemptExecution(ctx, m.ledger, m.grant, entryID, attempt)
 	if err != nil {
-		return 0, "", fmt.Errorf("start execution: %w", err)
+		return 0, "", err
 	}
 	return execID, entryID, nil
 }

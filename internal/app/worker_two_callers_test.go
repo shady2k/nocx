@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -253,10 +254,32 @@ func newGroupTwoCallersRecordInSession(sessionID string) (*workers.Registrar, *w
 	return record, closer
 }
 
+func attemptLedgerForTest(t *testing.T) assistant.AttemptLedger {
+	t.Helper()
+	key := make([]byte, 32)
+	db, err := content.Open(context.Background(), content.Config{
+		Path: filepath.Join(t.TempDir(), "content.db"),
+		Key:  key,
+		Budget: content.Budget{
+			RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8,
+		},
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db.Ledger()
+}
+
 // publishGroupEndpoint starts the shipped endpoint over the shipped authorizer
 // with the real kernel-stamped peer credentials, and returns its socket path.
 func publishGroupEndpoint(t *testing.T, reg *session.Reg, grid workerAuthEnrolments, record *workers.Registrar, dispatch assistant.ToolDispatcher) string {
 	t.Helper()
+	dispatch, err := assistant.NewAttemptRecordingDispatcher(toolRegistry(t), dispatch, attemptLedgerForTest(t))
+	if err != nil {
+		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
+	}
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      t.TempDir(),
 		Peers:    coordsock.SystemPeerCredentials{},

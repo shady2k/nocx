@@ -81,6 +81,15 @@ func (s *Store) Install(ctx context.Context, rawURL string) (InstallResult, erro
 	// the server rather than trusting the dialog to have shown anything.
 	source, read := s.approvedAcquisition(rawURL)
 	if !read {
+		// TWO CAUSES, AND THEY ARE NOT THE SAME SENTENCE. An address nobody
+		// read is a pipeline the caller skipped; an address that WAS read and
+		// has since been displaced is nocx's own bound, and telling a person
+		// they never read what they just read is the defect nocx-aesm2 names.
+		if s.ReadButDisplaced(rawURL) {
+			return InstallResult{}, errors.New(
+				"that document was read, but its preview has since been displaced by newer ones:" +
+					displacedNextStep)
+		}
 		return InstallResult{}, errors.New(
 			"nothing has been read from that address in this session, so there is nothing to install: " +
 				"read the document first, then install what you read")

@@ -16,9 +16,13 @@ func (s *Store) Resolve(ctx context.Context, address string) (*Resolution, error
 	if s.resolver == nil {
 		return nil, nil
 	}
-	// A new attempt replaces the old one even when the new attempt is refused.
-	// Otherwise a failed resolution could leave an earlier approval spendable.
-	s.clearPreview()
+	// A REFUSED ATTEMPT NO LONGER REVOKES ANYBODY. It had to while there was
+	// one slot: a failed resolution that left the previous one in place left
+	// an earlier approval spendable through a slot the caller believed it had
+	// taken. Now every resolution is keyed by its own handle, so a failure
+	// simply records nothing and can leave nothing behind — and revoking a
+	// DIFFERENT caller's live approval because this one failed would be the
+	// bug nocx-aesm2 is about, from the other end.
 	plan, err := s.resolver.Resolve(ctx, address)
 	if err != nil || plan == nil {
 		return nil, err
@@ -54,6 +58,9 @@ func (s *Store) PreviewResolved(ctx context.Context, handle string, paths []stri
 	}
 	plan, _, ok := s.approvedResolution(handle, paths)
 	if !ok {
+		if s.ResolutionDisplaced(handle) {
+			return nil, errors.New("that resolution was displaced by newer ones:" + displacedNextStep)
+		}
 		return nil, errors.New("that resolution handle is no longer valid: resolve the repository again before reading a skill")
 	}
 	if s.resolver == nil || s.fetcher == nil {
@@ -117,6 +124,9 @@ func (s *Store) InstallResolved(ctx context.Context, handle string, paths []stri
 	}
 	plan, _, ok := s.approvedResolution(handle, paths)
 	if !ok {
+		if s.ResolutionDisplaced(handle) {
+			return nil, errors.New("that resolution was displaced by newer ones:" + displacedNextStep)
+		}
 		return nil, errors.New("that resolution handle is no longer valid: resolve the repository again before installing a skill")
 	}
 	digests, approved := s.approvedResolvedDigests(handle, paths)
@@ -157,10 +167,4 @@ func duplicatePath(paths []string) string {
 		seen[candidatePath] = struct{}{}
 	}
 	return ""
-}
-
-func (s *Store) clearPreview() {
-	s.previewMu.Lock()
-	defer s.previewMu.Unlock()
-	s.previewed = nil
 }

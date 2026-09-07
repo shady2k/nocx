@@ -93,20 +93,41 @@ type PreviewResult struct {
 	Digest string `json:"-"`
 }
 
-// previewedDocument is what Preview last showed a person, kept on the SERVER
-// so Install has something to compare a second fetch against (install.go).
+// previewedDocument is what a Preview showed a person, kept on the SERVER so
+// Install has something to compare a second fetch against (install.go).
 //
-// It is ONE slot rather than a map, because the surface it serves holds one
-// source at a time (design §9: "One source is held, visibly, and can be taken
-// back"). A single slot needs no eviction policy, no expiry and no bound, and
-// there is never any question about which preview an install refers to. The
-// cost is that previewing a second address forgets the first, and the refusal
-// that produces — read it again — is recoverable in one click.
+// IT USED TO BE ONE SLOT, and that was right while Settings was the only
+// acquisition surface: design §9 holds one source at a time, visibly, and it
+// can be taken back, so a single slot needed no eviction policy, no expiry and
+// no bound, and there was no question about which preview an install referred
+// to. skills.install (nocx-ojfuc.1) made the assistant a second caller, and
+// removing the paste box (nocx-ojfuc.4) did not remove the class: two
+// concurrent runs are still two callers. Two previews of different addresses
+// clobbered each other and the loser's install refused with "nothing has been
+// read from that address" — about an address the person had read (nocx-aesm2).
+//
+// SO IT IS A KEYED MAP, AND THE MAP OWES WHAT THE SLOT DID NOT.
+//
+//   - THE KEY is what the installing caller actually holds: a direct URL
+//     install has only its address, a resolved install has only its handle.
+//     They cannot collide because they are prefixed apart.
+//   - THE BOUND is maxRememberedPreviews entries. Every entry is a digest and
+//     a few strings, so the bound is about not growing without limit rather
+//     than about bytes.
+//   - THE EVICTION is oldest-first by preview order, never newest-first: the
+//     preview a person is most likely to be answering right now is the last
+//     one shown.
+//   - AND AN EVICTION IS REMEMBERED, by key, for exactly as long as the ring
+//     below holds it. That is not bookkeeping for its own sake — it is the
+//     only way the refusal can say "you read this and nocx has since let it
+//     go" instead of "you never read this", which is the defect this replaces.
 //
 // It holds the DIGEST and not the bytes: nothing here ever needs to serve the
 // document a second time, only to answer whether the document that comes back
 // is the one the person read.
 type previewedDocument struct {
+	key        string
+	seq        uint64
 	url        string
 	digest     string
 	resolution *githubResolutionPlan
@@ -114,6 +135,100 @@ type previewedDocument struct {
 	activePath string
 	digests    map[string]string
 }
+
+// maxRememberedPreviews bounds both the live previews and the ring of keys
+// recently evicted from them. One preview belongs to one unanswered approval,
+// and unanswered approvals are a handful at the very most; the number is
+// generous rather than tuned, because being too small costs a person a
+// re-read and being too large costs a few hundred bytes.
+const maxRememberedPreviews = 16
+
+func previewKeyForURL(rawURL string) string { return "url:" + rawURL }
+
+func previewKeyForHandle(handle string) string { return "handle:" + handle }
+
+// putPreview stores one entry under its key, evicting the oldest if the bound
+// is reached. Replacing an existing key is not an eviction: the same address
+// previewed twice is one preview, freshened.
+func (s *Store) putPreview(entry *previewedDocument) {
+	if s.previews == nil {
+		s.previews = make(map[string]*previewedDocument, maxRememberedPreviews)
+	}
+	if _, replacing := s.previews[entry.key]; !replacing && len(s.previews) >= maxRememberedPreviews {
+		oldest := ""
+		for key, held := range s.previews {
+			if oldest == "" || held.seq < s.previews[oldest].seq {
+				oldest = key
+			}
+		}
+		delete(s.previews, oldest)
+		s.rememberEviction(oldest)
+	}
+	s.previewSeq++
+	entry.seq = s.previewSeq
+	s.previews[entry.key] = entry
+}
+
+func (s *Store) rememberEviction(key string) {
+	s.evicted = append(s.evicted, key)
+	if len(s.evicted) > maxRememberedPreviews {
+		s.evicted = append(s.evicted[:0], s.evicted[len(s.evicted)-maxRememberedPreviews:]...)
+	}
+}
+
+func (s *Store) wasEvicted(key string) bool {
+	for _, held := range s.evicted {
+		if held == key {
+			return true
+		}
+	}
+	return false
+}
+
+// previewFor finds the entry an install of rawURL refers to. A direct install
+// is keyed by its address; a RESOLVED install reaches here too, because
+// InstallResolved arms its chosen candidate's address on the resolution entry
+// (armResolvedPath) and then walks the same write path. The scan is over a map
+// bounded at maxRememberedPreviews.
+func (s *Store) previewFor(rawURL string) *previewedDocument {
+	if entry, ok := s.previews[previewKeyForURL(rawURL)]; ok && entry.url == rawURL {
+		return entry
+	}
+	for _, entry := range s.previews {
+		if entry.resolution != nil && entry.url == rawURL {
+			return entry
+		}
+	}
+	return nil
+}
+
+// ReadButDisplaced reports that an address WAS previewed and its record has
+// since been evicted by newer ones. The refusal a person sees is built from
+// it, so that "nothing has been read from that address" is never printed for
+// an address that was read (nocx-aesm2).
+func (s *Store) ReadButDisplaced(rawURL string) bool {
+	if s == nil {
+		return false
+	}
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	return s.wasEvicted(previewKeyForURL(rawURL))
+}
+
+// ResolutionDisplaced is ReadButDisplaced for the resolved half: a handle
+// whose plan has been evicted was resolved, it is not unknown.
+func (s *Store) ResolutionDisplaced(handle string) bool {
+	if s == nil {
+		return false
+	}
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	return s.wasEvicted(previewKeyForHandle(handle))
+}
+
+// displacedNextStep is what both refusals owe their reader once the cause is
+// known. One constant, for the reason nextStepForAPage is one constant.
+const displacedNextStep = " read it again, then install what you read"
 
 // rememberPreview records what was just shown. Only a successful preview is
 // remembered: a document that was refused was never shown, so there is
@@ -127,7 +242,7 @@ type previewedDocument struct {
 func (s *Store) rememberPreview(rawURL, digest string) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	s.previewed = &previewedDocument{url: rawURL, digest: digest}
+	s.putPreview(&previewedDocument{key: previewKeyForURL(rawURL), url: rawURL, digest: digest})
 }
 
 // rememberResolution replaces the one approval slot with a resolution. The
@@ -137,21 +252,22 @@ func (s *Store) rememberResolution(plan *githubResolutionPlan, handle string) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
 	plan.Resolution.Handle = handle
-	s.previewed = &previewedDocument{resolution: plan}
+	s.putPreview(&previewedDocument{key: previewKeyForHandle(handle), resolution: plan})
 }
 
 func (s *Store) approvedAcquisition(rawURL string) (acquisition, bool) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.url != rawURL {
+	entry := s.previewFor(rawURL)
+	if entry == nil {
 		return acquisition{}, false
 	}
-	from := acquisition{url: rawURL, digest: s.previewed.digest}
-	if s.previewed.resolution != nil {
-		from.entryURL = s.previewed.resolution.address
-		from.path = s.previewed.activePath
-		from.ref = s.previewed.resolution.Ref
-		from.commit = s.previewed.resolution.Commit
+	from := acquisition{url: rawURL, digest: entry.digest}
+	if entry.resolution != nil {
+		from.entryURL = entry.resolution.address
+		from.path = entry.activePath
+		from.ref = entry.resolution.Ref
+		from.commit = entry.resolution.Commit
 	}
 	return from, true
 }
@@ -159,28 +275,30 @@ func (s *Store) approvedAcquisition(rawURL string) (acquisition, bool) {
 func (s *Store) approvedResolution(handle string, paths []string) (*githubResolutionPlan, string, bool) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+	entry := s.previews[previewKeyForHandle(handle)]
+	if entry == nil || entry.resolution == nil {
 		return nil, "", false
 	}
-	if len(s.previewed.selected) > 0 && !samePaths(s.previewed.selected, paths) {
+	if len(entry.selected) > 0 && !samePaths(entry.selected, paths) {
 		return nil, "", false
 	}
-	return s.previewed.resolution, s.previewed.digest, true
+	return entry.resolution, entry.digest, true
 }
 
 func (s *Store) rememberResolvedDigests(handle string, paths []string, digests map[string]string) bool {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+	entry := s.previews[previewKeyForHandle(handle)]
+	if entry == nil || entry.resolution == nil {
 		return false
 	}
-	s.previewed.selected = append([]string(nil), paths...)
-	s.previewed.activePath = ""
-	s.previewed.url = ""
-	s.previewed.digest = ""
-	s.previewed.digests = make(map[string]string, len(digests))
+	entry.selected = append([]string(nil), paths...)
+	entry.activePath = ""
+	entry.url = ""
+	entry.digest = ""
+	entry.digests = make(map[string]string, len(digests))
 	for path, digest := range digests {
-		s.previewed.digests[path] = digest
+		entry.digests[path] = digest
 	}
 	return true
 }
@@ -188,15 +306,16 @@ func (s *Store) rememberResolvedDigests(handle string, paths []string, digests m
 func (s *Store) approvedResolvedDigests(handle string, paths []string) (map[string]string, bool) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle || !samePaths(s.previewed.selected, paths) {
+	entry := s.previews[previewKeyForHandle(handle)]
+	if entry == nil || entry.resolution == nil || !samePaths(entry.selected, paths) {
 		return nil, false
 	}
-	if len(s.previewed.digests) != len(paths) {
+	if len(entry.digests) != len(paths) {
 		return nil, false
 	}
 	digests := make(map[string]string, len(paths))
 	for _, path := range paths {
-		digest := s.previewed.digests[path]
+		digest := entry.digests[path]
 		if digest == "" {
 			return nil, false
 		}
@@ -208,12 +327,13 @@ func (s *Store) approvedResolvedDigests(handle string, paths []string) (map[stri
 func (s *Store) armResolvedPath(handle, activePath, rawURL, digest string) bool {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.resolution == nil || s.previewed.resolution.Handle != handle {
+	entry := s.previews[previewKeyForHandle(handle)]
+	if entry == nil || entry.resolution == nil {
 		return false
 	}
-	s.previewed.activePath = activePath
-	s.previewed.url = rawURL
-	s.previewed.digest = digest
+	entry.activePath = activePath
+	entry.url = rawURL
+	entry.digest = digest
 	return true
 }
 
@@ -223,23 +343,24 @@ func (s *Store) armResolvedPath(handle, activePath, rawURL, digest string) bool 
 func (s *Store) forgetPreview(rawURL string) {
 	s.previewMu.Lock()
 	defer s.previewMu.Unlock()
-	if s.previewed == nil || s.previewed.url != rawURL {
+	entry := s.previewFor(rawURL)
+	if entry == nil {
 		return
 	}
-	if s.previewed.resolution != nil && len(s.previewed.selected) > 1 {
-		remaining := s.previewed.selected[:0]
-		for _, path := range s.previewed.selected {
-			if path != s.previewed.activePath {
+	if entry.resolution != nil && len(entry.selected) > 1 {
+		remaining := entry.selected[:0]
+		for _, path := range entry.selected {
+			if path != entry.activePath {
 				remaining = append(remaining, path)
 			}
 		}
-		s.previewed.selected = append([]string(nil), remaining...)
-		s.previewed.activePath = ""
-		s.previewed.url = ""
-		s.previewed.digest = ""
+		entry.selected = append([]string(nil), remaining...)
+		entry.activePath = ""
+		entry.url = ""
+		entry.digest = ""
 		return
 	}
-	s.previewed = nil
+	delete(s.previews, entry.key)
 }
 
 func samePaths(left, right []string) bool {

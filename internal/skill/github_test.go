@@ -190,7 +190,16 @@ func TestStore_UnsupportedResolutionFallsBackWithoutError(t *testing.T) {
 	}
 }
 
-func TestStore_ResolutionHandleIsReplacedAndSpentByResolvedInstall(t *testing.T) {
+// A SECOND RESOLUTION NO LONGER REVOKES THE FIRST (nocx-aesm2). This test
+// asserted the single slot: resolving twice made the first handle "no longer
+// valid", which was a property of there being one slot rather than anything a
+// person wanted. Two runs resolving at once is the ordinary case now that the
+// assistant is a caller, and the loser being told its handle is invalid is the
+// same defect as an install being told nothing was read. What is unchanged and
+// still asserted is the part that was never about the slot: nothing installs
+// that has not been read, and an approval is spent by the install it
+// authorised.
+func TestStore_EachResolutionIsReadAndSpentOnItsOwn(t *testing.T) {
 	adapter := newFakeGitHubAdapter(nil)
 	fetcher := &resolverTextFetcher{}
 	adapter.fetcher = fetcher
@@ -211,11 +220,14 @@ func TestStore_ResolutionHandleIsReplacedAndSpentByResolvedInstall(t *testing.T)
 	if first.Handle == second.Handle {
 		t.Fatalf("handles = %q and %q, want replacement", first.Handle, second.Handle)
 	}
-	if _, installErr := store.InstallResolved(context.Background(), first.Handle, []string{"agent/SKILL.md"}); installErr == nil || !strings.Contains(installErr.Error(), "no longer valid") {
-		t.Fatalf("stale handle error = %v, want recoverable stale-handle refusal", installErr)
-	}
-	if _, installErr := store.InstallResolved(context.Background(), second.Handle, []string{"agent/SKILL.md"}); installErr == nil || !strings.Contains(installErr.Error(), "nothing has been read") {
-		t.Fatalf("unread resolution error = %v, want read-before-install refusal", installErr)
+	// NEITHER handle has been read yet, so both earn the same refusal — and
+	// the first earns it for not having been read, never for having been
+	// displaced by the second.
+	for _, handle := range []string{first.Handle, second.Handle} {
+		_, installErr := store.InstallResolved(context.Background(), handle, []string{"agent/SKILL.md"})
+		if installErr == nil || !strings.Contains(installErr.Error(), "nothing has been read") {
+			t.Fatalf("unread resolution %s error = %v, want read-before-install refusal", handle, installErr)
+		}
 	}
 	previews, err := store.PreviewResolved(context.Background(), second.Handle, []string{"agent/SKILL.md"})
 	if err != nil || len(previews) != 1 || previews[0].Body == "" || previews[0].URL != adapter.rawURL("acme/tools", "deadbeef", "agent/SKILL.md") {
@@ -230,6 +242,12 @@ func TestStore_ResolutionHandleIsReplacedAndSpentByResolvedInstall(t *testing.T)
 	}
 	if _, err := store.InstallResolved(context.Background(), second.Handle, []string{"agent/SKILL.md"}); err == nil || !strings.Contains(err.Error(), "no longer valid") {
 		t.Fatalf("spent handle error = %v, want handle-spent refusal", err)
+	}
+	// Spending the second did not spend the first: it is still readable, and
+	// would install were its skill name not already taken by what the second
+	// just wrote. This is the assertion the single slot could not carry.
+	if _, err := store.PreviewResolved(context.Background(), first.Handle, []string{"agent/SKILL.md"}); err != nil {
+		t.Fatalf("the first resolution stopped being readable when the second was spent: %v", err)
 	}
 }
 

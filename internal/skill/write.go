@@ -128,10 +128,14 @@ type Store struct {
 	docMu      sync.Mutex
 	docFailure error
 
-	// previewed is the one document or resolution last shown, which is the
-	// only thing Install compares its second fetch against (preview.go).
+	// previews are the documents and resolutions that have been shown and
+	// not yet spent — the only thing Install compares its second fetch
+	// against. Bounded, oldest-evicted, and an eviction is remembered by key
+	// so a refusal can tell "displaced" from "never read" (preview.go).
 	previewMu     sync.Mutex
-	previewed     *previewedDocument
+	previews      map[string]*previewedDocument
+	previewSeq    uint64
+	evicted       []string
 	resolver      *GitHubAdapter
 	githubAPIBase string
 	githubRawBase string

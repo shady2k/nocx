@@ -144,6 +144,16 @@ func installSkillFacts(preview *skill.PreviewResult) (ApprovalInstallSkill, bool
 	}, true
 }
 
+// InstallFactsForResolved builds the question for a resolved route. `source`
+// is where the route STARTED, and it is established by nocx rather than
+// asserted by the caller: routeSourceFromRun hands over the address of a
+// document THIS RUN fetched whose bytes name the pinned repository, or nothing
+// at all (nocx-89mi5's decision, nocx-b6stz).
+//
+// No source therefore means no note. The alternative — reporting a route with
+// one end missing, or defaulting `originsDiffer` to a value — would put a
+// claim in the one window where a guess costs most. Destination, ref and
+// commit are real either way and are carried either way.
 func InstallFactsForResolved(resolution *skill.Resolution, source string, paths []string, previews []skill.PreviewResult) *ApprovalInstall {
 	if resolution == nil || len(paths) != len(previews) || len(paths) == 0 {
 		return nil
@@ -157,20 +167,23 @@ func InstallFactsForResolved(resolution *skill.Resolution, source string, paths 
 		item.Path = paths[i]
 		skills = append(skills, item)
 	}
-	destination := resolution.Repository
-	destinationURL := destination
-	if !strings.HasPrefix(destinationURL, "http://") && !strings.HasPrefix(destinationURL, "https://") {
-		destinationURL = "https://" + destinationURL
+	facts := &ApprovalInstall{
+		Source:      source,
+		Destination: resolution.Repository,
+		Ref:         resolution.Ref,
+		Commit:      resolution.Commit,
+		Skills:      skills,
 	}
-	originsDiffer := routeOriginsDiffer(source, destinationURL)
-	return &ApprovalInstall{
-		Source:        source,
-		Destination:   destination,
-		OriginsDiffer: &originsDiffer,
-		Ref:           resolution.Ref,
-		Commit:        resolution.Commit,
-		Skills:        skills,
+	if source != "" {
+		// The repository's address comes from the package that owns what a
+		// repository address IS. Synthesising one here from the `owner/repo`
+		// slug produced `https://owner/repo`, whose host is the OWNER — so
+		// every comparison found two different origins, including the ones
+		// that were the same.
+		originsDiffer := routeOriginsDiffer(source, skill.RepositoryURL(resolution.Repository))
+		facts.OriginsDiffer = &originsDiffer
 	}
+	return facts
 }
 
 func routeOriginsDiffer(source, destination string) bool {
@@ -183,4 +196,21 @@ func routeOriginsDiffer(source, destination string) bool {
 		return true
 	}
 	return !strings.EqualFold(sourceURL.Host, destinationURL.Host)
+}
+
+// routeSourceFromRun answers where a resolved route started, from what nocx
+// itself holds: the earliest document fetch.url returned in THIS run whose
+// bytes name the pinned repository. It is deliberately not reachable from the
+// model's arguments — a caller that names an address it was never given
+// changes nothing here, because nothing here reads what the caller said.
+func routeSourceFromRun(snapshots *runSnapshots, runID, repository string) string {
+	if repository == "" {
+		return ""
+	}
+	for _, doc := range snapshots.documents(runID) {
+		if skill.DocumentNamesRepository(doc.Text, repository) {
+			return doc.URL
+		}
+	}
+	return ""
 }

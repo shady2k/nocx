@@ -323,11 +323,6 @@ type AttemptLedger interface {
 // design §6.2. A path is a few hundred bytes; anything larger is malformed.
 const maxArgsBytes = 64 << 10
 
-type resolvedSkillPlan struct {
-	resolution *skill.Resolution
-	source     string
-}
-
 // effectKernel is the pipeline for ONE run (one Ask): it holds the run's
 // grant, the assembled registry, the ledger seam, the approval store, the
 // egress vault comparison and the run's identity — everything the
@@ -389,8 +384,12 @@ type effectKernel struct {
 	// send back, and the two exist for the same reason: the description
 	// the model was shown has to be true, and the only way to keep a
 	// description true is to check it (nocx-d6gn4.8.1).
-	results     map[string]*jsonschema.Schema
-	resolutions map[string]resolvedSkillPlan
+	results map[string]*jsonschema.Schema
+	// resolutions are the plans skills.resolve produced in this run, by
+	// handle. They carry no source: where a route STARTED is established from
+	// the documents this run fetched, not from what the caller passed to
+	// skills.resolve (nocx-b6stz, routeSourceFromRun).
+	resolutions map[string]*skill.Resolution
 }
 
 // newEffectKernel builds the pipeline for one run. A schema that does
@@ -444,7 +443,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
 			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 		},
-		resolutions: make(map[string]resolvedSkillPlan),
+		resolutions: make(map[string]*skill.Resolution),
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
 		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
 		onCall:      onCall,
@@ -963,11 +962,10 @@ func (k *effectKernel) resolveSkillInstallFacts(ctx context.Context, decl agentt
 		if !ok || library == nil {
 			return nil, errors.New("resolved skill installs are unavailable: this backend has no resolver seam wired")
 		}
-		plan, ok := k.resolutions[handle]
-		if !ok || plan.resolution == nil {
+		resolution, ok := k.resolutions[handle]
+		if !ok || resolution == nil {
 			return nil, errors.New("that resolution was not produced by this run: resolve the repository again before installing")
 		}
-		resolution := plan.resolution
 		paths, err := resolvedInstallPaths(args["paths"])
 		if err != nil {
 			return nil, err
@@ -981,7 +979,8 @@ func (k *effectKernel) resolveSkillInstallFacts(ctx context.Context, decl agentt
 		if err != nil {
 			return nil, err
 		}
-		facts := InstallFactsForResolved(resolution, plan.source, paths, previews)
+		source := routeSourceFromRun(k.runSeams.snapshots, k.runSeams.runID, resolution.Repository)
+		facts := InstallFactsForResolved(resolution, source, paths, previews)
 		if facts == nil {
 			return nil, errors.New("resolved skill preview did not produce a complete approval payload")
 		}
@@ -1958,12 +1957,8 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	}
 	if runErr == nil && decl.Name == "skills.resolve" {
 		var resolution skill.Resolution
-		source, _ := args["url"].(string)
 		if err := json.Unmarshal([]byte(out), &resolution); err == nil && resolution.Handle != "" {
-			k.resolutions[resolution.Handle] = resolvedSkillPlan{
-				resolution: &resolution,
-				source:     source,
-			}
+			k.resolutions[resolution.Handle] = &resolution
 		}
 	}
 

@@ -329,11 +329,12 @@ func TestSkillsResolverHappyPathThroughProductionWiring(t *testing.T) {
 		CallID  string `json:"callId"`
 		ArgHash string `json:"argHash"`
 		Install *struct {
-			Source      string `json:"source"`
-			Destination string `json:"destination"`
-			Ref         string `json:"ref"`
-			Commit      string `json:"commit"`
-			Skills      []struct {
+			Source        string `json:"source"`
+			Destination   string `json:"destination"`
+			OriginsDiffer *bool  `json:"originsDiffer"`
+			Ref           string `json:"ref"`
+			Commit        string `json:"commit"`
+			Skills        []struct {
 				Path  string `json:"path"`
 				Name  string `json:"name"`
 				Files []struct {
@@ -383,8 +384,24 @@ func TestSkillsResolverHappyPathThroughProductionWiring(t *testing.T) {
 	if approval.Install == nil {
 		t.Fatal("approval omitted resolved install facts")
 	}
-	if approval.Install.Source != "https://github.com/"+resolverRepository || approval.Install.Destination != resolverRepository {
-		t.Fatalf("approval route = %+v", approval.Install)
+	// THE SIXTH FACT (nocx-b6stz). The source is where the route STARTED —
+	// the documentation page nocx itself fetched, whose bytes name the
+	// repository — and NOT the address the model handed to skills.resolve,
+	// which is the destination. The two are on different hosts, so the window
+	// can say so; while the source was read off the model's arguments the two
+	// were always equal and this note could never render.
+	if approval.Install.Source != pageURL {
+		t.Fatalf("approval source = %q, want the fetched documentation page %q", approval.Install.Source, pageURL)
+	}
+	if approval.Install.Source == "https://github.com/"+resolverRepository {
+		t.Fatal("approval source is the model's own skills.resolve argument: the origin must be established by nocx, not asserted by the model")
+	}
+	if approval.Install.Destination != resolverRepository {
+		t.Fatalf("approval destination = %q, want %q", approval.Install.Destination, resolverRepository)
+	}
+	if approval.Install.OriginsDiffer == nil || !*approval.Install.OriginsDiffer {
+		t.Fatalf("approval originsDiffer = %v, want true: the page is on %s and the repository is on github.com",
+			approval.Install.OriginsDiffer, pageURL)
 	}
 	if approval.Install.Ref != "main" || approval.Install.Commit != "commit-123" {
 		t.Fatalf("approval pin = ref %q commit %q", approval.Install.Ref, approval.Install.Commit)

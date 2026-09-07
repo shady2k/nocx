@@ -193,6 +193,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// 47: preserve the user's Claude flags and prompt before appending the
 		// variadic MCP configuration argument.
 		"47": "08c389e6b00ff30c110fc005d53bbc033ddc381cdb049ce30a7a7e08566ca31a",
+		// 48: identify private launch leases with pid and start time, preserve
+		// the user's signal traps, and prove interruption cleans the launch
+		// directory.
+		"48": "c648dc929b5a14e7e9d28a619f1873d35c7e47a1fdbf81654be66a037ec7a0be",
 	}
 
 	h := sha256.New()

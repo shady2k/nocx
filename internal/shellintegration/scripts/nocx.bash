@@ -638,7 +638,7 @@ __nocx_agent_n=0
 __nocx_agent_enrolled=0
 __nocx_agent_reason=
 __nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
-__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-}}"
+__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"
 __nocx_agent_launch_dir=
 __nocx_agent_launch_lease=
 __nocx_agent_old_exit=
@@ -788,15 +788,23 @@ __nocx_agent_report_send() {
 
 __nocx_agent_stage_reason=
 __nocx_agent_sweep() {
-    local __root="${TMPDIR:-/tmp}" __dir __pid
+    # The lease compares pid plus ps lstart, not pid alone. lstart has
+    # one-second granularity and busybox may not provide it: missing or
+    # changed data rejects staging or sweeps the directory, but same-second
+    # pid reuse is outside what this check can distinguish.
+    local __root="${TMPDIR:-/tmp}" __dir __pid __start
     for __dir in "$__root"/nocx-agent-launch.*; do
         [[ -d "$__dir" ]] || continue
         [[ "$__dir" == "$__nocx_agent_launch_dir" ]] && continue
         __pid=
+        __start=
         if [[ -r "$__dir/lease" ]]; then
             IFS= read -r __pid < "$__dir/lease" || __pid=
+            __start="$(command sed -n '2p' "$__dir/lease" 2>/dev/null)"
         fi
-        if [[ -z "$__pid" ]] || ! kill -0 "$__pid" 2>/dev/null; then
+        if [[ -z "$__pid" || -z "$__start" ]] ||
+            ! kill -0 "$__pid" 2>/dev/null ||
+            [[ "$(ps -o lstart= -p "$__pid" 2>/dev/null | tr -s ' ')" != "$__start" ]]; then
             command rm -rf -- "$__dir" 2>/dev/null || true
         fi
     done
@@ -811,7 +819,7 @@ __nocx_agent_cleanup() {
 }
 
 __nocx_agent_stage() {
-    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config
+    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config __start
     __nocx_agent_stage_reason=
     __nocx_agent_launch_dir=
     __nocx_agent_launch_lease=
@@ -837,7 +845,9 @@ __nocx_agent_stage() {
     __config="$__dir/mcp.json"
     if ! (
         umask 077
-        printf '%s\n' "$$" > "$__lease" || exit 1
+        __start="$(ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ')" || exit 1
+        [[ -n "$__start" ]] || exit 1
+        printf '%s\n%s\n' "$$" "$__start" > "$__lease" || exit 1
         __nocx_lc_json_escape "$__helper" || exit 1
         __helper_json="$__nocx_lc_json_escaped"
         __nocx_lc_json_escape "$__socket" || exit 1
@@ -860,8 +870,8 @@ __nocx_agent_capture_traps() {
     __nocx_agent_old_int="$(trap -p INT 2>/dev/null)" || __nocx_agent_old_int=
     __nocx_agent_old_term="$(trap -p TERM 2>/dev/null)" || __nocx_agent_old_term=
     __nocx_agent_old_hup="$(trap -p HUP 2>/dev/null)" || __nocx_agent_old_hup=
-    trap '__nocx_agent_cleanup; exit 130' INT
-    trap '__nocx_agent_cleanup; exit 143' TERM HUP
+    trap '__nocx_agent_cleanup' INT
+    trap '__nocx_agent_cleanup' TERM HUP
     trap '__nocx_agent_cleanup' EXIT
 }
 
@@ -906,18 +916,23 @@ __nocx_agent_run() {
         return $?
     fi
     if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
-        "${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-$__nocx_agent_tool_socket}}"; then
+        "${NOCX_TOOL_SOCKET:-$__nocx_agent_tool_socket}"; then
         __staged=1
         __nocx_agent_capture_traps
     else
         __stage_reason="$__nocx_agent_stage_reason"
-        builtin printf 'nocx: not orchestrated — %s\n' "$__stage_reason" >&2
+        builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
     # The drop is opened BEFORE the agent starts, or an agent that finished
     # quickly would have had nowhere to write. A drop that could not be opened
     # is not a refusal: the agent still runs, and the worker is simply one
     # that cannot declare — which the record already has a name for.
     __nocx_agent_report_open || true
+    # Claude's --mcp-config option is variadic: placing it before "$@" would
+    # swallow a user's positional prompt as another config path. Keep it last.
+    # If a future Claude subcommand rejects trailing flags, update this
+    # argv proof and feed the prompt through stdin instead of moving the flag
+    # ahead of user arguments.
     if (( __staged )); then
         NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
             --mcp-config "$__nocx_agent_launch_dir/mcp.json"

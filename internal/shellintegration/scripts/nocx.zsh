@@ -434,9 +434,12 @@ __nocx_agent_n=0
 __nocx_agent_enrolled=0
 __nocx_agent_reason=
 __nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
-__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-}}"
+__nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"
 __nocx_agent_launch_dir=
 __nocx_agent_launch_lease=
+__nocx_agent_old_int=
+__nocx_agent_old_term=
+__nocx_agent_old_hup=
 
 __nocx_lc_read_agent_answer() {
     local __rid="$1" __t=0 __reason
@@ -540,15 +543,23 @@ __nocx_agent_report_send() {
 
 __nocx_agent_stage_reason=
 __nocx_agent_sweep() {
-    local __root="${TMPDIR:-/tmp}" __dir __pid
+    # The lease compares pid plus ps lstart, not pid alone. lstart has
+    # one-second granularity and busybox may not provide it: missing or
+    # changed data rejects staging or sweeps the directory, but same-second
+    # pid reuse is outside what this check can distinguish.
+    local __root="${TMPDIR:-/tmp}" __dir __pid __start
     for __dir in "$__root"/nocx-agent-launch.*(N); do
         [[ -d "$__dir" ]] || continue
         [[ "$__dir" == "$__nocx_agent_launch_dir" ]] && continue
         __pid=
+        __start=
         if [[ -r "$__dir/lease" ]]; then
             IFS= read -r __pid < "$__dir/lease" || __pid=
+            __start="$(command sed -n '2p' "$__dir/lease" 2>/dev/null)"
         fi
-        if [[ -z "$__pid" ]] || ! kill -0 "$__pid" 2>/dev/null; then
+        if [[ -z "$__pid" || -z "$__start" ]] ||
+            ! kill -0 "$__pid" 2>/dev/null ||
+            [[ "$(ps -o lstart= -p "$__pid" 2>/dev/null | tr -s ' ')" != "$__start" ]]; then
             command rm -rf -- "$__dir" 2>/dev/null || true
         fi
     done
@@ -563,7 +574,7 @@ __nocx_agent_cleanup() {
 }
 
 __nocx_agent_stage() {
-    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config
+    local __helper="$1" __socket="$2" __root="${TMPDIR:-/tmp}" __dir __lease __config __start
     typeset -g __nocx_agent_stage_reason=
     typeset -g __nocx_agent_launch_dir=
     typeset -g __nocx_agent_launch_lease=
@@ -589,7 +600,9 @@ __nocx_agent_stage() {
     __config="$__dir/mcp.json"
     if ! (
         umask 077
-        printf '%s\n' "$$" > "$__lease" || exit 1
+        __start="$(ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ')" || exit 1
+        [[ -n "$__start" ]] || exit 1
+        printf '%s\n%s\n' "$$" "$__start" > "$__lease" || exit 1
         __nocx_lc_json_escape "$__helper" || exit 1
         __helper_json="$__nocx_lc_json_escaped"
         __nocx_lc_json_escape "$__socket" || exit 1
@@ -608,8 +621,33 @@ __nocx_agent_stage() {
 }
 
 
+__nocx_agent_capture_traps() {
+    local __line __saved="$__nocx_agent_launch_dir/traps"
+    __nocx_agent_old_int=
+    __nocx_agent_old_term=
+    __nocx_agent_old_hup=
+    trap > "$__saved"
+    while IFS= read -r __line; do
+        case "$__line" in
+            *" INT") __nocx_agent_old_int="$__line" ;;
+            *" TERM") __nocx_agent_old_term="$__line" ;;
+            *" HUP") __nocx_agent_old_hup="$__line" ;;
+        esac
+    done < "$__saved"
+    trap '__nocx_agent_cleanup' INT
+    trap '__nocx_agent_cleanup' TERM HUP
+    add-zsh-hook zshexit __nocx_agent_cleanup
+}
+
 __nocx_agent_restore_traps() {
-    trap - EXIT INT TERM HUP
+    trap - INT TERM HUP
+    [[ -z "$__nocx_agent_old_int" ]] || eval "$__nocx_agent_old_int"
+    [[ -z "$__nocx_agent_old_term" ]] || eval "$__nocx_agent_old_term"
+    [[ -z "$__nocx_agent_old_hup" ]] || eval "$__nocx_agent_old_hup"
+    add-zsh-hook -d zshexit __nocx_agent_cleanup 2>/dev/null
+    __nocx_agent_old_int=
+    __nocx_agent_old_term=
+    __nocx_agent_old_hup=
 }
 
 # Run agent $1 with the pane enrolled for its lifetime. The refusal is visible
@@ -637,18 +675,21 @@ __nocx_agent_run() {
         return $?
     fi
     if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
-        "${NOCX_TOOL_SOCKET:-${NOCX_AGENT_TOOL_SOCKET:-$__nocx_agent_tool_socket}}"; then
+        "${NOCX_TOOL_SOCKET:-$__nocx_agent_tool_socket}"; then
         __staged=1
-        trap '__nocx_agent_cleanup; exit 130' INT
-        trap '__nocx_agent_cleanup; exit 143' TERM HUP
-        trap '__nocx_agent_cleanup' EXIT
+        __nocx_agent_capture_traps
     else
         __stage_reason="$__nocx_agent_stage_reason"
-        builtin printf 'nocx: not orchestrated — %s\n' "$__stage_reason" >&2
+        builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
     # Opened before the agent starts, and the declaration goes before the
     # withdraw — inside the interval the enrolment opened.
     __nocx_agent_report_open || true
+    # Claude's --mcp-config option is variadic: placing it before "$@" would
+    # swallow a user's positional prompt as another config path. Keep it last.
+    # If a future Claude subcommand rejects trailing flags, update this
+    # argv proof and feed the prompt through stdin instead of moving the flag
+    # ahead of user arguments.
     if (( __staged )); then
         NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
             --mcp-config "$__nocx_agent_launch_dir/mcp.json"

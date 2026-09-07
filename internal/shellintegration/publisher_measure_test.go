@@ -130,8 +130,14 @@ import (
 // directory and file permissions, stale-lease sweeping and exit cleanup all
 // live in the shell launch bracket.
 //
+// 2026-09-07, eleventh move (nocx-rowqt.2.2): 82,244 -> 83,718, +1,474
+// across the two generation scripts. The review round strengthened lease
+// identity with pid start times and made zsh preserve signal traps without
+// firing its function-scoped EXIT trap during launch setup.
+//
 // The CALL counts did not move on this occasion — the bundle changed size, not
 // the filesystem work.
+//
 // The CALL counts did not move on any of the ten occasions —
 // 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
 // changed size, not the work. B = 256 KiB still holds, and the new maximum
@@ -143,7 +149,7 @@ import (
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 82244
+	measuredMaxPublishBytes = 83718
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -157,6 +158,28 @@ func runBashAgentEnrollmentRefusal(t *testing.T, configure func(*nestedKernel)) 
 	return out
 }
 
+func TestBashAgentStagingFailureUsesDistinctWording(t *testing.T) {
+	refusal := runBashAgentEnrollmentRefusal(t, func(k *nestedKernel) {
+		k.refuseEnrolment = true
+		k.enrolReason = "enrolment was refused"
+	})
+	k := newNestedKernel(t)
+	s := startNestedBashParent(t, k, "claude", agentFallbackBody)
+	if _, err := s.ptmx.Write([]byte("unset NOCX_TOOL_SOCKET; export NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude\n")); err != nil {
+		t.Fatalf("type claude: %v", err)
+	}
+	waitUntil(t, "the staging-failure fallback", func() bool {
+		return strings.Contains(s.output(), "AGENT-RAN")
+	})
+	staging := s.output()
+	if !strings.Contains(staging, "nocx: tool surface unavailable — nocx tool socket path is not configured") {
+		t.Fatalf("staging failure was not identified as a tool-surface failure: %q", staging)
+	}
+	if strings.Contains(staging, "nocx: not orchestrated") || strings.Contains(refusal, "tool surface unavailable") {
+		t.Fatalf("enrolment refusal and staging failure wording overlap: refusal=%q staging=%q", refusal, staging)
+	}
+}
+
 func TestBashAgentMalformedEnrollmentFallsBackWithoutStaging(t *testing.T) {
 	out := runBashAgentEnrollmentRefusal(t, func(k *nestedKernel) {
 		k.agentMalformed = true
@@ -178,7 +201,7 @@ func TestBashAgentTimedOutEnrollmentFallsBackWithoutStaging(t *testing.T) {
 func TestBashAgentKeepsLiveLaunchLease(t *testing.T) {
 	k := newNestedKernel(t)
 	s := startNestedBashParent(t, k, "claude", inspectingAgentBody)
-	if _, err := s.ptmx.Write([]byte("mkdir -p \"$TMPDIR/nocx-agent-launch.stale\"; printf '%s\\n' \"$$\" > \"$TMPDIR/nocx-agent-launch.stale/lease\"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude\n")); err != nil {
+	if _, err := s.ptmx.Write([]byte("mkdir -p \"$TMPDIR/nocx-agent-launch.stale\"; printf '%s\\n' \"$$\" > \"$TMPDIR/nocx-agent-launch.stale/lease\"; ps -o lstart= -p \"$$\" | tr -s ' ' >> \"$TMPDIR/nocx-agent-launch.stale/lease\"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude\n")); err != nil {
 		t.Fatalf("type claude: %v", err)
 	}
 	waitUntil(t, "the live launch lease", func() bool {
@@ -235,4 +258,74 @@ func TestStage1CarriesOnlyNonSecretAgentPaths(t *testing.T) {
 			t.Fatalf("stage-1 carried forbidden authority %q", forbidden)
 		}
 	}
+}
+
+func TestBashAndZshAgentRestoreUserTrapByteForByte(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start nestedParentStarter
+	}{
+		{name: "bash", start: startNestedBashParent},
+		{name: "zsh", start: startNestedZshParent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := newNestedKernel(t)
+			s := tc.start(t, k, "claude", fakeAgentBody)
+			cmd := `trap 'echo USER_INT_TRAP' INT; trap | grep ' INT$' > "$TMPDIR/trap.before"; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude; trap | grep ' INT$' > "$TMPDIR/trap.after"; cmp "$TMPDIR/trap.before" "$TMPDIR/trap.after" && echo TRAP_RESTORED
+`
+			if _, err := s.ptmx.Write([]byte(cmd)); err != nil {
+				t.Fatalf("type claude: %v", err)
+			}
+			waitUntil(t, "the restored user trap", func() bool {
+				return strings.Contains(s.output(), "TRAP_RESTORED")
+			})
+		})
+	}
+}
+
+const interruptingAgentBody = `#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+		*/mcp.json) echo MCP_PATH="$arg" ;;
+	esac
+done
+echo AGENT-STARTED
+while :; do sleep 1; done
+`
+
+func TestBashAgentInterruptDoesNotExitInteractiveShell(t *testing.T) {
+	k := newNestedKernel(t)
+	s := startNestedBashParent(t, k, "claude", interruptingAgentBody)
+	if _, err := s.ptmx.Write([]byte("set +m; export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude\n")); err != nil {
+		t.Fatalf("type claude: %v", err)
+	}
+	waitUntil(t, "the interruptible agent", func() bool {
+		return strings.Contains(s.output(), "AGENT-STARTED")
+	})
+	var mcpPath string
+	waitUntil(t, "the staged launch path", func() bool {
+		out := strings.ReplaceAll(s.output(), "\r", "")
+		const marker = "MCP_PATH="
+		if idx := strings.Index(out, marker); idx >= 0 {
+			rest := out[idx+len(marker):]
+			if end := strings.IndexByte(rest, '\n'); end >= 0 {
+				rest = rest[:end]
+			}
+			mcpPath = strings.TrimSpace(rest)
+		}
+		return mcpPath != ""
+	})
+	if err := syscall.Kill(-s.cmd.Process.Pid, syscall.SIGINT); err != nil {
+		t.Fatalf("interrupt foreground process group: %v", err)
+	}
+	if _, err := s.ptmx.Write([]byte("echo SHELL_ALIVE\n")); err != nil {
+		t.Fatalf("type shell liveness check: %v", err)
+	}
+	waitUntil(t, "the interactive shell after interrupt", func() bool {
+		return strings.Contains(s.output(), "SHELL_ALIVE")
+	})
+	waitUntil(t, "the interrupted launch directory cleanup", func() bool {
+		_, err := os.Stat(filepath.Dir(mcpPath))
+		return os.IsNotExist(err)
+	})
 }

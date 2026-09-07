@@ -327,6 +327,15 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/storage internal/update internal/vault/system \
                internal/peerpin
 OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin)
+
+# internal/claudeconformance cannot run in CI: no runner can carry an
+# authenticated vendor CLI, and a `t.Fatal` is the honest result when it is
+# absent. Keep it out of the portable package set at the derivation rather than
+# re-spelling this exclusion in each Linux caller. This also excludes the
+# package's bash-only launch-cleanup proof; the host conformance gate runs it
+# alongside the live vendor checks.
+CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
+PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -338,7 +347,7 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # keyring is a fixture dimension that crosses both (nocx-aruz).
 ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
+	./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
 
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
@@ -388,7 +397,7 @@ print-os-pkgs:
 	@echo '$(OS_PKGS)'
 
 print-portable-pkgs:
-	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)'
+	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
 
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
@@ -572,8 +581,24 @@ test-ci:
   does not. To run it here: sudo scripts/install-bash32.sh"; \
 	    printf '%b\n' "$$notice"; \
 	  fi; \
+	  if claude=$$(./scripts/have-claude.sh); then \
+	    echo "Claude Code is installed and authenticated ($$claude): vendor conformance runs on this host"; \
+	    claude_notice=""; \
+	  else \
+	    claude_rc=$$?; \
+	    pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
+	    if [ "$$claude_rc" -eq 1 ]; then \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is not installed.\n\
+  Install Claude Code before running the vendor conformance check."; \
+	    else \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is installed but not authenticated.\n\
+  Run 'claude auth login' before running the vendor conformance check."; \
+	    fi; \
+	    printf '%b\n' "$$claude_notice"; \
+	  fi; \
 	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
-	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi
+	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi; \
+	  if [ -n "$$claude_notice" ]; then echo ""; printf '%b\n' "$$claude_notice"; fi
 	@echo ""
 	@echo "=== go test -race -tags release (the shipped profile directory) ==="
 	@# The shipped profile directory lives behind `-tags release`

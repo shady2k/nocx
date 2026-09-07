@@ -354,6 +354,10 @@ type optionSet struct {
 	// with keystoreReal, and logged, so a keychain prompt during a run can
 	// be traced to the test that asked for it.
 	keystoreReason string
+	// forgeAPIBase and forgeRawBase override the GitHub resolver endpoints.
+	// Empty values retain the resolver's production defaults.
+	forgeAPIBase string
+	forgeRawBase string
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
@@ -384,6 +388,15 @@ func WithRealSystemKeystore(reason string) Option {
 // any other path must be under a disposable directory the test owns.
 func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
+}
+
+// WithSkillForge names the endpoints where the resolver finds repository
+// metadata and raw files. Empty values retain the production GitHub defaults.
+func WithSkillForge(apiBase, rawBase string) Option {
+	return func(o *optionSet) {
+		o.forgeAPIBase = apiBase
+		o.forgeRawBase = rawBase
+	}
 }
 
 // notifyDebounceWindow is how long one session and kind is held quiet AFTER a
@@ -768,7 +781,13 @@ func New(opts ...Option) (*App, error) {
 	// One fetcher for both: a second one would be a second answer to which
 	// addresses this product may reach, which internal/httppolicy exists to
 	// prevent.
-	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots, docStore, skill.WithFetcher(apiFetcher))
+	skills := skill.NewStore(
+		skill.OSFileSystem{},
+		skillRoots,
+		docStore,
+		skill.WithFetcher(apiFetcher),
+		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
+	)
 
 	// The UI-state document (ADR-0048): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It

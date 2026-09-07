@@ -130,9 +130,11 @@ type Store struct {
 
 	// previewed is the one document or resolution last shown, which is the
 	// only thing Install compares its second fetch against (preview.go).
-	previewMu sync.Mutex
-	previewed *previewedDocument
-	resolver  *GitHubAdapter
+	previewMu     sync.Mutex
+	previewed     *previewedDocument
+	resolver      *GitHubAdapter
+	githubAPIBase string
+	githubRawBase string
 }
 
 // StoreOption configures a Store at construction. It is variadic rather than
@@ -149,9 +151,15 @@ type StoreOption func(*Store)
 func WithFetcher(fetcher apifetch.TextFetcher) StoreOption {
 	return func(s *Store) {
 		s.fetcher = fetcher
-		if s.resolver == nil {
-			s.resolver = NewGitHubAdapter(fetcher)
-		}
+	}
+}
+
+// WithGitHubBases names the forge endpoints used by the GitHub resolver.
+// Empty values retain the production GitHub defaults.
+func WithGitHubBases(apiBase, rawBase string) StoreOption {
+	return func(s *Store) {
+		s.githubAPIBase = apiBase
+		s.githubRawBase = rawBase
 	}
 }
 
@@ -164,6 +172,12 @@ func NewStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore, opt
 	}
 	if s.resolver == nil && s.fetcher != nil {
 		s.resolver = NewGitHubAdapter(s.fetcher)
+		if s.githubAPIBase != "" {
+			s.resolver.apiBase = s.githubAPIBase
+		}
+		if s.githubRawBase != "" {
+			s.resolver.rawBase = s.githubRawBase
+		}
 	}
 	return s
 }

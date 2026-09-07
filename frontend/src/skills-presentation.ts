@@ -92,6 +92,13 @@ export function shortDate(iso: string): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`
 }
 
+/** "used 12 times, last on 3 Mar" — or the honest absence. */
+export function usageLine(usage: Skill['usage']): string {
+  if (usage.count === 0) return 'never used'
+  const lastUsed = usage.lastUsedAt ? `, last on ${shortDate(usage.lastUsedAt)}` : ''
+  return `used ${usage.count} ${usage.count === 1 ? 'time' : 'times'}${lastUsed}`
+}
+
 /**
  * The words for a refusal's closed reason (nocx-j0lei). The SENTENCE a person
  * acts on is the server's — nocx knows which file and which number — and this

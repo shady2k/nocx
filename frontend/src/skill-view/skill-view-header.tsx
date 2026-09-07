@@ -27,7 +27,7 @@ import { Show, type JSX } from 'solid-js'
 import { Badge, Button, Checkbox, FactList, Stack, StatusCard, type Fact } from '../ui'
 import { provenanceTone } from '../skills-presentation'
 import { formatTimestamp } from '../ui/format-time'
-import type { Skill } from '../skills-store'
+import type { PinKind, Skill } from '../skills-store'
 
 export type ViewState =
   { kind: 'loading' } | { kind: 'unavailable'; message: string } | { kind: 'ready'; skill: Skill }
@@ -43,6 +43,7 @@ export interface SkillViewIdentityProps {
   skill: Skill
   busy: boolean
   onToggle: (enabled: boolean) => void
+  onPin: (pin: PinKind, on: boolean) => void
 }
 
 /**
@@ -106,6 +107,20 @@ export function SkillViewIdentity(props: SkillViewIdentityProps): JSX.Element {
           checked={props.skill.enabled}
           disabled={props.busy}
           onChange={(enabled) => props.onToggle(enabled)}
+        />
+        <Checkbox
+          variant="switch"
+          label="Keep enabled when unused"
+          checked={props.skill.pins.keepEnabled === true}
+          disabled={props.busy}
+          onChange={(on) => props.onPin('keepEnabled', on)}
+        />
+        <Checkbox
+          variant="switch"
+          label="Keep unchanged by the assistant"
+          checked={props.skill.pins.keepUnchanged === true}
+          disabled={props.busy}
+          onChange={(on) => props.onPin('keepUnchanged', on)}
         />
       </Stack>
     </div>

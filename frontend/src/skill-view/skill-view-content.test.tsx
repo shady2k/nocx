@@ -37,6 +37,8 @@ const A_SKILL: SkillsList['skills'][number] = {
   path: '/tmp/nocx/skills/deploy/SKILL.md',
   enabled: true,
   status: 'approved',
+  usage: { count: 0 },
+  pins: {},
 }
 
 // 256, not a round fixture number — internal/skill/files.go's own
@@ -150,6 +152,7 @@ function auditFields(overrides: Partial<SkillsAudit> = {}): SkillsAudit {
 
 function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike {
   return {
+    setPin: vi.fn().mockResolvedValue({ name: A_SKILL.name, pins: {} }),
     list: vi.fn().mockResolvedValue({ documentPath: '/tmp/nocx/skills.json', skills: [A_SKILL] }),
     setEnabled: vi.fn().mockResolvedValue({ name: A_SKILL.name, enabled: false }),
     remove: vi.fn().mockResolvedValue({ name: A_SKILL.name }),

@@ -632,7 +632,12 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
     >
       <div class="skill-view__split">
         <div class="skill-view__list-col">
-          <SkillViewIdentity skill={props.skill} busy={props.busy} onToggle={props.onToggle} />
+          <SkillViewIdentity
+            skill={props.skill}
+            busy={props.busy}
+            onToggle={props.onToggle}
+            onPin={props.onPin}
+          />
           <Stack gap="loose">
             {/* THE CHECK (nocx-dh14q, review round 2) — ONE ROW, selected
                 the same way a file is; its full content (the verdict, the

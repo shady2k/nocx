@@ -73,6 +73,8 @@ const SKILLS: SkillsList = {
       path: '/tmp/nocx/skills/deploy/SKILL.md',
       enabled: true,
       status: 'approved',
+      usage: { count: 0 },
+      pins: {},
     },
     {
       name: 'skill-authoring',
@@ -80,6 +82,8 @@ const SKILLS: SkillsList = {
       provenance: 'builtin',
       path: 'skill-authoring/SKILL.md',
       enabled: true,
+      usage: { count: 0 },
+      pins: {},
       status: 'approved',
     },
   ],
@@ -94,6 +98,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
     list: vi.fn().mockResolvedValue(SKILLS),
     setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
+    setPin: vi.fn().mockResolvedValue({ name: 'deploy', pins: {} }),
     remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
     approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
     file: vi.fn().mockResolvedValue(BUILTIN_FILE),
@@ -270,12 +275,16 @@ describe('SkillsSection', () => {
     // the second one is a claim about. The address is still verbatim inside
     // it, which is the part that has to be.
     expect(evidenceIn(rowFor(container, 'weather')!)).toEqual([
+      'never used',
       '/tmp/nocx/installed-skills/weather/SKILL.md',
       'Installed from https://example.com/weather/SKILL.md',
     ])
     // And nothing borrows it: a skill the person wrote has no source, and a
     // row that showed one would be claiming a stranger wrote their bytes.
-    expect(evidenceIn(rowFor(container, 'deploy')!)).toEqual(['/tmp/nocx/skills/deploy/SKILL.md'])
+    expect(evidenceIn(rowFor(container, 'deploy')!)).toEqual([
+      'never used',
+      '/tmp/nocx/skills/deploy/SKILL.md',
+    ])
   })
 
   it('draws no source line for a skill moved into the installed root by hand', async () => {
@@ -289,19 +298,21 @@ describe('SkillsSection', () => {
           path: '/tmp/nocx/installed-skills/byhand/SKILL.md',
           enabled: true,
           status: 'approved',
+          usage: { count: 0 },
+          pins: {},
         },
       ],
     }
     const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(byHand) }))
-    const { container } = render(() => <SkillsSection store={store} />)
 
+    const { container } = render(() => <SkillsSection store={store} />)
     await waitFor(() => expect(rowFor(container, 'byhand')).toBeTruthy())
     const row = rowFor(container, 'byhand')!
     // Installed, and nothing recorded: the row renders WITHOUT the line
     // rather than with an empty one. The provenance badge still says
     // installed, because the root decides that and not the document.
     expect(row.textContent).toContain('installed')
-    expect(evidenceIn(row)).toEqual(['/tmp/nocx/installed-skills/byhand/SKILL.md'])
+    expect(evidenceIn(row)).toEqual(['never used', '/tmp/nocx/installed-skills/byhand/SKILL.md'])
   })
 
   // Moved from the modal card's own audit tests (skills-section.test.tsx
@@ -324,6 +335,7 @@ describe('SkillsSection', () => {
     await waitFor(() => expect(rowFor(container, 'deploy')).toBeTruthy())
 
     expect(evidenceIn(rowFor(container, 'deploy')!)).toEqual([
+      'never used',
       '/tmp/nocx/skills/deploy/SKILL.md',
       'Checked 4 Sep — suspect',
     ])
@@ -331,6 +343,31 @@ describe('SkillsSection', () => {
     // would read as an approval this fact never made — there is no approval
     // here, only what a model once said about the bytes.
     expect(rowFor(container, 'deploy')!.textContent).not.toContain('✓')
+  })
+  it('shows usage age and distinguishes automatic switch-off from the person’s switch', async () => {
+    const aged: SkillsList = {
+      ...SKILLS,
+      skills: [
+        {
+          ...SKILLS.skills[0],
+          enabled: false,
+          usage: { count: 2, lastUsedAt: '2026-03-03T10:00:00Z' },
+          autoOff: {
+            at: '2026-06-11T10:00:00Z',
+            silentSince: '2026-03-03T10:00:00Z',
+            days: 30,
+          },
+        },
+        { ...SKILLS.skills[1], name: 'person-off', enabled: false },
+      ],
+    }
+    const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(aged) }))
+    const { container } = render(() => <SkillsSection store={store} />)
+    await waitFor(() => expect(rowFor(container, 'deploy')).toBeTruthy())
+
+    expect(rowFor(container, 'deploy')?.textContent).toContain('used 2 times, last on 3 Mar')
+    expect(rowFor(container, 'deploy')?.textContent).toContain('Switched off by nocx on 11 Jun')
+    expect(rowFor(container, 'person-off')?.textContent).not.toContain('Switched off by nocx')
   })
 
   it('says the files have changed since a stored check, when the row already knows they moved', async () => {
@@ -350,8 +387,8 @@ describe('SkillsSection', () => {
     const store = new SkillsStore(fakeClient({ list: vi.fn().mockResolvedValue(changed) }))
     const { container } = render(() => <SkillsSection store={store} />)
     await waitFor(() => expect(rowFor(container, 'deploy')).toBeTruthy())
-
     expect(evidenceIn(rowFor(container, 'deploy')!)).toEqual([
+      'never used',
       '/tmp/nocx/skills/deploy/SKILL.md',
       'Checked 4 Sep, and the files have changed since',
     ])
@@ -492,6 +529,8 @@ const CHANGED: SkillsList = {
       // Re-approve, Delete, Open and the switch. A row in its quiet state
       // would leave the busiest half of the page unexercised.
       status: 'changed',
+      usage: { count: 1, lastUsedAt: '2026-09-02T12:00:00Z' },
+      pins: {},
       source: { url: 'https://example.com/weather/SKILL.md', installedAt: '2026-09-03T12:00:00Z' },
     },
   ],
@@ -622,6 +661,8 @@ const INSTALLED: SkillsList = {
       // from outside, and the person turns it on after they have looked.
       enabled: false,
       status: 'approved',
+      usage: { count: 0 },
+      pins: {},
       source: {
         url: 'https://example.com/weather/SKILL.md',
         installedAt: '2026-09-03T12:00:00Z',

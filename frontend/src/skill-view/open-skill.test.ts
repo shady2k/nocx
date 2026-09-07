@@ -52,10 +52,13 @@ const A_SKILL: SkillsList['skills'][number] = {
   path: '/tmp/nocx/skills/deploy/SKILL.md',
   enabled: true,
   status: 'approved',
+  usage: { count: 0 },
+  pins: {},
 }
 
 function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike {
   return {
+    setPin: vi.fn().mockResolvedValue({ name: A_SKILL.name, pins: {} }),
     list: vi.fn().mockResolvedValue({ documentPath: '/tmp/nocx/skills.json', skills: [A_SKILL] }),
     setEnabled: vi.fn().mockResolvedValue({ name: A_SKILL.name, enabled: false }),
     remove: vi.fn().mockResolvedValue({ name: A_SKILL.name }),
@@ -132,6 +135,8 @@ const INSTALLED_SKILL: SkillsList['skills'][number] = {
   path: '/tmp/nocx/installed-skills/weather/SKILL.md',
   enabled: false,
   status: 'approved',
+  usage: { count: 0 },
+  pins: {},
   source: {
     url: 'https://example.com/weather/SKILL.md',
     installedAt: '2026-09-03T12:00:00Z',
@@ -251,6 +256,26 @@ describe('openSkill — the tab a skill is read in', () => {
     // interface signature.
     // eslint-disable-next-line @typescript-eslint/unbound-method
     expect(client.setEnabled).toHaveBeenCalledWith('deploy', false)
+  })
+
+  it('toggling a pin calls skills.setPin and refreshes the skill', async () => {
+    const setPin = vi.fn().mockResolvedValue({ name: A_SKILL.name, pins: { keepEnabled: true } })
+    const client = fakeClient({ setPin })
+    const { openPane } = await setup(client)
+    const paneEl = await openAndSettle(openPane)
+    const pin = Array.from(paneEl.querySelectorAll<HTMLLabelElement>('.ui-checkbox')).find(
+      (label) => label.textContent?.includes('Keep enabled when unused'),
+    )
+    const input = pin?.querySelector<HTMLInputElement>('input')
+    if (!input) throw new Error('keep-enabled pin did not render')
+    input.checked = true
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(setPin).toHaveBeenCalledWith('deploy', 'keepEnabled', true)
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.list).toHaveBeenCalledTimes(2)
   })
 
   it('a failed toggle shows a toast and leaves the switch usable again', async () => {
@@ -448,17 +473,17 @@ describe('openSkill — the tab a skill is read in', () => {
     ).toBe(false)
   })
 
-  // Restored from the deleted modal card's "asks nothing of the person: no
-  // confirmation, no signature, just the look" (review's minor 3,
-  // nocx-54a2c): the tab offers a look and a decision, never a signature —
-  // the only checkbox anywhere on it is the enable switch itself.
-  it('asks nothing of the person: no confirmation, no signature — the only checkbox is the switch', async () => {
+  // The tab offers a look and three immediate decisions: offer the skill,
+  // keep it enabled when unused, and keep it unchanged by the assistant.
+  it('offers the enable switch and the two machine pins on the skill tab', async () => {
     const { openPane } = await setup()
     const paneEl = await openAndSettle(openPane)
 
     const boxes = Array.from(paneEl.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
-    expect(boxes).toHaveLength(1)
-    expect(boxes[0].getAttribute('role')).toBe('switch')
+    expect(boxes).toHaveLength(3)
+    expect(boxes.every((box) => box.getAttribute('role') === 'switch')).toBe(true)
+    expect(paneEl.textContent).toContain('Keep enabled when unused')
+    expect(paneEl.textContent).toContain('Keep unchanged by the assistant')
     expect(paneEl.textContent).not.toContain('I have')
   })
 })

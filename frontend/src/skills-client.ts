@@ -7,6 +7,7 @@ import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsList } from './generated/skills.list'
 import type { SkillsScan } from './generated/skills.scan'
 import type { SkillsSetEnabled } from './generated/skills.setEnabled'
+import type { SkillsSetPin } from './generated/skills.setPin'
 import type { SkillsRemove } from './generated/skills.remove'
 
 export class SkillsClient {
@@ -18,6 +19,10 @@ export class SkillsClient {
 
   setEnabled(name: string, enabled: boolean): Promise<SkillsSetEnabled> {
     return this.dispatcher.call<SkillsSetEnabled>('skills.setEnabled', { name, enabled })
+  }
+
+  setPin(name: string, pin: 'keepEnabled' | 'keepUnchanged', on: boolean): Promise<SkillsSetPin> {
+    return this.dispatcher.call<SkillsSetPin>('skills.setPin', { name, pin, on })
   }
 
   remove(name: string): Promise<SkillsRemove> {

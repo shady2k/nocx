@@ -10,9 +10,12 @@ export type Skill = GeneratedSkill
 // exported name for one shape is a second thing to keep in step.
 type SkillRefusal = Refusal
 
+export type PinKind = 'keepEnabled' | 'keepUnchanged'
+
 export interface SkillsClientLike {
   list(): Promise<SkillsList>
   setEnabled(name: string, enabled: boolean): Promise<unknown>
+  setPin(name: string, pin: PinKind, on: boolean): Promise<unknown>
   remove(name: string): Promise<unknown>
   approve(name: string): Promise<unknown>
   file(name: string, path: string): Promise<SkillsFile>
@@ -91,6 +94,11 @@ export class SkillsStore {
 
   async setEnabled(name: string, enabled: boolean): Promise<void> {
     await this.client.setEnabled(name, enabled)
+    await this.refresh()
+  }
+
+  async setPin(name: string, pin: PinKind, on: boolean): Promise<void> {
+    await this.client.setPin(name, pin, on)
     await this.refresh()
   }
 

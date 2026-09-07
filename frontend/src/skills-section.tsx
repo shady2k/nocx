@@ -75,7 +75,7 @@ import { EyeIcon, RefreshIcon, TrashIcon } from './ui/icons'
 import { showConfirm } from './ui/dialog'
 import { showToast } from './ui/toast'
 import { openSkill } from './skill-view'
-import { provenanceTone, refusalLabel, shortDate } from './skills-presentation'
+import { provenanceTone, refusalLabel, shortDate, usageLine } from './skills-presentation'
 import type { Skill, SkillsState, SkillsStore } from './skills-store'
 
 export interface SkillsSectionProps {
@@ -267,11 +267,16 @@ export function SkillsSection(props: SkillsSectionProps) {
                     title={skill.name}
                     kind={{ label: skill.provenance, tone: provenanceTone(skill.provenance) }}
                     meta={skill.description}
-                    detail={evidence(skill)}
+                    detail={[usageLine(skill.usage), ...evidence(skill)]}
                     status={
-                      skill.status === 'changed'
-                        ? { tone: 'error', text: 'Changed since installation' }
-                        : undefined
+                      skill.autoOff
+                        ? {
+                            tone: 'warning',
+                            text: `Switched off by nocx on ${shortDate(skill.autoOff.at)}`,
+                          }
+                        : skill.status === 'changed'
+                          ? { tone: 'error', text: 'Changed since installation' }
+                          : undefined
                     }
                     /* Enabling a skill is the record's STATE, not an action on
                      it, and the kit's state cell is where the row keeps it

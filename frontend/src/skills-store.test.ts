@@ -16,6 +16,8 @@ const SKILLS: SkillsList = {
       path: '/tmp/nocx/skills/deploy/SKILL.md',
       enabled: true,
       status: 'approved',
+      usage: { count: 0 },
+      pins: {},
     },
   ],
 }
@@ -50,6 +52,7 @@ const A_SCAN: SkillsScan = {
 function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike {
   return {
     audit: vi.fn().mockRejectedValue(new Error('no audit was asked for in this test')),
+    setPin: vi.fn().mockResolvedValue({ name: 'deploy', pins: {} }),
     list: vi.fn().mockResolvedValue(SKILLS),
     setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
     remove: vi.fn().mockResolvedValue({ name: 'deploy' }),

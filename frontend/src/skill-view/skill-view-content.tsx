@@ -44,7 +44,7 @@ import { createSignal, Show, type JSX } from 'solid-js'
 import { render } from 'solid-js/web'
 import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import { showToast } from '../ui/toast'
-import type { Skill, SkillsState, SkillsStore } from '../skills-store'
+import type { PinKind, Skill, SkillsState, SkillsStore } from '../skills-store'
 import { SkillViewHeader, type ViewState } from './skill-view-header'
 import { SkillViewBody } from './skill-view-body'
 // Styling lives at styles/surfaces/skill-view.css, imported centrally from
@@ -73,6 +73,7 @@ function SkillView(props: {
   state: ViewState
   busy: boolean
   onToggle: (enabled: boolean) => void
+  onPin: (pin: PinKind, on: boolean) => void
   onApprove: () => void
   deps: SkillViewDeps
   refreshToken: number
@@ -95,6 +96,7 @@ function SkillView(props: {
             name={skill().name}
             skill={skill()}
             busy={props.busy}
+            onPin={props.onPin}
             onToggle={props.onToggle}
             provenance={skill().provenance}
             store={props.deps.store}
@@ -152,6 +154,7 @@ export class SkillViewContent extends SolidPaneContent {
           name={this.name}
           state={this.viewState()}
           busy={this.busy()}
+          onPin={(pin, on) => void this.setPin(pin, on)}
           onToggle={(enabled) => void this.toggle(enabled)}
           onApprove={() => void this.approve()}
           deps={this.deps}
@@ -251,6 +254,20 @@ export class SkillViewContent extends SolidPaneContent {
       // looking at a toast for a tab that no longer exists, and writing to
       // its signals afterward is exactly the "late async callback" case
       // PaneHost's methods are documented to go inert for.
+      if (this._disposed) return
+      showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      if (!this._disposed) this.setBusy(false)
+    }
+  }
+
+  private async setPin(pin: PinKind, on: boolean): Promise<void> {
+    const state = this.viewState()
+    if (state.kind !== 'ready' || this.busy()) return
+    this.setBusy(true)
+    try {
+      await this.deps.store.setPin(state.skill.name, pin, on)
+    } catch (err) {
       if (this._disposed) return
       showToast({ level: 'danger', message: err instanceof Error ? err.message : String(err) })
     } finally {

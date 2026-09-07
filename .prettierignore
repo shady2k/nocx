@@ -45,3 +45,10 @@ eslint-fixtures/
 .internal/sdd/
 .internal/handoff/
 .repowise/
+
+# Память репозитория для cass-memory. Файл генерируется
+# scripts/bd-memories-to-cass.py из .internal/memories-export.jsonl, и
+# переформатировать его — значит поставить prettier против генератора: следующий
+# прогон вернёт свою раскладку, и гейт снова покраснеет. То же основание, что у
+# .beads/ выше: это вывод инструмента, а не текст, который кто-то писал руками.
+.cass/playbook.yaml

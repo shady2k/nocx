@@ -1,89 +1,73 @@
-# Dolt database (managed by Dolt, not git)
-dolt/
-embeddeddolt/
-proxieddb/
+# Database
+*.db
+*.db-journal
+*.db-shm
+# -wal plus fsqlite 0.2+'s -wal-cert / -wal-cert-head durability sidecars
+*.db-wal*
+# fsqlite multi-process namespace sidecars (-fsqlite-ns-gate / -fsqlite-ns-use),
+# including the `.<db>.schema-migration-<run>.vacuum-*` copies left by
+# `br doctor migrate-schema` (#427)
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+*.vacuum-wal-cert*
+# fsqlite 0.3.6+ engine-upgrade bookkeeping written beside the database
+*.fsqlite-migration-state
 
-# Runtime files
-bd.sock
-bd.sock.startlock
-sync-state.json
-last-touched
-.exclusive-lock
-
-# Daemon runtime (lock, log, pid)
-daemon.*
-
-# Push state (runtime, per-machine)
-push-state.json
-
-# Plugin prime safety-net pointer (regenerated per-machine by beads-superpowers)
-PRIME.md
-
-# Lock files (various runtime locks)
+# Lock files
+.write.lock
 *.lock
 
-# Credential key (encryption key for federation peer auth — never commit)
-.beads-credential-key
+# Temporary
+last-touched
+*.tmp
 
-# Local version tracking (prevents upgrade notification spam after git ops)
-.local_version
+# Local history backups
+.br_history/
 
-proxied_server_client_info.json
-
-# Worktree redirect file (contains relative path to main repo's .beads/)
-# Must not be committed as paths would be wrong in other clones
-redirect
+# DB-family recovery artifacts (truncated WAL/SHM, quarantined sidecars)
+# — same lifecycle as .br_history/, written by recovery paths and
+# `br doctor --repair`. Recovery artifacts live under their own directory
+# rather than relying on the database globs above (#271).
+.br_recovery/
 
 # Sync state (local-only, per-machine)
-# These files are machine-specific and should not be shared across clones
 .sync.lock
-export-state/
-export-state.json
+sync_base.jsonl
 
-# Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
-ephemeral.sqlite3
-ephemeral.sqlite3-journal
-ephemeral.sqlite3-wal
-ephemeral.sqlite3-shm
+# Merge artifacts (temporary files from 3-way merge)
+beads.base.jsonl
+beads.base.meta.json
+beads.left.jsonl
+beads.left.meta.json
+beads.right.jsonl
+beads.right.meta.json
 
-# Dolt server management (auto-started by bd)
-dolt-server.pid
-dolt-server.log
-dolt-server.lock
-dolt-server.port
-dolt-server.activity
+# Daemon runtime files
+daemon.lock
+daemon.log
+daemon.pid
+bd.sock
+sync-state.json
 
-# Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
-dolt-pprof/
+# Worktree redirect file
+redirect
 
-# Corrupt backup directories (created by bd doctor --fix recovery)
-*.corrupt.backup/
+# bv (beads viewer) lock file
+.bv.lock
 
-# Backup data (auto-exported JSONL, local-only)
+# Leftovers from bd: the embedded Dolt store and its backups. Deleted on the
+# primary machine on 2026-09-05, but a clone that has not migrated still has
+# them, and they must never reach git from there either.
+embeddeddolt/
 backup/
+proxieddb/
 
-# Per-project environment file (Dolt connection config, GH#2520)
-.env
+# Per-machine stat cache for sync.auto_import: {size, mtime_ns} of the JSONL as
+# this clone last saw it. mtime_ns is per-filesystem, so tracking it made every
+# clone rewrite the file on every import — the same churn that untracked
+# issues.jsonl in the first place. Untracked 2026-09-06.
+.auto-import-issues.jsonl
 
-# Audit trail (field-change log). Untracked on purpose: bd appends to it on
-# every mutation, so a tracked copy is dirty after any bd command and turns
-# every session into a chore(beads) commit. The history itself is not lost —
-# Dolt holds it, and `bd history <id>` reads it back. Unlike issues.jsonl this
-# file is not a bootstrap source: `bd bootstrap` never reads it.
-interactions.jsonl
-
-# Legacy files (from pre-Dolt versions)
-*.db
-*.db?*
-*.db-journal
-*.db-wal
-*.db-shm
-db.sqlite
-bd.db
-# NOTE: Do NOT add negation patterns here.
-# They would override fork protection in .git/info/exclude.
-# Config files (metadata.json, config.yaml) are tracked by git by default
-# since no pattern above ignores them.
-
-# Added by bd (missing required patterns)
-last_pull
+# Written by the beads-superpowers plugin as a `bd prime` safety net, and it
+# recreates itself. It describes bd, which is not this repository's tracker.
+PRIME.md

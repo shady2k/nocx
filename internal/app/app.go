@@ -775,20 +775,6 @@ func New(opts ...Option) (*App, error) {
 	)
 	apiFetcher := apifetch.New(apiRouteTable, logger)
 
-	// The skill library is built HERE, after the fetch seam, because
-	// installing a skill by its URL goes through the same person-initiated
-	// fetch api.import.postman does (installing-a-skill-by-url design §4).
-	// One fetcher for both: a second one would be a second answer to which
-	// addresses this product may reach, which internal/httppolicy exists to
-	// prevent.
-	skills := skill.NewStore(
-		skill.OSFileSystem{},
-		skillRoots,
-		docStore,
-		skill.WithFetcher(apiFetcher),
-		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
-	)
-
 	// The UI-state document (ADR-0048): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
 	// never fails to open, because an absent document is an ordinary state
@@ -884,6 +870,25 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
+
+	// The skill library is built after the settings registry so the ageing
+	// threshold is read at evaluation time. A notifier is unnecessary: List
+	// calls the function on each discovery pass, so a changed setting applies
+	// without rebuilding the store.
+	skills := skill.NewStore(
+		skill.OSFileSystem{},
+		skillRoots,
+		docStore,
+		skill.WithFetcher(apiFetcher),
+		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
+		skill.WithIdleDays(func() int {
+			days, settingErr := settingsRegistry.GetNumber(settings.SkillsIdleDays)
+			if settingErr != nil {
+				return 0
+			}
+			return int(days)
+		}),
+	)
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in

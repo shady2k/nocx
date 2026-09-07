@@ -1997,6 +1997,12 @@ func New(opts ...Option) (*App, error) {
 	if toolDispatcherErr != nil {
 		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)
 	}
+	toolDispatcher, toolDispatcherErr = assistant.NewAttemptRecordingDispatcher(
+		agentToolRegistry, toolDispatcher, contentDB.Ledger(),
+	)
+	if toolDispatcherErr != nil {
+		return nil, fmt.Errorf("worker dispatcher ledger: %w", toolDispatcherErr)
+	}
 	// The record is handed in so the authorizer can tell the two callers
 	// apart: a session it holds a live participant for is a WORKER calling
 	toolAuthorizer, toolAuthorizerErr := newToolAuthorizer(

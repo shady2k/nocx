@@ -349,14 +349,61 @@ written and permission-checked.
 
 If the bridge executable cannot start, Claude's measured behavior is insufficient for
 D4: it logs an error, may retry, and can still complete a turn that never requests a
-tool. The implementation therefore needs a bridge-status monitor whose pane-visible
-failure path is part of the adapter contract. The monitor must be event-driven, not a
-sleep-based poll: the bridge writes `ready` only after endpoint authorization succeeds,
-`failed` with a bounded reason on startup failure, and `closed` when the endpoint or
-stdio session ends. The shell-owned bracket prints the first failure once and does not
-claim orchestration after it. The exact monitor transport and the safe way to write a
-sentence without stealing the agent's input are open questions, because the current
-vendor measurement proves only that MCP stderr is not a pane guarantee.
+tool.
+
+**Amended 2026-09-07 (`nocx-rowqt.2.3`): the monitor needs no transport of its own,
+because the health signal is already a control-plane fact nocx receives.** Measured on
+this machine against the installed Claude Code, interactive, with the shipped launch
+shape (`--mcp-config`, no strict flag), using a stub MCP server that logged every method
+it was asked and a run in which **no prompt was ever typed**:
+
+```
++1.645s  SPAWNED
++1.645s  initialize
++1.648s  notifications/initialized
++1.648s  tools/list
+```
+
+`tools/list` is EAGER — it arrives three milliseconds after `initialize` and about 1.6
+seconds after launch, as part of MCP discovery, before any model turn. In this codebase
+`tools/list` is answered by `mcpstdio`'s `handleList` → `loadCatalogue` →
+`endpointCall("tools.catalogue")` (`internal/mcpstdio/mcpstdio.go:311`, 355), so a
+healthy launch puts a `tools.catalogue` call on `tool.sock` at startup by itself. The
+endpoint therefore observes, without asking anyone: the whole chain alive (the call
+arrived), a named refusal (a peer connected and was refused), or nothing.
+
+The second half of the same measurement is why this bead exists at all. With a config
+naming a bridge binary that does not exist, **interactive Claude Code printed nothing**:
+the pane showed an ordinary prompt, and a search of the visible screen for `mcp`,
+`fail`, `error` and `warn` found no line. The person is not told, so nocx must tell
+them. (An earlier reading that "the vendor announces it" came from watching a DIFFERENT
+agent — omp prints `MCP finished with failures …`; Claude does not.)
+
+So the monitor is: the endpoint's own view of the launch window, and the sentence is
+raised on the surface nocx already has for "this session is degraded, here is why" —
+`frontend/src/integration/notice.tsx` with `status.ts`, which sits ABOVE the terminal
+rather than over it and is raised once per session per reason. Nothing is written into
+the pty while the agent owns the screen, and nothing is read off the agent's screen.
+
+**What was rejected, and why, so it is not re-proposed.** A bridge-written
+`ready`/`failed`/`closed` file or FIFO watched by a backgrounded subshell: it needs a
+new file protocol, a background process to kill in cleanup, and it still cannot print
+into an occupied pane, so it would end up changing the lifecycle wire anyway.
+Classifying the failure off the screen through `internal/agentdriver`: that package's
+founding rule is that every anchor is a POSITION in the terminal's own furniture and
+never text the agent chose to print, and an MCP failure line is printed text — a
+text-anchored rule would fire on any file or brief containing the phrase, which is the
+self-matching-sentinel defect this repository has already paid for once. Asking the
+model to call a tool at startup as a probe: a call that arrives proves the chain, but a
+call that does not arrive proves nothing (the model may simply not have obeyed), so it
+closes only the healthy half, and D5 already refuses prompt instructions as a
+load-bearing carrier.
+
+**The one thing still to choose is the window.** "Nothing arrived" is an absence, and an
+absence needs a moment at which it is decided. The measurement puts a healthy
+`tools.catalogue` at ~1.6 s after launch; the implementation picks a bound with margin,
+states it, and tests both sides of it. It is not a poll — it is one deadline inside the
+staging interval.
 
 If the endpoint is not published, the second-caller design says the server does not
 admit the endpoint while its authorizer is absent. Enrollment of the grid therefore
@@ -425,7 +472,8 @@ These are holes in the design, not assumptions hidden for the implementation wor
 1. **Setting merge precedence.** `--help` and debug output establish user, project, and
    local settings paths and the `user,project,local` source names, but do not establish
    the same-key precedence of those files versus `--settings`. The first implementation
-   avoids the question with strict MCP mode and stages no hooks. If a hook becomes part
+   avoids the question by staging no hooks (it does NOT use strict MCP mode; D3 as
+   amended forbids it in the product path). If a hook becomes part
    of the adapter, measure precedence with a conflicting temporary fixture before
    relying on it.
 
@@ -434,10 +482,14 @@ These are holes in the design, not assumptions hidden for the implementation wor
    dialect, or maximum parameter/result size accepted by Claude 2.1.258. A scripted
    bridge and a real Claude invocation must establish those facts from the wire.
 
-3. **Pane-visible bridge failure.** Claude's debug log records provider failure, while
-   print output and provider stderr did not show a pane sentence. The implementation
-   must choose and test an event-driven monitor or another direct pane channel. Until
-   then, claiming that MCP failure is visible to the person would be unsupported.
+3. ~~**Pane-visible bridge failure.**~~ **CLOSED 2026-09-07 (`nocx-rowqt.2.3`)** — see
+   the amendment in §6. The healthy signal is the eager `tools/list` that MCP discovery
+   sends at startup, which reaches `tool.sock` as `tools.catalogue` about 1.6 s after
+   launch with no prompt typed; the failing signal is its absence, because interactive
+   Claude Code was measured to print nothing at all for a bridge that cannot start. The
+   sentence is raised on the existing degraded-session notice, not written into the pty
+   and not read off the agent's screen. Only the absence deadline is left to the
+   implementation.
 
 4. **Child pin implementation.** The second-caller design leaves the enrolled child
    `(pid, start-time)` pin as an interface. This design requires the pin for the bridge

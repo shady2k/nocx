@@ -97,10 +97,9 @@ export function subscribeToolSurfaceChanged(
     const p = params as SessionToolSurfaceChanged
     if (
       p &&
-      typeof p.sessionId === 'string' &&
-      typeof p.instanceId === 'string' &&
       typeof p.sessionEpoch === 'number' &&
-      (p.status === 'available' || (p.status === 'unavailable' && typeof p.reason === 'string'))
+      ((p.status === 'available' && p.reason === undefined) ||
+        (p.status === 'unavailable' && typeof p.reason === 'string'))
     ) {
       handler(p)
     }

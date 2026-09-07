@@ -205,10 +205,14 @@ called before that", the fix is an assertion or a test.
 **`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
 it_.
 
-**`repowise` is installed, and it is a second way in, not a ranked one.** Use whichever
-fits the question: `grep` for _does this exist, and who calls it_, the MCP tools when the
-question is about history, risk or how a module hangs together. There is no ordering
-between them; one was asserted here once and withdrawn for want of a record.
+**`repowise` is installed, and it is not a second `grep`.** That ordering is measured, not
+asserted: `nocx-14sbw` put both against five questions we actually ask. With a live
+embedder repowise answered 2 correctly, 1 partially, missed 1 honestly, and got 1
+confidently wrong by repeating a stale comment in our own code (`nocx-n5gr2`). `grep`
+answered all five in under 0.1 s. With the embedder dead it scored 0 of 5. So `grep`,
+`glob` and reading the file remain the answer for _does this exist, and who calls it_, and
+the MCP tools are for the questions underneath that: history, risk, and how a module hangs
+together.
 
 - **History is what it gives that a search cannot.** `get_risk` / `repowise risk`: hotspot
   scores, defect profiles, bus factor, and co-change partners with support counts —
@@ -223,12 +227,37 @@ between them; one was asserted here once and withdrawn for want of a record.
   sits in a directory git does not carry. The generated `.claude/CLAUDE.md` says otherwise;
   this file wins.
 
+**The semantic half is off unless a dimension override is set, and nothing says so out
+loud.** repowise's `_DIMS` table declares `google/gemini-embedding-001` at 768 while the
+model returns 3072, so every vector fails its width check, none is written, and retrieval
+falls back to BM25 over the generated pages — which is the configuration that scored 0 of 5
+above. The override is `REPOWISE_EMBEDDING_DIMS=3072`, and it is needed **twice**: once for
+`repowise reindex`, which writes the vectors, and once in the environment of the MCP
+server, which embeds the QUERY. The server gets it from the tracked `.mcp.json`; a Claude
+Code session also carries it in `~/.claude/settings.json`. The symptom when it is missing
+is inside the tool result rather than on the surface — `retrieval_degraded: ["embed"]` with
+`confidence: "low"` — so an agent reads a hedged answer and learns not to ask again.
+
+**Check it with `repowise doctor`, and read the right row.** `Coordinator drift` is the one
+that tells the truth. `SQL ↔ Vector Store: in sync` passes while both sides are empty, and
+that pair was once read the wrong way round here: the drift counter was written off as the
+broken check while it was reporting 3699 pages against 0 vectors, correctly. After the
+override the same row reads `SQL=3854, Vector=3854, Drift=0.0%`, and `SQL ↔ Vector Store`
+is the one that goes red mid-rebuild.
+
 **The MCP registration is path-less on purpose, and it lives in two places.** Path-less so
 it resolves whichever repo you are in — pin a path and every worktree silently answers
 about `main`, stale on exactly the files you are there to change. The two places are not
 interchangeable: `~/.claude.json` is user-scope and **only Claude Code reads it**, while
 the tracked `.mcp.json` at the repo root is what every other agent reads. A new agent gets
 repowise by being added to `.mcp.json`.
+
+**Nothing in git turns repowise on.** `.mcp.json` names the server and carries the
+embedding override, and that is all it can do: the index in `.repowise/`, the post-commit
+sync in `.githooks/post-commit` and the read hooks in `~/.claude/settings.json` are
+gitignored or machine-scoped, so they are per-clone and opt-in. A fresh clone has the
+registration and no index — which is the "no index" answer described below, not a broken
+connection.
 
 **In a worktree the index does not come free, and we build it on demand** — when somebody
 is about to work there, not in advance. Budget several minutes and a few hundred megabytes.

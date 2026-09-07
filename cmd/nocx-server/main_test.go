@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/coordinator"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
@@ -143,11 +145,19 @@ func (a workerTestAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation
 }
 
 type workerTestDispatcher struct {
-	result string
+	result  string
+	catalog []agenttools.Tool
 }
 
 func (d workerTestDispatcher) Dispatch(assistant.ToolInvocation) (string, error) {
 	return d.result, nil
+}
+
+// Catalogue is required at composition, not at call time: toolendpoint.New
+// refuses a dispatcher that cannot enumerate what a grant admits, so a stub
+// without it does not stand in for the real dispatcher at all.
+func (d workerTestDispatcher) Catalogue(content.Grant) []agenttools.Tool {
+	return d.catalog
 }
 
 type workerTestPeers struct{}

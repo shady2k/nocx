@@ -116,11 +116,11 @@ already has. Upstream #2976 is open — recall can hand back a session's older f
 same session reversed it — and `superseded` is the lever against exactly that. Reach for it
 when you catch recall quoting something the tree has since disproved.
 
-**`--all`, never `--auto`.** `deja install --all` wires the MCP server for every agent it
-finds and writes no hook at all; `--auto` is the same plus session-start and
-`PreToolUse`/`PostToolUse` hooks, and a hook in front of a file read is what Code search
-below forbids. Upstream measures that hook at 172 ms a call for zero decisions in 48, so
-this costs us nothing. Add `--no-index` when the index already exists, or it rebuilds:
+**`--all` wires MCP, `--auto` also wires hooks.** `deja install --all` gives every agent it
+finds the MCP server and writes no hook; `--auto` adds `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `PreCompact` on top. We run `--all`
+today, so recall is pull-based: an agent remembers when it asks. Whether to turn the hooks
+on is open. Add `--no-index` when the index already exists, or it rebuilds:
 
 ```bash
 deja install --all --no-index     # MCP everywhere, no hooks
@@ -185,13 +185,7 @@ called before that", the fix is an assertion or a test.
 ## Code search
 
 **`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
-it_, and it beat an index on every one of those questions we measured.
-
-> A graph index was removed after one measured session: it answered none of the queries put
-> to it, while every finding that mattered came from `grep`. It cost a large committed
-> artifact and a hook that made a graph query mandatory before every read. Do not
-> reintroduce an index, or any hook in front of a file read, without measuring against that
-> baseline.
+it_.
 
 **`repowise` is installed, and it is a second way in, not a ranked one.** Use whichever
 fits the question: `grep` for _does this exist, and who calls it_, the MCP tools when the

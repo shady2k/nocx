@@ -71,4 +71,4 @@ steps for you.
 other, and neither outranks the other. Use `grep` for _does this exist, and who calls
 it_, and `repowise` when the question is about history or risk. Read
 [AGENTS.md](AGENTS.md#code-search) first: it says what `repowise` may and may not be
-believed about, and why an earlier index (`graphify`) was removed outright.
+believed about.

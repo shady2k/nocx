@@ -184,8 +184,8 @@ tar -xzf /tmp/deja.tar.gz -C ~/.local/bin deja
 
 Neither is in nixpkgs, and both are static: `br`'s Linux musl artifact and `deja`'s
 Go binary run as-is, so `nix-ld` is no longer needed for either. Then wire it with
-`deja install --all --no-index` — never `--auto`, which adds the hooks AGENTS.md
-forbids. Add **`minisign`** and **`sqlite3`** from nixpkgs while you are there:
+`deja install --all --no-index`; `--auto` also turns on hooks. Add **`minisign`**
+and **`sqlite3`** from nixpkgs while you are there:
 the first verifies `br`'s release signatures, the second is how you look at the
 database when `br doctor` disagrees with you. The `beads-superpowers` plugin
 installs via `claude` — see

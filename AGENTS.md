@@ -116,16 +116,22 @@ already has. Upstream #2976 is open — recall can hand back a session's older f
 same session reversed it — and `superseded` is the lever against exactly that. Reach for it
 when you catch recall quoting something the tree has since disproved.
 
-**`--all` wires MCP, `--auto` also wires hooks.** `deja install --all` gives every agent it
-finds the MCP server and writes no hook; `--auto` adds `SessionStart`,
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `PreCompact` on top. We run `--all`
-today, so recall is pull-based: an agent remembers when it asks. Whether to turn the hooks
-on is open. Add `--no-index` when the index already exists, or it rebuilds:
+**Installed with `--auto`, so recall does not wait to be asked.** Five hooks per agent:
+
+| event              | what it does                                                               |
+| ------------------ | -------------------------------------------------------------------------- |
+| `SessionStart`     | `hook-context` — a new window opens knowing the project's recent decisions |
+| `UserPromptSubmit` | `hook-prompt` — a prompt that matches earlier work pulls it in             |
+| `PreToolUse`       | `hook-tool` — one line on what this command or file already has            |
+| `PostToolUse`      | `hook-tool-after` — after a command fails, what was run after it last time |
+| `PreCompact`       | `hook-precompact` — memory goes in before the context is squeezed          |
 
 ```bash
-deja install --all --no-index     # MCP everywhere, no hooks
-deja uninstall --all              # and it is reversible
+deja install --auto --no-index    # MCP and hooks everywhere; --no-index keeps the index
+deja uninstall --auto             # and it is reversible
 ```
+
+`--no-index` matters: without it the install rebuilds, which is minutes on this corpus.
 
 **Its registration lives in two places, like repowise's.** `deja install --all` writes
 per-agent config under `$HOME` — this machine only. The tracked `.mcp.json` at the repo

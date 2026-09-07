@@ -236,7 +236,11 @@ var (
 // for. Every installed copy must be rewritten — a shell still sourcing 43
 // checks a `cap` field the kernel has stopped sending and never establishes.
 
-const version = "45"
+// 47: preserve every user-supplied Claude argument before appending nocx's
+// non-strict MCP configuration, so variadic parsing cannot consume prompts.
+// 48: identify private launch leases with pid and start time, preserve the
+// user's signal traps, and prove interruption cleans the launch directory.
+const version = "48"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

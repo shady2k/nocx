@@ -71,6 +71,11 @@ type nestedKernel struct {
 	// answer carrying no `enrolled` field at all. The wrapper must read that
 	// as "not orchestrated", say so in the pane, and still run the agent.
 	refuseEnrolment bool
+	// agentMalformed sends a malformed lifecycle frame, so the wrapper must
+	// treat an answer it cannot parse as a refusal.
+	agentMalformed bool
+	// agentTimeout accepts the enrolment request but never answers it.
+	agentTimeout bool
 	// refuseReport makes the kernel answer a declaration with recorded:false,
 	// which is the state where the agent said something and nocx did not keep
 	// it — and the pane has to say so.
@@ -173,6 +178,13 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 	case "domain_request":
 		k.grantLocked()
 	case "agent_enrol":
+		if k.agentTimeout {
+			return
+		}
+		if k.agentMalformed {
+			k.sendMalformedAgentAnswerLocked()
+			return
+		}
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
 	case "agent_report":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentReported)
@@ -300,6 +312,15 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 	}
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
 		k.t.Fatalf("encode %s: %v", kind, err)
+	}
+}
+
+func (k *nestedKernel) sendMalformedAgentAnswerLocked() {
+	body := []byte(`{"evt":`)
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	if _, err := k.conn.Write(append(hdr[:], body...)); err != nil {
+		k.t.Fatalf("write malformed agent answer: %v", err)
 	}
 }
 

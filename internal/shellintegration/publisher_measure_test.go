@@ -124,10 +124,24 @@ import (
 // exactly the actor ADR-0024 made the capability mandatory for — and 236
 // bytes is what it costs to stop.
 //
-// The CALL counts did not move on any of the nine occasions —
+// 2026-09-07, tenth move (nocx-dkawo.13): 74,264 -> 82,244, +7,980 across
+// the two generation scripts. The enrolled agent now receives a private,
+// lease-keyed MCP configuration instead of changing user-owned Claude files;
+// directory and file permissions, stale-lease sweeping and exit cleanup all
+// live in the shell launch bracket.
+//
+// 2026-09-07, eleventh move (nocx-rowqt.2.2): 82,244 -> 83,718, +1,474
+// across the two generation scripts. The review round strengthened lease
+// identity with pid start times and made zsh preserve signal traps without
+// firing its function-scoped EXIT trap during launch setup.
+//
+// The CALL counts did not move on this occasion — the bundle changed size, not
+// the filesystem work.
+//
+// The CALL counts did not move on any of the ten occasions —
 // 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
-// changed size, not the work. B = 256 KiB still holds, and the shrink puts
-// it at 3.45x headroom rather than 3.35x.
+// changed size, not the work. B = 256 KiB still holds, and the new maximum
+// leaves 3.18x headroom.
 //
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
@@ -135,7 +149,7 @@ import (
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 74264
+	measuredMaxPublishBytes = 83718
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

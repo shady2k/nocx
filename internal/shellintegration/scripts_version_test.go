@@ -187,6 +187,16 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// sourcing 44 can enrol a worker and can never say what it produced,
 		// so every worker it takes part in terminalizes as abandoned.
 		"45": "f1ae91b06be337ea944586139c77e1261bdf7fc1d325678e65ed405e153b0b02",
+		// 46: bash and zsh stage the enrolled agent's MCP configuration in a
+		// private lease directory rather than writing user-owned config files.
+		"46": "a91ef33f3d15c8af319bc62e1e705ee41206bf4669626bd5dec42c628e71adb6",
+		// 47: preserve the user's Claude flags and prompt before appending the
+		// variadic MCP configuration argument.
+		"47": "08c389e6b00ff30c110fc005d53bbc033ddc381cdb049ce30a7a7e08566ca31a",
+		// 48: identify private launch leases with pid and start time, preserve
+		// the user's signal traps, and prove interruption cleans the launch
+		// directory.
+		"48": "c648dc929b5a14e7e9d28a619f1873d35c7e47a1fdbf81654be66a037ec7a0be",
 	}
 
 	h := sha256.New()

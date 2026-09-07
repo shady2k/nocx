@@ -343,6 +343,10 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths for the
+	// launch-owned MCP bridge. They never carry lifecycle authority.
+	AgentHelperPath     string
+	AgentToolSocketPath string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: it travels as a bounded FRAME on the session
 	// channel and reaches the far shell through an inherited, already
@@ -493,6 +497,11 @@ type ConnectConfig struct {
 	// Enhanced requests the marker-only prompt mode (ADR-0006) for the
 	// remote shell; forwarded to the launcher in LaunchOptions.
 	Enhanced bool
+
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths forwarded
+	// to the launch-owned MCP bridge.
+	AgentHelperPath     string
+	AgentToolSocketPath string
 
 	// Shell pins the far shell the launcher must target. Empty means
 	// "detect it" — the launcher receives ShellAuto and decides on the far
@@ -702,6 +711,16 @@ func WithRemoteLauncher(l RemoteLauncher) ConnectOption {
 // connection; the launcher embeds it as NOCX_SESSION_ID.
 func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
+}
+
+// WithAgentHelperPath supplies the non-secret bridge executable path.
+func WithAgentHelperPath(path string) ConnectOption {
+	return func(c *ConnectConfig) { c.AgentHelperPath = path }
+}
+
+// WithAgentToolSocketPath supplies the non-secret local tool socket path.
+func WithAgentToolSocketPath(path string) ConnectOption {
+	return func(c *ConnectConfig) { c.AgentToolSocketPath = path }
 }
 
 // WithDesiredMode sets the resolved destination mode (raw|script|helper,

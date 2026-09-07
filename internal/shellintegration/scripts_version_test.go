@@ -197,6 +197,9 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// the user's signal traps, and prove interruption cleans the launch
 		// directory.
 		"48": "c648dc929b5a14e7e9d28a619f1873d35c7e47a1fdbf81654be66a037ec7a0be",
+		// 49: fail-open lifecycle initialization must not abort a shell running
+		// under errexit when no channel is configured or the channel fails.
+		"49": "4e2e4e3b628401720875b77fc3072d5a6c9b9d4f874265b58581ac01c7901214",
 	}
 
 	h := sha256.New()

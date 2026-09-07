@@ -240,7 +240,7 @@ var (
 // non-strict MCP configuration, so variadic parsing cannot consume prompts.
 // 48: identify private launch leases with pid and start time, preserve the
 // user's signal traps, and prove interruption cleans the launch directory.
-const version = "48"
+const version = "49"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

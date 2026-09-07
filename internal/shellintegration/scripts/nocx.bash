@@ -357,11 +357,11 @@ __nocx_lc_init() {
         __cfg_ok=1
     fi
     if [[ "$__cfg_ok" != "1" ]]; then
-        return 1
+        return 0
     fi
     # Before the first read of any kind — __nocx_lc_read_frame below is one.
     if ! __nocx_lc_resolve_probe; then
-        return 1
+        return 0
     fi
     if [[ -n "$__nocx_lc_port" ]]; then
         # Remote / in-band transport: bash network redirection. The bind
@@ -377,7 +377,7 @@ __nocx_lc_init() {
         # readline writes the prompt to stderr, so the restored native
         # prompt (decisions 8/9) would be invisible.
         if ! { exec 200<>"/dev/tcp/127.0.0.1/$__nocx_lc_port"; } 2>/dev/null; then
-            return 1
+            return 0
         fi
         __nocx_lc_fd=200
     fi
@@ -394,9 +394,11 @@ __nocx_lc_init() {
     # variable and anyone can set it before starting a shell.
     __nocx_lc_json_escape "${NOCX_GENERATION-}"
     __nocx_lc_gen_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
+    if ! __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'; then
+        return 0
+    fi
     if ! __nocx_lc_read_frame; then
-        return 1
+        return 0
     fi
     # Three independent substring checks, not one ordered pattern: the
     # envelope's field order is the adapter's, and a case pattern like
@@ -415,15 +417,15 @@ __nocx_lc_init() {
     # the envelope always has fields after the epoch, so the comma is there.
     case "$__nocx_lc_frame" in
         *'"evt":"accept"'*) : ;;
-        *) return 1 ;;
+        *) return 0 ;;
     esac
     case "$__nocx_lc_frame" in
         *'"dom":"'"$__nocx_lc_dom_esc"'"'*) : ;;
-        *) return 1 ;;
+        *) return 0 ;;
     esac
     case "$__nocx_lc_frame" in
         *'"epoch":'"$__nocx_lc_epoch"','*) : ;;
-        *) return 1 ;;
+        *) return 0 ;;
     esac
     __nocx_lc_active=1
     return 0

@@ -31,9 +31,9 @@ import (
 // integration/, lock polls) are measured separately by
 // TestMeasurePublishScaling and TestMeasureLockLoopCost and are NOT folded
 // into these constants.
-// measuredMaxPublishBytes has moved twice, and both moves are the ratchet
-// working rather than failing. Every byte of both is the launch carrier,
-// which is the only bundle file either change touched.
+// measuredMaxPublishBytes has moved twelve times, and every move is the ratchet
+// working rather than failing. Every byte of each move is the launch carrier,
+// which is the only bundle file these changes touched.
 //
 // 2026-08-21, first move: it was 57,496 when measured against a tree that had
 // the carrier but not stage-1; merging the two grew the launch carrier from
@@ -134,14 +134,19 @@ import (
 // across the two generation scripts. The review round strengthened lease
 // identity with pid start times and made zsh preserve signal traps without
 // firing its function-scoped EXIT trap during launch setup.
+// 2026-09-07, twelfth move (nocx-v58e8 / nocx-rowqt.5): 83,718 -> 83,788, +70
+// across the two generation scripts. The errexit fix preserves fail-open
+// sourcing when the shell enables errexit; the fail-closed assertions add the
+// coordinator-side lifecycle-loss proof. The assertions do not add bundle
+// bytes, but are part of the same round.
 //
 // The CALL counts did not move on this occasion — the bundle changed size, not
 // the filesystem work.
 //
-// The CALL counts did not move on any of the ten occasions —
+// The CALL counts did not move on any of the twelve occasions —
 // 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
 // changed size, not the work. B = 256 KiB still holds, and the new maximum
-// leaves 3.18x headroom.
+// leaves 3.13x headroom.
 //
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
@@ -149,7 +154,7 @@ import (
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 83718
+	measuredMaxPublishBytes = 83788
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

@@ -199,6 +199,39 @@ Three properties are load-bearing, and they are code, not prose:
   claims of different kinds and the surface never merges them into one
   judgement.
 
+**And the model is not shown the scan's matches either** — decided 2026-09-07
+under `nocx-cdmjj`, which asked the question the prompt had been begging. It
+once directed the model to judge "a static scan's match" while `audit.go`
+computed the findings beside the composed document and never wrote them in; the
+clause was removed rather than answered, because the answer is a design
+question. Four reasons, and the second is the binding one:
+
+- **It would tell the model nothing it cannot see.** The scan matches phrasings
+  in files the model is given in full. Handing over our matches adds no
+  information — it adds our LABELS.
+- **It would move nocx's facts into the attacker's half of the prompt.** The
+  frame's whole construction keeps nocx's words in the system turn and the
+  skill's bytes in the user turn, so a skill's own text never sits in the region
+  that says it is only a document (`skillaudit.go`). A finding written into the
+  document is a structured, quotable fact of ours placed where hostile text
+  already lives — and a hostile file can then imitate its shape.
+- **Reading them back out is worse than not sending them.** In prose, "the scan
+  flagged line 12" cannot be told from "I found line 12", and the person would
+  read our determinism into the model's guess. That is exactly the merge the
+  bullet above forbids at the surface, arriving through the input instead.
+- **What the "for" argument wanted is already asked for.** A model that can say
+  what a matched line DOES in context reaches that line by reading it, and the
+  prompt's second and third paragraphs ask for precisely that — what the skill
+  reaches for, and the file and line behind the verdict. The person then gets
+  the model's own reading rather than a gloss on our label.
+
+Two tests hold the two halves together, and neither can pass vacuously:
+`TestAuditDocumentIsTheFilesAndNothingElse` rebuilds the composed document from
+the files that were read and compares, so there is no room in it for a finding;
+`TestTheAuditPromptNeverReferstoAScanTheModelWasNotGiven` fails on the words.
+Adding the clause back without giving the model the findings fails the second;
+giving it the findings fails the first.
+
 The existing caveats stay, at a sentence's weight: absence of a scan match is
 not safety, and a skill's own text can address its reader.
 

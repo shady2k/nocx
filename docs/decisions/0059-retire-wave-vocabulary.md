@@ -26,15 +26,15 @@ the question the caller asks, not a `wave` noun that needs renaming.
 
 The old names map to the following live names:
 
-| Old | New |
-| --- | --- |
+| Old                                                                                | New                                                                                                  |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `wave.spawn`, `wave.wait`, `wave.holdings`, `wave.say`, `wave.close`, `wave.inbox` | `workers.spawn`, `workers.wait`, `workers.holdings`, `workers.say`, `workers.close`, `workers.inbox` |
-| `internal/wave` | `internal/workers` |
-| `internal/waveendpoint` | `internal/toolendpoint` |
-| `internal/wavepin` | `internal/peerpin` |
-| `assistant.WaveDispatcher` | `assistant.ToolDispatcher` |
-| `assistant.WaveInvocation` | `assistant.ToolInvocation` |
-| worker-record fields and helpers that named a wave | names describing the worker group or tool surface |
+| `internal/wave`                                                                    | `internal/workers`                                                                                   |
+| `internal/waveendpoint`                                                            | `internal/toolendpoint`                                                                              |
+| `internal/wavepin`                                                                 | `internal/peerpin`                                                                                   |
+| `assistant.WaveDispatcher`                                                         | `assistant.ToolDispatcher`                                                                           |
+| `assistant.WaveInvocation`                                                         | `assistant.ToolInvocation`                                                                           |
+| worker-record fields and helpers that named a wave                                 | names describing the worker group or tool surface                                                    |
 
 The six schemas under `contracts/tools/`, the Go declaration table, the endpoint, and
 live generated contract types use the new names. The worker notification kind is also

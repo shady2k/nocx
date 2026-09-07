@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -12,6 +13,7 @@ import (
 type skillSettingsSource interface {
 	List() (skill.ListResult, error)
 	SetEnabled(name string, enabled bool) error
+	SetPin(name string, pin skill.PinKind, on bool) error
 	Remove(name string) error
 	Approve(name string) error
 	// File is the person's read path for one file of one discovered skill.
@@ -48,6 +50,12 @@ type skillSetEnabledParams struct {
 
 type skillRemoveParams struct {
 	Name string `json:"name"`
+}
+
+type skillSetPinParams struct {
+	Name string        `json:"name"`
+	Pin  skill.PinKind `json:"pin"`
+	On   bool          `json:"on"`
 }
 
 // skillFileParams names one file of one skill. The path is relative to the
@@ -228,6 +236,31 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			return
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(map[string]string{"name": p.Name}))
+	case "skills.setPin":
+		var p skillSetPinParams
+		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		if err := h.source.SetPin(p.Name, p.Pin, p.On); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		listed, err := h.source.List()
+		if err != nil || listed.DocumentError != "" {
+			if err == nil {
+				err = errors.New(listed.DocumentError)
+			}
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return
+		}
+		for _, row := range listed.Skills {
+			if row.Name == p.Name {
+				_ = h.r.TryResult(req.ID, mustMarshal(map[string]any{"name": p.Name, "pins": row.Pins}))
+				return
+			}
+		}
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "skill not found"})
 	case "skills.file":
 		var p skillFileParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" || p.Path == "" {
@@ -286,6 +319,7 @@ func (h skillSettingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 		var p skillRemoveParams
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+
 			return
 		}
 		if err := h.source.Approve(p.Name); err != nil {
@@ -306,6 +340,23 @@ func validateSkillSetEnabledRaw(raw json.RawMessage) string {
 	}
 	if p.Name == "" {
 		return "name is required"
+	}
+	return ""
+}
+
+func validateSkillSetPinRaw(raw json.RawMessage) string {
+	var p skillSetPinParams
+	if msg := decodeObject(raw, &p, "name", "pin", "on"); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("name", p.Name, 128); msg != "" {
+		return msg
+	}
+	if p.Name == "" {
+		return "name is required"
+	}
+	if p.Pin != skill.PinKeepEnabled && p.Pin != skill.PinKeepUnchanged {
+		return "pin must be keepEnabled or keepUnchanged"
 	}
 	return ""
 }

@@ -28,6 +28,20 @@ export interface Skill {
   path: string
   enabled: boolean
   status: 'approved' | 'changed'
+  usage: {
+    count: number
+    lastUsedAt?: string
+    firstSeenAt?: string
+  }
+  autoOff?: {
+    at: string
+    silentSince: string
+    days: number
+  }
+  pins: {
+    keepEnabled?: boolean
+    keepUnchanged?: boolean
+  }
   /**
    * What an installed skill was RESOLVED FROM, as skills.json recorded it at install time — the address, when it was taken, and the digest of what that address served. ABSENT unless a source is recorded: never for authored, builtin or managed skills, and not for a directory somebody moved into the installed root by hand — so its presence answers where the bytes came from and never what provenance the skill has. It is the RESULT and never the ROUTE: the search, the page the model read and the links it followed are deliberately not recorded anywhere, because an agent's route is not reproducible and could only be the model's own assertion (internal/skill/store_doc.go says this at length). Inlined rather than named, for the reason every finding here is: a named $def becomes a second generated export nothing consumes.
    */

@@ -2436,6 +2436,10 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		regResponder(configSub, "skills.setPin", params(validateSkillSetPinRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
 		regResponder(configSub, "skills.remove", params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

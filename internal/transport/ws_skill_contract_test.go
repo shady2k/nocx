@@ -54,6 +54,9 @@ func TestSkillsList_DTOConformsToContract(t *testing.T) {
 			ListedSkill: skill.ListedSkill{
 				Name: "audited", Description: "d", Provenance: skill.ProvenanceInstalled,
 				Path: "/installed-skills/audited/SKILL.md", Enabled: false, Status: skill.StatusApproved,
+				Usage:   skill.Usage{Count: 12, LastUsedAt: "2026-09-03T12:00:00Z", FirstSeenAt: "2026-08-01T12:00:00Z"},
+				AutoOff: &skill.AutoOff{At: "2026-09-03T12:00:00Z", SilentSince: "2026-08-01T12:00:00Z", Days: 30},
+				Pins:    skill.Pins{KeepEnabled: true, KeepUnchanged: true},
 			},
 			Check: &skillsListCheck{At: "2026-09-03T12:00:00Z", Verdict: "suspect", Model: "qwen3"},
 		},
@@ -85,9 +88,46 @@ func TestSkillsSetEnabled_DTOConformsToContract(t *testing.T) {
 	validateJSON(t, schema, mustMarshal(map[string]any{"name": "deploy", "enabled": false}), "skills.setEnabled DTO")
 }
 
+func TestSkillsSetPin_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "skills.setPin.schema.json")
+	validateJSON(t, schema, mustMarshal(map[string]any{
+		"name": "deploy",
+		"pins": map[string]any{"keepEnabled": true, "keepUnchanged": false},
+	}), "skills.setPin DTO")
+}
+
 func TestSkillsRemove_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "skills.remove.schema.json")
 	validateJSON(t, schema, mustMarshal(map[string]string{"name": "deploy"}), "skills.remove DTO")
+}
+
+func TestSkillsSetPin_OverTheWireConformsToContract(t *testing.T) {
+	configDir := t.TempDir()
+	writeSkillFile(t, filepath.Join(configDir, "managed-skills", "deploy"), "deploy", "Deploy")
+	conn, _, _, cleanup := skillsURLConnection(t, configDir)
+	defer cleanup()
+
+	resp := jsonrpcCall(t, conn, "skills.setPin", map[string]any{
+		"name": "deploy", "pin": "keepEnabled", "on": true,
+	})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("skills.setPin: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.setPin.schema.json"), env.Result, "skills.setPin wire")
+	var result struct {
+		Name string     `json:"name"`
+		Pins skill.Pins `json:"pins"`
+	}
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "deploy" || !result.Pins.KeepEnabled {
+		t.Fatalf("result = %+v, want deploy with keepEnabled", result)
+	}
 }
 
 func TestSkillsApprove_DTOConformsToContract(t *testing.T) {
@@ -411,6 +451,10 @@ func skillsContractConnection(t *testing.T) (*websocket.Conn, func()) {
 // content.db keeps this connection's setup to the two things the tests that
 // use it actually need — a skill library and a place to file a check.
 func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skill.Store, *recordingSkillChecks, func()) {
+	return skillsURLConnectionWithOptions(t, configDir)
+}
+
+func skillsURLConnectionWithOptions(t *testing.T, configDir string, opts ...skill.StoreOption) (*websocket.Conn, *skill.Store, *recordingSkillChecks, func()) {
 	t.Helper()
 	routes := func(_ context.Context, routeID string) (httppolicy.Route, error) {
 		if routeID != "" {
@@ -422,7 +466,7 @@ func skillsURLConnection(t *testing.T, configDir string) (*websocket.Conn, *skil
 		{Dir: filepath.Join(configDir, "skills"), Provenance: skill.ProvenanceAuthored},
 		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
 		{Dir: filepath.Join(configDir, "installed-skills"), Provenance: skill.ProvenanceInstalled},
-	}, storage.NewDocumentStore(configDir), skill.WithFetcher(apifetch.New(routes, nil)))
+	}, storage.NewDocumentStore(configDir), append([]skill.StoreOption{skill.WithFetcher(apifetch.New(routes, nil))}, opts...)...)
 	checks := &recordingSkillChecks{}
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithSkillSource(store), WithSkillChecks(checks))
 	ctx := context.Background()
@@ -943,4 +987,49 @@ func listOneSkillOverTheWire(t *testing.T, conn *websocket.Conn, name string) sk
 		t.Fatalf("DocumentError = %q, want none", got.DocumentError)
 	}
 	return wireSkill(t, got, name)
+}
+
+func TestSkillsList_AgedSkillCarriesAutomaticOffOverTheWire(t *testing.T) {
+	configDir := t.TempDir()
+	writeSkillFile(t, filepath.Join(configDir, "skills", "deploy"), "deploy", "Deploy the service")
+	now := time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC)
+	conn, store, _, cleanup := skillsURLConnectionWithOptions(t, configDir,
+		skill.WithClock(func() time.Time { return now }),
+		skill.WithIdleDays(func() int { return 30 }))
+	defer cleanup()
+
+	if _, err := store.List(); err != nil {
+		t.Fatalf("seed list: %v", err)
+	}
+	now = time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	resp := jsonrpcCall(t, conn, "skills.list", map[string]any{})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("skills.list: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "skills.list.schema.json"), env.Result, "aged skills.list wire")
+	var listed skillsListResult
+	if err := json.Unmarshal(env.Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	row := wireSkill(t, listed, "deploy")
+	if row.Enabled || row.AutoOff == nil {
+		t.Fatalf("aged row = %+v, want disabled with automatic mark", row)
+	}
+	if row.AutoOff.SilentSince != "2026-03-03T10:00:00Z" || row.AutoOff.Days != 30 {
+		t.Fatalf("autoOff = %+v, want first-seen date and threshold", row.AutoOff)
+	}
+	if row.Usage.Count != 0 {
+		t.Fatalf("usage = %+v, want never-read count zero", row.Usage)
+	}
+	raw, err := os.ReadFile(store.DocumentPath()) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"disabled":["deploy"]`) {
+		t.Fatalf("skills.json put the automatic switch in disabled: %s", raw)
+	}
 }

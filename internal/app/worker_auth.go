@@ -104,24 +104,23 @@ type toolAuthorizer struct {
 // newToolAuthorizer builds the one external caller authorizer. It binds a
 // peer only to a session whose pane is currently enrolled and whose root pid
 // came from a process nocx opened itself. The peer's uid and pid never supply
-// the root identity. When approval is wired, the durable executable/scope
-// decision is checked in addition to the live process-tree pin.
+// the root identity. The durable executable/scope decision is required in
+// addition to the live process-tree pin.
 func newToolAuthorizer(
 	pinner peerpin.Pinner,
 	sessions workerAuthSessions,
 	enrolments workerAuthEnrolments,
 	participants workerAuthParticipants,
 	workspace string,
-	approvals ...workerAuthApproval,
-) toolendpoint.Authorizer {
-	var approval workerAuthApproval
-	if len(approvals) != 0 {
-		approval = approvals[0]
+	approval workerAuthApproval,
+) (toolendpoint.Authorizer, error) {
+	if approval == nil {
+		return nil, errors.New("tool authorizer: no agent approval")
 	}
 	return &toolAuthorizer{
 		pinner: pinner, sessions: sessions, enrolments: enrolments,
 		participants: participants, approval: approval, workspace: workspace,
-	}
+	}, nil
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, bool) {
@@ -150,8 +149,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		if err != nil || !member {
 			continue
 		}
-		if a.approval != nil &&
-			!a.approval.Approved(rootPID, agentToolEndpointScopePrefix+a.workspace) {
+		if !a.approval.Approved(rootPID, agentToolEndpointScopePrefix+a.workspace) {
 			continue
 		}
 		if admitted != "" {

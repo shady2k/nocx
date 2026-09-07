@@ -57,13 +57,12 @@ func newPaneEnroller(
 	sessions *sessionRegistry,
 	grid panegrid.Observer,
 	watch paneWatcher,
-	approvals ...agentApproval,
-) *paneEnroller {
-	var approval agentApproval
-	if len(approvals) != 0 {
-		approval = approvals[0]
+	approval agentApproval,
+) (*paneEnroller, error) {
+	if approval == nil {
+		return nil, errors.New("pane enroller: no agent approval")
 	}
-	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch, approval: approval}
+	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch, approval: approval}, nil
 }
 
 // Enrol opens the interval for the pane the lane belongs to.
@@ -84,12 +83,10 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 			"lane", string(lane), "agent", agent)
 		return errors.New("nocx does not know which pane this shell is")
 	}
-	if e.approval != nil {
-		if err := e.approval.Approve(context.Background(), session.ID(sid), agent); err != nil {
-			e.log.Warn("agent enrolment refused: human approval was not granted",
-				"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
-			return err
-		}
+	if err := e.approval.Approve(context.Background(), session.ID(sid), agent); err != nil {
+		e.log.Warn("agent enrolment refused: human approval was not granted",
+			"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
+		return err
 	}
 	if err := e.grid.Enrol(sid, cols, rows); err != nil {
 		switch {

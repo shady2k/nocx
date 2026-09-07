@@ -304,6 +304,24 @@ func TestLocalPaneOpenerIsWiredAtTheCompositionRoot(t *testing.T) {
 	}
 }
 
+func TestNew_ComposesHumanApprovalIntoAgentEnroller(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := newTestApp(t)
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	defer a.Shutdown(context.Background())
+
+	if a.agentEnroller == nil || a.agentEnroller.approval == nil {
+		t.Fatal("composition root did not wire agent approval into the enroller")
+	}
+	a.agentEnroller.sessions.register("approval-test-lane", "approval-test-session")
+	err = a.agentEnroller.Enrol("approval-test-lane", "claude", 80, 24)
+	if err == nil || !strings.Contains(err.Error(), "cannot identify the enrolled agent executable") {
+		t.Fatalf("composed enroller approval result = %v, want the approval refusal", err)
+	}
+}
+
 func isLowerHex(s string) bool {
 	for _, c := range s {
 		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {

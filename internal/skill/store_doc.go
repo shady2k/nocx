@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -277,7 +278,7 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 	}
 	s := &Store{
 		fs: fsys, roots: copyRoots, managedDir: managedDir, installedDir: installedDir,
-		docStore: docStore, locks: make(map[string]*sync.Mutex),
+		docStore: docStore, locks: make(map[string]*sync.Mutex), now: time.Now,
 	}
 	for i := range s.roots {
 		s.roots[i].switches = s.loadSwitches
@@ -474,6 +475,16 @@ func (s *Store) List() (ListResult, error) {
 	if err := s.documentError(); err != nil {
 		result.DocumentError = err.Error()
 		return result, nil
+	}
+	if flushErr := s.FlushUsage(); flushErr != nil {
+		slog.Debug("skill: usage counters were not flushed", "error", flushErr)
+	}
+	names := make([]string, 0, len(detailed))
+	for _, found := range detailed {
+		names = append(names, found.Name)
+	}
+	if stampErr := s.stampFirstSeen(names); stampErr != nil {
+		slog.Debug("skill: first-seen dates were not stamped", "error", stampErr)
 	}
 	// Read AFTER discovery and outside it, because discovery is the roots'
 	// answer and this is the document's: recordedSources takes docMu, which

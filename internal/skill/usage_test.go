@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -45,5 +46,42 @@ func TestRecordUseDoesNotWritePerCall(t *testing.T) {
 	}
 	if got.Count != 0 {
 		t.Fatalf("count = %d before a flush, want 0", got.Count)
+	}
+}
+
+func writeSkillAt(t *testing.T, store *Store, name, description string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(store.roots[0].Dir, name), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: " + description + "\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(store.roots[0].Dir, name, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFirstSeenIsStampedOnceAndNeverMoves(t *testing.T) {
+	store := usageStand(t)
+	writeSkillAt(t, store, "deploy", "Deploy the service")
+
+	if _, err := store.List(); err != nil {
+		t.Fatalf("first list: %v", err)
+	}
+	first, err := store.usageFor("deploy")
+	if err != nil || first.FirstSeenAt == "" {
+		t.Fatalf("firstSeenAt = %q, %v; want it stamped by the first discovery", first.FirstSeenAt, err)
+	}
+
+	store.now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
+	if _, listErr := store.List(); listErr != nil {
+		t.Fatalf("second list: %v", listErr)
+	}
+	second, err := store.usageFor("deploy")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if second.FirstSeenAt != first.FirstSeenAt {
+		t.Fatalf("firstSeenAt moved from %q to %q: it is when nocx FIRST saw the skill",
+			first.FirstSeenAt, second.FirstSeenAt)
 	}
 }

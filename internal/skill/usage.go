@@ -117,3 +117,34 @@ func (s *Store) restorePending(pending map[string]pendingUse) {
 		s.pendingUsage[name] = merged
 	}
 }
+
+// stampFirstSeen records the moment discovery first saw each name, and never
+// moves one already recorded.
+func (s *Store) stampFirstSeen(names []string) error {
+	if s == nil || len(names) == 0 {
+		return nil
+	}
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, name := range names {
+		row := d.Usage[name]
+		if row.FirstSeenAt != "" {
+			continue
+		}
+		row.FirstSeenAt = s.now().UTC().Format(time.RFC3339)
+		if d.Usage == nil {
+			d.Usage = make(map[string]Usage, len(names))
+		}
+		d.Usage[name] = row
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.writeDocumentLocked(d)
+}

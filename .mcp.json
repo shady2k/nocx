@@ -7,7 +7,13 @@
     "repowise": {
       "command": "repowise",
       "args": ["mcp", "--transport", "stdio"],
-      "description": "repowise: codebase intelligence — docs, graph, git signals, dead code, decisions"
+      "description": "repowise: codebase intelligence — docs, graph, git signals, dead code, decisions",
+      "env": { "REPOWISE_EMBEDDING_DIMS": "3072" }
+    },
+    "deja": {
+      "command": "deja",
+      "args": ["mcp"],
+      "description": "deja: recall across every agent's session transcripts, machine-wide"
     }
   }
 }

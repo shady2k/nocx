@@ -32,7 +32,7 @@ twice, because "read consumes nothing" prevents loss and does not prevent duplic
 
 ## 3. Decisions this plan makes
 
-**M1. Durable, unlike the undispatched fact set.** ADR-0056 put that set in memory because a
+**M1. Durable, unlike the undispatched fact set.** ADR-0060 put that set in memory because a
 fact is a claim about a live process and a restart has already judged every process it could
 be about. A MESSAGE is not that: it is a thing that was said, and it keeps its value after
 the participants are gone — "committed and never taken" is exactly what you want to be able

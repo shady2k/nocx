@@ -1,4 +1,4 @@
-# ADR-0056 — Supervision outlives the coordinator, not the backend
+# ADR-0060 — Supervision outlives the coordinator, not the backend
 
 - **Status:** Accepted
 - **Date:** 2026-09-04

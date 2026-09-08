@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-09-06
 - **Owner request:** Retire the `wave` vocabulary before the tool surface is exposed to an external model.
-- **Related:** AD-8 (one owner per behaviour), ADR-0028 (the dispatcher narrows; it does not check), ADR-0056 (supervision outlives the coordinator, not the backend), ADR-0058 (authority is bound to a unit of work).
+- **Related:** AD-8 (one owner per behaviour), ADR-0028 (the dispatcher narrows; it does not check), ADR-0060 (supervision outlives the coordinator, not the backend), ADR-0058 (authority is bound to a unit of work).
 - **Design:** `.internal/specs/2026-09-05-the-tool-surface-at-launch-design.md` and `.internal/specs/2026-09-03-the-waves-authority-model-design.md`, both updated with the live vocabulary.
 
 ## Context

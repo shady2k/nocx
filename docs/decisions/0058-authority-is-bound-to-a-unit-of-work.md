@@ -5,7 +5,7 @@
 - **Related:** [ADR-0020](0020-the-agent-gets-a-lane-authority-is-granted-per-run.md)
   (`D5`: authority is granted per run; a container never confers it),
   [ADR-0028](0028-eino-runs-the-loop-the-grant-is-ours.md) (the dispatcher narrows,
-  it does not check), [ADR-0056](0056-supervision-outlives-the-coordinator-not-the-backend.md)
+  it does not check), [ADR-0060](0060-supervision-outlives-the-coordinator-not-the-backend.md)
   (which cites "authority per run, never per session"), AD-7 (the session is
   backend-owned), AD-8 (one owner per behaviour).
 - **Design:** `.internal/specs/2026-09-03-the-waves-authority-model-design.md` §5,
@@ -35,7 +35,7 @@ there: the person did not start an execution, they started a shell that will cal
 five methods over an hour.
 
 So the literal reading of `D5` says the external caller may hold no authority at
-all, and the literal reading of ADR-0056's "never per session" says the obvious
+all, and the literal reading of ADR-0060's "never per session" says the obvious
 alternative — a grant that lives as long as the session — is the one thing
 forbidden. Both readings are about the same fear, and it is a real one: a
 container that confers authority, so that dragging a tab or leaving a shell open
@@ -62,7 +62,7 @@ container:
   derived from the session's own kind and host rather than assumed.
 
 A session outlives many admission intervals, and holds no authority between them.
-That is the whole of the distinction ADR-0056 was protecting, and it survives.
+That is the whole of the distinction ADR-0060 was protecting, and it survives.
 
 ## Why this rather than the obvious alternatives
 
@@ -72,7 +72,7 @@ output budget, an interactivity policy and a termination reason (ADR-0020 `D2`,
 `D4`), all of which would be fabricated for a coordinator that executes nothing.
 An empty shell of a run is a lie a stranger would later read as data.
 
-**Amending ADR-0020** was considered and rejected: `D5` is accepted, ADR-0056 cites
+**Amending ADR-0020** was considered and rejected: `D5` is accepted, ADR-0060 cites
 it, and re-deciding a settled question inside another task is how it stops being
 settled. This record cites it instead, and leaves it as it stands.
 

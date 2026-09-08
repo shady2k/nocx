@@ -12,13 +12,13 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 256
+        "maxLength": 128
       },
       "minItems": 1
     },
     "targetGroupId": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 128
     }
   }
 }

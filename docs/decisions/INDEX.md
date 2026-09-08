@@ -105,6 +105,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0053 | [A tool declares the classes it can reach](0053-a-tool-declares-the-classes-it-can-reach.md)                                      | Accepted 2026-08-31                   |
 | 0054 | [A table is a stack of rows that carries a grid](0054-a-table-is-a-stack-of-rows-that-carries-a-grid.md)                          | Accepted 2026-08-31                   |
 | 0055 | [ContentDB schema changes migrate or refuse](0055-contentdb-schema-changes-migrate-or-refuse.md)                                  | Accepted 2026-09-01                   |
+| 0056 | [repowise is kept for history, not for search](0056-repowise-is-kept-for-history-not-for-search.md)                               | Accepted 2026-09-07                   |
 
 ## Adding one
 

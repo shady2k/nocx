@@ -292,3 +292,34 @@ describe('CodeBlock answer variant', () => {
     await vi.waitFor(() => expect(copy).toHaveBeenCalledWith('formatted\nrequest'))
   })
 })
+
+// THE CAP IS THIS KIT'S DECISION, AND SO IS LETTING A CALLER OUT OF IT
+// (nocx-xj1l6). `max-height: 200px` is right for machine output inside a page
+// that scrolls — the block must not push the page off screen. It is wrong for
+// a caller whose own element is already the scroll container and whose whole
+// job is the file: there the cap stops the bytes a fifth of the way down an
+// empty column. That caller gets a VARIANT, the way `dump` got one, rather
+// than reaching in from its own stylesheet to unset a rule this file owns.
+describe('CodeBlock fill variant', () => {
+  it('marks the block whose height belongs to its caller', () => {
+    const { container } = render(() => (
+      <CodeBlock variant="fill" ariaLabel="The whole of SKILL.md">
+        {'# Skill\n'}
+      </CodeBlock>
+    ))
+    expect(container.querySelector<HTMLElement>('.ui-code-block')?.dataset.variant).toBe('fill')
+    // The WRAP carries it too: the cap sits on the `<pre>`, but a `<pre>` can
+    // only fill a parent that is itself filling — a variant that stopped at
+    // the inner element would be a rule with nothing to stretch inside.
+    expect(container.querySelector<HTMLElement>('.ui-code-block-wrap')?.dataset.variant).toBe(
+      'fill',
+    )
+  })
+
+  it('lifts the cap in the stylesheet, and only for that variant', () => {
+    expect(CSS).toMatch(/\.ui-code-block\[data-variant='fill'\][^}]*max-height:\s*none/s)
+    // The default is untouched: every other caller still gets the 200px that
+    // keeps machine output from pushing a page off screen.
+    expect(CSS).toMatch(/\.ui-code-block \{[^}]*max-height:\s*200px/s)
+  })
+})

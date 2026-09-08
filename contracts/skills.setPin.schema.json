@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.setPin.schema.json",
+  "title": "SkillsSetPin",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "pins"],
+  "properties": {
+    "name": { "type": "string" },
+    "pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "keepEnabled": { "type": "boolean" },
+        "keepUnchanged": { "type": "boolean" }
+      }
+    }
+  }
+}

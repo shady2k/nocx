@@ -33,6 +33,38 @@ describe('Prompt', () => {
     expect(prompt?.querySelector('.ui-prompt__actions')?.textContent).toBe('OK')
   })
 
+  it('names the prompt on the overlay, not only on the panel inside it', () => {
+    const { container } = render(() => (
+      <Prompt
+        open
+        ariaLabel="Unlock the vault"
+        placement="top-sheet"
+        onClose={() => undefined}
+        actions={<button type="button">OK</button>}
+      >
+        <input />
+      </Prompt>
+    ))
+
+    const overlay = container.querySelector('.ui-prompt-overlay')!
+    expect(overlay.getAttribute('data-prompt')).toBe('Unlock the vault')
+    // One name, one owner: whatever the dialog is called is what the overlay
+    // reports, so the two can never drift into naming different things.
+    expect(container.querySelector('.ui-prompt')?.getAttribute('aria-label')).toBe(
+      'Unlock the vault',
+    )
+  })
+
+  it('leaves the overlay unnamed when the prompt has no name', () => {
+    const { container } = render(() => (
+      <Prompt open ariaLabel="" placement="top-sheet" onClose={() => undefined} actions={null}>
+        <input />
+      </Prompt>
+    ))
+
+    expect(container.querySelector('.ui-prompt-overlay')!.hasAttribute('data-prompt')).toBe(false)
+  })
+
   it('closes when the scrim is pressed', () => {
     const close = vi.fn()
     const [open, setOpen] = createSignal(true)

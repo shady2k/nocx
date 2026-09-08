@@ -15,6 +15,15 @@
  * state deserves is the caller's decision (primary to unlock, danger to
  * disconnect), and threading `variant` through would just re-export Button's
  * API one level up.
+ *
+ * `prose` is the one piece of variance the description carries, and it exists
+ * because a description is not always a sentence somebody wrote. The skill
+ * audit's report is several paragraphs of MODEL output shown verbatim, and a
+ * `<p>` collapses the blank lines between them into one run-on block — the
+ * component silently reformatting text it was asked to present as written.
+ * Added here rather than forked in the surface for the kit's own rule: this
+ * is a 90% fit missing one piece of variance, and a second card with its own
+ * type size and colour is exactly what this component was extracted to end.
  */
 
 import { Show, type JSX } from 'solid-js'
@@ -29,11 +38,20 @@ export interface StatusCardProps {
   /** The single action for this state. Usually a kit Button. */
   action?: JSX.Element
   tone?: StatusCardTone
+  /**
+   * The description is verbatim multi-paragraph text rather than one authored
+   * sentence: its blank lines are kept instead of collapsed.
+   */
+  prose?: boolean
 }
 
 export function StatusCard(props: StatusCardProps) {
   return (
-    <div class="ui-status-card" data-tone={props.tone ?? 'neutral'}>
+    <div
+      class="ui-status-card"
+      data-tone={props.tone ?? 'neutral'}
+      data-prose={props.prose ? '' : undefined}
+    >
       {/* The slot is absent, not empty, when there is no icon: an empty flex
           child still takes its gap, and the text would then sit indented from
           a column that holds nothing. */}

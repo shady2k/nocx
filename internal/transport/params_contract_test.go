@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 )
 
 func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
@@ -339,6 +340,21 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"settings.set": {
 			[]byte(`{"key":"clipboard.osc52Suppressed","value":true}`),
 		},
+		"skills.audit": {
+			[]byte(`{"name":"deploy"}`),
+		},
+		"skills.check": {
+			[]byte(`{"name":"deploy"}`),
+		},
+		"skills.file": {
+			[]byte(`{"name":"deploy","path":"references/hosts.md"}`),
+		},
+		"skills.files": {
+			[]byte(`{"name":"deploy"}`),
+		},
+		"skills.scan": {
+			[]byte(`{"name":"deploy"}`),
+		},
 		"skills.list": {
 			[]byte(`{}`),
 		},
@@ -347,6 +363,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		},
 		"skills.setEnabled": {
 			[]byte(`{"name":"deploy","enabled":true}`),
+		},
+		"skills.setPin": {
+			[]byte(`{"name":"deploy","pin":"keepEnabled","on":true}`),
 		},
 		"skills.approve": {
 			[]byte(`{"name":"deploy"}`),
@@ -845,6 +864,115 @@ func TestDecodeObjectRejectsUnknownTrailingAndNamedNull(t *testing.T) {
 			var got params
 			if msg := decodeObject(test.raw, &got, "required"); msg != test.want {
 				t.Fatalf("decodeObject(%s) = %q, want %q", test.raw, msg, test.want)
+			}
+		})
+	}
+}
+
+func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	server := NewWSServer(logger, newRegWithStub(logger))
+	idAtLimit := strings.Repeat("x", profile.MaxIDRunes)
+	nameAtLimit := strings.Repeat("n", maxConfigNameRunes)
+	if len(idAtLimit) != profile.MaxIDRunes || len(nameAtLimit) != maxConfigNameRunes {
+		t.Fatal("boundary fixtures have the wrong length")
+	}
+	overID := idAtLimit + "x"
+	overName := nameAtLimit + "n"
+
+	profileParams := func(id, name, group string) map[string]any {
+		return map[string]any{
+			"id": id, "type": "ssh", "name": name, "group": group,
+			"options": map[string]any{"host": "example.com"},
+		}
+	}
+	groupParams := func(id, name, parent string) map[string]any {
+		return map[string]any{"id": id, "name": name, "parentGroupId": parent}
+	}
+	endpointParams := func(name string) map[string]any {
+		return map[string]any{
+			"name": name, "baseUrl": "https://example.com/v1",
+			"models": []map[string]any{{"name": "model"}},
+		}
+	}
+	cases := []struct {
+		method string
+		valid  any
+		over   any
+	}{
+		{"profiles.create/id", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(overID, nameAtLimit, idAtLimit)},
+		{"profiles.create/name", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(idAtLimit, overName, idAtLimit)},
+		{"profiles.create/group", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(idAtLimit, nameAtLimit, overID)},
+		{"profiles.update/id", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(overID, nameAtLimit, idAtLimit)},
+		{"profiles.update/name", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(idAtLimit, overName, idAtLimit)},
+		{"profiles.update/group", profileParams(idAtLimit, nameAtLimit, idAtLimit), profileParams(idAtLimit, nameAtLimit, overID)},
+		{"groups.create/id", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(overID, nameAtLimit, idAtLimit)},
+		{"groups.create/name", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(idAtLimit, overName, idAtLimit)},
+		{"groups.create/parent", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(idAtLimit, nameAtLimit, overID)},
+		{"groups.update/id", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(overID, nameAtLimit, idAtLimit)},
+		{"groups.update/name", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(idAtLimit, overName, idAtLimit)},
+		{"groups.update/parent", groupParams(idAtLimit, nameAtLimit, idAtLimit), groupParams(idAtLimit, nameAtLimit, overID)},
+		{"groups.apply/id", []any{groupParams(idAtLimit, nameAtLimit, idAtLimit)}, []any{groupParams(overID, nameAtLimit, idAtLimit)}},
+		{"groups.apply/name", []any{groupParams(idAtLimit, nameAtLimit, idAtLimit)}, []any{groupParams(idAtLimit, overName, idAtLimit)}},
+		{"groups.apply/parent", []any{groupParams(idAtLimit, nameAtLimit, idAtLimit)}, []any{groupParams(idAtLimit, nameAtLimit, overID)}},
+		{"groups.impact/id", map[string]any{"group": groupParams(idAtLimit, nameAtLimit, idAtLimit)}, map[string]any{"group": groupParams(overID, nameAtLimit, idAtLimit)}},
+		{"groups.impact/name", map[string]any{"group": groupParams(idAtLimit, nameAtLimit, idAtLimit)}, map[string]any{"group": groupParams(idAtLimit, overName, idAtLimit)}},
+		{"groups.impact/parent", map[string]any{"group": groupParams(idAtLimit, nameAtLimit, idAtLimit)}, map[string]any{"group": groupParams(idAtLimit, nameAtLimit, overID)}},
+		{"groups.impact/delete", map[string]any{"deleteGroupId": idAtLimit}, map[string]any{"deleteGroupId": overID}},
+		{"endpoints.create/name", endpointParams(nameAtLimit), endpointParams(overName)},
+		{"endpoints.update/id", map[string]any{"id": idAtLimit, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}, map[string]any{"id": overID, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}},
+		{"endpoints.update/name", map[string]any{"id": idAtLimit, "name": nameAtLimit, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}, map[string]any{"id": idAtLimit, "name": overName, "baseUrl": "https://example.com/v1", "models": []map[string]any{{"name": "model"}}}},
+		{"endpoints.probe/name", map[string]any{"name": nameAtLimit, "baseUrl": "https://example.com/v1", "model": "model"}, map[string]any{"name": overName, "baseUrl": "https://example.com/v1", "model": "model"}},
+		{"profiles.moveImpact/profileId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{overID}, "targetGroupId": idAtLimit}},
+		{"profiles.moveImpact/targetGroupId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": overID}},
+		// The seam methods that take a profile id. They validate through
+		// validateProfileID, so they are bounded by the same domain ceiling
+		// the mint guarantees — and their contracts said 256 and 512 until
+		// nocx-ms4xq, which is a length a renderer built to the contract
+		// would have been answered -32602 for.
+		{"ports.status/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"ports.sample/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"ports.pause/profileId", map[string]any{"profileId": idAtLimit, "paused": true}, map[string]any{"profileId": overID, "paused": true}},
+		{"ports.visible/profileId", map[string]any{"profileId": idAtLimit, "visible": true}, map[string]any{"profileId": overID, "visible": true}},
+		{"connections.test/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"tunnel.open/profileId", map[string]any{"profileId": idAtLimit, "destination": "example.com:22"}, map[string]any{"profileId": overID, "destination": "example.com:22"}},
+		{"shell.footprint.uninstall/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"shell.footprint.helperUninstall/profileId", map[string]any{"profileId": idAtLimit, "fingerprint": "SHA256:abc", "path": "~/.nocx/helper/1/"}, map[string]any{"profileId": overID, "fingerprint": "SHA256:abc", "path": "~/.nocx/helper/1/"}},
+	}
+	for _, test := range cases {
+		test := test
+		method := test.method
+		if slash := strings.IndexByte(method, '/'); slash >= 0 {
+			method = method[:slash]
+		}
+		t.Run(test.method, func(t *testing.T) {
+			spec, ok := server.methods[method]
+			if !ok {
+				t.Fatalf("method is not registered")
+			}
+			schema := loadSchema(t, method+".params.schema.json")
+			for label, value := range map[string]struct {
+				payload any
+				reject  bool
+			}{
+				"at-limit":   {payload: test.valid},
+				"over-limit": {payload: test.over, reject: true},
+			} {
+				raw, err := json.Marshal(value.payload)
+				if err != nil {
+					t.Fatalf("%s marshal: %v", label, err)
+				}
+				schemaErr := validateJSONErr(schema, raw)
+				runtimeErr := spec.validate(raw)
+				if value.reject {
+					if schemaErr == nil || runtimeErr == "" {
+						t.Fatalf("%s accepted over-limit value: schema=%v runtime=%q", label, schemaErr, runtimeErr)
+					}
+					continue
+				}
+				if schemaErr != nil || runtimeErr != "" {
+					t.Fatalf("%s rejected boundary value: schema=%v runtime=%q", label, schemaErr, runtimeErr)
+				}
 			}
 		})
 	}

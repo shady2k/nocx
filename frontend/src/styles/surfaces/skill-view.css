@@ -1,0 +1,208 @@
+/* Skill tab (nocx-btg7d, nocx-4m1n1, nocx-yh8n9) — the changed warning
+   above the identity rail and the file list beside the file. The root
+   element is SolidPaneContent's `.surface-host` child; `.skill-view__header`
+   is the surface's flex column so the document can use the whole pane when
+   the warning is absent. The left rail owns identity, Check and Files; the
+   right side is only the selected document or check report. The surface
+   places kit components without repainting them. */
+
+.skill-view__header {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.skill-view__warning {
+  flex: 0 0 auto;
+}
+
+.skill-view__warning[data-populated='true'] {
+  padding: var(--space-4);
+}
+
+/* The name and its provenance badge read as one line: the badge answers
+   "what kind of skill is this" right where the name answers "which one".
+   IT WRAPS RATHER THAN COMPETES (nocx-qqj2q). This rail is 260px by
+   default and both were shrinkable flex items, so a name of ordinary
+   length took the width and left the badge to degrade the only way the kit
+   lets it — `builtin` clipped to `buil…`, which names no provenance at all.
+   A badge that has dropped below the name still says what the skill is; a
+   clipped one says nothing, so the line break is the better failure. */
+.skill-view__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* Placement only, per frontend/src/ui/README.md: the badge keeps its own
+   paint and stops being squeezed out of legibility. */
+.skill-view__title > .ui-badge {
+  flex: 0 0 auto;
+}
+
+.skill-view__name {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The rail holds two separate answers — who this skill is, and what it is
+   made of — and they were adjacent siblings with no gap at all
+   (nocx-qqj2q), so the "Files" heading sat directly under the last switch
+   and read as its caption. The space is a margin on the identity block
+   rather than a gap on the scrolling column: turning `.skill-view__list-col`
+   into a flex column would let its children shrink below their content
+   instead of scrolling, which is a different defect for the same pixels.
+   `--space-6` is what the identity Stack already puts between its own rows,
+   so this continues that rhythm rather than inventing a second one. */
+.skill-view__identity {
+  min-width: 0;
+  margin-block-end: var(--space-6);
+}
+
+/* ── The body: the file list beside the file (nocx-4m1n1) ─────────────────
+   `container-type: inline-size` is what lets the split below query its OWN
+   width rather than the window's — the pane can be narrower than the
+   window whenever the sidebar or a second pane shares it. The body fills
+   whatever the header leaves (flex:1, min-height:0 — the standard "let a
+   flex child scroll instead of push" pair), and never scrolls itself: the
+   two columns inside the split scroll on their own. */
+.skill-view__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  container-name: skill-view;
+}
+
+/* Three tracks — the list, the seam, and the view — with the list's width
+   a custom property the surface sets from what a person dragged
+   (skill-view-body.tsx), the same seam api-pane.tsx's tree column uses.
+   `minmax(0, 1fr)` on the view track is what lets CodeBlock's own
+   `overflow-x` inside FileReadout do its job instead of the grid track
+   growing to fit the widest line — the pane must never scroll
+   horizontally. */
+.skill-view__split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--skill-view-list-width, 260px) auto minmax(0, 1fr);
+  grid-template-areas: 'list seam view';
+  overflow: hidden;
+}
+
+.skill-view__list-col {
+  grid-area: list;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4);
+}
+
+.skill-view__seam {
+  grid-area: seam;
+  display: flex;
+  min-width: 0;
+}
+
+/* The column IS the pane's right half, and its single child fills it
+   (nocx-xj1l6). It was `overflow-y: auto` and nothing else, which made it a
+   scroll box whose child could only be as tall as its own content — so a file
+   stopped at CodeBlock's 200px page cap a fifth of the way down, with the
+   rest of the column empty beneath it.
+
+   A flex column that CLIPS instead: the height is now a real one the child
+   can be handed, and the scrolling belongs to whichever single child is in
+   the column — the file readout through CodeBlock's `fill` variant, the check
+   panel on its own root below. One scroll box, owned by the thing that knows
+   what is being scrolled; nesting a second one here would put a scrollbar
+   around a scrollbar the day a file was long. */
+.skill-view__view-col {
+  grid-area: view;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--space-4);
+}
+
+/* The keyboard owner and the ARIA list (skill-view-body.tsx's onKeyDown) —
+   this element carries no appearance of its own; row spacing is the kit
+   Stack's (`divided dense`) placed inside it. */
+.skill-view__file-list {
+  min-width: 0;
+}
+
+/* ── The check panel (nocx-dh14q) ──────────────────────────────────────────
+   SkillViewCheckPanel's own root, rendered in `.skill-view__view-col` (the
+   RIGHT pane) when the left column's "Check" row is selected — the same
+   slot a file's FileReadout occupies, never a group stacked in the narrow
+   list column (review round 2 moved it out of there: see
+   skill-view-body.tsx's module comment for why). A single child of that
+   column, so the rhythm BETWEEN its own children (the verdict line, the
+   Caption, the report, the scan sentences, the button) has to come from
+   here — the column's own padding places it, and does not space its
+   grandchildren. Owned outright, not a kit component, so it may carry
+   layout freely (README's own rule for the header and its `<h1>` above). */
+.skill-view__check {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  /* The panel scrolls itself now that the column clips (nocx-xj1l6). A long
+     model report has no length anybody promised, and the column above no
+     longer catches it. */
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* `> p`, not `p`: a bare descendant selector would also win over
+   `.ui-status-card__title { margin: 0 }` on every StatusCard this panel
+   places (same value today, so nothing looks wrong — but it is the
+   surface reaching past a kit component's root into its children, which
+   is exactly what "place, never repaint" forbids). `>` stops at this
+   panel's own direct `<p>` children and never descends into a StatusCard's
+   markup. */
+.skill-view__check > p {
+  margin: 0;
+}
+
+/* The one headline fact in the pane, replacing the whole StatusCard the
+   modal card used to spend on it (design §4's table) — a little louder than
+   body copy, never louder than that. */
+.skill-view__check-verdict {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+/* The model's prose, verbatim. `pre-wrap` keeps the paragraph breaks the
+   model wrote instead of collapsing them into one run-on block — the same
+   reason status-card.tsx grew its own `prose` variant, restated here
+   because this text is no longer inside a StatusCard at all (design §4:
+   "prose at the pane's full width"). */
+.skill-view__check-report {
+  white-space: pre-wrap;
+}
+
+/* Below 640px the two columns no longer fit side by side at any width
+   worth reading a file in — the list stacks above the view instead of
+   splitting the pane vertically. The seam is hidden rather than left to
+   drag a column that CSS no longer measures: a handle with no effect is
+   worse than no handle. */
+@container skill-view (max-width: 640px) {
+  .skill-view__split {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(120px, 1fr) minmax(160px, 2fr);
+    grid-template-areas: 'list' 'view';
+  }
+
+  .skill-view__seam {
+    display: none;
+  }
+}

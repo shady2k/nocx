@@ -580,6 +580,11 @@ type WSServer struct {
 	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+	// skillChecks is where skills.audit files what a model concluded, once
+	// it has answered (ws_skill_audit.go). When nil, an audit still returns
+	// its report and says stored:"no" — a store failure or a missing store
+	// must never swallow an answer the person already spent a model call on.
+	skillChecks skillCheckStore
 	// hostSessionInventory answers what active helper generations hold. It is
 	// nil when the helper plane is not wired, which is a visible unavailable
 	// method rather than a fabricated empty answer.
@@ -1005,6 +1010,19 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 // WithSkillSource attaches the single skill library used by assistant asks.
 func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
 	return func(ws *WSServer) { ws.skillLibrary = source }
+}
+
+// WithSkillChecks attaches the repository skills.audit writes a verdict to
+// once the model has answered (ws_skill_audit.go). It is wired beside
+// WithContentDB, the same way WithSessionOutputRecorder is — a distinct
+// option computed by calling the sub-repository getter on the content db —
+// rather than derived lazily from s.contentDB at registration time, so a nil
+// contentDB and a nil skillChecks are two independent facts a test can set
+// apart. When nil, a successful audit still returns its report and says
+// stored:"no", because a store that is not there must not swallow the
+// answer a model was already billed for.
+func WithSkillChecks(store skillCheckStore) WSServerOption {
+	return func(ws *WSServer) { ws.skillChecks = store }
 }
 
 // WithAgentToolRegistry attaches the registry used by the assistant engine.
@@ -1642,8 +1660,15 @@ type domainGates struct {
 
 func (s *WSServer) domainGates() domainGates {
 	return domainGates{
-		config:     capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		vault:      capability.Gate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		config: capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		// The vault gate is DECLARED as the one vault.unseal itself acquires
+		// (vaultSpecs builds VaultOperation from it). Every operation that
+		// composes this gate therefore fences the operation-stance credential
+		// reads inside its callback, because such a read waits for a person to
+		// answer an unlock whose answer needs this gate back — twice now a
+		// handler has shown somebody that dialog and refused their Unlock with
+		// "Control plane busy" (nocx-o3606, nocx-9fzkk).
+		vault:      capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),

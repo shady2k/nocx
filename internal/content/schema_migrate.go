@@ -153,8 +153,9 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
-	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild},
-	{from: 16, to: 17, apply: migrateTerminationReasons16to17, schemaDigest: "a1f0aa167b6dfaae4fd0d2e374e3406b096ea658ded032b1f88874a40a7b35e9"},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, preflight: refuseAPIRunTablesFromANewerBuild, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
+	{from: 16, to: 17, apply: migrateAddSkillChecks16to17, schemaDigest: "cc4c6529598c845b19936ee4c11c3adff9a66162ec56b70743f3188dc132092e"},
+	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -210,6 +211,39 @@ func validateLadderForSchema(ladder []migrationStep, version int, schema string)
 			return errors.New("content: migration ladder: 15→16 retirement rung is missing its api-run preflight")
 		}
 	}
+	// EVERY VERSION THIS LADDER LEAVES BEHIND MUST ALREADY BE PINNED
+	// (nocx-e5f55's Critical, closed as a class rather than as the one
+	// instance a reviewer happened to find). schemaShapeDigests answers "is
+	// a database stamped this version actually this shape" for every
+	// version except the one that is current, which derives its shape from
+	// schemaV1 at runtime instead — so the moment a step's `from` stops
+	// being current, that entry has to already exist, and there is no later
+	// point at which forgetting it becomes visible on its own. 16 shipped
+	// without one for exactly one release, because the pin was a convention
+	// ("remember to add it") and not a check, and validateOnDiskSchemaShapeFor
+	// only catches the gap for whoever happens to open a database stamped
+	// the forgotten version — which, in production, is everyone who has one,
+	// and none of the tests that only ever open a fresh or a 14-forward
+	// database. This runs unconditionally, before any file is even read: a
+	// commit that bumps schemaVersion without pinning the version it just
+	// dethroned now fails `Open` for a BRAND NEW install too, which is the
+	// only way to make it impossible to ship rather than easy to miss.
+	for _, step := range ladder {
+		if step.from >= version {
+			continue
+		}
+		if _, ok := schemaShapeDigests[step.from]; !ok {
+			return fmt.Errorf("content: migration ladder: schema %d has no pinned shape in schemaShapeDigests; "+
+				"every version this build has left behind must be pinned before something newer supersedes it, "+
+				"or a database stamped %d is refused at Open with no way to tell a real divergence from a shape "+
+				"that was simply never checked — add schemaShapeDigests[%d]", step.from, step.from, step.from)
+		}
+		if _, ok := historicalSchemaObjectNames[step.from]; !ok {
+			return fmt.Errorf("content: migration ladder: schema %d has a pinned digest but no pinned object names in "+
+				"historicalSchemaObjectNames; without it a shape mismatch for %d reports two digests that disagree "+
+				"and nothing about what is missing or extra — add historicalSchemaObjectNames[%d]", step.from, step.from, step.from)
+		}
+	}
 	return nil
 }
 
@@ -260,13 +294,27 @@ func validateOnDiskSchemaShapeFor(ctx context.Context, conn *sql.Conn, version, 
 var schemaShapeDigests = map[int]string{
 	14: "302e4e2479855b3aa0abdce4a9ecb0f3c5a8af7f06ad102f9a9049e6818fd4c2",
 	15: "75eb0aea40034a9db5c8f19648215e638234a9e9f0031a5a7275e2d8af7c3ff4",
+	// 16 is pinned now that schemaVersion moved past it (nocx-e5f55): until
+	// then 16 WAS current and its shape was derived at runtime by
+	// currentSchemaShape, which is exactly the branch that stops running the
+	// moment a newer version takes over as current. Taken from
+	// testdata/schema_v16.sql — the shape as it stood at 882f34b5, the last
+	// commit before skill_checks was added — because the working tree's
+	// schemaV1 already carries that table and would pin the shape of a v16 that
+	// never existed, which Open would then accept without having checked
+	// anything.
 	16: "014fa0face729e1f650b37d3d9ac7abb2d68490c98c3c6c48d6d74490702687f",
+	// 17 is pinned for the same reason, in the commit that dethroned it: it is
+	// testdata/schema_v17.sql, which is 16 plus skill_checks and is where
+	// executions.termination_reason still refused `answer-revoked`.
+	17: "623ffa936faf719fe2fad36b9a0e1393c0bfeabac4358a95f972559c92f5169a",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	14: schema14ObjectNames(),
 	15: schema15ObjectNames(),
 	16: schema16ObjectNames(),
+	17: schema17ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -319,13 +367,24 @@ func schema15ObjectNames() map[string]struct{} {
 	return result
 }
 
-// Schema 16 is 15 without the api-run counter: the 15→16 rung retired the
-// private `api_run_schema` table, and the `api_run*` tables it used to version
-// became ordinary tables of this file. Nothing else moved, which is why the
-// two lists differ by one name.
+// schema16ObjectNames is schema15's set with api_run_schema retired: the
+// 15→16 rung (migrateRetireTheAPIRunCounter15to16) drops that table and
+// nothing else, so this is the one line that differs. The `api_run*` tables it
+// used to version became ordinary tables of this file.
 func schema16ObjectNames() map[string]struct{} {
 	result := schema15ObjectNames()
 	delete(result, "table:api_run_schema")
+	return result
+}
+
+// schema17ObjectNames is schema16's set plus skill_checks: the 16→17 rung
+// (migrateAddSkillChecks16to17) adds that table and nothing else, so this is
+// the one line that differs. The 17→18 rung rebuilds `executions` to widen a
+// CHECK, which changes that table's DDL and not the set of names — which is
+// exactly why the digest and the names are pinned separately.
+func schema17ObjectNames() map[string]struct{} {
+	result := schema16ObjectNames()
+	result["table:skill_checks"] = struct{}{}
 	return result
 }
 
@@ -334,6 +393,18 @@ type sqliteSchemaObject struct {
 }
 
 func currentSchemaShape(ctx context.Context) (string, map[string]struct{}, error) {
+	return shapeOfDDL(ctx, schemaV1)
+}
+
+// shapeOfDDL builds a throwaway in-memory database from ddl and returns its
+// digest and object names — the same computation currentSchemaShape does for
+// the live schemaV1, factored out so a test can ask the identical question
+// of a DDL that is not the current one: a released fixture's text (freezing
+// a pin for a version schemaShapeDigests does not carry permanently), or a
+// synthetic schema built for a single test. Production calls only
+// currentSchemaShape; this exists for the tests that pin a version's shape
+// temporarily rather than editing the permanent maps below.
+func shapeOfDDL(ctx context.Context, ddl string) (string, map[string]struct{}, error) {
 	db, err := driver.Open(":memory:")
 	if err != nil {
 		return "", nil, err
@@ -344,7 +415,7 @@ func currentSchemaShape(ctx context.Context) (string, map[string]struct{}, error
 		return "", nil, err
 	}
 	defer func() { _ = conn.Close() }()
-	if _, execErr := conn.ExecContext(ctx, schemaV1); execErr != nil {
+	if _, execErr := conn.ExecContext(ctx, ddl); execErr != nil {
 		return "", nil, execErr
 	}
 	objects, err := sqliteSchemaObjects(ctx, conn)
@@ -753,7 +824,31 @@ func migrateRetireTheAPIRunCounter15to16(ctx context.Context, tx *sql.Tx) error 
 	return nil
 }
 
-// migrateTerminationReasons16to17 widens executions.termination_reason to
+// migrateAddSkillChecks16to17 adds the skill_checks table (design §6). Purely
+// additive: a database written by a build that predates it simply has no such
+// table, and no row anywhere else refers to one.
+func migrateAddSkillChecks16to17(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS skill_checks (
+  name        TEXT PRIMARY KEY,
+  provenance  TEXT NOT NULL,
+  verdict     TEXT NOT NULL,
+  report      TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  endpoint    TEXT NOT NULL,
+  model       TEXT NOT NULL,
+  digest      TEXT NOT NULL,
+  checked_at  INTEGER NOT NULL,
+  read_paths  TEXT NOT NULL DEFAULT '[]',
+  omitted     TEXT NOT NULL DEFAULT '[]',
+  findings    TEXT NOT NULL DEFAULT '[]',
+  max_bytes   INTEGER NOT NULL DEFAULT 0
+) STRICT`); err != nil {
+		return fmt.Errorf("add skill_checks table: %w", err)
+	}
+	return nil
+}
+
+// migrateTerminationReasons17to18 widens executions.termination_reason to
 // admit `answer-revoked` — the reason a run gets when a person takes back a
 // standing answer and chooses to stop the work running under it
 // (nocx-4yjwk.7).
@@ -806,7 +901,7 @@ func migrateRetireTheAPIRunCounter15to16(ctx context.Context, tx *sql.Tx) error 
 // file BECOMES on its way through 17, not what the current build creates.
 // TestAnUpgradedDatabaseAndAFreshOneHoldTheSameSchema is what keeps them equal
 // while they are supposed to be equal.
-func migrateTerminationReasons16to17(ctx context.Context, tx *sql.Tx) error {
+func migrateTerminationReasons17to18(ctx context.Context, tx *sql.Tx) error {
 	var present int
 	if err := tx.QueryRowContext(ctx,
 		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='executions'").Scan(&present); err != nil {

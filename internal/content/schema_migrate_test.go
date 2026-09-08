@@ -357,6 +357,23 @@ func TestTheAPIRunRetirementRungRequiresItsPreflight(t *testing.T) {
 	}
 }
 
+// TestMigratableRungWithoutHistoricalShapeIsRefused proves
+// validateOnDiskSchemaShapeFor's OWN refusal still reads correctly once its
+// two version numbers are symbolic (schemaVersion / schemaVersion+1) instead
+// of literal — nothing more. It is a regression test for a comment this test
+// used to make and did not keep: it once said 16 and 17 literally, and it
+// went on passing right through the commit that shipped schemaVersion 17
+// without pinning 16's shape (nocx-e5f55), because a literal cannot tell a
+// hypothetical next version from an actual historical one once the bump
+// lands. Naming the numbers symbolically here fixed THIS test's own
+// targeting, but a literal test staying green was a symptom, not the defect
+// — the defect was that nothing FORCED a pin to exist at all. That is now a
+// property of the ladder itself: validateLadderForSchema refuses any ladder
+// that dethrones a version without a pinned shape, unconditionally, before
+// any database is even opened (schema_migrate.go, the loop after the 15→16
+// preflight check), and TestALadderThatDethronesAnUnpinnedVersionIsRefused
+// (schema_parity_test.go) is the test for that gate. This test is the
+// narrower, older claim that gate now sits on top of.
 func TestMigratableRungWithoutHistoricalShapeIsRefused(t *testing.T) {
 	path := aFreshDatabase(t)
 	conn, closeConn := rawConn(t, path)

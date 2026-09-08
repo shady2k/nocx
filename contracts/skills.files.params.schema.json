@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.files.params.schema.json",
+  "title": "SkillsFilesParams",
+  "description": "Params for skills.files: which discovered skill to list. One skill, because one skill is what a card is about — the alternative was an array of paths on every row of skills.list, which would pay a directory walk per skill on every refresh to fill a field one open card reads.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

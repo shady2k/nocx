@@ -429,27 +429,91 @@ describe('dispatcher heartbeat', () => {
     expect(d.connectionState).toEqual({ kind: 'online' })
   })
 
-  it('does not ping while control traffic keeps the socket busy', async () => {
+  // Only what the CLIENT sends defers the ping, because only that refreshes the
+  // server's read deadline. The second half of this test used to assert that an
+  // INBOUND frame defers it too, which is the reading nocx-8jzbp was: it let a
+  // socket that was being talked at, and never talking back, run past the
+  // window and be closed.
+  it('lets its own traffic defer the ping, and a server frame not defer it', async () => {
     const d = new Dispatcher(new TestEndpointProvider())
     await connected(d)
+    const pings = () =>
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping')
 
     d.notify('activity', {})
     vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
-    expect(
-      socket()
-        .requests()
-        .filter((request) => request.method === 'transport.ping'),
-    ).toHaveLength(0)
+    expect(pings()).toHaveLength(0)
 
     socket().deliverText({ jsonrpc: '2.0', method: 'activity', params: {} })
-    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+    vi.advanceTimersByTime(1)
+
+    expect(pings()).toHaveLength(1)
+    expect(socket().closeCalled).toBe(false)
+  })
+
+  // A PENDING CALL IS WHEN THE CLIENT SENDS NOTHING, NOT WHEN IT IS BUSY
+  // (nocx-8jzbp).
+  //
+  // The server closes a client that has sent nothing for 30s, and the deadline
+  // is refreshed only by frames the CLIENT sends. The heartbeat used to stand
+  // down while anything was pending — on the reading that an in-flight request
+  // proves the socket alive, which is true of the connection and false of the
+  // server's read deadline. So a skills.audit, which is a model reading a whole
+  // skill, died at thirty seconds and took every other call on the socket with
+  // it: "This skill was not read — ws closed".
+  it('keeps pinging while a slow call is still pending', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    const slow = d.call('skills.audit', { name: 'agentmail' })
+    const audit = socket()
+      .requests()
+      .find((request) => request.method === 'skills.audit')
+    expect(audit).toBeDefined()
+
+    // Three idle windows with the call still in flight — more than the 30s the
+    // server allows — and each one answered, as the real server answers
+    // transport.ping on the read loop while the control lane works.
+    for (let window = 1; window <= 3; window++) {
+      vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS)
+      const pings = socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping')
+      expect(pings).toHaveLength(window)
+      socket().deliverText({
+        jsonrpc: '2.0',
+        id: pings[window - 1].id,
+        result: { serverTimeMs: 1756500000000 },
+      })
+      await flush()
+    }
+
+    expect(socket().closeCalled).toBe(false)
+    socket().deliverText({ jsonrpc: '2.0', id: audit!.id, result: { verdict: 'clear' } })
+    await expect(slow).resolves.toMatchObject({ verdict: 'clear' })
+  })
+
+  // The same confusion from the other side: a frame the SERVER sent does not
+  // refresh the server's own read deadline, so it cannot stand in for one the
+  // client owes. A run streaming its answer for a minute sends the renderer
+  // plenty and the renderer nothing.
+  it('pings even while the server is streaming notifications at it', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    for (let tick = 0; tick < 3; tick++) {
+      vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS / 2)
+      socket().deliverText({ jsonrpc: '2.0', method: 'agent.delta', params: {} })
+    }
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS / 2)
 
     expect(
       socket()
         .requests()
-        .filter((request) => request.method === 'transport.ping'),
-    ).toHaveLength(0)
-    expect(socket().closeCalled).toBe(false)
+        .filter((request) => request.method === 'transport.ping').length,
+    ).toBeGreaterThanOrEqual(1)
   })
 
   it('closes an idle socket when the heartbeat response times out through close', async () => {

@@ -73,10 +73,8 @@ type settingsSecretExistsParams struct {
 
 const (
 	// maxConfigIDRunes bounds renderer-supplied profile, group and endpoint
-	// ids. Ids are backend-minted "typ:custom:slug:uuid"; a renderer-supplied
-	// id only replaces the mint, and the ask path bounds the same class of
-	// value at 128 (maxIDRunes).
-	maxConfigIDRunes = 128
+	// ids with the same domain-owned ceiling the backend mint guarantees.
+	maxConfigIDRunes = profile.MaxIDRunes
 	// maxConfigNameRunes bounds display names (profile, group, endpoint,
 	// model). Names are echoed in lists and slugified into minted ids.
 	maxConfigNameRunes = 200
@@ -215,11 +213,8 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 	if o.Host == "" {
 		return "options.host is required"
 	}
-	if msg := boundedRunes("options.host", o.Host, maxHostRunes); msg != "" {
+	if msg := validateSSHHost("options.host", o.Host); msg != "" {
 		return msg
-	}
-	if hasControlChars(o.Host) {
-		return "options.host must not contain control characters"
 	}
 	if o.Port != nil && (*o.Port < 0 || *o.Port > 65535) {
 		return "options.port must be between 0 and 65535"
@@ -629,12 +624,26 @@ func validateProfileMoveImpactRaw(raw json.RawMessage) string {
 // params ARE the array (JSON-RPC positional form, which the floor already
 // admitted); the handler refuses an empty array, and the store requires
 // every member to name a group (ErrGroupIDRequired).
+//
+// Unknown member fields are refused, like every other group method: this was
+// the one that used a plain Unmarshal, so it silently DROPPED a key the
+// others answered -32602 to. Saving a group therefore looked like it worked
+// while the impact preview for the same object failed, which is how the
+// renderer went on sending a display shape nobody could see it sending
+// (nocx-a0pf3).
 func validateGroupApplyRaw(raw json.RawMessage) string {
-	var groups []profile.ProfileGroup
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return "groups required"
 	}
-	if err := json.Unmarshal(raw, &groups); err != nil {
+	var groups []profile.ProfileGroup
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&groups); err != nil {
+		const unknownField = "json: unknown field "
+		if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {
+			return "unknown field " + name
+		}
 		return "params must be a JSON array of groups"
 	}
 	if len(groups) == 0 {
@@ -2425,16 +2434,57 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.list", noParams(), func(r Responder) handlerFunc {
-			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			// checks and log are the only fields this registration sets that
+			// the other skills.* registrations below do not: every other
+			// method here never reads a stored check, so it never needs
+			// somewhere to report one it could not read.
+			h := skillSettingsHandlers{source: skillSource, checks: s.skillChecks, log: s.log, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.setEnabled", params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		regResponder(configSub, "skills.setPin", params(validateSkillSetPinRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
 		regResponder(configSub, "skills.remove", params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.file", params(validateSkillFileRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.files", params(validateSkillFilesRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.scan", params(validateSkillScanRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.audit", params(validateSkillAuditRaw), func(r Responder) handlerFunc {
+			// The one method here that spends money, so it is the one that
+			// needs a model as well as the library: the skills source for
+			// the bytes, the config operation and the vault for the role
+			// and its credential, and the engine for the call.
+			h := skillAuditHandlers{
+				source: skillSource, engine: s.assistantClient,
+				configOp: configOp, credentials: s.credentialResolver(),
+				checks: s.skillChecks, settings: s.settings,
+				log: s.log, wired: skillWired && s.assistantClient != nil, r: r,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
+		regResponder(configSub, "skills.check", params(validateSkillCheckRaw), func(r Responder) handlerFunc {
+			// Spends nothing: no configOp, no credentials, no engine. The
+			// same skillSource skills.audit reads from (it composes the
+			// bundle, never a model) and the same store skills.audit writes
+			// to (nil or a stub both answer checked:false, never an error).
+			h := skillCheckHandlers{source: skillSource, checks: s.skillChecks, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		regResponder(configSub, "skills.approve", params(validateSkillApproveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}

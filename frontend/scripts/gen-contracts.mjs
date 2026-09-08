@@ -55,7 +55,15 @@ async function main() {
     const generated = await compileFromFile(join(contractsDir, schemaFile), {
       bannerComment: BANNER.replace('%SCHEMA%', schemaFile),
       additionalProperties: false,
-      style: { semi: false, singleQuote: true, printWidth: 100 },
+      // The style is the repo's prettier config, and `trailingComma` is
+      // pinned rather than left to the formatter this library bundles: its
+      // default omits the comma after the last element of a MULTI-LINE
+      // tuple, which prettier 3 then rewrites — so `npm run contracts` and
+      // `prettier --check .` disagreed about the same file and no schema
+      // could be written whose type is a multi-line tuple (an array with
+      // minItems whose items are objects). Both are CI gates; a generated
+      // file has to satisfy both.
+      style: { semi: false, singleQuote: true, printWidth: 100, trailingComma: 'all' },
     })
     const target = join(outDir, outputName(schemaFile))
 

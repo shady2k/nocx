@@ -15,12 +15,12 @@
 // registry and tells this content whether the binding may still be called.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { ReadOnlyHost } from '../cm-host'
+import { ReadOnlyHost } from '../ui/cm-host'
 import { render } from 'solid-js/web'
 import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'
 import { BasePaneContent, type ActiveOrigin, type PaneHost } from '../pane-content'
-import { languageForPath, viewerHighlighting } from './language-registry'
+import { languageForPath, viewerHighlighting } from '../ui/document-language'
 import { highlightActiveLine } from '@codemirror/view'
 
 // ── The seam (injected at registration; never imported) ────────────────────

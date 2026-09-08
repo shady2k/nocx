@@ -1,17 +1,23 @@
 -- SCHEMA 16, VERBATIM. This is `schemaV1` as it stood in the tree at
--- `const schemaVersion = 16` — the shape released before the current one —
--- lifted unmodified so a test can fabricate a database a real build wrote
--- rather than one a test invented.
+-- 882f34b5, the last commit holding `const schemaVersion = 16` before
+-- skill_checks arrived and moved it to 17 (nocx-e5f55) — lifted unmodified
+-- so a test can fabricate a database a real build wrote rather than one a
+-- test invented.
 --
--- IT IS FROZEN, for the reason testdata/schema_v14.sql states at length: a
--- fixture edited to keep up with the current schema stops being a fixture,
--- because the migration it feeds would then be tested against the shape it
--- produces rather than against the shape it has to carry.
+-- It exists because nothing did: testdata held schema_v13.sql and
+-- schema_v14.sql and nothing since, so every rung from 14→15 onward had only
+-- ever been proven along the 14→current walk, which is exactly the path that
+-- keeps working while a NEWLY-CURRENT-version's entry point breaks. That gap
+-- is what let a database stamped 16 be refused at Open in production the
+-- moment 17 shipped: 16's shape had never needed pinning while it was
+-- current, nobody pinned it in the same commit that dethroned it, and
+-- nothing exercised opening a file stamped exactly 16 to notice. See
+-- schemaShapeDigests[16] and TestAReleasedSchema16DatabaseOpensAndReads.
 --
--- 16 is where `executions.termination_reason` still admitted nine values and
--- not `answer-revoked`; the 16→17 rung widens that CHECK, and the rows below
--- are what it has to carry across the rebuild (nocx-4yjwk.7).
-
+-- IT IS FROZEN, for the same reason schema_v14.sql is: a fixture edited to
+-- keep up with the current schema stops being a fixture. When 17 is no
+-- longer the version above this one, this file stays exactly as it is and a
+-- schema_v17.sql joins it.
 -- The layout chain (nocx-isoph.1, tabs-panes-and-blocks §3): workspace → tab
 -- → pane. A workspace is FLAT — it has no column naming another workspace, so
 -- nesting is unrepresentable rather than merely unused; depth comes from

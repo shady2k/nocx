@@ -493,7 +493,6 @@ export class Dispatcher {
 
   private _onSocketMessage = (ev: MessageEvent, source: WebSocket | null = this.ws): void => {
     if (source === null || source !== this.ws) return
-    this._noteInboundActivity(source)
     if (typeof ev.data !== 'string') return
     let msg: {
       id?: number
@@ -627,6 +626,22 @@ export class Dispatcher {
     this._heartbeatSocket = null
   }
 
+  // THE WINDOW IS MEASURED AGAINST WHAT THE CLIENT SENDS, and only that
+  // (nocx-8jzbp). The server closes a connection that has sent it nothing for
+  // heartbeatReadWindow — 30s, refreshed by client frames alone — so the only
+  // thing that can stand in for a ping is another OUTBOUND frame, which is why
+  // _noteOutboundActivity re-arms this and nothing on the receiving side does.
+  //
+  // Two readings of "the socket is busy" cost this a bug each. A pending
+  // request used to stand the heartbeat down, on the reasoning that a call in
+  // flight proves the connection alive: true of the connection, false of the
+  // server's deadline, and a pending request is exactly the state in which the
+  // client sends nothing — so a skills.audit, which is a model reading a whole
+  // bundle, died at thirty seconds and took every other call on the socket with
+  // it. A frame the server SENT used to re-arm it for the same reason and with
+  // the same flaw. transport.ping rides the immediate submission and is
+  // answered on the read loop, so it comes back while the control lane is busy;
+  // there is nothing to stand down for.
   private _armHeartbeatIdle(ws: WebSocket): void {
     if (
       this.ws !== ws ||
@@ -641,10 +656,6 @@ export class Dispatcher {
     this._heartbeatIdleTimer = setTimeout(() => {
       if (this._heartbeatSocket !== ws || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return
       this._heartbeatIdleTimer = null
-      if (this.pending.size !== 0) {
-        this._armHeartbeatIdle(ws)
-        return
-      }
       const id = this.nextID++
       this._heartbeatRequestID = id
       ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'transport.ping', params: {} }))
@@ -665,12 +676,6 @@ export class Dispatcher {
   }
 
   private _noteOutboundActivity(ws: WebSocket): void {
-    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
-      return
-    this._armHeartbeatIdle(ws)
-  }
-
-  private _noteInboundActivity(ws: WebSocket): void {
     if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
       return
     this._armHeartbeatIdle(ws)

@@ -181,6 +181,13 @@ type Declaration struct {
 	// declarations describe ordinary actions; a command carrier may resolve
 	// to several classes after its arguments are parsed.
 	Effect []content.Effect
+	// EffectRelation says HOW to read that set, and the zero value is the
+	// reading ADR-0053 gave it. Alternatives are what a door offers — one of
+	// them happens and parsing the arguments picks which. A conjunction is
+	// what a compound act reaches: every class on every successful call, with
+	// nothing to select between them (ADR-0053's 2026-09-07 amendment,
+	// nocx-ykjai).
+	EffectRelation EffectRelation
 	// OutputTrust is independent from Effect: any result may contain text
 	// influenced by the program or data it observed. It must be explicit so
 	// adding a row cannot silently choose an unsafe default.
@@ -700,6 +707,76 @@ var declarations = []Declaration{
 		Params:           "skills.delete.schema.json",
 		Narrow:           narrowSkillsWrite,
 	},
+	{
+		Name:             "skills.resolve",
+		Description:      "Resolve the public address exactly as the person gave it, or as a page named it, into the repository, pinned commit and skills it contains without writing anything; do not judge in advance whether the address is enumerable — call this tool and let it refuse unsupported addresses, then fall back to skills.install.",
+		Effect:           []content.Effect{content.EffectCrossBoundary},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         120 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceDestination},
+		ResolveResources: resourceURL("url"),
+		ScopeFamily:      "skill",
+		Executes:         InGo,
+		Params:           "skills.resolve.schema.json",
+		Narrow:           narrowURL,
+	},
+	{
+		Name:        "skills.install",
+		Description: "Adopt a skill somebody has published at a web address: give the address and nocx fetches the document, reads what it says it is, fetches the files it names and shows the person all of it before anything is written. Reach for this when the person points you at a skill to add — a refusal is an answer, and what does land is switched OFF until THE PERSON turns it on from the skill's own tab, which you have no tool for and must not offer to do, so do not treat an install as a skill you can then use.",
+		// TWO CLASSES, AND THEY ARE BOTH REACHED — this is a CONJUNCTION,
+		// not the alternation ADR-0053 describes. session.run declares a set
+		// because `lsblk` and `rm -rf` are alternatives that share a carrier
+		// and exactly one of them happens; here the fetch AND the write both
+		// happen on every successful call, so nothing selects between them.
+		//
+		// Declaring the set anyway is still right, and better than either
+		// singleton. `mutate-reversible` alone would hide that the model
+		// chooses an address off this machine and nocx goes and reads it;
+		// `cross-boundary` alone would hide that bytes from there land on
+		// the person's disk. WorstEffect makes the DECISION on
+		// cross-boundary (the lattice's higher row), which is the strict
+		// reading of a conjunction and the one we want: the person's answer
+		// for the harsher of the two acts governs the pair.
+		//
+		// THE CONJUNCTION IS DECLARED, not left to the enforcement layer to
+		// discover. EffectRelation is what says so, and ForGrant, the policy
+		// decision and the scope check all read it (ADR-0053's 2026-09-07
+		// amendment, nocx-ykjai). Before it, this row was offered when ANY
+		// class was not refused and decided on the worst class alone, so a
+		// policy refusing reversible mutation while permitting cross-boundary
+		// still listed the tool to the model and still asked the person about
+		// a write they had declined.
+		//
+		// The enforcement layer is still the real one (ADR-0028 decision 4):
+		// narrowSkillsInstall builds the capability from BOTH rows and a
+		// refused mutate-reversible row yields a capability that cannot
+		// install anything. What the declaration adds is that the question is
+		// never put at all.
+		Effect: []content.Effect{
+			content.EffectMutateReversible,
+			content.EffectCrossBoundary,
+		},
+		EffectRelation: EffectsConjunctive,
+		OutputTrust:    OutputTrustUntrusted,
+		ResultBound:    ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		// Longer than fetch.url's minute, because the executor's half of
+		// this call re-acquires the WHOLE bundle — the document plus up to
+		// maxBundleFiles support files — where fetch.url's minute covers one
+		// request. The same bound is applied to the resolution that happens
+		// before the person is asked (internal/assistant/kernel.go), so the
+		// declared deadline governs both halves of the call rather than only
+		// the half that runs after the answer.
+		Deadline:         120 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceDestination, content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillInstallResources("url"),
+		Executes:         InGo,
+		Params:           "skills.install.schema.json",
+		Narrow:           narrowSkillsInstall,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the
@@ -843,7 +920,45 @@ func joinProblems(problems []string) error {
 // returned "for later filtering" — a tool no reachable effect can use, or one
 // that cannot execute, is absent from the set because the strongest refusal is
 // the one never proposed. The result is in table order.
-func anyEffectPermitted(effects []content.Effect, permitted map[content.Effect]bool) bool {
+// EffectRelation reads a declaration's effect set. It is a TYPE rather than a
+// bool because the two readings are two different questions asked of the same
+// field, and a bool at the call site would say "true" where the reader needs
+// to know true of what.
+type EffectRelation int
+
+const (
+	// EffectsAlternative — a call resolves to exactly ONE member, chosen at
+	// execution from the arguments. The zero value, because it is what every
+	// declaration meant before conjunctions existed.
+	EffectsAlternative EffectRelation = iota
+	// EffectsConjunctive — every successful call reaches EVERY member.
+	EffectsConjunctive
+)
+
+func (r EffectRelation) String() string {
+	if r == EffectsConjunctive {
+		return "conjunctive"
+	}
+	return "alternative"
+}
+
+// effectsPermitted asks the offer-time question in the relation's own terms.
+// For alternatives it is ADR-0053's "is any class not refused", which lets a
+// door through and moves the decision to execution. For a conjunction it is
+// "is every class not refused", because a call that reaches all of them is
+// refused by the first refusal and there is nothing to move to execution.
+func effectsPermitted(relation EffectRelation, effects []content.Effect, permitted map[content.Effect]bool) bool {
+	if len(effects) == 0 {
+		return false
+	}
+	if relation == EffectsConjunctive {
+		for _, effect := range effects {
+			if !permitted[effect] {
+				return false
+			}
+		}
+		return true
+	}
 	for _, effect := range effects {
 		if permitted[effect] {
 			return true
@@ -871,7 +986,7 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if t.Narrow == nil {
 			continue
 		}
-		if !anyEffectPermitted(t.Declaration.Effect, effectPermitted) {
+		if !effectsPermitted(t.EffectRelation, t.Declaration.Effect, effectPermitted) {
 			continue
 		}
 		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
@@ -928,6 +1043,18 @@ func (r Registry) RefusedEffects(g content.Grant, name string) []content.Effect 
 			if g.Policy.DecisionFor(effect) == content.DecisionRefuse {
 				refused = append(refused, effect)
 			}
+		}
+		// ONE REFUSAL IS THE WHOLE EXPLANATION FOR A CONJUNCTION. Requiring
+		// every row to be refused is right for a door, where the surviving
+		// rows are the ones still reachable; for a tool that reaches all of
+		// them, the rows that survive are reached by a call that is refused
+		// anyway, and reporting nothing would withhold the tool in silence —
+		// which ADR-0053 named as the defect it exists to end.
+		if t.EffectRelation == EffectsConjunctive {
+			if len(refused) > 0 {
+				return refused
+			}
+			return nil
 		}
 		if len(refused) == len(t.Declaration.Effect) {
 			return refused

@@ -27,6 +27,7 @@ import (
 // is to turn each into the right notification, in the same order, so the
 // fake must be able to express an order the old delta-only fake could not.
 type scriptedEventClient struct {
+	unauditedClient
 	mu     sync.Mutex
 	events []assistant.AskEvent
 	err    error

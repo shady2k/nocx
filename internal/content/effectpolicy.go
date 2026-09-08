@@ -379,7 +379,7 @@ func (p EffectPolicy) evaluateInvocation(e Effect, inv Invocation, fence []Grant
 			decision = ruleDecision
 		}
 	}
-	return p.resourceVerdict(e, decision, namedScopes(inv.Resources), fence, boundKindWise, tr)
+	return p.resourceVerdict(e, p.rowFor(e).Scopes, decision, namedScopes(inv.Resources), fence, boundKindWise, tr)
 }
 
 // DecisionForInvocation is EvaluateInvocation's decision alone, over the
@@ -407,7 +407,30 @@ func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
 // A command's resources are inferred from a command line instead, so they are
 // bounded kind-wise (see resourceVerdict).
 func (p EffectPolicy) EvaluateResources(e Effect, decision Decision, resources, fence []GrantScope) Verdict {
-	return p.resourceVerdict(e, decision, resources, fence, boundOutright, nil)
+	return p.resourceVerdict(e, p.rowFor(e).Scopes, decision, resources, fence, boundOutright, nil)
+}
+
+// EvaluateResourcesAcross is EvaluateResources for a CONJUNCTION — a call that
+// reaches several rows at once, so that several rows' scopes bound it TOGETHER
+// rather than one at a time.
+//
+// The scopes are UNIONED and not intersected, because the rows do not govern
+// the same resources. skills.install names a destination and a content item:
+// the destination is the fetch's, the content item is the write's, and each
+// belongs to the row that performs it. Intersecting would demand the fetched
+// address be inside the write row's scopes and refuse an install a person had
+// granted both halves of. What the union does NOT do is admit a resource no
+// reached row admits, which is the check that matters.
+//
+// Asking each row in turn would be the intersection by another name, which is
+// why this is one call over one scope set and not a loop over EvaluateResources
+// — the same rule as everywhere else here: one question, one evaluator.
+func (p EffectPolicy) EvaluateResourcesAcross(effects []Effect, decision Decision, resources, fence []GrantScope) Verdict {
+	var scopes []GrantScope
+	for _, e := range effects {
+		scopes = append(scopes, p.rowFor(e).Scopes...)
+	}
+	return p.resourceVerdict(WorstEffect(effects), scopes, decision, resources, fence, boundOutright, nil)
 }
 
 // scopeBound is how a resource set meets a scope set.
@@ -442,10 +465,16 @@ const (
 // under an ask row turns it into the refusal it always was at the layer
 // below, rather than a question answered by "Approve" and then refused.
 //
+// The SCOPES ARE THE CALLER'S, not `p.rowFor(e).Scopes` looked up here, so
+// that a conjunction can hand in the union of every row it reaches
+// (EvaluateResourcesAcross) without a second copy of this logic existing to
+// disagree with this one. `e` is then only what the trace step is labelled
+// with.
+//
 // Like the kernel's own check this is the advisory lexical approximation, not
 // the enforcement: the capability resolves canonical identity (ADR-0020 §7),
 // and a call this predicate lets through can still be refused by it.
-func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fence []GrantScope, bound scopeBound, tr *evalTrace) Verdict {
+func (p EffectPolicy) resourceVerdict(e Effect, scopes []GrantScope, decision Decision, resources, fence []GrantScope, bound scopeBound, tr *evalTrace) Verdict {
 	if decision == DecisionRefuse {
 		tr.step(TraceStep{
 			Kind: TraceResourceNotReached, Effect: e, Decision: decision,
@@ -462,7 +491,6 @@ func (p EffectPolicy) resourceVerdict(e Effect, decision Decision, resources, fe
 			return Verdict{Decision: DecisionRefuse, Cause: OutOfScopeFence, Resource: outside}
 		}
 	}
-	scopes := p.rowFor(e).Scopes
 	if bound == boundOutright && len(scopes) == 0 && len(resources) > 0 {
 		// NO scope at all is not a narrow selector somebody could widen: it
 		// is authority nobody minted. A grant whose matrix field was never

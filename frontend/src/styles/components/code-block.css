@@ -112,6 +112,36 @@
   border-radius: var(--control-radius-sm);
 }
 
+/* The block whose HEIGHT belongs to its caller (nocx-xj1l6).
+
+   `max-height: 200px` above is one decision for machine output: a response
+   has no length the caller can promise, and a block that grows with it pushes
+   the rest of the page off screen. That reasoning has a premise — a page that
+   scrolls — and a caller can be built without it. The skill tab's right
+   column IS the scroll container and holds nothing but the file, so there the
+   cap stops the bytes a fifth of the way down an empty column.
+
+   So the cap is lifted for that caller and for no other, as a variant of this
+   component rather than as an `unset` written from the surface's own
+   stylesheet — the second spelling of a height would agree with this one
+   until the day somebody changed 200px. The wrap becomes a flex column
+   because the `<pre>` can only fill a parent that is itself filling, and both
+   carry `min-height: 0` for the usual reason: a flex item's floor is its
+   content, so without it a long file makes the column grow instead of the
+   block scrolling inside the height it was given. */
+.ui-code-block-wrap[data-variant='fill'] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ui-code-block[data-variant='fill'] {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
 /* The block that holds BYTES rather than a list of lines. A long line is
    reached by scrolling sideways in the box the rule above already gave it —
    the same answer the body editor gives for the same octets (code-block.tsx,

@@ -354,6 +354,10 @@ type optionSet struct {
 	// with keystoreReal, and logged, so a keychain prompt during a run can
 	// be traced to the test that asked for it.
 	keystoreReason string
+	// forgeAPIBase and forgeRawBase override the GitHub resolver endpoints.
+	// Empty values retain the resolver's production defaults.
+	forgeAPIBase string
+	forgeRawBase string
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
@@ -560,6 +564,11 @@ func New(opts ...Option) (*App, error) {
 		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
+		// LAST, and the order is the whole of the precedence decision:
+		// discovery's seen map is the entire collision rule, so a skill
+		// downloaded from a URL can never shadow one the person wrote or
+		// one we ship.
+		{Dir: filepath.Join(paths.ConfigDir(), "installed-skills"), Provenance: skill.ProvenanceInstalled},
 	}
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
@@ -701,7 +710,6 @@ func New(opts ...Option) (*App, error) {
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
-	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots, docStore)
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -853,6 +861,31 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
+
+	// The skill library is built after the settings registry so the ageing
+	// threshold is read at evaluation time. A notifier is unnecessary: List
+	// calls the function on each discovery pass, so a changed setting applies
+	// without rebuilding the store.
+	skills := skill.NewStore(
+		skill.OSFileSystem{},
+		skillRoots,
+		docStore,
+		skill.WithFetcher(apiFetcher),
+		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
+		// The clock is NAMED here rather than defaulted inside the store. The
+		// store stamps a skill's first-seen date and reads it back to decide
+		// ageing, so which clock it uses is a composition decision like every
+		// other seam on this line — and an option only tests ever pass is an
+		// option nothing in the product has agreed to.
+		skill.WithClock(time.Now),
+		skill.WithIdleDays(func() int {
+			days, settingErr := settingsRegistry.GetNumber(settings.SkillsIdleDays)
+			if settingErr != nil {
+				return 0
+			}
+			return int(days)
+		}),
+	)
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -1116,6 +1149,15 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// Where skills.audit files what a model concluded, once it has
+		// answered (ws_skill_audit.go), and where skills.check reads it back
+		// for free (ws_skill_check.go) — one repository, one writer, one
+		// reader that spends nothing. With the store stubbed — no content
+		// key — Put refuses and the audit still returns its report with
+		// stored:"no", and Get answers found:false with no error, so a
+		// check the person already spent a model call on is never swallowed
+		// and a check nobody made never looks like a broken store.
+		transport.WithSkillChecks(contentDB.SkillChecks()),
 		// The durable sink for what a session prints while nothing is
 		// attached (nocx-22k1c.1). It is the replay ring's consumer in that
 		// interval, so a session whose window is closed keeps running past

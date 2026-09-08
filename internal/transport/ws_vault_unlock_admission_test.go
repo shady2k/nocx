@@ -136,3 +136,69 @@ func TestSecretOperation_ADismissedUnlockIsTheCancellation(t *testing.T) {
 			"dispatcher back to raise the dialog just shut: %s", raw)
 	}
 }
+
+// THE SAME INVARIANT, ON THE PATH THAT RESOLVES A MODEL (nocx-9fzkk).
+//
+// skills.audit resolves its endpoint's credential through the CONFIG
+// operation, and that operation holds the vault gate as well as the config
+// one (buildConfigOp takes both). So a resolution done inside its callback
+// raises the unlock while holding the very gate vault.unseal needs, and the
+// person is shown the "Unlock the vault to audit a skill" dialog whose
+// Unlock button answers "Control plane busy".
+//
+// It is the identical defect the two tests above pin for the secret
+// operation; it reappeared here because the rule lives in a comment on
+// credentialResolver rather than in anything a handler must satisfy.
+func TestSkillsAudit_TheUnlockItRaisesCanBeAnswered(t *testing.T) {
+	client := &auditingClient{report: "It reads the station and curls example.test."}
+	h := newAuditHarness(t, client)
+	h.createEndpoint()
+
+	// The vault seals while the card is open — auto-seal on idle is the
+	// ordinary way a person arrives at this dialog.
+	h.v.Seal()
+	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
+
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 91, "method": "skills.audit",
+		"params": map[string]any{"name": "weather"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if werr := h.conn.WriteMessage(websocket.TextMessage, req); werr != nil {
+		t.Fatalf("write skills.audit: %v", werr)
+	}
+
+	frame := readUnlockRequestFrame(t, h.conn)
+	if frame.Reason == "" {
+		t.Fatal("the unlock names no reason")
+	}
+
+	unseal := jsonrpcCallWithID(t, h.conn, "vault.unseal", map[string]any{
+		"means": "passphrase", "secret": "test",
+	}, 92)
+	if isErrorResponse(t, unseal) {
+		t.Fatalf("the unseal that answers the raised unlock was refused: %s", unseal)
+	}
+	answerUnlock(t, h.conn, frame.RequestID, "unsealed")
+
+	raw, err := awaitFrame(h.conn, time.Now().Add(wantWithin), isResponseTo(91))
+	if err != nil {
+		t.Fatalf("read skills.audit response: %v", err)
+	}
+	if isErrorResponse(t, raw) {
+		t.Fatalf("the audit did not continue after the unlock: %s", raw)
+	}
+	var out struct {
+		Result struct {
+			Verdict string `json:"verdict"`
+		} `json:"result"`
+	}
+	if uerr := json.Unmarshal(raw, &out); uerr != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", uerr, raw)
+	}
+	if out.Result.Verdict == "" {
+		t.Fatalf("the audit answered without a verdict: %s", raw)
+	}
+}

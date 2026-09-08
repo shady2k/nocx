@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.file.params.schema.json",
+  "title": "SkillsFileParams",
+  "description": "Params for skills.file: which discovered skill, and which file inside it. The path is relative to the skill's own directory and is contained by the same check the assistant's read tool goes through — an absolute path, a traversal, or a symlink leaving the directory is refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "path"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "path": { "type": "string", "minLength": 1, "maxLength": 1024 }
+  }
+}

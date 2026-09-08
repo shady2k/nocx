@@ -28,6 +28,7 @@ import (
 // makes a run "in flight" for these tests: the grant is minted, the run is in
 // the registry, and nothing has terminalized it.
 type heldAskClient struct {
+	unauditedClient
 	started chan int64
 	release chan struct{}
 	once    sync.Once

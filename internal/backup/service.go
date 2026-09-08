@@ -370,7 +370,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 			}
 			return nil, fmt.Errorf("replace skills: %w", serr)
 		}
-		result.Skills = len(doc.Skills.Authored) + len(doc.Skills.Managed)
+		result.Skills = doc.Skills.TreeCount()
 	}
 	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); werr != nil {
 		if recErr := s.Recover(); recErr != nil {
@@ -458,7 +458,7 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, sn
 	}
 	if skills != nil {
 		doc.Skills = skills
-		sum.Skills = len(skills.Authored) + len(skills.Managed)
+		sum.Skills = skills.TreeCount()
 	}
 	// An empty library is omitted entirely (the omitempty on Document
 	// Snippets): a backup without the key predates the section, and restore
@@ -668,7 +668,6 @@ func profileToBackup(p profile.SSHProfile) BackupProfile {
 		BehaviorOnSessionEnd: p.BehaviorOnSessionEnd,
 		Weight:               p.Weight,
 		IsBuiltin:            p.IsBuiltin,
-		NeedsReview:          p.NeedsReview,
 		Options:              o,
 	}
 }
@@ -1205,7 +1204,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	p.Groups.Included = len(doc.Connections.Groups)
 	p.Snippets.Included = len(doc.Snippets)
 	if doc.Skills != nil {
-		p.Skills.Included = len(doc.Skills.Authored) + len(doc.Skills.Managed)
+		p.Skills.Included = doc.Skills.TreeCount()
 	}
 	// What a person reads before deciding to restore over what they have.
 	p.Notes.Included = len(doc.Notes)
@@ -1491,7 +1490,6 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			BehaviorOnSessionEnd: bp.BehaviorOnSessionEnd,
 			Weight:               bp.Weight,
 			IsBuiltin:            bp.IsBuiltin,
-			NeedsReview:          bp.NeedsReview,
 		},
 		Options: profile.StoredSSHProfileOptions{
 			Host:                 bp.Options.Host,
@@ -1550,7 +1548,6 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.BehaviorOnSessionEnd = bp.BehaviorOnSessionEnd
 	mp.Weight = bp.Weight
 	mp.IsBuiltin = bp.IsBuiltin
-	mp.NeedsReview = bp.NeedsReview
 	// Copy the options block so pointer fields are not shared with the caller's
 	// snapshot before the merged values replace them.
 	mp.Options = cp.Options
@@ -1637,7 +1634,7 @@ func profileEqual(bp BackupProfile, cp profile.SSHProfile) bool {
 	if bp.Name != cp.Name || bp.Group != cp.Group || bp.Icon != cp.Icon ||
 		bp.Color != cp.Color || bp.DisableDynamicTitle != cp.DisableDynamicTitle ||
 		bp.BehaviorOnSessionEnd != cp.BehaviorOnSessionEnd || bp.Weight != cp.Weight ||
-		bp.IsBuiltin != cp.IsBuiltin || bp.NeedsReview != cp.NeedsReview {
+		bp.IsBuiltin != cp.IsBuiltin {
 		return false
 	}
 	if bp.Options.Host != cp.Options.Host || bp.Options.Port != intVal(cp.Options.Port) ||

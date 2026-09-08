@@ -40,6 +40,7 @@ import (
 // AskParams it was handed. The script is per ASK rather than one list, because
 // the whole point is what the SECOND ask receives after the first one ran.
 type conversationClient struct {
+	unauditedClient
 	mu       sync.Mutex
 	scripts  [][]assistant.AskEvent
 	fail     []error // per ask; nil entries answer normally

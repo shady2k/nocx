@@ -97,3 +97,32 @@ func (p *compositePermit) Release() {
 		}
 	})
 }
+
+// Parts reports the admissions a composite is made of, flattened and in
+// acquisition order; any other Admission reports itself.
+//
+// It exists so a caller that was handed one Admission can ask a question
+// about the PARTS it is made of — internal/capability asks whether one of
+// them is the gate the answer to a vault unlock would itself need — without
+// branching on Name(), which is metrics-only and may not be branched on
+// (AD-8). The question is asked once, at construction; nothing here is on an
+// acquisition path.
+//
+// Flattened because a composite may hold a composite, and a caller asking
+// "is this part in here" means it at any depth. The slice is fresh, so a
+// caller cannot reorder the acquisition contract by writing into it.
+func Parts(a Admission) []Admission {
+	c, ok := a.(*composite)
+	if !ok {
+		if n, isNB := a.(*nonblockingComposite); isNB {
+			c = &n.composite
+		} else {
+			return []Admission{a}
+		}
+	}
+	out := make([]Admission, 0, len(c.admissions))
+	for _, part := range c.admissions {
+		out = append(out, Parts(part)...)
+	}
+	return out
+}

@@ -118,7 +118,9 @@ export function CollisionDialog(props: CollisionDialogProps) {
         <Show when={asksAboutAll()}>
           <Checkbox
             checked={applyToAll()}
-            onChange={(checked) => setApplyToAll(checked)}
+            onChange={(checked) => {
+              setApplyToAll(checked)
+            }}
             label={
               others() === 1
                 ? 'Apply to the 1 remaining file'

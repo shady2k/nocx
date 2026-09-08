@@ -269,7 +269,7 @@ const (
 //     schemaVersion bumped;
 //  3. a rung on the migration ladder that rebuilds executions for databases
 //     that already exist (schema_migrate.go —
-//     migrateTerminationReasons16to17 is the worked example), carrying the new
+//     migrateTerminationReasons17to18 is the worked example), carrying the new
 //     schemaV1 digest.
 //
 // DO ALL THREE OR THE FEATURE IS SILENTLY ABSENT. A reason declared here and

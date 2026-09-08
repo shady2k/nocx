@@ -49,6 +49,29 @@ func locate(roots []Root, name, relPath string, offToo bool) (located, error) {
 		}
 	}
 	if found == nil {
+		// HERE AND SWITCHED OFF IS NOT THE SAME AS NOT HERE (nocx-tq6r7).
+		// Only the assistant's path passes offToo=false, and until this
+		// answered both cases with one sentence, a skill sitting on the
+		// person's disk was reported to the assistant as absent. It could
+		// not tell the sentence was false, so asked to turn a skill on —
+		// the one thing it has no tool for, deliberately — it read the
+		// skill instead and was told the skill did not exist. The person
+		// then got no explanation at all.
+		//
+		// A second walk, only on the failing path, so nothing that already
+		// sees off skills pays for it. What it discloses is narrow: you
+		// must already know the exact name, and the alternative is the
+		// product lying to its own assistant at the one moment somebody
+		// asked a direct question.
+		if !offToo {
+			for _, candidate := range discoverDetailed(roots, true) {
+				if candidate.Name == name {
+					return located{}, fmt.Errorf(
+						"skill %q is here and switched off, so it is not offered to you"+
+							" — turning it on is the person's to do, on the skill's own tab", name)
+				}
+			}
+		}
 		return located{}, fmt.Errorf("skill %q was not found", name)
 	}
 

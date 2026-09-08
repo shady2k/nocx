@@ -724,7 +724,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "skills.install",
-		Description: "Adopt a skill somebody has published at a web address: give the address and nocx fetches the document, reads what it says it is, fetches the files it names and shows the person all of it before anything is written. Reach for this when the person points you at a skill to add — a refusal is an answer, and what does land is switched OFF until they turn it on, so do not treat an install as a skill you can then use.",
+		Description: "Adopt a skill somebody has published at a web address: give the address and nocx fetches the document, reads what it says it is, fetches the files it names and shows the person all of it before anything is written. Reach for this when the person points you at a skill to add — a refusal is an answer, and what does land is switched OFF until THE PERSON turns it on from the skill's own tab, which you have no tool for and must not offer to do, so do not treat an install as a skill you can then use.",
 		// TWO CLASSES, AND THEY ARE BOTH REACHED — this is a CONJUNCTION,
 		// not the alternation ADR-0053 describes. session.run declares a set
 		// because `lsblk` and `rm -rf` are alternatives that share a carrier

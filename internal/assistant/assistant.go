@@ -92,7 +92,7 @@ type Client interface {
 	// call touches neither. An error means there is no reading, and the
 	// caller must say so rather than showing an empty one: a blank report
 	// reads exactly like a clean report.
-	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillReading, error)
+	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed

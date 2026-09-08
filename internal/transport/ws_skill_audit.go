@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
@@ -61,7 +62,7 @@ type skillAuditSource interface {
 // assistant.Client rather than the whole of it because this handler has no
 // business being able to start an ask.
 type skillAuditEngine interface {
-	AuditSkill(ctx context.Context, p assistant.SkillAuditParams) (assistant.SkillReading, error)
+	AuditSkill(ctx context.Context, p assistant.SkillAuditParams) (assistant.SkillAuditResult, error)
 }
 
 // skillAuditResult is the wire shape (contracts/skills.audit.schema.json).
@@ -191,6 +192,18 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
+	// SKILL.md is the skill's own claim, and the reduce measures the verdict
+	// against it — so it is passed verbatim as well as read as a file. It is
+	// the FIRST entry by construction (internal/skill walks the manifest, and
+	// the manifest opens with it), and a bundle whose first file is something
+	// else is a bundle whose SKILL.md could not be read, which Audit already
+	// refuses.
+	overview, purpose := "", ""
+	if len(material.Files) > 0 {
+		overview = material.Files[0].Text
+		purpose = skillPurpose(overview)
+	}
+
 	// WHAT WAS ASKED, BEFORE IT IS ASKED (nocx-w155y's diagnosis). A reading
 	// that hangs or fails used to leave NOTHING in the log — the last line was
 	// the vault's "secret retrieved" and then silence, so working out where it
@@ -207,9 +220,10 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 			"files", len(material.Read), "omitted", len(material.Omitted))
 	}
 
-	reading, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
+	result, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
 		Key: key, BaseURL: endpoint.BaseURL, Model: model, Headers: headers,
-		Document: material.Document,
+		Name: material.Name, Purpose: purpose, Overview: overview,
+		Files: auditFiles(material.Files),
 	})
 	if err != nil {
 		if h.log != nil {
@@ -238,11 +252,15 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
+	reading := result.SkillReading
 	if h.log != nil {
 		// What it COST and what it read, never the report: the prose is a
 		// stranger's document described by a model, and a log is not where
-		// that belongs.
+		// that belongs. notesFailed is the map pass's own outcome — a reading
+		// drawn from eight notes and one file nobody could read is a different
+		// reading from one drawn from nine, and only this line says which.
 		h.log.Info("skill: audit answered",
+			"notes", len(result.Files), "notesFailed", failedNotes(result.Files),
 			"skill", material.Name, "role", string(role), "model", model,
 			"elapsed", time.Since(askedAt),
 			"files", len(material.Read), "omitted", len(material.Omitted),
@@ -417,4 +435,49 @@ func (h skillAuditHandlers) resolveAuditModel(ctx context.Context) (
 // and four copies of the bound would agree until somebody widened one.
 func validateSkillAuditRaw(raw json.RawMessage) string {
 	return validateSkillRemoveRaw(raw)
+}
+
+// auditFiles converts internal/skill's view of a bundle to the engine's. The
+// two shapes are declared separately for auditOmissions' reason: the engine
+// knows nothing about provenance, roots or scan findings, and a shared struct
+// would carry all three into a package that must not have them.
+func auditFiles(in []skill.AuditFile) []assistant.SkillAuditFile {
+	out := make([]assistant.SkillAuditFile, 0, len(in))
+	for _, f := range in {
+		out = append(out, assistant.SkillAuditFile{Path: f.Path, Text: f.Text})
+	}
+	return out
+}
+
+// failedNotes counts the files the map pass could not read. It is a log fact
+// rather than a wire one: the person is told what the reading concluded, and
+// the reduce is told which files it was told nothing about, so a count on the
+// wire would be a third owner of the same fact.
+func failedNotes(notes []assistant.SkillFileReading) int {
+	n := 0
+	for _, note := range notes {
+		if note.Err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// skillPurpose is the skill's own one-line claim, taken from the frontmatter
+// SKILL.md opens with. It is what a per-file call is measured against, and it
+// is read here rather than parsed a second time in internal/skill because the
+// bytes are already in hand — a file that has no frontmatter description
+// yields "", and the per-file prompt omits the line rather than inventing one.
+func skillPurpose(overview string) string {
+	const marker = "description:"
+	for _, line := range strings.Split(overview, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, marker) {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, marker))
+		}
+		if trimmed == "---" && strings.Contains(overview, marker) {
+			continue
+		}
+	}
+	return ""
 }

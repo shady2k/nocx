@@ -40,13 +40,13 @@ type auditingClient struct {
 	beforeReturn func()
 }
 
-func (c *auditingClient) AuditSkill(_ context.Context, p assistant.SkillAuditParams) (assistant.SkillReading, error) {
+func (c *auditingClient) AuditSkill(_ context.Context, p assistant.SkillAuditParams) (assistant.SkillAuditResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
 	c.params = p
 	if c.failure != nil {
-		return assistant.SkillReading{}, c.failure
+		return assistant.SkillAuditResult{}, c.failure
 	}
 	v := c.verdict
 	if v == "" {
@@ -55,7 +55,19 @@ func (c *auditingClient) AuditSkill(_ context.Context, p assistant.SkillAuditPar
 	if c.beforeReturn != nil {
 		c.beforeReturn()
 	}
-	return assistant.SkillReading{Verdict: v, Report: c.report}, nil
+	// One note per file the handler passed in, which is what the real engine
+	// produces and what the handler's own log line counts.
+	notes := make([]assistant.SkillFileReading, 0, len(p.Files))
+	for _, file := range p.Files {
+		notes = append(notes, assistant.SkillFileReading{
+			Path:    file.Path,
+			Reading: assistant.SkillReading{Verdict: v, Report: "a note about " + file.Path},
+		})
+	}
+	return assistant.SkillAuditResult{
+		SkillReading: assistant.SkillReading{Verdict: v, Report: c.report},
+		Files:        notes,
+	}, nil
 }
 
 func (c *auditingClient) callCount() int {
@@ -237,9 +249,21 @@ func TestSkillsAudit_OverTheWireConformsToContract(t *testing.T) {
 	}
 	// The bytes the model was actually given are the bundle's, not a summary
 	// this handler wrote: a report about a document nobody can reconstruct is
-	// not evidence.
-	if sent := h.client.sent(); sent.Document == "" || sent.Model == "" {
+	// not evidence. Since nocx-fuymi the bundle arrives as FILES, one per call,
+	// and SKILL.md arrives a second time as the claim the verdict is measured
+	// against — so both are checked, and the file list is checked against the
+	// same Read the result reports.
+	sent := h.client.sent()
+	if sent.Model == "" || sent.Overview == "" {
 		t.Fatalf("the engine was asked with %+v", sent)
+	}
+	if len(sent.Files) != len(got.Read) {
+		t.Fatalf("files sent = %d, read = %v", len(sent.Files), got.Read)
+	}
+	for i, path := range got.Read {
+		if sent.Files[i].Path != path || sent.Files[i].Text == "" {
+			t.Fatalf("files[%d] = %+v, want %q with its bytes", i, sent.Files[i], path)
+		}
 	}
 }
 

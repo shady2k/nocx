@@ -49,7 +49,6 @@ import (
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	einoModel "github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 
 	"github.com/shady2k/nocx/internal/credential"
 )
@@ -161,17 +160,13 @@ func parseSkillReading(body string) (SkillReading, error) {
 	return SkillReading{Verdict: v, Report: truncateRunes(report, maxAuditReportBytes)}, nil
 }
 
-// auditSkill asks the auditing model to check one composed bundle and
-// returns its reading. Every failure is a refusal a person reads: a blank
-// answer is NOT a report, because a blank report reads exactly like a clean
-// one.
-// skillAuditCallTimeout bounds one skill reading, and the number is larger
-// than the classifier's 30s on purpose: a classifier answers one word about
-// one command, while an audit is handed a whole bundle — up to the skill
-// package's 64 KiB budget — and asked for several paragraphs about it. Long
-// enough that a slow model on a big skill still finishes, short enough that a
-// silent provider is a failure somebody can read rather than a spinner that
-// never ends.
+// skillAuditCallTimeout bounds one whole reading — every per-file call and
+// the reduce together — and the number is larger than the classifier's 30s on
+// purpose: a classifier answers one word about one command, while a reading
+// walks a bundle up to the skill package's budget and writes a paragraph per
+// file. Long enough that a slow model on a big skill still finishes, short
+// enough that a silent provider is a failure somebody can read rather than a
+// spinner that never ends.
 const skillAuditCallTimeout = 2 * time.Minute
 
 // auditTimedOut is the reading that ran out of time. It is a type rather than
@@ -192,44 +187,8 @@ func (e auditTimedOut) Error() string {
 // context.DeadlineExceeded) still tells a timeout from a provider saying no.
 func (auditTimedOut) Unwrap() error { return context.DeadlineExceeded }
 
-func auditSkill(ctx context.Context, client einoModel.BaseChatModel, document string, opts ...einoModel.Option) (SkillReading, error) {
-	if client == nil {
-		return SkillReading{}, errors.New("skill audit: the auditing model is unavailable")
-	}
-	if strings.TrimSpace(document) == "" {
-		return SkillReading{}, errors.New("skill audit: there is nothing to read")
-	}
-	// THE READING BOUNDS ITSELF (nocx-w155y). Without this the call inherited
-	// the JSON-RPC request's context, which has no deadline, and the guarded
-	// http.Client deliberately has none either — so a provider that accepted
-	// the connection and then said nothing left "Reading this skill" on
-	// somebody's screen for as long as the socket lived, with no result, no
-	// error and nothing to press. A shorter deadline the caller already holds
-	// still wins: WithTimeout never extends one.
-	ctx, cancel := context.WithTimeout(ctx, skillAuditCallTimeout)
-	defer cancel()
-	resp, err := client.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(skillAuditSystemPrompt),
-		schema.UserMessage(auditUserPreamble + document),
-	}, opts...)
-	if err != nil {
-		// A DEADLINE IS NOT A REFUSAL, and it is shown verbatim in a danger
-		// card, so it gets the sentence rather than the Go error. The sentinel
-		// is kept in the chain: a caller that wants to tell a timeout from a
-		// provider saying no can still ask, and nothing has to match prose.
-		if errors.Is(err, context.DeadlineExceeded) {
-			return SkillReading{}, auditTimedOut{budget: skillAuditCallTimeout}
-		}
-		return SkillReading{}, fmt.Errorf("skill audit: %w", err)
-	}
-	if resp == nil {
-		return SkillReading{}, errors.New("skill audit: the auditing model returned no answer")
-	}
-	return parseSkillReading(resp.Content)
-}
-
-// SkillAuditParams is one audit call: the resolved (endpoint, model) pair
-// with its credential, and the document internal/skill composed.
+// SkillAuditParams is one reading: the resolved (endpoint, model) pair with
+// its credential, and the bundle internal/skill composed.
 //
 // The facts arrive RESOLVED, exactly as ProbeParams does. The engine owns
 // model calls; the role resolution and the vault are the transport's, which
@@ -240,26 +199,85 @@ type SkillAuditParams struct {
 	BaseURL string
 	Model   string
 	Headers []Header
-	// Document is the skill's own bytes, composed and bounded by
-	// internal/skill. It is passed as one string because the engine has no
-	// business knowing a bundle has files.
-	Document string
+	// Name is the skill as it resolved, and Purpose its own one-line claim
+	// from the frontmatter. Both travel because a per-file call has to answer
+	// "does this file do what the skill says it does", and one file alone
+	// cannot say what the skill says.
+	Name    string
+	Purpose string
+	// Overview is SKILL.md verbatim: the claim the whole verdict is measured
+	// against, and the one part of the bundle the reduce still reads as bytes
+	// rather than as a note about bytes.
+	Overview string
+	// Files are the bundle's files, bounded and ordered by internal/skill.
+	// One call each.
+	Files []SkillAuditFile
 }
 
-// AuditSkill implements Client: one bounded completion against the resolved
-// pair, over the same guarded HTTP client every other model call uses.
-func (c *client) AuditSkill(ctx context.Context, p SkillAuditParams) (SkillReading, error) {
+// AuditSkill implements Client: the map pass over the bundle's files, then
+// the reduce over what it found.
+//
+// THE BUDGET IS THE WHOLE READING'S, not one call's. A reading that spends it
+// on the first of nine files has still spent it, and a person watching a
+// spinner cares about when the reading ends rather than about which call was
+// slow. Every per-file call inherits this context, so the bound holds however
+// many there are.
+func (c *client) AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error) {
+	if len(p.Files) == 0 {
+		return SkillAuditResult{}, errors.New("skill audit: there is nothing to read")
+	}
 	cm, err := buildModel(c.http, p.Key, p.BaseURL, p.Model)
 	if err != nil {
-		return SkillReading{}, err
+		return SkillAuditResult{}, err
 	}
-	if len(p.Headers) == 0 {
-		return auditSkill(ctx, cm, p.Document)
+	var opts []einoModel.Option
+	if len(p.Headers) > 0 {
+		// The endpoint's custom headers ride the call as per-request extra
+		// headers, and their names tag the context so the guarded client's
+		// redirect rule drops exactly them on an origin change (httpguard.go).
+		m, names := headerMap(p.Headers)
+		ctx = withCustomHeaderNames(ctx, names)
+		opts = append(opts, openai.WithExtraHeader(m))
 	}
-	// The endpoint's custom headers ride the call as per-request extra
-	// headers, and their names tag the context so the guarded client's
-	// redirect rule drops exactly them on an origin change (httpguard.go).
-	m, names := headerMap(p.Headers)
-	ctx = withCustomHeaderNames(ctx, names)
-	return auditSkill(ctx, cm, p.Document, openai.WithExtraHeader(m))
+	return auditBundle(ctx, cm, p, opts...)
+}
+
+// auditBundle is the reading itself, over a model somebody already built. It
+// is separate from AuditSkill so the budget and the two stages can be
+// exercised against a fake model — buildModel needs an endpoint, and a test
+// about a provider that never answers must not need one to exist.
+func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditParams, opts ...einoModel.Option) (SkillAuditResult, error) {
+	if cm == nil {
+		return SkillAuditResult{}, errors.New("skill audit: the auditing model is unavailable")
+	}
+	if len(p.Files) == 0 {
+		return SkillAuditResult{}, errors.New("skill audit: there is nothing to read")
+	}
+	ctx, cancel := context.WithTimeout(ctx, skillAuditCallTimeout)
+	defer cancel()
+
+	notes := readEachFile(ctx, cm, p.Name, p.Purpose, p.Files, opts...)
+	// EVERY file failing is the reading failing. One or two are notes that say
+	// so and a reduce that weighs them; all of them means there is nothing to
+	// weigh, and concluding from nothing would produce a verdict about a skill
+	// nobody read — which is the empty report this feature refuses to give.
+	failed := 0
+	var firstErr error
+	for _, note := range notes {
+		if note.Err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = note.Err
+			}
+		}
+	}
+	if failed == len(notes) {
+		return SkillAuditResult{Files: notes}, firstErr
+	}
+
+	reading, err := concludeFromNotes(ctx, cm, p.Name, p.Overview, notes, opts...)
+	if err != nil {
+		return SkillAuditResult{Files: notes}, err
+	}
+	return SkillAuditResult{SkillReading: reading, Files: notes}, nil
 }

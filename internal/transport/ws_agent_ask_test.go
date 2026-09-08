@@ -60,8 +60,8 @@ func (b *synchronizedBuffer) String() string {
 // (ws_skill_audit_test.go) overrides it.
 type unauditedClient struct{}
 
-func (unauditedClient) AuditSkill(context.Context, assistant.SkillAuditParams) (assistant.SkillReading, error) {
-	return assistant.SkillReading{}, errors.New("this fake engine does not audit skills")
+func (unauditedClient) AuditSkill(context.Context, assistant.SkillAuditParams) (assistant.SkillAuditResult, error) {
+	return assistant.SkillAuditResult{}, errors.New("this fake engine does not audit skills")
 }
 
 // scriptedAssistantClient is the injected engine: Ask plays back a script of

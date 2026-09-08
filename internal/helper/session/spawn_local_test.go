@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -128,6 +129,84 @@ func mustFailSpawn(t *testing.T, s *LocalSpawner, req SpawnRequest) {
 	}
 	if proc != nil {
 		t.Fatalf("a failed spawn returned a process: %#v", proc)
+	}
+}
+
+// TestLocalSpawner_CarriesTheConfiguredToolSocketIntoTheLaunchScript is
+// nocx-2tesu's acceptance criterion 1, at the seam LocalSpawner actually
+// owns: given this backend told the spawner its tool endpoint's socket path
+// (agentToolSocketPath, set once at NewLocalSpawner — a property of this
+// daemon's whole life, never of one request), every enhanced local pane it
+// starts carries NOCX_TOOL_SOCKET.
+//
+// The assertion reads the rendered launch SCRIPT rather than the process
+// environment: for the in-memory local tier the variable travels as an
+// `export` line inside the rcfile/script delivered over the inherited pipe
+// (LaunchOptions.AgentToolSocketPath -> launcherEnvBlock), exactly like the
+// remote tier's carrier already does — never as a second, ad hoc route
+// through the raw exec environment.
+func TestLocalSpawner_CarriesTheConfiguredToolSocketIntoTheLaunchScript(t *testing.T) {
+	const sock = "/run/nocx/tool.sock"
+	var script string
+	s := &LocalSpawner{
+		log:                 log.NewSlogAdapter(nil),
+		shell:               Shell{Path: "/bin/bash"},
+		agentToolSocketPath: sock,
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			if len(cfg.ExtraFiles) == 0 {
+				t.Fatal("no script pipe was attached for the enhanced launch")
+			}
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	req := SpawnRequest{SessionID: "sess-tool-socket", Cols: 80, Rows: 24}
+	if _, err := s.Spawn(req); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.Contains(script, "NOCX_TOOL_SOCKET='"+sock+"'") {
+		t.Fatalf("the launch script did not export the configured tool socket: %q", script)
+	}
+}
+
+// TestLocalSpawner_OmitsToolSocketWhenNoneIsConfigured is criterion 2's
+// half that belongs to this seam: a spawner nobody told a socket path (the
+// zero value — startToolEndpoint answered nil, nil) renders a script that
+// asks for nothing, so the shell's own refusal text is what a user sees,
+// rather than a pane silently pointed at an empty path.
+func TestLocalSpawner_OmitsToolSocketWhenNoneIsConfigured(t *testing.T) {
+	var script string
+	s := &LocalSpawner{
+		log:   log.NewSlogAdapter(nil),
+		shell: Shell{Path: "/bin/bash"},
+		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
+			if len(cfg.ExtraFiles) == 0 {
+				t.Fatal("no script pipe was attached for the enhanced launch")
+			}
+			data, err := io.ReadAll(cfg.ExtraFiles[0])
+			if err != nil {
+				t.Fatalf("read the rendered launch script: %v", err)
+			}
+			script = string(data)
+			return &stubPTY{}, nil
+		},
+	}
+	req := SpawnRequest{SessionID: "sess-no-tool-socket", Cols: 80, Rows: 24}
+	if _, err := s.Spawn(req); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// NOCX_TOOL_SOCKET= (an assignment) is what launcherEnvBlock renders when
+	// AgentToolSocketPath is set; the bare name still appears elsewhere in
+	// the embedded script, which READS the variable (nocx.bash's own
+	// __nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"), so a plain substring
+	// check for the name would fail on the script's own logic rather than on
+	// what this spawner rendered.
+	if strings.Contains(script, "NOCX_TOOL_SOCKET=") {
+		t.Fatalf("the launch script exported a tool socket nobody configured: %q", script)
 	}
 }
 

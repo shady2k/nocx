@@ -99,6 +99,16 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	if workerSocket != nil {
+		// A local pane is opened on a SEPARATE process — this machine's own
+		// helper daemon (cmd/nocx-helper) — and that process learns this
+		// backend's tool.sock only by being told: see
+		// App.SetLocalToolSocketPath and, past the process boundary,
+		// internal/helper/endpoint.Ensure (nocx-2tesu). Asked of the
+		// endpoint rather than recomputed from its directory, because
+		// internal/toolendpoint is the one owner of the socket's name
+		// (AD-8) and this is the only call site outside it that needs to
+		// know the value.
+		a.SetLocalToolSocketPath(workerSocket.SocketPath())
 		defer func() {
 			if closeErr := workerSocket.Close(); closeErr != nil {
 				logger.Error("closing the worker socket", "error", closeErr)

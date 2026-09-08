@@ -43,6 +43,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/mcpstdio"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 func main() {
@@ -152,9 +153,20 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// division is the whole of D1 in code: a connection ending releases that
 	// connection's reader and its write capability, and every session, window
 	// and process survives it.
+	// NOCX_TOOL_SOCKET, read here rather than derived: this process is not
+	// the coordinator and has no way to compute a coordinator's tool.sock
+	// path itself (internal/toolendpoint owns that name, AD-8) — it is
+	// only ever a fact the coordinator that forked this daemon already
+	// knew and handed down as this process's own environment (Ensure, in
+	// internal/helper/endpoint/bridge.go, is the one place that sets it;
+	// on the remote/bridge path nothing sets it, which is the honest
+	// answer there — nocx-2tesu). Read once, at composition, and carried
+	// for the daemon's whole life: it is a property of which coordinator
+	// started this generation, never of one spawn request.
+	agentToolSocketPath := os.Getenv(shellintegration.ToolSocketEnvVar)
 	sessions := session.New(session.Options{
 		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
@@ -237,7 +249,11 @@ func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generatio
 // required becoming the account (D12). A non-ssh carrier must supply one; that
 // is the carrier's problem, not this protocol's.
 func bridge(ctx context.Context, log *slog.Logger, dir string, want, generation proto.GenerationID, exe string) int {
-	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe)
+	// No extra environment: this generation is being reached over the ssh
+	// exec lane, on a machine with no local tool.sock of the caller's to
+	// relay (nocx-2tesu) — that concept exists only for the coordinator's
+	// own machine, in internal/helper/local's reach().
+	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe, nil)
 	if err != nil {
 		log.Error("bridge", "generation", want, "err", err)
 		if errors.Is(err, endpoint.ErrNoEndpoint) {

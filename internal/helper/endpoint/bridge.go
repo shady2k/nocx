@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"time"
 
@@ -121,7 +122,16 @@ const startRetry = 10 * time.Millisecond
 // cover is the daemon nobody ends up wanting — nothing retires a generation
 // yet, so it runs until it is signalled. That is D2's, unimplemented, and it
 // is stated here rather than papered over.
-func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe string) (net.Conn, error) {
+// env is extra KEY=VALUE entries the spawned helper's process environment
+// carries beyond what this process's own os.Environ() already gives it — a
+// caller reaching for its OWN machine's daemon hands down a fact only IT
+// knows this way (nocx-2tesu: the local coordinator's running tool endpoint
+// socket, so the shell the daemon later forks can find it); a caller
+// spawning a generation over the ssh exec lane (cmd/nocx-helper's own
+// `bridge` command) has nothing of that kind to add and passes nil. Nil or
+// empty changes nothing: the child gets exactly what full os.Environ()
+// inheritance always gave it.
+func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe string, env []string) (net.Conn, error) {
 	conn, err := Dial(ctx, dir, gen)
 	if err == nil {
 		return conn, nil
@@ -141,6 +151,15 @@ func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe
 	// is the whole point of it, forever.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	cmd.SysProcAttr = detachAttr()
+	if len(env) > 0 {
+		// Explicit rather than left nil, and explicit rather than relying on
+		// the caller having already set it in ITS OWN os.Environ(): Env==nil
+		// means "inherit os.Environ() as of Start", which stays exactly true
+		// when there is nothing extra to add, and adding entries here keeps
+		// the inheritance while making what was added visible at the one
+		// call site that does the spawning.
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("endpoint: start a helper for %s: %w", short(gen), err)
 	}

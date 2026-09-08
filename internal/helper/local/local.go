@@ -108,6 +108,13 @@ type Config struct {
 	// whether a helper of its generation is already serving, and a process
 	// about to bind the endpoint must not spawn a competitor for it.
 	Binary string
+	// Env is extra environment this caller's own process knows and a freshly
+	// spawned helper does not otherwise inherit any other way — today, this
+	// machine's tool endpoint socket path (nocx-2tesu), set by the
+	// composition root once it knows whether it is running one. Nil changes
+	// nothing: a helper Ensure starts inherits this caller's environment
+	// either way, and Env only ADDS to that.
+	Env []string
 	// SentinelTTL bounds the handshake; zero is client.DefaultSentinelTTL.
 	SentinelTTL time.Duration
 	Log         *slog.Logger
@@ -182,7 +189,7 @@ func reach(ctx context.Context, cfg Config) (net.Conn, error) {
 	// generation we are reaching for, because Install put it there under its
 	// own content hash. The two arguments differ only for the bridge, which
 	// runs one generation's binary and may be asked for another's.
-	conn, err := endpoint.Ensure(ctx, cfg.Dir, cfg.Generation, cfg.Generation, cfg.Binary)
+	conn, err := endpoint.Ensure(ctx, cfg.Dir, cfg.Generation, cfg.Generation, cfg.Binary, cfg.Env)
 	if err != nil {
 		return nil, fmt.Errorf("local helper %s: %w", short(cfg.Generation), err)
 	}

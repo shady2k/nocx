@@ -2450,6 +2450,29 @@ func (a *App) installLocalHelper(ctx context.Context, home string) {
 	}
 }
 
+// SetLocalToolSocketPath tells this machine's local helper opener where THIS
+// backend's tool endpoint is, so a local pane it starts can reach the worker
+// tools nocx-rowqt built (nocx-2tesu).
+//
+// It is called LATER than every other Set* in this file and later than
+// Start: whether this backend is running a tool endpoint at all is decided
+// outside internal/app, by cmd/nocx-server's composition root, which starts
+// the endpoint only after Start returns (it needs a.ToolAuthorizer and
+// a.ToolDispatcher, which Start is what populates) and only when both are
+// non-nil. So the caller is cmd/nocx-server, after it has that answer —
+// never New, never Start.
+//
+// path is the endpoint's own SocketPath(), asked of it rather than
+// recomputed: internal/toolendpoint is the one owner of the socket's name
+// (AD-8), and an empty path is the honest answer when there is no endpoint
+// to ask — see localHelperOpener.toolSocketPath's own doc for why that is a
+// real state a pane must carry faithfully, not an unset default.
+func (a *App) SetLocalToolSocketPath(path string) {
+	if a.localHelper != nil {
+		a.localHelper.setToolSocketPath(path)
+	}
+}
+
 func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {

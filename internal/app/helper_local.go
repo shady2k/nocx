@@ -90,6 +90,15 @@ type localHelperOpener struct {
 	// the install has run; an open before that is the refusal above.
 	installed helperlocal.Installed
 	dir       string
+	// toolSocketPath is THIS backend's tool endpoint socket, when it is
+	// running one — internal/toolendpoint.Endpoint.SocketPath(), handed
+	// down by cmd/nocx-server's composition root (nocx-2tesu). Empty is a
+	// real, deliberate state (startToolEndpoint answered nil, nil for no
+	// authorizer/dispatcher) and not merely "not set yet": a local pane
+	// opened while it is empty carries no NOCX_TOOL_SOCKET, which is the
+	// soft degrade staying soft — the shell's own refusal text is what a
+	// user sees, never a pane pointed at an empty path.
+	toolSocketPath string
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
 	client *helperclient.Client
@@ -105,6 +114,35 @@ func (o *localHelperOpener) installedLocalGeneration(installed helperlocal.Insta
 	defer o.mu.Unlock()
 	o.installed = installed
 	o.dir = endpoint.Dir(home)
+}
+
+// setToolSocketPath records this backend's tool endpoint socket, so a pane
+// this opener starts can find it (nocx-2tesu). It is a THIRD setter beside
+// installedLocalGeneration for the same reason that one is a setter rather
+// than a constructor argument, one step further: cmd/nocx-server does not
+// know whether it is running a tool endpoint at all until AFTER Start
+// returns (starting it needs the app's ToolAuthorizer/ToolDispatcher, which
+// Start is what populates), so this fact becomes known later than
+// installedLocalGeneration's ever does, and forcing the two through one
+// call would make the earlier one wait on the later.
+//
+// path is empty when this backend is not running an endpoint — see the
+// field's own doc for why that is a real state and not "not configured yet".
+func (o *localHelperOpener) setToolSocketPath(path string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.toolSocketPath = path
+}
+
+// toolSocketEnv turns this backend's tool socket path into the one extra
+// environment entry a freshly spawned local helper needs to find it — or
+// into nothing, when there is none, which is what keeps the soft degrade
+// soft: an empty path adds no entry rather than exporting an empty one.
+func toolSocketEnv(path string) []string {
+	if path == "" {
+		return nil
+	}
+	return []string{shellintegration.ToolSocketEnvVar + "=" + path}
 }
 
 // OpenHosted opens a local pane on this machine's helper.
@@ -260,7 +298,7 @@ func (o *localHelperOpener) watchForReplacement(sess session.Session, pid int, s
 // on the machine where builds land than on a server (D21).
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
-	installed, dir, existing := o.installed, o.dir, o.client
+	installed, dir, existing, toolSocketPath := o.installed, o.dir, o.client, o.toolSocketPath
 	o.mu.Unlock()
 
 	if installed.Binary == "" || installed.Generation == "" || dir == "" {
@@ -271,7 +309,7 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 	}
 	c, err := helperlocal.Open(ctx, helperlocal.Config{
 		Dir: dir, Generation: installed.Generation, Binary: installed.Binary,
-		Log: o.log,
+		Log: o.log, Env: toolSocketEnv(toolSocketPath),
 	})
 	if err != nil {
 		return nil, "", err

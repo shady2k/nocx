@@ -296,8 +296,8 @@ func stage1AgentEnv(opts LaunchOptions) string {
 		b.WriteString("export NOCX_AGENT_HELPER_PATH\n")
 	}
 	if opts.AgentToolSocketPath != "" {
-		b.WriteString("NOCX_TOOL_SOCKET=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
-		b.WriteString("export NOCX_TOOL_SOCKET\n")
+		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
+		b.WriteString("export " + ToolSocketEnvVar + "\n")
 	}
 	return b.String()
 }

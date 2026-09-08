@@ -29,6 +29,16 @@ const (
 	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
 )
 
+// ToolSocketEnvVar is the one spelling of the environment variable a shell
+// reads its nocx tool endpoint from (scripts/nocx.bash, scripts/nocx.zsh).
+// Every writer of it — this file's two renderers and, locally, the
+// composition root that hands the running endpoint's path down to the
+// helper daemon that forks the shell (internal/app/helper_local.go,
+// cmd/nocx-helper/main.go) — names it through this constant rather than
+// its own copy of the string, so the shell and every Go writer of the
+// variable can never spell it two different ways (nocx-2tesu).
+const ToolSocketEnvVar = "NOCX_TOOL_SOCKET"
+
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
@@ -119,7 +129,7 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString("NOCX_AGENT_HELPER_PATH=" + ShellQuote(opts.AgentHelperPath) + "\n")
 	}
 	if opts.AgentToolSocketPath != "" {
-		b.WriteString("NOCX_TOOL_SOCKET=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
+		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
 	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
 	// is deliberately NOT here: it reaches the shell by one of the two forms
@@ -143,7 +153,7 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString(" NOCX_AGENT_HELPER_PATH")
 	}
 	if opts.AgentToolSocketPath != "" {
-		b.WriteString(" NOCX_TOOL_SOCKET")
+		b.WriteString(" " + ToolSocketEnvVar)
 	}
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")

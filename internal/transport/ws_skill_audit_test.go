@@ -455,6 +455,17 @@ func TestSkillsAudit_ReportsAModelThatCouldNotBeReached(t *testing.T) {
 	if !strings.Contains(env.Error.Message, "connection refused") {
 		t.Fatalf("the refusal drops what happened: %q", env.Error.Message)
 	}
+	// AND WHICH MODEL DID NOT ANSWER. The reading resolves its own endpoint —
+	// from the auditing role, or the answering one, or the machine's default —
+	// so the person pressing Check never named the thing that failed, and a
+	// refusal that does not name it either sends them to the wrong endpoint.
+	// It cost exactly that once: a timeout was diagnosed against the remote
+	// provider while the call had gone to the local one (nocx-w155y).
+	for _, fact := range []string{"Local", "qwen3"} {
+		if !strings.Contains(env.Error.Message, fact) {
+			t.Fatalf("the refusal does not name %q: %q", fact, env.Error.Message)
+		}
+	}
 }
 
 // A model talked into answering with a word outside the closed vocabulary

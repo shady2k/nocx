@@ -222,11 +222,20 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 				"documentBytes", len(material.Document),
 				"elapsed", time.Since(askedAt), "error", err.Error())
 		}
-		// The engine's sentence travels. A reading that did not happen is a
-		// refusal the person reads, never an empty report — an empty report
-		// is indistinguishable from a clean one, which is the whole reason
-		// this feature refuses to certify anything.
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		// The engine's sentence travels, AND THE PAIR IT WAS ABOUT travels with
+		// it. A reading that did not happen is a refusal the person reads,
+		// never an empty report — an empty report is indistinguishable from a
+		// clean one, which is the whole reason this feature refuses to certify
+		// anything. But the person who pressed Check never named an endpoint:
+		// the reading resolved its own, from the auditing role, or the
+		// answering one, or the machine's default. A refusal that does not say
+		// which one it was sends them to change the wrong thing — it cost
+		// exactly that once, a timeout diagnosed against the remote provider
+		// while the call had gone to the local one (nocx-w155y).
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32603,
+			Message: fmt.Sprintf("%s (endpoint %q, model %q)", err.Error(), endpoint.Name, model),
+		})
 		return
 	}
 	if h.log != nil {

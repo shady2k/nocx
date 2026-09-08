@@ -262,32 +262,25 @@ func validateInvocation(invocation Invocation) error {
 	if err := json.Unmarshal(invocation.Arguments, &object); err != nil || object == nil {
 		return errors.New("MCP tool arguments must be a JSON object")
 	}
+	copyTools := append([]ToolDescriptor(nil), invocation.Activation.Tools...)
+	canonical, err := makeCatalog("", "", "", copyTools)
+	if err != nil {
+		return ErrCatalogStale
+	}
 	found := false
-	for _, tool := range invocation.Activation.Tools {
+	for _, tool := range canonical.Tools {
 		if tool.Name == invocation.RemoteTool {
 			found = true
-			if tool.DescriptorDigest != invocation.DescriptorDigest || descriptorDigest(tool) != invocation.DescriptorDigest {
+			if tool.DescriptorDigest != invocation.DescriptorDigest {
 				return ErrCatalogStale
 			}
 			break
 		}
 	}
-	if !found {
-		return ErrCatalogStale
-	}
-	if expectedCatalogDigest(invocation.Activation.Tools) != invocation.Activation.CatalogDigest {
+	if !found || canonical.Digest != invocation.Activation.CatalogDigest {
 		return ErrCatalogStale
 	}
 	return nil
-}
-
-func expectedCatalogDigest(tools []ToolDescriptor) string {
-	copyTools := append([]ToolDescriptor(nil), tools...)
-	catalog, err := makeCatalog("", "", "", copyTools)
-	if err != nil {
-		return ""
-	}
-	return catalog.Digest
 }
 
 func (m *Manager) sessionFor(key sessionKey, activation Activation) (*pooledSession, error) {

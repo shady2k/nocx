@@ -114,6 +114,31 @@ func TestMCPRuntimeIsReachedOnlyThroughEffectKernel(t *testing.T) {
 	}
 }
 
+func TestBoundedMCPErrorStillMatchesTheMCPResultContract(t *testing.T) {
+	ctx := withToolBound(context.Background(), agenttools.ResultBound{
+		MaxBytes:   1024,
+		Truncation: agenttools.TruncationDropTail,
+	})
+	scope := &agenttools.MCPScope{ServerID: "server-kernel", RemoteTool: "echo"}
+	out, err := boundedMCPError(mcp.ErrActivationChanged, ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result mcp.Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("failure result is not JSON: %v; output %q", err, out)
+	}
+	if result.ServerID != scope.ServerID || result.Tool != scope.RemoteTool || !result.IsError {
+		t.Fatalf("failure result lost MCP identity: %+v", result)
+	}
+	if len(result.Text) != 1 || result.Text[0] != "MCP tool call failed: "+mcp.ErrActivationChanged.Error() {
+		t.Fatalf("failure result text = %q", result.Text)
+	}
+	if result.Resources == nil || result.Omitted == nil {
+		t.Fatalf("failure result has nullable collections: %+v", result)
+	}
+}
+
 func TestMCPApprovalSuspensionDoesNotInvokeRuntime(t *testing.T) {
 	snapshot, err := agenttools.NewMCPCatalogSnapshot(assistantMCPServer())
 	if err != nil {

@@ -28,7 +28,7 @@ func executeMCP(ctx context.Context, capability agenttools.Capability, args json
 		if ctx.Err() != nil {
 			return "", err
 		}
-		message, boundErr := boundedMCPError(err, ctx)
+		message, boundErr := boundedMCPError(err, ctx, scope)
 		if boundErr != nil {
 			return "", boundErr
 		}
@@ -57,21 +57,35 @@ func executeMCP(ctx context.Context, capability agenttools.Capability, args json
 	return string(encoded), nil
 }
 
-func boundedMCPError(cause error, ctx context.Context) (string, error) {
+func boundedMCPError(cause error, ctx context.Context, scope *agenttools.MCPScope) (string, error) {
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
 	message := "MCP tool call failed: " + cause.Error()
-	limit := int(bound.MaxBytes)
-	if limit < 1 {
-		return "MCP tool call failed", nil
+	result := mcp.Result{
+		ServerID:  scope.ServerID,
+		Tool:      scope.RemoteTool,
+		IsError:   true,
+		Text:      []string{message},
+		Resources: []mcp.Resource{},
+		Omitted:   []mcp.Omitted{},
 	}
-	if len(message) > limit {
-		message = message[:limit]
+	for {
+		encoded, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return "", errors.New("MCP tool: failure result could not be encoded")
+		}
+		if int64(len(encoded)) <= bound.MaxBytes {
+			return string(encoded), nil
+		}
+		if len(message) == 0 {
+			return "", errors.New("MCP tool: failure result exceeds the declared bound")
+		}
+		message = message[:len(message)/2]
 		for len(message) > 0 && !utf8.ValidString(message) {
 			message = message[:len(message)-1]
 		}
+		result.Text[0] = message
 	}
-	return message, nil
 }

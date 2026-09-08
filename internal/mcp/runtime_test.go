@@ -172,14 +172,26 @@ func TestHTTPRefreshAndInvokeUseSDKWithoutRetainingDiscoverySession(t *testing.T
 		t.Fatal(err)
 	}
 	record.Catalog = stored
-	activation, err = ActivationFromServer(record)
+	// The profile store writes indented JSON and reads it back before the
+	// assistant assembles a run. Descriptor identity is semantic JSON, not the
+	// incidental whitespace chosen by persistence.
+	persisted, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reloaded profile.MCPServer
+	err = json.Unmarshal(persisted, &reloaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err = ActivationFromServer(reloaded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := json.RawMessage(`{"value":"hello"}`)
 	result, err := runtime.Invoke(t.Context(), Invocation{
 		RunID: "run-1", Activation: activation, RemoteTool: "echo",
-		DescriptorDigest: stored.Tools[0].DescriptorDigest, Arguments: args,
+		DescriptorDigest: reloaded.Catalog.Tools[0].DescriptorDigest, Arguments: args,
 	})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -188,6 +200,140 @@ func TestHTTPRefreshAndInvokeUseSDKWithoutRetainingDiscoverySession(t *testing.T
 		t.Fatalf("result = %+v, calls = %d", result, calls.Load())
 	}
 	runtime.CloseRun("run-1")
+}
+
+func TestInvokeRejectsChangedLiveDescriptorWithoutCallingTool(t *testing.T) {
+	var calls atomic.Int32
+	original := sdk.NewServer(&sdk.Implementation{Name: "fixture", Version: "1"}, nil)
+	sdk.AddTool(original, &sdk.Tool{Name: "echo"},
+		func(_ context.Context, _ *sdk.CallToolRequest, in echoInput) (*sdk.CallToolResult, echoOutput, error) {
+			calls.Add(1)
+			return nil, echoOutput(in), nil
+		})
+	changed := sdk.NewServer(&sdk.Implementation{Name: "fixture", Version: "2"}, nil)
+	changed.AddTool(
+		&sdk.Tool{
+			Name:        "echo",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "integer"}}},
+		},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			calls.Add(1)
+			return &sdk.CallToolResult{}, nil
+		},
+	)
+	var serveChanged atomic.Bool
+	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		if serveChanged.Load() {
+			return changed
+		}
+		return original
+	}, &sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	record := httpServerRecord(server.URL)
+	activation, err := ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewManager(nil)
+	defer func() { _ = runtime.Close() }()
+	catalog, err := runtime.Refresh(t.Context(), activation)
+	if err != nil {
+		t.Fatalf("Refresh original catalog: %v", err)
+	}
+	record.Catalog, err = catalog.ProfileCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err = ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serveChanged.Store(true)
+	_, err = runtime.Invoke(t.Context(), Invocation{
+		RunID: "stale", Activation: activation, RemoteTool: "echo",
+		DescriptorDigest: record.Catalog.Tools[0].DescriptorDigest, Arguments: json.RawMessage(`{"value":"old shape"}`),
+	})
+	if !errors.Is(err, ErrCatalogStale) {
+		t.Fatalf("Invoke error = %v, want ErrCatalogStale", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("changed live descriptor reached tools/call %d times", calls.Load())
+	}
+	runtime.mu.Lock()
+	sessionCount := len(runtime.sessions)
+	runtime.mu.Unlock()
+	if sessionCount != 0 {
+		t.Fatalf("sessions after stale descriptor = %d, want 0", sessionCount)
+	}
+
+	refreshed, err := runtime.Refresh(t.Context(), activation)
+	if err != nil {
+		t.Fatalf("Refresh changed catalog: %v", err)
+	}
+	if refreshed.Tools[0].DescriptorDigest == record.Catalog.Tools[0].DescriptorDigest {
+		t.Fatal("Refresh did not replace the stale descriptor")
+	}
+}
+
+func TestInvokeCollapsesServerErrorContainingSecretAndClosesSession(t *testing.T) {
+	const secret = "sk-proj-server-error-secret-material" // #nosec G101 -- deterministic fake credential used to prove error redaction
+	var calls atomic.Int32
+	fixture := sdk.NewServer(&sdk.Implementation{Name: "fixture", Version: "1"}, nil)
+	fixture.AddTool(
+		&sdk.Tool{Name: "fail", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			calls.Add(1)
+			return nil, fmt.Errorf("server rejected credential %s", secret)
+		},
+	)
+	server := httptest.NewServer(sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return fixture },
+		&sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	))
+	defer server.Close()
+
+	record := httpServerRecord(server.URL)
+	activation, err := ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewManager(nil)
+	defer func() { _ = runtime.Close() }()
+	catalog, err := runtime.Refresh(t.Context(), activation)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	record.Catalog, err = catalog.ProfileCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err = ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runtime.Invoke(t.Context(), Invocation{
+		RunID: "server-error", Activation: activation, RemoteTool: "fail",
+		DescriptorDigest: record.Catalog.Tools[0].DescriptorDigest, Arguments: json.RawMessage(`{}`),
+	})
+	if err == nil || err.Error() != "MCP tool call failed" {
+		t.Fatalf("Invoke error = %v, want collapsed tool-call failure", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Invoke error leaked server secret: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("tools/call count = %d, want 1", calls.Load())
+	}
+	runtime.mu.Lock()
+	sessionCount := len(runtime.sessions)
+	runtime.mu.Unlock()
+	if sessionCount != 0 {
+		t.Fatalf("sessions after server error = %d, want 0", sessionCount)
+	}
 }
 
 func TestHTTPGuardRefusesLinkLocalBeforeDial(t *testing.T) {
@@ -415,18 +561,67 @@ func TestStdioRefreshAndCancellationCloseTheProcess(t *testing.T) {
 	stored, _ := catalog.ProfileCatalog()
 	record.Catalog = stored
 	activation, _ = ActivationFromServer(record)
+	var waitDigest, doneDigest string
+	for _, tool := range stored.Tools {
+		switch tool.Name {
+		case "wait":
+			waitDigest = tool.DescriptorDigest
+		case "done":
+			doneDigest = tool.DescriptorDigest
+		}
+	}
+	if waitDigest == "" || doneDigest == "" {
+		t.Fatalf("stdio catalog tools = %+v, want wait and done", stored.Tools)
+	}
 	_ = os.Remove(stopped)
 	_ = os.Remove(started)
 	ctx, cancel := context.WithCancel(t.Context())
 	called := make(chan error, 1)
 	go func() {
-		_, err := runtime.Invoke(ctx, Invocation{RunID: "cancel", Activation: activation, RemoteTool: "wait", DescriptorDigest: stored.Tools[0].DescriptorDigest, Arguments: json.RawMessage(`{}`)})
-		called <- err
+		_, invokeErr := runtime.Invoke(ctx, Invocation{RunID: "cancel", Activation: activation, RemoteTool: "wait", DescriptorDigest: waitDigest, Arguments: json.RawMessage(`{}`)})
+		called <- invokeErr
 	}()
 	waitFile(t, started)
 	cancel()
-	if err := <-called; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Invoke error = %v, want context.Canceled", err)
+	if invokeErr := <-called; !errors.Is(invokeErr, context.Canceled) {
+		t.Fatalf("Invoke error = %v, want context.Canceled", invokeErr)
+	}
+	waitFile(t, stopped)
+
+	_ = os.Remove(stopped)
+	_ = os.Remove(started)
+	record.Limits.CallTimeoutMS = 500
+	activation, err = ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Invoke(t.Context(), Invocation{
+		RunID: "timeout", Activation: activation, RemoteTool: "wait",
+		DescriptorDigest: waitDigest, Arguments: json.RawMessage(`{}`),
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed Invoke error = %v, want context.DeadlineExceeded", err)
+	}
+	waitFile(t, started)
+	waitFile(t, stopped)
+
+	_ = os.Remove(stopped)
+	_ = os.Remove(started)
+	record.Limits = profile.DefaultMCPLimits()
+	activation, err = ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.Invoke(t.Context(), Invocation{
+		RunID: "mutation", Activation: activation, RemoteTool: "done",
+		DescriptorDigest: doneDigest, Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil || len(result.Text) != 1 || result.Text[0] != "done" {
+		t.Fatalf("pooled Invoke result = %+v, err = %v", result, err)
+	}
+	waitFile(t, started)
+	if err := runtime.RunServerMutation(record.ID, func() error { return nil }); err != nil {
+		t.Fatalf("RunServerMutation: %v", err)
 	}
 	waitFile(t, stopped)
 }
@@ -460,6 +655,9 @@ func TestStdioHelper(t *testing.T) {
 	server.AddTool(&sdk.Tool{Name: "wait", InputSchema: map[string]any{"type": "object"}}, func(ctx context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	})
+	server.AddTool(&sdk.Tool{Name: "done", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "done"}}}, nil
 	})
 	if err := server.Run(context.Background(), &sdk.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, "server stopped")

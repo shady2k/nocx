@@ -212,6 +212,72 @@ func (s *mcpRefreshStub) Refresh(_ context.Context, _ mcp.Activation) (mcp.Catal
 	return s.catalog, nil
 }
 
+type mcpMutationRuntime struct {
+	attempts   []string
+	successful []string
+	fallback   []string
+}
+
+func (*mcpMutationRuntime) Refresh(context.Context, mcp.Activation) (mcp.Catalog, error) {
+	return mcp.Catalog{}, nil
+}
+
+func (*mcpMutationRuntime) Invoke(context.Context, mcp.Invocation) (mcp.Result, error) {
+	return mcp.Result{}, nil
+}
+
+func (*mcpMutationRuntime) CloseRun(string) {}
+
+func (r *mcpMutationRuntime) CloseServer(serverID string) {
+	r.fallback = append(r.fallback, serverID)
+}
+
+func (*mcpMutationRuntime) Close() error { return nil }
+
+func (r *mcpMutationRuntime) RunServerMutation(serverID string, mutation func() error) error {
+	r.attempts = append(r.attempts, serverID)
+	if err := mutation(); err != nil {
+		return err
+	}
+	r.successful = append(r.successful, serverID)
+	return nil
+}
+
+func TestMCPServers_UpdateAndDeleteUseRuntimeMutationBoundary(t *testing.T) {
+	runtime := &mcpMutationRuntime{}
+	h := newMCPWireHarness(t, WithMCPRuntime(runtime))
+	createdRaw := mcpResultEnvelope(t, jsonrpcCall(t, h.conn, "mcpServers.create", mcpStdioParams("Mutable", false, "wire-secret-material")))
+	var created mcpServerResult
+	if err := json.Unmarshal(createdRaw, &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.attempts) != 0 {
+		t.Fatalf("create entered mutation boundary: %v", runtime.attempts)
+	}
+
+	update := mcpStdioParams("Updated", true, nil)
+	update["id"], update["revision"] = created.Server.ID, created.Server.Revision
+	mcpResultEnvelope(t, jsonrpcCall(t, h.conn, "mcpServers.update", update))
+	_ = jsonrpcCall(t, h.conn, "mcpServers.delete", map[string]any{
+		"id": created.Server.ID, "revision": created.Server.Revision,
+	})
+	mcpResultEnvelope(t, jsonrpcCall(t, h.conn, "mcpServers.delete", map[string]any{
+		"id": created.Server.ID, "revision": created.Server.Revision + 1,
+	}))
+
+	wantAttempts := []string{created.Server.ID, created.Server.ID, created.Server.ID}
+	if strings.Join(runtime.attempts, ",") != strings.Join(wantAttempts, ",") {
+		t.Fatalf("runtime mutation attempts = %v, want %v", runtime.attempts, wantAttempts)
+	}
+	wantSuccessful := []string{created.Server.ID, created.Server.ID}
+	if strings.Join(runtime.successful, ",") != strings.Join(wantSuccessful, ",") {
+		t.Fatalf("successful runtime mutations = %v, want %v", runtime.successful, wantSuccessful)
+	}
+	if len(runtime.fallback) != 0 {
+		t.Fatalf("MutationRunner unexpectedly used CloseServer fallback: %v", runtime.fallback)
+	}
+}
+
 func TestMCPServers_RefreshDiscoversAndCASCommitsCatalog(t *testing.T) {
 	refresher := &mcpRefreshStub{catalog: mcp.Catalog{
 		ServerName:      "fixture",

@@ -88,6 +88,7 @@ type storeData struct {
 	// key decodes to it, so a document written before this field existed
 	// reads back as a person who has chosen nothing — which they had not.
 	DefaultModel DefaultModel `json:"defaultModel"`
+	MCPServers   []MCPServer  `json:"mcpServers,omitempty"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {

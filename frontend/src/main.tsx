@@ -36,6 +36,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
+import { MCPServerClient } from './mcp-servers-client'
 import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
@@ -228,6 +229,7 @@ function main(): void {
   const dialogClient = new DialogClient(dispatcher)
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
+  const mcpServersClient = new MCPServerClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
   // The UI-state document (ADR-0048): what the app remembers without being
   // asked — the sidebar's collapse, its active view, its width. Not the
@@ -552,6 +554,7 @@ function main(): void {
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
         skillsStore,
+        mcpServersClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

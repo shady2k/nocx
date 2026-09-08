@@ -29,13 +29,17 @@ const (
 	// explicitly routes exited items to the ledger and live items to the
 	// renderer broker.
 	Dynamic Executes = "dynamic"
+	// InMCP invokes a configured MCP runtime through an immutable activation
+	// captured by the per-run registry. It remains a distinct site because
+	// model names are dynamic and cannot be keys in the static Go executor map.
+	InMCP Executes = "mcp"
 )
 
-var allExecutes = []Executes{InGo, InRenderer, Dynamic}
+var allExecutes = []Executes{InGo, InRenderer, Dynamic, InMCP}
 
 func supportedExecutes(e Executes) bool {
 	switch e {
-	case InGo, InRenderer, Dynamic:
+	case InGo, InRenderer, Dynamic, InMCP:
 		return true
 	default:
 		return false

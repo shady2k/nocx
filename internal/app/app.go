@@ -50,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
@@ -110,6 +111,10 @@ type App struct {
 	// noteCloser closes the notes database on shutdown; nil when the store
 	// never opened.
 	noteCloser interface{ Close() error }
+	// mcpRuntime owns every on-demand MCP process and HTTP session. It is
+	// dormant after construction and closed after the transport stops, before
+	// the vault that supplies its activation-time credentials is sealed.
+	mcpRuntime mcp.Runtime
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
@@ -846,6 +851,34 @@ func New(opts ...Option) (*App, error) {
 	credResolver := credential.NewResolver(v, func(err error) bool {
 		return errors.Is(err, vault.ErrVaultSealed)
 	}, v)
+	// MCP construction is deliberately inert: NewManager records only the
+	// stanced resolver. No executable starts and no HTTP connection opens until
+	// an explicit Settings refresh or an authorized tool invocation reaches it.
+	mcpMaterial := mcpSecretMaterial{
+		resolver: credResolver,
+		replace: func(ctx context.Context, ref string, value credential.Secret) error {
+			return v.ReplaceSecret(ctx, vault.RowFor(credential.SecretID(ref)), value, nil)
+		},
+	}
+	mcpManager := mcp.NewManager(
+		mcpMaterial,
+		mcp.WithActivationVerifier(func(_ context.Context, expected mcp.Activation) error {
+			current, currentErr := profileStore.GetMCPServer(expected.ServerID)
+			if currentErr != nil {
+				return currentErr
+			}
+			actual, actualErr := mcp.ActivationFromServer(current)
+			if actualErr != nil {
+				return actualErr
+			}
+			if !expected.SameIdentity(actual) {
+				return mcp.ErrActivationChanged
+			}
+			return nil
+		}),
+	)
+	mcpOAuth := mcp.NewOAuthManager(v, mcpMaterial)
+	mcpRefresh := mcpCatalogRefresher{runtime: mcpManager}
 
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is
@@ -1088,6 +1121,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithBackupService(backupService),
 		transport.WithBackupFileSaver(backup.SaveToFile),
 		transport.WithGroupRepository(profileStore),
+		transport.WithMCPServerRepository(profileStore),
+		transport.WithMCPServerRefresher(mcpRefresh),
+		transport.WithMCPRuntime(mcpManager),
+		transport.WithMCPOAuthService(mcpOAuth),
 		transport.WithCredentialStore(v),
 		// The vault raises its own unlock, and it is SAID here rather than
 		// discovered from the store's method set: a resolver built without an
@@ -1819,6 +1856,7 @@ func New(opts ...Option) (*App, error) {
 		skills:           skills,
 		vaultCloser:      v,
 		noteCloser:       noteCloser,
+		mcpRuntime:       mcpManager,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
 		helperRegistry:   helperReg,
@@ -2585,6 +2623,14 @@ func (a *App) Shutdown(ctx context.Context) {
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
 	}
+	// No agent call can still enter the runtime after the transport drains.
+	// Close it before sealing the vault because active sessions may still own
+	// transport cleanup whose errors must remain inside the MCP boundary.
+	if a.mcpRuntime != nil {
+		if err := a.mcpRuntime.Close(); err != nil {
+			a.Logger.Error("MCP runtime shutdown error", "error", err)
+		}
+	}
 	// After the transport, so nothing is still writing a note.
 	if a.noteCloser != nil {
 		if err := a.noteCloser.Close(); err != nil {
@@ -3141,4 +3187,36 @@ func (m apiSecretMaterial) Material(ctx context.Context, id credential.SecretID)
 		return credential.Secret{}, vault.ErrVaultSealed
 	}
 	return m.resolver.Resolve(ctx, id, credential.Operation("send an API request"))
+}
+
+// mcpSecretMaterial is the composition root's narrow join between opaque MCP
+// bindings and the credential resolver. Every activation-time read explicitly
+// carries an Operation stance, so a sealed vault raises its owned unlock flow;
+// the runtime never receives the vault or a stanceless plaintext store.
+type mcpSecretMaterial struct {
+	resolver credential.Resolver
+	replace  func(context.Context, string, credential.Secret) error
+}
+
+func (m mcpSecretMaterial) ResolveSecret(ctx context.Context, ref string) (credential.Secret, error) {
+	if m.resolver == nil {
+		return credential.Secret{}, vault.ErrVaultSealed
+	}
+	return m.resolver.Resolve(ctx, credential.SecretID(ref), credential.Operation("connect to an MCP server"))
+}
+
+func (m mcpSecretMaterial) ReplaceOAuthToken(ctx context.Context, ref string, value credential.Secret) error {
+	if m.replace == nil {
+		return errors.New("MCP OAuth token persistence is unavailable")
+	}
+	return m.replace(ctx, ref, value)
+}
+
+// mcpCatalogRefresher names the only management path that performs discovery.
+// Persistence and its changed notification remain in mcpServers.refresh after
+// Runtime.Refresh returns a complete one-shot catalog.
+type mcpCatalogRefresher struct{ runtime mcp.Runtime }
+
+func (r mcpCatalogRefresher) Refresh(ctx context.Context, activation mcp.Activation) (mcp.Catalog, error) {
+	return r.runtime.Refresh(ctx, activation)
 }

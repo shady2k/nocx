@@ -278,7 +278,12 @@ function main(): void {
     const p = params as { requestId: string; reason: string }
     if (!p || !p.requestId) return
     pendingBackendUnlock = p.requestId
-    vaultController.openUnlock(p.reason || 'The vault is locked.')
+    // The backend's reason is a verb phrase by contract (credential.Operation:
+    // "audit a skill", "answer the ask"), so it completes the prompt's title.
+    // An absent one passes nothing rather than a sentence: undefined gets the
+    // bare "Unlock the vault", where 'The vault is locked.' got "Unlock the
+    // vault to The vault is locked." (nocx-0nhec).
+    vaultController.openUnlock(p.reason || undefined)
   })
 
   // ── Backend-initiated connection-password asks ─────────────────────

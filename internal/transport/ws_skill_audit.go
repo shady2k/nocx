@@ -191,11 +191,37 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
+	// WHAT WAS ASKED, BEFORE IT IS ASKED (nocx-w155y's diagnosis). A reading
+	// that hangs or fails used to leave NOTHING in the log — the last line was
+	// the vault's "secret retrieved" and then silence, so working out where it
+	// stopped meant reading the process's open sockets. These two lines make
+	// the span visible from both ends: what went out, and what came back or
+	// did not. Sizes and names only; the document is a stranger's text and the
+	// report is a model's description of it, and neither belongs in a log.
+	askedAt := time.Now()
+	if h.log != nil {
+		h.log.Info("skill: audit asked",
+			"skill", material.Name, "role", string(role),
+			"endpoint", endpoint.Name, "model", model,
+			"documentBytes", len(material.Document),
+			"files", len(material.Read), "omitted", len(material.Omitted))
+	}
+
 	reading, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
 		Key: key, BaseURL: endpoint.BaseURL, Model: model, Headers: headers,
 		Document: material.Document,
 	})
 	if err != nil {
+		if h.log != nil {
+			// The elapsed time is the fact that distinguishes the three ways
+			// this fails: a refusal comes back at once, a bad address takes a
+			// dial, and a provider that accepted and then said nothing takes
+			// the whole budget.
+			h.log.Warn("skill: audit failed",
+				"skill", material.Name, "endpoint", endpoint.Name, "model", model,
+				"documentBytes", len(material.Document),
+				"elapsed", time.Since(askedAt), "error", err.Error())
+		}
 		// The engine's sentence travels. A reading that did not happen is a
 		// refusal the person reads, never an empty report — an empty report
 		// is indistinguishable from a clean one, which is the whole reason
@@ -209,6 +235,7 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		// that belongs.
 		h.log.Info("skill: audit answered",
 			"skill", material.Name, "role", string(role), "model", model,
+			"elapsed", time.Since(askedAt),
 			"files", len(material.Read), "omitted", len(material.Omitted),
 			"findings", len(material.Findings))
 	}

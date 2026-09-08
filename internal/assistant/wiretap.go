@@ -113,6 +113,18 @@ func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecord
 	return &wireTap{inner: inner, logPath: logPath, recorder: recorder, logger: logger}
 }
 
+// requestTarget is the address as it may be LOGGED: scheme, host and path, and
+// deliberately nothing else. A query string can carry an API key — some
+// providers take one that way — and userinfo can carry a password, so neither
+// goes near a log line. The rest of this file never records headers for the
+// same reason.
+func requestTarget(req *http.Request) string {
+	if req.URL == nil {
+		return ""
+	}
+	return req.URL.Scheme + "://" + req.URL.Host + req.URL.Path
+}
+
 func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body *wireRequestBody
 	if req.Body != nil {
@@ -123,6 +135,18 @@ func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
 			label:  "REQUEST " + req.Method + " " + req.URL.String(),
 		}
 		req.Body = body
+	}
+	// TWO LINES PER EXCHANGE, AND THE FIRST ONE IS THE POINT (nocx-8byie). A
+	// call that never answers is a START WITH NO END, which is a shape somebody
+	// reading a log can recognise; one line written on completion says nothing
+	// about the failure that matters most. Diagnosing a reading that hung meant
+	// running `ss -tnp` against the backend to find the open socket, because
+	// between the vault's "secret retrieved" and silence there was nothing.
+	started := time.Now()
+	where := requestTarget(req)
+	if w.logger != nil {
+		w.logger.Info("provider call started",
+			"method", req.Method, "url", where, "requestBytes", req.ContentLength)
 	}
 	resp, err := w.inner.RoundTrip(req)
 	if body == nil {
@@ -135,7 +159,25 @@ func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if err != nil {
 		w.write("TRANSPORT ERROR\n" + err.Error())
+		if w.logger != nil {
+			// The ELAPSED time is what tells the three failures apart: a
+			// refusal comes back at once, an address nobody answers takes a
+			// dial, and a provider that accepted and then said nothing takes
+			// the caller's whole budget.
+			w.logger.Warn("provider call failed",
+				"method", req.Method, "url", where,
+				"elapsed", time.Since(started), "error", err.Error())
+		}
 		return resp, err
+	}
+	if w.logger != nil {
+		// Elapsed to the HEADERS, not to the last byte: a streaming answer is
+		// still arriving when this is written, and the time to first headers
+		// is the number that separates "the provider is thinking" from "the
+		// provider is streaming slowly".
+		w.logger.Info("provider call answered",
+			"method", req.Method, "url", where,
+			"status", resp.StatusCode, "elapsed", time.Since(started))
 	}
 	w.write(fmt.Sprintf("RESPONSE %s", resp.Status))
 	resp.Body = &wireResponseBody{

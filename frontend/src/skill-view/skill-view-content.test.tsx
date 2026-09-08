@@ -841,9 +841,13 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
   const checkPane = (host: HTMLElement): HTMLElement | null =>
     host.querySelector('.skill-view__check')
 
+  /** The run-a-check button lives beside the Check ROW in the left rail
+   *  (nocx-dxy86), not in the pane that shows the reading: a never-checked
+   *  skill used to put it alone on an empty right half, where the person
+   *  reached it only by first guessing that "Not checked" was clickable. */
   const findButton = (host: HTMLElement, label: string): HTMLButtonElement | undefined =>
-    Array.from(host.querySelectorAll<HTMLButtonElement>('.skill-view__check .ui-button')).find(
-      (b) => b.textContent?.includes(label),
+    Array.from(host.querySelectorAll<HTMLButtonElement>('#skill-view-check .ui-button')).find((b) =>
+      b.textContent?.includes(label),
     )
 
   it('THE CHECK is a row beside the files, and its panel renders in the RIGHT pane', async () => {
@@ -954,7 +958,7 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     expect(client.audit).not.toHaveBeenCalled()
   })
 
-  it('with none: shows the Check this skill button and nothing else in that pane', async () => {
+  it('with none: the rail offers the button and the pane shows no reading', async () => {
     const client = fakeClient({
       files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
       file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
@@ -965,7 +969,10 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
 
     const pane = checkPane(host)
     expect(pane).not.toBeNull()
+    // The action is reachable WITHOUT selecting the row: it is in the rail,
+    // beside the "Not checked" line it acts on.
     expect(findButton(host, 'Check this skill')).toBeDefined()
+    expect(pane?.querySelector('.ui-button')).toBeNull()
     // No verdict, no prose, no scan sentence — there is nothing stored yet.
     expect(pane?.textContent).not.toContain('Suspect')
     expect(pane?.textContent).not.toContain('Clear')

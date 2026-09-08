@@ -27,14 +27,18 @@
    skill tab allows, the name took 83 of 148 usable pixels and the value, the
    half a person actually reads, got 53: a path rendered one syllable per line,
    and a list 654px tall instead of 274px.
-   Below 200px of LIST width there is no two-column layout that keeps both
-   halves readable, so the alignment this component exists for — every value
-   starting at the same x — is given up for the thing it exists to serve. The rows still stack
+   The threshold is 320px of LIST width, and it was set from the product
+   rather than from arithmetic: the skill tab's rail gives this list 218px at
+   its ordinary width, and a first cut pitched at 200px did not fire there at
+   all. A dialog's list is far wider — 368px at a 400px rail — so 320 divides
+   the two shapes rather than splitting either. Below it the alignment this
+   component exists for, every value starting at the same x, is given up for
+   the thing it exists to serve. The rows still stack
    name-then-value in source order, so nothing changes for a screen reader.
    Written on the CHILDREN rather than on the list, because an element cannot
    answer its own container query: each takes the full track instead of the
    template being swapped. */
-@container (max-width: 200px) {
+@container (max-width: 320px) {
   .ui-fact-list__name,
   .ui-fact-list__value {
     grid-column: 1 / -1;

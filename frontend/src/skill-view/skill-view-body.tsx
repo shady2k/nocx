@@ -68,6 +68,7 @@
 
 import { For, Show, createEffect, createSignal, on, onCleanup, onMount, type JSX } from 'solid-js'
 import {
+  Button,
   DocumentSurface,
   FileReadout,
   RecordRow,
@@ -685,6 +686,31 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
                     }}
                   />
                 </Stack>
+                {/* THE ACTION SITS WITH ITS ROW (nocx-dxy86). It used to
+                    live in the check pane, which meant a never-checked
+                    skill showed one button alone on an empty right half
+                    while the left column said "Not checked" and looked
+                    like a label — the person had to guess that the label
+                    led somewhere. It is still ONE button in every state:
+                    it moved, it was not duplicated, so review round 2's
+                    rule that a store-read failure must not withhold the
+                    model call holds by construction here.
+                    Pressing it also selects the check pane, because what
+                    happens next — the progress card, the failure, the
+                    reading itself — needs the width the rail does not
+                    have, which is the same reason nocx-dh14q took the
+                    button out of the identity header in the first
+                    place. */}
+                <Button
+                  disabled={auditing()}
+                  onClick={() => {
+                    hasChosenDefaultPane = true
+                    setRightPane('check')
+                    void runAudit()
+                  }}
+                >
+                  {checkState().kind === 'ready' ? 'Re-check' : 'Check this skill'}
+                </Button>
               </Section>
             </Show>
             <Section title="Files">
@@ -813,7 +839,6 @@ export function SkillViewBody(props: SkillViewBodyProps): JSX.Element {
               state={checkState()}
               auditing={auditing()}
               auditError={auditError()}
-              onRunAudit={() => void runAudit()}
             />
           </Show>
         </div>

@@ -45,7 +45,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { Show, type JSX } from 'solid-js'
-import { Button, Caption, StatusCard } from '../ui'
+import { Caption, StatusCard } from '../ui'
 import { shortDate } from '../skills-presentation'
 import type { SkillsCheck } from '../generated/skills.check'
 
@@ -196,7 +196,6 @@ export interface SkillViewCheckPanelProps {
   state: CheckState
   auditing: boolean
   auditError: string
-  onRunAudit: () => void
 }
 
 export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Element {
@@ -264,19 +263,15 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
           </>
         )}
       </Show>
-      {/* ALWAYS EXACTLY ONE BUTTON, IN EVERY STATE (review round 2's
-          Important #2). A store READ failure (`unavailable`) must not
-          withhold the model call: `skills.check` errors only on a genuine
-          store fault (a stub or unwired store answers `checked:false`
-          instead), while `skills.audit` would run happily and report
-          `stored:'no'`, which design §6 says must still reach the person
-          — the model is billed before the write is even attempted. An
-          earlier version of this panel rendered no button at all in the
-          `unavailable` branch, which withheld a call the backend was
-          willing to make. */}
-      <Button onClick={props.onRunAudit} disabled={props.auditing}>
-        {props.state.kind === 'ready' ? 'Re-check' : 'Check this skill'}
-      </Button>
+      {/* THE BUTTON IS NOT HERE ANY MORE (nocx-dxy86). It sits beside the
+          Check ROW in the left rail, where a person looking at "Not
+          checked" can see that something can be done about it — this pane
+          held nothing else for a never-checked skill, so the action stood
+          alone on an empty half. Review round 2's rule that a store-read
+          failure (`unavailable`) must not withhold the model call is
+          unaffected and now holds by construction: the rail renders the
+          button in every state, including this one, because it does not
+          read `state` to decide whether to draw it. */}
       <Show when={props.auditing}>
         <StatusCard
           tone="neutral"

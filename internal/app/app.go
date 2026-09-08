@@ -390,15 +390,6 @@ func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
 }
 
-// WithSkillForge names the endpoints where the resolver finds repository
-// metadata and raw files. Empty values retain the production GitHub defaults.
-func WithSkillForge(apiBase, rawBase string) Option {
-	return func(o *optionSet) {
-		o.forgeAPIBase = apiBase
-		o.forgeRawBase = rawBase
-	}
-}
-
 // notifyDebounceWindow is how long one session and kind is held quiet AFTER a
 // notification has gone out. The debounce is leading-edge (notify.Policy):
 // the first event is delivered at once, and the window suppresses what follows
@@ -881,6 +872,12 @@ func New(opts ...Option) (*App, error) {
 		docStore,
 		skill.WithFetcher(apiFetcher),
 		skill.WithGitHubBases(o.forgeAPIBase, o.forgeRawBase),
+		// The clock is NAMED here rather than defaulted inside the store. The
+		// store stamps a skill's first-seen date and reads it back to decide
+		// ageing, so which clock it uses is a composition decision like every
+		// other seam on this line — and an option only tests ever pass is an
+		// option nothing in the product has agreed to.
+		skill.WithClock(time.Now),
 		skill.WithIdleDays(func() int {
 			days, settingErr := settingsRegistry.GetNumber(settings.SkillsIdleDays)
 			if settingErr != nil {

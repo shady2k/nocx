@@ -655,7 +655,13 @@ test.describe('a person installs a skill by asking for it (nocx-ojfuc.5)', () =>
     // still readable — the switch below is unchecked — so this line is
     // dropped rather than pointed at text the product no longer has
     // anywhere; see the report on nocx-at05r.
-    const tabSwitch = tab.locator('[role="switch"]')
+    // NAMED, because the tab now carries three switches: the one that offers
+    // the skill and the two pins the ageing work added beside it (nocx-dzy7l).
+    // An unnamed locator over "the switch" was true when there was one, and
+    // became a strict-mode violation the day a second arrived — which is the
+    // failure mode of every locator that describes a role rather than a
+    // control.
+    const tabSwitch = tab.getByRole('switch', { name: 'Offer this skill to the assistant' })
     await expect(tabSwitch).not.toBeChecked()
     await tabSwitch.click()
     await expect(tabSwitch).toBeChecked({ timeout: 15_000 })

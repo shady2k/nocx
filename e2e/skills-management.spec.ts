@@ -391,7 +391,11 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // {"verdict": "clear"|"suspect", "report": "..."}), never as prose. The
     // wire shape didn't change under this repointing; the fixture below did,
     // to keep sending something the parser accepts.
-    fake.setScript({ chunks: [JSON.stringify({ verdict: 'clear', report: AUDIT_REPORT })] })
+    // STANDING, not queued: a reading is one call per file of the bundle and
+    // one more to conclude (nocx-fuymi), so queueing one script would leave
+    // the per-file calls unscripted — and queueing N+1 would make this spec
+    // assert how many files its own fixture happens to have.
+    fake.setStandingScript({ chunks: [JSON.stringify({ verdict: 'clear', report: AUDIT_REPORT })] })
     await card.getByRole('button', { name: 'Check this skill' }).click()
     await fake.waitForRequests(requestBase + 1)
     await expect(card).toContainText(AUDIT_REPORT, { timeout: 30_000 })
@@ -424,7 +428,10 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     //
     // And it moved nothing: the skill is still off, because a reading is not
     // a decision.
-    const cardSwitch = card.locator('[role="switch"]')
+    // NAMED, because the tab carries three switches now: the one that offers
+    // the skill and the two pins beside it (nocx-dzy7l). A locator that
+    // describes a ROLE was true while there was one of them.
+    const cardSwitch = card.getByRole('switch', { name: 'Offer this skill to the assistant' })
     await expect(cardSwitch).not.toBeChecked()
 
     // ── ENABLE, FROM THE TAB, WHERE THE EVIDENCE IS ─────────────────────────
@@ -562,7 +569,9 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // never a button floating beside whichever file happens to be open.
     await tab.locator('#skill-view-check .ui-record-row__title').click()
     const before = fake.requests().length
-    fake.setScript({ chunks: [JSON.stringify({ verdict: 'clear', report: HAPPY_AUDIT_REPORT })] })
+    fake.setStandingScript({
+      chunks: [JSON.stringify({ verdict: 'clear', report: HAPPY_AUDIT_REPORT })],
+    })
     await tab.getByRole('button', { name: 'Check this skill' }).click()
     await expect(tab.locator('.skill-view__check-verdict')).toContainText(/clear|suspect/i, {
       timeout: 30_000,

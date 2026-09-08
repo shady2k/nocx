@@ -179,6 +179,7 @@ export class FakeOpenAI {
   private server: Server | null = null
   private baseUrl_ = ''
   private scripts: StreamScript[] = []
+  private standing: StreamScript | null = null
   private readonly requests_: FakeRequest[] = []
   private readonly releases = new Map<number, () => void>()
   private nextId = 1
@@ -230,9 +231,23 @@ export class FakeOpenAI {
   }
 
   /** Script the NEXT request. Scripts are consumed in request order; a
-   *  request with no script left answers with a single 'ok' chunk. */
+   *  request with no script left answers with the standing script if one was
+   *  set, and otherwise with a single 'ok' chunk. */
   setScript(script: StreamScript): void {
     this.scripts.push(script)
+  }
+
+  /** Answer EVERY unscripted request with this, until it is replaced.
+   *
+   *  For a call whose SHAPE the spec is asserting and whose COUNT is a detail
+   *  of the fixture. A skill reading is the case that needed it: it is one
+   *  model call per file of the bundle and one more to conclude
+   *  (internal/assistant/skillaudit_pass.go), so a spec queueing one script
+   *  per call would be asserting how many files its own fixture happens to
+   *  have — and would break the next time somebody adds a reference file to
+   *  it, in a spec about something else entirely. */
+  setStandingScript(script: StreamScript): void {
+    this.standing = script
   }
 
   /** Let a held request finish its remaining chunks and [DONE]. No-op for a
@@ -316,7 +331,7 @@ export class FakeOpenAI {
         res.end(JSON.stringify({ object: 'list', data: [{ id: 'e2e-model' }] }))
         return
       }
-      const script = this.scripts.shift() ?? { chunks: ['ok'] }
+      const script = this.scripts.shift() ?? this.standing ?? { chunks: ['ok'] }
       let streamRequest = false
       try {
         const payload = JSON.parse(record.body) as { stream?: unknown }

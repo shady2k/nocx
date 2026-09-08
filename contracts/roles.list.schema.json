@@ -41,9 +41,9 @@
       "required": ["role", "endpointId", "model"],
       "properties": {
         "role": {
-          "description": "The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead); 'summarizing' drafts reusable skills from the person's own words.",
+          "description": "The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead); 'summarizing' drafts reusable skills from the person's own words; 'auditing' reads one skill the person already holds and describes it back to them when they ask.",
           "type": "string",
-          "enum": ["answering", "classifier", "summarizing"]
+          "enum": ["answering", "classifier", "summarizing", "auditing"]
         },
         "endpointId": {
           "description": "The assigned endpoint's backend-minted id, or null when the role has no assignment.",

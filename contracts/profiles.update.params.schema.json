@@ -9,7 +9,7 @@
   "properties": {
     "id": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 128
     },
     "type": {
       "type": "string",
@@ -17,11 +17,11 @@
     },
     "name": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 200
     },
     "group": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 128
     },
     "icon": {
       "type": "string",
@@ -41,9 +41,6 @@
       "type": "integer"
     },
     "isBuiltin": {
-      "type": "boolean"
-    },
-    "needsReview": {
       "type": "boolean"
     },
     "options": {

@@ -92,21 +92,21 @@ func metadataFor(result APIRunResult) (string, error) {
 		Environment:  result.Environment,
 		Route:        result.Route,
 		RemoteAddr:   result.RemoteAddr,
-		DNSAddresses: nonNilStrings(result.DNSAddresses),
+		DNSAddresses: nonNil(result.DNSAddresses),
 		Timings:      result.Timings,
-		Certificates: nonNilCertificates(result.Certificates),
+		Certificates: nonNil(result.Certificates),
 		Failure:      result.Failure,
 	}
 	if result.Response != nil {
 		meta.Response = &apiRunResponseMeta{
 			Status:         result.Response.Status,
-			Headers:        nonNilHeaders(result.Response.Headers),
+			Headers:        nonNil(result.Response.Headers),
 			Binary:         result.Response.Binary,
 			Lossy:          result.Response.Lossy,
 			Truncated:      result.Response.Truncated,
 			Size:           result.Response.Size,
 			TLSVersion:     result.Response.TLSVersion,
-			RawSpans:       nonNilSpans(result.Response.Raw.Spans),
+			RawSpans:       nonNil(result.Response.Raw.Spans),
 			TLSCipherSuite: result.Response.TLSCipherSuite,
 			Trust:          result.Response.Trust,
 		}
@@ -118,39 +118,11 @@ func metadataFor(result APIRunResult) (string, error) {
 	return string(raw), nil
 }
 
-func nonNilStrings(in []string) []string {
-	if in == nil {
-		return []string{}
-	}
-	return in
-}
-
-func nonNilSpans(in []APIRunSpan) []APIRunSpan {
-	if in == nil {
-		return []APIRunSpan{}
-	}
-	return in
-}
-
-func nonNilHeaders(in []APIRunHeader) []APIRunHeader {
-	if in == nil {
-		return []APIRunHeader{}
-	}
-	return in
-}
-
-func nonNilCertificates(in []APIRunCertificate) []APIRunCertificate {
-	if in == nil {
-		return []APIRunCertificate{}
-	}
-	return in
-}
-
 func (s *sqliteContent) Begin(ctx context.Context, start APIRunStart) (APIRun, error) {
 	if err := validateAPIRunStart(start); err != nil {
 		return APIRun{}, err
 	}
-	spans, err := json.Marshal(nonNilSpans(start.Request.Spans))
+	spans, err := json.Marshal(nonNil(start.Request.Spans))
 	if err != nil {
 		return APIRun{}, fmt.Errorf("content: api run: encode request spans: %w", err)
 	}
@@ -189,7 +161,7 @@ func (s *sqliteContent) Begin(ctx context.Context, start APIRunStart) (APIRun, e
 		Method:         start.Method,
 		URL:            start.URL,
 		Outcome:        APIRunPending,
-		Request:        APIRaw{Text: start.Request.Text, Spans: nonNilSpans(start.Request.Spans)},
+		Request:        APIRaw{Text: start.Request.Text, Spans: nonNil(start.Request.Spans)},
 		StartedAt:      start.StartedAt,
 	}, nil
 }
@@ -310,9 +282,9 @@ func apiRunFromStartResult(id int64, start APIRunStart, result APIRunResult) API
 		Route:          result.Route,
 		Request:        start.Request,
 		RemoteAddr:     result.RemoteAddr,
-		DNSAddresses:   nonNilStrings(result.DNSAddresses),
+		DNSAddresses:   nonNil(result.DNSAddresses),
 		Timings:        result.Timings,
-		Certificates:   nonNilCertificates(result.Certificates),
+		Certificates:   nonNil(result.Certificates),
 		Response:       result.Response,
 		Failure:        result.Failure,
 		StartedAt:      start.StartedAt,
@@ -435,11 +407,11 @@ func (s *sqliteContent) hydrateAPIRun(ctx context.Context, row storedAPIRun) (AP
 		Outcome:        row.outcome,
 		Environment:    meta.Environment,
 		Route:          meta.Route,
-		Request:        APIRaw{Text: requestText, Spans: nonNilSpans(spans)},
+		Request:        APIRaw{Text: requestText, Spans: nonNil(spans)},
 		RemoteAddr:     meta.RemoteAddr,
-		DNSAddresses:   nonNilStrings(meta.DNSAddresses),
+		DNSAddresses:   nonNil(meta.DNSAddresses),
 		Timings:        meta.Timings,
-		Certificates:   nonNilCertificates(meta.Certificates),
+		Certificates:   nonNil(meta.Certificates),
 		Failure:        meta.Failure,
 		StartedAt:      row.startedAt,
 		EndedAt:        row.endedAt,
@@ -455,14 +427,14 @@ func (s *sqliteContent) hydrateAPIRun(ctx context.Context, row storedAPIRun) (AP
 		}
 		run.Response = &APIRunResponse{
 			Status:         meta.Response.Status,
-			Headers:        nonNilHeaders(meta.Response.Headers),
+			Headers:        nonNil(meta.Response.Headers),
 			Text:           responseText,
 			Binary:         meta.Response.Binary,
 			Lossy:          meta.Response.Lossy,
 			Truncated:      meta.Response.Truncated,
 			Size:           meta.Response.Size,
 			TLSVersion:     meta.Response.TLSVersion,
-			Raw:            APIRaw{Text: responseRaw, Spans: nonNilSpans(meta.Response.RawSpans)},
+			Raw:            APIRaw{Text: responseRaw, Spans: nonNil(meta.Response.RawSpans)},
 			TLSCipherSuite: meta.Response.TLSCipherSuite,
 			Trust:          meta.Response.Trust,
 		}

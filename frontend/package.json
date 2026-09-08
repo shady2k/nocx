@@ -39,6 +39,7 @@
     "@codemirror/language": "6.12.4",
     "@codemirror/legacy-modes": "6.5.3",
     "@codemirror/lint": "6.9.7",
+    "@codemirror/search": "^6.7.2",
     "@codemirror/state": "6.7.1",
     "@codemirror/view": "6.43.7",
     "@shikijs/langs": "4.4.1",
@@ -49,11 +50,14 @@
     "@xterm/addon-unicode11": "^0.8.0",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
+    "dompurify": "^3.4.14",
+    "markdown-it": "^15.0.1",
     "shiki": "4.4.1",
     "solid-js": "^1.9.14"
   },
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "26.1.2",
     "css-tree": "^3.2.1",
     "eslint": "^9.39.5",

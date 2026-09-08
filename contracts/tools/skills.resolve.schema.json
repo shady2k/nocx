@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/skills.resolve.schema.json",
+  "title": "SkillsResolveParams",
+  "description": "Resolve a public forge address into a pinned repository and installable skill candidates without writing anything.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "description": "Pass the address exactly as the person gave it, or as a page named it. You are not expected to know whether it can be enumerated, and do not judge in advance whether the address is enumerable: call this tool and let it say \"I cannot enumerate that\" when the address is unsupported, then fall back to skills.install."
+    }
+  },
+  "$defs": {
+    "result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["handle", "repository", "ref", "commit", "candidates"],
+          "properties": {
+            "handle": { "type": "string", "minLength": 1 },
+            "repository": { "type": "string", "minLength": 1 },
+            "ref": { "type": "string", "minLength": 1 },
+            "commit": { "type": "string", "minLength": 1 },
+            "candidates": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "name", "description"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "name": { "type": "string", "minLength": 1 },
+                  "description": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "message"],
+          "properties": {
+            "status": { "const": "unsupported" },
+            "message": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -19,8 +19,8 @@
 // same defect as the one the tab panels had, one layer down.
 
 import { createEffect, createMemo, on, onCleanup } from 'solid-js'
-import { EditableHost } from '../cm-host'
-import { jsonEditing, viewerHighlighting } from '../file-viewer/language-registry'
+import { EditableHost } from '../ui/cm-host'
+import { jsonEditing, viewerHighlighting } from '../ui/document-language'
 import { lineNumbers } from '@codemirror/view'
 
 export interface BodyEditorProps {

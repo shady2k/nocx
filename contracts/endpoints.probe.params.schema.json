@@ -9,7 +9,7 @@
   "properties": {
     "name": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 200
     },
     "baseUrl": {
       "type": "string",

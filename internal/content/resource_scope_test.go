@@ -170,3 +170,182 @@ func TestGrantScopeContainsContentFamilyRoots(t *testing.T) {
 		}
 	}
 }
+
+// ── the destination endpoint scope (design §5.4; bead nocx-67byy) ────────
+
+func endpoint(id string, includeSubdomains bool) content.GrantScope {
+	return content.GrantScope{Kind: content.ResourceDestination, ID: id, IncludeSubdomains: includeSubdomains}
+}
+
+func destination(rawURL string) content.GrantScope {
+	return content.GrantScope{Kind: content.ResourceDestination, ID: rawURL}
+}
+
+// The nine rows are the whole of what "everything on github.com" means. The
+// two suffix-alikes are why matching is label-wise and never a string
+// suffix: both end in the parent's name and neither is inside it.
+func TestDestinationEndpointContainment(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		scope  content.GrantScope
+		url    string
+		inside bool
+	}{
+		{"a path under the endpoint", endpoint("https://github.com", false), "https://github.com/owner/repo", true},
+		{"a subdomain without the marker", endpoint("https://github.com", false), "https://api.github.com/x", false},
+		{"a subdomain with the marker", endpoint("https://github.com", true), "https://api.github.com/x", true},
+		{"a name that merely shares a suffix", endpoint("https://github.com", true), "https://notgithub.com/x", false},
+		{"a longer name ending elsewhere", endpoint("https://github.com", true), "https://github.com.evil.example/x", false},
+		{"a scheme downgrade", endpoint("https://github.com", true), "http://github.com/x", false},
+		{"the default port, spelled", endpoint("https://github.com", false), "https://github.com:443/x", true},
+		{"a non-default port", endpoint("https://github.com:8443", false), "https://github.com/x", false},
+		{"case and a trailing dot", endpoint("https://GitHub.com.", false), "https://github.com/x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.scope.Contains(destination(tc.url))
+			if got != tc.inside {
+				t.Errorf("Contains(%q) = %v, want %v", tc.url, got, tc.inside)
+			}
+		})
+	}
+}
+
+// A deeper subdomain is still inside, and the endpoint itself is inside
+// itself with the marker on — a grant that named the host must not stop
+// covering the host.
+func TestDestinationSubdomainMarkerCoversDepthAndTheHostItself(t *testing.T) {
+	scope := endpoint("https://github.com", true)
+	for _, in := range []string{
+		"https://github.com/x",
+		"https://api.github.com/x",
+		"https://a.b.api.github.com/x",
+		"https://api.github.com:443/x",
+	} {
+		if !scope.Contains(destination(in)) {
+			t.Errorf("Contains(%q) = false, want true", in)
+		}
+	}
+	for _, out := range []string{
+		"https://github.com.evil.example/x",
+		"https://xgithub.com/x",
+		"https://api.github.com:8443/x",
+		"http://api.github.com/x",
+	} {
+		if scope.Contains(destination(out)) {
+			t.Errorf("Contains(%q) = true, want false", out)
+		}
+	}
+}
+
+// Host normalization is the same on both ends of the comparison: case, a
+// trailing dot, IDNA and IPv6 brackets all name one place.
+func TestDestinationHostNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		scope  content.GrantScope
+		url    string
+		inside bool
+	}{
+		{"punycode scope, unicode url", endpoint("https://xn--e1afmkfd.xn--p1ai", false), "https://пример.рф/x", true},
+		{"unicode scope, punycode url", endpoint("https://пример.рф", false), "https://xn--e1afmkfd.xn--p1ai/x", true},
+		{"unicode scope, other host", endpoint("https://пример.рф", false), "https://example.com/x", false},
+		{"ipv6 brackets", endpoint("https://[::1]:8443", false), "https://[0:0:0:0:0:0:0:1]:8443/x", true},
+		{"ipv4 literal", endpoint("http://127.0.0.1:8080", false), "http://127.0.0.1:8080/x", true},
+		{"ipv4 literal, other port", endpoint("http://127.0.0.1:8080", false), "http://127.0.0.1:9090/x", false},
+		{"trailing dot on the url", endpoint("https://github.com", false), "https://GitHub.com./x", true},
+		{"http default port, spelled", endpoint("http://127.0.0.1", false), "http://127.0.0.1:80/x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.scope.Contains(destination(tc.url)); got != tc.inside {
+				t.Errorf("Contains(%q) = %v, want %v", tc.url, got, tc.inside)
+			}
+		})
+	}
+}
+
+// * keeps its meaning, and an endpoint grant is not it. The asymmetry is the
+// point: * contains an endpoint, and no endpoint contains *.
+func TestDestinationStarStaysDistinguishableFromAnEndpoint(t *testing.T) {
+	star := endpoint("*", false)
+	gh := endpoint("https://github.com", true)
+
+	if !star.Contains(destination("https://anything.example/x")) {
+		t.Error("* stopped meaning every address")
+	}
+	if !star.Contains(gh) {
+		t.Error("* does not contain an endpoint grant")
+	}
+	if gh.Contains(star) {
+		t.Error("an endpoint grant contains *; it would be indistinguishable from the whole internet")
+	}
+	if err := content.ValidateGrantScope(endpoint("*", true)); err == nil {
+		t.Error("* with includeSubdomains was accepted; it is incoherent, not a wider *")
+	}
+}
+
+// A child that itself claims subdomains is only inside a parent that claims
+// them too — otherwise a narrowing comparison would read a wider scope as
+// contained in a narrower one.
+func TestDestinationSubdomainMarkedChildNeedsAMarkedParent(t *testing.T) {
+	if endpoint("https://github.com", false).Contains(endpoint("https://github.com", true)) {
+		t.Error("a bare host scope contains the same host WITH its subdomains")
+	}
+	if !endpoint("https://github.com", true).Contains(endpoint("https://api.github.com", true)) {
+		t.Error("a subdomain-marked scope does not contain a marked sub-scope")
+	}
+}
+
+func TestDestinationScopeCanonicalIDs(t *testing.T) {
+	valid := []content.GrantScope{
+		endpoint("*", false),
+		endpoint("https://github.com", false),
+		endpoint("https://github.com", true),
+		endpoint("https://github.com/", false),
+		endpoint("https://GitHub.com.", true),
+		endpoint("https://github.com:8443", false),
+		endpoint("http://127.0.0.1:8080", false),
+		endpoint("https://[::1]:8443", false),
+		endpoint("https://пример.рф", true),
+	}
+	for _, scope := range valid {
+		if err := content.ValidateGrantScope(scope); err != nil {
+			t.Errorf("ValidateGrantScope(%v): %v", scope, err)
+		}
+	}
+
+	invalid := map[string]content.GrantScope{
+		"userinfo":              endpoint("https://user:token@github.com", false),
+		"bare user":             endpoint("https://user@github.com", false),
+		"a path":                endpoint("https://github.com/owner/repo", false),
+		"a query":               endpoint("https://github.com?a=b", false),
+		"a fragment":            endpoint("https://github.com#frag", false),
+		"no scheme":             endpoint("github.com", false),
+		"a scheme we never GET": endpoint("ftp://github.com", false),
+		"no host":               endpoint("https://", false),
+		"a port that is not":    endpoint("https://github.com:https", false),
+		"ipv4 with subdomains":  endpoint("http://127.0.0.1:8080", true),
+		"ipv6 with subdomains":  endpoint("https://[::1]", true),
+		"star with subdomains":  endpoint("*", true),
+	}
+	for name, scope := range invalid {
+		if err := content.ValidateGrantScope(scope); err == nil {
+			t.Errorf("ValidateGrantScope(%s: %v) accepted a scope that cannot be enforced", name, scope)
+		}
+	}
+}
+
+// A malformed scope contains nothing — the predicate fails toward refusing,
+// never toward the exact-identity fallback it used to share with the other
+// singleton kinds.
+func TestDestinationMalformedScopeContainsNothing(t *testing.T) {
+	bad := endpoint("https://user@github.com", false)
+	if bad.Contains(destination("https://user@github.com")) {
+		t.Error("a scope ValidateGrantScope refuses still contained a resource")
+	}
+	if endpoint("https://github.com", false).Contains(destination("not a url")) {
+		t.Error("an unparseable resource was contained")
+	}
+	if endpoint("https://github.com", false).Contains(content.GrantScope{Kind: content.ResourcePath, ID: "/etc"}) {
+		t.Error("a destination scope contained a path")
+	}
+}

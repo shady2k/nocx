@@ -49,6 +49,7 @@
 @import './styles/components/terminal-link.css';
 @import './styles/components/disclosure.css';
 @import './styles/components/answer-markdown.css';
+@import './styles/components/document-surface.css';
 @import './styles/components/mode-indicator.css';
 @import './styles/components/secret-value-field.css';
 @import './styles/components/block-receipt.css';
@@ -79,6 +80,7 @@
 @import './styles/components/progress-bar.css';
 @import './styles/components/record-row.css';
 @import './styles/components/fact-list.css';
+@import './styles/components/file-readout.css';
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
 @import './styles/components/workspace-chip.css';
@@ -117,6 +119,7 @@
 @import './styles/surfaces/agent-calibration.css';
 @import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
+@import './styles/surfaces/skill-view.css';
 
 /* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 

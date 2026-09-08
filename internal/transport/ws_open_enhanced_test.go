@@ -24,6 +24,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -167,6 +168,47 @@ func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
 
 	if got := rec.config(t); !got.Enhanced {
 		t.Error("direct-host ssh dial did not request integration: ConnectConfig.Enhanced is false")
+	}
+}
+
+func TestWSServer_Open_SSHDirectHost_RejectsOptionLikeHost(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	rec := &sshConfigRecorder{}
+	reg.WithSSHFactory(rec.factory(logger))
+
+	resolver := newLauncherTestResolver()
+	ws := NewWSServer(logger, reg, WithSSHConfigResolver(resolver, "/nonexistent/config"))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "host": "-F/tmp/attacker_config",
+	})
+	var parsed struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		t.Fatalf("unmarshal open response: %v", err)
+	}
+	if parsed.Error == nil || parsed.Error.Message == "" {
+		t.Fatalf("open response = %s, want validation error", resp)
+	}
+	if !strings.Contains(parsed.Error.Message, "host must not begin with a dash") {
+		t.Fatalf("open error = %q, want option-like host rejection", parsed.Error.Message)
+	}
+	rec.mu.Lock()
+	seen := rec.seen
+	rec.mu.Unlock()
+	if seen {
+		t.Fatal("invalid direct host reached the SSH dialer")
 	}
 }
 

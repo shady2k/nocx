@@ -19,7 +19,7 @@ import (
 func expansionSuspension(facts *assistant.ExpansionFacts) func(runID string) error {
 	return func(runID string) error {
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
-			RunID: runID, Attempt: 1, Tool: "run", CallID: "call_1",
+			RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 			Arguments: `{"command":"rm -rf $HOME/x $(id -u)","sessionId":"s"}`,
 			ArgHash:   "hash-a",
 			Effect:    content.EffectMutateDestructive,
@@ -79,7 +79,7 @@ func TestAgentApprovalRequested_ExpansionDTOConformsToContract(t *testing.T) {
 	}
 	for name, facts := range cases {
 		dto := agentApprovalRequested{
-			RunID: "7", Attempt: 1, Tool: "run", CallID: "call_1",
+			RunID: "7", Attempt: 1, Tool: "session.run", CallID: "call_1",
 			ArgHash: "hash-a", Arguments: `{"command":"rm -rf $HOME/x"}`,
 			Reason: "policy", Effect: "mutate-destructive",
 			Standing:  agentApprovalStanding{Reason: "the command uses an indirect wrapper or shell feature"},

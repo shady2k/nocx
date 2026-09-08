@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { EditorState, type Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
-import { EditableHost, ReadOnlyHost } from './cm-host'
+import { EditableHost, ReadOnlyHost } from './ui/cm-host'
 
 // CM6 renders each line as a div.cm-line (no newline text nodes), so a raw
 // textContent read collapses lines. Joining the line divs reconstructs the

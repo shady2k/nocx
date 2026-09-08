@@ -101,13 +101,17 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 		return ErrVaultSealed
 	}
 	if p := v.unlockPending; p != nil {
-		p.join(reason)
+		token := p.join(reason)
 		v.mu.Unlock()
-		return p.wait(ctx)
+		return p.wait(ctx, token)
 	}
-	pctx := v.promptCtx
-	p := &unlockPrompt{done: make(chan struct{})}
-	p.join(reason)
+	// The raise gets a context of its own, derived from the vault's, so the
+	// last waiter to give up can end it. Built and stored BEFORE the prompt
+	// is published, because a caller that joins and abandons in the same
+	// microsecond must not find `abandon` nil.
+	raiseCtx, cancelRaise := context.WithCancel(v.promptCtx)
+	p := &unlockPrompt{done: make(chan struct{}), abandon: cancelRaise}
+	token := p.join(reason)
 	v.unlockPending = p
 	v.mu.Unlock()
 
@@ -135,7 +139,8 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 	// fresh prompt — telling those two apart is what the pointer is for, and
 	// leaving it set past the resolution is what stopped it doing that.
 	go func() {
-		err := v.raiseUnlock(pctx, req, p)
+		defer cancelRaise()
+		err := v.raiseUnlock(raiseCtx, req, p)
 		v.mu.Lock()
 		if v.unlockPending == p {
 			v.unlockPending = nil
@@ -147,7 +152,7 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 		p.resolve(err)
 	}()
 
-	return p.wait(ctx)
+	return p.wait(ctx, token)
 }
 
 // unlockPrompt is one outstanding unlock ask and the waiters joined to it.
@@ -157,10 +162,24 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 // this seam exists to prevent.
 type unlockPrompt struct {
 	mu      sync.Mutex
-	reasons []string // every joined waiter's sentence, in join order
+	reasons []reasonEntry // every LIVE waiter's sentence, in join order
+	nextID  uint64
 	done    chan struct{}
 	err     error
 	once    sync.Once
+	// abandon ends the raise. It is the raise context's cancel, set before
+	// the prompt is published so a waiter that gives up in the same
+	// microsecond cannot find it nil.
+	abandon func()
+}
+
+// reasonEntry is one waiter's sentence and the token it leaves by. A slice
+// keeps join order, which the dialog text depends on; the token is what
+// makes removal possible without it, since two callers may give the same
+// sentence — "audit a skill" twice was the reported case.
+type reasonEntry struct {
+	id   uint64
+	text string
 }
 
 // join records one more waiting caller. Called under the vault lock, with
@@ -170,10 +189,29 @@ type unlockPrompt struct {
 // between the close and the clear receives it immediately (done is already
 // closed); one that arrives after the clear starts a new prompt or answers
 // from the vault's state. There is no third outcome.
-func (p *unlockPrompt) join(reason string) {
+func (p *unlockPrompt) join(reason string) uint64 {
 	p.mu.Lock()
-	p.reasons = append(p.reasons, reason)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	p.nextID++
+	p.reasons = append(p.reasons, reasonEntry{id: p.nextID, text: reason})
+	return p.nextID
+}
+
+// leave withdraws one waiter's sentence and reports how many are left. A
+// caller that gave up is not waiting, and the dialog is what a person decides
+// on: a list that only ever grew asked them to unlock for work that had
+// already gone (nocx-gx83p — four dead "audit a skill" entries were being
+// shown minutes after the last one died).
+func (p *unlockPrompt) leave(token uint64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, entry := range p.reasons {
+		if entry.id == token {
+			p.reasons = append(p.reasons[:i], p.reasons[i+1:]...)
+			break
+		}
+	}
+	return len(p.reasons)
 }
 
 // reason composes the dialog text: every waiting caller known at raise
@@ -186,9 +224,13 @@ func (p *unlockPrompt) reason() string {
 	case 0:
 		return ""
 	case 1:
-		return p.reasons[0]
+		return p.reasons[0].text
 	default:
-		return fmt.Sprintf("%d operations need the vault: %s", n, strings.Join(p.reasons, "; "))
+		texts := make([]string, 0, n)
+		for _, entry := range p.reasons {
+			texts = append(texts, entry.text)
+		}
+		return fmt.Sprintf("%d operations need the vault: %s", n, strings.Join(texts, "; "))
 	}
 }
 
@@ -205,14 +247,22 @@ func (p *unlockPrompt) resolve(err error) {
 
 // wait blocks until the prompt is answered or the caller's own context
 // ends. A caller that gives up — its own cancel or deadline — is released
-// with its own error; the prompt keeps running for everyone else.
-func (p *unlockPrompt) wait(ctx context.Context) error {
+// with its own error, withdraws its sentence, and if it was the LAST one,
+// ends the raise: an unlock nobody is waiting for is not suspended, it is
+// over. The raise runs on the vault's own context rather than any caller's,
+// which is what lets a suspended operation survive a reconnect; without this
+// it also let a DEAD one go on suspending and resuming for the eight-hour
+// ceiling, holding the admission its handler ran under (nocx-gx83p).
+func (p *unlockPrompt) wait(ctx context.Context, token uint64) error {
 	select {
 	case <-p.done:
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.err
 	case <-ctx.Done():
+		if p.leave(token) == 0 && p.abandon != nil {
+			p.abandon()
+		}
 		return ctx.Err()
 	}
 }

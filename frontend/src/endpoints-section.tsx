@@ -1088,13 +1088,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           <Checkbox
             label="This endpoint does not require an API key"
             checked={draft().noKey}
-            onChange={(checked) =>
+            onChange={(checked) => {
               setDraft((d) => ({
                 ...d,
                 noKey: checked,
                 key: checked ? '' : d.key,
               }))
-            }
+            }}
           />
           <Show when={!draft().noKey}>
             {/* ONE field, and the lock on it is the whole of "or use one you

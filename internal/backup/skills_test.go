@@ -74,21 +74,36 @@ func newSkillsBackupService(t *testing.T, configDir string, skills *skill.Store)
 	)
 }
 
+// skillRootsFor is the production root order (internal/app/app.go): authored,
+// builtin, managed, installed — installed LAST, so nothing downloaded can
+// shadow what the person wrote or what nocx ships.
+func skillRootsFor(configDir string) []skill.Root {
+	return []skill.Root{
+		{Dir: filepath.Join(configDir, "skills"), Provenance: skill.ProvenanceAuthored},
+		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
+		{Dir: filepath.Join(configDir, "managed-skills"), Provenance: skill.ProvenanceManaged},
+		{Dir: filepath.Join(configDir, "installed-skills"), Provenance: skill.ProvenanceInstalled},
+	}
+}
+
 func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	sourceConfig := t.TempDir()
 	sourceAuthored := filepath.Join(sourceConfig, "skills")
-	sourceManaged := filepath.Join(sourceConfig, "managed-skills")
+	sourceInstalled := filepath.Join(sourceConfig, "installed-skills")
 	writeAuthoredSkill(t, sourceAuthored, "authored", "written here", "Use the local deploy command.")
-	sourceSkills := skill.NewStore(nil, []skill.Root{
-		{Dir: sourceAuthored, Provenance: skill.ProvenanceAuthored},
-		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
-		{Dir: sourceManaged, Provenance: skill.ProvenanceManaged},
-	}, storage.NewDocumentStore(sourceConfig))
+	// There is no install API yet (nocx-qja4m.4), so the bytes are placed the
+	// way a downloaded skill comes to rest and then approved, which is the
+	// state a backup would actually find.
+	writeAuthoredSkill(t, sourceInstalled, "installed", "from a URL", "Use their deploy command.")
+	sourceSkills := skill.NewStore(nil, skillRootsFor(sourceConfig), storage.NewDocumentStore(sourceConfig))
 	if err := sourceSkills.Create("managed", "approved procedure", "Use the managed deploy command."); err != nil {
 		t.Fatalf("create managed skill: %v", err)
 	}
 	if err := sourceSkills.SetEnabled("managed", false); err != nil {
 		t.Fatalf("disable managed skill: %v", err)
+	}
+	if err := sourceSkills.Approve("installed"); err != nil {
+		t.Fatalf("approve installed skill: %v", err)
 	}
 
 	sourceService := newSkillsBackupService(t, sourceConfig, sourceSkills)
@@ -100,8 +115,11 @@ func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(created.Contents), &document); decodeErr != nil {
 		t.Fatalf("decode backup: %v", decodeErr)
 	}
-	if len(document.Skills.Authored) != 1 || len(document.Skills.Managed) != 1 {
-		t.Fatalf("backup skills = %+v, want one authored and one managed tree", document.Skills)
+	if len(document.Skills.Authored) != 1 || len(document.Skills.Managed) != 1 || len(document.Skills.Installed) != 1 {
+		t.Fatalf("backup skills = %+v, want one authored, one managed and one installed tree", document.Skills)
+	}
+	if created.Summary.Skills != 3 {
+		t.Fatalf("create summary skills = %d, want all three trees counted", created.Summary.Skills)
 	}
 	if strings.Contains(created.Contents, `"builtin"`) || strings.Contains(created.Contents, "skill-authoring") {
 		t.Fatalf("backup carried builtin skill data: %s", created.Contents)
@@ -110,18 +128,25 @@ func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	destinationConfig := t.TempDir()
 	destinationAuthored := filepath.Join(destinationConfig, "skills")
 	destinationManaged := filepath.Join(destinationConfig, "managed-skills")
-	destinationSkills := skill.NewStore(nil, []skill.Root{
-		{Dir: destinationAuthored, Provenance: skill.ProvenanceAuthored},
-		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
-		{Dir: destinationManaged, Provenance: skill.ProvenanceManaged},
-	}, storage.NewDocumentStore(destinationConfig))
+	destinationInstalled := filepath.Join(destinationConfig, "installed-skills")
+	destinationSkills := skill.NewStore(nil, skillRootsFor(destinationConfig), storage.NewDocumentStore(destinationConfig))
 	destinationService := newSkillsBackupService(t, destinationConfig, destinationSkills)
 	preview, err := destinationService.Preview(created.Contents, backup.RestoreMerge)
 	if err != nil {
 		t.Fatalf("preview restore: %v", err)
 	}
-	if _, restoreErr := destinationService.Restore(created.Contents, backup.RestoreMerge, preview.PreviewToken); restoreErr != nil {
+	// What a person reads BEFORE deciding to restore over what they have: an
+	// installed skill they are about to be handed has to be in that count,
+	// rather than discovered afterwards.
+	if preview.Skills.Included != 3 {
+		t.Fatalf("preview skills included = %d, want the installed tree counted too", preview.Skills.Included)
+	}
+	result, restoreErr := destinationService.Restore(created.Contents, backup.RestoreMerge, preview.PreviewToken)
+	if restoreErr != nil {
 		t.Fatalf("restore backup: %v", restoreErr)
+	}
+	if result.Skills != 3 {
+		t.Fatalf("restore result skills = %d, want all three trees reported", result.Skills)
 	}
 
 	listed, err := destinationSkills.List()
@@ -138,14 +163,90 @@ func TestSkillsBackupRestoreRoundTripPreservesTreesAndEnablement(t *testing.T) {
 	if got := byName["managed"]; got.Enabled || got.Provenance != skill.ProvenanceManaged {
 		t.Fatalf("restored managed skill = %+v, want disabled managed skill", got)
 	}
+	if got := byName["installed"]; got.Provenance != skill.ProvenanceInstalled || got.Status != skill.StatusApproved {
+		t.Fatalf("restored installed skill = %+v, want an approved installed skill", got)
+	}
 	if _, err := os.Stat(filepath.Join(destinationAuthored, "authored", "references", "hosts.md")); err != nil {
 		t.Fatalf("restored authored reference: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(destinationManaged, "managed", "SKILL.md")); err != nil {
 		t.Fatalf("restored managed skill: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(destinationInstalled, "installed", "references", "hosts.md")); err != nil {
+		t.Fatalf("restored installed reference: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(destinationAuthored, "skill-authoring")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("builtin should not be restored into authored tree, stat error = %v", err)
+	}
+}
+
+// TestABackupWithNoInstalledSectionLeavesTheInstalledLibraryAlone is the
+// service-level half of the compatibility criterion: a backup FILE written
+// before installed skills travelled has no `installed` key inside `skills`,
+// and restoring it must neither fail nor empty the root a person has skills
+// in. Restore writes trees and never deletes them, so silence means silence.
+func TestABackupWithNoInstalledSectionLeavesTheInstalledLibraryAlone(t *testing.T) {
+	sourceConfig := t.TempDir()
+	writeAuthoredSkill(t, filepath.Join(sourceConfig, "skills"), "authored", "written here", "Use the local deploy command.")
+	sourceSkills := skill.NewStore(nil, skillRootsFor(sourceConfig), storage.NewDocumentStore(sourceConfig))
+	created, err := newSkillsBackupService(t, sourceConfig, sourceSkills).Create()
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	// Strip the section the older build never wrote, leaving a document that
+	// build could genuinely have produced.
+	var raw map[string]json.RawMessage
+	if decodeErr := json.Unmarshal([]byte(created.Contents), &raw); decodeErr != nil {
+		t.Fatalf("decode backup: %v", decodeErr)
+	}
+	var skills map[string]json.RawMessage
+	if decodeErr := json.Unmarshal(raw["skills"], &skills); decodeErr != nil {
+		t.Fatalf("decode skills section: %v", decodeErr)
+	}
+	delete(skills, "installed")
+	if raw["skills"], err = json.Marshal(skills); err != nil {
+		t.Fatal(err)
+	}
+	older, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(older), `"installed"`) {
+		t.Fatalf("the older-build document still names installed: %s", older)
+	}
+
+	destinationConfig := t.TempDir()
+	destinationInstalled := filepath.Join(destinationConfig, "installed-skills")
+	writeAuthoredSkill(t, destinationInstalled, "mine", "installed here", "Keep me.")
+	destinationSkills := skill.NewStore(nil, skillRootsFor(destinationConfig), storage.NewDocumentStore(destinationConfig))
+	destinationService := newSkillsBackupService(t, destinationConfig, destinationSkills)
+
+	preview, err := destinationService.Preview(string(older), backup.RestoreMerge)
+	if err != nil {
+		t.Fatalf("preview a backup with no installed section: %v", err)
+	}
+	if _, restoreErr := destinationService.Restore(string(older), backup.RestoreMerge, preview.PreviewToken); restoreErr != nil {
+		t.Fatalf("restore a backup with no installed section: %v", restoreErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(destinationInstalled, "mine", "SKILL.md")); statErr != nil {
+		t.Fatalf("the installed library did not survive a restore that said nothing about it: %v", statErr)
+	}
+	listed, err := destinationSkills.List()
+	if err != nil {
+		t.Fatalf("list restored skills: %v", err)
+	}
+	var found bool
+	for _, item := range listed.Skills {
+		if item.Name == "mine" {
+			found = true
+			if item.Provenance != skill.ProvenanceInstalled {
+				t.Fatalf("provenance = %q, want installed", item.Provenance)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("skills = %+v, want the untouched installed skill still listed", listed.Skills)
 	}
 }
 

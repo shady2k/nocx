@@ -54,6 +54,11 @@ func (f *captureFakeDB) SessionOutput() content.SessionOutputRepository { return
 // reconcile and no reconciler to hand out.
 func (f *captureFakeDB) Reconcile() content.SessionReconciler { return nil }
 
+// SkillChecks is a forced arm: content.ContentDB grew this method
+// (nocx-e5f55, internal/content) and every hand-written fake implementing
+// the interface must still compile. Unused by these tests.
+func (f *captureFakeDB) SkillChecks() content.SkillCheckRepository { return nil }
+
 func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

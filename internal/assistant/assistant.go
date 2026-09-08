@@ -32,11 +32,13 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/skill"
 )
 
 // Client is the app-facing surface of the assistant engine. Consumers: the
-// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
-// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
+// endpoint form's Test button (Probe, nocx-edio), the ask transaction (Ask,
+// nocx-x8s2.2 — the run f4s5 prepares is driven here), and the skill card's
+// audit button (AuditSkill, nocx-0bsa4.4).
 type Client interface {
 	// Probe streams one real response from the given endpoint configuration
 	// — the Test button's whole meaning: it probes what will actually be
@@ -77,6 +79,20 @@ type Client interface {
 	// transport can call it from its one terminal funnel without asking
 	// whether the run ever suspended.
 	Discard(runID string)
+	// AuditSkill asks the auditing role's model to CHECK one skill's bundle
+	// and returns its reading — a verdict plus the prose that says why
+	// (design §7, reversed: the refusal to conclude is gone). It is here
+	// beside Probe rather than behind a seam of its own because it is the
+	// same shape: the caller resolves the pair and the credential, the
+	// engine owns the model call.
+	//
+	// It gates nothing and certifies nothing. Nothing in the product
+	// branches on what comes back — a skill is offered to the assistant
+	// when the person's switch is on and the bytes still match, and this
+	// call touches neither. An error means there is no reading, and the
+	// caller must say so rather than showing an empty one: a blank report
+	// reads exactly like a clean report.
+	AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error)
 }
 
 // AskEventKind names which of the three things one Ask event is. A closed
@@ -196,6 +212,22 @@ type SkillLibrary interface {
 	Create(name, description, body string) error
 	Update(name, description, body string) error
 	Delete(name string) error
+	// Preview and Install are the two halves of adopting a skill published
+	// at an address, and they are on THIS interface rather than one of their
+	// own for the reason the writes are: one owner, so a composition root
+	// cannot offer an install whose preview came from somewhere else. The
+	// pair is not two ways to do one thing — Preview fetches and writes
+	// nothing, Install re-fetches and refuses unless the bytes are the ones
+	// Preview showed. What joins them is a digest the store keeps on the
+	// server, which is why neither method takes anything but an address:
+	// there is no field in which a caller could assert what the bytes were.
+	Preview(ctx context.Context, url string) (skill.PreviewResult, error)
+	Install(ctx context.Context, url string) (skill.InstallResult, error)
+	// Resolve enumerates a supported public repository without writing.
+	Resolve(ctx context.Context, address string) (*skill.Resolution, error)
+	// RecordUse notes successful skills.read calls. It returns nothing on
+	// purpose: usage telemetry must never make a read fail.
+	RecordUse(name string)
 }
 
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
@@ -263,6 +295,23 @@ type AskParams struct {
 	// constant: the spawner opens a local session, so a value the model
 	// supplied could name an environment nothing can deliver.
 	WorkerEnvironment string
+	// Scripts reads the whole of a file a proposed command NAMES, so an
+	// approval question about `bash deploy.sh` carries deploy.sh itself
+	// (nocx-872jc.3). It READS and never executes; which file to read comes
+	// from the command parser's own resource report, never from a second
+	// tokenizing of the command line.
+	//
+	// Nil is the honest shape wherever no provider can reach the machine the
+	// command would run on: nothing is read, the question says so in words,
+	// and the run is otherwise unaffected.
+	Scripts ScriptSource
+	// Cwd is where this run was asked from. It is the run's own cwd — the
+	// one the question carried and the ledger recorded with it — and it is
+	// carried for exactly one purpose: resolving the relative path in
+	// `bash deploy.sh` before that file is read for the approval question.
+	// Empty means a relative path cannot be resolved, and the question says
+	// that rather than guessing a directory.
+	Cwd string
 	// NoteOperation and SnippetOperation are the existing guard-bound domain
 	// operations used by the Notes and Snippets panels. The assistant carries
 	// them as seams; it never owns a service or a second store implementation.

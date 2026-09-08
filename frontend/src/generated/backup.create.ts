@@ -21,7 +21,7 @@ export interface BackupCreateResult {
      */
     snippets: number
     /**
-     * The number of authored and managed skill trees in the backup. Builtins are embedded and never carried.
+     * The number of authored, managed and installed skill trees in the backup. Builtins are embedded and never carried.
      */
     skills: number
     credentialBindingsRemoved: number

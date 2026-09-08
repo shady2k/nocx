@@ -650,25 +650,45 @@ func TestListKeepsCoherenceWhenParentRetargetedMidOperation(t *testing.T) {
 }
 
 // TestListResponseSizeCeiling: the third D14 bound guards bytes, because
-// equal entry counts do not cost equal bytes. A few short names pass a small
-// cap; the same count of long names is refused.
+// equal entry counts do not cost equal bytes. The same number of short names
+// passes a cap the long ones exceed.
+//
+// THE CAP IS MEASURED, NEVER WRITTEN DOWN. The wire cost counts Entry.Path,
+// so what three short names cost depends on how deep the directory holding
+// them sits: a constant here turned red on a machine whose $TMPDIR was long,
+// reporting the bound as broken when nothing about the bound had moved. The
+// number comes from the product's own refusal — an impossible cap answers
+// with the observed byte count — rather than from a second implementation of
+// the cost function here, which would agree with it right up until one of
+// them changed. Both directories hang off ONE parent so the prefix they are
+// measured with is the same string.
 func TestListResponseSizeCeiling(t *testing.T) {
-	short := tempDir(t)
+	parent := tempDir(t)
+	short := filepath.Join(parent, "s")
+	long := filepath.Join(parent, "l")
+	mustMkdir(t, short)
+	mustMkdir(t, long)
 	for i := range 3 {
 		mustWrite(t, filepath.Join(short, "f"+string(rune('a'+i))), nil)
-	}
-	p := New(newFakeFS(t), WithSizeCap(1024))
-	if _, err := p.List(context.Background(), short, filesystem.Page{Offset: 0, Limit: 10}); err != nil {
-		t.Fatalf("small listing refused by the size cap: %v", err)
-	}
-	long := tempDir(t)
-	for i := range 5 {
 		mustWrite(t, filepath.Join(long, strings.Repeat("n", 150)+string(rune('a'+i))), nil)
 	}
-	_, err := p.List(context.Background(), long, filesystem.Page{Offset: 0, Limit: 10})
+	page := filesystem.Page{Offset: 0, Limit: 10}
+
+	var probe *filesystem.ErrTooLargeSize
+	_, probeErr := New(newFakeFS(t), WithSizeCap(1)).List(context.Background(), short, page)
+	if !errors.As(probeErr, &probe) {
+		t.Fatalf("a one-byte cap accepted the short listing: %v", probeErr)
+	}
+	// Exactly what the short listing costs: the refusal is strictly
+	// greater-than, so a listing that costs the whole cap is still a listing.
+	p := New(newFakeFS(t), WithSizeCap(int(probe.ObservedBytes)))
+	if _, err := p.List(context.Background(), short, page); err != nil {
+		t.Fatalf("short listing refused at exactly its own cost (%d bytes): %v", probe.ObservedBytes, err)
+	}
+	_, err := p.List(context.Background(), long, page)
 	var ts *filesystem.ErrTooLargeSize
 	if !errors.As(err, &ts) {
-		t.Fatalf("err = %v, want ErrTooLargeSize", err)
+		t.Fatalf("err = %v, want ErrTooLargeSize: three entries with 150-character names cost more than three with one", err)
 	}
 	// The same long-name directory under the default cap is a listing, and a
 	// disabled cap (non-positive) refuses nothing.

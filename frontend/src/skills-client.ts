@@ -1,7 +1,13 @@
 import type { Dispatcher } from './dispatcher'
 import type { SkillsApprove } from './generated/skills.approve'
+import type { SkillsAudit } from './generated/skills.audit'
+import type { SkillsCheck } from './generated/skills.check'
+import type { SkillsFile } from './generated/skills.file'
+import type { SkillsFiles } from './generated/skills.files'
 import type { SkillsList } from './generated/skills.list'
+import type { SkillsScan } from './generated/skills.scan'
 import type { SkillsSetEnabled } from './generated/skills.setEnabled'
+import type { SkillsSetPin } from './generated/skills.setPin'
 import type { SkillsRemove } from './generated/skills.remove'
 
 export class SkillsClient {
@@ -15,11 +21,93 @@ export class SkillsClient {
     return this.dispatcher.call<SkillsSetEnabled>('skills.setEnabled', { name, enabled })
   }
 
+  setPin(name: string, pin: 'keepEnabled' | 'keepUnchanged', on: boolean): Promise<SkillsSetPin> {
+    return this.dispatcher.call<SkillsSetPin>('skills.setPin', { name, pin, on })
+  }
+
   remove(name: string): Promise<SkillsRemove> {
     return this.dispatcher.call<SkillsRemove>('skills.remove', { name })
   }
 
   approve(name: string): Promise<SkillsApprove> {
     return this.dispatcher.call<SkillsApprove>('skills.approve', { name })
+  }
+
+  // One file of one discovered skill, for any provenance including builtin:
+  // reading is not writing, and the person may read what the assistant reads.
+  //
+  // The path is relative to the skill's own directory and is sent AS THE
+  // PERSON'S REQUEST, never resolved here: whether it stays inside that
+  // directory is settled once, by the backend, through the same containment
+  // the assistant's read tool goes through. A renderer that cleaned or joined
+  // the path first would be a second answer to that question, agreeing with
+  // the first everywhere anybody looked.
+  //
+  // A file that is not text and a file larger than the read budget come back
+  // as a RESOLVED result carrying `refusal`, not as a rejection — they are
+  // true sentences about a file that exists, and the caller needs its path,
+  // provenance and `maxBytes` to say them. Only a refusal of the request
+  // itself (the file is gone, the path leaves the skill, no such skill)
+  // rejects.
+  file(name: string, path: string): Promise<SkillsFile> {
+    return this.dispatcher.call<SkillsFile>('skills.file', { name, path })
+  }
+
+  // What the skill is MADE OF, so the card can list it and point `file` at
+  // any of it. It is a method of its own rather than a field on `list`
+  // because a directory walk per row on every refresh — and the list
+  // refreshes after every toggle, delete and approve — would be paid to fill
+  // a field one open card reads.
+  //
+  // It answers for a skill that is switched OFF, which is the case it exists
+  // for: an installed skill lands inert precisely so the person can open it
+  // and see what it carries before turning it on.
+  files(name: string): Promise<SkillsFiles> {
+    return this.dispatcher.call<SkillsFiles>('skills.files', { name })
+  }
+
+  // The static scan's own answer for the same skill (nocx-4m1n1), by file: a
+  // count of the patterns matched per file, and which files could not be
+  // read at all. A METHOD OF ITS OWN, never a field `files` also fills:
+  // `files` is a bare directory listing and stays fast so the list renders
+  // before this answers — folding the scan in made the list wait on reading
+  // and scanning the whole bundle first, which is worse than the fan-out it
+  // replaced for exactly the bundles that fan-out hurt. It reaches no model
+  // and reads no more than skills.audit already would; it just never sends
+  // the bytes across the socket.
+  scan(name: string): Promise<SkillsScan> {
+    return this.dispatcher.call<SkillsScan>('skills.scan', { name })
+  }
+
+  // THE READING A PERSON ASKS FOR (design §7). It is a method of its own —
+  // never a field the card fills on open — because it is a model call, and a
+  // model call is money: `internal/profile/role.go` refuses to spend that
+  // silently, and a page load is the silent spend in another costume.
+  //
+  // The name is the WHOLE request. Nothing about the model is a parameter:
+  // which model reads a skill is the auditing role's assignment, resolved on
+  // the backend in the one place a role becomes an (endpoint, model) pair, so
+  // a renderer that named one would be a second answer to that question. The
+  // result says which role actually answered, on which endpoint, because an
+  // unassigned auditing role falls back to the answering one and must never
+  // do it quietly.
+  //
+  // A reading that could not happen REJECTS — no model assigned, an endpoint
+  // that is gone, a skill that vanished since the card opened. It is never an
+  // empty report, because an empty report is indistinguishable from a clean
+  // one, which is the whole reason this feature refuses to certify anything.
+  audit(name: string): Promise<SkillsAudit> {
+    return this.dispatcher.call<SkillsAudit>('skills.audit', { name })
+  }
+
+  // THE READ HALF OF `audit`, and it spends NOTHING: `audit` is the method
+  // that calls a model, and this one only reads what that call already
+  // wrote. Nobody having checked a skill is a RESOLVED result carrying
+  // `checked: false`, never a rejection — the same shape `file`'s refusal
+  // is, for the same reason: it is a true sentence about a thing (or a
+  // skill) that exists, and a caller that could only tell it apart from a
+  // broken store by reading an error string would get it wrong.
+  check(name: string): Promise<SkillsCheck> {
+    return this.dispatcher.call<SkillsCheck>('skills.check', { name })
   }
 }

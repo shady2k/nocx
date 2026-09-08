@@ -397,3 +397,81 @@ func TestFetchTextKeepsOriginalURLAcrossRedirect(t *testing.T) {
 		t.Fatalf("result = %+v, want original URL identity and redirected body", got)
 	}
 }
+
+// TestFetchTextSameOriginOnlyRefusesACrossOriginRedirect and its paired
+// success below are the two halves of one rule: a caller that resolves
+// relative paths against an address it was given (internal/skill's bundle)
+// must be answered by that origin and no other, at every hop and not only on
+// the first request.
+func TestFetchTextSameOriginOnlyRefusesACrossOriginRedirect(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("bytes from an origin the caller never named"))
+	}))
+	defer elsewhere.Close()
+	// TWO hops, deliberately: the first stays home and the second leaves. A
+	// same-host check on the initial request passes this chain.
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/first" {
+			http.Redirect(w, r, srv.URL+"/second", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, elsewhere.URL+"/third", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{
+		URL: srv.URL + "/first", MaxBytes: 64 << 10, SameOriginOnly: true,
+	})
+	if err == nil {
+		t.Fatal("FetchText followed a redirect off the origin it was told not to leave")
+	}
+	if !strings.Contains(err.Error(), "may only be answered by the origin it named") {
+		t.Errorf("error = %v, want the refusal to name the rule", err)
+	}
+}
+
+func TestFetchTextSameOriginOnlyFollowsARedirectThatStaysHome(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/first" {
+			http.Redirect(w, r, srv.URL+"/second", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("the document, one hop along"))
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{
+		URL: srv.URL + "/first", MaxBytes: 64 << 10, SameOriginOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.Text != "the document, one hop along" {
+		t.Errorf("text = %q, want the document the redirect pointed at", got.Text)
+	}
+}
+
+// And the same chain WITHOUT the flag is still followed, so the refusal above
+// is the flag's doing and not a redirect rule everything now pays for.
+func TestFetchTextWithoutSameOriginOnlyStillCrossesOrigins(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("the document, at its real home"))
+	}))
+	defer elsewhere.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/doc", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{
+		URL: srv.URL + "/vanity", MaxBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.Text != "the document, at its real home" {
+		t.Errorf("text = %q, want the redirect target's document", got.Text)
+	}
+}

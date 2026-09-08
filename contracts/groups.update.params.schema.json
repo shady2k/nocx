@@ -13,11 +13,11 @@
     },
     "parentGroupId": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 128
     },
     "name": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 200
     },
     "icon": {
       "type": "string",
@@ -83,6 +83,9 @@
         }
       },
       "required": []
+    },
+    "editable": {
+      "type": "boolean"
     }
   }
 }

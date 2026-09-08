@@ -161,12 +161,27 @@
   align-items: flex-end;
 }
 
+/* ── The surface's control rail (nocx-zrh5z) ──────────────────────────────
+   Two numbers make it, and until this bead they were written down once each
+   and read once each, which is why nothing else on the surface could line up
+   with a settings control: the reset affordance's slot, and the gap that
+   holds it off the control it undoes. A settings row therefore ends its
+   CONTROL 30px short of where it ends its CELL, and anything drawn beside a
+   settings row — the Skills list is the first — ends at the cell's edge and
+   stands 30px out of column with it. Named here so both consumers read the
+   same two values rather than a constant that happens to cancel them today. */
+.ui-settings {
+  --settings-reset-slot: 18px;
+  --settings-control-gap: var(--space-3);
+  --settings-control-rail: calc(var(--settings-reset-slot) + var(--settings-control-gap));
+}
+
 /* The control and its reset affordance on one line, so the icon is level with
    the control by construction rather than by a hand-picked offset. */
 .ui-settings-control-line {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--settings-control-gap);
 }
 
 /* A paragraph needs the room to be one. Every other control on this screen is
@@ -193,7 +208,34 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 18px;
+  width: var(--settings-reset-slot);
+}
+
+/* ── A list's state control sits on the same rail ─────────────────────────
+   A page that owns a settings section draws the section's switches above its
+   own content, and on the Skills page that content is a list whose every row
+   carries a switch of exactly the same kind. RecordRow hangs its state cell
+   off the row's trailing edge, which is the page's content edge; a settings
+   row's switch stops one reset gutter short of it. Both are right inside
+   their own frame, and the result is two identical controls 30px out of
+   column down one screen.
+
+   Placement, not paint: the margin moves the kit's cell and declares nothing
+   about how it looks. It is the surface's to declare because the rail is the
+   surface's — the gutter exists because a settings row may sprout a reset
+   icon, which is a fact about this page and about no list in the kit.
+
+   The two alternatives, and why not. Giving the LIST an inset of its own —
+   padding on the row, or a wrapper around the Stack — shortens the divider
+   hairlines the Stack draws between rows, so the list would stop agreeing
+   with the settings section above it in order to agree with one control in
+   it. Moving the reset slot to the LEFT of the control would put every
+   settings control on the page's edge and end this rail entirely, but the
+   reset icons themselves are right-aligned in one column today precisely
+   because they come last; ahead of the control they would sit wherever each
+   control's width left them, which trades one ragged column for another. */
+.ui-settings .ui-record-row__state {
+  margin-right: var(--settings-control-rail);
 }
 
 /* ── The routing matrix ───────────────────────────────────────────────────

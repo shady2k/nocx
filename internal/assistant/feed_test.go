@@ -16,7 +16,7 @@ func executeFetchedDocument(t *testing.T, doc apifetch.TextDocument) map[string]
 	t.Helper()
 	out, err := executeFetchURL(
 		withToolBound(context.Background(), agenttools.ResultBound{MaxBytes: 64 << 10, Truncation: agenttools.TruncationDropTail}),
-		&agenttools.URLScope{URLs: []string{"https://example.test/feed"}},
+		endpointCapability("https://example.test"),
 		json.RawMessage(`{"url":"https://example.test/feed"}`),
 		toolSeams{
 			fetcher:   fakeTextFetcher{result: doc},

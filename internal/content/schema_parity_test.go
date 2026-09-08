@@ -112,8 +112,53 @@ func TestAChangedSchemaPassesWhenANewFinalRungCarriesIt(t *testing.T) {
 		schemaDigest: hex.EncodeToString(digest[:]),
 	})
 
+	// A real bump to schemaVersion+1 must ALSO pin the shape of the version
+	// it just dethroned, in the same commit (nocx-e5f55's ladder gate) — the
+	// exact thing 16 shipped without and this test would now be the shape
+	// of, if it stopped here. Simulate that a correct bump did it: pin
+	// schemaVersion's shape from the real, unmodified schemaV1 (not
+	// changedSchema — schemaVersion itself did not change).
+	pinTemporarily(t, schemaVersion, schemaV1)
+
 	if err := validateLadderForSchema(ladder, schemaVersion+1, changedSchema); err != nil {
 		t.Fatalf("a changed schema with its new final rung was refused: %v", err)
+	}
+}
+
+// A LADDER THAT DETHRONES A VERSION WITHOUT PINNING IT IS REFUSED — THE
+// NEGATIVE THIS ROUND'S CRITICAL WAS MISSING (nocx-e5f55).
+//
+// This is the same ladder the paired positive above builds — schemaVersion
+// bumping to schemaVersion+1 — with the one step that positive test adds
+// left out: nobody pins schemaShapeDigests[schemaVersion]. That omission is
+// exactly what shipped for schema 16 under schema 17: the version a bump
+// leaves behind, unpinned, and every other check in the ladder green because
+// none of them ask this question. Before this gate existed the only way to
+// notice was to open a database stamped exactly the forgotten version, which
+// nothing did for 16 until nocx-e5f55's own review added it — this test
+// asks the ladder itself, unconditionally, with no database involved at all.
+func TestALadderThatDethronesAnUnpinnedVersionIsRefused(t *testing.T) {
+	changedSchema := schemaV1 + "\n-- schema 17"
+	digest := sha256.Sum256([]byte(changedSchema))
+	ladder := append([]migrationStep(nil), schemaLadder...)
+	ladder = append(ladder, migrationStep{
+		from: schemaVersion, to: schemaVersion + 1,
+		apply:        func(context.Context, *sql.Tx) error { return nil },
+		schemaDigest: hex.EncodeToString(digest[:]),
+	})
+
+	// Deliberately NOT pinning schemaShapeDigests[schemaVersion] — that
+	// omission is the whole point of this test.
+	if _, ok := schemaShapeDigests[schemaVersion]; ok {
+		t.Fatalf("schemaShapeDigests[%d] is already pinned in the real map; this test needs it absent to mean anything", schemaVersion)
+	}
+
+	err := validateLadderForSchema(ladder, schemaVersion+1, changedSchema)
+	if err == nil {
+		t.Fatalf("validateLadderForSchema accepted a ladder that dethrones schema %d without ever pinning its shape", schemaVersion)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("schema %d has no pinned shape in schemaShapeDigests", schemaVersion)) {
+		t.Fatalf("the refusal reads %q; it must name the unpinned version and the map it belongs in", err)
 	}
 }
 

@@ -19,8 +19,9 @@
         "finding": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["patternId", "line", "lineNumber"],
+          "required": ["path", "patternId", "line", "lineNumber"],
           "properties": {
+            "path": { "type": "string", "minLength": 1 },
             "patternId": { "type": "string" },
             "line": { "type": "string" },
             "lineNumber": { "type": "integer" }

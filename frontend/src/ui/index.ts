@@ -57,11 +57,22 @@ export {
 export { FileStatusRow, type FileStatusRowProps, type FileStatus } from './file-status-row'
 export { RecordRow, type RecordRowProps } from './record-row'
 export { FactList, type Fact, type FactListProps } from './fact-list'
+export { FileReadout, type FileReadoutOutcome } from './file-readout'
 export { ActionGroup, type ActionGroupProps } from './action-group'
 export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
 export { CodeBlock, type CodeBlockProps } from './code-block'
+export {
+  DocumentSurface,
+  type DocumentLanguage,
+  type DocumentSurfaceHandle,
+  type DocumentSurfaceProps,
+  type DocumentSearch,
+  type DocumentSourceOptions,
+  type DocumentWrap,
+  type MarkdownView,
+} from './document-surface'
 export {
   createFormValidation,
   required,

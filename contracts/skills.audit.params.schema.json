@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.audit.params.schema.json",
+  "title": "SkillsAuditParams",
+  "description": "Params for skills.audit: which discovered skill to read. One skill, because one skill is what a card is about — and because this is the one skills method that spends a model call, so it is asked for by name, once, when a person presses a button. Nothing about the model is a parameter: which model reads the skill is the auditing role's assignment, resolved on the backend in the one place a role becomes an (endpoint, model) pair.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

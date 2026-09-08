@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.scan.params.schema.json",
+  "title": "SkillsScanParams",
+  "description": "Params for skills.scan: which discovered skill to run the static scan over. One skill, because one skill is what a file list is about — the same reason skills.files and skills.audit take one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

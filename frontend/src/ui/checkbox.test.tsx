@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
+import { createSignal, untrack } from 'solid-js'
 import { Checkbox, type CheckboxProps } from './checkbox'
 
 afterEach(() => cleanup())
@@ -75,6 +76,62 @@ describe('Checkbox', () => {
     const cb = screen.getByRole('checkbox')
     cb.click()
     expect(onChange).not.toHaveBeenCalled()
+  })
+
+  // THE CONTROL SHOWS WHAT THE BACKEND HOLDS, NOT WHERE THE FINGER LEFT IT
+  // (nocx-845y4).
+  //
+  // `checked` is bound to the caller's state, so a write that FAILS changes
+  // nothing for Solid to re-run and the DOM keeps the position the drag left.
+  // The person then reads a switch that says one thing and a toast that says
+  // the opposite, and the switch is the louder of the two.
+  //
+  // It is settled here rather than in each surface because it is a property of
+  // any controlled Checkbox whose write can fail — and there are two such
+  // surfaces already (the Skills row and the skill tab).
+  it('snaps back when a synchronous handler does not change the state', () => {
+    const onChange = vi.fn() // a write that refused: the state never moves
+    subject({ checked: false, onChange })
+    const cb = screen.getByRole('checkbox')
+    fireEvent.click(cb)
+    expect(onChange).toHaveBeenCalledWith(true)
+    expect(cb).toHaveProperty('checked', false)
+  })
+
+  it('waits for an async handler and then shows what the state holds', async () => {
+    let settle: (() => void) | undefined
+    const onChange = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve
+        }),
+    )
+    subject({ checked: false, onChange })
+    const cb = screen.getByRole('checkbox')
+    fireEvent.click(cb)
+    // In flight the switch stays where the person put it: the write may yet
+    // succeed, and snapping back first would read as the control ignoring them.
+    expect(cb).toHaveProperty('checked', true)
+    settle?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(cb).toHaveProperty('checked', false)
+  })
+
+  it('leaves the control alone when the state did move', () => {
+    const [checked, setChecked] = createSignal(false)
+    render(() => (
+      <Checkbox
+        checked={checked()}
+        onChange={(v) => {
+          setChecked(v)
+        }}
+      />
+    ))
+    const cb = screen.getByRole('checkbox')
+    fireEvent.click(cb)
+    expect(untrack(checked)).toBe(true)
+    expect(cb).toHaveProperty('checked', true)
   })
 
   it('is a native checkbox with keyboard support (Space handled by browser)', () => {

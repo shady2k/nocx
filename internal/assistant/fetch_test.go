@@ -7,7 +7,19 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/content"
 )
+
+// endpointCapability is the narrowed fetch.url authority these tests run
+// under, in the form a grant actually produces: the ENDPOINT the policy
+// names, never the document at it (design §5.4).
+func endpointCapability(ids ...string) *agenttools.URLScope {
+	scope := &agenttools.URLScope{}
+	for _, id := range ids {
+		scope.Endpoints = append(scope.Endpoints, content.GrantScope{Kind: content.ResourceDestination, ID: id})
+	}
+	return scope
+}
 
 type fakeTextFetcher struct {
 	result apifetch.TextDocument
@@ -22,7 +34,7 @@ func TestExecuteFetchURLReturnsTheFetchedPage(t *testing.T) {
 		context.WithValue(context.Background(), toolBoundContextKey{}, agenttools.ResultBound{
 			MaxBytes: 64 << 10, Truncation: agenttools.TruncationDropTail,
 		}),
-		&agenttools.URLScope{URLs: []string{"https://example.test/page"}},
+		endpointCapability("https://example.test"),
 		json.RawMessage(`{"url":"https://example.test/page"}`),
 		toolSeams{
 			fetcher:   fakeTextFetcher{result: apifetch.TextDocument{URL: "https://example.test/page", ContentType: "text/html", Text: "Hello from the page"}},

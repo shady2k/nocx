@@ -125,3 +125,42 @@ func TestDiscoverStopsAtTheEntryCap(t *testing.T) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// TestDiscoverArrivesOnForEveryRootButInstalled is the counterpart to
+// TestAnInstalledSkillIsInertUntilThePersonTurnsItOn (inert_test.go), and it
+// exists because that one was written alone. Discovery defaults enablement
+// from the ROOT — `enabled := !root.Provenance.inertOnArrival()` — and only
+// `installed` arrives off, so three quarters of that decision had no
+// assertion at all: widening inertOnArrival to builtin would have taken every
+// skill nocx ships out of the assistant's index with a green suite
+// (nocx-eg3i9).
+//
+// No document store is involved BY CONSTRUCTION: `Discover` takes only roots,
+// so what this pins is the arrival default itself and never a recorded
+// switch. A `disabled` list saying otherwise is a person's decision and is
+// tested where SetEnabled is.
+func TestDiscoverArrivesOnForEveryRootButInstalled(t *testing.T) {
+	for _, provenance := range []skill.Provenance{
+		skill.ProvenanceAuthored,
+		skill.ProvenanceBuiltin,
+		skill.ProvenanceManaged,
+	} {
+		t.Run(string(provenance), func(t *testing.T) {
+			root := t.TempDir()
+			writeSkill(t, root, "deploy", "name: deploy\ndescription: How we ship this service.", "Run make release.")
+
+			got := skill.Discover([]skill.Root{{Dir: root, Provenance: provenance}})
+
+			// Discover DROPS a skill that arrives off, so an arrival
+			// default gone wrong shows up here as an empty result rather
+			// than as `Enabled == false` — both are the same defect and
+			// this says so, so the failure names its cause.
+			if len(got) != 1 {
+				t.Fatalf("Discover returned %d skills, want 1: a %s skill arrived off and was filtered out", len(got), provenance)
+			}
+			if !got[0].Enabled {
+				t.Errorf("a %s skill arrives disabled; only an installed skill waits for the person", provenance)
+			}
+		})
+	}
+}

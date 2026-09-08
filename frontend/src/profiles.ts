@@ -107,6 +107,36 @@ export interface ProfileGroup {
   order?: number
   color?: string
   icon?: string
+  /** Backend-owned: set on groups derived from ~/.ssh/config and Tabby imports. */
+  editable?: boolean
+}
+
+// toProfileGroup projects a group down to the shape the group params contracts
+// declare, and is the ONE place a group is prepared for the wire.
+//
+// Two kinds of extra key reach a draft. A TreeNode carries `children` for the
+// sidebar, and the editor deep-clones the node the user clicked. And the
+// editor's Description field writes `description`, which no group contract
+// declares and no backend field stores (nocx-3vgbn).
+//
+// Neither is ignored on arrival: the group params schemas are
+// `additionalProperties: false`, and groups.impact, groups.create and
+// groups.update decode with DisallowUnknownFields, so an extra key is answered
+// -32602. That is what made the impact preview fail for every existing group
+// while saving appeared to work — groups.apply used a plain Unmarshal and
+// silently dropped the same keys (nocx-a0pf3).
+//
+// The projection is explicit rather than a `children`-shaped omission so that
+// the next display-only field added to ProfileGroup does not reach the wire by
+// default.
+export function toProfileGroup(group: ProfileGroup): ProfileGroup {
+  const projected: ProfileGroup = { id: group.id, name: group.name }
+  if (group.parentGroupId !== undefined) projected.parentGroupId = group.parentGroupId
+  if (group.icon !== undefined) projected.icon = group.icon
+  if (group.color !== undefined) projected.color = group.color
+  if (group.defaults !== undefined) projected.defaults = group.defaults
+  if (group.editable !== undefined) projected.editable = group.editable
+  return projected
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of
@@ -362,10 +392,10 @@ export class ProfileClient {
     return this.call('groups.list', {})
   }
   createGroup(g: ProfileGroup): Promise<ProfileGroup> {
-    return this.call('groups.create', g)
+    return this.call('groups.create', toProfileGroup(g))
   }
   updateGroup(g: ProfileGroup): Promise<ProfileGroup> {
-    return this.call('groups.update', g)
+    return this.call('groups.update', toProfileGroup(g))
   }
   deleteGroup(id: string): Promise<boolean> {
     return this.call('groups.delete', { id })
@@ -376,12 +406,13 @@ export class ProfileClient {
     group?: ProfileGroup
     deleteGroupId?: string
   }): Promise<GroupImpactResponse> {
-    return this.call('groups.impact', params)
+    if (!params.group) return this.call('groups.impact', params)
+    return this.call('groups.impact', { ...params, group: toProfileGroup(params.group) })
   }
 
   /** groups.apply — atomically apply one or more group changes. */
   groupApply(groups: ProfileGroup[]): Promise<ProfileGroup[]> {
-    return this.call('groups.apply', groups)
+    return this.call('groups.apply', groups.map(toProfileGroup))
   }
 
   /** profiles.moveImpact — preview the effect of moving profile(s) to a new group. */

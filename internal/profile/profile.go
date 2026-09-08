@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // AuthMode controls which auth buckets are tried for an SSH connection.
@@ -236,11 +237,6 @@ type Base struct {
 	BehaviorOnSessionEnd BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 	Weight               int                  `json:"weight,omitempty"`
 	IsBuiltin            bool                 `json:"isBuiltin,omitempty"`
-	// NeedsReview marks a profile whose identity was resolved from local
-	// state during import. Such profiles must be reviewed by a human before
-	// they can be resolved for connection. The resolver refuses profiles
-	// with this flag set; the UI for clearing it belongs to a later workers.
-	NeedsReview bool `json:"needsReview,omitempty"`
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.
@@ -1051,20 +1047,26 @@ type namespacedIDParts struct {
 	UUID string
 }
 
-// NewProfileID generates a namespaced profile id: "type:custom:slug:name".
+// MaxIDRunes is the shared upper bound for backend-minted profile-domain IDs
+// and renderer-supplied IDs accepted by the transport.
+const MaxIDRunes = 128
+
+const uuidHexRunes = 32
+
+// NewProfileID generates a namespaced profile ID: "type:custom:slug:uuid".
 // The name is slugified for filesystem/URL safety.
 func NewProfileID(typ, name string) string {
-	return typ + ":custom:" + slugify(name) + ":" + newUUID()
+	return mintID(typ, name)
 }
 
-// NewGroupID generates a namespaced group id: "group:custom:slug:uuid".
+// NewGroupID generates a namespaced group ID: "group:custom:slug:uuid".
 //
-// Group ids are minted here rather than in the renderer for the same reason
-// profile ids are: an id is identity, and a display layer that invents one has
+// Group IDs are minted here rather than in the renderer for the same reason
+// profile IDs are: an ID is identity, and a display layer that invents one has
 // to know the uniqueness rule the store enforces. CreateGroup refuses an empty
-// id, so something must fill it — this is that something.
+// ID, so something must fill it — this is that something.
 func NewGroupID(name string) string {
-	return "group:custom:" + slugify(name) + ":" + newUUID()
+	return mintID("group", name)
 }
 
 // isNamespacedID checks whether id has the "type:custom:..." shape.
@@ -1082,11 +1084,42 @@ func parseNamespacedID(id string) (namespacedIDParts, bool) {
 	return namespacedIDParts{Type: parts[0], Name: parts[2], UUID: parts[3]}, true
 }
 
-// slugify lowercases and replaces spaces/special chars with hyphens.
-func slugify(s string) string {
+func mintID(namespace, name string) string {
+	fixedRunes := utf8.RuneCountInString(":custom:") + 1 + uuidHexRunes
+	namespaceBudget := MaxIDRunes - fixedRunes
+	namespace = truncateRunes(namespace, namespaceBudget)
+	slugBudget := MaxIDRunes - utf8.RuneCountInString(namespace) - fixedRunes
+	return namespace + ":custom:" + slugify(name, slugBudget) + ":" + newUUID()
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
+		if maxRunes <= 0 {
+			return ""
+		}
+		return s
+	}
+	i := 0
+	for range maxRunes {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+	}
+	return s[:i]
+}
+
+// slugify lowercases and replaces spaces/special chars with hyphens, bounded
+// by maxRunes after lowercasing.
+func slugify(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder
+	count := 0
 	for _, r := range s {
+		if count >= maxRunes {
+			break
+		}
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			b.WriteRune(r)
@@ -1095,6 +1128,7 @@ func slugify(s string) string {
 		default:
 			b.WriteRune('-')
 		}
+		count++
 	}
 	return b.String()
 }

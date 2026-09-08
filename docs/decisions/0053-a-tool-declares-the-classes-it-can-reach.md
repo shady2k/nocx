@@ -1,13 +1,15 @@
 # ADR-0053 — A tool declares the classes it can reach, not a worst case
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-09-07 — see _Amendment: a set may be a
+  conjunction_)
 - **Date:** 2026-08-31
 - **Related:** [ADR-0020](0020-agent-lane-and-per-run-authority.md) (the effect
   lattice, the policy matrix and the per-run grant this amends), AD-8 (one owner
   per behaviour).
 - **Beads:** `nocx-4h0m7.3` (execute is delegation — blocked by this),
   `nocx-4lxxj` (the assistant never calls a tool — P0, caused by this),
-  `nocx-cmj11` (the run fence and the policy selector).
+  `nocx-cmj11` (the run fence and the policy selector), `nocx-ykjai` (the
+  amendment below).
 - **Consulted:** the owner, 2026-08-31, who put it in one sentence — _"session.run
   cannot be classified at all without its arguments"_ — and who proposed and then
   helped reject `EffectUnknown`.
@@ -144,6 +146,68 @@ what a person has permitted.
   the thing that says which argument the selection reads.
 - A future tool that is also a door — a remote exec relay, a package manager
   wrapper — declares a set and needs no new mechanism.
+
+## Amendment: a set may be a conjunction (2026-09-07, `nocx-ykjai`)
+
+**The decision above reads a set ONE way — as alternatives.** "Is any class in
+this tool's set not refused?" is the right question for a door, where exactly one
+member happens and parsing the arguments picks which. It was the only kind of set
+that existed when this was written, and the word "resolve to" says so.
+
+`skills.install` is the first declaration where the set is a **conjunction**. It
+reaches `cross-boundary` AND `mutate-reversible` on **every successful call** —
+nocx fetches a document from off the machine and writes it to the person's disk,
+and nothing selects between them. Read as alternatives, the consequences were
+wrong in three places at once:
+
+- **Offer time** listed the tool to the model when either class survived, so a
+  policy refusing reversible mutation still offered an installer.
+- **The decision** was taken on `WorstEffect` alone, so refusing the write while
+  permitting the fetch produced a QUESTION about a write the person had already
+  declined. It only looked right by accident: `cross-boundary` is the higher row
+  and it was the permitting one. Had the rows been the other way round, an `Ask`
+  on the lower row would have been silently upgraded to a permit.
+- **The scope check** measured every resource against that one row, so the
+  written skill had to be inside the FETCH row's scopes.
+
+### What the amendment adds
+
+**A declaration says which reading applies, and every consumer honours it.**
+`Declaration.EffectRelation` is `EffectsAlternative` (the zero value, so fifteen
+declarations are untouched and mean exactly what they meant) or
+`EffectsConjunctive`.
+
+- **Offer time** asks the relation's own question: any-not-refused for
+  alternatives, **every**-not-refused for a conjunction. A conjunctive tool
+  missing one of its classes is not offered and not escalated, because there is
+  nothing to move to execution — the refusal is already certain.
+- **The explanation stays mandatory and gets stricter.** `RefusedEffects`
+  reported a tool as withheld only when EVERY row refused it, which is right for
+  a door. For a conjunction one refusal is the whole explanation, and reporting
+  nothing would withhold the tool in silence — the defect the original decision
+  exists to end.
+- **The decision is the strictest across every row reached**, not the decision of
+  the worst row. One refusal refuses; one ask asks. Note this is a different
+  order from the lattice: the lattice ranks acts by severity, this ranks answers
+  by how little they allow.
+- **The scope check consults every row reached, and takes their scopes
+  TOGETHER.** The rows do not govern the same resources — the destination is the
+  fetch's and the content item is the write's — so intersecting would refuse an
+  install whose two halves a person had both granted. What the union does not do
+  is admit a resource no reached row admits.
+
+### What it does not change
+
+The alternation is untouched wherever it applies, and `session.run` is the test
+of that: refusing `mutate-destructive` still leaves `lsblk` offered and still
+moves the decision to execution. Enforcement is still the real boundary
+(ADR-0028 decision 4) — `narrowSkillsInstall` builds the capability from both
+rows, and a refused write row yields a capability that cannot install anything.
+What the declaration adds is that the question is never put at all.
+
+The original text's closing consequence — "a future tool that is also a door
+needs no new mechanism" — still holds for doors. This amendment is about the
+tools that are not doors and were never alternatives.
 
 ## What this does not decide
 

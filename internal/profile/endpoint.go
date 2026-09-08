@@ -286,13 +286,13 @@ func ValidateEndpoint(e Endpoint) error {
 	return nil
 }
 
-// NewEndpointID mints a namespaced endpoint id: "endpoint:custom:slug:uuid".
+// NewEndpointID mints a namespaced endpoint ID: "endpoint:custom:slug:uuid".
 //
-// Ids are minted here rather than in the renderer for the same reason
-// profile ids are: an id is identity, and a display layer that invents one
+// IDs are minted here rather than in the renderer for the same reason
+// profile IDs are: an ID is identity, and a display layer that invents one
 // has to know the uniqueness rule the store enforces.
 func NewEndpointID(name string) string {
-	return "endpoint:custom:" + slugify(name) + ":" + newUUID()
+	return mintID("endpoint", name)
 }
 
 // EndpointDTO is the wire form of an endpoint (design §4.5.4): the stored

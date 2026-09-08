@@ -115,6 +115,23 @@ func TestResolveArgv_RunsTypedArgv(t *testing.T) {
 	}
 }
 
+func TestResolveConfig_RejectsOptionLikeHostBeforeExec(t *testing.T) {
+	sshPath, logPath := scriptedSSH(t)
+	resolver := NewSSHConfigResolver(log.NewSlogAdapter(nil), "/nonexistent/config", sshPath)
+
+	host := "-F/tmp/attacker_config"
+	cfg, err := resolver.ResolveConfig(context.Background(), host)
+	if err == nil {
+		t.Fatal("ResolveConfig accepted an option-like host")
+	}
+	if cfg == nil || cfg.HostName != host {
+		t.Fatalf("degraded config = %+v, want original host %q", cfg, host)
+	}
+	if n := spawnCount(t, logPath); n != 0 {
+		t.Fatalf("ssh -G spawned %d times for an option-like host, want 0", n)
+	}
+}
+
 // TestResolveArgv_CacheSkipsRepeatSpawn: a repeat of the same typed line
 // must not spawn ssh -G again — the argvIndex fast path is what makes the
 // second connection cheaper than the first.

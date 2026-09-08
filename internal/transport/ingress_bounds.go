@@ -1,5 +1,7 @@
 package transport
 
+import "github.com/shady2k/nocx/internal/ssh"
+
 // Ingress bounds shared by more than one control domain.
 //
 // A bound lives here when two domains bound THE SAME THING. It does not live
@@ -27,3 +29,36 @@ const maxHostRunes = 253
 // at the same number independently, which is the clearest sign it is one
 // concept rather than two.
 const maxUserRunes = 256
+
+// validateSSHHost owns the control-plane shape shared by direct opens and
+// stored profiles. A leading dash would be parsed by ssh as an option, not
+// as the positional destination the caller named.
+func validateSSHHost(field, value string) string {
+	if msg := validateStringBound(field, value, maxHostRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(value) {
+		return field + " must not contain control characters"
+	}
+	if ssh.IsOptionLikeHost(value) {
+		return field + " must not begin with a dash"
+	}
+	return ""
+}
+
+// validateProfileID owns the renderer-supplied profile-id shape shared by the
+// ports, tunnel, connections and shell.footprint seams: required, bounded,
+// control-free. The stored id is a store key and a resolver input, so a
+// control character in it is a hostile or broken caller.
+//
+// The bound is maxConfigIDRunes — profile.MaxIDRunes, the ceiling the backend
+// mint guarantees — and NOT maxIDRunes, which bounds the agent surface's ask
+// and attached-item ids. Both are 128 today; they are different concepts, and
+// a profile id measured against the ask path's number agrees with the domain
+// only until one of them moves.
+func validateProfileID(id string) string {
+	if id == "" {
+		return "profileId is required"
+	}
+	return validateStringBound("profileId", id, maxConfigIDRunes)
+}

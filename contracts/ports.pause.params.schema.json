@@ -10,7 +10,7 @@
     "profileId": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 512
+      "maxLength": 128
     },
     "paused": {
       "type": "boolean"

@@ -330,10 +330,8 @@ func (h skillAuditHandlers) resolveAuditModel(ctx context.Context) (
 		role     = profile.RoleAuditing
 		endpoint profile.Endpoint
 		model    string
-		key      credential.Secret
-		headers  []assistant.Header
 	)
-	err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
+	err := h.configOp.Run(ctx, func(_ context.Context, svc capability.ConfigService) error {
 		ep, m, resolveErr := svc.ResolveRole(profile.RoleAuditing)
 		if errors.Is(resolveErr, profile.ErrRoleUnassigned) {
 			role = profile.RoleAnswering
@@ -348,19 +346,31 @@ func (h skillAuditHandlers) resolveAuditModel(ctx context.Context) (
 		if resolveErr != nil {
 			return fmt.Errorf("skill audit: %w", resolveErr)
 		}
-		// "audit a skill" rather than "answer the ask": this string is what
-		// the vault shows a person when it raises an unlock, and an unlock
-		// prompt that named the wrong reason would be the product lying
-		// about why it wants a key.
-		k, hs, materialErr := resolveEndpointMaterial(ctx, h.credentials, ep, credential.Operation("audit a skill"))
-		if materialErr != nil {
-			return materialErr
-		}
-		endpoint, model, key, headers = ep, m, k, hs
+		endpoint, model = ep, m
 		return nil
 	})
 	if err != nil {
 		return "", profile.Endpoint{}, "", credential.Secret{}, nil, err
+	}
+
+	// THE MATERIAL IS READ AFTER THE OPERATION HAS RELEASED, and the position
+	// is the whole of the fix (nocx-9fzkk, and nocx-o3606 before it). The
+	// config operation is composed from the config gate AND THE VAULT GATE
+	// (buildConfigOp), and an operation-stance read raises the vault's own
+	// unlock and waits for a person. vault.unseal — the answer to that very
+	// prompt — needs the vault gate, so resolving inside the callback shows
+	// somebody "Unlock the vault to audit a skill" and then refuses their
+	// Unlock with "Control plane busy". The role resolution needs the store
+	// and the material does not, so they are two steps and only the first
+	// takes a gate.
+	//
+	// "audit a skill" rather than "answer the ask": this string is what the
+	// vault shows a person when it raises the unlock, and a prompt that named
+	// the wrong reason would be the product lying about why it wants a key.
+	key, headers, materialErr := resolveEndpointMaterial(
+		ctx, h.credentials, endpoint, credential.Operation("audit a skill"))
+	if materialErr != nil {
+		return "", profile.Endpoint{}, "", credential.Secret{}, nil, materialErr
 	}
 	return role, endpoint, model, key, headers, nil
 }

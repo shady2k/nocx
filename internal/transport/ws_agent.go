@@ -1125,28 +1125,38 @@ func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
 		if h.configOp == nil {
 			return assistant.SkillDraftTarget{}, errors.New("skill draft: config operation is not wired")
 		}
-		var target assistant.SkillDraftTarget
-		err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-			endpoint, model, resolveErr := svc.ResolveRole(profile.RoleSummarizing)
+		var (
+			endpoint profile.Endpoint
+			model    string
+		)
+		err := h.configOp.Run(ctx, func(_ context.Context, svc capability.ConfigService) error {
+			ep, m, resolveErr := svc.ResolveRole(profile.RoleSummarizing)
 			if errors.Is(resolveErr, profile.ErrRoleUnassigned) {
-				endpoint, model, resolveErr = svc.ResolveRole(profile.RoleAnswering)
+				ep, m, resolveErr = svc.ResolveRole(profile.RoleAnswering)
 			}
 			if resolveErr != nil {
 				return resolveErr
 			}
-			key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
-			if materialErr != nil {
-				return materialErr
-			}
-			target = assistant.SkillDraftTarget{
-				Key:     key,
-				BaseURL: endpoint.BaseURL,
-				Model:   model,
-				Headers: headers,
-			}
+			endpoint, model = ep, m
 			return nil
 		})
-		return target, err
+		if err != nil {
+			return assistant.SkillDraftTarget{}, err
+		}
+		// Outside the operation, for the reason resolveAuditModel states in
+		// full (nocx-9fzkk): the config operation holds the vault gate, and
+		// the unlock this read may raise is answered by a vault.unseal that
+		// needs the same gate.
+		key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
+		if materialErr != nil {
+			return assistant.SkillDraftTarget{}, materialErr
+		}
+		return assistant.SkillDraftTarget{
+			Key:     key,
+			BaseURL: endpoint.BaseURL,
+			Model:   model,
+			Headers: headers,
+		}, nil
 	})
 }
 

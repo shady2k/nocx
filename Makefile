@@ -334,6 +334,24 @@ OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|int
 # re-spelling this exclusion in each Linux caller. This also excludes the
 # package's bash-only launch-cleanup proof; the host conformance gate runs it
 # alongside the live vendor checks.
+#
+# It also runs in a PASS OF ITS OWN in test-ci, after everything else, and that
+# is not tidiness. `go test` runs packages concurrently, and this package's two
+# external waits — a 90-second bound on a live vendor CLI, and a probe that
+# expects a SIGTERM'd bash to exit within ten seconds — lost that race against
+# internal/app on a six-core host: 119.890s and two failures beside it,
+# 16.823s and green alone, with the same binary and the same commit (nocx-nj9ab).
+# Widening either bound was the alternative and it is the wrong one: ten seconds
+# to die after SIGTERM is already a defect worth reporting, and the 90-second
+# bound only earns its keep if it means the vendor has actually hung.
+#
+# Splitting the pass also closed a hole beside it. test-ci built its package
+# list as the literal "./..." on a host that has GNU bash 3.2, and both
+# exclusions below are `grep -v` over that list — which removes nothing from a
+# single "./..." token. So on such a host the conformance package was never
+# actually excluded when Claude Code was absent, and the run failed with
+# "Claude Code is not installed" under a banner that had just said it would not
+# be run. The list is now always enumerated by `go list`, so a filter filters.
 CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
 PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
@@ -578,7 +596,7 @@ test-ci:
 	  notice=""; \
 	  if bash32=$$(./scripts/have-bash32.sh); then \
 	    echo "GNU bash 3.2 is present ($$bash32): the whole tree runs on this host"; \
-	    pkgs="./..."; \
+	    pkgs="$$($(GO) list ./...)"; \
 	  else \
 	    pkgs="$$($(GO) list ./... | grep -vE 'nocx/$(BASH32_PKG)(/|$$)')"; \
 	    notice="NOT RUN HERE: ./$(BASH32_PKG)/... — this host has no GNU bash 3.2\n\
@@ -588,12 +606,13 @@ test-ci:
   does not. To run it here: sudo scripts/install-bash32.sh"; \
 	    printf '%b\n' "$$notice"; \
 	  fi; \
+	  run_claude=0; \
 	  if claude=$$(./scripts/have-claude.sh); then \
-	    echo "Claude Code is installed and authenticated ($$claude): vendor conformance runs on this host"; \
+	    echo "Claude Code is installed and authenticated ($$claude): vendor conformance runs on this host, in a pass of its own"; \
 	    claude_notice=""; \
+	    run_claude=1; \
 	  else \
 	    claude_rc=$$?; \
-	    pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
 	    if [ "$$claude_rc" -eq 1 ]; then \
 	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is not installed.\n\
   Install Claude Code before running the vendor conformance check."; \
@@ -603,7 +622,13 @@ test-ci:
 	    fi; \
 	    printf '%b\n' "$$claude_notice"; \
 	  fi; \
+	  pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
 	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
+	  if [ "$$run_claude" -eq 1 ]; then \
+	    echo ""; \
+	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \
+	    $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./$(CLAUDE_CONFORMANCE_PKG)/...; \
+	  fi; \
 	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi; \
 	  if [ -n "$$claude_notice" ]; then echo ""; printf '%b\n' "$$claude_notice"; fi
 	@echo ""

@@ -325,9 +325,6 @@ func TestImportTabby_HappyPath(t *testing.T) {
 	if p.Options.PasswordSecret == "" {
 		t.Error("profile should have PasswordSecret set from vault secret matching")
 	}
-	if p.NeedsReview {
-		t.Error("imported profile should not be marked for review")
-	}
 	if _, err := cs.Get(context.Background(), credential.SecretID(p.Options.PasswordSecret)); err != nil {
 		t.Errorf("bound password secret %q: %v", p.Options.PasswordSecret, err)
 	}

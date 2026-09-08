@@ -73,10 +73,8 @@ type settingsSecretExistsParams struct {
 
 const (
 	// maxConfigIDRunes bounds renderer-supplied profile, group and endpoint
-	// ids. Ids are backend-minted "typ:custom:slug:uuid"; a renderer-supplied
-	// id only replaces the mint, and the ask path bounds the same class of
-	// value at 128 (maxIDRunes).
-	maxConfigIDRunes = 128
+	// ids with the same domain-owned ceiling the backend mint guarantees.
+	maxConfigIDRunes = profile.MaxIDRunes
 	// maxConfigNameRunes bounds display names (profile, group, endpoint,
 	// model). Names are echoed in lists and slugified into minted ids.
 	maxConfigNameRunes = 200
@@ -215,11 +213,8 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 	if o.Host == "" {
 		return "options.host is required"
 	}
-	if msg := boundedRunes("options.host", o.Host, maxHostRunes); msg != "" {
+	if msg := validateSSHHost("options.host", o.Host); msg != "" {
 		return msg
-	}
-	if hasControlChars(o.Host) {
-		return "options.host must not contain control characters"
 	}
 	if o.Port != nil && (*o.Port < 0 || *o.Port > 65535) {
 		return "options.port must be between 0 and 65535"
@@ -629,12 +624,26 @@ func validateProfileMoveImpactRaw(raw json.RawMessage) string {
 // params ARE the array (JSON-RPC positional form, which the floor already
 // admitted); the handler refuses an empty array, and the store requires
 // every member to name a group (ErrGroupIDRequired).
+//
+// Unknown member fields are refused, like every other group method: this was
+// the one that used a plain Unmarshal, so it silently DROPPED a key the
+// others answered -32602 to. Saving a group therefore looked like it worked
+// while the impact preview for the same object failed, which is how the
+// renderer went on sending a display shape nobody could see it sending
+// (nocx-a0pf3).
 func validateGroupApplyRaw(raw json.RawMessage) string {
-	var groups []profile.ProfileGroup
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return "groups required"
 	}
-	if err := json.Unmarshal(raw, &groups); err != nil {
+	var groups []profile.ProfileGroup
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&groups); err != nil {
+		const unknownField = "json: unknown field "
+		if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {
+			return "unknown field " + name
+		}
 		return "params must be a JSON array of groups"
 	}
 	if len(groups) == 0 {

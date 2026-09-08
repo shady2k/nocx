@@ -5,6 +5,7 @@ import {
   resolveGroupPath,
   parseQuickConnect,
   ProfileClient,
+  toProfileGroup,
   type EffectiveFieldDTO,
   type PatchParams,
   type SSHProfile,
@@ -13,6 +14,77 @@ import {
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { ProfileGroup } from './profiles'
+
+describe('toProfileGroup', () => {
+  // The group the sidebar hands the editor is a buildGroupTree node, and the
+  // editor writes a `description` no group contract declares (nocx-3vgbn).
+  // Neither is ignored on arrival: the group params schemas are
+  // additionalProperties:false and groups.impact/create/update decode with
+  // DisallowUnknownFields, so an extra key is answered -32602 (nocx-a0pf3).
+  const node = {
+    ...buildGroupTree([{ id: 'g1', name: 'Prod', icon: '🌐', color: '#abc' }])[0],
+    editable: true,
+    description: 'typed by the user',
+    order: 3,
+  }
+
+  it('drops every key no group contract declares', () => {
+    const projected = toProfileGroup(node)
+    expect(Object.keys(projected).sort()).toEqual(['color', 'editable', 'icon', 'id', 'name'])
+  })
+
+  it('keeps the backend-owned editable flag, which the editor round-trips', () => {
+    expect(toProfileGroup(node).editable).toBe(true)
+  })
+
+  it('omits an absent optional rather than sending it as undefined', () => {
+    expect('editable' in toProfileGroup({ id: 'g1', name: 'Prod' })).toBe(false)
+  })
+})
+
+describe('ProfileClient group methods send the contract shape', () => {
+  // The projection is applied at the client seam so no caller can forget it.
+  // Asserted on what reaches the dispatcher, which is the last thing before
+  // the wire.
+  const node = {
+    ...buildGroupTree([{ id: 'g1', name: 'Prod' }])[0],
+    description: 'typed by the user',
+  }
+
+  function clientWithSpy() {
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
+    const call = vi
+      .spyOn(pc as unknown as { call: (m: string, p: unknown) => Promise<unknown> }, 'call')
+      .mockResolvedValue(undefined)
+    return { pc, call }
+  }
+
+  it('groups.impact carries a projected group', async () => {
+    const { pc, call } = clientWithSpy()
+    await pc.groupImpact({ group: node })
+    expect(call).toHaveBeenCalledWith('groups.impact', { group: { id: 'g1', name: 'Prod' } })
+  })
+
+  it('groups.impact leaves a delete-only request alone', async () => {
+    const { pc, call } = clientWithSpy()
+    await pc.groupImpact({ deleteGroupId: 'g1' })
+    expect(call).toHaveBeenCalledWith('groups.impact', { deleteGroupId: 'g1' })
+  })
+
+  it('groups.apply projects every member', async () => {
+    const { pc, call } = clientWithSpy()
+    await pc.groupApply([node])
+    expect(call).toHaveBeenCalledWith('groups.apply', [{ id: 'g1', name: 'Prod' }])
+  })
+
+  it('groups.create and groups.update project too', async () => {
+    const { pc, call } = clientWithSpy()
+    await pc.createGroup(node)
+    await pc.updateGroup(node)
+    expect(call).toHaveBeenNthCalledWith(1, 'groups.create', { id: 'g1', name: 'Prod' })
+    expect(call).toHaveBeenNthCalledWith(2, 'groups.update', { id: 'g1', name: 'Prod' })
+  })
+})
 
 describe('buildGroupTree', () => {
   it('builds a flat tree from nested groups via parentGroupId', () => {

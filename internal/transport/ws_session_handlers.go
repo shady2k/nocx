@@ -1339,7 +1339,17 @@ func validateOpenRaw(raw json.RawMessage) string {
 			return msg
 		}
 	}
-	if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
+	// The option-like check applies to the branch the handler actually dials
+	// a typed host on. With a profileId present the handler resolves the
+	// stored profile and never reads p.Host at all, and the resolver applies
+	// the same refusal to the STORED host; with kind "local" there is no ssh
+	// to hand a dash to. Refusing a dash on those branches would reject a
+	// request over a field nothing reads.
+	if p.Kind == "ssh" && p.ProfileID == "" {
+		if msg := validateSSHHost("host", p.Host); msg != "" {
+			return msg
+		}
+	} else if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
 		return msg
 	}
 	if msg := validateStringBound("user", p.User, maxUserRunes); msg != "" {

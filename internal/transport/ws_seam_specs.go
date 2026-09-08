@@ -169,23 +169,6 @@ func validateStringBound(field, value string, max int) string {
 	return ""
 }
 
-// validateProfileID checks the one renderer-supplied profile id shape every
-// profile-id-taking seam method shares: required, bounded (maxIDRunes — the
-// agent surface's id bound), control-free. The stored id is a store key and
-// a resolver input; a control character in it is a hostile or broken caller.
-func validateProfileID(id string) string {
-	if id == "" {
-		return "profileId is required"
-	}
-	if utf8.RuneCountInString(id) > maxIDRunes {
-		return fmt.Sprintf("profileId exceeds %d characters", maxIDRunes)
-	}
-	if hasControlChars(id) {
-		return "profileId must not contain control characters"
-	}
-	return ""
-}
-
 // validateSessionIDShape reports whether s is a server-minted session or
 // tunnel id: 32 lowercase hex chars. The shape's owner is session.IDToBytes
 // (session.NewID and tunnel.newID both mint it — tunnel.go says so) — call

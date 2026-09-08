@@ -1653,8 +1653,15 @@ type domainGates struct {
 
 func (s *WSServer) domainGates() domainGates {
 	return domainGates{
-		config:     capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
-		vault:      capability.Gate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		config: capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		// The vault gate is DECLARED as the one vault.unseal itself acquires
+		// (vaultSpecs builds VaultOperation from it). Every operation that
+		// composes this gate therefore fences the operation-stance credential
+		// reads inside its callback, because such a read waits for a person to
+		// answer an unlock whose answer needs this gate back — twice now a
+		// handler has shown somebody that dialog and refused their Unlock with
+		// "Control plane busy" (nocx-o3606, nocx-9fzkk).
+		vault:      capability.UnlockAnsweringGate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),

@@ -486,7 +486,7 @@ func newHappyStand(t *testing.T) *happyStand {
 		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
 	}
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
-		Dir:      filepath.Join(t.TempDir(), "runtime"),
+		Dir:      filepath.Join(shortWorkerSocketDir(t), "runtime"),
 		Peers:    coordsock.SystemPeerCredentials{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},

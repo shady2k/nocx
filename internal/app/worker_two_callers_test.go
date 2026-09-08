@@ -281,7 +281,7 @@ func publishGroupEndpoint(t *testing.T, reg *session.Reg, grid workerAuthEnrolme
 		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
 	}
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
-		Dir:      t.TempDir(),
+		Dir:      shortWorkerSocketDir(t),
 		Peers:    coordsock.SystemPeerCredentials{},
 		Owner:    coordsock.SystemPathOwner{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // a uid is not a signed quantity

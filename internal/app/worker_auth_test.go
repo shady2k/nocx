@@ -299,7 +299,7 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 		t.Fatalf("wrap worker dispatcher with ledger: %v", err)
 	}
 	ep, err := toolendpoint.New(toolendpoint.Config{
-		Dir:      t.TempDir(),
+		Dir:      shortWorkerSocketDir(t),
 		Peers:    workerAuthEndpointPeers{},
 		Owner:    workerAuthEndpointOwner{},
 		SelfUID:  1000,
@@ -484,4 +484,25 @@ func containsGrantScope(grant content.Grant, kind content.ResourceKind, id strin
 		}
 	}
 	return false
+}
+
+// shortWorkerSocketDir is a temporary directory whose NAME is short, for a
+// worker endpoint that has to bind a unix socket inside it.
+//
+// t.TempDir() embeds the test's own name, and the CI target adds a TMPDIR
+// prefix of its own, so TestWorkerToolCallAfterLifecycleLossIsRefusedWith// outParticipant produced a 115-byte socket path against the 103 bytes
+// coordinator.maxSocketPath allows for the smaller of the two platforms, and
+// every one of these tests failed with ErrPathTooLong under `make ci-mac`
+// while passing under a bare `go test`. internal/coordinator already bought
+// this once (nocx-lvdj3, shortTempDir in bind_internal_test.go); the same
+// rule holds here. The name of the test may not decide whether its socket
+// can be bound, so the directory does not carry it.
+func shortWorkerSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nocxwrk")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

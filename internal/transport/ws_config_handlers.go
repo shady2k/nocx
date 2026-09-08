@@ -215,11 +215,8 @@ func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
 	if o.Host == "" {
 		return "options.host is required"
 	}
-	if msg := boundedRunes("options.host", o.Host, maxHostRunes); msg != "" {
+	if msg := validateSSHHost("options.host", o.Host); msg != "" {
 		return msg
-	}
-	if hasControlChars(o.Host) {
-		return "options.host must not contain control characters"
 	}
 	if o.Port != nil && (*o.Port < 0 || *o.Port > 65535) {
 		return "options.port must be between 0 and 65535"

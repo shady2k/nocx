@@ -22,12 +22,25 @@
 }
 
 /* The name and its provenance badge read as one line: the badge answers
-   "what kind of skill is this" right where the name answers "which one". */
+   "what kind of skill is this" right where the name answers "which one".
+   IT WRAPS RATHER THAN COMPETES (nocx-qqj2q). This rail is 260px by
+   default and both were shrinkable flex items, so a name of ordinary
+   length took the width and left the badge to degrade the only way the kit
+   lets it — `builtin` clipped to `buil…`, which names no provenance at all.
+   A badge that has dropped below the name still says what the skill is; a
+   clipped one says nothing, so the line break is the better failure. */
 .skill-view__title {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-2);
   min-width: 0;
+}
+
+/* Placement only, per frontend/src/ui/README.md: the badge keeps its own
+   paint and stops being squeezed out of legibility. */
+.skill-view__title > .ui-badge {
+  flex: 0 0 auto;
 }
 
 .skill-view__name {
@@ -36,8 +49,18 @@
   overflow-wrap: anywhere;
 }
 
+/* The rail holds two separate answers — who this skill is, and what it is
+   made of — and they were adjacent siblings with no gap at all
+   (nocx-qqj2q), so the "Files" heading sat directly under the last switch
+   and read as its caption. The space is a margin on the identity block
+   rather than a gap on the scrolling column: turning `.skill-view__list-col`
+   into a flex column would let its children shrink below their content
+   instead of scrolling, which is a different defect for the same pixels.
+   `--space-6` is what the identity Stack already puts between its own rows,
+   so this continues that rhythm rather than inventing a second one. */
 .skill-view__identity {
   min-width: 0;
+  margin-block-end: var(--space-6);
 }
 
 /* ── The body: the file list beside the file (nocx-4m1n1) ─────────────────

@@ -1274,6 +1274,54 @@ func leaseResult(tool string, leaseErr *RunLeaseError) string {
 // named a run which is no longer waiting. It follows leaseResult's contract:
 // the sentence is the CALL'S RESULT, so the model reads what happened and
 // carries on, instead of the whole turn dying over a race it could not win.
+// failureChangedNothing answers the one question that decides whether a
+// failed call ends the run: could it have left anything behind? It is read
+// off the DECLARATION rather than off a list of tool names, so a new tool
+// gets the right answer by classifying itself, which the registry already
+// makes compulsory (content.Effect's doc: "forgot to classify a tool" stops
+// compiling).
+//
+// It is TRUE for a cross-boundary call that mutates nothing — a read of
+// something off this machine, which is every cross-boundary tool nocx
+// declares: fetch.url and skills.resolve. A read that failed leaves this
+// machine exactly as it was, and the thing that failed is somebody else's
+// server, which is precisely the case a model can route around. A tool that
+// ever POSTS somewhere carries a mutate class as well, exactly as
+// skills.install does for the bytes it writes, and is therefore not in this
+// set; nor is a disclosure, a privilege change or a delegation, each of
+// which may have half-happened.
+//
+// A PURELY LOCAL Observe failure is deliberately NOT in this set, and that
+// is a boundary rather than an oversight (nocx-i9j5e). A failed session.read
+// already ends the run and three tests in internal/transport say so on
+// purpose. Whether it should is a real question and a separate one: it has
+// its own bead, because deciding it as a side effect of this fix is how a
+// settled question stops being settled.
+func failureChangedNothing(tool agenttools.Tool) bool {
+	crossBoundary := false
+	for _, effect := range tool.Declaration.Effect {
+		switch effect {
+		case content.EffectCrossBoundary:
+			crossBoundary = true
+		case content.EffectObserve:
+		default:
+			return false
+		}
+	}
+	return crossBoundary
+}
+
+// toolFailedResult is what such a failure reads as to the model. It names the
+// tool, carries what actually went wrong — the model cannot choose another
+// way without knowing which way failed — and says outright that nothing
+// changed, so trying something else is not a second attempt at a half-done
+// thing. Modelled on runNotWaitingResult, whose situation is the same one.
+func toolFailedResult(tool string, err error) string {
+	return "FAILED: nocx ran your call to " + tool + " and it did not succeed: " + err.Error() +
+		". Nothing was changed by this call. You may try another way of getting what you needed, " +
+		"or tell the person what stopped you."
+}
+
 func runNotWaitingResult(tool string) string {
 	return "NOT WAITING: nocx did not run your call to " + tool +
 		": that command is no longer waiting to be answered about — it finished on its own, or it was already stopped. " +
@@ -2172,6 +2220,21 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
 		}
 		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
+		// A CALL THAT CHANGED NOTHING IS A RESULT, NOT THE END OF THE TURN
+		// (nocx-y0h3h). Two arms above already draw this line for the two
+		// cases session.run happens to produce; the line itself is not about
+		// session.run. skills.resolve declares only cross-boundary and
+		// records nothing when it fails, and its own declaration tells the
+		// model to "let this tool refuse unsupported addresses, then fall
+		// back to skills.install" — a fallback no model can reach if the
+		// failure ends the turn. A forge answering 504 did exactly that.
+		//
+		// The bytes are safe to hand over because screenResult above has
+		// already screened them: the egress gate reads the error string as
+		// well as the result, for the reason stated there.
+		if failureChangedNothing(decl) {
+			return modelResult{text: toolFailedResult(decl.Name, runErr), kind: modelNocxMessage}, nil
+		}
 		// Named, so the transport can say WHICH tool failed without
 		// stringifying the framework's wrapper around it.
 		return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: runErr}

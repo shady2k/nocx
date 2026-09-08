@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -84,6 +85,51 @@ func TestFirstSeenIsStampedOnceAndNeverMoves(t *testing.T) {
 	if second.FirstSeenAt != first.FirstSeenAt {
 		t.Fatalf("firstSeenAt moved from %q to %q: it is when nocx FIRST saw the skill",
 			first.FirstSeenAt, second.FirstSeenAt)
+	}
+}
+
+// A BUILTIN IS NOT STAMPED, because nothing would ever read the stamp: the
+// idle sweep exempts builtins by provenance (applyAutoOff), and firstSeenAt
+// exists only to answer "silent since when" for that sweep. A row written for
+// a builtin is dead data with a cost — it puts our own shipped name into the
+// person's settings document, which travels in a backup that is supposed to
+// carry no builtin at all (internal/backup's round-trip test caught it there).
+func TestDiscoveryDoesNotStampABuiltin(t *testing.T) {
+	configDir := t.TempDir()
+	store := NewStore(OSFileSystem{},
+		[]Root{
+			{Dir: filepath.Join(configDir, "skills"), Provenance: ProvenanceAuthored},
+			{FS: builtin.FS, Provenance: ProvenanceBuiltin},
+		},
+		storage.NewDocumentStore(configDir),
+		WithClock(func() time.Time { return time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC) }))
+	writeSkillAt(t, store, "deploy", "Deploy the service")
+
+	listed, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	sawBuiltin := false
+	for _, item := range listed.Skills {
+		row, readErr := store.usageFor(item.Name)
+		if readErr != nil {
+			t.Fatalf("read usage for %q: %v", item.Name, readErr)
+		}
+		if item.Provenance != ProvenanceBuiltin {
+			// The control: the same pass DOES stamp everything else, so a
+			// green result cannot mean discovery stamped nothing at all.
+			if row.FirstSeenAt == "" {
+				t.Fatalf("%s skill %q was not stamped", item.Provenance, item.Name)
+			}
+			continue
+		}
+		sawBuiltin = true
+		if row.FirstSeenAt != "" {
+			t.Fatalf("builtin %q was stamped %q", item.Name, row.FirstSeenAt)
+		}
+	}
+	if !sawBuiltin {
+		t.Fatal("no builtin was discovered, so this test asserted nothing")
 	}
 }
 

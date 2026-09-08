@@ -477,11 +477,7 @@ func (s *Store) List() (ListResult, error) {
 	if flushErr := s.FlushUsage(); flushErr != nil {
 		slog.Debug("skill: usage counters were not flushed", "error", flushErr)
 	}
-	names := make([]string, 0, len(detailed))
-	for _, found := range detailed {
-		names = append(names, found.Name)
-	}
-	if stampErr := s.stampFirstSeen(names); stampErr != nil {
+	if stampErr := s.stampFirstSeen(detailed); stampErr != nil {
 		slog.Debug("skill: first-seen dates were not stamped", "error", stampErr)
 	}
 	autoOff, autoErr := s.applyAutoOff(detailed)

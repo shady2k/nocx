@@ -140,10 +140,19 @@ func (s *Store) restorePending(pending map[string]pendingUse) {
 	}
 }
 
-// stampFirstSeen records the moment discovery first saw each name, and never
+// stampFirstSeen records the moment discovery first saw each skill, and never
 // moves one already recorded.
-func (s *Store) stampFirstSeen(names []string) error {
-	if s == nil || len(names) == 0 {
+//
+// It takes what discovery found rather than a list of names because a BUILTIN
+// IS NOT STAMPED: the stamp answers "silent since when" and nothing else, and
+// the only reader of that is the idle sweep, which exempts builtins by
+// provenance (applyAutoOff, on the same slice). A row written for a builtin is
+// therefore dead data that puts one of our own shipped names into the person's
+// settings document — which a backup carries, and a backup is supposed to
+// carry no builtin at all (internal/backup's round-trip test is where it
+// surfaced).
+func (s *Store) stampFirstSeen(found []discovered) error {
+	if s == nil || len(found) == 0 {
 		return nil
 	}
 	s.docMu.Lock()
@@ -153,16 +162,19 @@ func (s *Store) stampFirstSeen(names []string) error {
 		return err
 	}
 	changed := false
-	for _, name := range names {
-		row := d.Usage[name]
+	for _, candidate := range found {
+		if candidate.Provenance == ProvenanceBuiltin {
+			continue
+		}
+		row := d.Usage[candidate.Name]
 		if row.FirstSeenAt != "" {
 			continue
 		}
 		row.FirstSeenAt = s.now().UTC().Format(time.RFC3339)
 		if d.Usage == nil {
-			d.Usage = make(map[string]Usage, len(names))
+			d.Usage = make(map[string]Usage, len(found))
 		}
-		d.Usage[name] = row
+		d.Usage[candidate.Name] = row
 		changed = true
 	}
 	if !changed {

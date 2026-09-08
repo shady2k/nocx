@@ -576,7 +576,14 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     await expect(tab.locator('.skill-view__check-verdict')).toContainText(/clear|suspect/i, {
       timeout: 30_000,
     })
-    expect(fake.requests().length).toBe(before + 1)
+    // WHAT THE READING SPENT, whatever that is. It used to be asserted as
+    // `before + 1`, which was true while a reading was one call and stopped
+    // being true when it became one call per file and one to conclude
+    // (nocx-fuymi). How many calls a reading takes is the engine's business;
+    // what this spec is about is that reopening spends NOTHING MORE, and that
+    // is asserted against this number below.
+    const spent = fake.requests().length
+    expect(spent).toBeGreaterThan(before)
     const verdict = await tab.locator('.skill-view__check-verdict').textContent()
     // AND THE REPORT — criterion 2 is "the verdict AND the report", and a
     // regression that stored and restored the verdict while losing the
@@ -610,7 +617,7 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     // because the screen cannot tell a remembered verdict from a re-earned
     // one — an empty pane and a pane that did not need refilling look
     // identical.
-    expect(fake.requests().length).toBe(before + 1)
+    expect(fake.requests().length).toBe(spent)
 
     // ── THE BYTES MOVE, AND THE VERDICT SAYS WHAT IT IS ABOUT ──────────────
     writeFileSync(join(happyDir, SKILL_FILE), `${HAPPY_SKILL_DOCUMENT}${HAPPY_EDITED_LINE}\n`)
@@ -622,7 +629,7 @@ test.describe('a person manages the skills they have (nocx-ojfuc.4)', () => {
     })
     await expect(reopenedAgain.locator('.skill-view__check-report')).toHaveText(HAPPY_AUDIT_REPORT)
     await expect(reopenedAgain).toContainText('earlier version', { timeout: 15_000 })
-    expect(fake.requests().length).toBe(before + 1)
+    expect(fake.requests().length).toBe(spent)
 
     // ── AND A BUILTIN IS NOT CHECKED AT ALL ────────────────────────────────
     await page.keyboard.press('Meta+w')

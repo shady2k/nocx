@@ -245,8 +245,17 @@ function exactText(pre: Locator): Promise<string> {
 /** One file's readout, addressed by the accessible name its own surface gives
  *  the block of bytes — which is also the assertion that the reader is
  *  labelling the file it is showing rather than the one that was asked for. */
+// THE LABEL IS PASSED WHOLE, because it is not one sentence with a shared
+// suffix. The skill tab builds "<path> of “<skill>”, verbatim"
+// (skill-view-body.tsx's readoutLabel) and the approval window builds "What
+// <path> holds right now" (agent-approval-prompt.tsx) — two surfaces, two
+// sentences. This helper used to append ", verbatim" to whatever it was
+// given, which made one call site's selector end in ", verbatim, verbatim"
+// and the other's carry a suffix the DOM never had. Both matched nothing, and
+// a locator that cannot match reports the same words as a control that is
+// missing: "element(s) not found".
 function readoutFor(scope: Locator, ariaLabel: string): { readout: Locator; pre: Locator } {
-  const selector = `pre.ui-code-block[aria-label="${ariaLabel}, verbatim"]`
+  const selector = `pre.ui-code-block[aria-label="${ariaLabel}"]`
   // The `has:` locator is resolved RELATIVE to each candidate, so it is built
   // off the page rather than off `scope` — a scoped one would carry its own
   // ancestor chain into the filter and match nothing.
@@ -322,7 +331,13 @@ test.describe('a person reads every byte they are being asked about (nocx-872jc)
     await card.locator('.ui-record-row__title', { hasText: SETUP_FILE }).click()
     const setup = readoutFor(card, `${SETUP_FILE} of “${SKILL_NAME}”, verbatim`)
     await expect(setup.readout).toHaveAttribute('data-state', 'text', { timeout: 15_000 })
-    await expect(setup.readout).toContainText(SETUP_FILE)
+    // The file's own name is asserted by the LOCATOR above — it is the
+    // readout's accessible label and the only thing that selects this readout
+    // rather than another. A second assertion for the name inside the block
+    // used to hold because the readout drew a fact list carrying the path;
+    // the skill tab passes `facts={[]}` (skill-view-body.tsx) and puts the
+    // name in the rail, so that line was asserting a placement the surface
+    // moved rather than a fact it dropped.
     await expect.poll(() => exactText(setup.pre), { timeout: 15_000 }).toBe(SETUP_SCRIPT)
     // The document is no longer on screen: opening a file REPLACES the view,
     // so the reader can never be showing one file under another's name.

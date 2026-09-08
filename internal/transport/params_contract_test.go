@@ -887,6 +887,19 @@ func TestProfileDomainParamsSchemasMatchRuntimeBounds(t *testing.T) {
 		{"endpoints.probe/name", map[string]any{"name": nameAtLimit, "baseUrl": "https://example.com/v1", "model": "model"}, map[string]any{"name": overName, "baseUrl": "https://example.com/v1", "model": "model"}},
 		{"profiles.moveImpact/profileId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{overID}, "targetGroupId": idAtLimit}},
 		{"profiles.moveImpact/targetGroupId", map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": idAtLimit}, map[string]any{"profileIds": []string{idAtLimit}, "targetGroupId": overID}},
+		// The seam methods that take a profile id. They validate through
+		// validateProfileID, so they are bounded by the same domain ceiling
+		// the mint guarantees — and their contracts said 256 and 512 until
+		// nocx-ms4xq, which is a length a renderer built to the contract
+		// would have been answered -32602 for.
+		{"ports.status/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"ports.sample/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"ports.pause/profileId", map[string]any{"profileId": idAtLimit, "paused": true}, map[string]any{"profileId": overID, "paused": true}},
+		{"ports.visible/profileId", map[string]any{"profileId": idAtLimit, "visible": true}, map[string]any{"profileId": overID, "visible": true}},
+		{"connections.test/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"tunnel.open/profileId", map[string]any{"profileId": idAtLimit, "destination": "example.com:22"}, map[string]any{"profileId": overID, "destination": "example.com:22"}},
+		{"shell.footprint.uninstall/profileId", map[string]any{"profileId": idAtLimit}, map[string]any{"profileId": overID}},
+		{"shell.footprint.helperUninstall/profileId", map[string]any{"profileId": idAtLimit, "fingerprint": "SHA256:abc", "path": "~/.nocx/helper/1/"}, map[string]any{"profileId": overID, "fingerprint": "SHA256:abc", "path": "~/.nocx/helper/1/"}},
 	}
 	for _, test := range cases {
 		test := test

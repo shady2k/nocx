@@ -107,6 +107,25 @@ field-specific limits. The JSON schemas and registered runtime validators are
 checked together at both inclusive boundaries, including nested group-impact
 and array-shaped group-apply requests.
 
+### 3.1 The bound reaches every surface that takes a profile ID
+
+`profile.MaxIDRunes` is the owner only if every profile-id check reads it.
+`validateProfileID` did not: it measured a profile id against `maxIDRunes`,
+the agent surface's ask-and-attached-item bound, which is 128 today and is a
+different concept. It now reads `maxConfigIDRunes` and lives in
+`ingress_bounds.go`, which is where that file's own rule puts a bound shared
+by more than one domain — `ports.status/sample/pause/visible`, `tunnel.open`,
+`connections.test` and `shell.footprint.uninstall/helperUninstall` all reach
+it (nocx-ms4xq).
+
+Their contracts published 256 and 512 for the same field, so a renderer built
+to the contract would be answered `-32602` for an id the contract called
+legal. All eight now declare 128, and the parity table covers them.
+
+The same class remains outside the profile domain — agent, ledger, lifecycle,
+vault, api and uistate ids and names whose declared `maxLength` outruns their
+validator — measured and recorded in nocx-o446h rather than fixed here.
+
 ## 4. Behavioral verification
 
 Permanent regressions cover:
@@ -120,7 +139,9 @@ Permanent regressions cover:
 - probe key-file read and parse failures sharing one public error without path
   disclosure;
 - obsolete `needsReview` backup input rejected;
-- contract/runtime parity for 128/129 ID and 200/201 name boundaries.
+- contract/runtime parity for 128/129 ID and 200/201 name boundaries, over the
+  profile, group and endpoint methods and the eight seam methods that take a
+  profile id.
 
 The existing stale-subscriber acknowledgement ownership regression on the current
 main branch is retained and verified; no old PR ack rewrite is ported because
@@ -131,8 +152,8 @@ that behavior is already fixed upstream.
 - `internal/profile/profile.go`, `internal/profile/endpoint.go`
 - `internal/ssh/ssh_resolver.go`, `internal/ssh/auth_chain_test.go`
 - `internal/connection/resolver.go`
-- `internal/transport/ingress_bounds.go`,
-  `ws_config_handlers.go`, `ws_session_handlers.go`, and regression tests
+- `internal/transport/ingress_bounds.go`, `ws_config_handlers.go`,
+  `ws_seam_specs.go`, `ws_session_handlers.go`, and regression tests
 - `internal/backup/document.go`, `internal/backup/service.go`, and tests
 - profile/group/endpoint parameter schemas under `contracts/`
 - `docs/architecture.md`

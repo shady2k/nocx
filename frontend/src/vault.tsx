@@ -302,7 +302,20 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
         sealedUnlock = new Promise<void>((resolve, reject) => {
           sealedAccessResolve = resolve
           sealedAccessReject = reject
-          setUnlockReason('The vault is locked. Unlock it to continue.')
+          // NO REASON, and that is the honest answer rather than a missing
+          // one. The slot completes "Unlock the vault to …", so it wants the
+          // OPERATION that made the app ask; this seam knows only the METHOD
+          // whose reply came back sealed, and a method name is not that. The
+          // path where the operation IS known is the backend's own unlock
+          // request, which carries the reason the vault was told
+          // (credential.Operation) — one owner for that vocabulary, and it is
+          // not a table in here that a new method would silently miss.
+          //
+          // It used to pass 'The vault is locked. Unlock it to continue.',
+          // which rendered as "Unlock the vault to The vault is locked. Unlock
+          // it to continue." on the commonest path there is, and said nothing
+          // the person was not already looking at (nocx-0nhec).
+          setUnlockReason(null)
           setShowUnlock(true)
         }).finally(() => {
           sealedUnlock = null
@@ -1012,6 +1025,17 @@ export interface UnlockDialogProps {
    * vault". Every password prompt must say WHICH password it wants and why it
    * is asking now (nocx-s8jn): "Unlock the vault" cannot be told apart from
    * the key and connection prompts a user meets a week later.
+   *
+   * IT IS A VERB PHRASE, because the title and the aria-label complete
+   * `Unlock the vault to ${reason}` — "audit a skill", "save this connection",
+   * "view your secrets". A sentence here is rendered verbatim into the middle
+   * of that clause, which is how the prompt came to read "Unlock the vault to
+   * The vault is locked. Unlock it to continue." (nocx-0nhec). A caller with
+   * no operation to name passes nothing and gets the bare title, which is
+   * grammatical; it never invents a sentence to fill the slot.
+   *
+   * Enforced across every call site by vault-unlock-reason.test.ts, because
+   * the two callers that broke it were not the ones this comment sat beside.
    */
   reason?: string | null
 }

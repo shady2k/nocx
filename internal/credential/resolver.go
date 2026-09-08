@@ -116,6 +116,13 @@ type resolver struct {
 func (r resolver) Resolve(ctx context.Context, id SecretID, why Stance) (Secret, error) {
 	switch why.kind {
 	case stanceOperation:
+		// The fence first, before the unsealer is asked for anything: a read
+		// that cannot have its unlock answered must not raise the prompt at
+		// all, because a raised prompt is a person's attention already spent
+		// (unlock_fence.go).
+		if err := fencedUnlock(ctx); err != nil {
+			return Secret{}, err
+		}
 		if r.unsealer != nil {
 			if err := r.unsealer.EnsureUnsealed(ctx, why.reason); err != nil {
 				return Secret{}, err

@@ -182,6 +182,25 @@ The decision is amended:
   write — the split `endpoints.probe` already had, and the same reason PHASE
   TWO of `open` dials outside its domain gate.
 
+  **That bound the packages and not the handlers, and it took a second
+  occurrence to say so.** The architecture test binds `internal/capability`; it
+  cannot see a transport handler resolving through its OWN resolver from inside
+  `op.Run`, which is what `skills.audit` and the skill draft did — on code
+  written after this amendment, with the rule sitting in a comment two files
+  away (`nocx-9fzkk`). So the invariant is carried by the code now rather than
+  by this paragraph. The composition root DECLARES which gate the answer needs
+  (`capability.UnlockAnsweringGate`, wired onto the vault gate in
+  `transport.domainGates`); an operation composed from such a gate marks the
+  context it hands its callback; and an operation-stance resolve that sees the
+  mark answers `credential.ErrUnlockUnanswerable` **before** the prompt is
+  raised, so no attention is spent on a dialog nobody can answer.
+
+  The mark is deliberately not on every admission. `open`'s dial phase holds
+  the execution lane and no domain gate, and resolves a key passphrase inside
+  it legitimately. Whether enough lane permits can be held across one wait to
+  starve `vault.unseal` is a bound rather than an exclusion, and it is
+  `nocx-0dvf2`.
+
 - `agent.ask` creates the durable run, answers with its backend identity, then
   resolves endpoint material at the start of the stream task before the
   streaming transition or any model request. Unlock therefore waits and

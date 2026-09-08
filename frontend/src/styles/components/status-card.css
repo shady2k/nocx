@@ -89,6 +89,16 @@
   color: var(--color-text-dim);
 }
 
+/* VERBATIM TEXT KEEPS ITS SHAPE. A description carrying several paragraphs of
+   somebody else's writing — the skill audit's report — is presented as
+   written; collapsing its blank lines would be the component quietly
+   reformatting the thing it was asked to show. The measure widens with it,
+   because 60ch is a caption's measure and this is reading matter. */
+.ui-status-card[data-prose] .ui-status-card__desc {
+  white-space: pre-wrap;
+  max-width: 80ch;
+}
+
 .ui-status-card__action {
   flex: 0 0 auto;
   margin-left: auto;

@@ -28,6 +28,24 @@ playwright-report/
 # normal lint/typecheck runs, and must not be reformatted by prettier either.
 eslint-fixtures/
 
+# Agent-tooling scratch, the same class as .agents/ and .claude/ above: the
+# SDD brief/report workspace (written per worktree by the beads-superpowers
+# plugin, self-ignored by a generated .gitignore), the briefs a coordinator
+# hands a herdr worker, and repowise's index. All exist only on a machine
+# running those tools, so CI never sees them — but `prettier --check .` walks
+# the filesystem rather than the index, so they failed the ci-frontend job
+# locally while the same job was green on the runner, on files no human wrote
+# and nothing in the repo reads.
+#
+# These are named one directory at a time rather than as `.internal/` because
+# the rest of that tree is TRACKED PROSE — briefs, specs, plans, handoffs —
+# which prettier formats and should go on formatting. So the list grows by one
+# line each time a tool invents a new scratch directory, and `.internal/handoff/`
+# is the second (nocx-x4i5z).
+.internal/sdd/
+.internal/handoff/
+.repowise/
+
 # Память репозитория для cass-memory. Файл генерируется
 # scripts/bd-memories-to-cass.py из .internal/memories-export.jsonl, и
 # переформатировать его — значит поставить prettier против генератора: следующий

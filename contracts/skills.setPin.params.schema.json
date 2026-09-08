@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.setPin.params.schema.json",
+  "title": "SkillsSetPinParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "pin", "on"],
+  "properties": {
+    "name": { "type": "string" },
+    "pin": { "type": "string", "enum": ["keepEnabled", "keepUnchanged"] },
+    "on": { "type": "boolean" }
+  }
+}

@@ -1465,7 +1465,9 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     <Checkbox
                       label="I understand this will change authentication for affected connections"
                       checked={dangerConfirmed()}
-                      onChange={(v) => setDangerConfirmed(v)}
+                      onChange={(v) => {
+                        setDangerConfirmed(v)
+                      }}
                     />
                   </div>
                 </Show>

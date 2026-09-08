@@ -55,6 +55,25 @@ describe('StatusCard', () => {
     expect(document.querySelector('.ui-status-card__icon svg')).not.toBeNull()
   })
 
+  // VERBATIM TEXT KEEPS ITS SHAPE. `prose` exists for a description that is
+  // somebody else's multi-paragraph writing rather than one authored
+  // sentence — the skill audit's model-written report — and the defect it
+  // prevents is the component quietly reformatting the thing it was asked to
+  // present as written. The attribute is asserted rather than the computed
+  // style, because jsdom does not apply the stylesheet and the variance IS
+  // the attribute.
+  it('marks a description as verbatim prose so its blank lines survive', () => {
+    subject({ description: 'first\n\nsecond', prose: true })
+    const card = document.querySelector('.ui-status-card')!
+    expect(card.getAttribute('data-prose')).toBe('')
+    expect(document.querySelector('.ui-status-card__desc')?.textContent).toBe('first\n\nsecond')
+  })
+
+  it('carries no prose attribute by default, so an authored sentence is set as one', () => {
+    subject({ description: 'one sentence' })
+    expect(document.querySelector('.ui-status-card')!.hasAttribute('data-prose')).toBe(false)
+  })
+
   // The card exists to pair a state with the one thing to do about it. A card
   // whose action does not reach its handler announces a problem and offers a
   // remedy that does nothing — worse than announcing nothing.

@@ -1,0 +1,279 @@
+package skill
+
+// What an audit READS (design §7).
+//
+// An audit is asked for by the person, about a skill they already hold, and
+// produces a reading they act on themselves. This file owns the half of it
+// that is bytes: which files of the bundle go to the model, in what order,
+// under what budget, and what the static scan matched in each of them. The
+// model call is internal/assistant's; the sentence a person reads is the
+// surface's. Nothing here decides anything about the skill.
+//
+// WHY IT IS A FUNCTION HERE AND NOT A COMPOSITION IN THE TRANSPORT. The
+// transport can already reach Files and File, so it could have walked the
+// manifest and read each path itself. That would be a second answer to "what
+// is this skill made of" living beside Files' — they would agree on every
+// bundle anybody tried and disagree the first time a symlink, an unreadable
+// directory or the 256-file cap turned up, because only one of them would
+// have been taught about it. Files is the walk; this reuses it.
+//
+// THE BUDGET, and why it is reported rather than silently applied. A bundle
+// can be anything a person copied into the directory, and the whole of it
+// goes into a model's context if nothing bounds it — which is money, and on a
+// large enough directory is a call that fails rather than answers. So the
+// document is bounded, and every file that did not make it is NAMED with the
+// reason, because a report about a subset the reader cannot identify is worse
+// than no report: it reads exactly like a report about the whole thing.
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+// MaxAuditBytes bounds the composed document one audit sends to a model.
+//
+// The number is a cost bound, not a safety one. 128 KiB is roughly 30k tokens
+// of somebody else's prose in one call the person pressed a button for; the
+// bundles this feature was built for — a SKILL.md and a handful of
+// `references/` files — are one to two orders of magnitude under it, so the
+// cap refuses nothing anybody has actually published while putting a ceiling
+// on the directory somebody drops a vendored dependency tree into. Per FILE
+// the bound is MaxReadBytes, which is the same ceiling the person's own
+// viewer applies: a file the card will not show whole is not a file the
+// audit should describe whole either.
+const MaxAuditBytes = 128 << 10
+
+// AuditOmissionReason names why one file of a bundle is not in the document.
+// The set is closed and the wire declares it.
+//
+// It is NOT FileRefusal, though two of the three words are the same.
+// FileRefusal is a fact about one file asked for on its own — this is a PNG,
+// this is bigger than the budget — and a viewer states it beside that file's
+// own name. "The budget was already spent" is not a fact about the file at
+// all; it is a fact about the file's POSITION in a bundle, and the same file
+// asked for alone would be shown without complaint. Widening FileRefusal to
+// carry it would put a value in skills.file's closed union that skills.file
+// can never return, which is a contract that lies about its own range.
+type AuditOmissionReason string
+
+const (
+	// AuditOmittedTooLarge means the file alone is over MaxReadBytes.
+	AuditOmittedTooLarge AuditOmissionReason = "too-large"
+	// AuditOmittedNotText means the bytes are not UTF-8. They are named
+	// rather than transliterated: a report describing replacement runes
+	// would be describing something nobody wrote.
+	AuditOmittedNotText AuditOmissionReason = "not-text"
+	// AuditOmittedBudgetSpent means the document was already full when this
+	// file's turn came. Manifest order decides who is inside the budget, so
+	// this always falls on the tail of the list and never on SKILL.md.
+	AuditOmittedBudgetSpent AuditOmissionReason = "budget-spent"
+	// AuditOmittedUnreadable means the file is named by the manifest and
+	// could not be read now — it was deleted, or its permissions changed,
+	// between the walk and the read. Naming it keeps the manifest and the
+	// document reconcilable; dropping it silently would make the document
+	// look like the whole skill.
+	AuditOmittedUnreadable AuditOmissionReason = "unreadable"
+)
+
+// AuditOmission is one file the document does not carry, and why.
+type AuditOmission struct {
+	Path   string              `json:"path"`
+	Reason AuditOmissionReason `json:"reason"`
+}
+
+// AuditMaterial is one skill's bytes as an audit reads them: what was read,
+// what was left out, what the scan matched, and the single document those
+// bytes were composed into.
+//
+// It carries no judgement and no field a surface could count into one. Every
+// member is either a fact about the REQUEST (which skill, which root), a fact
+// about what was READ, or the scan's own output — and the scan is advisory by
+// construction (scan.go) and has been since before this feature existed.
+// AuditFile is one file of a bundle as it was read: its path, its bytes, and
+// what the static scan matched IN THOSE BYTES.
+//
+// It exists because a reading is made file by file — one model call per file,
+// then one over the notes — and that pass needs the split scanBundle already
+// had. The alternative was to hand it Document and let it split on the header
+// line, which is a second answer to "which bytes are which file": it would
+// agree with this one on every bundle anybody tried and disagree the first
+// time a file's own text contained the header, which is a line an attacker
+// writes on purpose.
+//
+// Text is the file's bytes and nothing of ours — no header, no fence. Whoever
+// frames it for a model owns the framing, and there is exactly one such
+// caller.
+type AuditFile struct {
+	Path     string    `json:"path"`
+	Text     string    `json:"-"`
+	Findings []Finding `json:"findings"`
+}
+
+type AuditMaterial struct {
+	// Name and Provenance are the skill as RESOLVED by root precedence, for
+	// FileResult's reason: a reader labels what it is describing rather than
+	// what was asked for, and the two differ exactly when two roots hold one
+	// name.
+	Name       string     `json:"name"`
+	Provenance Provenance `json:"provenance"`
+	// Read are the paths whose bytes are in Document, in manifest order.
+	Read []string `json:"read"`
+	// Omitted are the paths that are not, each with its reason. Never nil.
+	Omitted []AuditOmission `json:"omitted"`
+	// Findings are the scan's matches over EXACTLY the bytes in Document —
+	// a file that was omitted was not read, so it contributes none. Each
+	// names the file it matched in, because a line number counted through a
+	// document made of four files points at nothing a person can open; that
+	// path is a field of Finding itself (scan.go) rather than a wrapper this
+	// package puts round one, so the audit's findings and the preview's are
+	// the same shape. Never nil: no matches is [].
+	Findings []Finding `json:"findings"`
+	// Files are the bytes behind Read, in the same order: what the per-file
+	// pass is given, one call each. Not on the wire for Document's reason —
+	// the person reads the files through skills.file rather than through a
+	// second copy of them.
+	Files []AuditFile `json:"-"`
+	// Document is what a model is given. It is not on the wire — the person
+	// reads the files through skills.file, which is the same bytes without a
+	// second copy of them crossing the socket.
+	Document string `json:"-"`
+	// MaxBytes is the budget the composition was measured against, so the
+	// sentence about a cut can name the number that made it rather than
+	// keeping a second copy of it.
+	MaxBytes int `json:"maxBytes"`
+	// Digest is the hex sha256 over Document — the bytes a model was
+	// actually given, and nothing else.
+	//
+	// IT IS NOT Digests[name], AND THE DIFFERENCE IS LOAD-BEARING. That one
+	// answers "did the bytes move since the person approved them" and exists
+	// only for managed and installed (skill.go:45). This one answers "did the
+	// bytes move since the model read them", exists for every provenance that
+	// can be audited, and is computed HERE rather than by a walk of its own —
+	// a separate walk observes different bytes under an ordinary concurrent
+	// edit, and the two walks this package already has disagree about
+	// symlinks (discover.go:315 hashes the target; files.go:130 skips it), so
+	// a digest built on either would contradict status:changed on a real
+	// edit. Hashing what was sent cannot disagree with itself.
+	//
+	// A multi-file audit is a mixed-time snapshot — the files are read one
+	// after another — and this makes no larger claim than that: it is the
+	// digest of exactly those bytes, whenever each was read.
+	Digest string `json:"digest"`
+}
+
+// auditFileHeader marks where one file's bytes begin in the composed
+// document.
+//
+// It is a LABEL and not a boundary. A skill can write this exact line into
+// its own text and make the document look as though a fifth file started
+// there; nothing here can stop that, and the audit does not depend on it
+// being unforgeable — the report is prose a person reads next to the file
+// list, not a parse. Saying so here is the point: the alternative considered
+// was a random per-call delimiter, which would buy the appearance of a
+// boundary in a place where the real defence is that the model is told it is
+// reading a document and the result changes nothing.
+func auditFileHeader(path string) string {
+	return "----- file: " + path + " -----\n"
+}
+
+// scanBundle reads every path in a skill's manifest, in manifest order, and
+// bounds the reading exactly the way Audit always has: MaxReadBytes per
+// file, MaxAuditBytes for the composed whole. It is the ONE loop that reads
+// a bundle's bytes off disk to learn what the static scan makes of them —
+// Audit needs the concatenated Document for a model call and ScanSkill
+// (scan_skill.go) needs only which paths were skipped and what matched, but
+// both ask the same question of the same bytes under the same budget, and a
+// second loop answering it would be the AD-8 defect: it would agree with
+// this one on every bundle anybody tried and disagree the day a symlink, a
+// huge file or the 128 KiB cap fell on a different file in the two counts.
+//
+// It is a package function rather than a method so it never has to resolve
+// a skill of its own — every caller has already done that through locate,
+// which is the one answer to root precedence and containment.
+func scanBundle(root Root, entry string, paths []string) (read []string, omitted []AuditOmission, findings []Finding, files []AuditFile, document string) {
+	read = []string{}
+	omitted = []AuditOmission{}
+	findings = []Finding{}
+	files = []AuditFile{}
+	var doc strings.Builder
+	for _, path := range paths {
+		// One byte past the per-file budget, file.go's trick: it settles "is
+		// this over" for a directory root and the embedded one at once, and
+		// costs one byte.
+		data, readErr := readRootFile(root, entry, path, MaxReadBytes+1)
+		switch {
+		case readErr != nil:
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedUnreadable})
+			continue
+		case len(data) > MaxReadBytes:
+			// Asked before the text check for file.go's reason: an over-long
+			// file is over-long whatever its bytes decode to, and reporting a
+			// 40 MiB archive as "not text" names the less useful of two true
+			// facts.
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedTooLarge})
+			continue
+		case !utf8.Valid(data):
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedNotText})
+			continue
+		}
+		header := auditFileHeader(path)
+		if doc.Len()+len(header)+len(data)+1 > MaxAuditBytes {
+			omitted = append(omitted, AuditOmission{Path: path, Reason: AuditOmittedBudgetSpent})
+			continue
+		}
+		doc.WriteString(header)
+		doc.Write(data)
+		doc.WriteByte('\n')
+		read = append(read, path)
+		// ONE Scan per file, and both views share its result: the bundle's
+		// list is the concatenation of the per-file ones, so the two cannot
+		// disagree about what matched.
+		matched := Scan(path, data)
+		findings = append(findings, matched...)
+		files = append(files, AuditFile{Path: path, Text: string(data), Findings: matched})
+	}
+	return read, omitted, findings, files, doc.String()
+}
+
+// Audit composes one skill's bundle for a reading. It answers for ANY
+// provenance and for a skill that is switched OFF, because a skill that is
+// off is precisely the one this exists for: design §8 lands an installed
+// skill inert so the person can look at it, and an audit that refused an off
+// skill would make the look it exists for impossible.
+//
+// A skill no root holds is an ERROR and not an empty document, for file.go's
+// reason: there is nothing to describe, so every field of a result would be
+// an invention — and an empty report reads exactly like a clean one.
+func Audit(roots []Root, name string) (AuditMaterial, error) {
+	manifest, err := Files(roots, name)
+	if err != nil {
+		return AuditMaterial{}, err
+	}
+	// Resolution happened inside Files; this second locate is the handle on
+	// the same skill's root and entry, which is what the reads are joined
+	// onto. It cannot disagree with the first — both go through locate, and
+	// locate is the one answer to root precedence and containment.
+	at, err := locate(roots, name, "", true)
+	if err != nil {
+		return AuditMaterial{}, err
+	}
+
+	out := AuditMaterial{
+		Name:       manifest.Name,
+		Provenance: manifest.Provenance,
+		MaxBytes:   MaxAuditBytes,
+	}
+	out.Read, out.Omitted, out.Findings, out.Files, out.Document = scanBundle(at.skill.root, at.entry, manifest.Files)
+	if len(out.Read) == 0 {
+		// Every file was refused, which for a discovered skill means SKILL.md
+		// itself could not be read — the file discovery just parsed. There is
+		// no document, so there is nothing to send and nothing to describe.
+		return AuditMaterial{}, fmt.Errorf("skill %q: none of its files could be read", manifest.Name)
+	}
+	sum := sha256.Sum256([]byte(out.Document))
+	out.Digest = hex.EncodeToString(sum[:])
+	return out, nil
+}

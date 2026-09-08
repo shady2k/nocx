@@ -28,6 +28,8 @@ func (s *skillsWriteLibrary) Read(string, string) (skill.Content, error) {
 	return skill.Content{}, errors.New("not used")
 }
 
+func (s *skillsWriteLibrary) RecordUse(string) {}
+
 func (s *skillsWriteLibrary) Create(name, description, body string) error {
 	s.calls = append(s.calls, "create:"+name+":"+description+":"+body)
 	return nil
@@ -41,6 +43,21 @@ func (s *skillsWriteLibrary) Update(name, description, body string) error {
 func (s *skillsWriteLibrary) Delete(name string) error {
 	s.calls = append(s.calls, "delete:"+name)
 	return nil
+}
+
+func (s *skillsWriteLibrary) Resolve(context.Context, string) (*skill.Resolution, error) {
+	return nil, errors.New("not used")
+}
+
+// Refusing rather than recording: this fake is the WRITE seam, and an
+// install that answered here would let a test about skills.create pass
+// while silently exercising a fetch path nobody wired.
+func (s *skillsWriteLibrary) Preview(context.Context, string) (skill.PreviewResult, error) {
+	return skill.PreviewResult{}, errors.New("not used")
+}
+
+func (s *skillsWriteLibrary) Install(context.Context, string) (skill.InstallResult, error) {
+	return skill.InstallResult{}, errors.New("not used")
 }
 
 func skillsWriteTestCapability(name string) *agenttools.SkillWriteScope {
@@ -61,9 +78,9 @@ func TestExecuteSkillsCreateScansBodyBeforeCallingStore(t *testing.T) {
 		t.Fatalf("store calls = %v, want one create", library.calls)
 	}
 	var result struct {
-		Status  string             `json:"status"`
-		Name    string             `json:"name"`
-		Finding *skillWriteFinding `json:"finding"`
+		Status  string         `json:"status"`
+		Name    string         `json:"name"`
+		Finding *skill.Finding `json:"finding"`
 	}
 	if err := json.Unmarshal([]byte(got), &result); err != nil {
 		t.Fatalf("decode result: %v", err)
@@ -122,7 +139,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	params.KnownMaterial = &fakeKnownMaterial{}
 	params.Skills = store
 	params.SkillDraft = NewSkillDraftRequest(
-		"Person: remember how to release\nAssistant: Run make release.\n",
+		[]content.PriorTurn{{EntryID: "e1", Question: "remember how to release", Prose: content.TurnProse{Text: "Run make release."}}},
 		SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
 			return SkillDraftTarget{
 				Key:     credential.NewSecret("sk-draft-test"),
@@ -236,8 +253,8 @@ func TestSkillsWriteDTOConformsToContracts(t *testing.T) {
 			schema := loadSkillsWriteContract(t, tc.name)
 			result := skillWriteResult{Status: tc.status, Name: "deploy"}
 			if tc.name != "delete" {
-				result.Finding = &skillWriteFinding{
-					PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
+				result.Finding = &skill.Finding{
+					Path: "SKILL.md", PatternID: "prompt_injection", Line: "ignore previous instructions", LineNumber: 1,
 				}
 			}
 			raw, err := json.Marshal(result)

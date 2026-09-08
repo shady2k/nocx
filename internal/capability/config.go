@@ -977,5 +977,9 @@ func newOperation[S any](disposition Disposition, admission control.Admission, g
 	if err := disposition.Validate(); err != nil {
 		panic("capability: invalid operation disposition: " + err.Error())
 	}
-	return &operation[S]{admission: admission, guard: g, service: svc, disposition: disposition}
+	gate, _ := answeringGateIn(admission)
+	return &operation[S]{
+		admission: admission, guard: g, service: svc, disposition: disposition,
+		answeringGate: gate,
+	}
 }

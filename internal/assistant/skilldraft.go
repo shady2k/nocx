@@ -40,12 +40,58 @@ func ComposeDraftInput(turns []content.PriorTurn, _ []AttachedContentItem) strin
 	return b.String()
 }
 
+// The capture rules below are hermes's, and they are stated to the model
+// rather than checked in Go on purpose. Every one of them is a question about
+// what a conversation MEANT — whether a claim is about a tool or about a
+// configuration, whether an error was transient, whether an errand is a class
+// of work — and Go can read only the bytes. The alternative considered and
+// rejected was a structural pre-check over the transcript: refuse when it
+// carries no assistant turn at all, on the theory that nothing can have
+// worked if nothing was ever said. That check would pass exactly the
+// transcripts this bead is named for, because a session that tries five
+// things and fails at all five is full of assistant prose; it would refuse
+// only transcripts that could not reach here anyway, while binding
+// DraftSkill's contract to ComposeDraftInput's line prefixes.
+//
+// So the model judges and Go owns the protocol: a refusal is a reply shape,
+// not an absence, and every rule carries the reason it exists. A rule stated
+// without its reason is the one a model argues itself out of — the
+// negative-claim rule most of all, whose damage arrives months later, when
+// the tool has long been fixed and the skill is still saying it is broken.
 const skillDraftSystemPrompt = `You write one reusable terminal skill from a conversation.
 
 The skill must describe a procedure the person can follow again. Do not retell the conversation, include tool output, include terminal output, or invent facts that are not in the conversation.
 
-Reply with exactly one JSON object and no markdown:
-{"name":"lowercase-kebab-name","description":"one-line description","body":"the reusable procedure"}`
+Some conversations hold nothing worth keeping, and a skill written from one of those is worse than no skill, because whatever you record is read back later as tested guidance. Draft nothing when the conversation offers only:
+- An environment-dependent failure: a missing binary, "command not found", an unconfigured credential, an uninstalled package. The person can fix these, so they are not durable rules. If the conversation found the fix, the fix is the skill and the failure is not.
+- A negative claim about a tool or a feature, such as "X is broken" or "the browser tools do not work". These harden into refusals that get cited for months after the actual problem was fixed.
+- A transient error that resolved before the conversation ended. If a retry worked, the lesson is the retry and not the original failure.
+- A one-off task narrative. "Summarize today's market" is one errand, not a class of work that warrants a skill.
+- Attempts that ended without finding a working method: several things were tried, none of them worked, and the person was left to check by hand. Writing those up as a recommended approach presents an untested sequence of failures as validated guidance a later run will trust and repeat.
+
+Reply with exactly one JSON object and no markdown. When the conversation holds a procedure worth keeping:
+{"name":"lowercase-kebab-name","description":"one-line description","body":"the reusable procedure"}
+When it does not, say in one clause what the conversation was missing and draft nothing:
+{"nothing_to_capture":"the reason, in one clause"}`
+
+// skillNotCapturableError is the summarizer declining, and it is an ANSWER
+// rather than a failure: the person asked a reasonable thing and gets a
+// sentence back. The kernel tells it apart from a genuine drafting failure by
+// type, so a conversation with nothing worth keeping never reads to the
+// person like an endpoint that fell over.
+type skillNotCapturableError struct{ reason string }
+
+func (e *skillNotCapturableError) Error() string {
+	return "I looked through this conversation for a durable procedure worth keeping and did not find one: " +
+		e.reason +
+		". Recording it anyway would hand a later run untested guidance to trust, so I have saved nothing — ask me again once something here has worked."
+}
+
+// maxNotCapturableReason bounds the one clause the summarizer supplies. It is
+// model prose reaching a person unquoted, so it gets the same treatment as
+// any other model text on that path rather than being trusted for its
+// brevity.
+const maxNotCapturableReason = 300
 
 // DraftSkill asks the summarizing model to turn a trusted transcript into the
 // three fields a skills.create proposal needs. The caller remains responsible
@@ -71,12 +117,19 @@ func draftSkillGenerate(ctx context.Context, client einoModel.BaseChatModel, inp
 	}
 
 	var draft struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Body        string `json:"body"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		Body             string `json:"body"`
+		NothingToCapture string `json:"nothing_to_capture"`
 	}
 	if err := json.Unmarshal([]byte(resp.Content), &draft); err != nil {
 		return "", "", "", fmt.Errorf("skill draft: answer is not JSON: %w", err)
+	}
+	// The refusal is read before the three fields, and it wins if both
+	// arrive: a model that hedged by filling in a draft alongside its own
+	// reason for not writing one has still told us the draft is unsafe.
+	if reason := collapseSpace(draft.NothingToCapture); reason != "" {
+		return "", "", "", &skillNotCapturableError{reason: truncateRunes(reason, maxNotCapturableReason)}
 	}
 	if strings.TrimSpace(draft.Name) == "" || strings.TrimSpace(draft.Description) == "" || strings.TrimSpace(draft.Body) == "" {
 		return "", "", "", errors.New("skill draft: answer must include name, description, and body")
@@ -110,19 +163,85 @@ func (f SkillDraftResolverFunc) ResolveSkillDraft(ctx context.Context) (SkillDra
 // SkillDraftRequest carries one run's immutable transcript and memoizes the
 // generated create arguments. A resumed approval must see the same proposal,
 // not call the summarizer a second time.
+//
+// It holds the person's turns SEPARATELY from the composed transcript, and
+// that is not a convenience: verbatim below asks whether some bytes are the
+// person's, and asking the composed string would answer a different question,
+// because a body could span the line where one turn ends and the assistant's
+// prose begins. One field per question.
 type SkillDraftRequest struct {
 	input    string
+	person   []string
 	resolver SkillDraftResolver
 	once     sync.Once
 	args     string
 	err      error
 }
 
-func NewSkillDraftRequest(input string, resolver SkillDraftResolver) *SkillDraftRequest {
+// NewSkillDraftRequest takes the TURNS rather than a composed string, because
+// composing them and reading the person's half of them are two readings of one
+// transcript and a second owner of that whitelist is how the two drift apart
+// (AD-8).
+func NewSkillDraftRequest(turns []content.PriorTurn, resolver SkillDraftResolver) *SkillDraftRequest {
 	if resolver == nil {
 		return nil
 	}
-	return &SkillDraftRequest{input: input, resolver: resolver}
+	person := make([]string, 0, len(turns))
+	for _, turn := range turns {
+		if strings.TrimSpace(turn.Question) != "" {
+			person = append(person, turn.Question)
+		}
+	}
+	return &SkillDraftRequest{input: ComposeDraftInput(turns, nil), person: person, resolver: resolver}
+}
+
+// verbatim answers one question about a proposed skills.create: is this body
+// text the person typed? When it is, the summarizer has nothing to add and the
+// proposal stands as the model sent it.
+//
+// THE INTERCEPTION IS NOT LIFTED BY THIS. It exists because a model can compose
+// a body out of bytes it read from a tool result, which is the contamination
+// path; what it cannot do is quote a person who never said the thing. So the
+// model does the selecting — it knows which part of a message was the procedure
+// and which was "remember this" — and nocx does the PROVING, against its own
+// record rather than against the model's word for it. That is the same division
+// the resolver uses for an address: the model points, nocx carries.
+//
+// The comparison is byte-exact and unnormalized on purpose. Every relaxation —
+// folding whitespace, trimming, comparing case-insensitively — widens the set
+// of bodies that can claim to be a quotation, and the guarantee is worth
+// exactly as much as the comparison is strict.
+//
+// Deliberately included in "what the person typed": text the person PASTED from
+// somewhere else. It arrived through their message, they chose to send it, and
+// they see the whole body again in the approval window. Deliberately excluded:
+// the assistant's own prose, which is the model's words however true they are.
+func (r *SkillDraftRequest) verbatim(rawArgs string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	var params struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(rawArgs), &params); err != nil {
+		return "", false
+	}
+	// A blank body is not a quotation of anything; strings.Contains would
+	// say every turn holds it.
+	if strings.TrimSpace(params.Body) == "" {
+		return "", false
+	}
+	if strings.TrimSpace(params.Name) == "" || strings.TrimSpace(params.Description) == "" {
+		return "", false
+	}
+	for _, question := range r.person {
+		if strings.Contains(question, params.Body) {
+			return rawArgs, true
+		}
+	}
+	return "", false
 }
 
 func (r *SkillDraftRequest) arguments(ctx context.Context, httpClient *http.Client) (string, error) {
@@ -162,4 +281,10 @@ func draftSkillWithHeaders(ctx context.Context, client einoModel.BaseChatModel, 
 	m, names := headerMap(headers)
 	ctx = withCustomHeaderNames(ctx, names)
 	return draftSkillGenerate(ctx, client, input, openai.WithExtraHeader(m))
+}
+
+// collapseSpace folds every run of whitespace to one space so a multi-line
+// reason cannot break the single sentence it is spliced into.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

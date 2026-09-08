@@ -35,6 +35,10 @@ html {
      than a set of boxes sized by whatever text each happens to hold. Wide
      enough for a seven-digit value beside its unit (2097152 MiB). */
   --control-width-number: 132px;
+  /* The switch's track. One width, declared once, because two places need the
+     same number: the switch itself and the row state cell that holds a column
+     of them open even on a row that has no switch (record-row.css). */
+  --control-width-switch: 34px;
   --control-radius-sm: 4px;
   --control-radius-md: 6px;
   --control-radius-lg: 8px;

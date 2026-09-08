@@ -43,7 +43,7 @@ func TestExecuteFetchURLWindowsAStableDocumentWithoutRefetching(t *testing.T) {
 		Text:        "0123456789abcdef",
 	}}
 	seams := toolSeams{fetcher: fetcher, snapshots: newRunSnapshots(), runID: "run-1"}
-	scope := &agenttools.URLScope{URLs: []string{"https://example.test/page"}}
+	scope := endpointCapability("https://example.test")
 
 	first, err := executeFetchURL(fetchWindowTestContext(), scope, json.RawMessage(`{"url":"https://example.test/page"}`), seams)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestExecuteFetchURLDoesNotSplitAMultibyteRuneAtTheWindowBoundary(t *testing
 	fetcher := &countingTextFetcher{doc: apifetch.TextDocument{Text: "1234567🙂tail"}}
 	seams := toolSeams{fetcher: fetcher, snapshots: newRunSnapshots(), runID: "run-rune"}
 	bound := withToolBound(context.Background(), agenttools.ResultBound{MaxBytes: 10, Truncation: agenttools.TruncationDropTail})
-	out, err := executeFetchURL(bound, &agenttools.URLScope{URLs: []string{"https://example.test/rune"}}, json.RawMessage(`{"url":"https://example.test/rune"}`), seams)
+	out, err := executeFetchURL(bound, endpointCapability("https://example.test"), json.RawMessage(`{"url":"https://example.test/rune"}`), seams)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestExecuteFetchURLDoesNotSplitAMultibyteRuneAtTheWindowBoundary(t *testing
 func TestExecuteFetchURLRefusesExpiredRevisionWithoutRefetching(t *testing.T) {
 	fetcher := &countingTextFetcher{doc: apifetch.TextDocument{Text: "ordinary"}}
 	seams := toolSeams{fetcher: fetcher, snapshots: newRunSnapshots(), runID: "run-expired"}
-	scope := &agenttools.URLScope{URLs: []string{"https://example.test/page"}}
+	scope := endpointCapability("https://example.test")
 	args := json.RawMessage(`{"url":"https://example.test/page","revision":"expired","start":0}`)
 	_, err := executeFetchURL(fetchWindowTestContext(), scope, args, seams)
 	if err == nil || !strings.Contains(err.Error(), "restart with start 0 and no revision") {
@@ -148,7 +148,7 @@ func TestRunSnapshotsDiscardAndRejectsOversizeDocuments(t *testing.T) {
 func TestExecuteFetchURLReportsByteAccountingForEachWindow(t *testing.T) {
 	fetcher := &countingTextFetcher{doc: apifetch.TextDocument{Text: "0123456789abcdef"}}
 	seams := toolSeams{fetcher: fetcher, snapshots: newRunSnapshots(), runID: "run-accounting"}
-	scope := &agenttools.URLScope{URLs: []string{"https://example.test/page"}}
+	scope := endpointCapability("https://example.test")
 	out, err := executeFetchURL(fetchWindowTestContext(), scope, json.RawMessage(`{"url":"https://example.test/page"}`), seams)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
@@ -164,7 +164,7 @@ func TestExecuteFetchURLHandlesStartBounds(t *testing.T) {
 	fetcher := &countingTextFetcher{doc: apifetch.TextDocument{Text: "ordinary"}}
 	store := newRunSnapshots()
 	seams := toolSeams{fetcher: fetcher, snapshots: store, runID: "run-bounds"}
-	scope := &agenttools.URLScope{URLs: []string{"https://example.test/page"}}
+	scope := endpointCapability("https://example.test")
 	first, err := executeFetchURL(fetchWindowTestContext(), scope, json.RawMessage(`{"url":"https://example.test/page"}`), seams)
 	if err != nil {
 		t.Fatalf("seed fetch: %v", err)

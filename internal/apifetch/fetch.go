@@ -96,6 +96,18 @@ type Fetcher interface {
 type TextRequest struct {
 	URL      string
 	MaxBytes int64
+	// SameOriginOnly refuses the exchange if any redirect leaves the origin
+	// the URL named, rather than following it with the credentials stripped.
+	//
+	// It is a request field and not this package's default because the two
+	// callers want opposite things. A person pasting an address wants a
+	// vanity host to redirect them to wherever the document actually lives;
+	// a caller that RESOLVES relative paths against that address — the skill
+	// bundle (internal/skill/bundle.go) — is asking for bytes from one
+	// origin, and a hop to another silently answers a different question.
+	// The rule itself lives in httppolicy, which owns what a redirect may
+	// do, so this field only says which requests it applies to.
+	SameOriginOnly bool
 }
 
 // TextDocument is the complete decoded document acquired by the fetch seam.
@@ -166,6 +178,9 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, route apicoll.Route) 
 func (c *Client) FetchText(ctx context.Context, request TextRequest) (TextDocument, error) {
 	if request.MaxBytes <= 0 {
 		return TextDocument{}, fmt.Errorf("%s: text ceiling must be positive", component)
+	}
+	if request.SameOriginOnly {
+		ctx = httppolicy.WithSameOriginOnly(ctx)
 	}
 	resp, u, err := c.get(ctx, request.URL, apicoll.Route{Kind: apicoll.RouteDirect})
 	if err != nil {

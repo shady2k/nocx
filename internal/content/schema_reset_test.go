@@ -73,6 +73,53 @@ func rawUserVersion(t *testing.T, path string) int {
 	return v
 }
 
+// pinTemporarily installs a temporary entry in schemaShapeDigests and
+// historicalSchemaObjectNames for version, computed from ddl, and removes
+// both via t.Cleanup when the test ends. Two tests need to simulate a
+// version being correctly pinned without leaving a second,
+// silently-permanent entry in the real maps —
+// TestAChangedSchemaPassesWhenANewFinalRungCarriesIt (pinning schemaVersion
+// itself, standing in for what a real bump must also do in the same commit)
+// and TestTheFloorMovesWithTheLadderRatherThanBeingAConstant (pinning a
+// synthetic schema 13 rung, which is not a version the shipped ladder
+// actually supports migrating from) — and a third caller is expected the
+// next time schemaVersion bumps and needs the same simulation for whatever
+// version that bump dethrones.
+//
+// It refuses loudly if version is already pinned, rather than overwriting
+// it: a leaked pin from a test whose cleanup did not run would otherwise be
+// silently reused by the next caller, and the failure that should have been
+// visible in the leaking test would show up nowhere at all — the same
+// protection TestALadderThatDethronesAnUnpinnedVersionIsRefused already
+// gives itself by checking the map is empty before it starts.
+//
+// SAFE ONLY WHILE THIS PACKAGE STAYS SERIAL. schemaShapeDigests and
+// historicalSchemaObjectNames are package-level maps with no lock, and this
+// mutates them for the duration of one test; that is correct only because
+// nothing in internal/content calls t.Parallel(). The day something does,
+// this helper needs its own copy-on-write scheme or a mutex — whoever adds
+// t.Parallel() here should find that out from this comment, not from a
+// flake in a test that never touches this file.
+func pinTemporarily(t *testing.T, version int, ddl string) {
+	t.Helper()
+	if _, ok := schemaShapeDigests[version]; ok {
+		t.Fatalf("schemaShapeDigests[%d] is already pinned; a previous test's cleanup did not run, or two tests are pinning the same version", version)
+	}
+	if _, ok := historicalSchemaObjectNames[version]; ok {
+		t.Fatalf("historicalSchemaObjectNames[%d] is already pinned; a previous test's cleanup did not run, or two tests are pinning the same version", version)
+	}
+	digest, objects, err := shapeOfDDL(context.Background(), ddl)
+	if err != nil {
+		t.Fatalf("compute schema %d's shape: %v", version, err)
+	}
+	schemaShapeDigests[version] = digest
+	historicalSchemaObjectNames[version] = objects
+	t.Cleanup(func() {
+		delete(schemaShapeDigests, version)
+		delete(historicalSchemaObjectNames, version)
+	})
+}
+
 func openStore(t *testing.T, path string) ContentDB {
 	t.Helper()
 	db, err := Open(context.Background(), Config{

@@ -3,7 +3,6 @@ package assistant
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,10 +46,10 @@ func TestWireTap_LogsOneStructuralOfferPerRun(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("log = %q: %v", logs.String(), err)
-	}
+	// The offer line is SELECTED rather than assumed to be the only one: every
+	// provider exchange now brackets itself with a started/answered pair
+	// (nocx-8byie), so the buffer holds several records.
+	record := lineWithMsg(t, logs.Bytes(), "agent ask: tools offered")
 	if record["msg"] != "agent ask: tools offered" {
 		t.Fatalf("message = %v, want structural offer", record["msg"])
 	}
@@ -109,10 +108,10 @@ func TestClientAsk_TagsToolOfferOnModelRequest(t *testing.T) {
 	if err := cl.Ask(WithWireToolOfferState(context.Background(), p.RunID, p.Grant, NewWireToolOfferState()), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("log = %q: %v", logs.String(), err)
-	}
+	// The offer line is SELECTED rather than assumed to be the only one: every
+	// provider exchange now brackets itself with a started/answered pair
+	// (nocx-8byie), so the buffer holds several records.
+	record := lineWithMsg(t, logs.Bytes(), "agent ask: tools offered")
 	if record["run"] != "run-7" {
 		t.Fatalf("offer record = %v, want run-7", record)
 	}
@@ -185,15 +184,20 @@ func TestWireTap_LogsOfferOncePerRun(t *testing.T) {
 		_, _ = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("offer log lines = %d, want one for each run: %s", len(lines), logs.String())
+	// The OFFER lines, picked out of the provider-call pairs each exchange now
+	// writes around them (nocx-8byie). The count is still exact: one offer per
+	// run, however many calls that run made.
+	offers := []map[string]any{}
+	for _, record := range logLines(t, logs.Bytes()) {
+		if record["msg"] == "agent ask: tools offered" {
+			offers = append(offers, record)
+		}
+	}
+	if len(offers) != 2 {
+		t.Fatalf("offer log lines = %d, want one for each run: %s", len(offers), logs.String())
 	}
 	for i, want := range []string{"run-7", "run-8"} {
-		var record map[string]any
-		if err := json.Unmarshal([]byte(lines[i]), &record); err != nil {
-			t.Fatalf("line %d: %v", i, err)
-		}
+		record := offers[i]
 		if record["run"] != want {
 			t.Fatalf("line %d run = %v, want %s", i, record["run"], want)
 		}
@@ -222,10 +226,10 @@ func TestWireTap_LogsEmptyStructuralOffer(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("log = %q: %v", logs.String(), err)
-	}
+	// The offer line is SELECTED rather than assumed to be the only one: every
+	// provider exchange now brackets itself with a started/answered pair
+	// (nocx-8byie), so the buffer holds several records.
+	record := lineWithMsg(t, logs.Bytes(), "agent ask: tools offered")
 	if record["msg"] != "agent ask: tools offered" || record["count"] != float64(0) {
 		t.Fatalf("offer record = %v, want empty structural offer", record)
 	}

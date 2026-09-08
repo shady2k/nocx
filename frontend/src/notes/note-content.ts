@@ -12,8 +12,8 @@
  * below: between an edit and the save landing, the text exists in exactly
  * ONE place, and the tab says so.
  */
-import { EditableHost } from '../cm-host'
-import { markdownLanguage, viewerHighlighting } from '../file-viewer/language-registry'
+import { EditableHost } from '../ui/cm-host'
+import { markdownLanguage, viewerHighlighting } from '../ui/document-language'
 import { BasePaneContent, type PaneHost } from '../pane-content'
 import { log } from '../log'
 import { showToast } from '../ui/toast'

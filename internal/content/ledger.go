@@ -627,9 +627,17 @@ type FinishAgentRun struct {
 // the durable record persists kind and id as columns, not JSON. ValidateGrantScope
 // and GrantScope.Contains define the canonical ids and containment relation
 // consumed by policy and capability narrowing.
+//
+// IncludeSubdomains is meaningful for ResourceDestination alone, and it is a
+// field rather than a spelling inside ID because "everything on github.com"
+// and "github.com itself" are two grants over ONE id — encoding the marker
+// in the string would make the id ambiguous exactly where it is compared
+// (design §5.4). ValidateGrantScope refuses it on an IP literal and on the
+// universal "*", both of which already answer the question it asks.
 type GrantScope struct {
-	Kind ResourceKind `json:"kind"`
-	ID   string       `json:"id"`
+	Kind              ResourceKind `json:"kind"`
+	ID                string       `json:"id"`
+	IncludeSubdomains bool         `json:"includeSubdomains,omitempty"`
 }
 
 // ── the assistant ask (design §5, §7; bead nocx-f4s5) ────────────────────

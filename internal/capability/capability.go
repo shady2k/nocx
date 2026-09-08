@@ -100,6 +100,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -145,6 +146,48 @@ var CanonicalOrder = []string{GateConfig, GateVault, GateContent, GateSession, G
 // (tests) and are deliberately generous.
 func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
 	return control.NewWaitingSemaphore(domain, capacity, maxQueue, waitTimeout)
+}
+
+// UnlockAnsweringGate is Gate for a domain whose gate THE ANSWER TO A VAULT
+// UNLOCK must itself acquire, and the declaration is the whole of it: an
+// operation composed from such a gate marks its callback's context, and an
+// operation-stance credential read that sees the mark fails rather than
+// waiting for a dialog nobody can satisfy (credential/unlock_fence.go).
+//
+// Today that is exactly one gate — the vault's, because vault.unseal runs
+// under it (transport.vaultSpecs) — and the composition root says so rather
+// than this package inferring it from the domain name, which is metrics-only
+// (AD-8). Two handlers have already raised an unanswerable unlock by holding
+// this gate across a resolve (nocx-o3606, nocx-9fzkk); the mark is what stops
+// the third.
+//
+// It is deliberately NOT applied to the execution lane, which vault.unseal
+// also acquires. The lane has capacity for several holders and the ssh dial
+// legitimately resolves a key passphrase while holding one (openOperation's
+// Dial phase, which holds no domain gate at all). Whether enough lane permits
+// can be held across one wait to starve the unseal is a bound, not an
+// exclusion, and it is nocx-0dvf2.
+func UnlockAnsweringGate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
+	return unlockAnsweringGate{Admission: Gate(domain, capacity, maxQueue, waitTimeout)}
+}
+
+// unlockAnsweringGate is the marker wrapper. It is a type rather than a flag
+// on the admission so the declaration travels with the gate through every
+// composite it is put into, and so only this package can make one.
+type unlockAnsweringGate struct {
+	control.Admission
+}
+
+// answeringGateIn reports the name of the unlock-answering gate inside a
+// (possibly composite) admission, if there is one. Asked once per operation,
+// at construction.
+func answeringGateIn(a control.Admission) (string, bool) {
+	for _, part := range control.Parts(a) {
+		if g, ok := part.(unlockAnsweringGate); ok {
+			return g.Name(), true
+		}
+	}
+	return "", false
 }
 
 // ErrOperationInactive is returned by a domain service method called
@@ -228,6 +271,11 @@ type operation[S any] struct {
 	guard       *guard
 	service     S
 	disposition Disposition
+	// answeringGate is the name of the unlock-answering gate this
+	// operation's admission holds, empty when it holds none. Computed once
+	// by newOperation, because the answer cannot change for the life of the
+	// operation and Run must not walk a composite per call.
+	answeringGate string
 }
 
 // Disposition returns the operation's explicit assistant projection contract.
@@ -250,5 +298,17 @@ func (op *operation[S]) Run(ctx context.Context, fn func(context.Context, S) err
 	defer permit.Release()
 	defer op.guard.end()
 	op.guard.begin()
+	// THE CALLBACK'S CONTEXT SAYS WHAT IT IS INSIDE. An operation-stance
+	// credential read waits for a person to answer the vault's unlock, and
+	// the answer is a vault.unseal that needs this very gate; a read from in
+	// here would show somebody a dialog and then refuse their Unlock. The
+	// mark makes that a loud, immediate failure of the one request instead
+	// (credential/unlock_fence.go). It is set only when the operation
+	// actually holds such a gate, so the callbacks that legitimately resolve
+	// material — the ssh dial holds the lane and no domain gate — are
+	// untouched.
+	if op.answeringGate != "" {
+		ctx = credential.WithUnlockAnswerGate(ctx, op.answeringGate)
+	}
 	return fn(ctx, op.service)
 }

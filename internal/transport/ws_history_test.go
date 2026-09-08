@@ -44,6 +44,11 @@ func (f *fakeHistoryDB) SessionOutput() content.SessionOutputRepository { return
 // reconcile and no reconciler to hand out.
 func (f *fakeHistoryDB) Reconcile() content.SessionReconciler { return nil }
 
+// SkillChecks is a forced arm: content.ContentDB grew this method
+// (nocx-e5f55, internal/content) and every hand-written fake implementing
+// the interface must still compile. Unused by these tests.
+func (f *fakeHistoryDB) SkillChecks() content.SkillCheckRepository { return nil }
+
 // RecordCompleted keeps no row: this fake is the STORE-FAILURE arm of the
 // write path (TestHistoryRecord_StoreErrorIsRPCError). The fake that actually
 // stores what it is handed is fakeRecordHistoryDB.

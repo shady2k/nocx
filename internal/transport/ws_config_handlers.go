@@ -2434,16 +2434,57 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.list", noParams(), func(r Responder) handlerFunc {
-			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			// checks and log are the only fields this registration sets that
+			// the other skills.* registrations below do not: every other
+			// method here never reads a stored check, so it never needs
+			// somewhere to report one it could not read.
+			h := skillSettingsHandlers{source: skillSource, checks: s.skillChecks, log: s.log, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "skills.setEnabled", params(validateSkillSetEnabledRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		regResponder(configSub, "skills.setPin", params(validateSkillSetPinRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
 		regResponder(configSub, "skills.remove", params(validateSkillRemoveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.file", params(validateSkillFileRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.files", params(validateSkillFilesRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.scan", params(validateSkillScanRaw), func(r Responder) handlerFunc {
+			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "skills.audit", params(validateSkillAuditRaw), func(r Responder) handlerFunc {
+			// The one method here that spends money, so it is the one that
+			// needs a model as well as the library: the skills source for
+			// the bytes, the config operation and the vault for the role
+			// and its credential, and the engine for the call.
+			h := skillAuditHandlers{
+				source: skillSource, engine: s.assistantClient,
+				configOp: configOp, credentials: s.credentialResolver(),
+				checks: s.skillChecks, settings: s.settings,
+				log: s.log, wired: skillWired && s.assistantClient != nil, r: r,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
+		regResponder(configSub, "skills.check", params(validateSkillCheckRaw), func(r Responder) handlerFunc {
+			// Spends nothing: no configOp, no credentials, no engine. The
+			// same skillSource skills.audit reads from (it composes the
+			// bundle, never a model) and the same store skills.audit writes
+			// to (nil or a stub both answer checked:false, never an error).
+			h := skillCheckHandlers{source: skillSource, checks: s.skillChecks, wired: skillWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		regResponder(configSub, "skills.approve", params(validateSkillApproveRaw), func(r Responder) handlerFunc {
 			h := skillSettingsHandlers{source: skillSource, wired: skillWired, r: r}

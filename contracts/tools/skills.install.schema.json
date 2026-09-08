@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/skills.install.schema.json",
+  "title": "SkillsInstallParams",
+  "description": "Adopt the skill published at one address. The address is the whole of the call: nocx fetches the document itself, reads what it says it is, fetches every support file it names, and shows the person all of that before anything is written. There is no field in which the caller can assert what the document says, deliberately — the person approves the bytes nocx read, not a description of them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "description": "The http:// or https:// address the person gave you, exactly as they gave it. You are not expected to know whether it answers with a skill file, and you must not withhold the call because it looks like documentation: nocx fetches what is there and says what it found, so a page about a skill earns a refusal naming what to look for instead — which is a better answer for the person than not calling. A refusal returns that sentence and nothing from the page, so this is not a way to read one. Everything nocx keeps about an installed skill is derived from this address, which is why a redirect off its origin is refused rather than followed."
+    },
+    "handle": { "type": "string", "minLength": 1 },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["url"],
+      "not": { "anyOf": [{ "required": ["handle"] }, { "required": ["paths"] }] },
+      "description": "The address the person gave you, exactly as they gave it."
+    },
+    {
+      "required": ["handle", "paths"],
+      "not": { "required": ["url"] },
+      "description": "The opaque handle and exact candidate paths returned by skills.resolve."
+    }
+  ],
+  "$defs": {
+    "result": {
+      "oneOf": [
+        {
+          "title": "SkillsInstallResult",
+          "description": "What the person's approval produced. `enabled` is always false: a skill installed from outside this machine arrives switched OFF and only the person turns it on, so a successful install does not mean the skill is in use — say so rather than acting as though it were available.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "name", "provenance", "enabled"],
+          "properties": {
+            "status": { "const": "installed" },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The name the document's own frontmatter carried. It is never derived from the address."
+            },
+            "provenance": {
+              "const": "installed",
+              "description": "The root the bytes landed in, which is the only thing that decides how nocx treats them."
+            },
+            "enabled": {
+              "const": false,
+              "description": "Always false. This tool writes a skill; it has no way to turn one on."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "skills"],
+          "properties": {
+            "status": { "const": "installed" },
+            "skills": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "provenance", "enabled"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "provenance": { "const": "installed" },
+                  "enabled": { "const": false }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

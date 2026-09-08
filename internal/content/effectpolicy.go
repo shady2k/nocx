@@ -295,16 +295,69 @@ func (p EffectPolicy) namedResourcesWithinRow(e Effect, report ResourceReport) b
 	return true
 }
 
+// scopeKindForVerb is the mapping from what a command DOES to a resource to
+// the scope kind a row STATES that resource in, and it is exhaustive over
+// ResourceVerb by construction: every verb is named, none falls to a default.
+// A verb with no scope kind is a resource a row can never bound, which is
+// exactly how a destination scope came to govern fetch.url and not curl
+// (nocx-c88xr). A verb added to resources.go and not named here reaches the
+// default arm, and the default arm is not a quiet fallback: it is what
+// TestEveryResourceVerbHasAScopeKind fails on, so the gap is reported rather
+// than returned as false in silence.
+//
+// ResourceUnknown is decided explicitly and deliberately has NO scope kind.
+// It is the verb of an UnresolvedResource and never of a resolved Resource
+// (internal/assistant/cmdeffect.go emits it on the Unresolved slice alone),
+// so it cannot reach namedResourcesWithinRow, which walks Resources. Giving
+// it a kind would be worse than useless: the parser is saying it could not
+// determine what the operand is, and comparing that undetermined string
+// against a real scope could only ever declare it INSIDE one. Uncertainty is
+// answered a row earlier instead — ResourceReport.Effect sends any report
+// carrying an unresolved entry to WorstEffect(declared).
+func scopeKindForVerb(v ResourceVerb) (ResourceKind, bool) {
+	switch v {
+	case ResourceNetwork:
+		// A URL, an ssh destination or a cluster: a place on the network,
+		// which is what a destination scope names.
+		return ResourceDestination, true
+	case ResourceRead, ResourceWrite, ResourceDelete, ResourceExecute, ResourceSource:
+		// Everything a command reads, changes, runs or sources into the
+		// current shell is a path, and keeps path semantics.
+		return ResourcePath, true
+	case ResourceUnknown:
+		return "", false
+	default:
+		// A verb this table does not name. Fail toward asking, and toward
+		// the test above rather than toward a policy nobody can bound.
+		return "", false
+	}
+}
+
 // namedResourceScope maps one parser-named resource to the canonical scope
-// the policy compares. Only an absolute path has a canonical scope id today;
-// Resource.Path also carries relative operands, URLs and ssh destinations,
-// and none of those is a ResourcePath — a scope form for them is a change to
-// the scope vocabulary, not something to guess at inside a decision.
+// the policy compares: the kind from the verb, the id from the operand the
+// parser recorded.
+//
+// The id is not validated here beyond the path form, because the two kinds
+// spell their ids differently and only one of them can be checked cheaply. A
+// ResourcePath must be absolute, since Resource.Path also carries relative
+// operands and a relative operand has no canonical scope id at all. A
+// ResourceDestination is left to destinationContains, which parses it as a
+// whole URL — the one predicate both this path and the dialler reach, so an
+// operand it cannot parse (an ssh destination, "kubectl cluster") is inside
+// no destination scope and the row therefore asks, which is the direction
+// this package fails in.
 func namedResourceScope(r Resource) (GrantScope, bool) {
-	if !isAbsolutePath(r.Path) {
+	if r.Path == "" {
 		return GrantScope{}, false
 	}
-	return GrantScope{Kind: ResourcePath, ID: r.Path}, true
+	kind, ok := scopeKindForVerb(r.Verb)
+	if !ok {
+		return GrantScope{}, false
+	}
+	if kind == ResourcePath && !isAbsolutePath(r.Path) {
+		return GrantScope{}, false
+	}
+	return GrantScope{Kind: kind, ID: r.Path}, true
 }
 
 func restrictiveRank(d Decision) int {

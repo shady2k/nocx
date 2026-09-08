@@ -34,6 +34,8 @@ func (fixedSkills) Read(string, string) (skill.Content, error) {
 	return skill.Content{}, errors.New("not used")
 }
 
+func (fixedSkills) RecordUse(string) {}
+
 func (fixedSkills) Create(string, string, string) error {
 	return errors.New("not used")
 }
@@ -46,7 +48,20 @@ func (fixedSkills) Delete(string) error {
 	return errors.New("not used")
 }
 
+func (fixedSkills) Resolve(context.Context, string) (*skill.Resolution, error) {
+	return nil, errors.New("not used")
+}
+
+func (fixedSkills) Preview(context.Context, string) (skill.PreviewResult, error) {
+	return skill.PreviewResult{}, errors.New("not used")
+}
+
+func (fixedSkills) Install(context.Context, string) (skill.InstallResult, error) {
+	return skill.InstallResult{}, errors.New("not used")
+}
+
 type grantPromptClient struct {
+	unauditedClient
 	seen chan assistant.AskParams
 }
 

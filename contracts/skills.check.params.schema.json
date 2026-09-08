@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/skills.check.params.schema.json",
+  "title": "SkillsCheckParams",
+  "description": "Params for skills.check: which discovered skill's stored reading to read back. One skill, by name — the same bound skills.audit takes, because both name the same discovered bundle. Nothing about a model travels here: this method never resolves a role and never calls one, it only reads a row content.db may already hold and recomputes a digest to say whether that row still describes the bytes on disk.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

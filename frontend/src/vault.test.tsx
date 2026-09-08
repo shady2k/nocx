@@ -909,6 +909,48 @@ describe('UnlockDialog', () => {
     ))
     expect(screen.getByText('Unlock the vault')).toBeTruthy()
   })
+
+  // A screen reader hears the same sentence a sighted person reads. The two
+  // are built from one expression today and this is what keeps them so: an
+  // aria-label that drifts from the title is a prompt that says WHICH password
+  // to one audience and not the other (nocx-0nhec).
+  it.each([
+    ['save this connection', 'Unlock the vault to save this connection'],
+    [undefined, 'Unlock the vault'],
+  ])('labels the dialog exactly as it titles it (%s)', (reason, expected) => {
+    const { client } = mockClient()
+    render(() => (
+      <UnlockDialog
+        open={true}
+        onClose={vi.fn()}
+        vaultClient={client}
+        vaultStatus={BASE_STATUS}
+        reason={reason}
+      />
+    ))
+    expect(screen.getByText(expected)).toBeTruthy()
+    expect(screen.getByRole('dialog').getAttribute('aria-label')).toBe(expected)
+  })
+})
+
+// ── The global sealed seam names no operation ──────────────────────────
+// The dispatcher raises this prompt for ANY renderer call that lands on a
+// sealed vault, which makes it the commonest way a person meets it. It knows
+// the METHOD that came back sealed and not the operation, and the title's slot
+// wants the operation — so it supplies nothing and gets the bare title. It used
+// to supply a whole sentence, which the slot rendered mid-clause (nocx-0nhec).
+describe('createVaultState — the dispatcher seam', () => {
+  it('raises the unlock with no reason at all', () => {
+    const { client } = mockClient()
+    const dispatcher = {} as { onVaultSealed?: (method: string) => Promise<void> }
+    const ctrl = createVaultState({ ...client, dispatcher } as unknown as VaultClient)
+
+    expect(dispatcher.onVaultSealed).toBeTypeOf('function')
+    void dispatcher.onVaultSealed?.('vault.inventory')
+
+    expect(ctrl.showUnlock()).toBe(true)
+    expect(ctrl.unlockReason()).toBeNull()
+  })
 })
 
 // ── ChangePassphraseDialog ─────────────────────────────────────────────

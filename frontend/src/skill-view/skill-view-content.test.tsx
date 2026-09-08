@@ -1209,6 +1209,33 @@ describe('SkillViewContent — the check pane (nocx-dh14q)', () => {
     expect(pane?.textContent).toContain('the store is a stub')
   })
 
+  // A MODEL READING A BUNDLE TAKES TENS OF SECONDS, and a card that says so
+  // and then sits still is indistinguishable from one that has hung
+  // (nocx-l9dy8). The kit already owns the loading mark, and StatusCard
+  // already has the slot to put it in.
+  it('says it is working while the reading is in flight', async () => {
+    const client = fakeClient({
+      files: vi.fn().mockResolvedValue(filesResult(['SKILL.md'])),
+      file: vi.fn().mockResolvedValue(fileResult({ path: 'SKILL.md', text: 'x' })),
+      audit: vi.fn((): Promise<SkillsAudit> => new Promise(() => {})), // in flight, and stays there
+    })
+    const { host } = await mount(client)
+    selectCheckRow(host)
+
+    const button = findButton(host, 'Check this skill')
+    if (!button) throw new Error('Check this skill button did not render')
+    button.click()
+    await flush()
+
+    const pane = checkPane(host)
+    expect(pane?.textContent).toContain('Reading this skill')
+    const mark = pane?.querySelector('.ui-spinner')
+    expect(mark).not.toBeNull()
+    // The mark is named, because "something is happening" has to reach a
+    // screen reader too — Spinner carries role="status" and the name.
+    expect(mark?.getAttribute('aria-label')).toBeTruthy()
+  })
+
   it('offers no check on a builtin: no button, no panel, no call', async () => {
     const builtin: SkillsList['skills'][number] = { ...A_SKILL, provenance: 'builtin' }
     const client = fakeClient({

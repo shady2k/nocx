@@ -46,6 +46,7 @@
 
 import { Show, type JSX } from 'solid-js'
 import { Caption, StatusCard } from '../ui'
+import { Spinner } from '../ui/spinner'
 import { shortDate } from '../skills-presentation'
 import type { SkillsCheck } from '../generated/skills.check'
 
@@ -275,6 +276,13 @@ export function SkillViewCheckPanel(props: SkillViewCheckPanelProps): JSX.Elemen
       <Show when={props.auditing}>
         <StatusCard
           tone="neutral"
+          /* The kit's one loading mark, in the slot StatusCard already has for
+             a glyph. A card that names a model call and then sits perfectly
+             still reads the same as one that has hung, and this call is a
+             model reading a whole bundle — tens of seconds (nocx-l9dy8). It is
+             PLACED here, never repainted: Spinner carries its own motion, its
+             reduced-motion gate and its role="status" name. */
+          icon={<Spinner size="sm" label="Reading this skill" />}
           title="Reading this skill"
           description={`A model is reading the files of “${props.name}” and writing a description of them.`}
         />

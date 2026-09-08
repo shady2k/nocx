@@ -624,12 +624,26 @@ func validateProfileMoveImpactRaw(raw json.RawMessage) string {
 // params ARE the array (JSON-RPC positional form, which the floor already
 // admitted); the handler refuses an empty array, and the store requires
 // every member to name a group (ErrGroupIDRequired).
+//
+// Unknown member fields are refused, like every other group method: this was
+// the one that used a plain Unmarshal, so it silently DROPPED a key the
+// others answered -32602 to. Saving a group therefore looked like it worked
+// while the impact preview for the same object failed, which is how the
+// renderer went on sending a display shape nobody could see it sending
+// (nocx-a0pf3).
 func validateGroupApplyRaw(raw json.RawMessage) string {
-	var groups []profile.ProfileGroup
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return "groups required"
 	}
-	if err := json.Unmarshal(raw, &groups); err != nil {
+	var groups []profile.ProfileGroup
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&groups); err != nil {
+		const unknownField = "json: unknown field "
+		if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {
+			return "unknown field " + name
+		}
 		return "params must be a JSON array of groups"
 	}
 	if len(groups) == 0 {

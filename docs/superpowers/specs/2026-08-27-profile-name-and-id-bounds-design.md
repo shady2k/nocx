@@ -126,6 +126,33 @@ The same class remains outside the profile domain — agent, ledger, lifecycle,
 vault, api and uistate ids and names whose declared `maxLength` outruns their
 validator — measured and recorded in nocx-o446h rather than fixed here.
 
+### 3.2 `editable`, `children`, and one strict answer per method
+
+The group params contracts carry `additionalProperties: false`, so what they
+omit is refused. Two things were wrong on that seam, in opposite directions
+(nocx-a0pf3).
+
+`editable` is a real field of `profile.ProfileGroup`, backend-owned, returned
+by `groups.list` on every group derived from `~/.ssh/config` or a Tabby
+import, and accepted by every group validator — and it was declared by none of
+the four contracts. A renderer echoing back the group it was given was sending
+something the published contract called invalid. It is declared now.
+
+`children` is the opposite: `buildGroupTree` adds it for the sidebar, and the
+editor deep-clones the node the user clicked, so it rode along on every group
+the editor sent. `groups.impact`, `groups.create` and `groups.update` decode
+with `DisallowUnknownFields` and answered `-32602`; `groups.apply` used a
+plain `json.Unmarshal` and silently dropped it. That split is why saving a
+group looked like it worked while the impact preview for the same object had
+never once succeeded — and the failure was invisible, because the renderer
+caught it, logged it, and left `groupImpact` null, which the Apply button
+reads as "not dangerous".
+
+Both halves are closed at the seam that owns them: the renderer projects a
+group to the contract shape in `toProfileGroup` before any of the four calls,
+and `groups.apply` refuses unknown fields like its three siblings, so no group
+method tolerates what the others refuse.
+
 ## 4. Behavioral verification
 
 Permanent regressions cover:
@@ -141,7 +168,14 @@ Permanent regressions cover:
 - obsolete `needsReview` backup input rejected;
 - contract/runtime parity for 128/129 ID and 200/201 name boundaries, over the
   profile, group and endpoint methods and the eight seam methods that take a
-  profile id.
+  profile id;
+- a group carrying `editable` accepted over a real socket by all four group
+  methods, and by all four contracts, in one test;
+- a group carrying `children` refused by all four, contract and socket alike —
+  the assertion that `groups.apply` has stopped being the tolerant one;
+- the renderer's projection: what reaches the dispatcher for
+  `groups.create/update/apply/impact` is the contract shape, not the tree node
+  the editor was handed.
 
 The existing stale-subscriber acknowledgement ownership regression on the current
 main branch is retained and verified; no old PR ack rewrite is ported because
@@ -155,7 +189,9 @@ that behavior is already fixed upstream.
 - `internal/transport/ingress_bounds.go`, `ws_config_handlers.go`,
   `ws_seam_specs.go`, `ws_session_handlers.go`, and regression tests
 - `internal/backup/document.go`, `internal/backup/service.go`, and tests
-- profile/group/endpoint parameter schemas under `contracts/`
+- `frontend/src/profiles.ts` and its tests
+- profile/group/endpoint parameter schemas under `contracts/`, plus the eight
+  that take a profile id
 - `docs/architecture.md`
 
 No migration rewrites existing stored IDs. The new invariant governs IDs minted

@@ -87,6 +87,9 @@
           }
         },
         "required": []
+      },
+      "editable": {
+        "type": "boolean"
       }
     },
     "required": ["id"]

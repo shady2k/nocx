@@ -9,9 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/storage"
@@ -264,6 +266,34 @@ func TestSkillsAudit_OverTheWireConformsToContract(t *testing.T) {
 		if sent.Files[i].Path != path || sent.Files[i].Text == "" {
 			t.Fatalf("files[%d] = %+v, want %q with its bytes", i, sent.Files[i], path)
 		}
+	}
+}
+
+// THE READING'S BOUND IS THE PERSON'S NUMBER (nocx-fuymi.4).
+//
+// It began as a constant in internal/assistant, and the owner met the
+// consequence within the hour: on their own machine a 27B model on a 32 KB
+// bundle blew through two minutes while a smaller one on the same box answered
+// in seventy-three seconds. A bound nobody chose is the bound that stops the
+// work somebody wanted, which is the same lesson assistant.runWallClockMinutes
+// was created by.
+func TestSkillsAudit_BoundsTheReadingByTheSetting(t *testing.T) {
+	client := &auditingClient{report: "a reading"}
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	h := newAuditHarnessWithRoots(t, client, nil, WithSettingsRegistry(reg))
+	h.createEndpoint()
+	assignAuditingRole(t, h)
+
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "settings.set", map[string]any{
+		"key": "skills.readingMinutes", "value": 7,
+	})) {
+		t.Fatal("settings.set skills.readingMinutes refused")
+	}
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "skills.audit", map[string]any{"name": "weather"})) {
+		t.Fatal("skills.audit refused")
+	}
+	if got := h.client.sent().Budget; got != 7*time.Minute {
+		t.Fatalf("budget = %s, want the seven minutes the person chose", got)
 	}
 }
 

@@ -37,7 +37,7 @@ func (*recordingModel) Stream(context.Context, []*schema.Message, ...model.Optio
 // written against the single-pass reading this replaced. The subject changed
 // from "the bundle" to "one file of it"; the claims did not.
 func auditOneFile(ctx context.Context, m model.BaseChatModel, text string, opts ...model.Option) (SkillReading, error) {
-	return readOneFile(ctx, m, "weather", "", SkillAuditFile{Path: "SKILL.md", Text: text}, opts...)
+	return readOneFile(ctx, m, "weather", "", SkillAuditFile{Path: "SKILL.md", Text: text}, skillAuditCallTimeout, opts...)
 }
 
 // auditOK builds a model reply in the shape parseSkillReading demands: one

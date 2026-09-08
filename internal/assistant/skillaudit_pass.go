@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -111,7 +112,7 @@ Reply with exactly one JSON object and no prose outside it:
 // question "does this do what the skill claims" is answerable from one call;
 // it is the skill's own words, so it arrives inside the document frame like
 // everything else the skill wrote.
-func readOneFile(ctx context.Context, client einoModel.BaseChatModel, name, purpose string, file SkillAuditFile, opts ...einoModel.Option) (SkillReading, error) {
+func readOneFile(ctx context.Context, client einoModel.BaseChatModel, name, purpose string, file SkillAuditFile, budget time.Duration, opts ...einoModel.Option) (SkillReading, error) {
 	if client == nil {
 		return SkillReading{}, errors.New("skill audit: the auditing model is unavailable")
 	}
@@ -137,7 +138,7 @@ func readOneFile(ctx context.Context, client einoModel.BaseChatModel, name, purp
 		schema.UserMessage(user.String()),
 	}, opts...)
 	if err != nil {
-		return SkillReading{}, auditCallError(err)
+		return SkillReading{}, auditCallError(err, budget)
 	}
 	if resp == nil {
 		return SkillReading{}, errors.New("skill audit: the auditing model returned no answer")
@@ -149,7 +150,7 @@ func readOneFile(ctx context.Context, client einoModel.BaseChatModel, name, purp
 // call failed is a NOTE THAT SAYS SO, and the reduce is told. The only thing
 // that ends the pass early is the context, and that surfaces as every
 // remaining file carrying the same failure.
-func readEachFile(ctx context.Context, client einoModel.BaseChatModel, name, purpose string, files []SkillAuditFile, opts ...einoModel.Option) []SkillFileReading {
+func readEachFile(ctx context.Context, client einoModel.BaseChatModel, name, purpose string, files []SkillAuditFile, budget time.Duration, opts ...einoModel.Option) []SkillFileReading {
 	out := make([]SkillFileReading, len(files))
 	var wg sync.WaitGroup
 	permits := make(chan struct{}, auditFanOut)
@@ -159,7 +160,7 @@ func readEachFile(ctx context.Context, client einoModel.BaseChatModel, name, pur
 			defer wg.Done()
 			permits <- struct{}{}
 			defer func() { <-permits }()
-			reading, err := readOneFile(ctx, client, name, purpose, file, opts...)
+			reading, err := readOneFile(ctx, client, name, purpose, file, budget, opts...)
 			out[i] = SkillFileReading{Path: file.Path, Reading: reading, Err: err}
 		}()
 	}
@@ -169,7 +170,7 @@ func readEachFile(ctx context.Context, client einoModel.BaseChatModel, name, pur
 
 // concludeFromNotes runs the reduce. overview is SKILL.md verbatim — the
 // skill's own claim, which is what the verdict is measured against.
-func concludeFromNotes(ctx context.Context, client einoModel.BaseChatModel, name, overview string, notes []SkillFileReading, opts ...einoModel.Option) (SkillReading, error) {
+func concludeFromNotes(ctx context.Context, client einoModel.BaseChatModel, name, overview string, notes []SkillFileReading, budget time.Duration, opts ...einoModel.Option) (SkillReading, error) {
 	var user strings.Builder
 	user.WriteString("Skill: ")
 	user.WriteString(name)
@@ -197,7 +198,7 @@ func concludeFromNotes(ctx context.Context, client einoModel.BaseChatModel, name
 		schema.UserMessage(user.String()),
 	}, opts...)
 	if err != nil {
-		return SkillReading{}, auditCallError(err)
+		return SkillReading{}, auditCallError(err, budget)
 	}
 	if resp == nil {
 		return SkillReading{}, errors.New("skill audit: the auditing model returned no answer")
@@ -207,9 +208,9 @@ func concludeFromNotes(ctx context.Context, client einoModel.BaseChatModel, name
 
 // auditCallError is the one place a failed audit call becomes a sentence, so
 // the map and the reduce cannot word a timeout differently.
-func auditCallError(err error) error {
+func auditCallError(err error, budget time.Duration) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return auditTimedOut{budget: skillAuditCallTimeout}
+		return auditTimedOut{budget: budget}
 	}
 	return fmt.Errorf("skill audit: %w", err)
 }

@@ -680,6 +680,34 @@ var SkillsIdleDays = MustRegisterNumber(NumberSpec{
 	ZeroLabel:   "Never switched off automatically",
 })
 
+// SkillsReadingMinutes bounds one reading of a skill: every per-file call and
+// the conclusion together.
+//
+// It is a SETTING for the reason the two agent-run bounds above are settings.
+// It began as a constant in internal/assistant, written in the session that
+// discovered a reading could hang forever, and the owner met the consequence
+// within the hour: on their own machine a 27B model on a 32 KB bundle blew
+// through two minutes while a smaller one on the same box answered in
+// seventy-three seconds. The number was never anybody's choice, and a bound
+// nobody chose is the bound that stops the work somebody wanted.
+//
+// The reading is not a command, so it is neither of the two above: nothing is
+// signalled and nothing keeps a timer alive by printing. It is a wall clock
+// over the whole reading — a reading that spends the budget on the first of
+// nine files has still spent it, and the person is waiting for the reading
+// rather than for a call.
+var SkillsReadingMinutes = MustRegisterNumber(NumberSpec{
+	Key:         "skills.readingMinutes",
+	Section:     "Skills",
+	Label:       "Give up on a skill reading after",
+	Description: "The longest one check of a skill may take, counted over every file it reads and the conclusion it draws. When it is reached the check stops and says so, and nothing is stored. A local model on a large skill can need several minutes; a hosted one is usually done inside one.",
+	DataClass:   PublicConfig,
+	Default:     5,
+	Min:         fp(1),
+	Max:         fp(60),
+	Unit:        "minutes",
+})
+
 // HistoryRetentionDays is the age-based retention limit. The label is honest
 // by design (internal/content's package doc): ordinary DELETE leaves rows in
 // WAL pages and free space, so the wording says "removed from nocx", never

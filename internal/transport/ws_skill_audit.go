@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 )
 
@@ -148,9 +149,12 @@ type skillAuditHandlers struct {
 	// report, and Stored says "no" rather than the RPC pretending nothing
 	// was asked for.
 	checks skillCheckStore
-	log    log.Logger
-	wired  bool
-	r      Responder
+	// settings is where the reading's own budget comes from. Nil is a server
+	// built without a registry, and the engine's fallback bound applies.
+	settings *settings.Registry
+	log      log.Logger
+	wired    bool
+	r        Responder
 }
 
 func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
@@ -223,7 +227,7 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 	result, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
 		Key: key, BaseURL: endpoint.BaseURL, Model: model, Headers: headers,
 		Name: material.Name, Purpose: purpose, Overview: overview,
-		Files: auditFiles(material.Files),
+		Files: auditFiles(material.Files), Budget: h.readingBudget(),
 	})
 	if err != nil {
 		if h.log != nil {
@@ -480,4 +484,20 @@ func skillPurpose(overview string) string {
 		}
 	}
 	return ""
+}
+
+// readingBudget is the person's bound for one reading, read WHEN THE READING
+// STARTS — the same moment and the same reason the run lease reads its two
+// (run_lease.go): changing the number changes what the next reading is bound
+// by and never moves a bound under a reading already in flight. Zero when
+// there is no settings registry, which is the engine's own fallback.
+func (h skillAuditHandlers) readingBudget() time.Duration {
+	if h.settings == nil {
+		return 0
+	}
+	v, err := h.settings.GetNumber(settings.SkillsReadingMinutes)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return time.Duration(v * float64(time.Minute))
 }

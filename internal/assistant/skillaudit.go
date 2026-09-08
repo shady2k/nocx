@@ -160,13 +160,15 @@ func parseSkillReading(body string) (SkillReading, error) {
 	return SkillReading{Verdict: v, Report: truncateRunes(report, maxAuditReportBytes)}, nil
 }
 
-// skillAuditCallTimeout bounds one whole reading — every per-file call and
-// the reduce together — and the number is larger than the classifier's 30s on
-// purpose: a classifier answers one word about one command, while a reading
-// walks a bundle up to the skill package's budget and writes a paragraph per
-// file. Long enough that a slow model on a big skill still finishes, short
-// enough that a silent provider is a failure somebody can read rather than a
-// spinner that never ends.
+// skillAuditCallTimeout is the fallback bound for one whole reading — every
+// per-file call and the conclusion together — used when the caller names none.
+//
+// THE NUMBER IS THE PERSON'S, and it arrives on the params from
+// settings.SkillsReadingMinutes. This constant is what a caller with no
+// settings gets: the engine must still bound a call it was handed without one,
+// because an unbounded reading is the defect that started all of this. It is
+// deliberately not the setting's default — that number is the owner's and
+// lives beside the other bounds they can see.
 const skillAuditCallTimeout = 2 * time.Minute
 
 // auditTimedOut is the reading that ran out of time. It is a type rather than
@@ -212,6 +214,10 @@ type SkillAuditParams struct {
 	// Files are the bundle's files, bounded and ordered by internal/skill.
 	// One call each.
 	Files []SkillAuditFile
+	// Budget bounds the WHOLE reading. Zero means the engine's own fallback:
+	// the number is the person's (settings.SkillsReadingMinutes) and the
+	// transport reads it, exactly as the run lease reads its two.
+	Budget time.Duration
 }
 
 // AuditSkill implements Client: the map pass over the bundle's files, then
@@ -253,10 +259,14 @@ func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditPa
 	if len(p.Files) == 0 {
 		return SkillAuditResult{}, errors.New("skill audit: there is nothing to read")
 	}
-	ctx, cancel := context.WithTimeout(ctx, skillAuditCallTimeout)
+	budget := p.Budget
+	if budget <= 0 {
+		budget = skillAuditCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	notes := readEachFile(ctx, cm, p.Name, p.Purpose, p.Files, opts...)
+	notes := readEachFile(ctx, cm, p.Name, p.Purpose, p.Files, budget, opts...)
 	// EVERY file failing is the reading failing. One or two are notes that say
 	// so and a reduce that weighs them; all of them means there is nothing to
 	// weigh, and concluding from nothing would produce a verdict about a skill
@@ -275,7 +285,7 @@ func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditPa
 		return SkillAuditResult{Files: notes}, firstErr
 	}
 
-	reading, err := concludeFromNotes(ctx, cm, p.Name, p.Overview, notes, opts...)
+	reading, err := concludeFromNotes(ctx, cm, p.Name, p.Overview, notes, budget, opts...)
 	if err != nil {
 		return SkillAuditResult{Files: notes}, err
 	}

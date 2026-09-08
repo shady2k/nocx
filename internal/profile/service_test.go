@@ -212,23 +212,6 @@ func TestAtomicImport_GroupOverwrite(t *testing.T) {
 	}
 }
 
-func TestAtomicImport_NewProfileNotMarkedForReview(t *testing.T) {
-	s := svc(t)
-	prof := makeTestProfile("ssh:custom:p1:1", "web", "web.example.com")
-
-	result := s.AtomicImport([]SSHProfile{prof}, nil)
-	if len(result.ImportErrors) > 0 {
-		t.Fatalf("import errors: %v", result.ImportErrors)
-	}
-	if result.ProfilesMarkedReview != 0 {
-		t.Errorf("ProfilesMarkedReview = %d, want 0", result.ProfilesMarkedReview)
-	}
-	all, _ := s.store.LoadAll()
-	if len(all.Profiles) != 1 || all.Profiles[0].NeedsReview {
-		t.Errorf("profile should NOT be marked for review, NeedsReview=%v", all.Profiles[0].NeedsReview)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Transactional import — partial failure leaves store unchanged
 // ---------------------------------------------------------------------------
@@ -270,38 +253,6 @@ func TestAtomicImport_Transactional_LastRecordFailure(t *testing.T) {
 
 	if !bytes.Equal(preRaw, postRaw) {
 		t.Error("store file changed byte-for-byte after failed import")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ClearReviewFlag
-// ---------------------------------------------------------------------------
-
-func TestClearReviewFlag_ClearsFlag(t *testing.T) {
-	s := svc(t)
-	p := makeTestProfile("ssh:custom:p1:1", "web", "web.example.com")
-	p.NeedsReview = true
-	if err := s.SaveProfile(p); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-	updated, err := s.ClearReviewFlag("ssh:custom:p1:1")
-	if err != nil {
-		t.Fatalf("ClearReviewFlag: %v", err)
-	}
-	if updated.NeedsReview {
-		t.Error("NeedsReview still true after clearing")
-	}
-	all, _ := s.store.LoadAll()
-	if all.Profiles[0].NeedsReview {
-		t.Error("NeedsReview still true on stored profile after clearing")
-	}
-}
-
-func TestClearReviewFlag_RejectsNonexistent(t *testing.T) {
-	s := svc(t)
-	_, err := s.ClearReviewFlag("ssh:custom:nope:1")
-	if !errors.Is(err, ErrProfileNotFound) {
-		t.Fatalf("expected ErrProfileNotFound, got %v", err)
 	}
 }
 

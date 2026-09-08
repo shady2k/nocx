@@ -22,6 +22,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 func TestBootstrapWindow_TheRendererStillSeesEveryByte(t *testing.T) {
@@ -87,6 +88,10 @@ func TestBootstrapWindow_QuarantinesTheUsersInputAndNotItsOwn(t *testing.T) {
 	w, _, _ := newWindowFixture(t)
 
 	s := windowSession(t, w)
+	ch, ok := s.ch.(*fakeWindowChannel)
+	if !ok {
+		t.Fatalf("channel is %T, want *fakeWindowChannel", s.ch)
+	}
 	// Before ownership is proven the user is still talking to their own ssh
 	// client — a host-key prompt, a password, a second factor — and their
 	// keystrokes must reach it.
@@ -94,7 +99,7 @@ func TestBootstrapWindow_QuarantinesTheUsersInputAndNotItsOwn(t *testing.T) {
 		t.Fatal("the user's own authentication input was refused before nocx had interposed at all")
 	}
 	w.QuarantineInput()
-	if s.EnqueueWrite([]byte("typed")) {
+	if s.EnqueueWrite([]byte(quarantinedKeystroke)) {
 		t.Fatal("a keystroke reached the terminal while the bootstrap owned it")
 	}
 	if _, err := w.Write([]byte("NOCX1 1        4\nabcd")); err != nil {
@@ -104,17 +109,38 @@ func TestBootstrapWindow_QuarantinesTheUsersInputAndNotItsOwn(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if !s.EnqueueWrite([]byte("typed")) {
+	if !s.EnqueueWrite([]byte(reEnabledKeystroke)) {
 		t.Fatal("input was not re-enabled at the terminal outcome")
 	}
-	ch, ok := s.ch.(*fakeWindowChannel)
-	if !ok {
-		t.Fatalf("channel is %T, want *fakeWindowChannel", s.ch)
-	}
-	if got := ch.written(); strings.Contains(got, "typed") {
+
+	// EnqueueWrite hands the bytes to a queue, and ONE goroutine drains it in
+	// FIFO order. So the observable state that says "everything the
+	// quarantine let through has now been delivered" is the arrival of the
+	// keystroke sent after it: nothing enqueued earlier can still be in
+	// flight once this one has landed.
+	//
+	// Waiting for that is the whole fix (nocx-mgevc). The previous version
+	// enqueued the SAME bytes on both sides of the quarantine and read the
+	// channel immediately, so a refused keystroke and a legitimately
+	// re-enabled one were indistinguishable in the assertion, and it could
+	// only pass by beating its own writer to the channel. It lost that race
+	// under container load and reported a quarantine failure that had not
+	// happened.
+	waittest.WaitForDetail(t, "the re-enabled keystroke to reach the terminal",
+		func() string { return ch.written() },
+		func() bool { return strings.Contains(ch.written(), reEnabledKeystroke) })
+
+	if got := ch.written(); strings.Contains(got, quarantinedKeystroke) {
 		t.Fatalf("a refused keystroke was delivered later; the terminal received %q", got)
 	}
 }
+
+// The two keystrokes are spelled differently on purpose: the assertion is
+// about WHICH one arrived, and one string cannot answer that.
+const (
+	quarantinedKeystroke = "typed-while-quarantined"
+	reEnabledKeystroke   = "typed-after-reopen"
+)
 
 // One window, one interval: a second open is refused rather than silently
 // handing two owners the same stream.

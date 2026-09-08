@@ -292,7 +292,7 @@ export function SkillsSection(props: SkillsSectionProps) {
                         checked={skill.enabled}
                         disabled={busy() === skill.name}
                         ariaLabel={`${skill.name} enabled`}
-                        onChange={(enabled) => void toggle(skill, enabled)}
+                        onChange={(enabled) => toggle(skill, enabled)}
                       />
                     }
                     /* The group used to be drawn only when the row had an

@@ -223,6 +223,42 @@ describe('SkillsSection', () => {
     await waitFor(() => expect(toggle.checked).toBe(false))
   })
 
+  // A FAILED WRITE LEAVES THE SWITCH SHOWING WHAT THE BACKEND HOLDS
+  // (nocx-845y4). The toast already said the write failed; a switch still
+  // sitting where the finger left it contradicts it, and the switch is the
+  // louder of the two.
+  //
+  // The mechanism is the kit's (ui/checkbox.test.tsx). What this asserts is
+  // the WIRING: the row hands its promise back, so the control knows when to
+  // look again. The row used to write `void toggle(...)`, which throws that
+  // promise away, and is what a refactor would reach for again.
+  it('puts the switch back when the toggle is refused', async () => {
+    let refuse: ((e: Error) => void) | undefined
+    const setEnabled = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject
+        }),
+    )
+    const store = new SkillsStore(fakeClient({ setEnabled }))
+    const { container } = render(() => <SkillsSection store={store} />)
+    await waitFor(() => expect(screen.getByText('Deploy the service')).toBeTruthy())
+
+    const toggle = rowFor(container, 'deploy')!.querySelector<HTMLInputElement>('[role="switch"]')!
+    expect(toggle.checked).toBe(true)
+    fireEvent.click(toggle)
+    await waitFor(() => expect(setEnabled).toHaveBeenCalledWith('deploy', false))
+
+    // IN FLIGHT the switch stays where the person put it. This is the half
+    // that fails when the row throws its promise away: without it the control
+    // would snap back the instant the handler returned, and then flip forward
+    // again on success — which is the same defect wearing the other face.
+    expect(toggle.checked).toBe(false)
+
+    refuse?.(new Error('settings document is read-only'))
+    await waitFor(() => expect(toggle.checked).toBe(true))
+  })
+
   it('shows a changed managed skill with its path and offers re-approval', async () => {
     const approve = vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' })
     const changed: SkillsList = {

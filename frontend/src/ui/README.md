@@ -206,6 +206,20 @@ label; `ui-checkbox__control` owns the box, its checked mark and its disabled st
 label, disabled — and a switch is a shape, not a different behaviour. It is
 `variant="switch"`.
 
+**A control shows the state, not where the finger left it.** `checked` is bound to the
+caller's state, and that binding only re-runs when the state CHANGES — so a write that
+fails changes nothing, and the box keeps the position the drag put it in. The person then
+reads a switch saying one thing and a toast saying the opposite, and the switch is the
+louder of the two. Checkbox therefore restores itself once the handler has had its say:
+immediately for a handler that answers synchronously, and when the promise settles for a
+handler that returns one. **A surface whose write can fail returns that promise from
+`onChange`** — `onChange={(v) => save(v)}`, never `onChange={(v) => void save(v)}`, which
+throws away the only thing that says when to look again. The promise is in the signature
+(`=> void | Promise<void>`) because it has to be: a bare `=> void` would also accept a
+promise-returning handler, but `no-misused-promises` reads that as "nobody awaits this"
+and refuses the call site. A handler that only sets a signal gives its arrow a block body,
+so it returns nothing (`nocx-845y4`).
+
 ## Form validation
 
 `Field` and `TextField` have always rendered an `error` and set `aria-invalid`. What the

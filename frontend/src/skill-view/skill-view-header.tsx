@@ -42,8 +42,11 @@ export interface SkillViewHeaderProps {
 export interface SkillViewIdentityProps {
   skill: Skill
   busy: boolean
-  onToggle: (enabled: boolean) => void
-  onPin: (pin: PinKind, on: boolean) => void
+  // Both HAND BACK the write's promise: the kit's Checkbox restores the
+  // switch when it settles, so a setEnabled that fails cannot leave the
+  // control saying the opposite of the toast beside it (nocx-845y4).
+  onToggle: (enabled: boolean) => void | Promise<void>
+  onPin: (pin: PinKind, on: boolean) => void | Promise<void>
 }
 
 /**

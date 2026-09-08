@@ -72,8 +72,8 @@ function SkillView(props: {
   name: string
   state: ViewState
   busy: boolean
-  onToggle: (enabled: boolean) => void
-  onPin: (pin: PinKind, on: boolean) => void
+  onToggle: (enabled: boolean) => void | Promise<void>
+  onPin: (pin: PinKind, on: boolean) => void | Promise<void>
   onApprove: () => void
   deps: SkillViewDeps
   refreshToken: number
@@ -154,8 +154,8 @@ export class SkillViewContent extends SolidPaneContent {
           name={this.name}
           state={this.viewState()}
           busy={this.busy()}
-          onPin={(pin, on) => void this.setPin(pin, on)}
-          onToggle={(enabled) => void this.toggle(enabled)}
+          onPin={(pin, on) => this.setPin(pin, on)}
+          onToggle={(enabled) => this.toggle(enabled)}
           onApprove={() => void this.approve()}
           deps={this.deps}
           refreshToken={this.visibleGeneration()}

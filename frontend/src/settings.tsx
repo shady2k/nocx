@@ -1237,7 +1237,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           variant="switch"
           checked={!!eff()}
           ariaLabel={decl.label}
-          onChange={(c) => void saveSetting(decl.key, c)}
+          onChange={(c) => saveSetting(decl.key, c)}
         />
         <ProvenanceBadge decl={decl} />
       </div>
@@ -1357,7 +1357,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 variant="switch"
                 checked={!!eff()}
                 ariaLabel={decl.label}
-                onChange={(c) => void saveSetting(decl.key, c)}
+                onChange={(c) => saveSetting(decl.key, c)}
               />
             </Show>
 
@@ -1487,7 +1487,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <div class="ui-settings-filter">
               <Checkbox
                 checked={modifiedOnly()}
-                onChange={(c) => setModifiedOnly(c)}
+                onChange={(c) => {
+                  setModifiedOnly(c)
+                }}
                 label={' Modified'}
               />
               <Show when={modifiedCount() > 0}>

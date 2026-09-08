@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { within } from '@solidjs/testing-library'
+import { fireEvent, within } from '@solidjs/testing-library'
 import type { PaneHost } from '../pane-content'
 import { SkillsStore, type SkillsClientLike } from '../skills-store'
 import type { SkillsList } from '../generated/skills.list'
@@ -372,6 +372,32 @@ describe('SkillViewContent — the bundle beside the file (nocx-4m1n1)', () => {
     // and opening it must not have asked `skills.audit` for anything.
     // eslint-disable-next-line @typescript-eslint/unbound-method
     expect(client.audit).not.toHaveBeenCalled()
+  })
+
+  // THE OTHER SURFACE WITH THE SAME SWITCH (nocx-845y4). The mechanism lives
+  // in the kit (ui/checkbox.test.tsx) precisely so the row and the tab cannot
+  // answer this differently; what is asserted here is the tab's WIRING, that
+  // it hands the write's promise back rather than dropping it with a `void`.
+  it('puts the enable switch back when the write is refused', async () => {
+    let refuse: ((e: Error) => void) | undefined
+    const setEnabled = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject
+        }),
+    )
+    const { host } = await mount(fakeClient({ setEnabled }))
+
+    const toggle = host.querySelector<HTMLInputElement>('.skill-view__identity [role="switch"]')!
+    expect(toggle.checked).toBe(true)
+    fireEvent.click(toggle)
+    await flush()
+    // In flight it stays where the person put it — the write may yet succeed.
+    expect(toggle.checked).toBe(false)
+
+    refuse?.(new Error('settings document is read-only'))
+    await flush()
+    expect(toggle.checked).toBe(true)
   })
 
   // Restored from the deleted modal card's "READ-ONLY: the file takes no

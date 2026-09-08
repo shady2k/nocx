@@ -15,6 +15,36 @@
   align-items: baseline;
   margin: 0;
   min-width: 0;
+  /* So the rows below can ask how wide THIS list is rather than how wide the
+     window is: the same list appears in a dialog and in a 180px rail, and
+     only its own width decides which shape reads. */
+  container-type: inline-size;
+}
+
+/* NARROW: THE NAME GOES ABOVE THE VALUE (nocx-p49e9). `max-content` gives the
+   name column its full natural width out of whatever there is, which is right
+   in a dialog and ruinous in a rail — measured at the 180px MIN_LIST_WIDTH the
+   skill tab allows, the name took 83 of 148 usable pixels and the value, the
+   half a person actually reads, got 53: a path rendered one syllable per line,
+   and a list 654px tall instead of 274px.
+   Below 200px of LIST width there is no two-column layout that keeps both
+   halves readable, so the alignment this component exists for — every value
+   starting at the same x — is given up for the thing it exists to serve. The rows still stack
+   name-then-value in source order, so nothing changes for a screen reader.
+   Written on the CHILDREN rather than on the list, because an element cannot
+   answer its own container query: each takes the full track instead of the
+   template being swapped. */
+@container (max-width: 200px) {
+  .ui-fact-list__name,
+  .ui-fact-list__value {
+    grid-column: 1 / -1;
+  }
+
+  /* The name is no longer a column that can be too narrow, so it may wrap
+     rather than push the list wider than the rail holding it. */
+  .ui-fact-list__name {
+    white-space: normal;
+  }
 }
 
 /* The row is a grouping element for the DOM and for screen readers, and it

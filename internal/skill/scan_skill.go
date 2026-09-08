@@ -102,7 +102,7 @@ func ScanSkill(roots []Root, name string) (ScanResult, error) {
 	if err != nil {
 		return ScanResult{}, err
 	}
-	read, omitted, findings, _ := scanBundle(at.skill.root, at.entry, manifest.Files)
+	read, omitted, findings, _, _ := scanBundle(at.skill.root, at.entry, manifest.Files)
 	return ScanResult{
 		Name:       manifest.Name,
 		Provenance: manifest.Provenance,

@@ -92,6 +92,26 @@ type AuditOmission struct {
 // member is either a fact about the REQUEST (which skill, which root), a fact
 // about what was READ, or the scan's own output — and the scan is advisory by
 // construction (scan.go) and has been since before this feature existed.
+// AuditFile is one file of a bundle as it was read: its path, its bytes, and
+// what the static scan matched IN THOSE BYTES.
+//
+// It exists because a reading is made file by file — one model call per file,
+// then one over the notes — and that pass needs the split scanBundle already
+// had. The alternative was to hand it Document and let it split on the header
+// line, which is a second answer to "which bytes are which file": it would
+// agree with this one on every bundle anybody tried and disagree the first
+// time a file's own text contained the header, which is a line an attacker
+// writes on purpose.
+//
+// Text is the file's bytes and nothing of ours — no header, no fence. Whoever
+// frames it for a model owns the framing, and there is exactly one such
+// caller.
+type AuditFile struct {
+	Path     string    `json:"path"`
+	Text     string    `json:"-"`
+	Findings []Finding `json:"findings"`
+}
+
 type AuditMaterial struct {
 	// Name and Provenance are the skill as RESOLVED by root precedence, for
 	// FileResult's reason: a reader labels what it is describing rather than
@@ -111,6 +131,11 @@ type AuditMaterial struct {
 	// package puts round one, so the audit's findings and the preview's are
 	// the same shape. Never nil: no matches is [].
 	Findings []Finding `json:"findings"`
+	// Files are the bytes behind Read, in the same order: what the per-file
+	// pass is given, one call each. Not on the wire for Document's reason —
+	// the person reads the files through skills.file rather than through a
+	// second copy of them.
+	Files []AuditFile `json:"-"`
 	// Document is what a model is given. It is not on the wire — the person
 	// reads the files through skills.file, which is the same bytes without a
 	// second copy of them crossing the socket.
@@ -168,10 +193,11 @@ func auditFileHeader(path string) string {
 // It is a package function rather than a method so it never has to resolve
 // a skill of its own — every caller has already done that through locate,
 // which is the one answer to root precedence and containment.
-func scanBundle(root Root, entry string, paths []string) (read []string, omitted []AuditOmission, findings []Finding, document string) {
+func scanBundle(root Root, entry string, paths []string) (read []string, omitted []AuditOmission, findings []Finding, files []AuditFile, document string) {
 	read = []string{}
 	omitted = []AuditOmission{}
 	findings = []Finding{}
+	files = []AuditFile{}
 	var doc strings.Builder
 	for _, path := range paths {
 		// One byte past the per-file budget, file.go's trick: it settles "is
@@ -202,9 +228,14 @@ func scanBundle(root Root, entry string, paths []string) (read []string, omitted
 		doc.Write(data)
 		doc.WriteByte('\n')
 		read = append(read, path)
-		findings = append(findings, Scan(path, data)...)
+		// ONE Scan per file, and both views share its result: the bundle's
+		// list is the concatenation of the per-file ones, so the two cannot
+		// disagree about what matched.
+		matched := Scan(path, data)
+		findings = append(findings, matched...)
+		files = append(files, AuditFile{Path: path, Text: string(data), Findings: matched})
 	}
-	return read, omitted, findings, doc.String()
+	return read, omitted, findings, files, doc.String()
 }
 
 // Audit composes one skill's bundle for a reading. It answers for ANY
@@ -235,7 +266,7 @@ func Audit(roots []Root, name string) (AuditMaterial, error) {
 		Provenance: manifest.Provenance,
 		MaxBytes:   MaxAuditBytes,
 	}
-	out.Read, out.Omitted, out.Findings, out.Document = scanBundle(at.skill.root, at.entry, manifest.Files)
+	out.Read, out.Omitted, out.Findings, out.Files, out.Document = scanBundle(at.skill.root, at.entry, manifest.Files)
 	if len(out.Read) == 0 {
 		// Every file was refused, which for a discovered skill means SKILL.md
 		// itself could not be read — the file discovery just parsed. There is

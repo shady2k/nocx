@@ -8,87 +8,91 @@
   "required": [],
   "properties": {
     "group": {
-      "id": {
-        "type": "string",
-        "maxLength": 256
-      },
-      "parentGroupId": {
-        "type": "string",
-        "maxLength": 256
-      },
-      "name": {
-        "type": "string",
-        "maxLength": 256
-      },
-      "icon": {
-        "type": "string",
-        "maxLength": 256
-      },
-      "color": {
-        "type": "string",
-        "maxLength": 256
-      },
-      "defaults": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "port": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 65535
-          },
-          "passwordSecret": {
-            "type": "string"
-          },
-          "keySecret": {
-            "type": "string"
-          },
-          "keyPassphraseSecret": {
-            "type": "string"
-          },
-          "user": {
-            "type": "string"
-          },
-          "auth": {
-            "type": "string"
-          },
-          "keepaliveInterval": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "keepaliveCountMax": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "readyTimeout": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "keyPath": {
-            "type": "string"
-          },
-          "jumpHost": {
-            "type": "string"
-          },
-          "agentForward": {
-            "type": "boolean"
-          },
-          "desiredMode": {
-            "type": "string"
-          },
-          "portDiscovery": {
-            "type": "string"
-          },
-          "behaviorOnSessionEnd": {
-            "type": "string"
-          }
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
         },
-        "required": []
+        "parentGroupId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "icon": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "color": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "passwordSecret": {
+              "type": "string"
+            },
+            "keySecret": {
+              "type": "string"
+            },
+            "keyPassphraseSecret": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            },
+            "auth": {
+              "type": "string"
+            },
+            "keepaliveInterval": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "keepaliveCountMax": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "readyTimeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "keyPath": {
+              "type": "string"
+            },
+            "jumpHost": {
+              "type": "string"
+            },
+            "agentForward": {
+              "type": "boolean"
+            },
+            "desiredMode": {
+              "type": "string"
+            },
+            "portDiscovery": {
+              "type": "string"
+            },
+            "behaviorOnSessionEnd": {
+              "type": "string"
+            }
+          },
+          "required": []
+        }
       }
     },
     "deleteGroupId": {
       "type": "string",
-      "maxLength": 256
+      "maxLength": 128
     }
   }
 }

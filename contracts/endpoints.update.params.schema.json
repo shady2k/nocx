@@ -10,12 +10,12 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 256
+      "maxLength": 128
     },
     "name": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 256
+      "maxLength": 200
     },
     "baseUrl": {
       "type": "string",

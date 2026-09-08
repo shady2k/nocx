@@ -73,10 +73,8 @@ type settingsSecretExistsParams struct {
 
 const (
 	// maxConfigIDRunes bounds renderer-supplied profile, group and endpoint
-	// ids. Ids are backend-minted "typ:custom:slug:uuid"; a renderer-supplied
-	// id only replaces the mint, and the ask path bounds the same class of
-	// value at 128 (maxIDRunes).
-	maxConfigIDRunes = 128
+	// ids with the same domain-owned ceiling the backend mint guarantees.
+	maxConfigIDRunes = profile.MaxIDRunes
 	// maxConfigNameRunes bounds display names (profile, group, endpoint,
 	// model). Names are echoed in lists and slugified into minted ids.
 	maxConfigNameRunes = 200

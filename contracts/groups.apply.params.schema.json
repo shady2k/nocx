@@ -21,7 +21,7 @@
       },
       "name": {
         "type": "string",
-        "maxLength": 256
+        "maxLength": 200
       },
       "icon": {
         "type": "string",

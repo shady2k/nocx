@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
@@ -39,6 +40,91 @@ func auditOK(report string) *recordingModel {
 		panic(err)
 	}
 	return &recordingModel{response: &schema.Message{Content: string(body)}}
+}
+
+// blockingModel answers nothing and waits for the context, which is what a
+// provider that accepts the connection and then goes silent looks like from
+// in here. seen carries the context the call was made with, so a test can ask
+// what deadline the audit gave itself.
+type blockingModel struct {
+	seen context.Context //nolint:containedctx // the assertion IS about the context the call carried
+}
+
+func (m *blockingModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.seen = ctx
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (*blockingModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, errors.New("stream is not used by a skill audit")
+}
+
+// A READING IS BOUNDED BY THE READING, not by whoever called it (nocx-w155y).
+//
+// This call used to inherit the JSON-RPC request's context, which has no
+// deadline, so an endpoint that accepted the connection and stayed silent left
+// "Reading this skill" on somebody's screen for as long as the socket lived —
+// measured on the dev stand as an ESTAB connection to the provider with the
+// request out and nothing coming back.
+func TestAuditSkillGivesTheCallADeadlineOfItsOwn(t *testing.T) {
+	m := &blockingModel{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = auditSkill(ctx, m, "---\nSKILL.md\n---\nbody")
+	}()
+	// The model is called before anything is asserted about it.
+	deadline := time.Now().Add(2 * time.Second)
+	for m.seen == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if m.seen == nil {
+		t.Fatal("the model was never called")
+	}
+	at, ok := m.seen.Deadline()
+	if !ok {
+		t.Fatal("the audit gave the model call no deadline: a silent provider hangs the reading forever")
+	}
+	if left := time.Until(at); left <= 0 || left > skillAuditCallTimeout {
+		t.Fatalf("deadline in %s, want a positive budget no larger than %s", left, skillAuditCallTimeout)
+	}
+	cancel()
+	<-done
+}
+
+// AND WHAT THE PERSON READS IS A SENTENCE, not a Go error. The report is shown
+// verbatim in a danger card; "context deadline exceeded" tells somebody
+// nothing about what to do next.
+func TestAuditSkillReportsAModelThatNeverAnswers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := auditSkill(ctx, &blockingModel{}, "---\nSKILL.md\n---\nbody")
+	if err == nil {
+		t.Fatal("a model that never answered was reported as a reading")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want it to carry context.DeadlineExceeded so a caller can tell a timeout from a refusal", err)
+	}
+	sentence := err.Error()
+	if strings.Contains(sentence, "context deadline exceeded") {
+		t.Fatalf("the sentence shown to a person is a Go error: %q", sentence)
+	}
+	for _, word := range []string{"did not answer", "Try again"} {
+		if !strings.Contains(sentence, word) {
+			t.Fatalf("sentence %q does not say %q", sentence, word)
+		}
+	}
+	// The sentence prints the budget in whole minutes, so a budget that is not
+	// whole minutes would round itself into a lie. Asserted rather than
+	// commented, because the constant and the wording live apart.
+	if skillAuditCallTimeout%time.Minute != 0 {
+		t.Fatalf("skillAuditCallTimeout = %s: the sentence renders whole minutes", skillAuditCallTimeout)
+	}
 }
 
 // THE FRAME, and what is claimed for it. The auditor's input is

@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	einoModel "github.com/cloudwego/eino/components/model"
@@ -164,6 +165,33 @@ func parseSkillReading(body string) (SkillReading, error) {
 // returns its reading. Every failure is a refusal a person reads: a blank
 // answer is NOT a report, because a blank report reads exactly like a clean
 // one.
+// skillAuditCallTimeout bounds one skill reading, and the number is larger
+// than the classifier's 30s on purpose: a classifier answers one word about
+// one command, while an audit is handed a whole bundle — up to the skill
+// package's 64 KiB budget — and asked for several paragraphs about it. Long
+// enough that a slow model on a big skill still finishes, short enough that a
+// silent provider is a failure somebody can read rather than a spinner that
+// never ends.
+const skillAuditCallTimeout = 2 * time.Minute
+
+// auditTimedOut is the reading that ran out of time. It is a type rather than
+// a wrapped sentinel because it has to be BOTH things at once: a sentence
+// shown verbatim in a danger card, and something a caller can recognise
+// without matching prose. fmt.Errorf("%w", context.DeadlineExceeded) can only
+// be the second — it appends "context deadline exceeded" to whatever was
+// written in front of it.
+type auditTimedOut struct{ budget time.Duration }
+
+func (e auditTimedOut) Error() string {
+	return fmt.Sprintf(
+		"the model did not answer within %d minutes — the endpoint may be busy, or the model too slow for a skill this size. Try again, or assign a faster model to the auditing role in Settings.",
+		int(e.budget.Minutes()))
+}
+
+// Unwrap keeps the sentinel in the chain, so errors.Is(err,
+// context.DeadlineExceeded) still tells a timeout from a provider saying no.
+func (auditTimedOut) Unwrap() error { return context.DeadlineExceeded }
+
 func auditSkill(ctx context.Context, client einoModel.BaseChatModel, document string, opts ...einoModel.Option) (SkillReading, error) {
 	if client == nil {
 		return SkillReading{}, errors.New("skill audit: the auditing model is unavailable")
@@ -171,11 +199,27 @@ func auditSkill(ctx context.Context, client einoModel.BaseChatModel, document st
 	if strings.TrimSpace(document) == "" {
 		return SkillReading{}, errors.New("skill audit: there is nothing to read")
 	}
+	// THE READING BOUNDS ITSELF (nocx-w155y). Without this the call inherited
+	// the JSON-RPC request's context, which has no deadline, and the guarded
+	// http.Client deliberately has none either — so a provider that accepted
+	// the connection and then said nothing left "Reading this skill" on
+	// somebody's screen for as long as the socket lived, with no result, no
+	// error and nothing to press. A shorter deadline the caller already holds
+	// still wins: WithTimeout never extends one.
+	ctx, cancel := context.WithTimeout(ctx, skillAuditCallTimeout)
+	defer cancel()
 	resp, err := client.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(skillAuditSystemPrompt),
 		schema.UserMessage(auditUserPreamble + document),
 	}, opts...)
 	if err != nil {
+		// A DEADLINE IS NOT A REFUSAL, and it is shown verbatim in a danger
+		// card, so it gets the sentence rather than the Go error. The sentinel
+		// is kept in the chain: a caller that wants to tell a timeout from a
+		// provider saying no can still ask, and nothing has to match prose.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return SkillReading{}, auditTimedOut{budget: skillAuditCallTimeout}
+		}
 		return SkillReading{}, fmt.Errorf("skill audit: %w", err)
 	}
 	if resp == nil {

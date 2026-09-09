@@ -414,10 +414,48 @@ func (e happyLifecycleEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 	)
 }
 
-func newHappyStand(t *testing.T) *happyStand {
+// happyStandOption tunes the stand for a test that needs something other than
+// the happy path's own values — a logger it can read back, or a deadline it can
+// afford to wait out.
+type happyStandOption func(*happyStandConfig)
+
+type happyStandConfig struct {
+	slogger  *slog.Logger
+	deadline time.Duration
+}
+
+// logger is the stand's own logger, and endpointSlog is the same sink the tool
+// endpoint writes to — ONE sink, which is the property the product now has and
+// the reason a test can assert about a whole exchange from a single buffer.
+func (c happyStandConfig) logger() log.Logger { return log.NewSlogAdapter(c.slogger) }
+
+func (c happyStandConfig) endpointSlog() *slog.Logger {
+	if c.slogger != nil {
+		return c.slogger
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// withHappyStandLogger makes the stand's log READABLE, which is what a test
+// about what a person can read has to assert on.
+func withHappyStandLogger(sl *slog.Logger) happyStandOption {
+	return func(c *happyStandConfig) { c.slogger = sl }
+}
+
+// withHappyStandEnrolmentDeadline shortens the wait a test spends proving that
+// a launcher which never enrols is given up on.
+func withHappyStandEnrolmentDeadline(d time.Duration) happyStandOption {
+	return func(c *happyStandConfig) { c.deadline = d }
+}
+
+func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	t.Helper()
 	ctx := context.Background()
-	logger := log.NewSlogAdapter(nil)
+	cfg := happyStandConfig{deadline: 10 * time.Second}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	logger := cfg.logger()
 	stand := &happyStand{}
 
 	dir := t.TempDir()
@@ -464,7 +502,8 @@ func newHappyStand(t *testing.T) *happyStand {
 		&workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger},
 		enrol,
 		sup,
-		workers.WithEnrolmentDeadline(10*time.Second),
+		workers.WithEnrolmentDeadline(cfg.deadline),
+		workers.WithLogger(logger),
 		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
 	)
 	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
@@ -490,7 +529,7 @@ func newHappyStand(t *testing.T) *happyStand {
 		Peers:    coordsock.SystemPeerCredentials{},
 		SelfUID:  uint32(os.Getuid()), //nolint:gosec // uid is not a signed quantity
 		Owner:    happyEndpointOwner{},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   cfg.endpointSlog(),
 		Auth:     auth,
 		Dispatch: dispatcher,
 	})

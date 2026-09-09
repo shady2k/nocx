@@ -55,6 +55,11 @@ type agentApprovalService struct {
 	// withdrawn must stop admitting live panes, not only new ones.
 	mu       sync.Mutex
 	enrolled map[session.ID]agentapproval.Executable
+	// Identities with a question already on screen. Starting the agent again
+	// while the person is still reading must not put a second copy of the
+	// same question in the queue: it is the same decision, and a stack of
+	// identical dialogs is how a person clicks one without reading it.
+	asking map[string]bool
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -63,6 +68,7 @@ func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.S
 		scope:     agentToolEndpointScopePrefix + scope,
 		workspace: scope,
 		enrolled:  map[session.ID]agentapproval.Executable{},
+		asking:    map[string]bool{},
 	}
 }
 
@@ -123,32 +129,58 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if s.requester == nil {
 		return errors.New("nocx has no client to ask for agent approval")
 	}
-	// One fact per field. The path, the digest and the workspace used to
-	// travel as one composed string and a durable scope key, so the renderer
-	// could not give them a row each and printed the key at a person
-	// ("tool-endpoint:workspace:default"). The key's grammar has one owner and
-	// it is here; what crosses is the workspace's NAME (nocx-fu18z).
-	response, err := s.requester.RequestHost(ctx, transport.HostAsk{
+	// THE QUESTION IS RAISED, AND THIS RETURNS WITHOUT IT (nocx-t7xds).
+	//
+	// The two deadlines are irreconcilable and both are right. The shell gives
+	// an enrolment five seconds (nocx.bash __nocx_lc_grant_timeout_s) because
+	// a handshake between two programs must be bounded. The approval question
+	// has no deadline at all (transport.hostTimeoutFor) because it waits on
+	// somebody reading it. Waiting for the second inside the first meant a
+	// person could never answer in time: the pane printed "nocx did not
+	// answer", the agent started without tools, the dialog stayed up, and the
+	// click that eventually came was recorded against an enrolment that no
+	// longer existed. It worked on the NEXT start, which made a rule look like
+	// a fluke.
+	//
+	// So the ask goes out on its own and the enrolment refuses now, saying
+	// what is happening. D4 holds — no enrolment, no orchestration, and the
+	// pane says so — and the sentence is an instruction rather than a report
+	// about a timeout. The answer is durable, so starting the agent again
+	// after answering enrols with no question at all.
+	if s.beginAsking(executable) {
+		go s.ask(executable, agent)
+	}
+	return fmt.Errorf("nocx is asking you whether %s may use its tools; answer that, then start it again", agent)
+}
+
+// ask puts the question and records what comes back. It outlives the
+// enrolment that raised it, deliberately: a person reading a consent dialog
+// is not on the shell's clock.
+//
+// Its own context, for the same reason. The enrolment's is finished by the
+// time anybody clicks, and cancelling the question with it would take the
+// dialog off the screen mid-read and leave the person's next start refusing
+// for ever with nothing to answer.
+func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string) {
+	defer s.doneAsking(executable)
+	response, err := s.requester.RequestHost(context.Background(), transport.HostAsk{
 		Capability: transport.HostCapAgentApproval,
 		Executable: executable.Path,
 		Digest:     executable.SHA256,
 		Workspace:  s.workspace,
 	})
 	if err != nil {
-		return fmt.Errorf("agent approval: %w", err)
+		// Nothing is recorded. An unanswerable question — no client, a window
+		// that went away — must not become a durable "no": the person never
+		// said it, and a denial is never silently retried, so it would be
+		// permanent (nocx-6jbad).
+		return
 	}
 	decision := agentapproval.Denied
 	if response.Approved {
 		decision = agentapproval.Granted
 	}
-	if err := s.store.Record(executable, s.scope, decision); err != nil {
-		return err
-	}
-	if decision != agentapproval.Granted {
-		return fmt.Errorf("agent approval was denied for %s", agent)
-	}
-	s.remember(sid, executable)
-	return nil
+	_ = s.store.Record(executable, s.scope, decision)
 }
 
 // ListAgentAccess is the answers a person gave, in the terms the surface
@@ -194,6 +226,26 @@ func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace s
 		return false, fmt.Errorf("nocx does not hold answers for workspace %q", workspace)
 	}
 	return s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
+}
+
+// beginAsking claims the question for one identity, and answers false when
+// somebody else already holds it. The claim is released when the ask returns,
+// answered or not: a question nobody could deliver must be askable again.
+func (s *agentApprovalService) beginAsking(executable agentapproval.Executable) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := executable.Path + "\x00" + executable.SHA256
+	if s.asking[k] {
+		return false
+	}
+	s.asking[k] = true
+	return true
+}
+
+func (s *agentApprovalService) doneAsking(executable agentapproval.Executable) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.asking, executable.Path+"\x00"+executable.SHA256)
 }
 
 func (s *agentApprovalService) remember(sid session.ID, executable agentapproval.Executable) {

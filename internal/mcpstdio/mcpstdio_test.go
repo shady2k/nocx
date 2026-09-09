@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 func TestServeInitializesAbsorbsNotificationAndLists(t *testing.T) {
@@ -251,6 +253,9 @@ type rpcEnvelope struct {
 	Params  json.RawMessage   `json:"params,omitempty"`
 	Result  json.RawMessage   `json:"result,omitempty"`
 	Error   *rpcErrorEnvelope `json:"error,omitempty"`
+	// Traceparent is what this adapter sends the endpoint so the two
+	// processes' log lines belong to one exchange (nocx-4l2a5.3).
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 type rpcErrorEnvelope struct {
@@ -392,5 +397,57 @@ func mustDecode(t *testing.T, line string, target any) {
 	t.Helper()
 	if err := json.Unmarshal([]byte(line), target); err != nil {
 		t.Fatalf("decode %q: %v", line, err)
+	}
+}
+
+// THE HOP IS WHERE THE EXCHANGE STARTS. An agent's tool call reaches this
+// adapter first, so this is where the trace is born, and the endpoint request
+// carries it as a traceparent — otherwise the coordinator's call, this hop and
+// the backend's dispatch are three sets of log lines with nothing in common,
+// which is how the failure of 2026-09-09 had to be assembled.
+func TestTheEndpointRequestCarriesATraceparent(t *testing.T) {
+	seen := make(chan string, 4)
+	socket := startEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
+		seen <- request.Traceparent
+		_, _ = io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`+"\n")
+	})
+
+	runAdapter(t, socket, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n")
+
+	select {
+	case header := <-seen:
+		span, ok := nocxlog.ParseTraceparent(header)
+		if !ok {
+			t.Fatalf("the endpoint request carried %q, which is not a traceparent", header)
+		}
+		if !span.Valid() {
+			t.Fatalf("the traceparent named no usable span: %+v", span)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the endpoint was never asked")
+	}
+}
+
+// TWO CALLS ARE TWO EXCHANGES. A trace that never changed would join every
+// call an agent ever makes into one unreadable thread.
+func TestEachMCPRequestGetsATraceOfItsOwn(t *testing.T) {
+	seen := make(chan string, 8)
+	socket := startEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
+		seen <- request.Traceparent
+		_, _ = io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`+"\n")
+	})
+
+	runAdapter(t, socket,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`+"\n")
+
+	first, second := <-seen, <-seen
+	one, ok1 := nocxlog.ParseTraceparent(first)
+	two, ok2 := nocxlog.ParseTraceparent(second)
+	if !ok1 || !ok2 {
+		t.Fatalf("traceparents did not parse: %q, %q", first, second)
+	}
+	if one.TraceID == two.TraceID {
+		t.Fatalf("two calls shared one trace: %s", one.TraceID)
 	}
 }

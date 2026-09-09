@@ -14,6 +14,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 const (
@@ -299,6 +301,15 @@ func validateRequest(request requestMessage) error {
 }
 
 func (s *Server) handle(ctx context.Context, writer *lineWriter, state *sessionState, request requestMessage) error {
+	// WHERE THE EXCHANGE IS BORN. This process is the first thing in nocx an
+	// agent's tool call reaches, so the trace starts here and travels to the
+	// backend as a traceparent on the endpoint request (nocx-4l2a5.3). Without
+	// it the coordinator's call, this hop and the backend's dispatch are three
+	// sets of log lines with nothing in common.
+	//
+	// Every method, not only tools/call: initialize and tools/list fail too,
+	// and a failure with no trace is the one this epic exists to remove.
+	ctx, _ = nocxlog.StartSpan(ctx)
 	switch request.Method {
 	case "initialize":
 		version := negotiateVersion(initializeVersion(request.Params))
@@ -480,12 +491,20 @@ func (s *Server) endpointCall(ctx context.Context, method string, params json.Ra
 	defer stop()
 	defer func() { _ = conn.Close() }()
 
-	request, err := json.Marshal(map[string]any{
+	envelope := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  method,
 		"params":  params,
-	})
+	}
+	// The far side opens a CHILD of this frame, which is what makes the hop
+	// visible in the tree rather than collapsing two processes into one span.
+	// A context carrying no span sends no header, and the endpoint serves the
+	// call anyway under a trace of its own.
+	if header := nocxlog.SpanFrom(ctx).Traceparent(); header != "" {
+		envelope["traceparent"] = header
+	}
+	request, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, nil, err
 	}

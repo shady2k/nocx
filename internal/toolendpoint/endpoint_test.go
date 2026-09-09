@@ -109,6 +109,17 @@ func (d *testDispatcher) Dispatch(inv assistant.ToolInvocation) (string, error) 
 // of them pass on a surface the real dispatcher never offers.
 func (d *testDispatcher) Catalogue(content.Grant) []agenttools.Tool { return nil }
 
+// lastInvocation is what the endpoint handed the dispatcher, for the tests
+// that assert about the CONTEXT rather than about the answer.
+func (d *testDispatcher) lastInvocation() assistant.ToolInvocation {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.calls) == 0 {
+		return assistant.ToolInvocation{}
+	}
+	return d.calls[len(d.calls)-1]
+}
+
 func (d *testDispatcher) callCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()

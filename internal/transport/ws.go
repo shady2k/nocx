@@ -2961,6 +2961,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// them being passed the method or the id. A handler that goes on to
 	// drive an EXCHANGE (an agent run) adds the trace beside it.
 	ctx = log.WithRequestID(ctx, requestTag(wconn, req))
+	// AND THE FRAME IS A SPAN (nocx-4l2a5.3). The request id above is the
+	// transport's own token and joins nothing outside this process; the span
+	// is the W3C identity, so a frame that goes on to reach the tool endpoint,
+	// a helper or a session carries one exchange all the way down. A handler
+	// that drives a RUN opens its own trace over this, because a run outlives
+	// the frame that started it.
+	ctx, _ = log.StartSpan(ctx)
 	requestCtx := ctx
 	cancelRequest := func() {}
 	var cancelEntry *requestCancel

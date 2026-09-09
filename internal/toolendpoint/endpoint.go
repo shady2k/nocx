@@ -13,12 +13,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/coordinator"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/workers"
 )
 
@@ -393,6 +396,22 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 			}()
 			requestCtx, requestCancel := context.WithCancel(connectionCtx)
 			defer requestCancel()
+			// The caller's frame becomes this one's parent, and this request
+			// gets a span of its own under their trace. Everything below —
+			// the dispatch, the refusals, the answer — hangs off it, because
+			// the context is what the dispatcher is handed.
+			requestCtx = nocxlog.ContinueTrace(requestCtx, request.Traceparent)
+			requestCtx = nocxlog.WithRequestID(requestCtx, requestIDTag(request.ID))
+			// BOUND, not passed as start-line arguments: the start line is
+			// debug and a release build does not write it, so a caller named
+			// only there would be absent from the one record that matters —
+			// the failure.
+			requestCtx, requestLog, endRequest := nocxlog.Start(requestCtx,
+				nocxlog.NewSlogAdapter(e.log()).With(
+					"session_id", invocation.RunContext.Session,
+					"participant", invocation.RunContext.Participant,
+				),
+				request.Method)
 			requestInvocation := invocation
 			requestInvocation.Context = requestCtx
 			requestInvocation.Method = request.Method
@@ -419,19 +438,28 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 					// unclassified error must not spell a backend's internals
 					// to an agent — which is exactly why the log has to carry
 					// it.
-					e.log().Error("tool endpoint: unclassified dispatch failure",
-						"method", request.Method,
-						"session_id", requestInvocation.RunContext.Session,
-						"participant", requestInvocation.RunContext.Participant,
+					// The method, the session and the participant are on the
+					// record already — requestLog is bound to the span this
+					// request opened — so what this line adds is the error
+					// itself, which is the fact the wire deliberately withholds.
+					requestLog.Error("tool endpoint: unclassified dispatch failure",
 						"error", dispatchErr)
 				}
+				endRequest(dispatchErr)
 				e.writeError(conn, request.ID, code, message, reason)
 				return
 			}
 			if !json.Valid([]byte(result)) {
+				// The second unlogged internal error, and it had the same
+				// shape as the one nocx-1w3my found: two words on the wire and
+				// nothing anywhere naming the dispatcher that produced them.
+				invalid := errors.New("dispatcher returned an invalid result")
+				requestLog.Error("tool endpoint: " + invalid.Error())
+				endRequest(invalid)
 				e.writeError(conn, request.ID, rpcInternalError, "internal error", "dispatcher returned an invalid result")
 				return
 			}
+			endRequest(nil)
 			if request.Method == "tools.catalogue" {
 				e.observe(Observation{
 					SessionID: requestInvocation.RunContext.Session,
@@ -473,6 +501,17 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+	// Traceparent is the caller's W3C Trace Context header, and it is the one
+	// member here that is not JSON-RPC's. It carries the exchange across the
+	// process boundary: a coordinator's MCP call is served by nocx-helper,
+	// which asks this socket, and without it those are three sets of log lines
+	// with nothing in common — which is exactly how the failure of 2026-09-09
+	// had to be assembled, by reading timestamps (nocx-4l2a5.3).
+	//
+	// Absent or malformed is not a bad request. It means a caller whose
+	// telemetry we cannot join, and the call still runs: an observability
+	// mechanism that can refuse service is not one.
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 func decodeRequest(line []byte) (rpcRequest, error) {
@@ -613,4 +652,16 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		return rpcInternalError, "internal error",
 			"nocx failed to complete this call for a reason inside nocx, not in what you sent. Do not repeat it; carry on without this tool and say what you could not do."
 	}
+}
+
+// requestIDTag is the caller's JSON-RPC id as a log value. It is their token
+// and not ours, so it is quoted-string-unwrapped for readability and otherwise
+// passed through: a caller that numbered its requests reads "7", one that named
+// them reads the name.
+func requestIDTag(id json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(id))
+	if unquoted, err := strconv.Unquote(trimmed); err == nil {
+		return unquoted
+	}
+	return trimmed
 }

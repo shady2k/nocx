@@ -58,7 +58,21 @@ export interface HostBindings {
  *  ones — so the whole external-coordinator feature was unreachable outside a
  *  Wails build (nocx-qlp9w), and the always-rejecting default won the race the
  *  double mount created (nocx-pighx). */
-export type ApprovalSurface = (executable: string, scope: string) => Promise<boolean>
+export type ApprovalSurface = (facts: ApprovalFacts) => Promise<boolean>
+
+/** What the person is being asked to admit, one fact per member. The wire
+ *  carries three because the surface words them: a path and a digest glued
+ *  into one string cannot be given a row each, and a durable scope key
+ *  ("tool-endpoint:workspace:default") is an identifier this renderer must
+ *  not parse to find a word for a person (nocx-fu18z). */
+export interface ApprovalFacts {
+  /** The agent's absolute path. */
+  executable: string
+  /** SHA-256 of that file's bytes. */
+  digest: string
+  /** The workspace the answer covers, by name. */
+  workspace: string
+}
 
 /** The one binding name the reachability probe is asked about. All seven live
  *  on the same bound struct, so one answer covers the set: either this client
@@ -241,7 +255,11 @@ async function perform(
         cancelled: false,
         // Non-null: answer() has already refused this capability when no
         // surface is mounted, which is the only way it can be absent here.
-        approved: await approveAgent!(p.executable ?? '', p.scope ?? ''),
+        approved: await approveAgent!({
+          executable: p.executable ?? '',
+          digest: p.digest ?? '',
+          workspace: p.workspace ?? '',
+        }),
       }
     default:
       // A capability this client does not know. The vocabulary is the

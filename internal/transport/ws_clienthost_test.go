@@ -87,7 +87,8 @@ type hostRequestWire struct {
 	SessionID  string `json:"sessionId"`
 	Count      *int   `json:"count"`
 	Executable string `json:"executable"`
-	Scope      string `json:"scope"`
+	Digest     string `json:"digest"`
+	Workspace  string `json:"workspace"`
 }
 
 // askAsync issues one RequestHost on a goroutine and hands back its outcome.
@@ -194,8 +195,9 @@ var hostCapabilityCases = []struct {
 		name: "agent approval",
 		ask: HostAsk{
 			Capability: HostCapAgentApproval,
-			Executable: "/usr/local/bin/agent (sha256:abc)",
-			Scope:      "tool-endpoint:default",
+			Executable: "/usr/local/bin/agent",
+			Digest:     "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+			Workspace:  "default",
 		},
 		noHost: ErrNoApprovalHost,
 		answer: map[string]any{"outcome": "ok", "approved": true},
@@ -221,9 +223,11 @@ func TestClientHost_EachCapabilityReachesAnAttachedClient(t *testing.T) {
 				t.Errorf("url = %q, want %q", req.URL, tc.wantURL)
 			}
 			if tc.ask.Capability == HostCapAgentApproval &&
-				(req.Executable != tc.ask.Executable || req.Scope != tc.ask.Scope) {
-				t.Fatalf("approval args = (%q,%q), want (%q,%q)",
-					req.Executable, req.Scope, tc.ask.Executable, tc.ask.Scope)
+				(req.Executable != tc.ask.Executable || req.Digest != tc.ask.Digest ||
+					req.Workspace != tc.ask.Workspace) {
+				t.Fatalf("approval args = (%q,%q,%q), want (%q,%q,%q)",
+					req.Executable, req.Digest, req.Workspace,
+					tc.ask.Executable, tc.ask.Digest, tc.ask.Workspace)
 			}
 			if tc.ask.Capability == HostCapBanner {
 				if req.Title != "done" || req.Body != "the build finished" || req.SessionID != "s-1" {

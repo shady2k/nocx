@@ -130,8 +130,14 @@ func TestTheQuestionNamesTheAgentAndNotTheShell(t *testing.T) {
 	if !strings.Contains(requester.asks[0].Executable, agent) {
 		t.Fatalf("the question named %q, want the agent %s", requester.asks[0].Executable, agent)
 	}
-	if !strings.Contains(requester.asks[0].Scope, "workspace:default") {
-		t.Fatalf("the question's scope was %q, want the tool-endpoint scope", requester.asks[0].Scope)
+	if requester.asks[0].Workspace != "workspace:default" {
+		t.Fatalf("the question named workspace %q, want the one the answer covers",
+			requester.asks[0].Workspace)
+	}
+	// The digest travels as its own fact, so the renderer can give it a row
+	// and say what it is for (nocx-fu18z).
+	if len(requester.asks[0].Digest) != 64 {
+		t.Fatalf("the question carried digest %q, want a sha256", requester.asks[0].Digest)
 	}
 }
 

@@ -124,7 +124,8 @@ type hostRequestParams struct {
 	SessionID  string         `json:"sessionId,omitempty"`
 	Count      *int           `json:"count,omitempty"`
 	Executable string         `json:"executable,omitempty"`
-	Scope      string         `json:"scope,omitempty"`
+	Digest     string         `json:"digest,omitempty"`
+	Workspace  string         `json:"workspace,omitempty"`
 }
 
 // hostResolvedParams is the client's answer: a closed outcome — "ok" (the
@@ -171,8 +172,12 @@ type HostAsk struct {
 	Title, Body, SessionID string
 	// Count is HostCapBadge's dock badge count; 0 clears it.
 	Count int
-	// Executable and Scope are HostCapAgentApproval's human-readable facts.
-	Executable, Scope string
+	// HostCapAgentApproval's facts, one per member. Executable is the
+	// agent's absolute path, Digest the SHA-256 of its bytes, Workspace the
+	// name of the workspace the answer covers. Three fields rather than one
+	// composed sentence, because the renderer is what words them and a value
+	// carrying two facts cannot be given a row each (nocx-fu18z).
+	Executable, Digest, Workspace string
 }
 
 // HostAnswer is what the client reported. Path is set only by a picker;
@@ -383,7 +388,8 @@ func (s *WSServer) RequestHost(ctx context.Context, ask HostAsk) (HostAnswer, er
 		Body:       ask.Body,
 		SessionID:  ask.SessionID,
 		Executable: ask.Executable,
-		Scope:      ask.Scope,
+		Digest:     ask.Digest,
+		Workspace:  ask.Workspace,
 	}
 	if ask.Capability == HostCapBadge {
 		// Sent only where it means something. A badge of zero CLEARS the

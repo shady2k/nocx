@@ -47,6 +47,7 @@ type agentApprovalService struct {
 	store     *agentapproval.Store
 	requester hostApprovalRequester
 	scope     string
+	workspace string
 
 	// What was approved for a live enrolment, so the admit-time check reads
 	// the same identity the person answered about. The ANSWER is still read
@@ -59,8 +60,9 @@ type agentApprovalService struct {
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
 	return &agentApprovalService{
 		sessions: sessions, store: store,
-		scope:    agentToolEndpointScopePrefix + scope,
-		enrolled: map[session.ID]agentapproval.Executable{},
+		scope:     agentToolEndpointScopePrefix + scope,
+		workspace: scope,
+		enrolled:  map[session.ID]agentapproval.Executable{},
 	}
 }
 
@@ -121,11 +123,16 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if s.requester == nil {
 		return errors.New("nocx has no client to ask for agent approval")
 	}
-	wireExecutable := executable.Path + " (sha256:" + executable.SHA256 + ")"
+	// One fact per field. The path, the digest and the workspace used to
+	// travel as one composed string and a durable scope key, so the renderer
+	// could not give them a row each and printed the key at a person
+	// ("tool-endpoint:workspace:default"). The key's grammar has one owner and
+	// it is here; what crosses is the workspace's NAME (nocx-fu18z).
 	response, err := s.requester.RequestHost(ctx, transport.HostAsk{
 		Capability: transport.HostCapAgentApproval,
-		Executable: wireExecutable,
-		Scope:      s.scope,
+		Executable: executable.Path,
+		Digest:     executable.SHA256,
+		Workspace:  s.workspace,
 	})
 	if err != nil {
 		return fmt.Errorf("agent approval: %w", err)

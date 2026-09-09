@@ -19,15 +19,20 @@ import { AgentApprovalDialog } from './host-key-dialog'
 // The shape the backend actually sends: agent_approval.go composes the path
 // and the digest into one string, so the value the dialog receives is long,
 // unbroken and the reason the wrapping matters.
-const EXECUTABLE =
-  '/nix/store/7a60q5dgnv6z96c279rc1nalyiw4mgqn-bash-interactive-5.3p15/bin/bash' +
-  ' (sha256:4e8ad350dcb1c859cb4c7f0d694a90f7a5734465b1096f3a2b0c7d4e8f1a2b3c4)'
-const SCOPE = 'tool-endpoint:workspace:default'
+const EXECUTABLE = '/run/current-system/sw/bin/claude'
+const DIGEST = '55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825'
+const WORKSPACE = 'default'
 
 function open(busy = false) {
   const onDecide = vi.fn()
   const view = render(() => (
-    <AgentApprovalDialog executable={EXECUTABLE} scope={SCOPE} busy={busy} onDecide={onDecide} />
+    <AgentApprovalDialog
+      executable={EXECUTABLE}
+      digest={DIGEST}
+      workspace={WORKSPACE}
+      busy={busy}
+      onDecide={onDecide}
+    />
   ))
   return { view, onDecide }
 }
@@ -35,18 +40,41 @@ function open(busy = false) {
 describe('AgentApprovalDialog', () => {
   afterEach(cleanup)
 
-  it('names the executable and the scope as fact rows a long value can wrap in', () => {
+  it('names the agent and its fingerprint as fact rows a long value can wrap in', () => {
     const { view } = open()
     const values = Array.from(
       view.container.querySelectorAll('.ui-fact-list__value'),
       (el) => el.textContent,
     )
-    expect(values).toEqual([EXECUTABLE, SCOPE])
+    // toContain, not toBe: a row's value element carries the note beside the
+    // value, which is the point of the note — it cannot drift from what it
+    // qualifies.
+    expect(values[0]).toBe(EXECUTABLE)
+    expect(values[1]).toContain(DIGEST)
     const names = Array.from(
       view.container.querySelectorAll('.ui-fact-list__name'),
       (el) => el.textContent,
     )
-    expect(names).toEqual(['Executable', 'Scope'])
+    expect(names).toEqual(['Agent', 'Fingerprint', 'Applies to', 'Lasts'])
+  })
+
+  // The four questions a person has, and the dialog used to answer none of
+  // them (nocx-fu18z). Asserted as text a person can read rather than as the
+  // presence of a row, because the row was never the missing part.
+  it('says what a yes allows, how far it reaches, how long it lasts and what a no costs', () => {
+    const { view } = open()
+    const text = view.container.textContent ?? ''
+    expect(text).toContain('start other agents in new tabs')
+    expect(text).toContain(`Every tab in the ${WORKSPACE} workspace`)
+    expect(text).toContain('no way to undo it yet')
+    expect(text).toContain('the agent still runs')
+  })
+
+  // Vocabulary nobody outside this repository has met. It named the internal
+  // surface and never what the surface lets an agent do.
+  it('never calls it "the tool endpoint"', () => {
+    const { view } = open()
+    expect(view.container.textContent ?? '').not.toContain('tool endpoint')
   })
 
   // D14's wording, asserted because it is the part that tells a person the
@@ -58,7 +86,7 @@ describe('AgentApprovalDialog', () => {
 
   it('reports allow and deny as the answer the person gave', () => {
     const { view, onDecide } = open()
-    fireEvent.click(view.getByText('Allow this agent and commands it launches'))
+    fireEvent.click(view.getByText('Allow'))
     expect(onDecide).toHaveBeenCalledWith(true)
     fireEvent.click(view.getByText('Deny'))
     expect(onDecide).toHaveBeenCalledWith(false)

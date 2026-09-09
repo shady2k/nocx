@@ -79,22 +79,50 @@ export function HostKeyDialog(props: HostKeyDialogProps) {
 
 interface AgentApprovalDialogProps {
   executable: string
-  scope: string
+  digest: string
+  workspace: string
   busy: boolean
   onDecide: (approved: boolean) => void
 }
 
-/** One consent surface for admitting an executable process tree to tools. */
+/**
+ * The consent surface that admits an agent's process tree to nocx's tools.
+ *
+ * IT SAYS WHAT A YES ALLOWS (nocx-fu18z). It used to state six facts and
+ * answer none of the questions a person actually has. "the tool endpoint" is
+ * vocabulary nobody outside this repository has met; the scope arrived as the
+ * durable key it is part of ("tool-endpoint:workspace:default"); the digest
+ * sat there with nothing to check it against and no reason given; and what
+ * would BECOME POSSIBLE, which is the whole of what consent is for, appeared
+ * in no word of it. So the lead is one sentence naming the three powers the
+ * caller's grant actually carries — Delegate, Observe and MutateDestructive
+ * over its own session and environment (internal/app/worker_auth.go
+ * callerGrant) — and the rows say how far the answer reaches and how long it
+ * lasts.
+ *
+ * D14's words are kept verbatim in the lead: the approval must read "allow
+ * this agent and commands it launches", and it is the sentence that tells a
+ * person the grant does not stop at the process they typed.
+ *
+ * IT ALSO SAYS WHAT A NO COSTS. Without that line Deny reads as the button
+ * that breaks something: the agent still runs, it simply runs without nocx's
+ * tools, and the pane says so.
+ *
+ * AND IT ADMITS WHAT NOCX CANNOT YET DO. The answer is durable and no surface
+ * can withdraw it — nothing reads agent-approvals.json (nocx-6jbad). A person
+ * deciding is entitled to know the decision is one-way for now, and a dialog
+ * that implied otherwise would be the more comfortable lie.
+ */
 export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
   return (
     <Dialog
       open
       onClose={() => props.onDecide(false)}
-      title="Allow agent access?"
+      title="Allow this agent to use nocx's tools?"
       footer={
         <>
           <Button variant="primary" disabled={props.busy} onClick={() => props.onDecide(true)}>
-            {props.busy ? 'Saving…' : 'Allow this agent and commands it launches'}
+            {props.busy ? 'Saving…' : 'Allow'}
           </Button>
           <Button
             variant="default"
@@ -109,24 +137,35 @@ export function AgentApprovalDialog(props: AgentApprovalDialogProps) {
     >
       <Stack>
         <p>
-          Allow this agent <strong>and commands it launches</strong> to use the tool endpoint?
+          If you allow it, this agent <strong>and commands it launches</strong> can start other
+          agents in new tabs, watch what they are doing, and stop them. They cannot read your
+          secrets, reach another machine, or change anything else on this one.
         </p>
-        {/* The kit's named-row list, not two hand-rolled paragraphs. A
-            digest is one 64-character word, and a <code> in a dialog body
-            inherits no wrapping — .nocx-dialog__message carries the
-            word-break and only the message prop wears that class — so the
-            executable ran off the dialog and took its closing bracket with
-            it, behind a horizontal scrollbar. .ui-fact-list__value breaks
-            anywhere, which is the whole reason this component exists: its
-            first caller was the other approval surface, for facts of
-            exactly this shape (nocx-n7xha). */}
         <FactList
-          ariaLabel="What is being approved"
+          ariaLabel="What is being allowed"
           facts={[
-            { name: 'Executable', value: props.executable },
-            { name: 'Scope', value: props.scope },
+            { name: 'Agent', value: props.executable },
+            {
+              name: 'Fingerprint',
+              value: props.digest,
+              note: 'The answer is remembered against these bytes, so a replaced program is asked about again.',
+            },
+            {
+              name: 'Applies to',
+              value: `Every tab in the ${props.workspace} workspace`,
+              note: 'Not only this tab: the same agent started anywhere in this workspace is allowed without asking again.',
+            },
+            {
+              name: 'Lasts',
+              value: 'Until you undo it, and nocx has no way to undo it yet',
+              note: 'The answer survives a restart. Removing it means editing agent-approvals.json in the profile by hand.',
+            },
           ]}
         />
+        <p>
+          If you deny, the agent still runs — without nocx's tools, and its pane says so. The answer
+          is remembered for this agent alone.
+        </p>
       </Stack>
     </Dialog>
   )

@@ -53,6 +53,7 @@ import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from '
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountClientHost } from './client-host'
+import type { ApprovalFacts } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -382,9 +383,7 @@ function main(): void {
   const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
   const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
 
-  type AgentHostApproval = {
-    executable: string
-    scope: string
+  type AgentHostApproval = ApprovalFacts & {
     resolve: (approved: boolean) => void
   }
   const pendingAgentHostApprovals: AgentHostApproval[] = []
@@ -394,9 +393,9 @@ function main(): void {
   const nextAgentHostApproval = () => {
     setActiveAgentHostApproval(pendingAgentHostApprovals.shift() ?? null)
   }
-  const requestAgentHostApproval = (executable: string, scope: string): Promise<boolean> =>
+  const requestAgentHostApproval = (facts: ApprovalFacts): Promise<boolean> =>
     new Promise((resolve) => {
-      pendingAgentHostApprovals.push({ executable, scope, resolve })
+      pendingAgentHostApprovals.push({ ...facts, resolve })
       if (!untrack(() => activeAgentHostApproval())) nextAgentHostApproval()
     })
   const decideAgentHostApproval = (approved: boolean) => {
@@ -1785,7 +1784,8 @@ function main(): void {
           {(ask) => (
             <AgentApprovalDialog
               executable={ask.executable}
-              scope={ask.scope}
+              digest={ask.digest}
+              workspace={ask.workspace}
               busy={agentHostApprovalBusy()}
               onDecide={decideAgentHostApproval}
             />

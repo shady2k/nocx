@@ -114,8 +114,8 @@ function mount(
  *  nocx-qlp9w. */
 function scriptedApproval(answer = true) {
   const seen: string[] = []
-  const surface: ApprovalSurface = (executable, scope) => {
-    seen.push(`approveAgent:${executable}|${scope}`)
+  const surface: ApprovalSurface = (facts) => {
+    seen.push(`approveAgent:${facts.executable}|${facts.digest}|${facts.workspace}`)
     return Promise.resolve(answer)
   }
   return { surface, seen }
@@ -213,9 +213,10 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
       requestId: 'r-approval',
       capability: 'agent.approval',
       executable: '/usr/local/bin/agent',
-      scope: 'tool-endpoint:workspace-1',
+      digest: 'ab'.repeat(32),
+      workspace: 'workspace-1',
     })
-    expect(a.seen).toEqual(['approveAgent:/usr/local/bin/agent|tool-endpoint:workspace-1'])
+    expect(a.seen).toEqual([`approveAgent:/usr/local/bin/agent|${'ab'.repeat(32)}|workspace-1`])
     expect(b.seen).toEqual([])
     expect(lastResolution(d)).toEqual({ requestId: 'r-approval', outcome: 'ok', approved: true })
   })
@@ -326,9 +327,10 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
       requestId: 'r-na-approval',
       capability: 'agent.approval',
       executable: '/usr/local/bin/claude',
-      scope: 'tool-endpoint:workspace-1',
+      digest: 'cd'.repeat(32),
+      workspace: 'workspace-1',
     })
-    expect(a.seen).toEqual(['approveAgent:/usr/local/bin/claude|tool-endpoint:workspace-1'])
+    expect(a.seen).toEqual([`approveAgent:/usr/local/bin/claude|${'cd'.repeat(32)}|workspace-1`])
     expect(lastResolution(d)).toEqual({
       requestId: 'r-na-approval',
       outcome: 'ok',

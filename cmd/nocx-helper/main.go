@@ -37,17 +37,29 @@ import (
 
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
-	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
+	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/mcpstdio"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 func main() {
 	// stdout is the wire — for the bridge it is literally the ssh channel —
 	// so every diagnostic goes to stderr (D22).
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	args := os.Args[1:]
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
+		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2]); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("mcp", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -72,17 +84,13 @@ func main() {
 	}
 	dir := endpoint.Dir(home)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	args := os.Args[1:]
 	switch {
 	case len(args) == 1 && args[0] == endpoint.ServeCommand:
 		os.Exit(serve(ctx, log, dir, generation, contentHash, exe))
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:
-		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation>\n",
+		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path>\n",
 			endpoint.ServeCommand, endpoint.BridgeCommand)
 		os.Exit(2)
 	}
@@ -97,7 +105,27 @@ func main() {
 // generation at the same time produce, and the socket is the only authority
 // present on both sides of it.
 func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID, contentHash, exe string) int {
-	if alreadyServing(ctx, log, dir, generation, contentHash) {
+	// Everything that can fail and is not the endpoint happens BEFORE the
+	// bind. The instance id used to be minted after it, which left one window
+	// in which the socket existed and this process was about to exit without
+	// ever serving it — a socket with nothing behind it. Nothing repairs that
+	// from this side: the next helper's Listen dials it, is refused, and
+	// unlinks it (endpoint.clearStale), while a coordinator only ever reports
+	// it as no endpoint. Shrinking the window is cheap, so it is shrunk; what
+	// remains is bind → Serve, which cannot be removed because binding is what
+	// makes serving possible, and a prober cannot mistake it for a slow
+	// daemon: net.Listen creates the socket ALREADY LISTENING, so there is no
+	// state in which the file exists and nothing has bound it, and a daemon
+	// that is merely slow to reach its accept loop still accepts (the kernel
+	// queues it) and is told apart by the handshake budget rather than by the
+	// file.
+	instanceID, err := randomID()
+	if err != nil {
+		log.Error("instance id", "err", err)
+		return 1
+	}
+
+	if alreadyServing(ctx, log, dir, generation) {
 		log.Info("a helper of this generation is already serving", "generation", generation)
 		return 0
 	}
@@ -125,20 +153,25 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// division is the whole of D1 in code: a connection ending releases that
 	// connection's reader and its write capability, and every session, window
 	// and process survives it.
+	// NOCX_TOOL_SOCKET, read here rather than derived: this process is not
+	// the coordinator and has no way to compute a coordinator's tool.sock
+	// path itself (internal/toolendpoint owns that name, AD-8) — it is
+	// only ever a fact the coordinator that forked this daemon already
+	// knew and handed down as this process's own environment (Ensure, in
+	// internal/helper/endpoint/bridge.go, is the one place that sets it;
+	// on the remote/bridge path nothing sets it, which is the honest
+	// answer there — nocx-2tesu). Read once, at composition, and carried
+	// for the daemon's whole life: it is a property of which coordinator
+	// started this generation, never of one spawn request.
+	agentToolSocketPath := os.Getenv(shellintegration.ToolSocketEnvVar)
 	sessions := session.New(session.Options{
 		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})
 	defer sessions.Close()
-
-	instanceID, err := randomID()
-	if err != nil {
-		log.Error("instance id", "err", err)
-		return 1
-	}
 
 	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
@@ -174,23 +207,29 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 // hello-ok carrying this content hash is the fact (D4: liveness is a fact,
 // never an inference from an error).
 //
+// It takes the generation and NOT a content hash beside it, because they are
+// the same value — the generation IS this binary's content hash — and two
+// parameters for one fact is a drift waiting to be introduced.
+//
 // A "no" here is never a verdict either: it means this process saw nothing
 // serving and may try to bind. If it is wrong, Listen finds the live socket
 // and refuses.
-func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID, contentHash string) bool {
-	conn, err := endpoint.Dial(ctx, dir, generation)
-	if err != nil {
-		return false
-	}
-	carrier := client.NewSocketConn(conn)
-	c, err := client.Dial(ctx, client.Config{
-		Exec:       carrier,
-		ExpectHash: contentHash,
+func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generation proto.GenerationID) bool {
+	// The local carrier, which is one thing and not two: the probe a daemon
+	// makes of its own generation and the connection a coordinator makes to it
+	// are the same dial, the same socket adapter and the same handshake, so
+	// there is no second implementation to drift.
+	//
+	// No binary is offered, and that is the whole difference between this
+	// caller and the coordinator's: a process that is about to bind the
+	// endpoint must not start a competitor for it.
+	c, err := helperlocal.Open(ctx, helperlocal.Config{
+		Dir:        dir,
+		Generation: generation,
 		Log:        log,
 	})
 	if err != nil {
-		_ = carrier.Close()
-		log.Info("something answers on the endpoint but it is not this helper", "err", err)
+		log.Info("nothing of this generation answers on the endpoint", "err", err)
 		return false
 	}
 	_ = c.Close()
@@ -210,7 +249,11 @@ func alreadyServing(ctx context.Context, log *slog.Logger, dir string, generatio
 // required becoming the account (D12). A non-ssh carrier must supply one; that
 // is the carrier's problem, not this protocol's.
 func bridge(ctx context.Context, log *slog.Logger, dir string, want, generation proto.GenerationID, exe string) int {
-	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe)
+	// No extra environment: this generation is being reached over the ssh
+	// exec lane, on a machine with no local tool.sock of the caller's to
+	// relay (nocx-2tesu) — that concept exists only for the coordinator's
+	// own machine, in internal/helper/local's reach().
+	conn, err := endpoint.Ensure(ctx, dir, want, generation, exe, nil)
 	if err != nil {
 		log.Error("bridge", "generation", want, "err", err)
 		if errors.Is(err, endpoint.ErrNoEndpoint) {

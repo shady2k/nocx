@@ -1211,7 +1211,7 @@ func TestReadTransportErrorPassesThrough(t *testing.T) {
 // Watch, Canonical, Close, Rev
 // ---------------------------------------------------------------------------
 
-func TestWatchUnavailableUntilTheWatchingWave(t *testing.T) {
+func TestWatchUnavailableUntilTheWatchingGroup(t *testing.T) {
 	_, err := New(newFakeFS(t)).Watch(context.Background(), tempDir(t))
 	var wu *filesystem.ErrWatchUnavailable
 	if !errors.As(err, &wu) {

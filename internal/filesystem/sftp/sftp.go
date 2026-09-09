@@ -542,10 +542,10 @@ func (p *Provider) Read(ctx context.Context, pathValue string, maxBytes int64) (
 }
 
 // Watch is declared by the Provider contract (spec §5.1), but watching is a
-// later wave of the design's sequence (§6 step 5): SFTP polling arrives with
-// the sftp provider's watching wave. SFTP has no change-notification in the
+// later worker of the design's sequence (§6 step 5): SFTP polling arrives with
+// the sftp provider's watching workers. SFTP has no change-notification in the
 // protocol at all, and the polling that substitutes for it belongs to that
-// wave, not here. Until then a watch cannot be established honestly — a
+// worker, not here. Until then a watch cannot be established honestly — a
 // Watch whose Events never fired would be a silent lie the product could not
 // surface — so the provider refuses with ErrWatchUnavailable.
 func (p *Provider) Watch(ctx context.Context, pathValue string) (filesystem.Watch, error) {

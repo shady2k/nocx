@@ -1,0 +1,77 @@
+{"agent": "claude", "argv": ["claude"], "cols": 120, "rows": 40, "started": "2026-09-03T14:47:31.898575725Z", "script": ["+12000ms \"\"", "+500ms \"say hi\"", "+2000ms \"\\\\r\"", "+30000ms \"\""]}
+{"atMs": 325, "offset": 0, "data": "\u001b7\u001b[r\u001b8\u001b[?25h"}
+{"atMs": 336, "offset": 13, "data": "\u001b[?25l\u001b[?2004h\u001b[?1004h\u001b[?2031h"}
+{"atMs": 356, "offset": 43, "data": "\u001b[>0q\u001b[c"}
+{"atMs": 1191, "offset": 51, "data": "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs": 1195, "offset": 98, "data": "\u001b]0;✳ Claude Code\u0007"}
+{"atMs": 1227, "offset": 118, "data": "\u001b[H\r\u001b[1B\u001b[38;2;215;119;87m╭───\u001b[6GClaude Code\u001b[18G\u001b[38;2;153;153;153mv2.1.245\u001b[27G\u001b[38;2;215;119;87m─────────────────────────────────────────────────────────────────────────────────────────────╮\r\u001b[1B│\u001b[54G\u001b[2m│\u001b[56G\u001b[22m\u001b[1mTips for getting started\u001b[120G\u001b[22m│\r\u001b[1B│\u001b[17G\u001b[39m\u001b[1mWelcome back Alexandr!\u001b[54G\u001b[22m\u001b[2m\u001b[38;2;215;119;87m│\u001b[56G\u001b[39m\u001b[22mRun\u001b[60G/init\u001b[66Gto\u001b[69Gcreate\u001b[76Ga\u001b[78GCLAUDE.md\u001b[88Gfile\u001b[93Gwith\u001b[98Ginstructions\u001b[111Gfor\u001b[115GCla…\u001b[120G\u001b[38;2;215;119;87m│\r\u001b[1B│\u001b[54G\u001b[2m│\u001b[56G\u001b[22m───────────────────────────────────────────────────────────────\u001b[120G│\r\u001b[1B│\u001b[24G ▐\u001b[48;2;0;0;0m▛███▛█\u001b[54G\u001b[49m\u001b[2m│\u001b[56G\u001b[22m\u001b[1mWhat's new\u001b[120G\u001b[22m│\r\u001b[1B│\u001b[24G▝▜\u001b[48;2;0;0;0m█████\u001b[49m█▀\u001b[54G\u001b[2m│\u001b[56G\u001b[39m\u001b[22mBug\u001b[60Gfixes\u001b[66Gand\u001b[70Greliability\u001b[82Gimprovements\u001b[120G\u001b[38;2;215;119;87m│\r\u001b[1B│\u001b[24G  ▝▝ ▝▝  \u001b[54G\u001b[2m│\u001b[56G\u001b[39m\u001b[22mAdded\u001b[62G`--restricted`\u001b[77G(or\u001b[81G`CLAUDE_CODE_RESTRICTED=1`):\u001b[110Gremoves\u001b[118G…\u001b[120G\u001b[38;2;215;119;87m│\r\u001b[1B│\u001b[5G\u001b[38;2;153;153;153mOpus 5 (1M context) with high… · Claude Max · \u001b[54G\u001b[2m\u001b[38;2;215;119;87m│\u001b[56G\u001b[39m\u001b[22mAdded\u001b[62G`experimental.cacheTtl`\u001b[86G(`\"5m\"`\u001b[94Gor\u001b[97G`\"1h\"`)\u001b[105Gto\u001b[108Gagent\u001b[114Gfron…\u001b[120G\u001b[38;2;215;119;87m│\r\u001b[1B│\u001b[5G\u001b[38;2;153;153;153magent@example.com's Organization\u001b[54G\u001b[2m\u001b[38;2;215;119;87m│\u001b[56G\u001b[22m\u001b[38;2;153;153;153m\u001b[3m/release-notes for more\u001b[120G\u001b[23m\u001b[38;2;215;119;87m│\r\u001b[1B│\u001b[17G\u001b[38;2;153;153;153m/…/scratchpad/capwork\u001b[54G\u001b[2m\u001b[38;2;215;119;87m│\u001b[120G\u001b[22m│\r\u001b[1B╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\r\u001b[102C\u001b[23B\u001b[38;2;153;153;153m● high · /effort\r\u001b[1B\u001b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[1B\u001b[39m❯ \u001b[2mTry \"refactor <filepath>\"\r\u001b[1B\u001b[22m\u001b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[2B\u001b[38;2;255;193;7m⏵⏵ auto mode on\u001b[38;2;153;153;153m (shift+tab to cycle) · ← for agents\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 1335, "offset": 3365, "data": "\u001b[?25l\u001b[H\r\u001b[2C\u001b[36B\u001b[K\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 11201, "offset": 3407, "data": "\u001b[?25l\u001b[H\r\u001b[102C\u001b[34B        \u001b[38;2;153;153;153m0 tokens\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 12501, "offset": 3488, "data": "\u001b(B\u000f\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs": 12507, "offset": 3524, "data": "\u001b[?25l\u001b[H\r\u001b[2C\u001b[36Bsay\u001b[7Ghi\r\u001b[38C\u001b[3B\u001b[K\u001b[40;1H\u001b[37;9H\u001b[?25h"}
+{"atMs": 14521, "offset": 3585, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 14523, "offset": 3605, "data": "\u001b[?25l\u001b[H\r\u001b[14B\u001b[48;2;55;55;55m\u001b[38;2;80;80;80m❯ \u001b[38;2;255;255;255msay hi\u001b[39m                                                                                                                \r\u001b[19B\u001b[49m\u001b[38;2;215;119;87m·\u001b[3GSwirli\u001b[38;2;235;159;127mng…\u001b[38;2;215;119;87m \u001b[38;2;153;153;153m(0s)\r\u001b[3B❯ \u001b[39m\u001b[K\r\u001b[38C\u001b[3B\u001b[38;2;153;153;153m · ← for agents\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 14572, "offset": 3995, "data": "\u001b[?25l\u001b[H\r\u001b[33B\u001b[38;2;255;107;128m✻\u001b[3GConnection refused — a firewall or proxy may be blocking it (ConnectionRefused)\u001b[38;2;153;153;153m · Retrying in 1s · attempt 1/10\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 15157, "offset": 4195, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m2\u001b[110G2\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 15353, "offset": 4267, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m1\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 15481, "offset": 4332, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 16291, "offset": 4352, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m3\u001b[110G3\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 16355, "offset": 4424, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m2\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 16441, "offset": 4489, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 17373, "offset": 4509, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m1\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 17401, "offset": 4574, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 18346, "offset": 4594, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m5\u001b[110G4\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 18361, "offset": 4666, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 19321, "offset": 4686, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 19378, "offset": 4706, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m4\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 20281, "offset": 4771, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 20395, "offset": 4791, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m3\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 21242, "offset": 4856, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 21395, "offset": 4876, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m2\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 22202, "offset": 4941, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 22412, "offset": 4961, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m1\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 23162, "offset": 5026, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 23317, "offset": 5046, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m0s · a\u001b[105Gtempt 5/10\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 23977, "offset": 5133, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m9s · at\u001b[105Gempt 5/10\u001b[39m\u001b[K\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 24122, "offset": 5223, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 24978, "offset": 5243, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m8\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 25082, "offset": 5308, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 25993, "offset": 5328, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m7\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 26042, "offset": 5393, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 26994, "offset": 5413, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m6\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 27002, "offset": 5478, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 27962, "offset": 5498, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 28011, "offset": 5518, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m5\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 28922, "offset": 5583, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 29011, "offset": 5603, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m4\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 29883, "offset": 5668, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 30031, "offset": 5688, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m3\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 30843, "offset": 5753, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 31033, "offset": 5773, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m2\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 31803, "offset": 5838, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 32033, "offset": 5858, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m1\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 32763, "offset": 5923, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 32949, "offset": 5943, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m7s · a\u001b[105Gtempt 6/10\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 33723, "offset": 6030, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 33838, "offset": 6050, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m6\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 34683, "offset": 6115, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 34838, "offset": 6135, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m5\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 35643, "offset": 6200, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 35839, "offset": 6220, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m4\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 36603, "offset": 6285, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 36856, "offset": 6305, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m3\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 37564, "offset": 6370, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 37856, "offset": 6390, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m2\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 38524, "offset": 6455, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 38874, "offset": 6475, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m1\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 39484, "offset": 6540, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 39874, "offset": 6560, "data": "\u001b[?25l\u001b[H\r\u001b[97C\u001b[33B\u001b[38;2;153;153;153m0\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 40444, "offset": 6625, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 40778, "offset": 6645, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m9s · at\u001b[105Gempt 6/10\u001b[39m\u001b[K\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 41404, "offset": 6735, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 41778, "offset": 6755, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m8\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 42364, "offset": 6820, "data": "\u001b]0;◑ Claude Code\u0007"}
+{"atMs": 42793, "offset": 6840, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m7\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 43324, "offset": 6905, "data": "\u001b]0;◐ Claude Code\u0007"}
+{"atMs": 43794, "offset": 6925, "data": "\u001b[?25l\u001b[H\r\u001b[96C\u001b[33B\u001b[38;2;153;153;153m6\u001b[39m\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs": 44284, "offset": 6990, "data": "\u001b]0;◑ Claude Code\u0007"}

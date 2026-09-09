@@ -1056,7 +1056,7 @@ a secret is still inside it.
 
 ## 13. Out of scope
 
-The relay tier, and the compiled remote helper §5.4 names as the only answer to a stricter
+The helper tier, and the compiled remote binary §5.4 names as the only answer to a stricter
 threat model. Compression or minification of any payload — this design removes the reason
 for it on both paths, and reintroducing it restores a dependency on an unknown limit.
 Hiding the exec request from a recorder by any means. Reuse of a master the user owns.

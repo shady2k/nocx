@@ -176,6 +176,13 @@ type hostSession struct {
 	id              proto.HostSessionID
 	raw             [16]byte
 	workspace       proto.WorkspaceID
+	// key is the idempotency key the spawn carried, or empty (L7). It is held
+	// so the row's removal can release the claim in the same critical section
+	// that removes the row — the closing end of the interval "a key names its
+	// session from before the fork until the row leaves the inventory". It is
+	// never reported: the key is the CALLER's record and the helper is only
+	// asked to honour it, not to publish it.
+	key             string
 	startedAt       time.Time
 	launch          proto.LaunchRecord
 	proc            Process

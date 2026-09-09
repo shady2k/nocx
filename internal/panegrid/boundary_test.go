@@ -12,7 +12,7 @@ import (
 )
 
 // The AD-6 amendment grants a grid exactly two powers and names three things
-// it may never decide: a wave state, a lifecycle attempt, an execution
+// it may never decide: a worker state, a lifecycle attempt, an execution
 // attempt. A test that fed a stream and then asserted "and no lifecycle
 // attempt was created" would be checking one path through code that could
 // still grow another tomorrow.
@@ -75,7 +75,7 @@ func TestPanegridCannotReachTheAuthoritiesItMayNotDecide(t *testing.T) {
 			for _, bad := range forbidden {
 				if strings.Contains(path, bad) {
 					t.Errorf("%s imports %q: panegrid may not reach %s — "+
-						"the AD-6 amendment forbids the grid to decide a wave state, "+
+						"the AD-6 amendment forbids the grid to decide a worker state, "+
 						"a lifecycle attempt or an execution attempt, and this import "+
 						"is how that stops being structurally impossible",
 						name, path, bad)
@@ -126,7 +126,7 @@ func TestTheImportCheckActuallySeesImports(t *testing.T) {
 // declared it.
 func TestExportedSurfaceNamesNoAuthority(t *testing.T) {
 	files := packageFiles(t)
-	banned := []string{"lifecycle", "execution", "attempt", "wave", "session", "ledger", "notify"}
+	banned := []string{"lifecycle", "execution", "attempt", "worker", "session", "ledger", "notify"}
 	for name, f := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue

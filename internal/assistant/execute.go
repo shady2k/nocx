@@ -74,6 +74,12 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"skills.delete":    executeSkillsDelete,
 	"skills.resolve":   executeSkillsResolve,
 	"skills.install":   executeSkillsInstall,
+	"workers.holdings": executeWorkerHoldings,
+	"workers.spawn":    executeWorkerSpawn,
+	"workers.say":      executeWorkerSay,
+	"workers.wait":     executeWorkerWait,
+	"workers.close":    executeWorkerClose,
+	"workers.inbox":    executeWorkerInbox,
 }
 
 // SkillSource is the assistant's seam onto the skill library. The index is
@@ -116,6 +122,16 @@ type toolSeams struct {
 	// against a guessed directory would show the WRONG file, which is the
 	// one failure on this surface a person cannot see.
 	cwd string
+	// workerStore is the worker record. Nil is the ordinary shape for every caller
+	// that is not the transport, and it is also the honest answer where the
+	// encrypted store never opened: the tools refuse and say so, rather than
+	// starting a worker into a record that would not hold it.
+	workerStore WorkerRecord
+	// workerEnvironment names the environment a spawn would reach. It is a
+	// SEAM value and not an argument for the reason resourceLocalEnvironment
+	// is a constant: the spawner opens a local session, so a parameter would
+	// let the model name an environment nothing could deliver.
+	workerEnvironment string
 }
 
 type noteSearchRow struct {

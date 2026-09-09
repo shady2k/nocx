@@ -317,7 +317,7 @@ Stated in full, so nothing is implied that is not true:
   which is a different and still-held boundary;
 - **this posture must be revisited before any remotely reachable backend.** Computed
   authorization under a local single-user trust model does not automatically carry into
-  web or relay operation; that requires its own authority and threat-model decision.
+  web or server operation; that requires its own authority and threat-model decision.
 
 The root problem is a confused deputy, and neither computed authorization nor a grant
 stored in the same writable document solves it — a broker with an approval channel outside
@@ -679,7 +679,7 @@ document, not a label, is what says these are one feature.
   and cwd is known only because the shell emits OSC 7. The answer is a semantic sideband
   from a trusted producer, with a narrowly enumerated OSC extractor as compatibility
   fallback. AD-6 and AD-1 both need amending in the document rather than routing around.
-- **Replay confidentiality in a web/relay deployment.** AD-9 defines retention mechanics and
+- **Replay confidentiality in a web/server deployment.** AD-9 defines retention mechanics and
   says nothing about confidentiality or lifecycle; "auth token + bind-to-localhost"
   (`architecture.md:111`) is not sufficient for a remote deployment.
 - **A second hierarchy** (folders for navigation, sets for policy). One tree with visible

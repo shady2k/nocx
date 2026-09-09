@@ -54,7 +54,7 @@ type ceilings struct {
 
 // Close releases nothing: the local Repo owns no persistent resource — every
 // invocation is a fresh child, and the binding drains in-flight calls before
-// Close — so closing is a no-op. The method exists so the relay
+// Close — so closing is a no-op. The method exists so the helper
 // implementation has a teardown point at the seam.
 func (r *Repo) Close() error { return nil }
 

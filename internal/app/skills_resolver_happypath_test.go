@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,7 +18,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 const resolverRepository = "agentmail-to/agentmail-skills"
@@ -235,19 +233,15 @@ func resolverStreamAnswer(w http.ResponseWriter, text string) {
 }
 
 func TestSkillsResolverHappyPathThroughProductionWiring(t *testing.T) {
-	storagetest.IsolateWithHome(t)
 	forge := newResolverForge(t)
 	pageURL := forge.server.URL + "/docs/integrations/skills"
 	model := newResolverModel(t, pageURL)
 
-	a, err := newTestApp(t, WithSkillForge(forge.server.URL+"/api", forge.server.URL+"/raw"))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if startErr := a.Start(context.Background()); startErr != nil {
-		t.Fatalf("Start: %v", startErr)
-	}
-	defer a.Shutdown(context.Background())
+	// The whole composition root, with this machine's helper really
+	// installed: `open` mints a local pane through the helper now, so an app
+	// booted without one answers the dial with "there is nothing to open the
+	// pane on" and this test has no session to hang the ask on.
+	a := newLocalPaneApp(t, WithSkillForge(forge.server.URL+"/api", forge.server.URL+"/raw"))
 
 	conn, _, err := (&websocket.Dialer{
 		Subprotocols: []string{"nocx.token." + a.Transport.Token()},

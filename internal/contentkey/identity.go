@@ -21,7 +21,7 @@ var errNoMachineID = errors.New("this host exposes no machine identifier")
 // /etc/machine-id at all, and our own `go test -race` runs in one, which is
 // how this was found: the acceptance test passed on the developer's host and
 // failed in the gate, reporting that history simply does not work there.
-// That is not a test-environment quirk to wave away — containers, minimal
+// That is not a test-environment quirk to worker away — containers, minimal
 // images and several BSDs are machines a user runs a terminal on, and
 // failing closed would silently cost them the feature.
 //

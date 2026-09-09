@@ -31,9 +31,9 @@ import (
 // integration/, lock polls) are measured separately by
 // TestMeasurePublishScaling and TestMeasureLockLoopCost and are NOT folded
 // into these constants.
-// measuredMaxPublishBytes has moved twice, and both moves are the ratchet
-// working rather than failing. Every byte of both is the launch carrier,
-// which is the only bundle file either change touched.
+// measuredMaxPublishBytes has moved twelve times, and every move is the ratchet
+// working rather than failing. Every byte of each move is the launch carrier,
+// which is the only bundle file these changes touched.
 //
 // 2026-08-21, first move: it was 57,496 when measured against a tree that had
 // the carrier but not stage-1; merging the two grew the launch carrier from
@@ -89,13 +89,72 @@ import (
 // also the one that fixed the most: a byte is not a proxy for a change's
 // weight, which is the assumption a size ratchet quietly invites.
 //
-// The CALL counts did not move on any of the six occasions —
-// 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
-// changed size, not the work. B = 256 KiB still holds, now at 3.51x
-// headroom.
+// 2026-09-05, ninth move (nocx-ec18, noticed by whoever was integrating):
+// 76,440 -> 74,264, -2,176 across the two generation scripts, and the FIRST
+// move in this list that is a SHRINK. `6e2a97ac` moved the local pane onto
+// this machine's helper, so the launcher stopped carrying the coordinator's
+// own fork path — 308 lines out of launcher_local.go and its two shell
+// halves, 38 back. Nothing about publishing changed; the bundle got smaller
+// because a mechanism left it.
+//
+// Recorded late, and that is the finding worth keeping: the shrink landed on
+// 2026-09-04 and the constant was not moved with it, so this test was red on
+// the branch for a day while the work that made it red was green in its own
+// right. A size ratchet only reports growth if somebody re-measures on the
+// commit that changes the size; a downward miss looks exactly like an upward
+// one from here and costs the same red gate.
+//
+// 2026-09-04, eighth move (nocx-dkawo.12): 73,326 -> 76,440, +3,114 across
+// the two generation scripts. This is the biggest single move the ratchet has
+// recorded and it is a whole mechanism rather than a comparison: the agent
+// wrapper now opens a DROP before the agent starts, reads what the agent
+// wrote there, and sends it as agent_report inside the enrolment's interval.
+// Until this, agent_report had a complete receiving half and no sender
+// anywhere, so a worker could be started and could never say what it produced
+// and every worker terminalized as abandoned. Two shells carry it, because a
+// worker whose completions depended on the person's login shell is not a
+// mechanism.
+//
+// 2026-09-03, seventh move (nocx-aqz7o): 73,090 -> 73,326, +236 across the
+// two generation scripts. The accept a shell waits for is now identified by
+// its domain and its epoch instead of by the capability echoed back at it,
+// which is one `case` block per tier where there was one before, and one
+// more comparison. The kernel had been writing the per-epoch bearer onto the
+// outbound half of a descriptor every descendant of the shell inherits —
+// exactly the actor ADR-0024 made the capability mandatory for — and 236
+// bytes is what it costs to stop.
+//
+// 2026-09-07, tenth move (nocx-dkawo.13): 74,264 -> 82,244, +7,980 across
+// the two generation scripts. The enrolled agent now receives a private,
+// lease-keyed MCP configuration instead of changing user-owned Claude files;
+// directory and file permissions, stale-lease sweeping and exit cleanup all
+// live in the shell launch bracket.
+//
+// 2026-09-07, eleventh move (nocx-rowqt.2.2): 82,244 -> 83,718, +1,474
+// across the two generation scripts. The review round strengthened lease
+// identity with pid start times and made zsh preserve signal traps without
+// firing its function-scoped EXIT trap during launch setup.
+// 2026-09-07, twelfth move (nocx-v58e8 / nocx-rowqt.5): 83,718 -> 83,788, +70
+// across the two generation scripts. The errexit fix preserves fail-open
+// sourcing when the shell enables errexit; the fail-closed assertions add the
+// coordinator-side lifecycle-loss proof. The assertions do not add bundle
+// bytes, but are part of the same round.
+//
+// The CALL counts did not move on this occasion — the bundle changed size, not
+// the filesystem work.
+//
+// The CALL counts did not move on any of the twelve occasions —
+// 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
+// changed size, not the work. B = 256 KiB still holds, and the new maximum
+// leaves 3.13x headroom.
+//
+// REPORT-p3-measure.md, which the failure messages below tell you to update
+// alongside these constants, HAS NEVER EXISTED in this repository — checked
+// across every ref. Whoever restores it, or removes the instruction, owns
+// nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 73090
+	measuredMaxPublishBytes = 83788
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

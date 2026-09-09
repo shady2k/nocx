@@ -178,7 +178,7 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 			// every session this build opens is on this machine (nocx-2gfh6).
 			// Left empty, the renderer could not resolve the occurrence to a
 			// tab at all — its lookup COMPARES the backend id, so that a
-			// relay's sessions stay distinguishable once one lands — and a
+			// helper's sessions stay distinguishable once one lands — and a
 			// program notification raised from a live tab rendered inert.
 			Backend: commandnames.LocalRoute,
 			Tab:     h.tab,

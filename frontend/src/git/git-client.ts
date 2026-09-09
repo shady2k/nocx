@@ -127,7 +127,7 @@ class GitClient {
     return this.dispatcher.call<ShellOpenUrl>('shell.openUrl', { url })
   }
   /** The consent prompt's Accept: raise the session's machine to the
-   *  relay tier (remote-helper design D8). The machine is resolved from
+   *  helper tier (remote-helper design D8). The machine is resolved from
    *  the sessionId server-side — the renderer never sends a fingerprint.
    *  After it resolves, the panel re-opens through git.open, which now
    *  proceeds past consentRequired. */

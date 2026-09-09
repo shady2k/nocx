@@ -3,7 +3,7 @@
 // porcelain v2 status parser.
 //
 // It is linked ONLY by code that runs git — local here, and the copy of
-// local compiled into the relay helper build (AD-2). The relay CLIENT never
+// local compiled into the helper build (AD-2). The helper CLIENT never
 // imports it: a client that built argv or parsed porcelain would either put
 // process vocabulary on the wire or compute an answer nobody uses (spec
 // D16). The program name is not part of these argv tails for the same

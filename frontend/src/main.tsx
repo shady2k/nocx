@@ -38,6 +38,9 @@ import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
+import { EmittingClient } from './emitting-client'
+import { CalibrationClient } from './calibration-client'
+import { TypingClient } from './typing-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -105,8 +108,8 @@ import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import { applyPetsSettings, PETS_ENABLED_KEY, PETS_PACK_KEY, PETS_SIZE_KEY } from './pets/setting'
 import { mountWindowPet } from './pets/window-pet'
 import type { TunnelOpenResult } from './generated/tunnel.open'
-import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import { HostKeyDialog, AgentApprovalDialog } from './host-key-dialog'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { SkillsClient } from './skills-client'
@@ -128,6 +131,7 @@ import { NotificationsPanel } from './notify/notifications-panel'
 import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
 import { needsForm } from './snippets/resolve'
+import { installCellDriftApi } from './scrollback/cell-drift'
 
 const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
 
@@ -243,6 +247,18 @@ function main(): void {
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
   const skillsStore = new SkillsStore(new SkillsClient(dispatcher))
   const policyClient = new PolicyClient(dispatcher)
+  // What an enrolled pane is emitting, and what its rule reads on it
+  // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
+  // the interval, and there is nothing here to close.
+  const emittingClient = new EmittingClient(dispatcher)
+  // The guided calibration (nocx-etejh). Stateless in the same way: the walk
+  // it drives lives in the backend, keyed by the pane, so a window that goes
+  // away leaves nothing half-open.
+  const calibrationClient = new CalibrationClient(dispatcher)
+  // The typing primitive (nocx-dkawo.1). Stateless like its two neighbours:
+  // every decision about whether a keystroke may be sent is taken in the
+  // backend, on a frame it reads itself, in the instant before each write.
+  const typingClient = new TypingClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -366,6 +382,33 @@ function main(): void {
   const [openHostKeyBusy, setOpenHostKeyBusy] = createSignal(false)
   const openHostKeys = new OpenHostKeyRequestQueue((request) => setPendingOpenHostKey(request))
 
+  type AgentHostApproval = {
+    executable: string
+    scope: string
+    resolve: (approved: boolean) => void
+  }
+  const pendingAgentHostApprovals: AgentHostApproval[] = []
+  const [activeAgentHostApproval, setActiveAgentHostApproval] =
+    createSignal<AgentHostApproval | null>(null)
+  const [agentHostApprovalBusy, setAgentHostApprovalBusy] = createSignal(false)
+  const nextAgentHostApproval = () => {
+    setActiveAgentHostApproval(pendingAgentHostApprovals.shift() ?? null)
+  }
+  const requestAgentHostApproval = (executable: string, scope: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      pendingAgentHostApprovals.push({ executable, scope, resolve })
+      if (!untrack(() => activeAgentHostApproval())) nextAgentHostApproval()
+    })
+  const decideAgentHostApproval = (approved: boolean) => {
+    const ask = activeAgentHostApproval()
+    if (!ask || agentHostApprovalBusy()) return
+    setAgentHostApprovalBusy(true)
+    ask.resolve(approved)
+    setActiveAgentHostApproval(null)
+    setAgentHostApprovalBusy(false)
+    nextAgentHostApproval()
+  }
+
   const acceptOpenHostKey = async (request: OpenHostKeyRequest) => {
     setOpenHostKeyBusy(true)
     try {
@@ -485,6 +528,23 @@ function main(): void {
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
+  // -- The client host (nocx-uo1k6, design D3) -------------------------
+  // The coordinator runs as a daemon with no window of its own, so the
+  // native-host capabilities it cannot perform — a file picker, a browser
+  // open, a desktop banner, a window raise or a process-tree approval —
+  // are asked of this client and performed through the Wails bindings.
+  // Mounted unconditionally: a client with no Wails runtime still answers,
+  // saying so, because the coordinator must never be left waiting on a
+  // client that cannot act.
+  //
+  // EXACTLY ONCE, and the count is the contract. `host.request` is an ask
+  // that must be answered once, but the dispatcher keeps a SET of handlers
+  // per method, so a second mount answers every request a second time and the
+  // first resolution to land wins. There were two of these (nocx-pighx): this
+  // one, and a bare one further down that passed no approval surface — so the
+  // agent-tree question was answered by whichever mount was faster, and the
+  // one that had to wait for a person never was.
+  mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
@@ -507,15 +567,6 @@ function main(): void {
   // pane that owns its grid; a request for a session no pane holds is
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
-
-  // -- The client host (nocx-uo1k6, design D3) -------------------------
-  // The coordinator runs as a daemon with no window of its own, so the
-  // native-host capabilities it cannot perform -- a file picker, a browser
-  // open, a desktop banner, a window raise -- are asked of this client and
-  // performed through the Wails bindings. Mounted unconditionally: a client
-  // with no Wails runtime still answers, saying so, because the coordinator
-  // must never be left waiting on a client that cannot act.
-  mountClientHost(dispatcher)
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer
@@ -562,6 +613,14 @@ function main(): void {
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
         skillsStore,
+        emittingClient,
+        calibrationClient,
+        typingClient,
+        // The window already names every pane in its tab strip, and the
+        // backend answers the emitting view with a session id and an agent
+        // name. This is the one place those two meet; deriving a name inside
+        // the Settings page would be a second owner of what a pane is called.
+        (sessionId: string) => tm.sessionDisplayName(sessionId),
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -1722,6 +1781,16 @@ function main(): void {
             />
           )}
         </Show>
+        <Show when={activeAgentHostApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalDialog
+              executable={ask.executable}
+              scope={ask.scope}
+              busy={agentHostApprovalBusy()}
+              onDecide={decideAgentHostApproval}
+            />
+          )}
+        </Show>
         <Show when={activeApproval()} keyed>
           {(ask) => (
             <AgentApprovalPrompt
@@ -1837,6 +1906,10 @@ function main(): void {
         })
     })()
   })
+
+  // The frozen-line drift instrument (nocx-4n6sj): switched off, and the
+  // console surface is how it gets switched on for a week of dogfooding.
+  installCellDriftApi()
 
   // The dispatcher owns the first socket attempt; all stable clients, roots,
   // handlers and the connection-scoped lifecycle above are now installed.

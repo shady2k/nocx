@@ -76,6 +76,32 @@ func askEveryTimeMatrixForTests() content.EffectPolicy {
 	}
 }
 
+// The production mint states the grant's DEADLINE, and this is the pin that
+// keeps content.Grant.ExpiresAt's "zero means nobody minted it" honest
+// (nocx-1z1r1). Before this, runGrantFor's grant carried expires_at = 0 into
+// every authority_grants row and ADR-0020 §5's "expiring" was a word in a
+// document. The paired half — a grant PAST its deadline yields no capability
+// — lives where it is enforced, in internal/agenttools.
+func TestRunGrantFor_StatesTheDeadline(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(askEveryTimePolicyStore(t)))
+
+	before := time.Now()
+	grant := server.runGrantFor("session-a")
+	if grant == nil {
+		t.Fatal("runGrantFor returned nil grant")
+	}
+	if grant.ExpiresAt == 0 {
+		t.Fatal("the run mint stated no deadline: every recorded grant would carry expires_at = 0")
+	}
+	if grant.Expired(before) {
+		t.Fatal("a grant minted a moment ago is already expired")
+	}
+	if got, want := grant.ExpiresAt, before.Add(content.GrantLifetime).UnixMilli(); got < want {
+		t.Fatalf("ExpiresAt = %d, want at least mint + GrantLifetime (%d)", got, want)
+	}
+}
+
 // The product-minted grant includes the path, session and one root per
 // enabled content family, so the registry can offer each family's tools.
 func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
@@ -101,8 +127,15 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	if !hasGrantScope(grant.Scopes, content.ResourceDestination, "*") {
 		t.Fatalf("grant scopes = %+v, want the direct-destination scope", grant.Scopes)
 	}
-	if len(grant.Scopes) != 6 {
-		t.Fatalf("grant scopes = %+v, want path, session, three content and destination scopes", grant.Scopes)
+	// The environment a worker may be started in (nocx-dkawo.8). It is the
+	// local machine and only that: the spawner opens a local session, so a
+	// fence naming any other environment would offer an authority nothing
+	// could deliver.
+	if !hasGrantScope(grant.Scopes, content.ResourceEnvironment, content.EnvironmentIDFor(content.EnvLocal, "")) {
+		t.Fatalf("grant scopes = %+v, want the local environment scope", grant.Scopes)
+	}
+	if len(grant.Scopes) != 7 {
+		t.Fatalf("grant scopes = %+v, want path, session, three content, destination and environment scopes", grant.Scopes)
 	}
 
 	reg, err := agenttools.Assemble(tools.Schemas)
@@ -113,7 +146,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "session.wait", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete", "skills.resolve", "skills.install"}
+	want := []string{"files.read", "fetch.url", "session.list", "session.read", "session.run", "session.wait", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder", "skills.read", "skills.create", "skills.update", "skills.delete", "skills.resolve", "skills.install", "workers.holdings", "workers.spawn", "workers.say", "workers.wait", "workers.close"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}

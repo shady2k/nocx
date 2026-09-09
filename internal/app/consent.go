@@ -2,11 +2,11 @@ package app
 
 // The consent decision for the remote helper (remote-helper design D8):
 // what git.open may do for one machine. The 2026-08-10 footprint-consent
-// design's auto ladder resolved relay from "a suitable binary exists for
+// design's auto ladder resolved helper from "a suitable binary exists for
 // that platform" alone — forward structure written before any helper
 // existed. The day one ships, that arm becomes true everywhere, and every
 // user would be asked, on every new machine, about a feature they never
-// reached for. D8 adds the second condition: auto resolves to relay only
+// reached for. D8 adds the second condition: auto resolves to helper only
 // when a surface on that connection has asked for the helper. The ask moves
 // to the moment the user opens the git panel.
 
@@ -19,10 +19,10 @@ import (
 type Outcome string
 
 const (
-	// DesiredRelay — the machine resolves to the relay tier: install the
+	// DesiredHelper — the machine resolves to the helper tier: install the
 	// helper (if not complete) and serve it.
-	DesiredRelay Outcome = "relay"
-	// ConsentRequired — the machine has no relay-tier answer; git.open
+	DesiredHelper Outcome = "helper"
+	// ConsentRequired — the machine has no helper-tier answer; git.open
 	// answers consentRequired and the surface offers the consent flow.
 	ConsentRequired Outcome = "consentRequired"
 	// Refused — nothing is written and nothing is asked: raw, a denied
@@ -75,7 +75,7 @@ type resolver struct {
 }
 
 // Resolve decides what the selection may do for m's machine: install and
-// serve (DesiredRelay), raise the ask (ConsentRequired), or nothing
+// serve (DesiredHelper), raise the ask (ConsentRequired), or nothing
 // (Refused). The fail-closed default is Refused — a resolver that has not
 // been told the helper exists or that a surface asked for it installs
 // nothing and asks nothing (consent design §4.2: a failure to decide never
@@ -90,9 +90,9 @@ func (r *resolver) Resolve(m Machine) Outcome {
 	case profile.DesiredRaw:
 		// raw: nothing is written and nothing is asked (§4.2).
 		return Refused
-	case profile.DesiredRelay:
-		// An explicit relay choice is the consent for the binary (§4.3).
-		return DesiredRelay
+	case profile.DesiredHelper:
+		// An explicit helper choice is the consent for the binary (§4.3).
+		return DesiredHelper
 	case profile.DesiredScript:
 		// An explicit script is an ANSWER: "the shell tiers, and do not
 		// offer me the binary". D8 — script is an answer, not a gap.
@@ -110,7 +110,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// that do offer the helper, and both are one Select away.
 		return Refused
 	}
-	// auto falls through: the relay arm of the ladder needs more than a
+	// auto falls through: the helper arm of the ladder needs more than a
 	// binary (D8).
 	if !r.requested {
 		// No surface on this connection asked for the helper: nothing
@@ -123,7 +123,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 			switch ans {
 			case consent.Granted:
 				// A stored answer is honoured silently (§4.4).
-				return DesiredRelay
+				return DesiredHelper
 			case consent.Denied:
 				// Answered and declined: never asked again, never upgraded.
 				return Refused
@@ -135,7 +135,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// offer, so no ask.
 		return Refused
 	}
-	// No relay-tier answer, on a machine that has not answered: the ask is
+	// No helper-tier answer, on a machine that has not answered: the ask is
 	// raised at the feature (D8), before anything is written (§4 step 4).
 	return ConsentRequired
 }

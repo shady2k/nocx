@@ -480,7 +480,7 @@ func TestAdmitHonoursACancelledContext(t *testing.T) {
 	}
 }
 
-// TestIngressLeavesANonZeroAtAlone: a relay replaying a batch it buffered
+// TestIngressLeavesANonZeroAtAlone: a helper replaying a batch it buffered
 // carries its own instants, and restamping them "now" would file yesterday's
 // session end as having happened at reconnect.
 func TestIngressLeavesANonZeroAtAlone(t *testing.T) {
@@ -526,7 +526,7 @@ func TestIngressCarriesAttributionBackendToTheFeed(t *testing.T) {
 	}
 
 	ev := Event{SessionID: "s1", Title: "done", Kind: KindProgramNotify, Trust: TrustProgramRequest, Level: LevelInfo}
-	ev.Attribution = Attribution{Backend: "relay-7", Tab: "t1", Host: "h1", Session: "s1"}
+	ev.Attribution = Attribution{Backend: "helper-7", Tab: "t1", Host: "h1", Session: "s1"}
 	if _, err := in.Admit(context.Background(), ev); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}

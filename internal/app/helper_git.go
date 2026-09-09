@@ -100,7 +100,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 		// The platform probe is the one bounded remote exec the decision
 		// runs before the user has accepted anything — it writes nothing.
 		// The install, the prune and the footprint observation are reached
-		// only when the machine resolves to relay (D8: consent is asked
+		// only when the machine resolves to helper (D8: consent is asked
 		// when the user reaches for the feature, not when a connection is
 		// made; nothing is written before the ask is answered).
 		platform, available, perr := probeHelperPlatform(sess, lanes, source)
@@ -110,7 +110,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 			withHelperRequested(true), // git.open is the surface reaching for the helper
 		)
 		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: effectiveModeFor(sess)}) {
-		case DesiredRelay:
+		case DesiredHelper:
 			if perr != nil {
 				// The probe's failure is a fact with a state (§6), never
 				// a silent degrade: an artifact the matrix does not ship
@@ -139,7 +139,7 @@ func helperGitFactory(lanes helperInstallProvider, source deploy.ArtifactSource,
 			// design §3.3). A failed observation is a logged warning, not
 			// an install failure: the helper is up and serving.
 			// installs is always wired at the composition root; the guard
-			// keeps a nil store (a test double) from panicking the relay
+			// keeps a nil store (a test double) from panicking the helper
 			// path it never exercises.
 			if fp := sess.HostKeyFingerprint(); fp != "" && installs != nil {
 				if rerr := installs.Record(consent.Install{
@@ -237,16 +237,16 @@ func refusedHelperReason(sess session.Session, store *consent.Store) string {
 	// followed.
 	switch effectiveModeFor(sess) {
 	case profile.DesiredRaw:
-		return "this connection is set to Raw, which does not run the nocx helper — change its Delivery mode to Auto or Relay to open repositories here"
+		return "this connection is set to Raw, which does not run the nocx helper — change its Delivery mode to Auto or Helper to open repositories here"
 	case profile.DesiredScript:
 		// An answer, not a gap: script asked for the shell tiers and not
 		// the binary, so this is not a refusal to explain away but a
 		// choice to name back.
-		return "this connection is set to Script, which installs the shell integration but not the nocx helper — change its Delivery mode to Auto to be offered the helper, or Relay to allow it outright"
+		return "this connection is set to Script, which installs the shell integration but not the nocx helper — change its Delivery mode to Auto to be offered the helper, or to Helper to allow it outright"
 	}
 	if store != nil {
 		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok && ans == consent.Denied {
-			return "this machine has declined to run the nocx helper — set the connection's Delivery mode to Relay, or change the answer in the footprint screen, to allow it"
+			return "this machine has declined to run the nocx helper — set the connection's Delivery mode to Helper, or change the answer in the footprint screen, to allow it"
 		}
 	}
 	return "no helper available for this SSH session"
@@ -466,7 +466,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		withHelperArtifactAvailable(available),
 		withHelperRequested(true),
 	)
-	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredRelay {
+	if resolver.Resolve(Machine{Fingerprint: fingerprint, Mode: profile.DesiredMode(cfg.Remote.DesiredMode)}) != DesiredHelper {
 		return transport.HostedSessionOpen{}, false, nil
 	}
 	command, generation, err := installHelperAt(ctx, cfg.Host, opts, r.install, r.source, platform)

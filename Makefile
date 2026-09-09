@@ -60,10 +60,20 @@ endif
 # unknown remote host must be — no remote glibc, no dynamic-loader
 # surprises. The artifacts are gitignored; a fresh checkout compiles with
 # only the committed .gitignore embedded, and Artifact answers
-# ErrArtifactsNotBuilt until this target has run. `helpers` is a
-# prerequisite of the RELEASE build and of nothing else: ordinary
-# `go build`, `make build` and `make dev` must work with no artifacts
-# present.
+# ErrArtifactsNotBuilt until this target has run.
+#
+# IT IS A PREREQUISITE OF EVERY TARGET THAT PRODUCES A RUNNABLE BINARY, and
+# that changed on 2026-09-04 with ADR-0057. It used to be the release build's
+# and nothing else's, on the true reasoning of the time: the artifacts served
+# the REMOTE panel, so a build without them cost a developer one button they
+# were not using. Since ADR-0057 there is no Tier A behind the local helper —
+# a local pane IS a session on this machine's daemon — so a binary built over
+# an empty artifacts directory cannot open a terminal AT ALL. It refuses every
+# pane, correctly and unusably.
+#
+# `go build ./...` still compiles with no artifacts present, and must: the
+# package embeds its own .gitignore so a bare checkout, CI's `go vet` and every
+# unit test build. Compiling is not the thing that broke.
 #
 # The e2e suite needs them too and calls this target itself, from the stand's
 # bring-up (e2e/stand.ts). It is deliberately NOT a prerequisite of ci-e2e:
@@ -106,7 +116,7 @@ build: build-server
 # desktop shell's dependency surface into a headless daemon for nothing.
 # Same -ldflags as the app, because a pair that cannot report one version is
 # the defect the update health check exists to catch.
-build-server:
+build-server: helpers
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
@@ -133,7 +143,7 @@ build-release: helpers
 # no dev CLI without a Taskfile, and replicating the watcher is not worth
 # inventing one for — the dev-web target is the iteration path for frontend
 # work, this target is for exercising the real shell.
-dev:
+dev: helpers
 	$(FRONTEND_BUILD)
 	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
 
@@ -314,8 +324,36 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
-               internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+               internal/storage internal/update internal/vault/system \
+               internal/peerpin
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin)
+
+# internal/claudeconformance cannot run in CI: no runner can carry an
+# authenticated vendor CLI, and a `t.Fatal` is the honest result when it is
+# absent. Keep it out of the portable package set at the derivation rather than
+# re-spelling this exclusion in each Linux caller. This also excludes the
+# package's bash-only launch-cleanup proof; the host conformance gate runs it
+# alongside the live vendor checks.
+#
+# It also runs in a PASS OF ITS OWN in test-ci, after everything else, and that
+# is not tidiness. `go test` runs packages concurrently, and this package's two
+# external waits — a 90-second bound on a live vendor CLI, and a probe that
+# expects a SIGTERM'd bash to exit within ten seconds — lost that race against
+# internal/app on a six-core host: 119.890s and two failures beside it,
+# 16.823s and green alone, with the same binary and the same commit (nocx-nj9ab).
+# Widening either bound was the alternative and it is the wrong one: ten seconds
+# to die after SIGTERM is already a defect worth reporting, and the 90-second
+# bound only earns its keep if it means the vendor has actually hung.
+#
+# Splitting the pass also closed a hole beside it. test-ci built its package
+# list as the literal "./..." on a host that has GNU bash 3.2, and both
+# exclusions below are `grep -v` over that list — which removes nothing from a
+# single "./..." token. So on such a host the conformance package was never
+# actually excluded when Claude Code was absent, and the run failed with
+# "Claude Code is not installed" under a banner that had just said it would not
+# be run. The list is now always enumerated by `go list`, so a filter filters.
+CLAUDE_CONFORMANCE_PKG := internal/claudeconformance
+PORTABLE_EXEMPT_RE := (internal/claudeconformance)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -327,7 +365,7 @@ OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 # keyring is a fixture dimension that crosses both (nocx-aruz).
 ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
-	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
+	./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
 
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
@@ -377,7 +415,7 @@ print-os-pkgs:
 	@echo '$(OS_PKGS)'
 
 print-portable-pkgs:
-	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)'
+	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
 
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
@@ -558,7 +596,7 @@ test-ci:
 	  notice=""; \
 	  if bash32=$$(./scripts/have-bash32.sh); then \
 	    echo "GNU bash 3.2 is present ($$bash32): the whole tree runs on this host"; \
-	    pkgs="./..."; \
+	    pkgs="$$($(GO) list ./...)"; \
 	  else \
 	    pkgs="$$($(GO) list ./... | grep -vE 'nocx/$(BASH32_PKG)(/|$$)')"; \
 	    notice="NOT RUN HERE: ./$(BASH32_PKG)/... — this host has no GNU bash 3.2\n\
@@ -568,8 +606,31 @@ test-ci:
   does not. To run it here: sudo scripts/install-bash32.sh"; \
 	    printf '%b\n' "$$notice"; \
 	  fi; \
+	  run_claude=0; \
+	  if claude=$$(./scripts/have-claude.sh); then \
+	    echo "Claude Code is installed and authenticated ($$claude): vendor conformance runs on this host, in a pass of its own"; \
+	    claude_notice=""; \
+	    run_claude=1; \
+	  else \
+	    claude_rc=$$?; \
+	    if [ "$$claude_rc" -eq 1 ]; then \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is not installed.\n\
+  Install Claude Code before running the vendor conformance check."; \
+	    else \
+	      claude_notice="NOT RUN HERE: ./$(CLAUDE_CONFORMANCE_PKG)/... — Claude Code is installed but not authenticated.\n\
+  Run 'claude auth login' before running the vendor conformance check."; \
+	    fi; \
+	    printf '%b\n' "$$claude_notice"; \
+	  fi; \
+	  pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
 	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
-	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi
+	  if [ "$$run_claude" -eq 1 ]; then \
+	    echo ""; \
+	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \
+	    $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./$(CLAUDE_CONFORMANCE_PKG)/...; \
+	  fi; \
+	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi; \
+	  if [ -n "$$claude_notice" ]; then echo ""; printf '%b\n' "$$claude_notice"; fi
 	@echo ""
 	@echo "=== go test -race -tags release (the shipped profile directory) ==="
 	@# The shipped profile directory lives behind `-tags release`

@@ -10,7 +10,7 @@
  */
 
 /**
- * The accept of the git panel's consent prompt (remote-helper design D8): the session's machine — keyed by its host public-key fingerprint, resolved server-side from the sessionId the requesting connection owns — has been raised to the relay tier, and the next git.open on that machine proceeds past consentRequired. The write is durable: a grant survives a store reconstruction, and an empty fingerprint never grants.
+ * The accept of the git panel's consent prompt (remote-helper design D8): the session's machine — keyed by its host public-key fingerprint, resolved server-side from the sessionId the requesting connection owns — has been raised to the helper tier, and the next git.open on that machine proceeds past consentRequired. The write is durable: a grant survives a store reconstruction, and an empty fingerprint never grants.
  */
 export interface ShellFootprintConsentResult {
   /**

@@ -66,7 +66,7 @@ func TestAsk_LazyPresentationFallsBackBelowSchemaThreshold(t *testing.T) {
 		t.Fatalf("Ask: %v", err)
 	}
 	got := toolNames(t, requestTools(t, f.body()))
-	if !reflect.DeepEqual(got, []string{"session.list", "session.read", "session.run", "session.wait"}) {
+	if !reflect.DeepEqual(got, []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}) {
 		t.Fatalf("threshold fallback declared tools = %v, want all eligible tools", got)
 	}
 }

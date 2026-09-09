@@ -167,6 +167,13 @@ justify it. Avoid `contenteditable`.
 
 ### 4. Output stays in one xterm; no freeze in the MVP
 
+> **SUPERSEDED 2026-07-24, recorded 2026-09-05 by
+> [ADR-0009](0009-dom-scrollback-with-explicit-cell-geometry.md).** The direction reversed
+> after spike `nocx-4ff.17`: the scrollback is DOM, xterm is the VT engine and the live
+> region, and a finished command's rows leave the grid at freeze. This section stood
+> unamended for six weeks while the product did the opposite, and ADR-0008 cites it as a
+> constraint. Read it as history, not as a rule.
+
 One continuous xterm instance and its scrollback own all output and selection.
 OSC 133 boundaries create xterm markers carrying metadata (command, cwd,
 start/end, exit code); we draw lightweight decorations (separators, status,

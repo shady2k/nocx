@@ -101,7 +101,7 @@ func TestSessionEndRaisesAnAttestedEvent(t *testing.T) {
 		t.Errorf("Body = %q, want the exit status", got.Body)
 	}
 	// At is NOT stamped here: ingress owns that stamp (notify/ingress.go), so
-	// a relay replaying a buffered batch keeps its own instants.
+	// a helper replaying a buffered batch keeps its own instants.
 	if !got.At.IsZero() {
 		t.Errorf("At = %v, want the zero time — ingress stamps it, not the source", got.At)
 	}

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -10,7 +11,18 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/session"
 )
+
+type allowPaneApproval struct{}
+
+func (allowPaneApproval) Approve(context.Context, session.ID, string) error { return nil }
+
+func TestNewPaneEnrollerRejectsMissingApproval(t *testing.T) {
+	if _, err := newPaneEnroller(nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("newPaneEnroller accepted a missing approval dependency")
+	}
+}
 
 // realGrid is the product's own store rather than a double: what this seam is
 // tested for is that an enrolment actually opens a grid, and a fake grid can
@@ -33,7 +45,11 @@ func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *panegrid.Store, *sess
 	}
 	watch := paneobserve.New(lg, grid, drivers)
 	sessions := newSessionRegistry()
-	return newPaneEnroller(lg, sessions, grid, watch), grid, sessions, watch
+	e, err := newPaneEnroller(lg, sessions, grid, watch, allowPaneApproval{})
+	if err != nil {
+		t.Fatalf("enroller: %v", err)
+	}
+	return e, grid, sessions, watch
 }
 
 // The ordinary case, and every refusal below is paired against it: a lane that

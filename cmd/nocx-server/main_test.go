@@ -12,10 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/coordinator"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -130,3 +135,119 @@ type fakeWS struct{ addr, token string }
 
 func (f fakeWS) Addr() string  { return f.addr }
 func (f fakeWS) Token() string { return f.token }
+
+type workerTestAuthorizer struct {
+	invocation assistant.ToolInvocation
+}
+
+func (a workerTestAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+	return a.invocation, func() {}, nil
+}
+
+type workerTestDispatcher struct {
+	result  string
+	catalog []agenttools.Tool
+}
+
+func (d workerTestDispatcher) Dispatch(assistant.ToolInvocation) (string, error) {
+	return d.result, nil
+}
+
+// Catalogue is required at composition, not at call time: toolendpoint.New
+// refuses a dispatcher that cannot enumerate what a grant admits, so a stub
+// without it does not stand in for the real dispatcher at all.
+func (d workerTestDispatcher) Catalogue(content.Grant) []agenttools.Tool {
+	return d.catalog
+}
+
+type workerTestPeers struct{}
+
+func (workerTestPeers) PeerUID(*net.UnixConn) (uint32, error) {
+	return coordinator.SelfUID(), nil
+}
+
+func TestGroupEndpointWiringPublishesAndServesHoldings(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	appRoot := &app.App{
+		ToolAuthorizer: workerTestAuthorizer{
+			invocation: assistant.ToolInvocation{},
+		},
+		ToolDispatcher: workerTestDispatcher{result: `{"held":[{"id":"p-1"}]}`},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	endpoint, err := startToolEndpoint(
+		appRoot, dir, workerTestPeers{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), logger,
+	)
+	if err != nil {
+		t.Fatalf("start worker endpoint: %v", err)
+	}
+	if endpoint == nil {
+		t.Fatal("startToolEndpoint returned nil for a composed authorizer and dispatcher")
+	}
+
+	socketPath := filepath.Join(dir, "tool.sock")
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat worker socket: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("worker socket mode = %o, want 600", info.Mode().Perm())
+	}
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial worker socket: %v", err)
+	}
+	request := `{"jsonrpc":"2.0","id":"holdings-1","method":"workers.holdings","params":{}}` + "\n"
+	if _, err := io.WriteString(conn, request); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write worker request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var response struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
+		_ = conn.Close()
+		t.Fatalf("decode worker response: %v", err)
+	}
+	_ = conn.Close()
+	if len(response.Error) != 0 && string(response.Error) != "null" {
+		t.Fatalf("worker holdings error: %s", response.Error)
+	}
+	if string(response.ID) != `"holdings-1"` || string(response.Result) != `{"held":[{"id":"p-1"}]}` {
+		t.Fatalf("worker holdings response = id %s result %s", response.ID, response.Result)
+	}
+
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("close worker endpoint: %v", err)
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("worker socket after close: err = %v, want not exists", err)
+	}
+}
+
+func TestGroupEndpointWiringRefusesToPublishWithoutAuthorizer(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	appRoot := &app.App{
+		ToolDispatcher: workerTestDispatcher{result: `{"held":[]}`},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	endpoint, err := startToolEndpoint(
+		appRoot, dir, workerTestPeers{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), logger,
+	)
+	if err != nil {
+		t.Fatalf("start worker endpoint without authorizer: %v", err)
+	}
+	if endpoint != nil {
+		_ = endpoint.Close()
+		t.Fatal("startToolEndpoint published an endpoint without an authorizer")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tool.sock")); !os.IsNotExist(err) {
+		t.Fatalf("worker socket without authorizer: err = %v, want not exists", err)
+	}
+}

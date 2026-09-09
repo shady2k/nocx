@@ -115,11 +115,7 @@ func resolveCwd(cwd string) string {
 	return ""
 }
 
-func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) {
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	// The launcher may name an explicit command (e.g. a lifecycle bootstrap
 	// that must start bash with `--rcfile` so the per-epoch capability
 	// rides script text, never the environment — nocx-u7uh.21). Every
@@ -233,6 +229,34 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 	return lp.file.Write(p)
 }
 
+// hangupProcessGroup targets the session's process group, whose id is the
+// shell pid because pty.StartWithSize starts the shell with setsid. The
+// foreground command shares that group when job control is disabled.
+//
+// Why the group and not the pid. NOT because of nocx-pibr3, whose 600 s
+// deadlock turned out to be an artifact of how the gate was launched: `nohup`
+// sets SIGHUP to SIG_IGN, that disposition survives exec and Go deliberately
+// preserves signals ignored at entry, so every process below it — the test
+// binary, the shell, the program — ignored SIGHUP too. Measured: the leaked
+// `tail -f` processes carried SigIgn 0x1 and survived SIGHUP while dying at
+// once on SIGTERM. No signal target could have helped there, and an ordinary
+// foreground run has never reproduced it.
+//
+// The reason that survives is the macOS one the block below already records
+// (nocx-wwz0): there the kernel does not hang up the foreground group when
+// the master closes, so a pid-only SIGHUP leaves the running program's fate
+// entirely to whether the shell hangs up its own jobs on the way out. That is
+// a favour bash grants and dash, a shell killed some other way, or a program
+// outside the job table do not. The group is what the kernel itself signals
+// on a real terminal loss, so it is what Close names, and the program's death
+// stops depending on anyone's bookkeeping.
+func (lp *LocalPty) hangupProcessGroup() error {
+	if lp.cmd.Process == nil {
+		return nil
+	}
+	return lp.SignalProcessGroup(lp.cmd.Process.Pid, syscall.SIGHUP)
+}
+
 func (lp *LocalPty) Close() error {
 	lp.mu.Lock()
 	defer lp.mu.Unlock()
@@ -258,9 +282,7 @@ func (lp *LocalPty) Close() error {
 	// a shell that receives it saves its history, runs its exit hooks and
 	// hangs up its own jobs. The master is closed afterwards, so a shell that
 	// wants to write on the way out still has somewhere to write.
-	if lp.cmd.Process != nil {
-		_ = lp.cmd.Process.Signal(syscall.SIGHUP)
-	}
+	_ = lp.hangupProcessGroup()
 	return lp.file.Close()
 }
 

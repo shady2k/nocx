@@ -27,9 +27,11 @@ import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import {
   paneIndicator,
+  sameChildren,
   type PaneActivity,
   type PaneActivitySource,
   type DriverState,
+  type PaneChild,
 } from './pane-observation'
 import type { ConnectionCondition } from './connection-condition'
 import { startWakeReporter, type WakeObservation } from './wake-report'
@@ -123,6 +125,17 @@ export class Pane implements PaneHost {
    *  every pane. Never derived here: it is classified in the backend, where
    *  the grid lives, and arrives as session.observationChanged. */
   private _observation: DriverState | null = null
+  /** The child agents this pane's agent has spawned, as the pane's own chrome
+   *  named them (nocx-o1v0h). Empty for almost every pane. Like the
+   *  observation it is never derived here — the backend reads them off the
+   *  live grid and they arrive on the same notification.
+   *
+   *  Unlike the indicator, these are NOT withdrawn when the host stops
+   *  answering. The indicator is a call to act, so asserting it over a dead
+   *  pipe sends somebody to answer something that cannot be delivered; a
+   *  child row calls nobody — it says what the pane's screen last showed, and
+   *  it goes away when the observation does. */
+  private _observationChildren: readonly PaneChild[] = []
   private _connection: ConnectionCondition = 'reachable'
   /** Whether the content has declared its opening over (PaneHost.
    *  contentSettled). Output before that is the pane starting up, not
@@ -465,11 +478,22 @@ export class Pane implements PaneHost {
    *  exited, or the enrolment was withdrawn — and the indicator falls back to
    *  the title's weaker reading rather than holding a stale finding.
    */
-  updatePaneObservation(state: DriverState | null): void {
+  updatePaneObservation(state: DriverState | null, children: readonly PaneChild[] = []): void {
     if (this._disposed) return
-    if (state === this._observation) return
+    // Two facts, one notification, and the redraw is skipped only when
+    // NEITHER moved. A pane whose verdict held while its children changed is
+    // exactly the case the strip has to repaint, and comparing only the state
+    // would have made the rows go stale the moment they were interesting.
+    if (state === this._observation && sameChildren(children, this._observationChildren)) return
     this._observation = state
+    this._observationChildren = state === null ? [] : children
     this.onDisplayChange?.()
+  }
+
+  /** The child agents this pane's agent spawned, for the strip to draw under
+   *  it. Empty for a pane with none and for a pane nobody observes. */
+  get agentChildren(): readonly PaneChild[] {
+    return this._observationChildren
   }
 
   /** What the pane says about reaching its host. Kept because the agent
@@ -662,7 +686,7 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * string the notify feed stamps into every occurrence's backendId. It is
  * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
  * because that constant answers a different question — which target the
- * ports methods scope to — and one of the two will change when the relay
+ * ports methods scope to — and one of the two will change when the helper
  * lands.
  *
  * Exported because the composition root needs it too: a session.focus push
@@ -1458,7 +1482,8 @@ export class PaneManager {
         onOpenRoles: this.onOpenRoles,
         onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
-        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onPaneObservationChange: (state, children) =>
+          paneRef.current?.updatePaneObservation(state, children),
         onConnectionConditionChange: (condition) =>
           paneRef.current?.updateConnectionCondition(condition),
         // Where the pane IS, recorded so a restart reopens it there
@@ -1550,7 +1575,8 @@ export class PaneManager {
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         outputRecording: this.recordingSource(),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
-        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onPaneObservationChange: (state, children) =>
+          paneRef.current?.updatePaneObservation(state, children),
         onConnectionConditionChange: (condition) =>
           paneRef.current?.updateConnectionCondition(condition),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
@@ -2444,7 +2470,7 @@ export class PaneManager {
    * on this machine, so the only pair that can match carries
    * internal/commandnames.LocalRoute's value — and an argument that is
    * accepted and dropped silently stops meaning anything by the time the
-   * relay lands and a second backend's sessions start arriving with ids of
+   * helper lands and a second backend's sessions start arriving with ids of
    * their own.
    *
    * The session comes from the content's own capability, so PaneManager never

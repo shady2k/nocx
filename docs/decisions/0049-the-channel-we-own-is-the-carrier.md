@@ -18,6 +18,10 @@
   `nocx-a1615`, `nocx-m8jwn`, `nocx-mlm7`.
 - **Formerly ADR-0035:** renumbered 0049 on 2026-08-28 (`nocx-yjvg5`) — the number was shared with [ADR-0035 — the AppImage carries WebKitGTK's helper processes](0035-appimage-carries-webkits-helper-processes.md), which is older and keeps it.
 
+> **Naming, 2026-08-31:** `relay` below is the historical name of the third
+> delivery mode and of the deployed remote binary; both are now called the
+> **helper**. The argument is left exactly as it was written (`nocx-0xq2s`).
+
 ## What the binding texts already decided
 
 This ADR crosses several boundaries, so here is what already governs them,

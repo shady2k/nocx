@@ -131,7 +131,7 @@ func TestEnsureStartsAHelperWhenNoneIsServing(t *testing.T) {
 	t.Cleanup(func() { stopRecorded(t, pidFile) })
 
 	dir := endpoint.Dir(home)
-	conn, err := endpoint.Ensure(t.Context(), dir, generation, generation, wrapper)
+	conn, err := endpoint.Ensure(t.Context(), dir, generation, generation, wrapper, nil)
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
@@ -146,6 +146,45 @@ func TestEnsureStartsAHelperWhenNoneIsServing(t *testing.T) {
 	_ = again.Close()
 }
 
+// TestEnsureCarriesExtraEnvironmentIntoTheSpawnedHelper is nocx-2tesu's
+// acceptance criterion 1 at the process-boundary seam: the local helper is a
+// SEPARATE process, forked here, and Ensure is the one place that decides
+// what it inherits. A caller reaching for its OWN machine's daemon (the local
+// coordinator) hands it a fact only the coordinator knows — its running tool
+// endpoint's socket path — as an explicit extra entry rather than through a
+// second, ambient channel; the caller reaching for a REMOTE generation
+// (cmd/nocx-helper's own `bridge` command) passes none, because a remote host
+// has no local tool.sock to relay (see cmd/nocx-helper/main.go's bridge()).
+func TestEnsureCarriesExtraEnvironmentIntoTheSpawnedHelper(t *testing.T) {
+	bin, generation := helperBinary(t)
+	home := helperHome(t)
+
+	wrapper := filepath.Join(t.TempDir(), "start-helper")
+	pidFile := filepath.Join(home, "helper.pid")
+	envFile := filepath.Join(home, "helper.env")
+	script := "#!/bin/sh\necho $$ > " + pidFile + "\nenv > " + envFile + "\nexport HOME=" + home + "\nexec " + bin + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil { //nolint:gosec // it is meant to be executable
+		t.Fatalf("write wrapper: %v", err)
+	}
+	t.Cleanup(func() { stopRecorded(t, pidFile) })
+
+	dir := endpoint.Dir(home)
+	conn, err := endpoint.Ensure(t.Context(), dir, generation, generation, wrapper,
+		[]string{"NOCX_TOOL_SOCKET=/run/nocx/tool.sock"})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	_ = conn.Close()
+
+	data, err := os.ReadFile(envFile) // #nosec G304 — this test's own temp file
+	if err != nil {
+		t.Fatalf("read the spawned helper's recorded environment: %v", err)
+	}
+	if !strings.Contains(string(data), "NOCX_TOOL_SOCKET=/run/nocx/tool.sock") {
+		t.Fatalf("the spawned helper did not carry the extra environment: %q", data)
+	}
+}
+
 func TestEnsureRefusesToServeAGenerationThisBinaryIsNot(t *testing.T) {
 	// A binary that is not that generation may not publish its name over
 	// somebody's sessions. The refusal is ErrNoEndpoint, because that is what
@@ -153,7 +192,7 @@ func TestEnsureRefusesToServeAGenerationThisBinaryIsNot(t *testing.T) {
 	// change that. Nothing was started, so nothing has to be cleaned up.
 	dir := runDir(t)
 	other := proto.GenerationID("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
-	_, err := endpoint.Ensure(context.Background(), dir, other, gen, "/nonexistent/helper")
+	_, err := endpoint.Ensure(context.Background(), dir, other, gen, "/nonexistent/helper", nil)
 	if !errors.Is(err, endpoint.ErrNoEndpoint) {
 		t.Fatalf("Ensure = %v, want ErrNoEndpoint", err)
 	}
@@ -165,7 +204,7 @@ func TestEnsureReportsAHelperThatDiesBeforeItServes(t *testing.T) {
 	// observable fact — rather than on a duration, and what is true afterwards
 	// is that nothing is serving and nothing was left behind for the next
 	// attempt to trip over.
-	_, err := endpoint.Ensure(context.Background(), dir, gen, gen, lookPath(t, "false"))
+	_, err := endpoint.Ensure(context.Background(), dir, gen, gen, lookPath(t, "false"), nil)
 	if err == nil {
 		t.Fatal("Ensure returned a connection to a helper that never served")
 	}

@@ -293,13 +293,13 @@ func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 	return &coordinator{reg: reg, sess: sess, consent: store}
 }
 
-// relayConnection is a saved connection whose destination mode is an explicit
-// relay — the person said "use the helper on this machine", which is the
+// helperConnection is a saved connection whose destination mode is an explicit
+// helper — the person said "use the helper on this machine", which is the
 // consent for the binary (§4.3). The fake probe lease reports no host-key
 // fingerprint, so an `auto` connection here would resolve to the consent ASK
 // rather than to a helper, and there would be nothing to take back.
-func relayConnection(user string) *ssh.ConnectConfig {
-	return &ssh.ConnectConfig{User: user, DesiredMode: string(profile.DesiredRelay)}
+func helperConnection(user string) *ssh.ConnectConfig {
+	return &ssh.ConnectConfig{User: user, DesiredMode: string(profile.DesiredHelper)}
 }
 
 // quit is this coordinator's process ending: every helper channel it holds is
@@ -333,7 +333,7 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 	opened, selected, err := c.reg.OpenHosted(ctx, session.Config{
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: paneID, ProfileID: "profile-1",
-		Remote: relayConnection("u"),
+		Remote: helperConnection("u"),
 	})
 	if err != nil {
 		t.Fatalf("open a helper-hosted session: %v", err)
@@ -362,7 +362,7 @@ func readoptFixture(t *testing.T, c *coordinator, routes *stubRoutes, adopter *s
 }
 
 func routesFor(p content.PendingSession) *stubRoutes {
-	return &stubRoutes{host: p.Host, cfg: relayConnection(p.Account)}
+	return &stubRoutes{host: p.Host, cfg: helperConnection(p.Account)}
 }
 
 // ── THE HAPPY PATH ────────────────────────────────────────────────────────
@@ -585,7 +585,7 @@ func TestAConnectionThatNowLeadsElsewhereIsNotAsked(t *testing.T) {
 
 	first.quit()
 	second := newCoordinator(t, provider)
-	routes := &stubRoutes{host: "somebody.else.example", cfg: relayConnection(binding.Account)}
+	routes := &stubRoutes{host: "somebody.else.example", cfg: helperConnection(binding.Account)}
 
 	rec := &recordingReconciler{pending: []content.PendingSession{binding}}
 	adopter := &stubAdopter{}
@@ -825,7 +825,7 @@ func TestConsentWithdrawnBetweenRunsStopsTheHelperBeingReached(t *testing.T) {
 	first.quit()
 
 	// The binding records the machine the session runs on. A route whose mode
-	// is `auto` is the case where the STORE decides — an explicit relay mode
+	// is `auto` is the case where the STORE decides — an explicit helper mode
 	// is itself the consent (§4.3) and would not consult it.
 	binding.Fingerprint = machine
 	routes := &stubRoutes{host: binding.Host, cfg: &ssh.ConnectConfig{User: binding.Account}}

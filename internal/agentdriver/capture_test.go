@@ -25,6 +25,16 @@ import (
 	"github.com/shady2k/nocx/internal/panegrid"
 )
 
+// captureNames is the corpus, named once. Two tests walk all of it — the
+// closed-set sweep in claude_test.go and the projection sweep in
+// observation_test.go — and a corpus named twice is a corpus that grows in one
+// place only.
+var captureNames = []string{
+	"claude-error",
+	"claude-idle", "claude-idle-60", "claude-idle-80", "claude-working",
+	"claude-permission", "claude-permission-60", "claude-modal", "claude-subagent",
+}
+
 type captureHeader struct {
 	Agent string `json:"agent"`
 	Cols  int    `json:"cols"`

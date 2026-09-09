@@ -52,7 +52,8 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
-import type { DriverState } from './pane-observation'
+import type { SessionToolSurfaceChanged } from './generated/session.toolSurfaceChanged'
+import type { DriverState, PaneChild } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
@@ -60,9 +61,11 @@ import {
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
+  subscribeToolSurfaceChanged,
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountToolSurfaceNotice } from './tool-surface-notice'
 import { mountRecoveryNotice } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
@@ -352,10 +355,13 @@ export interface TerminalContentHooks {
    *  apart, so it pushes the program title on its own hook. */
   onProgramTitleChange?: (programTitle: string) => void
   /** What an ENROLLED pane's driver says its screen is inviting
-   *  (nocx-szb40.3). Pushed like the program title, and for the same reason:
-   *  the content owns the session handle, the pane owns what the tab shows.
-   *  Null when the pane stops being observed. */
-  onPaneObservationChange?: (state: DriverState | null) => void
+   *  (nocx-szb40.3), and the child agents its own chrome named (nocx-o1v0h).
+   *  Pushed like the program title, and for the same reason: the content owns
+   *  the session handle, the pane owns what the tab shows. Null when the pane
+   *  stops being observed, and the children go with it — a pane nobody is
+   *  observing has no rows to show, which is a different thing from a pane
+   *  observed to have none. */
+  onPaneObservationChange?: (state: DriverState | null, children: readonly PaneChild[]) => void
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
@@ -1018,13 +1024,13 @@ export class TerminalContent extends BasePaneContent {
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
   /** The resolved destination mode from the open ack
-   *  (auto|raw|script|relay): the connection-scope default the capability
+   *  (auto|raw|script|helper): the connection-scope default the capability
    *  control starts from. auto is the initial value because it is what an
    *  unanswered destination resolves to everywhere else (ADR-0033) — the
    *  ack is authoritative and arrives shortly, and a placeholder that
    *  disagreed with the cascade's default is the two-defaults defect that
    *  ADR closed on the backend. raw refuses every rewrite and remote
-   *  write; relay allows the Tier-B binary. */
+   *  write; helper allows the Tier-B binary. */
   private _policy: DesiredMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
@@ -1035,6 +1041,10 @@ export class TerminalContent extends BasePaneContent {
   private _integration: SessionIntegrationChanged | null = null
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** The launch-owned worker tool-surface result, independent of shell integration. */
+  private _toolSurface: SessionToolSurfaceChanged | null = null
+  private _toolSurfaceUnsub: (() => void) | null = null
+  private _toolSurfaceNoticeDispose: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
   /** The disposer for the reclaimed-pane card that names the output this
@@ -3611,6 +3621,10 @@ export class TerminalContent extends BasePaneContent {
       this._lifecycleUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
+      this._toolSurfaceUnsub?.()
+      this._toolSurfaceUnsub = null
+      this._dropToolSurfaceNotice()
+      this._toolSurface = null
       this.session?.close()
       this.session = null
 
@@ -3904,6 +3918,10 @@ export class TerminalContent extends BasePaneContent {
       if (fact.sessionId !== session.sessionId) return
       this._applyIntegration(fact)
     })
+    this._toolSurfaceUnsub = subscribeToolSurfaceChanged(this.client.dispatcher, (fact) => {
+      if (fact.sessionId !== session.sessionId) return
+      this._applyToolSurface(fact)
+    })
     // The statement is OBSERVED: until the first marker arrives, an auto
     // session honestly reads "Native input" — the launcher may be
     // mid-start, and the first prompt flips it to command blocks.
@@ -4032,7 +4050,7 @@ export class TerminalContent extends BasePaneContent {
     // of a pane that then sits still — which for a settled agent is
     // forever.
     session.onObservation((observation) => {
-      this.hooks.onPaneObservationChange?.(observation.state)
+      this.hooks.onPaneObservationChange?.(observation.state, observation.children ?? [])
     })
     session.onExit((exit) => {
       log.info('nocx: session exited', {
@@ -4159,6 +4177,11 @@ export class TerminalContent extends BasePaneContent {
     // makes equal usable geometry a no-op, so this presentation driver and
     // the live-region output driver never re-fit the same rectangle.
     if (this._mounted) {
+      // The pane's own size changed, so the running region's ceiling really
+      // did move — release the cap the running command is holding before
+      // anything reads it. This is the ONLY caller: a cap released from the
+      // output path is the resize-mid-repaint nocx-oikdu was.
+      this.scrollback?.invalidateRunningCap()
       this.fitUsableViewport(this.usableViewport(viewport))
       // And the live BOX, not only the grid inside it. The pane changing size
       // is the one resize the live-region path never heard about: it runs off
@@ -4933,6 +4956,28 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  private _applyToolSurface(fact: SessionToolSurfaceChanged): void {
+    if (this._disposed || this._sessionExited) return
+    this._toolSurface = fact
+    if (fact.status === 'available') {
+      this._dropToolSurfaceNotice()
+      return
+    }
+    if (!this._paneTarget || this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose = mountToolSurfaceNotice(this._paneTarget, {
+      fact,
+      onDismiss: () => this._dropToolSurfaceNotice(),
+    })
+    this.scheduleLiveResize()
+  }
+
+  private _dropToolSurfaceNotice(): void {
+    if (!this._toolSurfaceNoticeDispose) return
+    this._toolSurfaceNoticeDispose()
+    this._toolSurfaceNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Where this pane reads the recording fact, with the honest fallback for
@@ -6591,6 +6636,10 @@ export class TerminalContent extends BasePaneContent {
     this._lifecycleUnsub = null
     this._integrationUnsub?.()
     this._integrationUnsub = null
+    this._toolSurfaceUnsub?.()
+    this._toolSurfaceUnsub = null
+    this._toolSurfaceNoticeDispose?.()
+    this._toolSurfaceNoticeDispose = null
     this._noticeDispose?.()
     this._noticeDispose = null
     this._recoveryNoticeDispose?.()

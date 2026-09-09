@@ -4,5 +4,11 @@
     "identity": "nocx-tab",
     "roles": ["tab"],
     "contract": "Tab carries role=tab, drag/reorder, middle-click close, activity/agent indicators, aria-controls and two orientations — a behavioural unit outside the kit's primitive vocabulary (§3.7). Declared here so rule 10 permits role=tab outside ui/."
+  },
+  {
+    "file": "subagent-row.tsx",
+    "identity": "nocx-subagent",
+    "roles": ["button"],
+    "contract": "SubagentRow is one CHILD AGENT's line under its parent's row in the strip (nocx-o1v0h). It is not the kit's Button and could not be one: a Button is a control a person reaches for, and this is a row of the strip's list that happens to be activatable — full width, left aligned, dim, out of the keyboard order, indented by data-depth like Tab and TreeRow, and carrying a name and a task on one line. Making it a Button would mean repainting a kit control from a surface (its ground, its text colour, its alignment), which is the thing the kit rule forbids; making it a Button VARIANT would put a strip-shaped row into a primitive used everywhere. It is not Tab either: it stands for something with no pane, no pipe, no id and nothing to close or drag. Declared here so rule 10 permits role=button outside ui/, with the composite it owns named."
   }
 ]

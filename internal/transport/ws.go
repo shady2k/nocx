@@ -304,6 +304,21 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// agentRules is what a pane's rule READS on its frame, for the emitting
+	// view (nocx-02uci). Nil when unwired, and agent.emitting then answers
+	// that it is not available rather than a screen with no reading beside
+	// it — the half of that view the design says may not be missing.
+	agentRules agentRules
+	// agentCalibration runs the guided calibration walk (nocx-etejh). Nil
+	// when unwired, and both agent.calibration methods then answer "not
+	// found" rather than a step list nobody can answer.
+	agentCalibration agentCalibrator
+	// agentTypist is the one thing in nocx that writes into an agent's pane
+	// (nocx-dkawo.1). Nil when unwired, and agent.type then answers "not
+	// found" — a surface must be able to tell "nocx cannot type here" from
+	// "the rule refused", because only one of those is repairable by
+	// calibrating.
+	agentTypist agentTypist
 	// sweepDone closes at Stop and is the coalescer's second end;
 	// sweepExited closes when the coalescer has actually returned, so Stop
 	// can be sure nothing is still sweeping. Same shape as panegrid's own
@@ -363,7 +378,7 @@ type WSServer struct {
 	// empty helpers list — nothing is claimed installed that cannot be
 	// shown.
 	helperInstalls *consent.InstallStore
-	// helperConsent is the per-machine relay-tier answer store
+	// helperConsent is the per-machine helper-tier answer store
 	// (remote-helper design D8): the write half shell.footprint.consent
 	// persists grants through. Wired through WithHelperConsentStore; when
 	// nil, the method refuses — the consent prompt is never offered by a
@@ -630,6 +645,17 @@ type WSServer struct {
 	// helperSessionOpener selects the execution-host-owned PTY for remote
 	// opens when the existing helper resolver permits it.
 	helperSessionOpener HelperSessionOpener
+	// opener is the one path a session comes into existence by, shared
+	// between the `open` handler and the backend's own callers
+	// (nocx-dkawo.6). It is built where the method set is assembled, because
+	// that is where the admission gates it runs under exist — which is
+	// NewWSServer, so it is ready before the server serves anything.
+	opener *sessionOpener
+	// workerStore is the worker record a coordinator run reaches through its tools
+	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two worker
+	// tools refusing with a sentence rather than starting a worker into
+	// nothing.
+	workerStore assistant.WorkerRecord
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -736,15 +762,11 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
-	// bootstrapStages is how far each session's shell got through nocx's
-	// rcfile (nocx-yww2). Its own map rather than a field of
-	// integrationStatus, because the two arrive in an order nothing
-	// controls: the shell can write its first fact microseconds after the
-	// fork, while the launch registers the axis only once the pty is back.
-	// A stage folded into the status would be dropped for arriving early,
-	// and the failure it explains is exactly the one where the shell was
-	// fast and then vanished.
-	bootstrapStages map[session.ID]string
+	// toolSurfaces is the retained launch result for the worker tool path.
+	// It is separate from integration because it answers a different question:
+	// whether the external coordinator can actually reach its tools.
+	toolSurfaceMu sync.Mutex
+	toolSurfaces  map[session.ID]toolSurfaceStatus
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -1269,7 +1291,7 @@ func WithFilesystemRegistry(r *filesystem.Registry) WSServerOption {
 
 // WithFilesystemProviderFactory attaches the provider builder files.open
 // uses. The composition root decides which sessions get which providers —
-// local.New for local sessions today, the SFTP provider with the SFTP wave
+// local.New for local sessions today, the SFTP provider with the SFTP worker
 // (design §6 step 4) — and the transport never constructs a provider
 // itself (AD-8). When absent, files.open returns an error.
 func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
@@ -1313,7 +1335,7 @@ type GitOpenRefusal struct {
 // answers them.
 type GitOpenSelection struct {
 	Factory git.RepoFactory
-	// ConsentRequired — the session's machine has no relay-tier answer;
+	// ConsentRequired — the session's machine has no helper-tier answer;
 	// git.open must answer the consentRequired state and the panel offers
 	// the consent flow. Set means Factory is nil.
 	ConsentRequired bool
@@ -1388,8 +1410,24 @@ type HostedSessionOpen struct {
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
+// HelperSessionOpener is "this destination's helper opens the session".
+//
+// IT IS ASKED FOR EVERY DESTINATION, and that is the whole of what makes this
+// machine an entry in the inventory rather than a mode (L1 of the local-helper
+// design, D11 of level 1). Before nocx-ie23r.3 the call was made only on the
+// remote branch, so a local pane could not reach a helper even when one was
+// serving on its own socket; the opener answers "not mine" for what it does
+// not own, which is the same sentence it has always answered, now asked one
+// question more.
+//
+// claim is the idempotency key the coordinator wrote a durable claim under
+// BEFORE this call (L7), and the spawn carries it so a repeat answers with
+// the session the first one made rather than forking a second shell. Empty
+// means no claim was written and the caller is owed no promise — every remote
+// open today, whose spawn/binding interval is the same hole and is not this
+// bead's to close.
 type HelperSessionOpener interface {
-	OpenHosted(ctx context.Context, cfg session.Config) (HostedSessionOpen, bool, error)
+	OpenHosted(ctx context.Context, cfg session.Config, claim string) (HostedSessionOpen, bool, error)
 }
 
 func WithHelperSessionOpener(opener HelperSessionOpener) WSServerOption {
@@ -1506,6 +1544,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		laneCapacity:               DefaultControlLaneCapacity,
 		heartbeatReadWindow:        DefaultHeartbeatReadWindow,
 		domainWaitTimeout:          DefaultDomainConflictWaitTimeout,
+		toolSurfaces:               make(map[session.ID]toolSurfaceStatus),
 		domainMaxQueue:             DefaultDomainMaxQueue,
 		domainQueueDepth:           DefaultDomainQueueDepth,
 		controlDrainTimeout:        defaultControlDrainTimeout,
@@ -1628,6 +1667,9 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
+	specs = append(specs, s.agentEmittingSpecs()...)
+	specs = append(specs, s.agentCalibrationSpecs()...)
+	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
@@ -2988,7 +3030,7 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredHelper:
 		return remote.DesiredMode
 	default:
 		return string(profile.DefaultDesiredMode())
@@ -3898,3 +3940,14 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 	}
 	return tag
 }
+
+// SetWorkerRecord wires the worker record a coordinator run reaches through
+// workers.spawn and workers.holdings. Without it those tools refuse and say why: a
+// spawn accepted into a record that does not exist is exactly the unaccounted
+// agent the record was built to prevent.
+//
+// A setter rather than an option, for the reason the emitter is one: the
+// record is built from seams this server provides — its own session opener
+// among them — so it cannot exist before the server does. The window before
+// this line is empty, because no run can have been asked yet.
+func (s *WSServer) SetWorkerRecord(w assistant.WorkerRecord) { s.workerStore = w }

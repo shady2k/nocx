@@ -16,6 +16,7 @@ const resultAliases = new Map([
   ['connections.test', 'connections.probe.schema.json'],
   ['uistate.get', 'uistate.schema.json'],
   ['uistate.set', 'uistate.schema.json'],
+  ['agent.calibration.answer', 'agent.calibration.schema.json'],
 ])
 
 function ref(file) {

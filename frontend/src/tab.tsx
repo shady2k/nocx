@@ -1,7 +1,7 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
-import { PinIcon } from './ui/icons'
+import { ChevronDownIcon, PinIcon } from './ui/icons'
 import type { PaneActivity, PaneActivitySource } from './pane-observation'
 
 /**
@@ -110,6 +110,23 @@ export interface TabProps {
    *  It is provenance and nothing else. A child is drawn under its parent and
    *  no authority follows from that (ADR-0020 §5). */
   depth?: number
+  /**
+   * HOW MANY CHILD AGENTS the pane's agent has spawned (nocx-o1v0h). Zero —
+   * the normal case — draws no disclosure at all, so a strip of ordinary
+   * panes is exactly what it was.
+   *
+   * The strip draws the children as rows of their own under this one; this
+   * row carries only the control that folds them and the count that says what
+   * was folded. A count is the smallest honest thing a collapsed row can say,
+   * and saying nothing is how a person stops noticing there are children.
+   */
+  childCount?: number
+  /** Whether those rows are currently drawn. EXPANDED IS THE DEFAULT and the
+   *  strip owns the state: a spawned child is work in flight, and a
+   *  disclosure that hides work in flight by default is one nobody opens. */
+  childrenExpanded?: boolean
+  /** Fold or unfold them. The row raises the intent and decides nothing. */
+  onToggleChildren?: () => void
   /** Called when the tab is right-clicked, with the viewport coordinates the
    *  menu should open at. The strip owns the menu; a tab knows only that it
    *  was asked for one. */
@@ -160,6 +177,17 @@ export function Tab(props: TabProps) {
       data-pinned={props.pinned === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       data-depth={(props.depth ?? 0) > 0 ? String(props.depth) : undefined}
+      // The kit's disclosure vocabulary, borrowed rather than reinvented:
+      // TreeRow, RecordRow and Section all say expanded | collapsed | leaf,
+      // and the chevron's rotation is the same rule in all four. A row with
+      // no children is a leaf and draws no control.
+      data-disclosure={
+        (props.childCount ?? 0) === 0
+          ? 'leaf'
+          : props.childrenExpanded === false
+            ? 'collapsed'
+            : 'expanded'
+      }
       // Kept in BOTH orientations. The vertical row shows the same text as a
       // subtitle, but that line ellipses — so dropping the native tooltip there
       // took away the only way to read a long path in full.
@@ -247,6 +275,35 @@ export function Tab(props: TabProps) {
             is not showing — and pushed the two visible lines below the row's
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
+          {/* THE CONTROL COMES BEFORE THE INDICATOR, because it is about the
+              rows underneath and the dot is about this pane. A native button,
+              so it is reachable and operable with Enter and Space without
+              this row inventing key handling — the same thing TreeRow's
+              disclosure and Section's are. */}
+          <Show when={(props.childCount ?? 0) > 0}>
+            <IconButton
+              size="sm"
+              square
+              ariaLabel={
+                props.childrenExpanded === false
+                  ? `Show ${props.childCount} subagents`
+                  : `Hide ${props.childCount} subagents`
+              }
+              onClick={(e: MouseEvent) => {
+                e.stopPropagation()
+                props.onToggleChildren?.()
+              }}
+            >
+              {/* The icon is wrapped in a span THIS component owns, because
+                  the chevron turns and the kit's control must not be
+                  repainted or rotated from outside. Same division as
+                  RecordRow's: the button keeps its square hit area, the
+                  wrapper does the turning. */}
+              <span class="nocx-tab-disclosure-icon">
+                <ChevronDownIcon />
+              </span>
+            </IconButton>
+          </Show>
           <span class="nocx-tab-status" />
           {/* Why this tab is at the head of the strip. Without the mark the
               pinning is invisible until the strip is long enough for the
@@ -265,6 +322,12 @@ export function Tab(props: TabProps) {
             />
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
+          {/* WHAT WAS FOLDED AWAY. It appears only while the rows are hidden:
+              with them on screen the count is the thing a person can already
+              see, and a badge that repeats what is visible is noise. */}
+          <Show when={(props.childCount ?? 0) > 0 && props.childrenExpanded === false}>
+            <span class="nocx-tab-childcount">{`+${props.childCount}`}</span>
+          </Show>
         </span>
         {/* ONE SECOND LINE, AND WHAT IT SAYS. The row has room for exactly
             one line under the title, and two facts want it: WHERE the pane is

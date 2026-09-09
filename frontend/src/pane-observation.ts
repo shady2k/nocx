@@ -39,6 +39,7 @@ const PANE_STATES: readonly DriverState[] = [
   'permission_choice',
   'modal_choice',
   'working',
+  'error',
   'unknown',
   'exited',
 ]
@@ -58,11 +59,12 @@ export function isDriverState(v: unknown): v is DriverState {
  *  two would disagree at exactly the moment it mattered — a pane whose title
  *  still spins while its driver says a dialog is waiting.
  *
- *  Deliberately smaller than DriverState: the two kinds of menu need a person
- *  identically. WHICH menu it is decides whether answering it answers the
+ *  Deliberately smaller than DriverState, but NOT everywhere: the two kinds of
+ *  menu need a person identically, and 'error' needs one differently from both
+ *  of its neighbours. WHICH menu it is decides whether answering it answers the
  *  agent, and that matters to the caller that TYPES (nocx-dkawo.1), never to a
  *  dot on a tab. */
-export type PaneActivity = AgentStatus | 'waiting' | 'unknown' | 'exited'
+export type PaneActivity = AgentStatus | 'waiting' | 'error' | 'unknown' | 'exited'
 
 /** Where the value came from. `title` is the weaker row of the provenance
  *  table and may light the indicator; it decides nothing. */
@@ -83,6 +85,12 @@ function fromDriver(state: DriverState): PaneActivity {
     case 'permission_choice':
     case 'modal_choice':
       return 'waiting'
+    // 'error' does NOT collapse, and this is the one projection that must not.
+    // The two menus collapse because a dot cannot act on the difference; error
+    // is the opposite case — folding it into 'working' says leave it alone,
+    // and folding it into 'waiting' says answer something that is not there.
+    case 'error':
+      return 'error'
     case 'exited':
       return 'exited'
     case 'unknown':
@@ -140,4 +148,60 @@ function observedIndicator(
   if (observation !== null) return { activity: fromDriver(observation), source: 'driver' }
   if (titleStatus !== null) return { activity: titleStatus, source: 'title' }
   return null
+}
+
+/** ONE CHILD AGENT the pane's own agent spawned, as the pane's chrome named
+ *  it. Re-exported from the generated contract type rather than restated, for
+ *  the same reason DriverState is: a field added to the schema cannot be
+ *  missing here, and one the schema drops cannot survive here.
+ *
+ *  Two fields, and what is absent is the decision. The screen also draws an
+ *  elapsed time and a token flow per row and neither crosses the wire, because
+ *  observations are pushed only when the answer CHANGES and both of those move
+ *  on every frame — see the schema, which carries the reasoning a reader of
+ *  the wire has. So a row is drawn from what is stable for its whole life. */
+export type PaneChild = NonNullable<SessionObservationChanged['children']>[number]
+
+/** The wire's own shape for the list: non-empty when present. Named so the
+ *  boundary guard can hand back exactly what the notification type wants,
+ *  without a cast that would let an empty one through. */
+export type PaneChildren = NonNullable<SessionObservationChanged['children']>
+
+/** The boundary guard for the child rows, beside `isDriverState` and for the
+ *  same reason: this is an unsolicited notification, nothing correlates it,
+ *  and what it carries reaches a surface that will draw it.
+ *
+ *  Null for absent, not an array — and null for an EMPTY array too, because
+ *  present-and-empty is a claim the backend cannot make ("the panel is on
+ *  screen and names nobody") and a renderer that accepted it would draw an
+ *  expanded parent with nothing under it. A row without a usable name is
+ *  dropped rather than rendered blank; if that empties the list, the whole
+ *  list is absent. */
+export function readPaneChildren(value: unknown): PaneChildren | null {
+  if (!Array.isArray(value)) return null
+  const rows: PaneChild[] = []
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue
+    const row = entry as Record<string, unknown>
+    const name = row.name
+    if (typeof name !== 'string' || name === '') continue
+    const task = row.task
+    rows.push(typeof task === 'string' && task !== '' ? { name, task } : { name })
+  }
+  // Rebuilt as the wire's non-empty tuple rather than cast into it: the
+  // emptiness is decided here, once, where it can be seen.
+  const [first, ...rest] = rows
+  return first === undefined ? null : [first, ...rest]
+}
+
+/** Whether two readings name the same children, in the same order. The panel's
+ *  order is the lineage's order, so a reordering is a different screen.
+ *
+ *  It is here rather than at each caller because "are these the same rows" is
+ *  one question about one vocabulary, and the two places that ask it — the
+ *  pane deciding whether to repaint, and any surface diffing a list — must not
+ *  be able to answer it differently. */
+export function sameChildren(a: readonly PaneChild[], b: readonly PaneChild[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((child, i) => child.name === b[i]?.name && child.task === b[i]?.task)
 }

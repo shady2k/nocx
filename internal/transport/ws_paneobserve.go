@@ -15,6 +15,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -38,6 +39,13 @@ type paneObserver interface {
 	Unwatch(paneID string)
 	Sweep()
 	Snapshot(paneID string) (paneobserve.Observation, bool)
+	// Watching lists the panes under observation and the agent each was
+	// enrolled as. It is what the emitting view (nocx-02uci) asks first, and
+	// it is a read of the ENROLMENT rather than of a classification —
+	// Snapshot above is silent until a first sweep has produced one, and a
+	// view that waited for that would show its operator nothing on a settled
+	// screen.
+	Watching() []paneobserve.Enrolled
 }
 
 // WithPaneObserver attaches the backend's pane-observation watcher.
@@ -58,6 +66,34 @@ type observationChangedParams struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 	Agent        string `json:"agent"`
 	State        string `json:"state"`
+	// Children is omitted when the pane's chrome named none, which is the
+	// ordinary case. `omitempty` is load-bearing rather than tidy: the
+	// schema's minItems refuses an empty array, because "the panel is not on
+	// screen" and "the panel is on screen and says nothing" are different
+	// claims and only the first is ever true here.
+	Children []observationChildParams `json:"children,omitempty"`
+}
+
+// observationChildParams is one child row on the wire. Two fields, and what is
+// missing is the decision: the panel also draws an elapsed time and a token
+// flow, and this notification is sent only when the answer CHANGES — see
+// internal/paneobserve for the interval that leaves them behind.
+type observationChildParams struct {
+	Name string `json:"name"`
+	Task string `json:"task,omitempty"`
+}
+
+// observationChildren renders the watcher's children onto the wire shape. Nil
+// in, nil out: a pane with no children carries no field at all.
+func observationChildren(children []agentdriver.Subagent) []observationChildParams {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]observationChildParams, 0, len(children))
+	for _, c := range children {
+		out = append(out, observationChildParams{Name: c.Name, Task: c.Task})
+	}
+	return out
 }
 
 // runPaneObserverSweeps drives the coalescer for the life of the server.
@@ -113,6 +149,7 @@ func (s *WSServer) emitPaneObservation(sid session.ID, o paneobserve.Observation
 		SessionEpoch: ident.Epoch,
 		Agent:        o.Agent,
 		State:        string(o.State),
+		Children:     observationChildren(o.Children),
 	}
 	if err := wconn.TryNotify("session.observationChanged", mustMarshal(params)); err != nil {
 		s.log.Debug("write session.observationChanged", "session", sid, "error", err)

@@ -11,21 +11,21 @@
 Per AGENTS.md, the boundaries this design crosses and what they already say, before it
 says what to build.
 
-| Binding text                                          | What it already decided                                                                                                                                         | This design                                                                                              |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **N3** (2026-08-05 §3.5)                              | Script mode installs automatically, without asking; consent required only for the relay binary. Explicitly overrode ADR-0004 §2 for script delivery.            | **Reversed.** Requires an ADR.                                                                           |
-| **N3's compensating control** (2026-08-05 §4.1)       | The product _shows_ the footprint with an uninstall action "even though consent was not asked". Implemented as P10 / `nocx-bu6q`.                               | **Kept and repaired.** Stops being a compensation, becomes ordinary inventory.                           |
-| **ADR-0004 §2**                                       | Consent once per destination; automatic integration only as an informed opt-in, "never as the default".                                                         | **Restored** for script delivery.                                                                        |
-| **ADR-0004 §7**                                       | Fail-open is absolute. Untouched by ADR-0024.                                                                                                                   | **Binding on the ask** (§4.2): a failure to decide never swallows a command.                             |
-| **ADR-0024 decision 4**                               | _There is no in-band fallback tier._ No authoritative channel ⇒ conventional terminal: no blocks, no ledger.                                                    | **Obeyed.** It is why declining is expensive, and why `script` and "files on the host" are one choice.   |
-| **ADR-0022**                                          | The ssh command line is the carrier; the backend composes the rewritten line for a child domain.                                                                | Why the child path is authorisable at all (§4.3).                                                        |
-| **ADR-0023**                                          | A jump route is its own host-key identity.                                                                                                                      | **Superseded as the consent key** by the host key itself (§3.2) — the route was a proxy for the machine. |
-| **ADR-0015**                                          | The oracle is `ssh -G <host>`, cached per resolved identity.                                                                                                    | Used for mode resolution, **not** as the consent key.                                                    |
-| **AD-6**                                              | The backend never sniffs the byte stream.                                                                                                                       | Why an unintegrated session gets no offer (§4.4).                                                        |
-| **AD-5**                                              | Tier A is integration with no remote install.                                                                                                                   | Already contradicted by N3; the ADR must amend it either way.                                            |
-| `DesiredMode` (`internal/profile/profile.go:38`)      | `raw` adds nothing; `script` runs the shell tiers; `relay` deploys the Tier-B binary. Inherited through profile → group → global. **N3 made `script` default.** | **Gains `auto`, which becomes the default.** No new axis (§3.1).                                         |
-| `RelayConsent` (`internal/profile/profile.go:66`)     | Three-state, per destination, never inherited; script mode never consults it.                                                                                   | **Unchanged and not stacked** with this ask (§5.2).                                                      |
-| `InstalledFact` (`internal/ssh/installed_fact.go:13`) | Keyed by the resolved `ssh -G` identity — observation of what is on a host.                                                                                     | **Observation only, never authorization** (§6).                                                          |
+| Binding text                                          | What it already decided                                                                                                                                          | This design                                                                                              |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **N3** (2026-08-05 §3.5)                              | Script mode installs automatically, without asking; consent required only for the helper binary. Explicitly overrode ADR-0004 §2 for script delivery.            | **Reversed.** Requires an ADR.                                                                           |
+| **N3's compensating control** (2026-08-05 §4.1)       | The product _shows_ the footprint with an uninstall action "even though consent was not asked". Implemented as P10 / `nocx-bu6q`.                                | **Kept and repaired.** Stops being a compensation, becomes ordinary inventory.                           |
+| **ADR-0004 §2**                                       | Consent once per destination; automatic integration only as an informed opt-in, "never as the default".                                                          | **Restored** for script delivery.                                                                        |
+| **ADR-0004 §7**                                       | Fail-open is absolute. Untouched by ADR-0024.                                                                                                                    | **Binding on the ask** (§4.2): a failure to decide never swallows a command.                             |
+| **ADR-0024 decision 4**                               | _There is no in-band fallback tier._ No authoritative channel ⇒ conventional terminal: no blocks, no ledger.                                                     | **Obeyed.** It is why declining is expensive, and why `script` and "files on the host" are one choice.   |
+| **ADR-0022**                                          | The ssh command line is the carrier; the backend composes the rewritten line for a child domain.                                                                 | Why the child path is authorisable at all (§4.3).                                                        |
+| **ADR-0023**                                          | A jump route is its own host-key identity.                                                                                                                       | **Superseded as the consent key** by the host key itself (§3.2) — the route was a proxy for the machine. |
+| **ADR-0015**                                          | The oracle is `ssh -G <host>`, cached per resolved identity.                                                                                                     | Used for mode resolution, **not** as the consent key.                                                    |
+| **AD-6**                                              | The backend never sniffs the byte stream.                                                                                                                        | Why an unintegrated session gets no offer (§4.4).                                                        |
+| **AD-5**                                              | Tier A is integration with no remote install.                                                                                                                    | Already contradicted by N3; the ADR must amend it either way.                                            |
+| `DesiredMode` (`internal/profile/profile.go:38`)      | `raw` adds nothing; `script` runs the shell tiers; `helper` deploys the Tier-B binary. Inherited through profile → group → global. **N3 made `script` default.** | **Gains `auto`, which becomes the default.** No new axis (§3.1).                                         |
+| `HelperConsent` (`internal/profile/profile.go:66`)    | Three-state, per destination, never inherited; script mode never consults it.                                                                                    | **Unchanged and not stacked** with this ask (§5.2).                                                      |
+| `InstalledFact` (`internal/ssh/installed_fact.go:13`) | Keyed by the resolved `ssh -G` identity — observation of what is on a host.                                                                                      | **Observation only, never authorization** (§6).                                                          |
 
 ## 1. Context
 
@@ -85,19 +85,19 @@ const (
     DesiredAuto   DesiredMode = "auto"   // pick the best tier actually available — the default
     DesiredRaw    DesiredMode = "raw"    // nothing added: no rewrite, no remote write
     DesiredScript DesiredMode = "script" // the shell tiers we ship
-    DesiredRelay  DesiredMode = "relay"  // Tier B, a deployed binary — consent-gated
+    DesiredHelper DesiredMode = "helper" // Tier B, a deployed binary — consent-gated
 )
 ```
 
 `auto` resolves, per machine, to the best tier that is genuinely available:
 
-1. **relay** — a suitable binary exists for that platform. _(Tier B is not built; this arm
+1. **helper** — a suitable binary exists for that platform. _(Tier B is not built; this arm
    is deliberate forward structure so the default need not change when it lands.)_
 2. **script** — no binary, but a shell tier fits (known shell, bootstrap under the cap).
 3. **raw** — neither. Today's `unsupported-shell` refusal and the over-cap refusal become
    an honest named outcome instead of a failure with an unhelpful reason.
 
-**An explicit choice is the consent.** A user who set `script`, `relay` or `raw` — on the
+**An explicit choice is the consent.** A user who set `script`, `helper` or `raw` — on the
 profile, or on a group, or as a global default — has answered, and is not asked. Consent is
 never inherited from the _hardcoded_ default, and does not need to be: the hardcoded
 default is now `auto`.
@@ -141,8 +141,8 @@ Resolution order, per connection:
 1. Resolve `desiredMode` through the cascade.
 2. `raw` → nothing is written and **nothing is asked**. The user answered more broadly
    already.
-3. `script` / `relay` (explicit) → that is the consent. Proceed. `relay` additionally
-   consults its own `RelayConsent`, unchanged.
+3. `script` / `helper` (explicit) → that is the consent. Proceed. `helper` additionally
+   consults its own `HelperConsent`, unchanged.
 4. `auto` → resolve the best available tier (§3.1). If it is `raw`, nothing is written and
    nothing is asked. Otherwise look up the answer for this host key:
    - present → honour it, silently;
@@ -208,9 +208,9 @@ When a footprint already exists on that machine, declining offers to take it wit
 **[Plain terminal, and remove what's there]**. Never the default, but not hidden in
 settings either.
 
-### 5.2 `relay` is not stacked onto this
+### 5.2 `helper` is not stacked onto this
 
-When Tier B lands, a `relay` user answers about the binary through `RelayConsent`, as
+When Tier B lands, a `helper` user answers about the binary through `HelperConsent`, as
 today. The two are never merged into one question: declining a deployed binary must not
 also decline shell scripts — different risks.
 
@@ -271,7 +271,7 @@ transient-integrated comments; the ADR superseding N3.
   is invisible on the footprint screen.)_
 - **A no-disk delivery tier.** §1.2.
 - **Nested ssh inside a remote parent.** §4.4.
-- **Tier B / relay itself.** Not built; only the `auto` arm anticipating it.
+- **Tier B / the helper itself.** Not built; only the `auto` arm anticipating it.
 - **PR #69's blocker** (`nocx-292k`). Required for this design too, but not gated on it, and
   its repair is pure observation (§6).
 
@@ -288,7 +288,7 @@ transient-integrated comments; the ADR superseding N3.
    the answer.
 4. The same machine reached directly and through a bastion is asked **once**; two machines
    sharing a spelling but not a host key are asked **twice**; a rotated host key asks again.
-5. An explicit `script`/`relay`/`raw` — own, group or global — is never asked about. The
+5. An explicit `script`/`helper`/`raw` — own, group or global — is never asked about. The
    hardcoded default never counts as an explicit choice.
 6. `raw`, and `auto` resolving to `raw`, write nothing and ask nothing.
 7. Declining leaves no new bytes on the machine, is remembered, and a later connection
@@ -358,13 +358,13 @@ Nine branches interrogated; six agreed, three changed the design materially.
 Removed the `FootprintPolicy` axis and its cascade projection; removed the route-keyed consent
 and the two-store join it forced; removed the invented reconciliation of "pre-N3 state"
 (greenfield); added `auto`, the host-key answer store, the trust-moment ask, the 3-second
-budget, the human-origin rule, the no-surface rule, the `raw`-first ordering, the `relay`
+budget, the human-origin rule, the no-surface rule, the `raw`-first ordering, the `helper`
 non-stacking rule, and decline-and-remove.
 
 ### Deferred / parking lot
 
 - Local installation is invisible on the footprint screen — separate bead.
-- Tier B / relay itself; only the `auto` arm anticipating it is in scope.
+- Tier B / the helper itself; only the `auto` arm anticipating it is in scope.
 - A no-disk delivery tier — rejected by the owner, recorded in §1.2.
 
 ### Confidence assessment
@@ -372,7 +372,7 @@ non-stacking rule, and decline-and-remove.
 - **Overall: medium-high.** The model is now a value on an existing axis plus one store,
   which is far less surface than the design started with, and every binding document it
   crosses is named.
-- **Areas of concern:** (1) the `auto` → relay arm is structure for something unbuilt, and
+- **Areas of concern:** (1) the `auto` → helper arm is structure for something unbuilt, and
   YAGNI is a real objection — kept only because it fixes the default once; (2) the ask riding
   with host-key trust couples two flows that are currently independent, and that coupling is
   the least-tested part of the design; (3) criterion 1's partial-failure enumeration depends

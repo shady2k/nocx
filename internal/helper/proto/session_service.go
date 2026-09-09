@@ -107,10 +107,30 @@ type CloseSessionParams struct {
 // CloseSessionResult is empty; success is the answer that the session ended.
 type CloseSessionResult struct{}
 
-// SignalParams sends Signal to the session's process group.
+// SignalParams sends Signal to a process group of the session.
 type SignalParams struct {
 	Session HostSessionID `json:"session"`
 	Signal  int           `json:"signal"`
+	// Pgid names the group to signal. Zero — the level-1 shape, and still
+	// legitimate — means the SESSION's own group, which is the shell.
+	//
+	// It exists because a stop is two statements and not one (nocx-uvac6.11):
+	// name the addressee once, then signal THAT group through the whole
+	// escalation, so a shell that starts another job between SIGINT and
+	// SIGKILL is not hit by the second. The caller names it from the
+	// foreground group this session's own inventory entry reports, and it
+	// must be able to keep naming it — a helper that re-resolved "whatever is
+	// in front now" on every call would be the race the ladder exists to
+	// avoid.
+	//
+	// IT GRANTS THE CALLER NOTHING IT DID NOT ALREADY HAVE. Reaching this
+	// service means having authenticated as the account that owns the helper
+	// (D12 locally, ssh remotely), and that account may call kill(2) on the
+	// same group directly. So this is a convenience of ADDRESSING and not a
+	// widening of authority, which is why the helper signals what it is told
+	// rather than keeping a policy about which groups are allowed — the
+	// helper owns no policy (D3).
+	Pgid int `json:"pgid,omitempty"`
 }
 
 // SignalResult is empty; success is the answer that the signal was delivered.
@@ -192,7 +212,34 @@ type SpawnParams struct {
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.
 	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+	// IdempotencyKey is the caller's name for the SPAWN, not for the session
+	// (L7 of the local-helper design). The helper mints the session id, so the
+	// coordinator cannot record what it is about to get — but it can record
+	// what it is about to ask for, and this is that record: a pane's claim is
+	// written durably with this key BEFORE the spawn, and a spawn repeated
+	// with the same key answers with the session the first one made rather
+	// than forking a second shell.
+	//
+	// That is what lets the claim precede the first irreversible effect, which
+	// is the worker record's own rule and was bought by the same failure: a
+	// coordinator that dies between the helper's spawn and the durable binding
+	// leaves a live PTY no pane claims, and — with the daemon lifecycle
+	// unimplemented — the helper holds it forever.
+	//
+	// It is OPTIONAL and empty is legitimate: a caller that minted no claim
+	// gets no promise, which is what every level-1 caller has always had. It
+	// is opaque to the helper, which stores it and compares it and never
+	// parses it, and it is never a name a person typed — the helper owns no
+	// policy and persists no human-authored name (D3).
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
+
+// MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
+// entry per live key for the life of the session it names, so the bound is
+// what keeps a caller's bookkeeping from becoming the helper's memory
+// footprint. It is stated here, next to the field, because the contract
+// declares it and an unenforced bound in a schema is theatre.
+const MaxIdempotencyKey = 128
 
 // LifecycleLaunch carries the coordinator-minted authenticated channel
 // bootstrap to the helper. Addressing is public; Capability and Recovery are

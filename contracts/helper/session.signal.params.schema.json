@@ -13,6 +13,11 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 64
+    },
+    "pgid": {
+      "description": "The process group to signal. Absent or zero means the session's own group, which is the shell. A named group is the addressee a stop ladder resolved once — from this session's foreground group as its inventory entry reports it — and keeps for the whole escalation, so a shell that starts another job between SIGINT and SIGKILL is not hit by the second. It grants the caller nothing it did not already have: reaching this service means having authenticated as the account that owns the helper, and that account may call kill(2) on the same group directly.",
+      "type": "integer",
+      "minimum": 0
     }
   }
 }

@@ -71,6 +71,16 @@ type nestedKernel struct {
 	// answer carrying no `enrolled` field at all. The wrapper must read that
 	// as "not orchestrated", say so in the pane, and still run the agent.
 	refuseEnrolment bool
+	// agentMalformed sends a malformed lifecycle frame, so the wrapper must
+	// treat an answer it cannot parse as a refusal.
+	agentMalformed bool
+	// agentTimeout accepts the enrolment request but never answers it.
+	agentTimeout bool
+	// refuseReport makes the kernel answer a declaration with recorded:false,
+	// which is the state where the agent said something and nocx did not keep
+	// it — and the pane has to say so.
+	refuseReport bool
+	reportReason string
 	// enrolReason is the sentence a refusal carries, which is what the pane
 	// prints. Empty means the kernel refuses without one.
 	enrolReason string
@@ -164,11 +174,20 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 				k.t.Errorf("child hello after the child closed — a late frame slipped through")
 			}
 		}
-		k.sendAcceptLocked(f.Dom, f.Epoch, f.Cap)
+		k.sendAcceptLocked(f.Dom, f.Epoch)
 	case "domain_request":
 		k.grantLocked()
 	case "agent_enrol":
+		if k.agentTimeout {
+			return
+		}
+		if k.agentMalformed {
+			k.sendMalformedAgentAnswerLocked()
+			return
+		}
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
+	case "agent_report":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentReported)
 	case "agent_withdraw":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentWithdrawn)
 	case "domain_suspended":
@@ -218,11 +237,10 @@ func (k *nestedKernel) grantLocked() {
 		bootstrap = rc
 	}
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(testDom),
-		Epoch:      testEpoch,
-		Capability: capBytes(k.t, testCap),
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(testDom),
+		Epoch:   testEpoch,
 		Event: lifecycle.Event{Kind: lifecycle.KindDomainGrant, DomainGrant: &lifecycle.DomainGrant{
 			RequestID: "r-" + testDom + "-0",
 			Env:       lifecycle.EnvSudo,
@@ -238,14 +256,16 @@ func (k *nestedKernel) grantLocked() {
 
 // sendAcceptLocked answers a hello with the accept for THAT domain (the
 // parent's accept carries the parent's addressing, the child's the child's).
-func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64, capHex string) {
+// It carries no capability, because the real kernel sends none on this
+// direction — the descriptor is inherited by every descendant of the shell
+// (nocx-aqz7o).
+func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64) {
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(dom),
-		Epoch:      epoch,
-		Capability: capBytes(k.t, capHex),
-		Event:      lifecycle.Event{Kind: lifecycle.KindAccept, Accept: &lifecycle.Accept{}},
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(dom),
+		Epoch:   epoch,
+		Event:   lifecycle.Event{Kind: lifecycle.KindAccept, Accept: &lifecycle.Accept{}},
 	}
 	k.t.Logf("kernel sending accept for dom=%s epoch=%d", dom, epoch)
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
@@ -270,21 +290,37 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 			ans.Reason = k.enrolReason
 		}
 		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
+	case lifecycle.KindAgentReported:
+		// Recorded unless the test says otherwise, so a wrapper that ignored
+		// the answer and one that read it look different here.
+		evt = lifecycle.Event{Kind: kind, AgentReported: &lifecycle.AgentReported{
+			RequestID: lifecycle.RequestID(f.Request),
+			Recorded:  !k.refuseReport,
+			Reason:    k.reportReason,
+		}}
 	default:
 		evt = lifecycle.Event{Kind: kind, AgentWithdrawn: &lifecycle.AgentWithdrawn{
 			RequestID: lifecycle.RequestID(f.Request),
 		}}
 	}
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(f.Dom),
-		Epoch:      f.Epoch,
-		Capability: capBytes(k.t, f.Cap),
-		Event:      evt,
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(f.Dom),
+		Epoch:   f.Epoch,
+		Event:   evt,
 	}
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
 		k.t.Fatalf("encode %s: %v", kind, err)
+	}
+}
+
+func (k *nestedKernel) sendMalformedAgentAnswerLocked() {
+	body := []byte(`{"evt":`)
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], 7)
+	if _, err := k.conn.Write(append(hdr[:], body...)); err != nil {
+		k.t.Fatalf("write malformed agent answer: %v", err)
 	}
 }
 
@@ -295,10 +331,9 @@ func (k *nestedKernel) sendRefresh(rid string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	env := lifecycle.Envelope{
-		Version:    lifecycle.ProtocolVersion,
-		Lane:       lifecycle.LaneID(testLane),
-		Domain:     lifecycle.DomainID(testDom),
-		Capability: capBytes(k.t, testCap),
+		Version: lifecycle.ProtocolVersion,
+		Lane:    lifecycle.LaneID(testLane),
+		Domain:  lifecycle.DomainID(testDom),
 		Event: lifecycle.Event{Kind: lifecycle.KindRefreshRequest, RefreshRequest: &lifecycle.RefreshRequest{
 			RequestID: lifecycle.RequestID(rid),
 		}},

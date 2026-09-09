@@ -36,7 +36,7 @@ func hostedSessions(t *testing.T) *client.Client {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
@@ -76,7 +76,10 @@ func TestSpawnAndInventoryOverTheWireConformToTheirContracts(t *testing.T) {
 
 	// The params the test sends must themselves satisfy the contract, or the
 	// result proves nothing about a payload anybody would actually send.
-	in := proto.SpawnParams{Cwd: "/", Cols: 100, Rows: 30, WindowBytes: 1 << 20}
+	// The idempotency key travels with the params a real coordinator sends
+	// (L7): the claim it names is written before this call is made, so a
+	// payload without it is not the payload the product sends.
+	in := proto.SpawnParams{Cwd: "/", Cols: 100, Rows: 30, WindowBytes: 1 << 20, IdempotencyKey: "pane-01H8"}
 	if err := validateHelperJSON(spawnParams, mustMarshal(t, in)); err != nil {
 		t.Fatalf("the spawn params the test sends do not satisfy the contract: %v", err)
 	}
@@ -194,7 +197,7 @@ func TestSessionInventorySurvivesCarrierLossUsesFreshDaemonHandshake(t *testing.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})

@@ -323,7 +323,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     await expect(page.locator(CONSENT)).toBeVisible({ timeout: 30_000 })
     await page.locator(ACCEPT).click()
 
-    // Accept raises the machine to the relay tier: the helper installs over
+    // Accept raises the machine to the helper tier: the helper installs over
     // the fixture's sftp subsystem, the dial answers, and git.open returns
     // ok. The branch badge is the store's own word for it.
     await expect(page.locator(BRANCH)).toBeVisible({ timeout: 60_000 })

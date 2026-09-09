@@ -14,13 +14,32 @@
 // over. Asking it here rather than re-deriving "where is char N of this row"
 // is AD-8 applied to a helper: one owner per behaviour.
 //
-// Wrapping is destructive to the flattened map, so spans are applied LAST
-// FIRST. `Range.extractContents` may split the text node it starts in, and a
-// split keeps the head in the original node — so every offset before the cut
-// stays valid, and offsets after it have already been consumed.
+// ONE ANCHOR PER TEXT NODE, not one per link — and that is the whole of
+// nocx-ec18's link half. A single Range over the link and one
+// `extractContents` re-parents everything between its ends, so when an end
+// falls INSIDE a `.term-cell` the browser splits that box: the original is
+// left empty and a clone of it goes inside the `<a>`. A frozen row's boxes
+// are what hold it on its columns, so a split box is a row that no longer
+// occupies its grid width — the defect this whole change exists to remove,
+// re-introduced by the decorator on every row carrying a link.
+//
+// Wrapping each text node's own slice instead never moves a node out of its
+// parent: the box stays a box and gains an `<a>` around its own text. The
+// cost is named and deliberate — a link straddling colour runs or boxes is
+// now SEVERAL anchors rather than one, so every one of them carries the
+// target (surface.ts reads it off whichever element was hit) and assistive
+// technology sees N links where a person sees one. That accessibility debt
+// is recorded rather than paid here; paying it means a focus order and
+// keyboard activation, which is `surface.ts`, not geometry.
+//
+// Wrapping is destructive to the flattened map, so segments are applied LAST
+// FIRST, spans and segments both. `Range.surroundContents` extracts and
+// re-inserts within one text node, and the extract keeps everything before
+// the cut in the ORIGINAL node — so every offset below the one just consumed
+// stays valid, and no offset above it is ever asked for again.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { flattenLine, charPos } from '../word-selection'
+import { flattenLine, type FlattenedLine } from '../word-selection'
 import { detectLinks, type LinkTarget } from './detect'
 
 /** Identity class for a decorated link. Styling hangs off it; so does the
@@ -46,23 +65,54 @@ function decorateRow(row: Element): void {
   const flat = flattenLine(row)
   if (flat === null) return
   const spans = detectLinks(flat.text)
+  const doc = row.ownerDocument
   for (let i = spans.length - 1; i >= 0; i--) {
     const span = spans[i]
-    const doc = row.ownerDocument
-    const start = charPos(flat, span.from)
-    const end = charPos(flat, span.to - 1)
-    const range = doc.createRange()
-    range.setStart(start.node, start.offset)
-    range.setEnd(end.node, end.offset + 1)
-    // An anchor with NO href: semantically a link for assistive technology,
-    // and inert to the webview's navigation — a real href pointing at a
-    // path would let a click replace the app's own document.
-    const a = doc.createElement('a')
-    a.className = LINK_CLASS
-    writeTarget(a, span.target)
-    a.appendChild(range.extractContents())
-    range.insertNode(a)
+    const segments = segmentsOf(flat, span.from, span.to)
+    for (let j = segments.length - 1; j >= 0; j--) {
+      const seg = segments[j]
+      const range = doc.createRange()
+      range.setStart(seg.node, seg.start)
+      range.setEnd(seg.node, seg.end)
+      // An anchor with NO href: semantically a link for assistive technology,
+      // and inert to the webview's navigation — a real href pointing at a
+      // path would let a click replace the app's own document.
+      const a = doc.createElement('a')
+      a.className = LINK_CLASS
+      // On EVERY segment, not only the first. attachLinkClicks reads the
+      // target off whatever element the click landed on (surface.ts), so a
+      // segment without one is half a link that opens nothing.
+      writeTarget(a, span.target)
+      // Surrounds within ONE text node, so the node's parent — a colour run,
+      // or a `.term-cell` — is never opened up and never re-parented.
+      range.surroundContents(a)
+    }
   }
+}
+
+/** The link's characters grouped by the text node holding them, in document
+ *  order. `flat.chars` already names the node of every character, so the
+ *  grouping is a walk of the same array the spans were detected over — no
+ *  second answer to "where is char N of this row" (AD-8). Runs are broken on
+ *  a node change OR on a gap in the offsets, so a node that appears twice in
+ *  the row cannot merge two disjoint slices into one range. */
+function segmentsOf(
+  flat: FlattenedLine,
+  from: number,
+  to: number,
+): Array<{ node: Text; start: number; end: number }> {
+  const segments: Array<{ node: Text; start: number; end: number }> = []
+  const last = Math.min(to, flat.chars.length)
+  for (let i = Math.max(0, from); i < last; i++) {
+    const { node, offset } = flat.chars[i]
+    const open = segments[segments.length - 1]
+    if (open !== undefined && open.node === node && open.end === offset) {
+      open.end = offset + 1
+    } else {
+      segments.push({ node, start: offset, end: offset + 1 })
+    }
+  }
+  return segments
 }
 
 /** Put the target on the element, so a click reads it back instead of

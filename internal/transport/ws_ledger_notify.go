@@ -58,7 +58,7 @@ const maxBlockSubjectRunes = 96
 // would escape further than one escaping into the database.
 //
 // At is deliberately not stamped, as at ws.go's session.ended raise: ingress
-// is the first nocx-owned stage and stamps it once, so a relay replaying a
+// is the first nocx-owned stage and stamps it once, so a helper replaying a
 // buffered batch keeps its own instants (internal/notify/ingress.go).
 //
 // status and facts arrive as the closing facts themselves rather than as one

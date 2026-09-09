@@ -348,7 +348,7 @@ func strPtr(v string) *string { return &v }
 
 // TestProfilesEffective_DTOConformsToContract marshals the actual
 // EffectiveProfileDTO struct and validates it against the schema. The
-// fields map is a closed set (propertyNames + required) and relayConsent is
+// fields map is a closed set (propertyNames + required) and helperConsent is
 // a required top-level field, so a field dropped from the wire — or a
 // consent state that went missing — fails here instead of looking like a
 // working field.
@@ -377,15 +377,15 @@ func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
 		"portDiscovery":        field("auto", profile.EffectiveSourceDefault),
 		"canBeJumpServer":      field(false, profile.EffectiveSourceDefault),
 		"behaviorOnSessionEnd": field("auto", profile.EffectiveSourceDefault),
-		"desiredMode":          field("relay", profile.EffectiveSourceProfile),
+		"desiredMode":          field("helper", profile.EffectiveSourceProfile),
 	}
 
 	cases := map[string]profile.EffectiveProfileDTO{
-		"relay with consent granted": {
-			ID: "ssh:test:1", Fields: fields, RelayConsent: profile.ConsentGranted,
+		"helper with consent granted": {
+			ID: "ssh:test:1", Fields: fields, HelperConsent: profile.ConsentGranted,
 		},
 		"script with consent unknown": {
-			ID: "ssh:test:2", Fields: fields, RelayConsent: profile.ConsentUnknown,
+			ID: "ssh:test:2", Fields: fields, HelperConsent: profile.ConsentUnknown,
 		},
 	}
 	for name, dto := range cases {
@@ -400,9 +400,9 @@ func TestProfilesEffective_DTOConformsToContract(t *testing.T) {
 }
 
 // TestProfilesEffective_OverTheWireConformsToContract runs the real method
-// off the real socket: a stored profile in relay mode with granted consent
-// must come back with desiredMode=relay in the closed fields map and
-// relayConsent=granted at the top level — the shape the connection UI
+// off the real socket: a stored profile in helper mode with granted consent
+// must come back with desiredMode=helper in the closed fields map and
+// helperConsent=granted at the top level — the shape the connection UI
 // renders consent state from.
 func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "profiles.effective.schema.json")
@@ -410,11 +410,11 @@ func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(dir + "/p.json")
 	prof := profile.SSHProfile{
-		Base: profile.Base{ID: "ssh:relay:1", Type: "ssh", Name: "relay"},
+		Base: profile.Base{ID: "ssh:helper:1", Type: "ssh", Name: "helper"},
 		Options: profile.StoredSSHProfileOptions{
-			Host:         "relay.example.com",
-			DesiredMode:  profile.Ptr(profile.DesiredRelay),
-			RelayConsent: profile.Ptr(profile.ConsentGranted),
+			Host:          "helper.example.com",
+			DesiredMode:   profile.Ptr(profile.DesiredHelper),
+			HelperConsent: profile.Ptr(profile.ConsentGranted),
 		},
 	}
 	if err := ps.CreateProfile(prof); err != nil {
@@ -433,7 +433,7 @@ func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	resp := jsonrpcCall(t, conn, "profiles.effective", map[string]any{
-		"ids": []string{"ssh:relay:1"},
+		"ids": []string{"ssh:helper:1"},
 	})
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`
@@ -456,12 +456,12 @@ func TestProfilesEffective_OverTheWireConformsToContract(t *testing.T) {
 	if len(got.Profiles) != 1 {
 		t.Fatalf("got %d profiles, want 1", len(got.Profiles))
 	}
-	if got.Profiles[0].RelayConsent != profile.ConsentGranted {
-		t.Errorf("relayConsent = %q, want granted", got.Profiles[0].RelayConsent)
+	if got.Profiles[0].HelperConsent != profile.ConsentGranted {
+		t.Errorf("helperConsent = %q, want granted", got.Profiles[0].HelperConsent)
 	}
 	if f, ok := got.Profiles[0].Fields["desiredMode"]; !ok {
 		t.Error("fields missing desiredMode")
-	} else if f.Value != "relay" {
-		t.Errorf("desiredMode value = %v, want relay", f.Value)
+	} else if f.Value != "helper" {
+		t.Errorf("desiredMode value = %v, want helper", f.Value)
 	}
 }

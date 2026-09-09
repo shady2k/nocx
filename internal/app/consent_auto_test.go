@@ -87,14 +87,14 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 	}
 }
 
-// TestRelayIsAdditiveNotAlternative states §5.2 as an assertion instead of
+// TestHelperIsAdditiveNotAlternative states §5.2 as an assertion instead of
 // prose: "declining a deployed binary must not also decline shell scripts —
 // different risks", and the inverse holds for the same reason. A user at
-// relay has allowed the helper; nothing about that answer says they gave up
+// helper has allowed the binary; nothing about that answer says they gave up
 // the blocks.
 //
 // It failed in the direction nobody looks: picking the MOST capable mode on
-// the axis delivered the LEAST, because the open-time gate had refused relay
+// the axis delivered the LEAST, because the open-time gate had refused helper
 // since the days the Tier-B carrier did not exist, and the helper landing
 // did not move it (nocx-7k8ma).
 //
@@ -102,18 +102,18 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 // each true of a broken product: the resolver alone cannot see that the
 // shell was left plain, and the gate alone cannot see that the helper was
 // allowed.
-func TestRelayIsAdditiveNotAlternative(t *testing.T) {
-	// The helper half: an explicit relay is the consent, with no surface
+func TestHelperIsAdditiveNotAlternative(t *testing.T) {
+	// The helper half: an explicit helper is the consent, with no surface
 	// having to ask (§4.3).
 	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(false))
-	if got := r.Resolve(explicitRelay); got != DesiredRelay {
-		t.Errorf("relay resolved to %q, want %q — the explicit choice is the consent", got, DesiredRelay)
+	if got := r.Resolve(explicitHelper); got != DesiredHelper {
+		t.Errorf("helper resolved to %q, want %q — the explicit choice is the consent", got, DesiredHelper)
 	}
 
 	// The scripts half: the same session still publishes the bundle and
 	// integrates, exactly as auto and script do.
-	if !profile.DesiredRelay.DeliversScripts() {
-		t.Error("a relay session does not integrate — allowing the binary " +
+	if !profile.DesiredHelper.DeliversScripts() {
+		t.Error("a helper session does not integrate — allowing the binary " +
 			"silently declined the shell scripts, which §5.2 forbids in both directions")
 	}
 

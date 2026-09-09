@@ -44,7 +44,7 @@ returns to zero and the row remains in the feed.
 | **AD-8**                                                     | One owner per behaviour, interface-first, wired at one composition root                                                      | The **router** stays the only holder of "where". The **centre** is the only holder of "what was raised". Neither answers the other's question |
 | **ADR-0047**                                                 | Routing resolves once before any sink; a sink never selects a target; default-deny; trust classes are hard capability bounds | Unchanged and load-bearing. §5 states what "unfiltered ingest" does **not** mean                                                              |
 | **ADR-0048**                                                 | UI state is a document on the Go side; localStorage may not carry facts                                                      | The feed is in memory and dies with the process, so it is not a document. `mark all read` is therefore also in memory — see §7                |
-| **helper design D17** (`2026-08-13-remote-helper-design.md`) | A helper service may only be the remote half of an interface that already exists locally                                     | §4's `Ingress` is that local interface. Defining it now is the precondition for a relay ever raising events, not a speculative hook           |
+| **helper design D17** (`2026-08-13-remote-helper-design.md`) | A helper service may only be the remote half of an interface that already exists locally                                     | §4's `Ingress` is that local interface. Defining it now is the precondition for a helper ever raising events, not a speculative hook          |
 | **`nocx-if6` phase A**                                       | Session identity becomes `(backendId, sessionId)`                                                                            | The occurrence record carries backend identity from the first commit. §4                                                                      |
 
 ## 3. The shape, in one paragraph
@@ -78,7 +78,7 @@ stops doing it. Nothing restamps afterwards.
 ```go
 // Ingress is the one entry point of the notification pipeline: it stamps the
 // fields nocx owns, mints the occurrence identity, and fans out to the feed
-// and the delivery path. It is the local interface a remote relay's `notify`
+// and the delivery path. It is the local interface a remote helper's `notify`
 // service may later be the remote half of (helper design D17).
 type Ingress interface {
     // Admit stamps and records one occurrence, then submits it for delivery.
@@ -274,7 +274,7 @@ Persistence of the feed across restart; the 151 existing `showToast` call sites,
 form feedback and not notifications (`frontend/src/dispatcher.ts:447`, the saturation toast,
 notably cannot travel over the transport whose failure it reports); a background mode with
 the window closed (`main.go:73` terminates the process after the last window closes — its
-own feature); the relay itself; per-kind and per-channel settings (`nocx-3mniv`, epic 3).
+own feature); the helper itself; per-kind and per-channel settings (`nocx-3mniv`, epic 3).
 
 ## 12. Open, and deliberately not decided here
 

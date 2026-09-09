@@ -624,7 +624,7 @@ func TestAdapterSeamCannotResume(t *testing.T) {
 // TestOneLaneSeveralDomainsNoCurrentDomain proves the adapter is a pipe, not
 // a policy: it registers one lane, its transport can carry several domains
 // (the kernel's registry is the authority), and it exposes no CurrentDomain
-// accessor — the future relay is a third adapter, not a protocol rewrite.
+// accessor — the helper is a third adapter, not a protocol rewrite.
 func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	tunnel := newFakeTunnel()
 	k := newTestKernel()

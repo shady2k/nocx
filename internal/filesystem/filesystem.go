@@ -34,7 +34,7 @@
 // # Watching
 //
 // Watch, WatchKind and WatchMode are part of the Provider and Handle
-// contracts (spec §5.1), but the watching wave — fsnotify locally, polling
+// contracts (spec §5.1), but the watching worker — fsnotify locally, polling
 // over SFTP — is a later step of the design's sequence (§6 step 5). Until
 // then the local provider's Watch refuses with ErrWatchUnavailable; the
 // Handle's set-replacement semantics are already live.

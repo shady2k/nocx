@@ -22,7 +22,7 @@ func TestModeAllowsIntegration(t *testing.T) {
 		{
 			mode: "auto", want: true,
 			why: "the hardcoded default (ADR-0033): auto wraps and installs the " +
-				"scripts exactly as script does — what it adds is that the relay " +
+				"scripts exactly as script does — what it adds is that the helper " +
 				"may be OFFERED, not that the scripts are withheld",
 		},
 		{
@@ -34,7 +34,7 @@ func TestModeAllowsIntegration(t *testing.T) {
 			why: "the direct-host default — no profile said otherwise",
 		},
 		{
-			mode: "relay", want: true,
+			mode: "helper", want: true,
 			why: "the tiers are additive, not alternative (§5.2: declining a " +
 				"deployed binary must not also decline shell scripts — and the " +
 				"inverse holds for the same reason). Picking the MOST capable " +

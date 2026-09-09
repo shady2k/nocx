@@ -198,7 +198,7 @@ func (c *countingPasswordRequester) count() int {
 }
 
 // refusingArtifactSource ships no helper for any platform: the selection can
-// never resolve to relay, so this test only ever exercises the fall-through
+// never resolve to helper, so this test only ever exercises the fall-through
 // to the ordinary open — which is the path every password profile takes.
 type refusingArtifactSource struct{}
 

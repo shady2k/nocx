@@ -5,7 +5,8 @@
 // on a real PTY, together with the moments at which those bytes arrived. This tool
 // makes that evidence reproducible. Capture pins terminal size and locale, drives
 // the child from a small timed-keystroke script, and stores bytes only. Replay feeds
-// those bytes through charmbracelet/x/vt and prints the screen at requested moments.
+// those bytes back through the replay in internal/agentcapture and prints the screen
+// at the requested moments.
 //
 // The two operations are subcommands of one binary because they share one capture
 // format and one workflow: take evidence, then inspect the exact moments a driver
@@ -13,8 +14,6 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,24 +27,12 @@ import (
 	"time"
 	"unicode"
 
-	xvt "github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+
+	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/panegrid"
 )
-
-type captureHeader struct {
-	Agent   string   `json:"agent"`
-	Argv    []string `json:"argv"`
-	Cols    int      `json:"cols"`
-	Rows    int      `json:"rows"`
-	Started string   `json:"started"`
-	Script  []string `json:"script"`
-}
-
-type captureChunk struct {
-	AtMs   int64  `json:"atMs"`
-	Offset int    `json:"offset"`
-	Data   string `json:"data"`
-}
 
 type scriptStep struct {
 	delay time.Duration
@@ -378,7 +365,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 		runErr = fmt.Errorf("program %q exited without producing PTY output; check the command and arguments", argv[0])
 	}
 
-	header := captureHeader{
+	header := agentcapture.Header{
 		Agent:   argv[0],
 		Argv:    append([]string(nil), argv...),
 		Cols:    cols,
@@ -386,7 +373,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 		Started: started.Format(time.RFC3339Nano),
 		Script:  scriptLabels(steps),
 	}
-	if writeErr := writeCapture(outPath, header, result.chunks); writeErr != nil {
+	if writeErr := agentcapture.Write(outPath, header, result.chunks); writeErr != nil {
 		if runErr == nil {
 			runErr = writeErr
 		} else {
@@ -408,7 +395,7 @@ func captureProgram(outPath string, argv []string, cols, rows int, timeout time.
 }
 
 type readResult struct {
-	chunks []captureChunk
+	chunks []agentcapture.Chunk
 	bytes  int
 	err    error
 }
@@ -420,7 +407,7 @@ func readPTY(ptmx io.Reader, started time.Time, done chan<- readResult) {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
 			data := string(buf[:n])
-			result.chunks = append(result.chunks, captureChunk{
+			result.chunks = append(result.chunks, agentcapture.Chunk{
 				AtMs:   time.Since(started).Milliseconds(),
 				Offset: result.bytes,
 				Data:   data,
@@ -499,164 +486,54 @@ func scriptLabels(steps []scriptStep) []string {
 	return labels
 }
 
-func writeCapture(path string, header captureHeader, chunks []captureChunk) error {
-	file, err := os.Create(path) //nolint:gosec // the operator explicitly supplies the capture path
-	if err != nil {
-		return fmt.Errorf("cannot create capture %q: %w", path, err)
-	}
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(header); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write capture header: %w", err)
-	}
-	for _, chunk := range chunks {
-		if err := encoder.Encode(chunk); err != nil {
-			_ = file.Close()
-			return fmt.Errorf("write capture chunk: %w", err)
-		}
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close capture %q: %w", path, err)
-	}
-	return nil
-}
-
-func replayCapture(path string, marks []int64, stdout io.Writer) (err error) {
-	header, chunks, err := readCapture(path)
+// replayCapture prints the screen at each mark. The replay itself belongs to
+// internal/agentcapture, which is also what a calibration set is read with:
+// one format, one emulator path, one owner.
+func replayCapture(path string, marks []int64, stdout io.Writer) error {
+	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		return err
 	}
-	term := xvt.NewEmulator(header.Cols, header.Rows)
-	drainDone := make(chan struct{})
-	go drainEmulator(term, drainDone)
-	defer func() {
-		if closeErr := term.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("close emulator: %w", closeErr)
-		}
-		<-drainDone
-	}()
-
-	consumed := 0
-	for _, mark := range marks {
-		previous := consumed
-		consumed = chunksThroughMark(chunks, mark, consumed)
-		if err := feedChunks(term, chunks[previous:consumed]); err != nil {
-			return fmt.Errorf("feed capture at %dms: %w", mark, err)
-		}
-		if err := printFrame(stdout, term, header, mark, consumed, previousOffset(chunks, consumed)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func readCapture(path string) (captureHeader, []captureChunk, error) {
-	file, err := os.Open(path) //nolint:gosec // the operator explicitly supplies the capture path
+	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, marks)
 	if err != nil {
-		return captureHeader{}, nil, fmt.Errorf("cannot open capture %q: %w", path, err)
+		return err
 	}
-	defer func() { _ = file.Close() }()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1<<20), 1<<24)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return captureHeader{}, nil, fmt.Errorf("read capture header: %w", err)
-		}
-		return captureHeader{}, nil, errors.New("capture is empty; expected a JSONL header")
-	}
-	var header captureHeader
-	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		return captureHeader{}, nil, fmt.Errorf("decode capture header: %w", err)
-	}
-	if header.Agent == "" || len(header.Argv) == 0 {
-		return captureHeader{}, nil, errors.New("capture header has no agent or argv")
-	}
-	if header.Cols <= 0 || header.Rows <= 0 {
-		return captureHeader{}, nil, fmt.Errorf("capture header has invalid geometry %dx%d", header.Cols, header.Rows)
-	}
-
-	chunks := make([]captureChunk, 0)
-	expectedOffset := 0
-	var previousAt int64
-	for lineNumber := 2; scanner.Scan(); lineNumber++ {
-		var chunk captureChunk
-		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-			return captureHeader{}, nil, fmt.Errorf("decode capture chunk on line %d: %w", lineNumber, err)
-		}
-		if chunk.AtMs < 0 || chunk.AtMs < previousAt {
-			return captureHeader{}, nil, fmt.Errorf("capture chunk on line %d has out-of-order atMs %d", lineNumber, chunk.AtMs)
-		}
-		if chunk.Offset != expectedOffset {
-			return captureHeader{}, nil, fmt.Errorf("capture chunk on line %d starts at offset %d, expected %d", lineNumber, chunk.Offset, expectedOffset)
-		}
-		chunks = append(chunks, chunk)
-		expectedOffset += len([]byte(chunk.Data))
-		previousAt = chunk.AtMs
-	}
-	if err := scanner.Err(); err != nil {
-		return captureHeader{}, nil, fmt.Errorf("read capture: %w", err)
-	}
-	return header, chunks, nil
-}
-
-func chunksThroughMark(chunks []captureChunk, mark int64, already int) int {
-	for already < len(chunks) && chunks[already].AtMs <= mark {
-		already++
-	}
-	return already
-}
-
-func previousOffset(chunks []captureChunk, consumed int) int {
-	if consumed == 0 {
-		return 0
-	}
-	return chunks[consumed-1].Offset + len([]byte(chunks[consumed-1].Data))
-}
-
-func feedChunks(term *xvt.Emulator, chunks []captureChunk) error {
-	for _, chunk := range chunks {
-		if _, err := term.Write([]byte(chunk.Data)); err != nil {
+	for _, m := range moments {
+		if err := printFrame(stdout, m); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func drainEmulator(term *xvt.Emulator, done chan<- struct{}) {
-	defer close(done)
-	buf := make([]byte, 4096)
-	for {
-		if _, err := term.Read(buf); err != nil {
-			return
-		}
-	}
-}
-
-func printFrame(w io.Writer, term *xvt.Emulator, header captureHeader, mark int64, consumed, offset int) error {
-	position := term.CursorPosition()
-	if _, err := fmt.Fprintf(w, "=== at %dms (through chunk %d, offset %d) cursor %d,%d alt=%v ===\n", mark, consumed, offset, position.X, position.Y, term.IsAltScreen()); err != nil {
+func printFrame(w io.Writer, m agentcapture.Moment) error {
+	f := m.Frame
+	if _, err := fmt.Fprintf(w, "=== at %dms (through chunk %d, offset %d) cursor %d,%d alt=%v ===\n",
+		m.AtMs, m.Chunks, m.Offset, f.CursorX, f.CursorY, f.AltScreen); err != nil {
 		return fmt.Errorf("write frame header: %w", err)
 	}
-	for y := 0; y < header.Rows; y++ {
-		var line strings.Builder
-		for x := 0; x < header.Cols; x++ {
-			cell := term.CellAt(x, y)
-			if cell == nil || cell.Width == 0 {
-				if cell == nil {
-					line.WriteByte(' ')
-				}
-				continue
-			}
-			if cell.Content == "" {
-				line.WriteByte(' ')
-				continue
-			}
-			line.WriteString(cell.Content)
-		}
-		if _, err := fmt.Fprintf(w, "%3d|%s\n", y, strings.TrimRight(line.String(), " ")); err != nil {
+	for y := 0; y < f.Rows; y++ {
+		if _, err := fmt.Fprintf(w, "%3d|%s\n", y, strings.TrimRight(rowText(f, y), " ")); err != nil {
 			return fmt.Errorf("write frame row %d: %w", y, err)
 		}
 	}
 	return nil
+}
+
+// rowText renders one row the way the frame reports it: a continuation cell
+// contributes nothing, because the double-width grapheme before it already
+// stands for both of its columns.
+func rowText(f panegrid.Frame, y int) string {
+	var line strings.Builder
+	for _, c := range f.Lines[y] {
+		if c.Width == 0 {
+			continue
+		}
+		if c.Text == "" {
+			line.WriteByte(' ')
+			continue
+		}
+		line.WriteString(c.Text)
+	}
+	return line.String()
 }

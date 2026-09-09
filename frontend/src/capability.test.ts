@@ -5,7 +5,7 @@ import {
   type ActionFacts,
   type DesiredMode,
   type ObservedDelivery,
-  type RelayConsent,
+  type HelperConsent,
 } from './capability'
 import { LifecycleKernel } from './lifecycle/state'
 
@@ -187,17 +187,17 @@ describe('deriveActions per state', () => {
   })
 })
 describe('three delivery axes, never collapsed (nocx-mlm7 §3.5)', () => {
-  it('desired mode, observed delivery and relay consent are distinct types', () => {
+  it('desired mode, observed delivery and helper consent are distinct types', () => {
     // The compile-time contract: each axis has its own closed union, so no
     // value of one axis is assignable to another. Asserting the unions here
     // pins them at runtime too — a collapsed single string would fail.
-    // 'relay' legitimately names a desired mode AND an observed delivery —
+    // 'helper' legitimately names a desired mode AND an observed delivery —
     // the axes are distinct TYPES, not distinct vocabularies; the compile
     // check (assigning an ObservedDelivery where a DesiredMode is expected
     // fails) is the real guard, no runtime value collapses them.
-    const modes: DesiredMode[] = ['raw', 'script', 'relay']
-    const observed: ObservedDelivery[] = ['none', 'bootstrap-script', 'installed-script', 'relay']
-    const consents: RelayConsent[] = ['unknown', 'granted', 'denied']
+    const modes: DesiredMode[] = ['raw', 'script', 'helper']
+    const observed: ObservedDelivery[] = ['none', 'bootstrap-script', 'installed-script', 'helper']
+    const consents: HelperConsent[] = ['unknown', 'granted', 'denied']
     expect(new Set(modes).size).toBe(3)
     expect(new Set(observed).size).toBe(4)
     expect(new Set(consents).size).toBe(3)

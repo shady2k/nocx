@@ -441,9 +441,33 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"skills.delete":    {content.EffectMutateReversible},
 		"skills.resolve":   {content.EffectCrossBoundary},
 		"skills.install":   {content.EffectMutateReversible, content.EffectCrossBoundary},
+		"workers.holdings": {content.EffectObserve},
+		// DELEGATE and nothing else. Handing work to another agent is what
+		// the seventh member of the closed lattice already names, so a
+		// `spawn` effect would be an eighth expressing the same thing.
+		"workers.spawn": {content.EffectDelegate},
+		// OBSERVE and not SEND-INPUT, and the distinction is load-bearing.
+		// Send-input is typing into a pane and is what a human takeover
+		// suspends; leaving a message in a mailbox reaches nobody's
+		// keyboard, cannot answer a modal, and must go on working while a
+		// person helps their own worker past a prompt.
+		"workers.say": {content.EffectObserve},
+		// OBSERVE for the wait, for session.wait's reason: waiting starts
+		// nothing, ends nothing, and names nothing outside the session the
+		// grant already named.
+		"workers.wait": {content.EffectObserve},
+		// MUTATE-DESTRUCTIVE for the close, and it is NOT session.wait's
+		// `stop`. That one withdraws an authority already in flight; this
+		// ends a process the person may never have watched start, whose work
+		// is lost with it.
+		"workers.close": {content.EffectMutateDestructive},
+		// OBSERVE for the inbox, read from the other end of workers.say: taking
+		// a message out of your own mailbox exercises no authority over
+		// anything but your own reading position.
+		"workers.inbox": {content.EffectObserve},
 	}
-	if len(declarations) != 24 {
-		t.Fatalf("declaration count = %d, want 24", len(declarations))
+	if len(declarations) != 30 {
+		t.Fatalf("declaration count = %d, want 30", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -562,6 +586,12 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"skills.delete.schema.json":    skillsReadSchema,
 		"skills.install.schema.json":   skillsReadSchema,
 		"skills.resolve.schema.json":   skillsReadSchema,
+		"workers.holdings.schema.json": workerHoldingsSchema,
+		"workers.say.schema.json":      workerSaySchema,
+		"workers.wait.schema.json":     workerWaitSchema,
+		"workers.close.schema.json":    workerCloseSchema,
+		"workers.spawn.schema.json":    workerSpawnSchema,
+		"workers.inbox.schema.json":    workerInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -609,16 +639,26 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// session.wait joins the list: it is an observe tool over a session, and
 	// the right to keep waiting on a command travels with the right to have
 	// started one (nocx-6dzxq).
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait"}
+	// workers.holdings joins them for the same reason session.wait did: it is
+	// an observe tool over a session, and "what is my session responsible
+	// for" is a question about the session the grant already named.
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
 	// The session.run row's set includes mutate-destructive + session. A grant
-	// carrying exactly that effect and kind offers exactly session.run; an observe
-	// grant also offers it because observe is another reachable member.
+	// carrying exactly that effect and kind offers exactly session.run and
+	// workers.close; an observe grant also offers session.run because observe is
+	// another reachable member, and does NOT offer workers.close, which declares
+	// mutate-destructive alone. That asymmetry is the point: ending a worker
+	// is not something a run permitted only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	if got := reg.ForGrant(runGrant); !containsName(got, "session.run") || len(got) != 1 {
-		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [session.run]", toolNames(got))
+	wantDestructive := []string{"session.run", "workers.close"}
+	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
+		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
+	}
+	if containsName(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)), "workers.close") {
+		t.Fatalf("an observe grant offers workers.close; ending a worker is not looking at one")
 	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
@@ -708,6 +748,12 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"skills.delete.schema.json":    skillsReadSchema,
 		"skills.install.schema.json":   skillsReadSchema,
 		"skills.resolve.schema.json":   skillsReadSchema,
+		"workers.holdings.schema.json": workerHoldingsSchema,
+		"workers.say.schema.json":      workerSaySchema,
+		"workers.wait.schema.json":     workerWaitSchema,
+		"workers.close.schema.json":    workerCloseSchema,
+		"workers.spawn.schema.json":    workerSpawnSchema,
+		"workers.inbox.schema.json":    workerInboxSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -1519,3 +1565,89 @@ func TestResourceInGrant_CarriesTheSubdomainMarker(t *testing.T) {
 		t.Fatalf("grantedResources = %v, want the covered destination kept", got)
 	}
 }
+
+// The worker tools' schemas, as this package's tests need them: a params shape
+// and a result shape. The real ones live in contracts/tools and are asserted
+// against the wire elsewhere; these exist so an assembly test does not depend
+// on the whole directory.
+const workerHoldingsSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {"acknowledge": {"type": "integer"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["participants"],
+    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const workerInboxSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {"acknowledge": {"type": "integer"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["messages", "cursor"],
+    "properties": {
+      "messages": {"type": "array", "items": {"type": "object"}},
+      "cursor": {"type": "integer"},
+      "more": {"type": "boolean"}
+    }
+  }}
+}`
+
+const workerWaitSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {"seconds": {"type": "integer"}, "acknowledge": {"type": "integer"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["participants"],
+    "properties": {"participants": {"type": "array", "items": {"type": "object"}}}
+  }}
+}`
+
+const workerCloseSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker"],
+  "properties": {"worker": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "ended"],
+    "properties": {"id": {"type": "string"}, "ended": {"type": "boolean"}}
+  }}
+}`
+
+const workerSaySchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker", "message"],
+  "properties": {"worker": {"type": "string"}, "message": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "seq"],
+    "properties": {"id": {"type": "string"}, "seq": {"type": "integer"}}
+  }}
+}`
+
+const workerSpawnSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "task"],
+  "properties": {"command": {"type": "string"}, "task": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "state"],
+    "properties": {"id": {"type": "string"}, "state": {"type": "string"}}
+  }}
+}`

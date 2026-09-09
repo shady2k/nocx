@@ -34,6 +34,11 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
+import { AgentEmittingSection } from './agent-emitting-section'
+import { AgentCalibrationSection } from './agent-calibration-section'
+import type { EmittingClient } from './emitting-client'
+import type { CalibrationClient } from './calibration-client'
+import type { TypingClient } from './typing-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -233,6 +238,20 @@ export interface SettingsComponentProps {
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
+  /** What an enrolled pane is emitting, and what its rule reads on it
+   *  (nocx-02uci). Optional like every other client here: without it the page
+   *  is still registered and says so, because a surface that appears only once
+   *  some other state exists is how a feature ships unreachable. */
+  emittingClient?: EmittingClient
+  /** The guided calibration (nocx-etejh). Optional like every other client
+   *  here: without it the page is still registered and says so. */
+  calibrationClient?: CalibrationClient
+  typingClient?: TypingClient
+  /** What the window calls a pane. The emitting view's picker lists panes the
+   *  backend named by session id and agent; this is what turns one into the
+   *  name on the tab. Optional — without it the picker says what the wire
+   *  said, which is honest and unmemorable. */
+  paneName?: (sessionId: string) => string | null
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -652,6 +671,67 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // Snippets. It is the page nobody navigates to on purpose until something
     // has gone wrong, which is exactly why it must be findable in the obvious
     // place rather than clever about where it sits.
+    // BESIDE the agent policy, in the same 'assistant' group: both answer
+    // "what is the assistant doing and on what terms", and a person who has
+    // come to repair a detection rule is looking for the agent group.
+    const emittingPage: SettingsPage = {
+      kind: 'component',
+      id: 'emitting',
+      title: 'Agent screens',
+      groupId: 'assistant',
+      // 'page' rather than 'contained': the grid is inside a kit CodeBlock,
+      // which owns its own scroll cap, so this page has no second scroll
+      // owner of its own.
+      scrollMode: 'page',
+      // Registered unconditionally, like the pages above it.
+      renderContent: () => (
+        <Show
+          when={props.emittingClient}
+          fallback={
+            <PageSection title="Agent screens">
+              What an agent is emitting is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentEmittingSection client={props.emittingClient!} nameOf={props.paneName} />
+        </Show>
+      ),
+    }
+
+    // BESIDE the emitting view, in the same 'assistant' group and directly
+    // after it. The two are one job seen from two ends: the emitting view is
+    // what a person looks at while repairing a rule, and calibration is where
+    // the evidence that rule is checked against comes from. A person who has
+    // found one has found the other.
+    const calibrationPage: SettingsPage = {
+      kind: 'component',
+      id: 'calibration',
+      title: 'Calibrate an agent',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          // BOTH OR NEITHER, the same rule the backend gates the calibration's
+          // two methods with. This page's headline claim is that nocx may type
+          // into a pane running this agent, and the control that checks it is
+          // the typing client — so a window with one and not the other would
+          // draw a claim it has no way to test.
+          when={props.calibrationClient && props.typingClient}
+          fallback={
+            <PageSection title="Calibrate an agent">
+              Calibrating an agent is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentCalibrationSection
+            client={props.calibrationClient!}
+            typing={props.typingClient!}
+            nameOf={props.paneName}
+          />
+        </Show>
+      ),
+    }
+
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
@@ -686,6 +766,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
       snippetsPage,
       rolesPage,
       policyPage,
+      emittingPage,
+      calibrationPage,
       // Last in Assistant, after the two pages that decide what the assistant
       // may do at all: a skill is what it does once that is settled.
       skillsPage,

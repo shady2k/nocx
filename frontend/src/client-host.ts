@@ -45,6 +45,21 @@ export interface HostBindings {
   focusWindow(): Promise<void>
 }
 
+/** The prompt that asks a person to admit an executable and the tree it
+ *  launches, and returns their answer.
+ *
+ *  NOT one of the bindings above, and that is the whole distinction this seam
+ *  exists to keep. Every binding is an effect only the native shell can
+ *  perform — a picker, a banner, a badge, a window raise — so a client without
+ *  a webview honestly has none of them. This is a prompt the RENDERER draws
+ *  (agent-approval-prompt.tsx), which a plain browser draws exactly as well.
+ *  Modelling it as a binding gave it a default that always rejected, and a
+ *  browser-hosted client answered `unavailable` for it along with the six real
+ *  ones — so the whole external-coordinator feature was unreachable outside a
+ *  Wails build (nocx-qlp9w), and the always-rejecting default won the race the
+ *  double mount created (nocx-pighx). */
+export type ApprovalSurface = (executable: string, scope: string) => Promise<boolean>
+
 /** The one binding name the reachability probe is asked about. All seven live
  *  on the same bound struct, so one answer covers the set: either this client
  *  is inside a Wails webview (or a shim that carries them) or it is not. */
@@ -81,23 +96,24 @@ const wailsEvents: HostEvents = {
  *
  * bindings and events default to the real Wails runtime; both are injected so
  * the exchange can be exercised without one. A client with no reachable
- * bindings still mounts and still answers -- failed, saying so -- because the
+ * bindings still mounts and still answers — failed, saying so — because the
  * coordinator must never be left waiting on a client that cannot act.
  */
 export function mountClientHost(
   dispatcher: Dispatcher,
   bindings: HostBindings = wailsBindings,
   events: HostEvents = wailsEvents,
+  approveAgent?: ApprovalSurface,
 ): () => void {
   const unsubscribeRequests = dispatcher.subscribe('host.request', (params) => {
     const p = params as HostRequest
     if (!p || !p.requestId || !p.capability) return
-    void answer(dispatcher, bindings, p)
+    void answer(dispatcher, bindings, approveAgent, p)
   })
   const unsubscribeEvents = events.on(ATTENTION_ACTIVATED_EVENT, (data) => {
     // The click half: the shell tells this renderer that a banner it
     // presented was activated, and the renderer tells the coordinator.
-    // Nothing is done about it here -- where the focus lands is the
+    // Nothing is done about it here — where the focus lands is the
     // coordinator's, because only it knows which connection holds the
     // session.
     const sessionId = activatedSessionId(data)
@@ -130,14 +146,26 @@ function activatedSessionId(data: unknown): string {
 interface Performed {
   path: string
   cancelled: boolean
+  approved: boolean
 }
 
 async function answer(
   dispatcher: Dispatcher,
   bindings: HostBindings,
+  approveAgent: ApprovalSurface | undefined,
   p: HostRequest,
 ): Promise<void> {
-  if (!bindingReachable(HOST_BINDING)) {
+  // Can THIS CLIENT perform THIS capability — not "is this client native".
+  // The six below are native effects and nothing else can produce them; the
+  // seventh is a prompt this renderer draws, so what it needs is a mounted
+  // surface and never a webview. One question, answered per capability,
+  // because the two capabilities have genuinely different requirements
+  // (nocx-qlp9w) — this is not a special case bolted onto a uniform rule.
+  const unavailable =
+    p.capability === 'agent.approval'
+      ? approveAgent === undefined && 'this client has no agent approval surface'
+      : !bindingReachable(HOST_BINDING) && 'this client has no native host'
+  if (unavailable) {
     // A plain browser, the dev-web harness, the headless suite: there is no
     // shell here to open a picker or raise a banner. Said once, honestly, so
     // the coordinator answers its caller rather than waiting on a client that
@@ -154,15 +182,11 @@ async function answer(
     // feed because a channel that does not exist is not a channel that lost
     // a message. Answering `failed` here put a "Not delivered" row behind
     // every banner-routed notification in every browser-hosted client.
-    resolve(dispatcher, {
-      requestId: p.requestId,
-      outcome: 'unavailable',
-      error: 'this client has no native host',
-    })
+    resolve(dispatcher, { requestId: p.requestId, outcome: 'unavailable', error: unavailable })
     return
   }
   try {
-    const done = await perform(bindings, p)
+    const done = await perform(bindings, approveAgent, p)
     if (done.cancelled) {
       resolve(dispatcher, { requestId: p.requestId, outcome: 'cancelled' })
       return
@@ -171,7 +195,9 @@ async function answer(
       dispatcher,
       done.path
         ? { requestId: p.requestId, outcome: 'ok', path: done.path }
-        : { requestId: p.requestId, outcome: 'ok' },
+        : p.capability === 'agent.approval'
+          ? { requestId: p.requestId, outcome: 'ok', approved: done.approved }
+          : { requestId: p.requestId, outcome: 'ok' },
     )
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
@@ -184,7 +210,11 @@ async function answer(
 }
 
 /** Perform one capability and say what it produced. */
-async function perform(bindings: HostBindings, p: HostRequest): Promise<Performed> {
+async function perform(
+  bindings: HostBindings,
+  approveAgent: ApprovalSurface | undefined,
+  p: HostRequest,
+): Promise<Performed> {
   switch (p.capability) {
     case 'dialog.file':
       return picked(await bindings.openFile())
@@ -205,21 +235,31 @@ async function perform(bindings: HostBindings, p: HostRequest): Promise<Performe
     case 'window.focus':
       await bindings.focusWindow()
       return done
+    case 'agent.approval':
+      return {
+        path: '',
+        cancelled: false,
+        // Non-null: answer() has already refused this capability when no
+        // surface is mounted, which is the only way it can be absent here.
+        approved: await approveAgent!(p.executable ?? '', p.scope ?? ''),
+      }
     default:
       // A capability this client does not know. The vocabulary is the
-      // server's and closed, so this is a version skew -- answered, never
+      // server's and closed, so this is a version skew — answered, never
       // dropped.
       throw new Error(`unknown host capability: ${String(p.capability)}`)
   }
 }
 
 /** The effect happened and produced nothing to report. */
-const done: Performed = { path: '', cancelled: false }
+const done: Performed = { path: '', cancelled: false, approved: false }
 
 /** An empty path from a picker is a dismissal, which is the contract the
  *  Wails open dialog has always had. */
 function picked(path: string): Performed {
-  return path === '' ? { path: '', cancelled: true } : { path, cancelled: false }
+  return path === ''
+    ? { path: '', cancelled: true, approved: false }
+    : { path, cancelled: false, approved: false }
 }
 
 function resolve(dispatcher: Dispatcher, params: HostResolved): void {

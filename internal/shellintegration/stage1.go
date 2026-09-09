@@ -252,6 +252,7 @@ NOCX_LIFECYCLE_EPOCH=$_E
 NOCX_LIFECYCLE_PORT=$LP
 export @CAPFDENV@ NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH NOCX_LIFECYCLE_PORT
 fi
+@AGENTENV@
 @BOOTENV@=1
 export @BOOTENV@
 stty "$T"
@@ -288,6 +289,19 @@ func shellPin(shell ShellKind) (string, bool) {
 	}
 }
 
+func stage1AgentEnv(opts LaunchOptions) string {
+	var b strings.Builder
+	if opts.AgentHelperPath != "" {
+		b.WriteString("NOCX_AGENT_HELPER_PATH=" + ShellQuote(opts.AgentHelperPath) + "\n")
+		b.WriteString("export NOCX_AGENT_HELPER_PATH\n")
+	}
+	if opts.AgentToolSocketPath != "" {
+		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
+		b.WriteString("export " + ToolSocketEnvVar + "\n")
+	}
+	return b.String()
+}
+
 // Stage1Frame renders frame 1 for one session: the payload the sender writes
 // and whose digest the carrier commits to (StageDigest).
 //
@@ -313,6 +327,7 @@ func Stage1Frame(shell ShellKind, opts LaunchOptions) ([]byte, error) {
 		"@MAXSECRET@", strconv.Itoa(MaxSecretFrameLen),
 		"@KSECRET@", secretFrameSecret,
 		"@KREFUSE@", secretFrameRefuse,
+		"@AGENTENV@", stage1AgentEnv(opts),
 		"@LAUNCHPATH@", dirName+"/"+launchName,
 		"@PIN@", pin,
 		"@INTERRUPTED@", OutcomeToken(OutcomeBootstrapInterrupted),

@@ -22,10 +22,10 @@ import (
 // that the local file manager cannot reveal — the attestation is what tells
 // the transport the path is not local. Opening a URL has no path semantics:
 // the string is a web address, equally valid whether the repository it was
-// derived from lives on this machine or on the relay's. The only producer
+// derived from lives on this machine or on the helper's. The only producer
 // today is the git panel, which git.open already refuses for SSH sessions
 // (D3), so in practice the URL is local-derived anyway — but the capability
-// itself carries no local-only meaning, and the relay (nocx-if6) must be
+// itself carries no local-only meaning, and the helper must be
 // able to reuse it without inheriting a guard this method does not need.
 type UrlOpener interface {
 	// OpenURL opens the URL in the default browser. The transport has

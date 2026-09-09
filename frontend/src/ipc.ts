@@ -15,7 +15,7 @@ import type {
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
-import { isDriverState } from './pane-observation'
+import { isDriverState, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 
@@ -666,12 +666,18 @@ export class WSClient {
       if (typeof agent !== 'string' || agent === '') return
       const paneState = raw.state
       if (!isDriverState(paneState)) return
+      // The child rows travel BESIDE the state and are guarded separately,
+      // because they are a separate claim: a malformed row must cost the row
+      // and not the classification, and an observation whose children could
+      // not be read is still an observation about the pane.
+      const children = readPaneChildren(raw.children)
       state.observationCallback?.({
         sessionId: sid,
         instanceId: state.instanceId,
         sessionEpoch: state.sessionEpoch,
         agent,
         state: paneState,
+        ...(children === null ? {} : { children }),
       })
     })
 

@@ -38,6 +38,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -184,13 +185,15 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 		return lifecyclepub.GrantBootstrap{}, err
 	}
 	opts := shellintegration.LaunchOptions{
-		SessionID:  sid,
-		Enhanced:   true,
-		Capability: hex.EncodeToString(h.Capability[:]),
-		Recovery:   hex.EncodeToString(h.Recovery[:]),
-		Lane:       string(req.Lane),
-		Domain:     string(h.Domain),
-		Epoch:      h.Epoch,
+		SessionID:           sid,
+		Enhanced:            true,
+		AgentHelperPath:     os.Getenv("NOCX_AGENT_HELPER_PATH"),
+		AgentToolSocketPath: os.Getenv("NOCX_TOOL_SOCKET"),
+		Capability:          hex.EncodeToString(h.Capability[:]),
+		Recovery:            hex.EncodeToString(h.Recovery[:]),
+		Lane:                string(req.Lane),
+		Domain:              string(h.Domain),
+		Epoch:               h.Epoch,
 	}
 	if kind.local {
 		opts.LifecycleFD = 3 // the inherited socketpair descriptor
@@ -296,13 +299,15 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// bytes nobody will send is a far side blocking on a frame that never
 	// arrives.
 	opts := shellintegration.LaunchOptions{
-		SessionID:  sid,
-		Enhanced:   true,
-		Lane:       string(req.Lane),
-		Domain:     string(h.Domain),
-		Epoch:      h.Epoch,
-		Capability: hex.EncodeToString(h.Capability[:]),
-		Recovery:   hex.EncodeToString(h.Recovery[:]),
+		SessionID:           sid,
+		Enhanced:            true,
+		AgentHelperPath:     os.Getenv("NOCX_AGENT_HELPER_PATH"),
+		AgentToolSocketPath: os.Getenv("NOCX_TOOL_SOCKET"),
+		Lane:                string(req.Lane),
+		Domain:              string(h.Domain),
+		Epoch:               h.Epoch,
+		Capability:          hex.EncodeToString(h.Capability[:]),
+		Recovery:            hex.EncodeToString(h.Recovery[:]),
 	}
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
 	if err != nil {

@@ -60,6 +60,20 @@ export class SettingsContent extends SolidPaneContent {
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
+    /** What an enrolled pane is emitting (nocx-02uci), and what the window
+     *  calls that pane. */
+    private readonly emittingClient?: import('./emitting-client').EmittingClient,
+    /** The guided calibration (nocx-etejh): the same pane list, and the walk
+     *  that labels its frames. A second client rather than a method on the
+     *  emitting one, because the two answer different questions about the
+     *  same pane — one looks, the other writes a labelled set. */
+    private readonly calibrationClient?: import('./calibration-client').CalibrationClient,
+    /** The typing primitive (nocx-dkawo.1). It rides beside the calibration
+     *  because the verdict that page draws is a claim about what nocx will do
+     *  with somebody's keyboard, and a claim like that should be checkable
+     *  where it is made. */
+    private readonly typingClient?: import('./typing-client').TypingClient,
+    private readonly paneName?: (sessionId: string) => string | null,
   ) {
     super()
   }
@@ -76,6 +90,10 @@ export class SettingsContent extends SolidPaneContent {
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
           policyClient: this.policyClient,
+          emittingClient: this.emittingClient,
+          calibrationClient: this.calibrationClient,
+          typingClient: this.typingClient,
+          paneName: this.paneName,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,

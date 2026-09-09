@@ -26,6 +26,11 @@
       "type": "integer",
       "minimum": 0
     },
+    "idempotencyKey": {
+      "description": "The caller's name for the SPAWN, not for the session. The helper mints the session id, so a coordinator cannot record what it is about to get — it records what it is about to ask for, and a spawn repeated with the same key answers with the session the first one made rather than forking a second shell. That is what lets a pane's durable claim be written BEFORE the first irreversible effect, so a coordinator that dies between the spawn and the binding comes back to the session instead of to a live PTY nothing claims. Absent is legitimate: a caller that minted no claim gets no promise. It is opaque to the helper, which compares it and never parses it, and it is never a name a person typed.",
+      "type": "string",
+      "maxLength": 128
+    },
     "lifecycle": {
       "description": "Optional authenticated lifecycle carrier configuration. Capability and recovery are consumed only by the shell bootstrap and never become argv or environment entries.",
       "type": "object",

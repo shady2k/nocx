@@ -55,7 +55,13 @@
         "skills.update",
         "skills.delete",
         "skills.resolve",
-        "skills.install"
+        "skills.install",
+        "workers.holdings",
+        "workers.spawn",
+        "workers.say",
+        "workers.wait",
+        "workers.inbox",
+        "workers.close"
       ]
     },
     "callId": {

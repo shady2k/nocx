@@ -40,6 +40,16 @@ type LocalSpawner struct {
 	// be told what to start over an API would be a second answer to the
 	// question the doc comment above says only the composition root may ask.
 	openPTY func(log.Logger, pty.Config) (localPTY, error)
+	// agentToolSocketPath is THIS backend's tool endpoint socket, if it is
+	// running one — a fact about this daemon's whole life (set once at
+	// NewLocalSpawner, from the composition root, never per-request) and
+	// never re-derived here: internal/toolendpoint is the one owner of the
+	// socket's file name (AD-8), and this field is simply what the
+	// composition root read off Endpoint.SocketPath(). Empty means no
+	// endpoint was started (nocx-2tesu's soft degrade): every enhanced launch below
+	// renders no NOCX_TOOL_SOCKET at all, and the shell's own refusal text
+	// is what a user sees, rather than a pane pointed at an empty path.
+	agentToolSocketPath string
 }
 
 // localPTY is everything Spawn and localProcess need from internal/pty, named
@@ -73,11 +83,16 @@ type Shell struct {
 	Args []string
 }
 
-// NewLocalSpawner builds the spawner. Production passes a zero Shell.
-func NewLocalSpawner(logger *slog.Logger, shell Shell) *LocalSpawner {
+// NewLocalSpawner builds the spawner. Production passes a zero Shell and,
+// when this daemon's process carried NOCX_TOOL_SOCKET at its own start
+// (cmd/nocx-helper's composition, inherited from the coordinator that
+// spawned it), that path as agentToolSocketPath — see the field's doc for
+// why it is a constructor argument rather than a per-Spawn one.
+func NewLocalSpawner(logger *slog.Logger, shell Shell, agentToolSocketPath string) *LocalSpawner {
 	return &LocalSpawner{
-		log:   log.NewSlogAdapter(logger),
-		shell: shell,
+		log:                 log.NewSlogAdapter(logger),
+		shell:               shell,
+		agentToolSocketPath: agentToolSocketPath,
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			// Returned through the named nil rather than as one expression:
 			// a (*pty.LocalPty)(nil) handed back as an interface is not nil,
@@ -154,7 +169,11 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 					return nil, err
 				}
 			}
-			opts := shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true}
+			opts := shellintegration.LaunchOptions{
+				SessionID:           req.SessionID,
+				Enhanced:            true,
+				AgentToolSocketPath: s.agentToolSocketPath,
+			}
 			if req.Lifecycle != nil {
 				opts.Lane = req.Lifecycle.Lane
 				opts.Domain = req.Lifecycle.Domain

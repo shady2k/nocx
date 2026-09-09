@@ -95,8 +95,12 @@ func TestAnAuthenticatedEnrolmentReachesTheSeamAndIsGranted(t *testing.T) {
 		t.Fatalf("seam saw %v, want one enrolment of claude on lane L at 120x40", e.enrolled)
 	}
 	ans := answerFrom(t, port, lifecycle.KindAgentEnrolled)
-	if ans.Domain != h.Domain || ans.Epoch != h.Epoch || ans.Capability != h.Capability {
+	if ans.Domain != h.Domain || ans.Epoch != h.Epoch {
 		t.Fatalf("answer must be addressed to the asking domain, got dom=%s epoch=%d", ans.Domain, ans.Epoch)
+	}
+	// By the tuple, and by nothing secret (nocx-aqz7o).
+	if ans.Capability != (lifecycle.Capability{}) {
+		t.Fatal("the answer carries the domain capability back down the inherited descriptor")
 	}
 	a := ans.Event.AgentEnrolled
 	if a == nil || !a.Enrolled || a.RequestID != "r-agent-0" || a.Agent != "claude" {

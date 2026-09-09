@@ -135,9 +135,13 @@ const (
 	// only channel for a reason was the session-open ack and this answer
 	// arrives ten seconds after it.
 	ReasonHandshakeTimeout RefusalReason = "handshake-timeout"
-	// ReasonStartupDidNotReturn means the shell started, nocx's rcfile began
-	// executing, and the user's own startup file never gave control back —
-	// so the install line after it was never reached (nocx-yww2). It is a
+	// ReasonStartupDidNotReturn means the shell started and the user's own
+	// startup file never gave control back, so nocx's install line after it
+	// was never reached (nocx-yww2). It used to be reached two ways — the
+	// rcfile's own progress descriptor falling silent, and the process
+	// observer seeing the shell replaced — and since nocx-ie23r.3 only the
+	// second: the descriptor needed the coordinator to fork the shell, and
+	// this machine's helper forks it now. It is a
 	// STAGE, deliberately not a cause: `exec` into a foreign terminal
 	// wrapper is the case that was measured, but a plain `exit`, a
 	// `tmux attach` that never returns, a keychain dialog and a shell that
@@ -339,6 +343,10 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths for the
+	// launch-owned MCP bridge. They never carry lifecycle authority.
+	AgentHelperPath     string
+	AgentToolSocketPath string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: it travels as a bounded FRAME on the session
 	// channel and reaches the far shell through an inherited, already
@@ -470,12 +478,12 @@ type ConnectConfig struct {
 	// prompt. Nil means no channel.
 	RemoteLifecycle RemoteLifecycle
 
-	// DesiredMode is the resolved destination mode (auto|raw|script|relay,
+	// DesiredMode is the resolved destination mode (auto|raw|script|helper,
 	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate,
 	// read through profile.DesiredMode.DeliversScripts: auto (the default —
 	// ADR-0033), script, and empty (the direct-host default) publish the
 	// bundle and integrate; raw publishes nothing and opens a plain shell;
-	// relay does not integrate either, which is nocx-7k8ma. The transport
+	// helper does not integrate either, which is nocx-7k8ma. The transport
 	// also carries it verbatim to the open ack so the renderer sees the
 	// AXIS value — every mode must stay distinguishable from every other
 	// even where two of them gate integration the same way.
@@ -489,6 +497,11 @@ type ConnectConfig struct {
 	// Enhanced requests the marker-only prompt mode (ADR-0006) for the
 	// remote shell; forwarded to the launcher in LaunchOptions.
 	Enhanced bool
+
+	// AgentHelperPath and AgentToolSocketPath are non-secret paths forwarded
+	// to the launch-owned MCP bridge.
+	AgentHelperPath     string
+	AgentToolSocketPath string
 
 	// Shell pins the far shell the launcher must target. Empty means
 	// "detect it" — the launcher receives ShellAuto and decides on the far
@@ -700,9 +713,19 @@ func WithSessionID(id string) ConnectOption {
 	return func(c *ConnectConfig) { c.SessionID = id }
 }
 
-// WithDesiredMode sets the resolved destination mode (raw|script|relay,
+// WithAgentHelperPath supplies the non-secret bridge executable path.
+func WithAgentHelperPath(path string) ConnectOption {
+	return func(c *ConnectConfig) { c.AgentHelperPath = path }
+}
+
+// WithAgentToolSocketPath supplies the non-secret local tool socket path.
+func WithAgentToolSocketPath(path string) ConnectOption {
+	return func(c *ConnectConfig) { c.AgentToolSocketPath = path }
+}
+
+// WithDesiredMode sets the resolved destination mode (raw|script|helper,
 // nocx-mlm7), the open-time gate shellStartCommand consults: script (or
-// empty — the pre-mode default) publishes and integrates; raw and relay
+// empty — the pre-mode default) publishes and integrates; raw and helper
 // open a plain shell and publish nothing.
 func WithDesiredMode(mode string) ConnectOption {
 	return func(c *ConnectConfig) { c.DesiredMode = mode }

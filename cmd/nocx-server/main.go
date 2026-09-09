@@ -27,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/toolendpoint"
 	"github.com/shady2k/nocx/internal/version"
 )
 
@@ -91,6 +92,29 @@ func run(logger *slog.Logger) error {
 		return startErr
 	}
 	defer a.Shutdown(ctx)
+	workerSocket, err := startToolEndpoint(a, coordinator.RuntimeDir(paths),
+		coordinator.SystemPeerCredentials{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), logger)
+	if err != nil {
+		return err
+	}
+	if workerSocket != nil {
+		// A local pane is opened on a SEPARATE process — this machine's own
+		// helper daemon (cmd/nocx-helper) — and that process learns this
+		// backend's tool.sock only by being told: see
+		// App.SetLocalToolSocketPath and, past the process boundary,
+		// internal/helper/endpoint.Ensure (nocx-2tesu). Asked of the
+		// endpoint rather than recomputed from its directory, because
+		// internal/toolendpoint is the one owner of the socket's name
+		// (AD-8) and this is the only call site outside it that needs to
+		// know the value.
+		a.SetLocalToolSocketPath(workerSocket.SocketPath())
+		defer func() {
+			if closeErr := workerSocket.Close(); closeErr != nil {
+				logger.Error("closing the worker socket", "error", closeErr)
+			}
+		}()
+	}
 
 	// After Start, so the address and the token exist to be handed out.
 	// The token is read by the socket and by nothing else on this path: it
@@ -129,6 +153,32 @@ func run(logger *slog.Logger) error {
 	<-sig
 	logger.Info("nocx-server shutting down")
 	return nil
+}
+
+// startToolEndpoint publishes the worker socket only when the application has
+// both sides of the common worker pipeline. A missing authorizer is a deliberate
+// refusal to publish, not a socket that rejects every request.
+func startToolEndpoint(a *app.App, dir string, peers coordinator.PeerCredentials, owner coordinator.PathOwner, selfUID uint32, logger *slog.Logger) (*toolendpoint.Endpoint, error) {
+	if a == nil || a.ToolAuthorizer == nil || a.ToolDispatcher == nil {
+		return nil, nil
+	}
+	endpoint, err := toolendpoint.New(toolendpoint.Config{
+		Dir:      dir,
+		Peers:    peers,
+		Owner:    owner,
+		SelfUID:  selfUID,
+		Auth:     a.ToolAuthorizer,
+		Dispatch: a.ToolDispatcher,
+		Observer: a.ToolSurfaceObserver,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := endpoint.Start(); err != nil {
+		return nil, err
+	}
+	return endpoint, nil
 }
 
 // wsBackend is the part of the running WS server this binary needs, which

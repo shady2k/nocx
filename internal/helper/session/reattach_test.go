@@ -228,7 +228,7 @@ func TestTheSessionSurvivesTheCoordinatorAndTheProcessRanAcrossTheGap(t *testing
 	// no caller over the wire can name it (D3).
 	svc := session.New(session.Options{
 		Generation: "content-hash",
-		Spawner:    session.NewLocalSpawner(discardLog(), session.Shell{Path: "/bin/sh", Args: []string{"-i"}}),
+		Spawner:    session.NewLocalSpawner(discardLog(), session.Shell{Path: "/bin/sh", Args: []string{"-i"}}, ""),
 		Inspector:  session.NewInspector(),
 		Log:        discardLog(),
 		Limits:     session.DefaultLimits(),

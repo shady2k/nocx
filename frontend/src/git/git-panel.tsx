@@ -601,7 +601,7 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'consentRequired'}>
           <div class="git-consent" data-testid="git-consent-required">
             {/* The consent flow (remote-helper design D8): the ask is a
-                state, and accepting raises this machine to the relay tier.
+                state, and accepting raises this machine to the helper tier.
                 The copy states the helper serves other remote features,
                 not only git — the panel is where the user meets the
                 trade. */}

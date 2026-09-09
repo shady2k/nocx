@@ -105,6 +105,56 @@ func installDir(home string, p Platform, contentHash string) string {
 // reinstall; a second mismatch on the same call returns ErrHashMismatch
 // and does not loop (D6). The context is honoured between phases — a
 // cancelled install stops rather than ploughing on.
+//
+// # What every failure boundary leaves, as an interval with both ends
+//
+// THE INTERVAL: an install directory is USABLE from the moment its marker
+// exists over a binary that hashes to the directory's key, until something
+// removes it. Outside that interval it is a tree the next attempt must REMOVE
+// before it may install, and there is no third state — which is why the
+// recovery is the same one at every boundary below rather than a table of
+// special cases.
+//
+// The dozen boundaries fall into exactly three groups:
+//
+//  1. NOTHING WAS TOUCHED, so whatever was on disk stays as usable as it was:
+//     artifact selection, both context checks, and the two reads isComplete
+//     makes (the marker Lstat and the binary ReadFile) when they fail for any
+//     reason other than absence. Note what those two do NOT do: an unreadable
+//     marker is refused rather than treated as absent, because "I could not
+//     look" is not "it is not there" — treating it as absent would delete a
+//     live install on a transient read error.
+//
+//  2. A MARKERLESS DIRECTORY, which is precisely the state isComplete answers
+//     `false` for, so the next attempt removes it and reinstalls: Mkdir,
+//     decompression, the temp create, the write, the sync, the close, the
+//     rename, and the directory sync. The write and rename paths remove their
+//     own temporary first, and if that removal itself fails the orphan is
+//     still harmless — the temporary name is per-attempt, so it can never be
+//     mistaken for the binary, and the directory around it is markerless
+//     anyway. THE DIRECTORY SYNC IS THE INTERESTING ONE: the binary is fully
+//     in place by then and is still not usable, because the marker is what
+//     makes a tree complete and it has not been written. That is the whole
+//     reason the marker is written last, after every byte is durable.
+//
+//  3. A COMPLETE-LOOKING TREE THAT IS NOT COMPLETE, which exactly one
+//     boundary can leave: the verification read after the install, when the
+//     bytes on disk do not hash to the key. It is left in place rather than
+//     removed, and it is still not reusable — the next Ensure runs the same
+//     isComplete, gets `false` from the hash, removes the tree and reinstalls
+//     once (D6). Completeness is the marker AND the hash, never the marker
+//     alone, and that pairing is what makes this state self-healing instead of
+//     permanently poisoned.
+//
+// The removal itself (removeTree, when it fails partway) cannot produce a
+// fourth state: whichever of the two files it has removed, what is left is
+// missing either the marker or the binary, which is group 2.
+//
+// Nothing in the layout is a claim about a PROCESS. There is no pid file and
+// no lock: a complete install says the bytes are there, never that a helper is
+// running from them, so an install followed by a start that fails is still
+// exactly as reusable as one followed by a start that succeeds. Liveness has
+// one authority and it is the endpoint socket.
 func Ensure(ctx context.Context, fs RemoteFS, src ArtifactSource, home string, p Platform) (binaryPath, contentHash string, err error) {
 	data, contentHash, err := src.Artifact(p)
 	if err != nil {

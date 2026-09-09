@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"time"
 
@@ -92,7 +93,45 @@ const startRetry = 10 * time.Millisecond
 // loses the bind answers ErrAlreadyServing to itself and exits, and both then
 // dial the winner. The race is resolved by the socket, which is the only
 // authority present on both sides of it.
-func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe string) (net.Conn, error) {
+//
+// # A cancelled caller does not kill the child, and that is the right answer
+//
+// When ctx ends while a helper this call started is still coming up, Ensure
+// returns and the child keeps going. WHAT THAT DAEMON IS: a legitimate helper
+// of exactly this generation — it was started from a binary whose content hash
+// IS gen, which is checked above — so if it comes up it serves the same
+// endpoint every other caller wants. Killing it would be the wrong repair: by
+// the time we noticed it may already hold somebody's PTY, and a process that
+// gave up waiting has learned nothing that entitles it to end a helper.
+//
+// HOW A RETRY TELLS IT FROM A STALE SOCKET: it does not have to reason about
+// it, because the distinction is made by ASKING rather than by inferring from
+// a file. A retry dials. A socket that ACCEPTS is a live daemon and the
+// handshake — not the file, and not this call's memory of having started
+// something — decides whether what is behind it is our generation. A socket
+// that REFUSES is stale by definition: net.Listen creates the file already
+// bound and listening, so a daemon that is merely slow to come up has no
+// socket yet, and one that is slow to reach its accept loop still accepts
+// (the kernel queues the connection). A stale one is unlinked by the next
+// helper about to bind (Listen → clearStale) and reported as ErrNoEndpoint by
+// anyone else; nothing else repairs it, deliberately.
+//
+// What is left over is therefore at most one extra helper process of our own
+// generation, and the design already has an answer for that: a second helper
+// finding one serving exits 0 without changing anything. What it does NOT
+// cover is the daemon nobody ends up wanting — nothing retires a generation
+// yet, so it runs until it is signalled. That is D2's, unimplemented, and it
+// is stated here rather than papered over.
+// env is extra KEY=VALUE entries the spawned helper's process environment
+// carries beyond what this process's own os.Environ() already gives it — a
+// caller reaching for its OWN machine's daemon hands down a fact only IT
+// knows this way (nocx-2tesu: the local coordinator's running tool endpoint
+// socket, so the shell the daemon later forks can find it); a caller
+// spawning a generation over the ssh exec lane (cmd/nocx-helper's own
+// `bridge` command) has nothing of that kind to add and passes nil. Nil or
+// empty changes nothing: the child gets exactly what full os.Environ()
+// inheritance always gave it.
+func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe string, env []string) (net.Conn, error) {
 	conn, err := Dial(ctx, dir, gen)
 	if err == nil {
 		return conn, nil
@@ -112,6 +151,15 @@ func Ensure(ctx context.Context, dir string, gen, exeGen proto.GenerationID, exe
 	// is the whole point of it, forever.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	cmd.SysProcAttr = detachAttr()
+	if len(env) > 0 {
+		// Explicit rather than left nil, and explicit rather than relying on
+		// the caller having already set it in ITS OWN os.Environ(): Env==nil
+		// means "inherit os.Environ() as of Start", which stays exactly true
+		// when there is nothing extra to add, and adding entries here keeps
+		// the inheritance while making what was added visible at the one
+		// call site that does the spawning.
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("endpoint: start a helper for %s: %w", short(gen), err)
 	}

@@ -188,10 +188,10 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
 	// Desired mode (nocx-mlm7): the effective desiredMode is the
-	// connection-scope delivery axis (auto|raw|script|relay) and rides the
+	// connection-scope delivery axis (auto|raw|script|helper) and rides the
 	// config verbatim; the ssh layer gates open-time integration on it
 	// through profile.DesiredMode.DeliversScripts, which owns that rule
-	// (auto, script and relay publish and integrate; raw alone opens a
+	// (auto, script and helper publish and integrate; raw alone opens a
 	// plain shell).
 	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
 

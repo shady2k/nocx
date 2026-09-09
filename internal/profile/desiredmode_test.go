@@ -33,13 +33,13 @@ func TestResolveEffectiveProfile_DesiredModePrecedence(t *testing.T) {
 			wantSource: FieldSourceDefault,
 		},
 		{
-			name: "global layer resolves relay",
+			name: "global layer resolves helper",
 			profile: SSHProfile{
 				Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
 				Options: StoredSSHProfileOptions{Host: "h"},
 			},
-			global:     SparseSSHOptions{DesiredMode: new(DesiredRelay)},
-			want:       DesiredRelay,
+			global:     SparseSSHOptions{DesiredMode: new(DesiredHelper)},
+			want:       DesiredHelper,
 			wantSource: FieldSourceGlobal,
 		},
 		{
@@ -78,14 +78,14 @@ func TestResolveEffectiveProfile_DesiredModePrecedence(t *testing.T) {
 			name: "profile wins over group",
 			profile: SSHProfile{
 				Base:    Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
-				Options: StoredSSHProfileOptions{Host: "h", DesiredMode: new(DesiredRelay)},
+				Options: StoredSSHProfileOptions{Host: "h", DesiredMode: new(DesiredHelper)},
 			},
 			groups: []ProfileGroup{
 				{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
 					SparseSSHOptions: SparseSSHOptions{DesiredMode: new(DesiredScript)},
 				}},
 			},
-			want:       DesiredRelay,
+			want:       DesiredHelper,
 			wantSource: FieldSourceProfile,
 		},
 		{
@@ -152,45 +152,45 @@ func TestResolveEffectiveProfile_DesiredModeInvalidStoredFallsBackToDefault(t *t
 }
 
 // ---------------------------------------------------------------------------
-// relayConsent — the third axis (spec §3.5). Persisted per destination,
+// helperConsent — the third axis (spec §3.5). Persisted per destination,
 // NEVER inherited through the cascade: a group cannot express consent,
 // script mode never reads it.
 // ---------------------------------------------------------------------------
 
-func TestResolveEffectiveProfile_RelayConsentInvalidStoredFallsBackToUnknown(t *testing.T) {
+func TestResolveEffectiveProfile_HelperConsentInvalidStoredFallsBackToUnknown(t *testing.T) {
 	// Consent is per-destination and not part of the cascade, so the same
 	// unrecognised-value rule applies at the profile's own stored options:
 	// an unknown value must never reach the wire dressed as a real choice.
 	profile := SSHProfile{
 		Base: Base{ID: "p1", Type: "ssh", Name: "web"},
 		Options: StoredSSHProfileOptions{
-			Host:         "h",
-			RelayConsent: new(RelayConsent("maybe")),
+			Host:          "h",
+			HelperConsent: new(HelperConsent("maybe")),
 		},
 	}
 	eff, err := ResolveEffectiveProfile(profile, nil, SparseSSHOptions{})
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if got := *eff.Profile.Options.RelayConsent; got != ConsentUnknown {
-		t.Errorf("relayConsent = %q, want %q (fallback)", got, ConsentUnknown)
+	if got := *eff.Profile.Options.HelperConsent; got != ConsentUnknown {
+		t.Errorf("helperConsent = %q, want %q (fallback)", got, ConsentUnknown)
 	}
 }
 
-func TestRelayConsentIsNotAnInheritableDefaultKey(t *testing.T) {
+func TestHelperConsentIsNotAnInheritableDefaultKey(t *testing.T) {
 	// Consent is per destination, so the group-defaults allowlist must
 	// reject it as an unknown key — a group "default consent" would be a
 	// second, conflicting owner of one fact.
 	var d ProfileDefaults
-	if err := d.UnmarshalJSON([]byte(`{"relayConsent":"granted"}`)); err != nil {
+	if err := d.UnmarshalJSON([]byte(`{"helperConsent":"granted"}`)); err != nil {
 		t.Fatalf("UnmarshalJSON: %v", err)
 	}
-	if keys := d.UnknownKeys(); len(keys) != 1 || keys[0] != "relayConsent" {
-		t.Errorf("UnknownKeys = %v, want [relayConsent] — consent must not be inheritable", keys)
+	if keys := d.UnknownKeys(); len(keys) != 1 || keys[0] != "helperConsent" {
+		t.Errorf("UnknownKeys = %v, want [helperConsent] — consent must not be inheritable", keys)
 	}
 }
 
-func TestRelayConsentJSONRoundTrip(t *testing.T) {
+func TestHelperConsentJSONRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "profiles.json")
 	store := NewJSONStore(path)
@@ -198,8 +198,8 @@ func TestRelayConsentJSONRoundTrip(t *testing.T) {
 	prof := SSHProfile{
 		Base: Base{ID: NewProfileID("ssh", "consent-roundtrip"), Type: "ssh", Name: "consent-roundtrip"},
 		Options: StoredSSHProfileOptions{
-			Host:         "h",
-			RelayConsent: new(ConsentGranted),
+			Host:          "h",
+			HelperConsent: new(ConsentGranted),
 		},
 	}
 	if err := store.CreateProfile(prof); err != nil {
@@ -212,8 +212,8 @@ func TestRelayConsentJSONRoundTrip(t *testing.T) {
 	if len(loaded) != 1 {
 		t.Fatalf("loaded %d profiles, want 1", len(loaded))
 	}
-	if loaded[0].Options.RelayConsent == nil || *loaded[0].Options.RelayConsent != ConsentGranted {
-		t.Errorf("round-tripped relayConsent = %v, want granted", loaded[0].Options.RelayConsent)
+	if loaded[0].Options.HelperConsent == nil || *loaded[0].Options.HelperConsent != ConsentGranted {
+		t.Errorf("round-tripped helperConsent = %v, want granted", loaded[0].Options.HelperConsent)
 	}
 }
 
@@ -229,13 +229,13 @@ func TestDesiredModeStoredOptionsMarshal(t *testing.T) {
 	}
 }
 
-func TestRelayConsentStoredOptionsMarshal(t *testing.T) {
-	raw, err := json.Marshal(StoredSSHProfileOptions{RelayConsent: new(ConsentDenied)})
+func TestHelperConsentStoredOptionsMarshal(t *testing.T) {
+	raw, err := json.Marshal(StoredSSHProfileOptions{HelperConsent: new(ConsentDenied)})
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if got := string(raw); got != `{"host":"","relayConsent":"denied"}` {
-		t.Errorf("marshalled = %s, want {\"host\":\"\",\"relayConsent\":\"denied\"}", got)
+	if got := string(raw); got != `{"host":"","helperConsent":"denied"}` {
+		t.Errorf("marshalled = %s, want {\"host\":\"\",\"helperConsent\":\"denied\"}", got)
 	}
 }
 
@@ -246,11 +246,11 @@ func TestRelayConsentStoredOptionsMarshal(t *testing.T) {
 func TestApplyPatchDesiredMode(t *testing.T) {
 	opts := &StoredSSHProfileOptions{}
 
-	if !ApplyPatchSet(opts, "options.desiredMode", "relay") {
+	if !ApplyPatchSet(opts, "options.desiredMode", "helper") {
 		t.Fatal("ApplyPatchSet(options.desiredMode) returned false for a known path")
 	}
-	if opts.DesiredMode == nil || *opts.DesiredMode != DesiredRelay {
-		t.Fatalf("after set: DesiredMode = %v, want relay", opts.DesiredMode)
+	if opts.DesiredMode == nil || *opts.DesiredMode != DesiredHelper {
+		t.Fatalf("after set: DesiredMode = %v, want helper", opts.DesiredMode)
 	}
 
 	if !ApplyPatchSet(opts, "options.desiredMode", "raw") {
@@ -267,7 +267,7 @@ func TestApplyPatchDesiredMode(t *testing.T) {
 		t.Fatalf("after unset: DesiredMode = %v, want nil (inherit)", opts.DesiredMode)
 	}
 
-	if ApplyPatchSet(opts, "options.notARealPath", "relay") {
+	if ApplyPatchSet(opts, "options.notARealPath", "helper") {
 		t.Fatal("ApplyPatchSet accepted an unknown path")
 	}
 	if !PatchPathAllowed("options.desiredMode") {
@@ -275,25 +275,25 @@ func TestApplyPatchDesiredMode(t *testing.T) {
 	}
 }
 
-func TestApplyPatchRelayConsent(t *testing.T) {
+func TestApplyPatchHelperConsent(t *testing.T) {
 	opts := &StoredSSHProfileOptions{}
 
-	if !ApplyPatchSet(opts, "options.relayConsent", "granted") {
-		t.Fatal("ApplyPatchSet(options.relayConsent) returned false for a known path")
+	if !ApplyPatchSet(opts, "options.helperConsent", "granted") {
+		t.Fatal("ApplyPatchSet(options.helperConsent) returned false for a known path")
 	}
-	if opts.RelayConsent == nil || *opts.RelayConsent != ConsentGranted {
-		t.Fatalf("after set: RelayConsent = %v, want granted", opts.RelayConsent)
-	}
-
-	if !ApplyPatchUnset(opts, "options.relayConsent") {
-		t.Fatal("ApplyPatchUnset(options.relayConsent) returned false for a known path")
-	}
-	if opts.RelayConsent != nil {
-		t.Fatalf("after unset: RelayConsent = %v, want nil", opts.RelayConsent)
+	if opts.HelperConsent == nil || *opts.HelperConsent != ConsentGranted {
+		t.Fatalf("after set: HelperConsent = %v, want granted", opts.HelperConsent)
 	}
 
-	if !PatchPathAllowed("options.relayConsent") {
-		t.Fatal("options.relayConsent must be an allowed patch path")
+	if !ApplyPatchUnset(opts, "options.helperConsent") {
+		t.Fatal("ApplyPatchUnset(options.helperConsent) returned false for a known path")
+	}
+	if opts.HelperConsent != nil {
+		t.Fatalf("after unset: HelperConsent = %v, want nil", opts.HelperConsent)
+	}
+
+	if !PatchPathAllowed("options.helperConsent") {
+		t.Fatal("options.helperConsent must be an allowed patch path")
 	}
 }
 
@@ -303,14 +303,14 @@ func TestApplyPatchRelayConsent(t *testing.T) {
 
 func TestDesiredModeIsAnAllowedDefaultKey(t *testing.T) {
 	var d ProfileDefaults
-	if err := d.UnmarshalJSON([]byte(`{"desiredMode":"relay"}`)); err != nil {
+	if err := d.UnmarshalJSON([]byte(`{"desiredMode":"helper"}`)); err != nil {
 		t.Fatalf("UnmarshalJSON: %v", err)
 	}
 	if keys := d.UnknownKeys(); len(keys) != 0 {
 		t.Errorf("UnknownKeys = %v, want none — desiredMode must be a known default key", keys)
 	}
-	if d.DesiredMode == nil || *d.DesiredMode != DesiredRelay {
-		t.Errorf("decoded desiredMode = %v, want relay", d.DesiredMode)
+	if d.DesiredMode == nil || *d.DesiredMode != DesiredHelper {
+		t.Errorf("decoded desiredMode = %v, want helper", d.DesiredMode)
 	}
 	if err := d.Validate(); err != nil {
 		t.Errorf("Validate = %v, want nil", err)
@@ -319,7 +319,7 @@ func TestDesiredModeIsAnAllowedDefaultKey(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Effective DTO — the mode rides the fields map with provenance; the consent
-// rides the DTO as a required top-level field so a relay selection can never
+// rides the DTO as a required top-level field so a helper selection can never
 // silently pretend to be granted.
 // ---------------------------------------------------------------------------
 
@@ -345,7 +345,7 @@ func TestToEffectiveDTOIncludesDesiredMode(t *testing.T) {
 	}
 }
 
-func TestToEffectiveDTOCarriesRelayConsent(t *testing.T) {
+func TestToEffectiveDTOCarriesHelperConsent(t *testing.T) {
 	// Unset consent resolves to unknown — the required field is always
 	// present, never absent-and-assumed.
 	eff, err := ResolveEffectiveProfile(SSHProfile{
@@ -355,18 +355,18 @@ func TestToEffectiveDTOCarriesRelayConsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if got := ToEffectiveDTO(eff, nil).RelayConsent; got != ConsentUnknown {
-		t.Errorf("unset relayConsent = %q, want unknown", got)
+	if got := ToEffectiveDTO(eff, nil).HelperConsent; got != ConsentUnknown {
+		t.Errorf("unset helperConsent = %q, want unknown", got)
 	}
 
 	eff, err = ResolveEffectiveProfile(SSHProfile{
 		Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
-		Options: StoredSSHProfileOptions{Host: "h", RelayConsent: new(ConsentGranted)},
+		Options: StoredSSHProfileOptions{Host: "h", HelperConsent: new(ConsentGranted)},
 	}, nil, SparseSSHOptions{})
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if got := ToEffectiveDTO(eff, nil).RelayConsent; got != ConsentGranted {
-		t.Errorf("granted relayConsent = %q, want granted", got)
+	if got := ToEffectiveDTO(eff, nil).HelperConsent; got != ConsentGranted {
+		t.Errorf("granted helperConsent = %q, want granted", got)
 	}
 }

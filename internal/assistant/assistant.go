@@ -285,6 +285,16 @@ type AskParams struct {
 	// reached: nothing is expanded, every expansion is marked NOT ASKED with
 	// its reason, and the run is otherwise unaffected.
 	Expansions ExpansionSource
+	// Workers is the worker record this run may start workers in and ask about
+	// (nocx-dkawo.8). Nil is the honest shape for a caller with no record —
+	// the tools refuse and say so, rather than starting a worker into
+	// something that would not hold it.
+	Workers WorkerRecord
+	// WorkerEnvironment names the environment a spawn would reach. The
+	// composition root owns it, for the reason the tool's resolver is a
+	// constant: the spawner opens a local session, so a value the model
+	// supplied could name an environment nothing can deliver.
+	WorkerEnvironment string
 	// Scripts reads the whole of a file a proposed command NAMES, so an
 	// approval question about `bash deploy.sh` carries deploy.sh itself
 	// (nocx-872jc.3). It READS and never executes; which file to read comes

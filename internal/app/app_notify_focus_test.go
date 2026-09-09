@@ -12,14 +12,12 @@ package app
 // each unit correct, the user's task impossible.
 
 import (
-	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // TestBannerClickReachesTheRendererAsSessionFocus drives the real composition
@@ -27,15 +25,11 @@ import (
 // session id a banner click carries, and watch session.focus arrive on the
 // socket naming that session.
 func TestBannerClickReachesTheRendererAsSessionFocus(t *testing.T) {
-	storagetest.IsolateWithHome(t)
-	a, err := newTestApp(t)
-	if err != nil {
-		t.Fatalf("New(): %v", err)
-	}
-	if serr := a.Start(context.Background()); serr != nil {
-		t.Fatalf("Start: %v", serr)
-	}
-	defer a.Shutdown(context.Background())
+	// The composition root WITH this machine's helper installed, because the
+	// session this test opens is a local pane and a local pane is the
+	// daemon's now (nocx-ie23r.3). There is no second route to fall back to
+	// (ADR-0057), so a test that needs a session needs a helper.
+	a := newLocalPaneApp(t)
 
 	conn, _, derr := (&websocket.Dialer{
 		Subprotocols: []string{"nocx.token." + a.Transport.Token()},

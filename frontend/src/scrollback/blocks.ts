@@ -3,7 +3,15 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import { serializeRange, serializeRangeSGR, serializeRangeText, fromITheme } from './serializer'
+import {
+  serializeRange,
+  serializeRangeSGR,
+  serializeRangeText,
+  fromITheme,
+  collectFitCandidates,
+} from './serializer'
+import { createCellFit, type CellFit, type FitCandidate } from './cell-fit'
+import { isEnabled as driftEnabled, recordFrozenBlock } from './cell-drift'
 import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -2101,6 +2109,10 @@ export class BlockManager {
   /** Lazy container supplier bound to this manager's scrollback inner. */
   private _getContainer = (): HTMLElement => this._scrollbackInner
 
+  /** Кто решает, какой ячейке нужна коробка. Живёт при блоках, потому что
+   *  меряет в ИХ контейнере: там опубликован --term-cell-width. */
+  private _cellFit: CellFit = createCellFit(() => this._scrollbackInner)
+
   /**
    * Deselect the currently selected block without clearing the block list.
    * Safe to call from keyboard handlers (P0-4: Escape deselects).
@@ -2371,7 +2383,26 @@ export class BlockManager {
   ): void {
     rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
-    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
+    // The drift instrument (nocx-4n6sj) is the only reader of the column
+    // counts, and it ships switched off: no array, no accounting, and the
+    // serializer's hot path is what it was.
+    const driftCols = driftEnabled() ? [] : undefined
+    // ДВА ПРОХОДА, ОДНА РАСКЛАДКА. Первый называет ячейки и греет кэш одним
+    // пакетным замером; второй сериализует, и там boxOf уже чистое
+    // чтение Map. Поштучный замер во время сериализации был бы N
+    // принудительных раскладок в тот самый момент, когда блок подменяет
+    // живую область.
+    let boxOf: Parameters<typeof serializeRange>[5]
+    if (this._cellFit.begin()) {
+      const candidates: FitCandidate[] = []
+      collectFitCandidates(getLine, rec.outputStart, endLine, (chars, width, attrs) =>
+        candidates.push({ chars, width, face: { bold: attrs.bold, italic: attrs.italic } }),
+      )
+      this._cellFit.warm(candidates)
+      boxOf = (chars, width, attrs) =>
+        this._cellFit.boxOf(chars, width, { bold: attrs.bold, italic: attrs.italic })
+    }
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine, driftCols, boxOf)
     // The DURABLE bodies, from the same rows and the same walk the frozen
     // block on screen is made of — so what comes back after a restart is
     // what was there, not a second reading of the buffer taken later.
@@ -2408,6 +2439,10 @@ export class BlockManager {
 
     this._reown(rec.el, newEl)
     rec.el = newEl
+    // BEFORE decoration: terminal-links rewrites ranges over the text nodes
+    // of these very rows, so a measurement taken after it would be reading
+    // a DOM the serializer did not produce.
+    if (driftCols) recordFrozenBlock(newEl, driftCols)
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
     // shot, cleared before it runs so a callback that re-enters cannot loop.
@@ -2985,5 +3020,9 @@ export class BlockManager {
 
   dispose(): void {
     this.clearAll()
+    // Зонд обязан уходить вместе с блоками: `_own()` объявлен единственным
+    // входом в `.scrollback-inner`, а `clearAll()` удаляет только своё, так
+    // что оставленный зонд был бы посторонним прямым ребёнком навсегда.
+    this._cellFit.dispose()
   }
 }

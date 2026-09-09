@@ -637,6 +637,8 @@ describe('SettingsContent', () => {
       'Endpoints',
       'Roles',
       'Assistant permissions',
+      'Agent screens',
+      'Calibrate an agent',
       // Skills is an ASSISTANT page and the last of them (nocx-fe7fe.1). It
       // sat under Application beside Backup, and it sat there TWICE, because
       // `skills.enabled` declares section "Skills" and that minted a second

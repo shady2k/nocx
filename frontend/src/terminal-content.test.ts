@@ -4264,6 +4264,93 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('a running program is not resized by its own output growing (nocx-oikdu)', async () => {
+    // omp draws a box, and in nocx the box came back MANGLED — its top border
+    // truncated mid-row while its bottom corners sat at the full width. Two
+    // different widths in one box is one thing: the grid changed size while
+    // the program was drawing into it. Warp, running the same program on the
+    // same host, drew it whole.
+    //
+    // The path is scheduleLiveResize: it runs on every chunk of parsed output
+    // and ends in refitIfResized, whose height is runningLiveCap — the
+    // scroller less the RUNNING BLOCK'S HEADER. That header is measured live,
+    // so anything that changes its height mid-command (it gains a duration,
+    // it wraps) re-fits the grid and sends the pty a SIGWINCH in the middle of
+    // a repaint.
+    //
+    // A running program owns its grid. The pane changing size is still a
+    // resize — that one the user asked for — but the program's OWN output
+    // must never be.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    const fitViewport = renderer.fitViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      content.viewportChanged({ width: 800, height: 400 })
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      let headerHeight = 24
+      block!.el.getBoundingClientRect = () => ({
+        height: headerHeight,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: headerHeight,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+
+      // First output: the grid is fitted once, to scroller minus header.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(100)
+      client._sessions[0].fireData('box top')
+      renderer._fireWriteParsed()
+      expect(fitViewport).toHaveBeenCalledTimes(2)
+
+      // The header grows by one row mid-command — the block gains its
+      // duration chip while omp is still drawing. Nothing about the PANE
+      // changed, so the program must not be resized.
+      headerHeight = 48
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(140)
+      client._sessions[0].fireData('box bottom')
+      renderer._fireWriteParsed()
+
+      expect(fitViewport).toHaveBeenCalledTimes(2)
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('a program repainting the same rows does not yank the scroll (nocx-6w4z)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

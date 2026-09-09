@@ -56,7 +56,12 @@ func TestLocalPty_ExtraFilesReachTheShell(t *testing.T) {
 		Cols:    80,
 		Rows:    24,
 		Command: "/bin/sh",
-	}, WithExtraFiles(child))
+		// Set on the config directly. It used to arrive through a
+		// WithExtraFiles option, which had exactly one production caller —
+		// internal/app's local pty factory — and went with it when the
+		// daemon became the only thing that forks a shell (nocx-ie23r.3).
+		ExtraFiles: []*os.File{child},
+	})
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}

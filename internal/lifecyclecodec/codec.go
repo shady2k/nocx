@@ -2,7 +2,7 @@
 // big-endian length prefix holding the JSON byte count, then the JSON
 // (docs/lifecycle-protocol.md §6). It is the framing half of every lifecycle
 // adapter — the local descriptor channel, the future forwarded-port channel
-// and the relay share it, so the wire contract lives here once.
+// and the helper share it, so the wire contract lives here once.
 //
 // The codec frames; it does not authenticate and does not interpret. A frame
 // that maps to an envelope is delivered even when the kernel will reject it
@@ -12,6 +12,12 @@
 // fence — is garbage, and the decoder scans past it to the next frame
 // boundary, reporting every skipped region through the GapSink so the kernel
 // can enforce the desync budgets in one place (its NotifyGap).
+//
+// The two directions are not symmetric in one field. The bearer capability
+// travels INBOUND only: the shell authenticates itself to the kernel with it
+// on every frame, and the kernel — the only sender on the other direction,
+// talking to a shell that already holds the value — sends none back. See
+// Encode.
 //
 // Scan accounting, per region: every byte the scanner consumes before the
 // resync point counts toward the byte budget; a garbage frame — a full
@@ -273,8 +279,17 @@ type wireEnvelope struct {
 	Domain  string `json:"dom"`
 	Epoch   uint64 `json:"epoch"`
 	Seq     uint64 `json:"seq"`
-	Cap     string `json:"cap"` // 64 lowercase hex chars
-	Evt     string `json:"evt"`
+	// Cap is the bearer capability, 64 lowercase hex chars — and it is
+	// present on the INBOUND half only. An outbound frame omits it
+	// entirely: the kernel is the only sender on that direction and the
+	// shell already holds the capability it was given at bootstrap, so
+	// echoing it back authenticates nothing while writing the secret onto
+	// a descriptor every descendant of the shell inherits (nocx-aqz7o).
+	// Absent therefore decodes to the zero capability, which the kernel
+	// refuses outright (internal/lifecycle/kernel.go's zero test) — the
+	// codec still does not authenticate, it only stops carrying.
+	Cap string `json:"cap,omitempty"`
+	Evt string `json:"evt"`
 
 	// Event payload fields (§3).
 	Shell *string `json:"shell,omitempty"`
@@ -321,6 +336,14 @@ type wireEnvelope struct {
 	Rows     *int    `json:"rows,omitempty"`
 	Enrolled bool    `json:"enrolled,omitempty"`
 	Reason   *string `json:"reason,omitempty"`
+	// Agent report (nocx-dkawo.7): what a worker participant says its own work
+	// produced, and the answer saying it was recorded. OK and Recorded are
+	// VALUES rather than pointers for the reason Enrolled is: a missing field
+	// decodes to false, so a truncated or hostile frame reads as "not
+	// successful" and "not recorded" rather than as either.
+	OK       bool    `json:"ok,omitempty"`
+	Summary  *string `json:"summary,omitempty"`
+	Recorded bool    `json:"recorded,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -332,10 +355,20 @@ type wireCompletedRef struct {
 // decodeEnvelope maps the wire shape to a lifecycle.Envelope. It fails only
 // when the wire cannot be represented: a malformed capability or fence, or
 // an unknown event kind. Every other judgement is the kernel's.
+//
+// An ABSENT cap is representable and decodes to the zero capability: that is
+// what an outbound frame looks like since nocx-aqz7o, and it is also the one
+// value the kernel's authentication refuses unconditionally. A cap that is
+// PRESENT and malformed is still garbage — the codec maps what it can and
+// scans past what it cannot.
 func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
-	capBytes, err := hex.DecodeString(w.Cap)
-	if err != nil || len(capBytes) != len(lifecycle.Capability{}) {
-		return lifecycle.Envelope{}, errFraming
+	var capability lifecycle.Capability
+	if w.Cap != "" {
+		capBytes, err := hex.DecodeString(w.Cap)
+		if err != nil || len(capBytes) != len(capability) {
+			return lifecycle.Envelope{}, errFraming
+		}
+		copy(capability[:], capBytes)
 	}
 	env := lifecycle.Envelope{
 		Version:  w.Version,
@@ -345,7 +378,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		Sequence: w.Seq,
 		Event:    lifecycle.Event{Kind: lifecycle.EventKind(w.Evt)},
 	}
-	copy(env.Capability[:], capBytes)
+	env.Capability = capability
 	switch env.Event.Kind {
 	case lifecycle.KindHello:
 		env.Event.Hello = &lifecycle.Hello{Shell: str(w.Shell), Generation: str(w.Gen)}
@@ -430,6 +463,18 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		env.Event.AgentWithdrawn = &lifecycle.AgentWithdrawn{
 			RequestID: lifecycle.RequestID(str(w.Request)),
 		}
+	case lifecycle.KindAgentReport:
+		env.Event.AgentReport = &lifecycle.AgentReport{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			OK:        w.OK,
+			Summary:   str(w.Summary),
+		}
+	case lifecycle.KindAgentReported:
+		env.Event.AgentReported = &lifecycle.AgentReported{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Recorded:  w.Recorded,
+			Reason:    str(w.Reason),
+		}
 	default:
 		return lifecycle.Envelope{}, errFraming
 	}
@@ -437,8 +482,19 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 }
 
 // Encode writes env as one length-delimited JSON frame. It is the outbound
-// half: the kernel's accept and refresh_request travel this way. A frame
-// over max_frame is refused before anything is written.
+// half: the kernel's accept, refresh_request and domain_grant travel this
+// way. A frame over max_frame is refused before anything is written.
+//
+// The capability is written only when the envelope carries one. Every
+// envelope the KERNEL builds carries none (nocx-aqz7o), so every frame this
+// writes on the kernel→shell direction is free of the bearer — which is what
+// makes ADR-0024's claim true, that a descendant which inherited the
+// descriptor cannot produce the capability. It was not true while the accept
+// echoed it back in cleartext onto that same descriptor. The condition is on
+// the VALUE and not on the event kind because the value is the thing that
+// must not be written; a caller that hands Encode a capability is speaking
+// the inbound half (the shell's own hello and events, and the tests and
+// helpers that stand in for them), and that half still needs it.
 func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	we := wireEnvelope{
 		Version: env.Version,
@@ -446,8 +502,10 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 		Domain:  string(env.Domain),
 		Epoch:   env.Epoch,
 		Seq:     env.Sequence,
-		Cap:     hex.EncodeToString(env.Capability[:]),
 		Evt:     string(env.Event.Kind),
+	}
+	if env.Capability != (lifecycle.Capability{}) {
+		we.Cap = hex.EncodeToString(env.Capability[:])
 	}
 	switch env.Event.Kind {
 	case lifecycle.KindHello:
@@ -546,6 +604,22 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	case lifecycle.KindAgentWithdrawn:
 		if p := env.Event.AgentWithdrawn; p != nil {
 			we.Request = new(string(p.RequestID))
+		}
+	case lifecycle.KindAgentReport:
+		if p := env.Event.AgentReport; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.OK = p.OK
+			if p.Summary != "" {
+				we.Summary = new(p.Summary)
+			}
+		}
+	case lifecycle.KindAgentReported:
+		if p := env.Event.AgentReported; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Recorded = p.Recorded
+			if p.Reason != "" {
+				we.Reason = new(p.Reason)
+			}
 		}
 	}
 	body, err := json.Marshal(&we)

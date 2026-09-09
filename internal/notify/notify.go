@@ -40,12 +40,13 @@ import (
 type Kind string
 
 const (
-	KindBlockFinished    Kind = "block.finished"    // block ledger (attested)
-	KindSessionEnded     Kind = "session.ended"     // session registry (attested)
-	KindTransferFinished Kind = "transfer.finished" // transfer registry (attested)
-	KindProgramNotify    Kind = "program.notify"    // OSC 9 / OSC 777 (programRequest)
-	KindBell             Kind = "bell"              // BEL (programRequest)
-	KindPaneWorkFinished Kind = "pane.workFinished" // title-transition inference (heuristic)
+	KindBlockFinished       Kind = "block.finished"       // block ledger (attested)
+	KindSessionEnded        Kind = "session.ended"        // session registry (attested)
+	KindTransferFinished    Kind = "transfer.finished"    // transfer registry (attested)
+	KindProgramNotify       Kind = "program.notify"       // OSC 9 / OSC 777 (programRequest)
+	KindBell                Kind = "bell"                 // BEL (programRequest)
+	KindPaneWorkFinished    Kind = "pane.workFinished"    // title-transition inference (heuristic)
+	KindWorkersUndispatched Kind = "workers.undispatched" // the worker record's backstop (attested)
 )
 
 // Trust is the trust class of an event, stamped by its source adapter —
@@ -86,7 +87,7 @@ type Attribution struct {
 	// the same vocabulary internal/commandnames.LocalRoute already uses for
 	// the same idea. nocx-if6 phase A makes session identity
 	// (backendId, sessionId); carrying it from the first commit is what stops
-	// every feed row needing a retrofit when the relay lands.
+	// every feed row needing a retrofit when the helper lands.
 	Backend string
 
 	// Tab keeps the old word on purpose (nocx-ehkvy). Everything else that
@@ -129,7 +130,7 @@ type Event struct {
 
 	// At is stamped by nocx at ingress, which is the first nocx-owned stage
 	// (ingress.go). It was the router's job until the feed arrived; the stamp
-	// moved so that a relay replaying a buffered batch keeps its own instants
+	// moved so that a helper replaying a buffered batch keeps its own instants
 	// instead of having them rewritten to the moment it reconnected.
 	At time.Time
 }

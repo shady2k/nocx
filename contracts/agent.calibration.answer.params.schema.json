@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.calibration.answer.params.schema.json",
+  "title": "AgentCalibrationAnswerParams",
+  "description": "Params of the agent.calibration.answer request: the write half of the guided calibration (nocx-etejh). THERE IS NO LABEL HERE, and its absence is the design rather than an omission. The bead is falsified if a label can be attached to a frame the person did not produce for it, so the label is never a value a caller supplies: it is read out of the walk's own PENDING step in the backend, and the frame it is written onto is read from the pane's live grid at the instant this request is handled. A caller names a pane, an action, and the step it believes it is showing — and nothing else. begin, capture, skip, redo and abandon are one action on one method rather than five methods because they drive one state machine: two methods could interleave, and the ordering that keeps a label on the right screen would then depend on which handler ran first.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "action"],
+  "properties": {
+    "sessionId": {
+      "description": "The enrolled pane the person is driving their agent in (AD-7). Required: a walk is bound to a pane at begin, so an answer can never be taken from a different pane than the one the person is looking at.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "action": {
+      "description": "What the person did. begin starts a walk, discarding any walk already in progress on that pane and leaving the stored set alone. capture labels the pane's current screen with the pending step. skip leaves an OPTIONAL state uncalibrated, and is refused for a required one — a calibration that lacks idle, working or asks-you verifies nothing, so it may not complete. redo re-asks the step just answered, which is why the missing label picker costs nothing: a person who captured at the wrong moment gets asked again rather than having to point a label at a frame they already have. abandon drops the walk without writing anything.",
+      "type": "string",
+      "enum": ["begin", "capture", "skip", "redo", "abandon"]
+    },
+    "step": {
+      "description": "The step the surface believes it is showing, by its index in the calibration's step list. Required for capture, skip and redo; refused for begin and abandon, which answer no question. It is a STALENESS GUARD and never a selector: the label written comes from the walk's pending step either way, so an answer that names a different step is refused rather than applied to the wrong label — a surface that redrew late cannot answer a question it is no longer being asked.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

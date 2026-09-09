@@ -1,0 +1,46 @@
+/* The guided calibration (nocx-etejh): one asked-for state at a time, and the
+   list of states behind it. Layout only — the kit owns every component's
+   paint, and the classes below place them. */
+
+.st-calibration__picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.st-calibration__stored,
+.st-calibration__ask {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+/* The instruction is what the whole page is for, so it is allowed to be the
+   widest thing on it and to wrap rather than truncate: a step read halfway is
+   a step answered wrongly. */
+.st-calibration__instruction,
+.st-calibration__summary {
+  flex: 1 1 auto;
+}
+
+.st-calibration__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* One state in the list: its name, and what has been said about it. */
+.st-calibration__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.st-calibration__name {
+  flex: 0 0 10rem;
+}
+
+.st-calibration__detail {
+  flex: 1 1 auto;
+}

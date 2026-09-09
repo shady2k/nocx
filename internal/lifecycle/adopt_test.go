@@ -71,13 +71,74 @@ func TestAnAdoptedDomainStillRefusesAWriterWithoutTheCapability(t *testing.T) {
 	}
 	// A descendant that inherited the descriptor knows the addressing — it
 	// is in the environment — and cannot know the capability.
-	forged := h
-	forged.Capability = Capability{}
-	id := AttemptID("forged")
-	if _, err := k.Ingest("tpt-adopt", env(lane, forged, 41, Event{
-		Kind: KindStart, Start: &Start{AttemptID: &id, Command: "curl evil"},
-	})); !errors.Is(err, ErrBadCapability) {
-		t.Fatalf("a frame without the capability was accepted into an adopted domain: %v", err)
+	//
+	// "Cannot know" is asserted three ways, because it used to be asserted
+	// one way that could not fail (nocx-aqz7o). The zero capability is the
+	// weakest of them: it is refused by an explicit zero test, so on its own
+	// it proves only that a descendant guessing NOTHING is refused. A
+	// WELL-FORMED wrong value is the guess a descendant would actually make.
+	// And the third is the one that matters — the value a descendant obtains
+	// by READING the channel, which is the only place a capability it was
+	// never handed could come from.
+	descendantGuesses := map[string]Capability{}
+	descendantGuesses["nothing at all"] = Capability{}
+	var allOnes Capability
+	for i := range allOnes {
+		allOnes[i] = 0xff
+	}
+	descendantGuesses["a well-formed wrong value"] = allOnes
+	nearMiss := cap
+	nearMiss[len(nearMiss)-1] ^= 0x01
+	descendantGuesses["the real capability with one bit wrong"] = nearMiss
+
+	// What a descendant reads off the descriptor. Every frame the kernel
+	// sends this domain is delivered through the port and its capability
+	// harvested; the harvest is the descendant's whole knowledge of the
+	// bearer, and it must come to nothing.
+	answers, aerr := k.Ingest("tpt-adopt", env(lane, h, 41, Event{
+		Kind: KindAgentEnrol, AgentEnrol: &AgentEnrol{
+			RequestID: "r-agent-0", Agent: "claude", Cols: 80, Rows: 24,
+		},
+	}))
+	if aerr != nil {
+		t.Fatalf("agent_enrol in the adopted domain: %v", aerr)
+	}
+	refresh, gerr := k.NotifyGap("tpt-adopt", h.Domain, 64, 1)
+	if gerr != nil {
+		t.Fatalf("NotifyGap: %v", gerr)
+	}
+	for _, out := range append(answers, refresh...) {
+		if derr := k.Deliver(out); derr != nil {
+			t.Fatalf("Deliver(%s): %v", out.Envelope.Event.Kind, derr)
+		}
+	}
+	read := port.envelopes()
+	if len(read) == 0 {
+		t.Fatal("no outbound frame reached the descriptor, so the harvest proves nothing")
+	}
+	var harvested Capability
+	for _, sent := range read {
+		if sent.Capability != (Capability{}) {
+			t.Fatalf("the %s frame the kernel sent this domain carries the capability; a descendant that inherited the descriptor reads it",
+				sent.Event.Kind)
+		}
+		harvested = sent.Capability
+	}
+	descendantGuesses["everything readable off the channel"] = harvested
+
+	seq := uint64(41)
+	for name, guess := range descendantGuesses {
+		t.Run(name, func(t *testing.T) {
+			seq++
+			forged := h
+			forged.Capability = guess
+			id := AttemptID("forged")
+			if _, err := k.Ingest("tpt-adopt", env(lane, forged, seq, Event{
+				Kind: KindStart, Start: &Start{AttemptID: &id, Command: "curl evil"},
+			})); !errors.Is(err, ErrBadCapability) {
+				t.Fatalf("a frame carrying %q was accepted into an adopted domain: %v", name, err)
+			}
+		})
 	}
 }
 

@@ -145,6 +145,22 @@ describe('a path printed by a command opens the file it names', () => {
   it('survives a path a program printed half-coloured', async () => {
     // The serializer emits one span per colour run; a link that spans two of
     // them is the case a node-local walk truncates.
+    //
+    // IT IS NOW SEVERAL ANCHORS, AND THAT IS THE POINT OF THE ASSERTION
+    // BELOW (nocx-ec18). This used to read `querySelector('a').textContent`
+    // and expect the whole of `AGENTS.md:84`, which stated that a link
+    // straddling colour runs is ONE element. The decorator can no longer
+    // promise that: wrapping the whole link means extracting one Range
+    // across the row's nodes, and when an end of that Range falls inside a
+    // `.term-cell` — the fixed-width box that keeps a frozen row on its
+    // columns — the box is split and the row loses its geometry. Each text
+    // node's slice is wrapped on its own instead.
+    //
+    // So what the user can do is stated twice: the link READS whole across
+    // its parts, and clicking a part that is NOT the first still opens it.
+    // The second half is the one that would have been silently lost — the
+    // target has to be written to every anchor, not just the one the old
+    // assertion happened to look at.
     const block = frozenBlock('AGENTS.md:84 is the contract', 6)
     document.body.append(block)
     decorateLinks(block)
@@ -152,9 +168,10 @@ describe('a path printed by a command opens the file it names', () => {
 
     const { opened, armed, opener } = harness()
     const detach = attachLinkClicks(block, { opener, origin: () => ORIGIN, armed })
-    const link = block.querySelector('a')
-    expect(link?.textContent).toBe('AGENTS.md:84')
-    metaClick(link as Element)
+    const parts = [...block.querySelectorAll('a')]
+    expect(parts.length).toBeGreaterThan(1)
+    expect(parts.map((a) => a.textContent).join('')).toBe('AGENTS.md:84')
+    metaClick(parts[parts.length - 1])
     await flush()
     expect(opened[0]).toMatchObject({ path: '/Users/a/repo/AGENTS.md', line: 84 })
     detach()

@@ -393,7 +393,8 @@ act, and it names the durable state it will delete before it runs.
 - **Recall across servers.** Federated query is named as an obligation (§4) but its partial-failure
   UX is its own work.
 - **The retention age** for anything, here or in level 1.
-- **The word `relay`** in code — 411 occurrences including type names; its own chore.
+- **The word `relay`** in code — 411 occurrences including type names; its own chore, done
+  since as `nocx-0xq2s`.
 
 ## 10. Open questions
 

@@ -22,42 +22,69 @@ and a frontend author can both work from this document alone.
 | **Lane**       | One input-routing lane (one terminal tab). At most one **active** domain per lane. A lane holds a stack of domains; the top of the stack is the active one.                                                                                                                                                        |
 | **Domain**     | One authenticated shell or helper instance. Logical — never an alias for a transport. Carries an id, an epoch and an optional parent.                                                                                                                                                                              |
 | **Epoch**      | The generation of a domain instance. Monotonic per kernel instance, assigned at creation, never reused, never resumed: a new establishment is a new domain with a new epoch.                                                                                                                                       |
-| **Capability** | The per-epoch authenticator: at least 256 random bits, minted by the kernel, substituted into the integration script text, never passed as an environment variable, never derived from the transport.                                                                                                              |
+| **Capability** | The per-epoch authenticator: at least 256 random bits, minted by the kernel, delivered to the shell by one of the two carriers ADR-0049 left standing (§4), never passed as an environment variable, never derived from the transport, and carried on the INBOUND half of the channel only (§2).                   |
 | **Attempt**    | One command execution. Belongs to exactly one domain; cannot cross an activation boundary.                                                                                                                                                                                                                         |
 | **Lifecycle**  | The per-lane authority axis: `Native                                                                                                                                                                                                                                                                               | PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost` (ADR-0024 decision 6). |
 
 ## 2. The envelope
 
 Every event travels in an envelope. **Every** envelope carries the full addressing
-tuple — protocol version, lane id, domain id, epoch, monotonic sequence, and the
-bearer capability. No API anywhere obtains lane, domain or epoch from a singleton;
-they are addressed explicitly in every message. This is the property that keeps
-the remote helper a third adapter instead of a protocol rewrite.
+tuple — protocol version, lane id, domain id, epoch and monotonic sequence — and
+every INBOUND envelope also carries the bearer capability. No API anywhere obtains
+lane, domain or epoch from a singleton; they are addressed explicitly in every
+message. This is the property that keeps the remote helper a third adapter instead
+of a protocol rewrite.
 
 ```
 +--------+--------+--------+--------+------------------+
 | length |  v:1   |  lane  |  dom   |  epoch (u64)     |
 +--------+--------+--------+--------+------------------+
-|  seq (u64)      |  cap (32 bytes)   |  event payload  |
+|  seq (u64)      |  cap (32 bytes)*  |  event payload  |
 +-----------------+-------------------+-----------------+
+                     * inbound only
 ```
 
 Wire encoding: **JSON** (UTF-8), length-delimited by a 4-byte big-endian length
 prefix preceding the JSON bytes. The envelope fields:
 
-| Field      | JSON    | Type                   | Rule                                                                                |
-| ---------- | ------- | ---------------------- | ----------------------------------------------------------------------------------- |
-| Version    | `v`     | integer                | `1` today. Anything else is rejected before any state is consulted.                 |
-| Lane       | `lane`  | string                 | The lane the event addresses. Must equal the addressed domain's lane.               |
-| Domain     | `dom`   | string                 | The domain instance. Must exist and be bound to the transport the frame arrived on. |
-| Epoch      | `epoch` | integer                | Must equal the domain's live epoch.                                                 |
-| Sequence   | `seq`   | integer                | Strictly increasing per domain within its epoch. See §11.                           |
-| Capability | `cap`   | 64 lowercase hex chars | The bearer. Authenticates the frame. See §4.                                        |
-| Event      | `evt`   | string                 | The event kind, §6.                                                                 |
+| Field      | JSON    | Type                   | Rule                                                                                              |
+| ---------- | ------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Version    | `v`     | integer                | `1` today. Anything else is rejected before any state is consulted.                               |
+| Lane       | `lane`  | string                 | The lane the event addresses. Must equal the addressed domain's lane.                             |
+| Domain     | `dom`   | string                 | The domain instance. Must exist and be bound to the transport the frame arrived on.               |
+| Epoch      | `epoch` | integer                | Must equal the domain's live epoch.                                                               |
+| Sequence   | `seq`   | integer                | Strictly increasing per domain within its epoch. See §11.                                         |
+| Capability | `cap`   | 64 lowercase hex chars | The bearer. Authenticates the frame. **Inbound only** — absent from every outbound frame. See §4. |
+| Event      | `evt`   | string                 | The event kind, §6.                                                                               |
 
-Outbound envelopes (kernel → shell: `accept`, `refresh_request`) use the same
-envelope. The bearer authenticates both directions; the shell's copy of the
-capability is what its bootstrap holds.
+Outbound envelopes (kernel → shell: `accept`, `refresh_request`, `domain_grant`,
+`agent_enrolled`, `agent_withdrawn`) use the same envelope shape, **minus the
+`cap` field, which they omit entirely**. The direction is not symmetric and must
+not be made so:
+
+- The kernel is the only sender on the outbound half, and the shell already holds
+  the capability its bootstrap gave it, so an echoed bearer authenticates nobody
+  to anybody. It cannot even authenticate the peer to the shell: the shell's own
+  `hello` hands that peer the capability one frame earlier.
+- The outbound half is the direction an actor the transport does not stop can
+  read. The local carrier is a socketpair whose child end is handed over with
+  `exec.Cmd.ExtraFiles` (which clears `FD_CLOEXEC`) and whose number is exported
+  as `NOCX_LIFECYCLE_FD`, so every descendant of the shell holds a reader on it
+  for the shell's whole life — and that descendant is precisely the actor ADR-0024
+  names when it makes the capability mandatory rather than belt-and-braces.
+
+A shell identifies an inbound-to-it frame by `dom` and `epoch`, which are names
+rather than secrets and are already in its environment. The kernel, receiving a
+frame with no `cap`, refuses it: an absent capability decodes to the zero value,
+and a zero capability authenticates nobody (`internal/lifecycle`'s explicit zero
+test). Recorded 2026-09-03 (`nocx-aqz7o`), when every outbound frame carried the
+capability in cleartext and the property above did not hold by construction.
+
+**What this does not cover.** A `domain_grant`'s `bootstrap` is opaque text the
+parent executes, and for a local nested environment that text is the child's
+rcfile, containing the CHILD's capability. It travels the same descriptor. That
+is inherent to the shape of §9 — the parent has to receive something to hand its
+child — and it is a separate question with a separate answer.
 
 ## 3. Event kinds
 
@@ -80,9 +107,11 @@ capability is what its bootstrap holds.
 | `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `reason`                                 | The verdict, and the reason when it is no. §15.                                    |
 | `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
 | `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
+| `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced, from the drop. §16.            |
+| `agent_reported`     | kernel → shell  | `request`, `recorded`, `reason`                                          | The declaration was written to the wave record, or why not. §16.                   |
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
-`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
+`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated.
 
 ## 4. Authentication
@@ -90,9 +119,12 @@ protocol violation. Everything else is shell-originated.
 **Property (ADR-0024 decision 2):** possession of the transport is not possession
 of the domain. An inherited descriptor, a discovered listening address, or a mere
 connection must never let a descendant or another local user publish an event.
-Every envelope therefore carries the domain's per-epoch **bearer capability**, and
-the kernel verifies it **before any domain or sequence state is consulted or
-mutated** (decision 7). A frame with a wrong capability is rejected as if it never
+Every INBOUND envelope therefore carries the domain's per-epoch **bearer
+capability**, and the kernel verifies it **before any domain or sequence state is
+consulted or mutated** (decision 7). The outbound direction carries none, and it
+is that asymmetry — not the bearer alone — that makes the property hold: a
+capability written back onto a descriptor the descendant inherits is a capability
+the descendant can read (§2). A frame with a wrong capability is rejected as if it never
 arrived: no state read, no counter advance, and the failure counts toward the
 handshake rate limit (§5).
 
@@ -109,10 +141,25 @@ epoch, never exported, never in the environment, and replay-safe within its epoc
 via the sequence rule (§11); authority rotates with the epoch, and a new epoch is a
 new capability.
 
-The capability never enters a filesystem object where the installer can avoid it;
-the bootstrap script is substituted at install time (`@CAP@`, the pattern
-`internal/shellintegration` already uses for `@SID@`), and the kernel keeps it only
-in memory on the domain record.
+The capability never enters an argv word, an environment variable or a filesystem
+NAME, and the kernel keeps it only in memory on the domain record. There are
+exactly two carriers by which it reaches a shell, and
+`internal/shellintegration/capability_source.go` owns both:
+
+- the shell reads it once from an **inherited, already-unlinked descriptor** and
+  closes that descriptor — the remote tiers, whose rcfile is an installed
+  generation file published long before the session and therefore capability-free
+  by construction;
+- the value is written into the **text of an rcfile that is itself delivered
+  through a descriptor** (`/dev/fd/N`) — the local nested child, where the
+  bootstrap IS the rcfile and never becomes a filesystem object.
+
+**Amended 2026-08-20 (ADR-0049).** This paragraph used to say the capability was
+substituted into the integration script text at install time (`@CAP@`), which was
+true of a carrier that is gone: that text travelled inside the remote SSH command,
+so the bearer reached the far host's process arguments and every recorder of the
+exec request. The substitution point is `@CAPSRC@` now, and what goes in it is one
+of the two forms above.
 
 ## 5. Establishment: the handshake
 
@@ -133,8 +180,8 @@ A listener existing is not a channel being live (decision 3). The sequence:
 6. Timeout (`hello_timeout`, 10 s) or any failure leaves the visible native
    prompt in place.
 
-`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
-`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
+`agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a
 protocol violation. Everything else is shell-originated. **Three outbound kinds, one boundary:** the transport port
 carries exactly three kinds of envelope — `accept`, `refresh_request` and
 `domain_grant`, the replies the shell must see. `domain_established` (and
@@ -626,3 +673,91 @@ which is the one thing only it can do, and the fact then belongs to whoever owns
 grid answers what is on the screen and where the cursor is, and nothing else; the two
 decisions the amendment permits from one — may nocx type here, what does the indicator show
 — are made by callers reading a frame, never by the grid and never here.
+
+## 16. The participant's declaration: the second of the two facts
+
+- **Implements:** `D9` of the orchestration mechanism design — only process exit and the
+  participant's own declaration may decide a wave participant's state.
+- **Bead:** `nocx-dkawo.7`.
+
+A wave participant produces two facts at the end of its work, and they are independent:
+what it **declared** it produced, and its **process exit**. The exit is the backend's own,
+because nocx owns the PTY. This pair is the declaration.
+
+### 16.0 Where a declaration comes from: the drop
+
+The declaration must come from the **agent**, and the agent cannot send one itself. The
+lifecycle capability is deliberately not exported (§3, and the 2026-08-15 design's `D13`:
+no bearer material in the environment), so a child process has nothing to authenticate a
+frame with. What it can do is leave the verdict where the shell will look, and the shell —
+which holds the capability — sends it.
+
+The agent wrapper opens a **drop** before starting the agent and passes its path in
+`NOCX_AGENT_REPORT`. A path is not bearer material: it names a rendezvous and confers
+nothing, `mktemp` gives it an unguessable name and mode 0600, and anything in the agent's
+own process tree can therefore declare — which is exactly the principal the 2026-08-15
+design's `D14` already enrols and states in the approval ("allow this agent **and commands
+it launches**").
+
+The format is for a shell to parse and for an agent to write:
+
+```
+ok                        <- or `fail`, on the first line, exactly
+what the agent produced   <- everything after it, free text
+```
+
+Anything else — an empty file, a half-written one, a file some other program left behind —
+is **not** a declaration and nothing is sent, so the participant stays undeclared and the
+record calls it `abandoned`. Consent is the presence of what the wrapper positively
+recognises, exactly as the enrolment answer's is (§15.3).
+
+The wrapper sends the declaration **inside** the interval the enrolment opened and before
+`agent_withdraw`: a verdict sent after the withdraw would report about a pane nocx had
+already stopped watching. It removes the drop afterwards. A declaration answered with
+`recorded:false` is printed in the pane, for `D4`'s reason — an agent that reported into
+nowhere must not think it was heard.
+
+**Nothing tells an agent to write one.** That is persuasion, not mechanism (§5 of the
+orchestration design), and it is why `wave.spawn`'s tool description tells a coordinator to
+put the instruction in its worker's task. An agent that never writes a drop is an ordinary
+worker that gets terminalized as `abandoned`, which is the fail-closed direction.
+
+### 16.1 Why it rides this channel, and why it is not `agent_withdraw`
+
+It rides this channel for §15.1's reason unchanged: a second socket would be a second
+authenticator for one trust decision, and a binary launched by the shell inherits the
+descriptor without inheriting the domain.
+
+It is **not** the withdraw of §15.2, and that distinction is the whole reason the pair
+exists. A withdraw says "the agent I bracketed has returned", which is the interval's
+other end and carries no verdict at all. A report says what the work **came to**. Reading
+a withdraw as a success would invent the one fact the participant did not send, in the
+fail-open direction — and a wave whose completions are inferred is the self-matching
+sentinel the orchestration design exists to kill.
+
+### 16.2 A declaration does not terminalize anything on its own
+
+`ok` is the participant's own verdict and there is no third value. A participant that
+cannot say whether it succeeded says nothing at all, and the record then reads its exit as
+an **abandonment** — which is the honest answer and the fail-closed one.
+
+A declaration with no exit leaves the participant **live**: the agent that says it finished
+is still running and may be given more work. Only the conjunction of a declaration and a
+process exit reaches a completion. The record reduces from the fact SET rather than the
+arrival order, so an exit observed before the declaration reads as abandoned and is refined
+by the declaration that follows — the second half of a conjunction arriving late, not a
+resurrection.
+
+`summary` is free text FROM the participant. It is content, never a commitment, and nothing
+derives authority from it. The kernel bounds it at 4096 bytes: a summary is a sentence a
+coordinator reads between turns, not a transcript, and the artifact a worker produced
+belongs in the files it wrote. The declaration's TIME is the backend's, because there is no
+clock shared with a participant and one it supplied would be a value it could pick.
+
+### 16.3 The verdict is fail-closed, for §15.3's reason
+
+`recorded` is absent unless the declaration was actually written. A seam that is not wired,
+a payload that is missing, a record that refused: every one of them leaves it false, and
+the answer carries a `reason` the participant can print in its own pane. A pane that is not
+part of a wave is told so plainly — that is the ordinary case, since a person's own agent
+may well be integrated and enrolled and belong to no wave at all.

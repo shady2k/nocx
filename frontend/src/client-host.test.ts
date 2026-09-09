@@ -7,7 +7,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mountClientHost, ATTENTION_ACTIVATED_EVENT } from './client-host'
-import type { HostBindings, HostEvents } from './client-host'
+import type { ApprovalSurface, HostBindings, HostEvents } from './client-host'
 import type { Dispatcher } from './dispatcher'
 import type { HostResolved } from './generated/host.resolved'
 
@@ -104,8 +104,21 @@ function mount(
   d: ScriptedDispatcher,
   bindings: HostBindings,
   events: HostEvents = { on: () => () => {} },
+  approveAgent?: ApprovalSurface,
 ) {
-  return mountClientHost(d as unknown as Dispatcher, bindings, events)
+  return mountClientHost(d as unknown as Dispatcher, bindings, events, approveAgent)
+}
+
+/** An approval surface a test drives by hand. It is NOT one of the bindings:
+ *  the prompt it raises is the renderer's own, which is the whole point of
+ *  nocx-qlp9w. */
+function scriptedApproval(answer = true) {
+  const seen: string[] = []
+  const surface: ApprovalSurface = (executable, scope) => {
+    seen.push(`approveAgent:${executable}|${scope}`)
+    return Promise.resolve(answer)
+  }
+  return { surface, seen }
 }
 
 /** Deliver one host.request and let the async answer settle. */
@@ -189,6 +202,22 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
     await request(d, { requestId: 'r7', capability: 'window.focus' })
     expect(b.seen).toEqual(['focusWindow'])
     expect(lastResolution(d)).toEqual({ requestId: 'r7', outcome: 'ok' })
+  })
+
+  it('asks the person to admit the executable tree and reports the answer', async () => {
+    const d = scriptedDispatcher()
+    const b = scriptedBindings()
+    const a = scriptedApproval()
+    mount(d, b, undefined, a.surface)
+    await request(d, {
+      requestId: 'r-approval',
+      capability: 'agent.approval',
+      executable: '/usr/local/bin/agent',
+      scope: 'tool-endpoint:workspace-1',
+    })
+    expect(a.seen).toEqual(['approveAgent:/usr/local/bin/agent|tool-endpoint:workspace-1'])
+    expect(b.seen).toEqual([])
+    expect(lastResolution(d)).toEqual({ requestId: 'r-approval', outcome: 'ok', approved: true })
   })
 
   it('reports a dismissed picker as cancelled, not as a failure', async () => {
@@ -277,6 +306,66 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
     await request(d, { requestId: 'r-na', capability })
     expect(b.seen).toEqual([])
     expect(lastResolution(d).outcome).toBe('unavailable')
+  })
+
+  // ...and the one capability that is NOT native (nocx-qlp9w). The list above
+  // is the whole native vocabulary — a picker, a URL, a banner, a badge, a
+  // bounce, a window raise — and agent.approval is not in it: what it needs is
+  // agent-approval-prompt.tsx, a prompt of this renderer's own, which a plain
+  // browser draws as well as a webview does. Refusing it for want of a Wails
+  // binding is nocx-bu8fl's wrong equation a second time: no native bindings
+  // == cannot act. It could act; it just could not act NATIVELY, and this
+  // capability never asked it to.
+  it('answers agent.approval from its own prompt when there is no native host at all', async () => {
+    reachable.value = false
+    const d = scriptedDispatcher()
+    const b = scriptedBindings()
+    const a = scriptedApproval()
+    mount(d, b, undefined, a.surface)
+    await request(d, {
+      requestId: 'r-na-approval',
+      capability: 'agent.approval',
+      executable: '/usr/local/bin/claude',
+      scope: 'tool-endpoint:workspace-1',
+    })
+    expect(a.seen).toEqual(['approveAgent:/usr/local/bin/claude|tool-endpoint:workspace-1'])
+    expect(lastResolution(d)).toEqual({
+      requestId: 'r-na-approval',
+      outcome: 'ok',
+      approved: true,
+    })
+  })
+
+  // The person said no, and a no is an ANSWER: ok with approved false, never
+  // cancelled and never failed. The endpoint stores the refusal; a client that
+  // reported it as a failure would leave the question askable again.
+  it('carries a refusal back as an answer, not as a failure', async () => {
+    reachable.value = false
+    const d = scriptedDispatcher()
+    const a = scriptedApproval(false)
+    mount(d, scriptedBindings(), undefined, a.surface)
+    await request(d, { requestId: 'r-no', capability: 'agent.approval' })
+    expect(lastResolution(d)).toEqual({ requestId: 'r-no', outcome: 'ok', approved: false })
+  })
+
+  // A client that mounted no prompt cannot ask anybody, and says exactly that.
+  // UNAVAILABLE, for nocx-bu8fl's reason: nothing was attempted, so this is
+  // absence and not a lost effect. It replaces a default binding that rejected
+  // — which answered `failed` for a question that was never put to a person,
+  // and, because main() mounted the host twice, was the answer that WON
+  // (nocx-pighx).
+  it('answers unavailable when no approval surface is mounted, native host or not', async () => {
+    for (const native of [true, false]) {
+      reachable.value = native
+      const d = scriptedDispatcher()
+      mount(d, scriptedBindings())
+      await request(d, { requestId: 'r-nosurface', capability: 'agent.approval' })
+      expect(lastResolution(d)).toEqual({
+        requestId: 'r-nosurface',
+        outcome: 'unavailable',
+        error: 'this client has no agent approval surface',
+      })
+    }
   })
 
   // The true positive the fix must not remove: a client that HAS a native

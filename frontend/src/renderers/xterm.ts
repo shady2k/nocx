@@ -276,6 +276,7 @@ export class XtermRenderer implements TerminalRenderer {
   private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
   private scrollDisposable?: { dispose(): void }
+  private _followingOutput = true
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
   /** Subscribers to "the cell dimensions may have changed" (nocx-yy9g) —
@@ -421,6 +422,7 @@ export class XtermRenderer implements TerminalRenderer {
     // clear/reset subscribers were never mount-dependent.
     this._ensureWriteParsed()
     this._ensureResize()
+    this._ensureScroll()
     this._ensureBufferChange()
 
     // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
@@ -630,7 +632,9 @@ export class XtermRenderer implements TerminalRenderer {
     const t = this.term
     if (!t || cols <= 0 || rows <= 0) return
     if (cols === t.cols && rows === t.rows) return
+    const followingOutput = this._followingOutput
     t.resize(cols, rows)
+    if (followingOutput) t.scrollToBottom()
     // A resize rebuilds the char atlas; cells xterm does not re-mark dirty
     // go on drawing from the old one, which on WKWebView is the mangled
     // overlapping glyphs of nocx-q18. Repaint the viewport so no cell is
@@ -863,6 +867,17 @@ export class XtermRenderer implements TerminalRenderer {
     this.resizeSubs.push(cb)
     this._ensureResize()
   }
+  /** Attach the scroll listener when the terminal exists. Subscribers
+   *  registered before mount must not be lost, and the renderer keeps the
+   *  xterm viewport's follow state separate from outer DOM scrollback. */
+  private _ensureScroll(): void {
+    const t = this.term
+    if (this.scrollDisposable || !t) return
+    this.scrollDisposable = t.onScroll(() => {
+      this._followingOutput = t.buffer.active.viewportY === t.buffer.active.baseY
+      for (const sub of this.scrollSubs) sub(t.buffer.active.viewportY)
+    })
+  }
 
   /** Attach the resize fan-out when the terminal exists. Subscribers
    *  registered before mount (the frame tracker constructs with the
@@ -1026,10 +1041,10 @@ export class XtermRenderer implements TerminalRenderer {
     // default rendering path (renderRows → _updateModel → getRasterizedGlyph)
     // draws glyphs to the atlas on demand, so clearing first buys nothing.
     //
-    // The resize path (fitViewport → resize) already refreshes the char atlas
-    // char atlas via _refreshCharAtlas() which acquires a correctly-sized
-    // atlas. The tab-activation path needs a viewport refresh because
-    // terminal content may have changed while the tab was in the background.
+    // Activation must restore a viewport that was following output to the
+    // current xterm tail before repainting. Deliberate history remains where
+    // the user left it.
+    if (this._followingOutput) this.term?.scrollToBottom()
     this._repaintViewport()
   }
 
@@ -1314,10 +1329,7 @@ export class XtermRenderer implements TerminalRenderer {
 
   onScroll(cb: (viewportY: number) => void): void {
     this.scrollSubs.push(cb)
-    if (this.scrollDisposable || !this.term) return
-    this.scrollDisposable = this.term.onScroll((y: number) => {
-      for (const sub of this.scrollSubs) sub(y)
-    })
+    this._ensureScroll()
   }
 
   onRender(cb: (range: { start: number; end: number }) => void): void {

@@ -1430,6 +1430,86 @@ describe('XtermRenderer disposal mid-capture (nocx-x8s2.4)', () => {
   })
 })
 
+describe('XtermRenderer keeps a followed viewport at the live tail', () => {
+  type TestTerm = {
+    rows: number
+    options: { smoothScrollDuration: number }
+    refresh: (start: number, end: number) => void
+    resize: (cols: number, rows: number) => void
+    scrollToTop: () => void
+    buffer: {
+      active: {
+        viewportY: number
+        baseY: number
+      }
+    }
+  }
+
+  const mountWithOutput = async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const term = (r as unknown as Record<string, unknown>).term as TestTerm
+    term.options.smoothScrollDuration = 0
+
+    await new Promise<void>((resolve) => {
+      r.onWriteParsed(resolve)
+      r.write(
+        `${Array.from({ length: term.rows + 10 }, (_, index) => `TAIL-${index}`).join('\r\n')}\r\n`,
+      )
+    })
+    expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY)
+    return { r, term }
+  }
+
+  it('restores a followed viewport to the tail on activation without moving history', async () => {
+    const { r, term } = await mountWithOutput()
+    const refresh = vi.spyOn(term, 'refresh')
+
+    // Model the Linux reflow drift without reporting it as user scrollback.
+    term.scrollToTop()
+    expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY)
+    ;(r as unknown as Record<string, unknown>)._followingOutput = true
+
+    r.refreshAtlas()
+
+    expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY)
+    expect(refresh).toHaveBeenCalledWith(0, term.rows - 1)
+
+    // A real user scroll remains history even when activation repaints.
+    term.scrollToTop()
+    expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY)
+    r.refreshAtlas()
+    expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY)
+    r.dispose()
+  })
+
+  it('restores a followed viewport after resize but preserves deliberate history', async () => {
+    const { r, term } = await mountWithOutput()
+    const originalResize = term.resize.bind(term)
+    const resize = vi.spyOn(term, 'resize').mockImplementation((cols, rows) => {
+      originalResize(cols, rows)
+      term.scrollToTop()
+      ;(r as unknown as Record<string, unknown>)._followingOutput = true
+    })
+
+    r.setGrid(132, 12)
+
+    expect(resize).toHaveBeenCalledWith(132, 12)
+    expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY)
+
+    resize.mockRestore()
+    term.scrollToTop()
+    expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY)
+    r.setGrid(140, 14)
+    expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY)
+    r.dispose()
+  })
+})
+
 // ── The repaint that has to follow a grid resize (nocx-q18, nocx-jfgb) ────
 //
 // A resize rebuilds xterm's char atlas, and on the real WKWebView the cells

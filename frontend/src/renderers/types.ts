@@ -249,9 +249,11 @@ export interface TerminalRenderer {
    *  editor-arbiter path only. */
   onSnippetChord?(cb: (() => void) | null): void
 
-  // refreshAtlas is called when the renderer becomes visible after being
-  // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
-  // while hidden; this gives the renderer a chance to clear and repaint.
+  /**
+   * Restore a followed terminal to its current buffer tail on hidden-to-visible
+   * activation, then repaint the visible viewport. A deliberate history
+   * position remains unchanged while it is repainted.
+   */
   refreshAtlas(): void
 
   /**

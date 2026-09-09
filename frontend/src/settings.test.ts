@@ -637,6 +637,10 @@ describe('SettingsContent', () => {
       'Endpoints',
       'Roles',
       'Assistant permissions',
+      // Beside the permissions page and not the same subject: that one
+      // governs nocx's own assistant, this lists the foreign programs a
+      // person admitted to nocx's tools (nocx-6jbad).
+      'Agent access',
       'Agent screens',
       'Calibrate an agent',
       // Skills is an ASSISTANT page and the last of them (nocx-fe7fe.1). It

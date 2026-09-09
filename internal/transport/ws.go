@@ -254,6 +254,13 @@ type WSServer struct {
 	// model is offered no tools — the state before readScreen (see
 	// runGrantFor).
 	agentPolicy assistant.GlobalPolicy
+	// agentAccess is the durable record of which AGENT PROGRAMS a person has
+	// admitted to the tool endpoint — a different question from agentPolicy,
+	// which governs what nocx's own assistant may do. Named by the
+	// composition root; unset, the two agentAccess methods answer "not
+	// available" rather than an empty list, because "nothing is remembered"
+	// and "this window cannot see what is remembered" are different facts.
+	agentAccess AgentAccessStore
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -1086,6 +1093,15 @@ func WithAgentPolicy(p assistant.GlobalPolicy) WSServerOption {
 	return func(ws *WSServer) { ws.agentPolicy = p }
 }
 
+// WithAgentAccess attaches the record of which agent programs a person has
+// admitted to the tool endpoint, so the answers can be read back and unmade
+// (nocx-6jbad). Unset, agentAccess.list and agentAccess.forget answer "not
+// available": a window that cannot see the document must not draw an empty
+// list, which reads as "you have decided nothing".
+func WithAgentAccess(store AgentAccessStore) WSServerOption {
+	return func(ws *WSServer) { ws.agentAccess = store }
+}
+
 // WithLiveEffects names which effect classes a declared tool actually
 // carries — policy.get's "live". The value is agenttools.LiveEffects(), read
 // at the composition root beside WithAgentPolicy: the policy says what a run
@@ -1667,6 +1683,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
+	specs = append(specs, s.agentAccessSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)

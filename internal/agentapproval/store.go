@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -160,6 +161,80 @@ func (s *Store) Record(executable Executable, scope string, answer Answer) error
 		return err
 	}
 	return nil
+}
+
+// Record is one remembered answer, for a person to read back and reconsider.
+type Record struct {
+	Executable Executable `json:"executable"`
+	Scope      string     `json:"scope"`
+	Answer     Answer     `json:"answer"`
+}
+
+// List returns every remembered answer, ordered by path then digest then
+// scope so a surface renders the same list twice running. A map's order is
+// not one, and a list that reshuffles under a person deciding what to forget
+// is a list they cannot use.
+func (s *Store) List() []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	records := make([]Record, 0, len(s.approvals))
+	for k, answer := range s.approvals {
+		parts := strings.SplitN(k, "\x00", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		records = append(records, Record{
+			Executable: Executable{Path: parts[0], SHA256: parts[1]},
+			Scope:      parts[2],
+			Answer:     answer,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		a, b := records[i], records[j]
+		if a.Executable.Path != b.Executable.Path {
+			return a.Executable.Path < b.Executable.Path
+		}
+		if a.Executable.SHA256 != b.Executable.SHA256 {
+			return a.Executable.SHA256 < b.Executable.SHA256
+		}
+		return a.Scope < b.Scope
+	})
+	return records
+}
+
+// Forget removes one remembered answer, so a decision a person made once is
+// one they can unmake. Without it the store is write-only from the product's
+// side: a denial is never silently retried, deliberately, which is only
+// defensible while there is somewhere to reconsider it (nocx-6jbad).
+//
+// The answer is what goes; nothing else does. Forgetting does not reach into
+// a live pane, and it does not have to: the admit check reads this store on
+// every call, so the next tool call from an agent whose answer is gone is
+// refused, and the agent itself goes on running without nocx's tools —
+// exactly the state a denial produces.
+//
+// A false second result is "there was nothing to forget", which is a SUCCESS
+// and not an error: a second click, or a page whose read predates somebody
+// else's forget, asked for a state that already holds.
+func (s *Store) Forget(executable Executable, scope string) (bool, error) {
+	if !executable.valid() || strings.TrimSpace(scope) == "" {
+		return false, errors.New("agent approval: invalid executable identity or scope")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	k := key(executable, scope)
+	previous, existed := s.approvals[k]
+	if !existed {
+		return false, nil
+	}
+	delete(s.approvals, k)
+	if err := s.writeLocked(); err != nil {
+		s.approvals[k] = previous
+		return false, err
+	}
+	return true, nil
 }
 
 func key(executable Executable, scope string) string {

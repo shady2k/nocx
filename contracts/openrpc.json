@@ -634,6 +634,104 @@
       }
     },
     {
+      "name": "agentAccess.forget",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/agentAccess.forget.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "agentAccess.forgetResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/agentAccess.forget.schema.json"
+        }
+      }
+    },
+    {
+      "name": "agentAccess.list",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/agentAccess.list.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "agentAccess.listResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/agentAccess.list.schema.json"
+        }
+      }
+    },
+    {
       "name": "api.collections.close",
       "params": [
         {
@@ -10538,6 +10636,12 @@
     },
     {
       "$ref": "https://nocx.local/contracts/agent.type.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/agentAccess.forget.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/agentAccess.list.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/api.collections.close.schema.json"

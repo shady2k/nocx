@@ -39,6 +39,7 @@ import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { EmittingClient } from './emitting-client'
+import { AgentAccessClient } from './agent-access-client'
 import { CalibrationClient } from './calibration-client'
 import { TypingClient } from './typing-client'
 import { AgentClient } from './agent'
@@ -252,6 +253,7 @@ function main(): void {
   // (nocx-02uci). A pull client with no state: the Settings page it feeds owns
   // the interval, and there is nothing here to close.
   const emittingClient = new EmittingClient(dispatcher)
+  const agentAccessClient = new AgentAccessClient(dispatcher)
   // The guided calibration (nocx-etejh). Stateless in the same way: the walk
   // it drives lives in the backend, keyed by the pane, so a window that goes
   // away leaves nothing half-open.
@@ -613,6 +615,7 @@ function main(): void {
         secretSource,
         skillsStore,
         emittingClient,
+        agentAccessClient,
         calibrationClient,
         typingClient,
         // The window already names every pane in its tab strip, and the

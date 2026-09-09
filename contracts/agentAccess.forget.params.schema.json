@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentAccess.forget.params.schema.json",
+  "title": "AgentAccessForgetParams",
+  "description": "Params for agentAccess.forget: the ONE answer to unmake, addressed by the three facts that identify it. The durable scope key is not sent — the backend composes it from the workspace, so its grammar keeps one owner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["executable", "digest", "workspace"],
+  "properties": {
+    "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "workspace": { "type": "string", "minLength": 1, "maxLength": 256 }
+  }
+}

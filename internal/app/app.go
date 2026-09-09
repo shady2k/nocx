@@ -1496,6 +1496,11 @@ func New(opts ...Option) (*App, error) {
 	// session conventional. Before this line the remote adapter was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger, transports: childTransports}
+	// The answers a person gave about which agents may use nocx's tools, so a
+	// settings surface can read them back and unmake one. Appended here
+	// rather than in the literal above because the service is built with the
+	// session registry, which does not exist that early (nocx-6jbad).
+	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 

@@ -34,6 +34,8 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
+import { AgentAccessSection } from './agent-access-section'
+import type { AgentAccessClient } from './agent-access-client'
 import { AgentEmittingSection } from './agent-emitting-section'
 import { AgentCalibrationSection } from './agent-calibration-section'
 import type { EmittingClient } from './emitting-client'
@@ -243,6 +245,7 @@ export interface SettingsComponentProps {
    *  is still registered and says so, because a surface that appears only once
    *  some other state exists is how a feature ships unreachable. */
   emittingClient?: EmittingClient
+  agentAccessClient?: AgentAccessClient
   /** The guided calibration (nocx-etejh). Optional like every other client
    *  here: without it the page is still registered and says so. */
   calibrationClient?: CalibrationClient
@@ -674,6 +677,32 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // BESIDE the agent policy, in the same 'assistant' group: both answer
     // "what is the assistant doing and on what terms", and a person who has
     // come to repair a detection rule is looking for the agent group.
+    // WHICH AGENTS MAY USE NOCX'S TOOLS, and the way back from an answer
+    // (nocx-6jbad). It sits beside Assistant permissions and is not the same
+    // subject: that page governs what NOCX'S OWN assistant may do, this one
+    // lists the foreign programs a person admitted or refused. The rail does
+    // not yet show that distinction — nocx-t72hg is the regrouping, and this
+    // is a fourth row waiting for it.
+    const agentAccessPage: SettingsPage = {
+      kind: 'component',
+      id: 'agent-access',
+      title: 'Agent access',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.agentAccessClient}
+          fallback={
+            <PageSection title="Agent access">
+              Which agents are allowed is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentAccessSection client={props.agentAccessClient!} />
+        </Show>
+      ),
+    }
+
     const emittingPage: SettingsPage = {
       kind: 'component',
       id: 'emitting',
@@ -766,6 +795,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       snippetsPage,
       rolesPage,
       policyPage,
+      // Beside the permissions page because both are about what may act, and
+      // after it because the assistant is ours and these are the programs a
+      // person brought (nocx-6jbad).
+      agentAccessPage,
       emittingPage,
       calibrationPage,
       // Last in Assistant, after the two pages that decide what the assistant

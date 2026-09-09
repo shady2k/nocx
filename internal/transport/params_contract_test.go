@@ -775,6 +775,19 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
 		},
+		// Listing asks nothing: a backend composes exactly one scope, so
+		// there is no workspace to select. `{}` is what the client sends and
+		// the only shape worth probing for a noParams() method.
+		"agentAccess.list": {
+			[]byte(`{}`),
+		},
+		// Forgetting names the one answer by the three facts the person was
+		// shown. The durable scope key is deliberately not among them — it is
+		// composed in internal/app, and a second speller of it here is how the
+		// two halves of one rule drift (nocx-6jbad).
+		"agentAccess.forget": {
+			[]byte(`{"executable":"/run/current-system/sw/bin/claude","digest":"55640c4f3b8769e625c91e6aeaac3032c713a8bd0b83e04c9265772d7cb40825","workspace":"default"}`),
+		},
 		// Typing carries a pane and text and NEVER an agent or a state, both
 		// of which the backend reads for itself (nocx-dkawo.1). The submit
 		// key is asked for explicitly; absent is false, which is the safe

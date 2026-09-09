@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentAccess.list.schema.json",
+  "title": "AgentAccessList",
+  "description": "Result of the agentAccess.list JSON-RPC method: every answer a person has given to the 'may this agent use nocx's tools' question, so they can read back what they decided and unmake it (nocx-6jbad). The store was write-only from the product's side — a denial is never silently retried, deliberately, and the only way to reconsider one was editing agent-approvals.json by hand. Only answers under the tool-endpoint scope are listed, because that is the only question this document holds answers to.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answers"],
+  "properties": {
+    "answers": {
+      "type": "array",
+      "description": "The answers, ordered by executable path then digest then workspace. The order is the backend's and it is stable: a list that reshuffles between reads is one a person cannot use to choose what to forget.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["executable", "digest", "workspace", "answer"],
+        "properties": {
+          "executable": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The agent's absolute path, as it was when the answer was given."
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of that file's bytes. The answer is keyed by it, so a replaced program is a different row and is asked about again."
+          },
+          "workspace": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The workspace the answer covers, by name — not the durable scope key it is part of, whose grammar has one owner in the backend."
+          },
+          "answer": {
+            "type": "string",
+            "enum": ["granted", "denied"],
+            "description": "What the person answered. The store's own two words; the surface is what turns them into a sentence."
+          }
+        }
+      }
+    }
+  }
+}

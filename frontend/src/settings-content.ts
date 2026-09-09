@@ -63,6 +63,7 @@ export class SettingsContent extends SolidPaneContent {
     /** What an enrolled pane is emitting (nocx-02uci), and what the window
      *  calls that pane. */
     private readonly emittingClient?: import('./emitting-client').EmittingClient,
+    private readonly agentAccessClient?: import('./agent-access-client').AgentAccessClient,
     /** The guided calibration (nocx-etejh): the same pane list, and the walk
      *  that labels its frames. A second client rather than a method on the
      *  emitting one, because the two answer different questions about the
@@ -91,6 +92,7 @@ export class SettingsContent extends SolidPaneContent {
           agentClient: this.agentClient,
           policyClient: this.policyClient,
           emittingClient: this.emittingClient,
+          agentAccessClient: this.agentAccessClient,
           calibrationClient: this.calibrationClient,
           typingClient: this.typingClient,
           paneName: this.paneName,

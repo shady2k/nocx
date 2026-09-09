@@ -151,6 +151,51 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	return nil
 }
 
+// ListAgentAccess is the answers a person gave, in the terms the surface
+// speaks: the three facts they were shown, and the store's own answer. The
+// durable scope key does not travel — this is where it is composed, so this
+// is where it is taken apart, and the transport never learns its grammar.
+//
+// Answers under some other scope are dropped rather than shown. This backend
+// composes exactly one, and a row a person cannot address is a row they
+// cannot act on.
+func (s *agentApprovalService) ListAgentAccess() []transport.AgentAccessRecord {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	records := []transport.AgentAccessRecord{}
+	for _, record := range s.store.List() {
+		if record.Scope != s.scope {
+			continue
+		}
+		records = append(records, transport.AgentAccessRecord{
+			Executable: record.Executable.Path,
+			Digest:     record.Executable.SHA256,
+			Workspace:  s.workspace,
+			Answer:     string(record.Answer),
+		})
+	}
+	return records
+}
+
+// ForgetAgentAccess unmakes one answer. It touches only the document: a pane
+// already running is not reached and does not need to be, because Approved
+// reads the store on every admit, so that agent's next tool call is refused
+// and it goes on running without nocx's tools — the state a denial produces.
+//
+// A workspace this backend does not answer for is refused rather than
+// composed into a key that would match nothing: silently forgetting nothing
+// and reporting success is how a person comes to believe a revocation landed.
+func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace string) (bool, error) {
+	if s == nil || s.store == nil {
+		return false, errors.New("nocx has no record of admitted agents")
+	}
+	if workspace != s.workspace {
+		return false, fmt.Errorf("nocx does not hold answers for workspace %q", workspace)
+	}
+	return s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
+}
+
 func (s *agentApprovalService) remember(sid session.ID, executable agentapproval.Executable) {
 	s.mu.Lock()
 	s.enrolled[sid] = executable

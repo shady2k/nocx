@@ -298,6 +298,18 @@ that is correct: before it, an e2e run wrote the developer's real settings and r
 theme on every pass. If you want your real SSH profiles in the dev stand, copy them across
 by hand — nothing migrates them for you, and nothing should.
 
+**A dev build logs everything, and that includes what you typed.** The default level is
+the BUILD's (`internal/log`'s `DefaultLevel`, split on the `release` tag), so a dev stand
+writes debug from its first line without being asked — the owner's decision of 2026-09-10,
+because a debug line nobody can reach without a restart is a debug line nobody writes.
+The data plane's arrival log (`internal/transport/ws.go`) is one of those lines, and that
+plane carries exactly what the person at the keyboard pressed: every password typed into a
+running `ssh` for a host nocx holds no credentials for. `log.Sensitive` still redacts it in
+a shipped build, chosen by the build tag and not by the level, so nothing a user runs is
+affected. What is affected is `~/.local/share/nocx-dev/nocx.log` on YOUR machine:
+**it is not a file to paste into an issue, a bead or a pull request.** Quote the lines you
+need.
+
 **The e2e suite gets a disposable `$HOME`.** There is one stand and Playwright owns it
 (`e2e/stand.ts`), so the boundary is applied to every backend the suite starts — the shared
 one and the ones individual specs raise — by `e2e/home-isolation.ts`, which RAISES rather

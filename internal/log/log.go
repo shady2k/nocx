@@ -73,42 +73,42 @@ func (a *SlogAdapter) With(args ...any) Logger {
 	return &SlogAdapter{log: a.log.With(args...)}
 }
 
-// WithContext binds the ids the context is carrying — the trace that names
-// the whole exchange and the request that named this frame — onto every
-// record this logger writes from here on.
+// WithContext binds the ids the context is carrying — the W3C span that names
+// this frame of the exchange, the trace the exchange belongs to, the frame that
+// asked for it, and the wire request being served — onto every record this
+// logger writes from here on. See span.go for what mints them.
 //
 // Empty ids are NOT attached: a `trace=""` on every line of a process is
 // noise that makes the lines that do carry one harder to find.
 func (a *SlogAdapter) WithContext(ctx context.Context) Logger {
 	l := a.log
-	if id := TraceID(ctx); id != "" {
-		l = l.With(slog.String("trace", id))
+	if span := SpanFrom(ctx); span.Valid() {
+		l = l.With(slog.String("trace_id", span.TraceID), slog.String("span_id", span.SpanID))
+		if span.ParentSpanID != "" {
+			l = l.With(slog.String("parent_span_id", span.ParentSpanID))
+		}
 	}
 	if id := RequestID(ctx); id != "" {
-		l = l.With(slog.String("request", id))
+		l = l.With(slog.String("request_id", id))
 	}
 	return &SlogAdapter{log: l}
 }
 
-// THE CHAIN (nocx-d6gn4.8.1). A trace names one EXCHANGE end to end — a run
-// and every ask, approval, effect and program that belongs to it, across the
-// several JSON-RPC requests it takes. A request names one frame off the
-// wire. Both travel in the context, so anything downstream that already
-// receives a context can say which exchange it is part of without being told
-// separately, and a resume eight seconds later logs under the same trace as
-// the ask that parked it.
+// THE CHAIN (nocx-d6gn4.8.1, given the spec's spelling by nocx-4l2a5.1). A
+// trace names one EXCHANGE end to end — a run and every ask, approval, effect
+// and program that belongs to it, across the several JSON-RPC requests it
+// takes. A span names one frame of it and its parent names the frame that
+// asked. A request names one frame off the wire. All travel in the context, so
+// anything downstream that already receives a context can say which exchange it
+// is part of without being told separately, and a resume eight seconds later
+// logs under the same trace as the ask that parked it.
 //
 // The seam for this existed and had NO producer: WithContext read a trace id
 // out of the context and nothing anywhere put one in, so every record
 // carried traceID="". Reading it was free; nobody noticed it said nothing.
-
-// WithTraceID returns a context carrying the exchange's trace id.
-func WithTraceID(ctx context.Context, id string) context.Context {
-	if id == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, traceKey, id)
-}
+// The trace half now lives in span.go, which mints ids something other than
+// this codebase can join on; what stays here is the wire request id, which is
+// the transport's own and belongs to no spec.
 
 // WithRequestID returns a context carrying the id of the wire frame being
 // served.
@@ -117,17 +117,6 @@ func WithRequestID(ctx context.Context, id string) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, requestKey, id)
-}
-
-// TraceID is the exchange this context belongs to, or empty.
-func TraceID(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	if v, ok := ctx.Value(traceKey).(string); ok {
-		return v
-	}
-	return ""
 }
 
 // RequestID is the wire frame this context is serving, or empty.
@@ -143,10 +132,7 @@ func RequestID(ctx context.Context) string {
 
 type ctxKeyType struct{ name string }
 
-var (
-	traceKey   = ctxKeyType{"trace"}
-	requestKey = ctxKeyType{"request"}
-)
+var requestKey = ctxKeyType{"request"}
 
 // CallPath is the chain of calls that reached the caller, innermost first,
 // as "function:line < function:line …". The record's own source answers

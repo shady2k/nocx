@@ -1075,7 +1075,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// approval that suspends it, the resume that finishes it and every
 	// effect any of them run all log under one trace, across the several
 	// wire frames it takes (internal/log).
-	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
+	runCtx, _ := log.StartTrace(ctx, runTrace(askRes.RunID))
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
@@ -1918,7 +1918,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
-	ctx = log.WithTraceID(ctx, runTrace(p.RunID))
+	ctx, _ = log.StartTrace(ctx, runTrace(p.RunID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[p.RunID]
 	h.pendingRunsMu.Unlock()
@@ -1996,7 +1996,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	}
 	// The person's answer belongs to the run's exchange, not to a new one:
 	// the resume and everything it drives log under the ask's trace.
-	ctx = log.WithTraceID(ctx, runTrace(runID))
+	ctx, _ = log.StartTrace(ctx, runTrace(runID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[runID]
 	h.pendingRunsMu.Unlock()
@@ -3238,7 +3238,7 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 			alreadyFinished = append(alreadyFinished, id)
 			continue
 		}
-		runCtx := log.WithTraceID(ctx, runTrace(id))
+		runCtx, _ := log.StartTrace(ctx, runTrace(id))
 		rc.control.cancelRunLeases()
 		rc.control.cancelContext()
 		rc.control.finishCancel(content.RunCancelled, content.TermAnswerRevoked, sentence, true)
@@ -3251,4 +3251,12 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 // runTrace is the id of one agent exchange — the run — as every log line
 // belonging to it names it. One derivation, so the ask, the approval and
 // the resume cannot disagree about which exchange they are part of.
-func runTrace(runID int64) string { return "run-" + strconv.FormatInt(runID, 10) }
+//
+// It is DERIVED rather than minted because the exchange outlives the frame:
+// an ask parks, a person answers eight seconds later on a different request,
+// and there is nowhere between the two to keep an id. The run id is the name
+// the exchange already has, and internal/log hashes it into the W3C shape so
+// the result is joinable by something that is not us (nocx-4l2a5.1).
+func runTrace(runID int64) string {
+	return log.DeterministicTraceID("run-" + strconv.FormatInt(runID, 10))
+}

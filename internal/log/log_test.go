@@ -37,13 +37,13 @@ func TestSlogAdapter_WithContext(t *testing.T) {
 	}
 }
 
-func TestTraceIDFromContext_EmptyWhenNotSet(t *testing.T) {
+func TestRequestIDFromContext_EmptyWhenNotSet(t *testing.T) {
 	ctx := context.Background()
-	if id := TraceID(ctx); id != "" {
-		t.Fatalf("expected empty, got %q", id)
-	}
 	if id := RequestID(ctx); id != "" {
 		t.Fatalf("expected empty, got %q", id)
+	}
+	if span := SpanFrom(ctx); span.Valid() {
+		t.Fatalf("expected no span, got %+v", span)
 	}
 }
 
@@ -54,11 +54,17 @@ func TestWithContext_CarriesTheTraceAndRequestOntoEveryRecord(t *testing.T) {
 	var buf bytes.Buffer
 	a := NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{AddSource: true})))
 
-	ctx := WithRequestID(WithTraceID(context.Background(), "run-349"), "agent.approve#7")
+	traced, span := StartTrace(context.Background(), DeterministicTraceID("run-349"))
+	ctx := WithRequestID(traced, "agent.approve#7")
 	a.WithContext(ctx).Warn("the parked program was ended", "cause", "discarded")
 
 	out := buf.String()
-	for _, want := range []string{"trace=run-349", "request=agent.approve#7", "cause=discarded"} {
+	for _, want := range []string{
+		"trace_id=" + span.TraceID,
+		"span_id=" + span.SpanID,
+		"request_id=agent.approve#7",
+		"cause=discarded",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("record does not carry %q:\n%s", want, out)
 		}
@@ -76,7 +82,7 @@ func TestWithContext_AttachesNothingWhenThereIsNoChain(t *testing.T) {
 	var buf bytes.Buffer
 	a := NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, nil)))
 	a.WithContext(context.Background()).Info("plain")
-	if out := buf.String(); strings.Contains(out, "trace=") || strings.Contains(out, "request=") {
+	if out := buf.String(); strings.Contains(out, "trace_id=") || strings.Contains(out, "request_id=") {
 		t.Fatalf("empty ids were attached:\n%s", out)
 	}
 }

@@ -227,12 +227,31 @@ func (s *hostSession) pump() {
 // into its bounded window. No decoder or policy exists on this host.
 func (s *hostSession) lifecyclePump(stream io.ReadWriteCloser) {
 	buf := make([]byte, pageSize)
+	// THE ONE FACT THAT SPLITS THE HELLO FAILURE IN TWO (nocx-n14oo.6).
+	//
+	// A pane that never integrates ends in a hello-timeout, reported by the
+	// backend twenty seconds and one process away, and until this counter
+	// nothing anywhere could say WHICH of the two failures it was: a shell
+	// that never wrote its hello — the rcfile did not run, or ran and could
+	// not reach fd 4 — or a hello that was written and did not survive the
+	// carriage. The first byte and the total are the whole of that answer.
+	first := true
+	var total int
 	for {
 		n, err := stream.Read(buf)
 		if n > 0 {
+			if first {
+				s.log.Info("lifecycle: the shell wrote its first bytes",
+					"session", s.id.Session, "bytes", n)
+				first = false
+			}
+			total += n
 			s.lifecycleWin.write(buf[:n])
 		}
 		if err != nil {
+			s.log.Info("lifecycle: the shell's channel ended",
+				"session", s.id.Session, "bytes_total", total,
+				"wrote_nothing", total == 0, "error", err)
 			s.lifecycleWin.close()
 			return
 		}

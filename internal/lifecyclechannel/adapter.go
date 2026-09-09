@@ -140,7 +140,11 @@ type Adapter struct {
 	dec        *lifecyclecodec.Decoder
 
 	helloTimeout time.Duration
-	report       LossReporter
+	// openedAt is when this transport was constructed, so the established
+	// line can say how long the far side took to authenticate — the number a
+	// hello-timeout is measured against.
+	openedAt time.Time
+	report   LossReporter
 
 	mu     sync.Mutex
 	closed bool
@@ -179,6 +183,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 		id:   lifecycle.TransportID("tpt-" + tptHex),
 		lane: lifecycle.LaneID("lane-" + laneHex),
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+		openedAt: time.Now(),
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
 	bindErr := k.BindTransport(a.id, a)
@@ -379,6 +384,14 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 	// the timer running and the domain times out — it must never sit
 	// Established forever.
 	if env.Event.Kind == lifecycle.KindAccept {
+		// SAID, because only the FAILURE was. A channel that integrated
+		// logged nothing at all, so "did this pane ever authenticate, and how
+		// long did it take" could be answered for a pane that failed and not
+		// for one that worked — and a comparison needs both sides
+		// (nocx-n14oo.6).
+		a.log.Info("lifecycle channel established",
+			"transport", a.id, "lane", a.lane, "domain", a.domain,
+			"after_ms", time.Since(a.openedAt).Milliseconds())
 		a.stopHelloTimer()
 	}
 	return nil

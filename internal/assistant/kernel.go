@@ -850,37 +850,6 @@ func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []a
 	return m.grant.Policy.FloorRefusal(invocation, scopes)
 }
 
-// resolveResources is the one call-resource derivation. A nil resolver means
-// the declaration names no resource at all; a non-nil resolver may validly
-// return zero refs for this call. Resolver failures are malformed model
-// output because arguments were validated but could not identify the
-// declared authority.
-func (m *effectKernel) resolveResources(decl agenttools.Tool, args map[string]any) ([]agenttools.ResourceRef, bool, error) {
-	if decl.ResolveResources == nil {
-		return nil, false, nil
-	}
-	resources, err := decl.ResolveResources(args, m.runCtx)
-	if err != nil {
-		return nil, true, err
-	}
-	for _, resource := range resources {
-		if resource.Kind == "" || resource.ID == "" {
-			return nil, true, fmt.Errorf("resource resolver returned an incomplete resource")
-		}
-		declared := false
-		for _, kind := range decl.ResourceKinds {
-			if resource.Kind == kind {
-				declared = true
-				break
-			}
-		}
-		if !declared {
-			return nil, true, fmt.Errorf("resource resolver returned undeclared kind %q", resource.Kind)
-		}
-	}
-	return resources, true, nil
-}
-
 // matchedResource is the singular wire projection of the first resolved
 // resource. The complete Resources slice remains on ApprovalRequest and in
 // the persisted proposal payload.

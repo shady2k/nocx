@@ -152,7 +152,7 @@ func TestHelperExitOutcomeCarriesStatusThroughTheProductSeam(t *testing.T) {
 	}
 
 	reg := session.New(log.NewSlogAdapter(nil), nil)
-	adopted, err := reg.Adopt(session.Config{Kind: session.KindRemote, Cwd: "/"}, session.ID(helperExitSessionID), channel)
+	adopted, err := reg.Adopt(context.Background(), session.Config{Kind: session.KindRemote, Cwd: "/"}, session.ID(helperExitSessionID), channel)
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}

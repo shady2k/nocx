@@ -41,7 +41,7 @@ type helperOpenTestOpener struct {
 
 func (o *helperOpenTestOpener) OpenHosted(_ context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
 	o.called = true
-	sess, err := o.reg.Adopt(cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
+	sess, err := o.reg.Adopt(context.Background(), cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
 	if err != nil {
 		return HostedSessionOpen{}, false, err
 	}

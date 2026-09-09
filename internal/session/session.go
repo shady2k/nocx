@@ -590,9 +590,14 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		sshOpts:      opts,
 		ch:           ch,
 		size:         eff,
-		log:          r.log.With("session_id", string(id)),
-		writeCh:      make(chan writeJob, writeQueueDepth),
-		writeDone:    make(chan struct{}),
+		// THE SESSION KEEPS THE EXCHANGE THAT OPENED IT (nocx-n14oo.3). A
+		// session outlives the call that made it and is written about from
+		// timers, pumps and goroutines that hold no context, so binding the
+		// caller's trace ONCE here is the only place it can be done — and it
+		// is what puts a pane's whole life under the spawn that asked for it.
+		log:       r.log.WithContext(ctx).With("session_id", string(id)),
+		writeCh:   make(chan writeJob, writeQueueDepth),
+		writeDone: make(chan struct{}),
 	}
 	s.startWriteLoop()
 
@@ -600,7 +605,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 
-	r.log.Info("session opened", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch, "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
+	s.log.Info("session opened", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch, "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
 	if r.usageTracker != nil && cfg.ProfileID != "" {
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
@@ -610,7 +615,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 // Adopt registers a session whose execution channel was created by an
 // execution-host helper. The helper mints the id; the registry preserves it
 // rather than generating a second coordinator id (AD-7).
-func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
+// The context is the CALLER'S EXCHANGE and nothing else — no deadline is read
+// from it and no cancellation acted on. It is here because an adopted session
+// is the helper-hosted path, which is every local pane on this machine, and a
+// pane whose whole life is unattributable to the call that opened it is exactly
+// what made a failed spawn unreadable (nocx-n14oo.3).
+func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session, error) {
 	if ch == nil {
 		return nil, errors.New("session: helper returned a nil channel")
 	}
@@ -634,7 +644,7 @@ func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
 		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
-		sshOpts: opts, ch: ch, size: eff, log: r.log.With("session_id", string(id)),
+		sshOpts: opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
 		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -646,7 +656,7 @@ func (r *Reg) Adopt(cfg Config, id ID, ch Channel) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 	s.startWriteLoop()
-	r.log.Info("helper session adopted", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch)
+	s.log.Info("helper session adopted", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch)
 	if r.usageTracker != nil && cfg.ProfileID != "" {
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
@@ -736,7 +746,11 @@ func (r *Reg) Close(id ID) error {
 		return fmt.Errorf("session not found: %s", id)
 	}
 
-	r.log.Info("session closed", "id", string(id))
+	// The SESSION's logger, not the registry's: it carries the exchange that
+	// opened this session, so a close reads under the same trace as the open
+	// — which is the pairing somebody diagnosing a torn-down pane is looking
+	// for. Close has no context of its own to bind, and does not need one.
+	s.log.Info("session closed", "id", string(id))
 	err := s.Close()
 	if r.usageTracker != nil && s.profileID != "" {
 		r.usageTracker.SessionClosed(s.profileID)

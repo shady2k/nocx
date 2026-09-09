@@ -135,3 +135,80 @@ func (b *safeBuffer) String() string {
 }
 
 var _ io.Writer = (*safeBuffer)(nil)
+
+// A PANE'S WHOLE LIFE BELONGS TO THE SPAWN THAT OPENED IT (nocx-n14oo.3).
+//
+// A session is written about from timers, pumps and compensations that hold no
+// context, so the exchange is bound onto its own logger once, where the session
+// is constructed. That is what puts its open, its every line and its close
+// thirty seconds later under one trace.
+//
+// What this stand cannot prove is the same binding on the lifecycle adapter,
+// because happyRealPTYFactory builds the lifecycle socketpair itself and never
+// reaches internal/app/helper_hosted.go, where the adapter a real pane gets is
+// constructed. That one is bound at the same seam and by construction; it is
+// read back from a live run, not from here.
+func TestAPanesWholeLifeBelongsToTheSpawnThatOpenedIt(t *testing.T) {
+	var logs safeBuffer
+	stand := newHappyStand(t,
+		withHappyStandLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+		withHappyStandEnrolmentDeadline(1500*time.Millisecond),
+	)
+	_, caller := nocxlog.StartSpan(context.Background())
+
+	conn, err := net.Dial("unix", stand.endpoint.SocketPath())
+	if err != nil {
+		t.Fatalf("dial the tool socket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	params, err := json.Marshal(map[string]string{"command": "true", "task": "never enrol"})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "spawn-cause-1", "method": "workers.spawn",
+		"params": json.RawMessage(params), "traceparent": caller.Traceparent(),
+	})
+	if err != nil {
+		t.Fatalf("marshal spawn request: %v", err)
+	}
+	if _, err := conn.Write(append(request, '\n')); err != nil {
+		t.Fatalf("write spawn request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var response struct {
+		Error *struct{} `json:"error"`
+	}
+	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
+		t.Fatalf("decode spawn response: %v", err)
+	}
+
+	// THE PANE'S WHOLE LIFE, not only the call that made it: the session this
+	// spawn opened writes under the spawn's trace, and so does its close
+	// thirty seconds later, from a compensation that holds no context.
+	//
+	// Only the lines UNDER THIS TRACE are read. The stand opens a coordinator
+	// session of its own before the spawn, under no exchange at all, and
+	// asserting over every "session opened" in the buffer would be asserting
+	// about that one too.
+	written := logs.String()
+	var opened, closed bool
+	for _, line := range strings.Split(strings.TrimSpace(written), "\n") {
+		if !strings.Contains(line, "trace_id="+caller.TraceID) {
+			continue
+		}
+		if strings.Contains(line, `msg="session opened"`) || strings.Contains(line, `msg="helper session adopted"`) {
+			opened = true
+		}
+		if strings.Contains(line, `msg="session closed"`) {
+			closed = true
+		}
+	}
+	if !opened {
+		t.Fatalf("the session this spawn opened is outside its trace:\n%s", written)
+	}
+	if !closed {
+		t.Fatalf("the close that compensated this spawn is outside its trace:\n%s", written)
+	}
+}

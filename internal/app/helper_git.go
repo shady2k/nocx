@@ -495,8 +495,9 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	if r.lifecycle != nil {
 		coordinatorConn, peerConn := net.Pipe()
 		var lifecycleErr error
+		// The caller's exchange, for the reason helper_hosted.go gives.
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
-			log.NewSlogAdapter(r.log), r.lifecycle, coordinatorConn,
+			log.NewSlogAdapter(r.log).WithContext(ctx), r.lifecycle, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
 		)
 		if lifecycleErr != nil {
@@ -542,7 +543,7 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	}
 	sid := session.ID(entry.HostSessionID.Session)
 	f.sid = sid
-	sess, err := r.registry.Adopt(cfg, sid, attached)
+	sess, err := r.registry.Adopt(ctx, cfg, sid, attached)
 	if err != nil {
 		_ = attached.Close()
 		if lifecycleAdapter != nil {

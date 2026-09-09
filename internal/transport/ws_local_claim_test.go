@@ -60,7 +60,7 @@ func (o *localClaimOpener) OpenHosted(ctx context.Context, cfg session.Config, c
 	if o.fail != nil {
 		return HostedSessionOpen{}, true, o.fail
 	}
-	sess, aerr := o.reg.Adopt(cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
+	sess, aerr := o.reg.Adopt(context.Background(), cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
 	if aerr != nil {
 		return HostedSessionOpen{}, true, aerr
 	}

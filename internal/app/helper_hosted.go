@@ -109,8 +109,14 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 		if h.helloTimeout > 0 {
 			opts = append(opts, lifecyclechannel.WithHelloTimeout(h.helloTimeout))
 		}
+		// THE CAUSE LINE JOINS THE EXCHANGE (nocx-n14oo.3). The adapter's
+		// loss is reported from a hello timer and a read pump, neither of
+		// which holds a context — and a hello-timeout is the single most
+		// diagnostic line a failed pane produces. Binding the caller's
+		// exchange onto its logger HERE, where the identity exists, is what
+		// puts it beside the wait it explains instead of a timestamp away.
 		adapter, err := lifecyclechannel.NewStream(
-			log.NewSlogAdapter(h.log), h.lifecycle, coordinatorConn, opts...)
+			log.NewSlogAdapter(h.log).WithContext(ctx), h.lifecycle, coordinatorConn, opts...)
 		if err != nil {
 			_ = peerConn.Close()
 			return hostedSpawnResult{}, err
@@ -150,7 +156,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 		return hostedSpawnResult{}, err
 	}
 
-	sess, err := h.registry.Adopt(cfg, session.ID(entry.HostSessionID.Session), attached)
+	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {
 		_ = attached.Close()
 		abortLifecycleNow()

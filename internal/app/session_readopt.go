@@ -345,7 +345,7 @@ func (rp *readoptPass) readopt(
 			return transport.HostedSessionOpen{}, fmt.Errorf(
 				"another nocx already holds the keyboard of this session on %s", p.Host)
 		}
-		sess, err := rp.registry.registry.Adopt(session.Config{
+		sess, err := rp.registry.registry.Adopt(ctx, session.Config{
 			Kind: session.KindRemote, Host: p.Host,
 			// The cwd is the HELPER's, read off the launch record it has kept
 			// since the shell started. The alternative is the pane's stored

@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,10 +148,14 @@ func (a workerTestAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation
 
 type workerTestDispatcher struct {
 	result  string
+	err     error
 	catalog []agenttools.Tool
 }
 
 func (d workerTestDispatcher) Dispatch(assistant.ToolInvocation) (string, error) {
+	if d.err != nil {
+		return "", d.err
+	}
 	return d.result, nil
 }
 
@@ -249,5 +255,81 @@ func TestGroupEndpointWiringRefusesToPublishWithoutAuthorizer(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "tool.sock")); !os.IsNotExist(err) {
 		t.Fatalf("worker socket without authorizer: err = %v, want not exists", err)
+	}
+}
+
+// A DISPATCH FAILURE IS READABLE IN THE BACKEND'S LOG FILE (nocx-halpn).
+//
+// It was not. This process wrote through two loggers — the app's, which opens
+// nocx.log, and cmd/nocx-server's own, which writes to os.Stderr — and
+// internal/coordinator/spawn.go gives the daemon it launches a nil Stderr,
+// which os/exec makes /dev/null. So the tool endpoint's diagnostic for an
+// unclassified failure, the one line nocx-1w3my added for exactly this case,
+// was discarded in the shipped product. The dev stand kept it only because
+// scripts/dev-web.sh redirects into a temp file.
+//
+// The assertion is on the FILE and not on a logger having been called: a
+// spy would have passed the whole time this was broken.
+func TestAnUnclassifiedDispatchFailureIsReadableInTheLogFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	logPath := filepath.Join(t.TempDir(), "nocx.log")
+	logFile, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // the path is this test's temp dir
+	if openErr != nil {
+		t.Fatalf("open log file: %v", openErr)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	appRoot := &app.App{
+		ToolAuthorizer: workerTestAuthorizer{invocation: assistant.ToolInvocation{}},
+		ToolDispatcher: workerTestDispatcher{err: errors.New("the participant's session refused its first line")},
+	}
+	endpoint, err := startToolEndpoint(
+		appRoot, dir, workerTestPeers{}, coordinator.SystemPathOwner{},
+		coordinator.SelfUID(), slog.New(slog.NewTextHandler(logFile, nil)),
+	)
+	if err != nil {
+		t.Fatalf("start worker endpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	conn, err := net.Dial("unix", filepath.Join(dir, "tool.sock"))
+	if err != nil {
+		t.Fatalf("dial worker socket: %v", err)
+	}
+	request := `{"jsonrpc":"2.0","id":"spawn-1","method":"workers.spawn","params":{}}` + "\n"
+	if _, err := io.WriteString(conn, request); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write worker request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var response struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&response); err != nil {
+		_ = conn.Close()
+		t.Fatalf("decode worker response: %v", err)
+	}
+	_ = conn.Close()
+	// The wire stays generic on purpose — that half is nocx-1w3my's — and it
+	// is what makes the log the only place the cause can be read.
+	if response.Error.Message != "internal error" {
+		t.Fatalf("wire answer = %q, want the generic sentence", response.Error.Message)
+	}
+
+	written, readErr := os.ReadFile(logPath) //nolint:gosec // the path is this test's temp dir
+	if readErr != nil {
+		t.Fatalf("read log file: %v", readErr)
+	}
+	out := string(written)
+	for _, want := range []string{
+		"unclassified dispatch failure",
+		"workers.spawn",
+		"the participant's session refused its first line",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the log file does not carry %q:\n%s", want, out)
+		}
 	}
 }

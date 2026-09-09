@@ -86,6 +86,21 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// ONE SINK FROM HERE ON (nocx-halpn, nocx-4l2a5.2). The logger above
+	// writes to stderr, and internal/coordinator/spawn.go gives the daemon it
+	// launches no stderr at all — os/exec makes a nil Stderr /dev/null. So
+	// every line this process wrote through it was discarded in the shipped
+	// product, including the tool endpoint's diagnostic for the one failure
+	// that most needs one: an error nobody classified. It survived a dev run
+	// only because scripts/dev-web.sh redirects into a temp file nobody is
+	// told about.
+	//
+	// The app opens the backend log file and logs to it AND to stderr, so
+	// taking its logger is what makes the two halves of this process one log.
+	// It cannot be taken earlier: the file lives in the profile directory the
+	// app resolves, and nothing above this line has anywhere to write.
+	logger = a.Slog()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if startErr := a.Start(ctx); startErr != nil {

@@ -643,12 +643,17 @@ func New(opts ...Option) (*App, error) {
 	// Warn to the backend, and why the cause of a whole class of e2e failures
 	// stayed "unknown" across three triage rounds (nocx-cbtc, nocx-xplc).
 	//
-	// An env var rather than a setting: the thing you need to turn up is the
-	// startup of a session that is already going wrong, and a setting is read
-	// from a store this runs before. Unrecognised values fall back to info
-	// rather than failing — a mistyped level must never stop the app starting,
-	// and the fallback says so in the log.
-	logLevel := slog.LevelInfo
+	// An env var rather than a setting: the thing you need to turn DOWN is a
+	// dev build that is saying everything, and the thing you need to turn up
+	// is the startup of a session that is already going wrong — and a setting
+	// is read from a store this runs before. Unrecognised values fall back to
+	// the build's default rather than failing: a mistyped level must never
+	// stop the app starting, and the fallback says so in the log.
+	// The DEFAULT is the build's, not this line's: a dev build says everything
+	// and a shipped one says what a person's own disk should carry
+	// (internal/log's build split, nocx-4l2a5.2). The variable below still
+	// wins over both.
+	logLevel := log.DefaultLevel()
 	levelName := strings.ToLower(strings.TrimSpace(os.Getenv(logLevelEnvVar)))
 	badLevel := ""
 	switch levelName {
@@ -656,6 +661,11 @@ func New(opts ...Option) (*App, error) {
 	case "debug":
 		logLevel = slog.LevelDebug
 	case "info":
+		// SET, not skipped. It was a bare case while the default was info, and
+		// leaving it bare now would make NOCX_LOG_LEVEL=info a no-op on the
+		// build whose default is debug — the one build somebody would type it
+		// on (nocx-4l2a5.2).
+		logLevel = slog.LevelInfo
 	case "warn", "warning":
 		logLevel = slog.LevelWarn
 	case "error":
@@ -696,7 +706,8 @@ func New(opts ...Option) (*App, error) {
 	// Said after the logger exists, so it lands in the file too — and said at
 	// all, because a level that silently did not apply is worse than no knob.
 	if badLevel != "" {
-		logger.Warn("unrecognised log level; using info",
+		logger.Warn("unrecognised log level; using the build's default",
+			"default", logLevel.String(),
 			"var", logLevelEnvVar, "value", badLevel, "known", "debug, info, warn, error")
 	}
 	if logLevel == slog.LevelDebug {

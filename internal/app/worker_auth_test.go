@@ -66,7 +66,7 @@ func emptyWorkerRecord() *workers.Registrar {
 
 type allowWorkerApproval struct{}
 
-func (allowWorkerApproval) Approved(int, string) bool { return true }
+func (allowWorkerApproval) Approved(session.ID, string) bool { return true }
 
 func mustToolAuthorizer(t *testing.T, pinner peerpin.Pinner, sessions workerAuthSessions, enrolments workerAuthEnrolments, participants workerAuthParticipants, workspace string, approval workerAuthApproval) toolendpoint.Authorizer {
 	t.Helper()

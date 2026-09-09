@@ -17,6 +17,7 @@ import (
 type allowPaneApproval struct{}
 
 func (allowPaneApproval) Approve(context.Context, session.ID, string) error { return nil }
+func (allowPaneApproval) Forget(session.ID)                                 {}
 
 func TestNewPaneEnrollerRejectsMissingApproval(t *testing.T) {
 	if _, err := newPaneEnroller(nil, nil, nil, nil, nil); err == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/session"
@@ -23,45 +24,96 @@ type hostApprovalRequester interface {
 // keyed too. This does not defend against a same-UID process that can replace
 // an approved executable and arrange the same digest; the kernel's (pid,
 // start-time) pin remains the separate runtime defence.
+//
+// THE IDENTITY IS THE AGENT, NOT THE PANE'S SHELL (nocx-opiq5). It was the
+// shell: the identity came from the session's owned process, which is the
+// login shell nocx opened, so the key was /bin/bash's path and digest — the
+// same in every pane on the machine. One yes therefore admitted every LATER
+// agent silently (approve claude, and codex came in behind it), and one no
+// refused every later agent with no question and no way to answer. The dialog
+// meanwhile promised "this agent", and named a nix-store path to bash that no
+// person could recognise as the thing they had typed. IdentityForExecutable
+// existed for this and had no caller.
+//
+// What is now keyed is what the person was shown and typed: the executable the
+// BACKEND resolves that agent name to. What this cannot verify is that the
+// shell went on to exec that same file — the shell is inside the tree being
+// granted, and a tree is the grant's unit by D13, so its claim about which
+// agent it is launching is a claim. The live pin still proves the connecting
+// peer belongs to a pane the person opened and enrolled; that is the fact this
+// identity does not supply, and the reason both are required.
 type agentApprovalService struct {
 	sessions  workerAuthSessions
 	store     *agentapproval.Store
 	requester hostApprovalRequester
 	scope     string
+
+	// What was approved for a live enrolment, so the admit-time check reads
+	// the same identity the person answered about. The ANSWER is still read
+	// from the store on every call rather than cached here: a grant that was
+	// withdrawn must stop admitting live panes, not only new ones.
+	mu       sync.Mutex
+	enrolled map[session.ID]agentapproval.Executable
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
-	return &agentApprovalService{sessions: sessions, store: store, scope: agentToolEndpointScopePrefix + scope}
+	return &agentApprovalService{
+		sessions: sessions, store: store,
+		scope:    agentToolEndpointScopePrefix + scope,
+		enrolled: map[session.ID]agentapproval.Executable{},
+	}
 }
 
 func (s *agentApprovalService) SetRequester(requester hostApprovalRequester) {
 	s.requester = requester
 }
 
-func (s *agentApprovalService) Approved(pid int, scope string) bool {
-	executable, err := agentapproval.IdentityForPID(pid)
-	if err != nil {
+// Approved answers for the AGENT this session enrolled, which is the identity
+// the person was asked about. A session that never enrolled an agent has none,
+// and is refused rather than falling back to some other identity the process
+// tree happens to offer.
+func (s *agentApprovalService) Approved(sid session.ID, scope string) bool {
+	s.mu.Lock()
+	executable, known := s.enrolled[sid]
+	s.mu.Unlock()
+	if !known {
 		return false
 	}
 	answer, ok := s.store.Lookup(executable, scope)
 	return ok && answer == agentapproval.Granted
 }
 
+// Forget drops what an enrolment approved when that enrolment ends, so the map
+// follows the live intervals rather than growing for the life of the backend.
+func (s *agentApprovalService) Forget(sid session.ID) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.enrolled, sid)
+	s.mu.Unlock()
+}
+
 func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agent string) error {
 	if s == nil || s.sessions == nil || s.store == nil {
 		return errors.New("nocx cannot ask for agent approval")
 	}
-	pid, ok := s.sessions.OwnedProcessPID(sid)
-	if !ok {
+	// Not for the identity — for the provenance. A session with no
+	// backend-owned process is not a tree nocx launched (an ssh pane, a
+	// session the helper did not start), and the authorizer refuses one at
+	// admit time; minting a durable workspace answer from it would record a
+	// yes that nothing could ever use.
+	if _, ok := s.sessions.OwnedProcessPID(sid); !ok {
 		return errors.New("nocx cannot identify the enrolled agent executable")
 	}
-	executable, err := agentapproval.IdentityForPID(pid)
+	executable, err := agentapproval.IdentityForExecutable(agent)
 	if err != nil {
 		return err
 	}
 	answer, found := s.store.Lookup(executable, s.scope)
 	if found {
 		if answer == agentapproval.Granted {
+			s.remember(sid, executable)
 			return nil
 		}
 		return fmt.Errorf("agent approval was denied for %s", agent)
@@ -88,7 +140,14 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if decision != agentapproval.Granted {
 		return fmt.Errorf("agent approval was denied for %s", agent)
 	}
+	s.remember(sid, executable)
 	return nil
+}
+
+func (s *agentApprovalService) remember(sid session.ID, executable agentapproval.Executable) {
+	s.mu.Lock()
+	s.enrolled[sid] = executable
+	s.mu.Unlock()
 }
 
 var _ agentApproval = (*agentApprovalService)(nil)

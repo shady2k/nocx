@@ -42,7 +42,7 @@ type workerAuthParticipants interface {
 }
 
 type workerAuthApproval interface {
-	Approved(pid int, scope string) bool
+	Approved(sid session.ID, scope string) bool
 }
 
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
@@ -149,7 +149,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		if err != nil || !member {
 			continue
 		}
-		if !a.approval.Approved(rootPID, agentToolEndpointScopePrefix+a.workspace) {
+		if !a.approval.Approved(sid, agentToolEndpointScopePrefix+a.workspace) {
 			continue
 		}
 		if admitted != "" {

@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -61,20 +60,6 @@ func IdentityForExecutable(command string) (Executable, error) {
 			return Executable{}, fmt.Errorf("agent approval: resolve executable %q: %w", command, err)
 		}
 		path = resolved
-	}
-	return IdentityForPath(path)
-}
-
-// IdentityForPID is available for callers that have a kernel-stamped process
-// id. The /proc link is the process's executable rather than a mutable PATH
-// lookup; callers still need the live process-tree pin for pid-reuse safety.
-func IdentityForPID(pid int) (Executable, error) {
-	if pid <= 0 {
-		return Executable{}, fmt.Errorf("agent approval: invalid executable pid %d", pid)
-	}
-	path, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
-	if err != nil {
-		return Executable{}, fmt.Errorf("agent approval: read executable for pid %d: %w", pid, err)
 	}
 	return IdentityForPath(path)
 }

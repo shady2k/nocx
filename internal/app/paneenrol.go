@@ -50,6 +50,9 @@ type paneWatcher interface {
 
 type agentApproval interface {
 	Approve(context.Context, session.ID, string) error
+	// Forget releases what the enrolment approved when the interval closes,
+	// so what admits a peer follows the live enrolments (nocx-opiq5).
+	Forget(session.ID)
 }
 
 func newPaneEnroller(
@@ -133,5 +136,9 @@ func (e *paneEnroller) Withdraw(lane lifecycle.LaneID) {
 	// a client attaching afterwards is answered with it.
 	e.watch.Exited(sid)
 	e.grid.Withdraw(sid)
+	// The agent this pane approved is no longer enrolled, so what it was
+	// approved AS goes with the interval. The durable answer in the store is
+	// untouched: the person permitted an agent, not this one run of it.
+	e.approval.Forget(session.ID(sid))
 	e.log.Info("agent withdrawn", "lane", string(lane), "session_id", sid)
 }

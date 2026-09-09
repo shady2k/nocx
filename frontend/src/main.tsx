@@ -536,6 +536,14 @@ function main(): void {
   // Mounted unconditionally: a client with no Wails runtime still answers,
   // saying so, because the coordinator must never be left waiting on a
   // client that cannot act.
+  //
+  // EXACTLY ONCE, and the count is the contract. `host.request` is an ask
+  // that must be answered once, but the dispatcher keeps a SET of handlers
+  // per method, so a second mount answers every request a second time and the
+  // first resolution to land wins. There were two of these (nocx-pighx): this
+  // one, and a bare one further down that passed no approval surface — so the
+  // agent-tree question was answered by whichever mount was faster, and the
+  // one that had to wait for a person never was.
   mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
@@ -555,15 +563,6 @@ function main(): void {
   // pane that owns its grid; a request for a session no pane holds is
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
-
-  // -- The client host (nocx-uo1k6, design D3) -------------------------
-  // The coordinator runs as a daemon with no window of its own, so the
-  // native-host capabilities it cannot perform -- a file picker, a browser
-  // open, a desktop banner, a window raise -- are asked of this client and
-  // performed through the Wails bindings. Mounted unconditionally: a client
-  // with no Wails runtime still answers, saying so, because the coordinator
-  // must never be left waiting on a client that cannot act.
-  mountClientHost(dispatcher)
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer

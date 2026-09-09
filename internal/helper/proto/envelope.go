@@ -29,6 +29,18 @@ type Request struct {
 	Op      string          `json:"op"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Corr    string          `json:"corr"`
+	// Traceparent is the caller's W3C Trace Context header (nocx-n14oo.2).
+	//
+	// It is NOT a second Corr. Corr pairs this request's two log lines across
+	// the hop and is minted per request; the traceparent names the EXCHANGE
+	// the request belongs to — the tool call, the run, the frame off the wire
+	// — and joins the helper's lines to everything the backend did before and
+	// after asking. A pane that failed to integrate is diagnosed from the
+	// second and not from the first.
+	//
+	// Absent is ordinary: a request from a caller that carries no span is
+	// served under a trace of its own.
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 // Response answers one Request by id, carrying either a result or an error.

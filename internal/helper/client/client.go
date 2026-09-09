@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // HelperConn is the pty-less exec lane the client rides (design D19): one
@@ -118,10 +119,16 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		}
 		raw = b
 	}
-	req := proto.Request{ID: id, Service: service, Op: op, Params: raw, Corr: randomCorr()}
+	req := proto.Request{
+		ID: id, Service: service, Op: op, Params: raw, Corr: randomCorr(),
+		// The exchange this call belongs to, so the helper's lines join what
+		// the backend was doing when it asked (nocx-n14oo.2).
+		Traceparent: nocxlog.SpanFrom(ctx).Traceparent(),
+	}
 	// D26: the correlation id the helper logs for this request is the
 	// SAME value the backend logs here — one trace across the two hops.
-	c.log.Debug("helper request", "service", service, "op", op, "corr", req.Corr)
+	nocxlog.NewSlogAdapter(c.log).WithContext(ctx).
+		Debug("helper request", "service", service, "op", op, "corr", req.Corr)
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("helper: request: %w", err)

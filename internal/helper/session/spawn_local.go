@@ -173,8 +173,35 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		}
 	}
 
+	// THE LAUNCH DECISION, SAID BEFORE IT IS ACTED ON (nocx-n14oo.2).
+	//
+	// Everything about whether a pane can ever integrate is decided in the
+	// next few lines, and none of it was written down. A pane that takes the
+	// plain arm gets no capability and no lifecycle, so a caller that asked
+	// for one waits out its whole hello budget and learns only that the
+	// channel was lost — in another process, ten seconds later, with nothing
+	// naming the shell or the tier that made it inevitable.
+	//
+	// Note what the enhanced arm requires: a session id, no explicit shell
+	// args, and a shell LocalShellKind recognises as bash or zsh. Anything
+	// else takes the plain arm DELIBERATELY — the POSIX tier has no local
+	// launch semantics yet and ShellUnknown means "start it, integrate
+	// nothing, and say so" rather than "substitute bash" (nocx-k28e,
+	// shellintegration.LocalShellKind). The saying-so is this line: it was the
+	// half that did not exist.
+	launchKind := shellintegration.LocalShellKind(shellPath)
+	enhanced := req.SessionID != "" && len(shellArgs) == 0 &&
+		(launchKind == shellintegration.ShellBash || launchKind == shellintegration.ShellZsh)
+	s.log.Info("pane launch decided",
+		"session", req.SessionID,
+		"shell", shellPath,
+		"shell_kind", string(launchKind),
+		"enhanced", enhanced,
+		"explicit_shell_args", len(shellArgs),
+		"lifecycle_requested", req.Lifecycle != nil)
+
 	if req.SessionID != "" && len(shellArgs) == 0 {
-		kind := shellintegration.LocalShellKind(shellPath)
+		kind := launchKind
 		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
 			if req.Lifecycle != nil {
 				lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
@@ -199,9 +226,18 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			}
 			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
 			if err != nil {
+				s.log.Error("pane launch: the enhanced tier could not be built",
+					"session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
 				release()
 				return nil, err
 			}
+			// The argv SHAPE and not its contents: the capability rides in
+			// the script text these arguments point at, and printing it would
+			// put a bearer token in a log file.
+			s.log.Info("pane launch: the enhanced tier is built",
+				"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
+				"extra_files", len(launch.ExtraFiles), "bootstrap_bytes", len(launch.Bootstrap),
+				"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch)
 			if lifecycleChild != nil {
 				launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
 				previousCleanup := launch.Cleanup
@@ -218,15 +254,24 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	}
 	lp, err := s.openPTY(s.log, cfg)
 	if err != nil {
+		s.log.Error("pane launch: the pty could not be opened",
+			"session", req.SessionID, "shell", cfg.Command, "error", err)
 		release()
 		return nil, err
 	}
 	if len(launch.Bootstrap) > 0 {
+		// The bootstrap is a LINE INTO THE TERMINAL — `. /dev/fd/3` for the
+		// tiers that cannot take a descriptor as an rcfile — so it is the one
+		// thing here that shares a channel with the user's own input.
 		if _, err := lp.Write(launch.Bootstrap); err != nil {
+			s.log.Error("pane launch: the bootstrap line could not be written",
+				"session", req.SessionID, "bytes", len(launch.Bootstrap), "error", err)
 			_ = lp.Close()
 			release()
 			return nil, err
 		}
+		s.log.Debug("pane launch: the bootstrap line is written",
+			"session", req.SessionID, "bytes", len(launch.Bootstrap))
 	}
 	if launch.Cleanup != nil {
 		launch.Cleanup()

@@ -17,8 +17,10 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // ExitVersionMismatch is the exit code a helper LAUNCHED DIRECTLY over the
@@ -340,40 +342,71 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 		stop()
 	}()
 
-	h.log.Info("request", "id", req.ID, "service", req.Service, "op", req.Op, "corr", req.Corr) // D26
+	// The exchange the CALLER is in becomes this request's parent, so the
+	// helper's lines join what the backend was doing when it asked
+	// (nocx-n14oo.2). A caller that sent no header is served under a trace of
+	// its own; the daemon serves several coordinators and refusing one for
+	// want of telemetry would be the observability costing more than what it
+	// observes.
+	reqCtx = nocxlog.ContinueTrace(reqCtx, req.Traceparent)
+	reqCtx, _ = nocxlog.StartSpan(reqCtx)
+	// The entry stays at INFO and keeps its message and its corr: D26 is a
+	// contract about what both sides of the hop write down, and a per-request
+	// line demoted to debug is a contract kept only when somebody remembered
+	// to turn debug on. What the span adds is the exchange around it and an
+	// outcome underneath.
+	lg := nocxlog.NewSlogAdapter(h.log).WithContext(reqCtx).
+		With("id", req.ID, "corr", req.Corr, "op", req.Service+"."+req.Op)
+	lg.Info("request", "id", req.ID, "service", req.Service, "op", req.Op, "corr", req.Corr) // D26
+	started := time.Now()
+	end := func(err error) {
+		ms := time.Since(started).Milliseconds()
+		if err != nil {
+			lg.Warn("request failed", "duration_ms", ms, "error", err)
+			return
+		}
+		lg.Debug("request ok", "duration_ms", ms)
+	}
 
+	// EVERY REFUSAL SAYS SO. All four below used to answer the caller and
+	// write nothing, so a helper that refused a request left the backend
+	// holding an error whose origin was a guess — the same shape as the
+	// unclassified dispatch failure of nocx-1w3my, one process over.
 	resp := proto.Response{ID: req.ID}
+	fail := func(code, message string, details json.RawMessage) {
+		lg.Warn("helper refused the request", "code", code, "message", message)
+		resp.Error = &proto.Error{Code: code, Message: message, Details: details}
+		end(errors.New(code))
+		h.respond(resp)
+	}
+
 	svc := h.serviceByName(req.Service)
 	if svc == nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownService, Message: "no service named " + req.Service}
-		h.respond(resp)
+		fail(proto.ErrCodeUnknownService, "no service named "+req.Service, nil)
 		return
 	}
 	schema := svc.ParamsSchema(req.Op)
 	if schema == nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownOp, Message: "no op " + req.Op + " on service " + req.Service}
-		h.respond(resp)
+		fail(proto.ErrCodeUnknownOp, "no op "+req.Op+" on service "+req.Service, nil)
 		return
 	}
 	if _, err := schema.Decode(req.Params); err != nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeBadParams, Message: err.Error()}
-		h.respond(resp)
+		fail(proto.ErrCodeBadParams, err.Error(), nil)
 		return
 	}
 	result, err := svc.Call(reqCtx, req.Op, req.Params)
 	if err != nil {
 		code, details := refusal(svc, err)
-		resp.Error = &proto.Error{Code: code, Message: err.Error(), Details: details}
-		h.respond(resp)
+		fail(code, err.Error(), details)
 		return
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: "result: " + err.Error()}
-		h.respond(resp)
+		fail(proto.ErrCodeInternal, "result: "+err.Error(), nil)
 		return
 	}
 	resp.Result = raw
+	end(nil)
 	h.respond(resp)
 }
 

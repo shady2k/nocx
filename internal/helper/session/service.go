@@ -34,6 +34,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // LifecycleDataPlane receives opaque lifecycle bytes from the coordinator.
@@ -486,7 +487,17 @@ func decode(raw json.RawMessage, into any) error {
 // is already one: a repeat that reserved a second window before discovering it
 // was a repeat would refuse itself at the budget on a helper with one session
 // left in it.
-func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnResult, error) {
+func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.SpawnResult, err error) {
+	// THE PANE LAUNCH, SAID OUT LOUD (nocx-n14oo.2). This is where a pane's
+	// shell is actually started, and the three ways it can fail below used to
+	// return an ErrSpawn that named a cause nowhere. A backend waiting thirty
+	// seconds for a hello it will never get learns from these lines which
+	// shell was started, with what geometry, and whether it was given a
+	// lifecycle carrier at all.
+	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn",
+		"cwd", p.Cwd, "cols", p.Cols, "rows", p.Rows,
+		"workspace", p.Workspace, "lifecycle_requested", p.Lifecycle != nil)
+	defer func() { end(err) }()
 	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
 			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
@@ -534,8 +545,10 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnRe
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
+		lg.Error("helper: could not mint a session id", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+	lg = lg.With("session", proto.SessionHex(raw))
 
 	proc, err := s.spawner.Spawn(SpawnRequest{
 		SessionID: proto.SessionHex(raw),
@@ -549,6 +562,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnRe
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
+		lg.Error("helper: the pane's shell could not be started", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 	lifecycleWin := (*window)(nil)
@@ -565,6 +579,11 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnRe
 		s.mu.Lock()
 		s.budget -= bound
 		s.mu.Unlock()
+		// A LIFECYCLE ASKED FOR AND NOT GIVEN. The caller will now wait out a
+		// hello budget for a channel that does not exist, and until this line
+		// the only sign of it was that timeout, ten seconds later and in
+		// another process.
+		lg.Warn("helper: a lifecycle channel was asked for and the launcher provided none")
 	}
 	hs := &hostSession{
 		id:              proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
@@ -610,8 +629,13 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (proto.SpawnRe
 	}
 	go hs.watchExit(s.now, s.notifyExit)
 
-	s.log.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
-		"shell", hs.launch.Shell, "pid", hs.launch.Pid, "pgid", hs.launch.Pgid, "windowBytes", bound)
+	lg.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
+		"shell", hs.launch.Shell, "cwd", hs.launch.Cwd,
+		"pid", hs.launch.Pid, "pgid", hs.launch.Pgid, "windowBytes", bound,
+		// The fact the hello-timeout hangs on: a pane with no carrier can
+		// never authenticate, and that is knowable here rather than a
+		// deadline later.
+		"lifecycle_carrier", lifecycleCarrier != nil)
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
 }
 

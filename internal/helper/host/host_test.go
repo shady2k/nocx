@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // fakeService implements host.Service over a per-op params table and one
@@ -1054,5 +1055,109 @@ func TestADeadTransportAbandonsWhatMayBeCancelled(t *testing.T) {
 	}
 	if !sawCancel.Load() {
 		t.Fatal("the handler was never cancelled")
+	}
+}
+
+// THE EXCHANGE CROSSES INTO THE HELPER (nocx-n14oo.2).
+//
+// The helper is the process that opens every local pane, and until this its
+// lines shared nothing with the backend's but a corr — which pairs one request
+// with one answer and joins neither to the tool call, the run or the frame that
+// caused them. A pane that failed to integrate is diagnosed from the exchange,
+// not from the pair.
+func TestARequestsTraceparentBecomesTheParentOfWhatTheHelperLogs(t *testing.T) {
+	var logs strings.Builder
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "h", "i",
+		slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	h.Register(&fakeService{
+		name: "session",
+		ops:  map[string]any{"open": struct{}{}},
+		callFn: func(context.Context, string, json.RawMessage) (any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	_, caller := nocxlog.StartSpan(context.Background())
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{
+		ID: 1, Service: "session", Op: "open", Corr: "corr-1",
+		Traceparent: caller.Traceparent(),
+	}))
+	if resp := readResponse(t, outCh); resp.ID != 1 || resp.Error != nil {
+		t.Fatalf("want the open answered, got %+v", resp)
+	}
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+
+	written := logs.String()
+	for _, want := range []string{
+		"trace_id=" + caller.TraceID,
+		"parent_span_id=" + caller.SpanID,
+		"op=session.open",
+		"corr=corr-1",
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the helper's log does not carry %q:\n%s", want, written)
+		}
+	}
+}
+
+// A REFUSAL SAYS SO. All four of the helper's refusal paths used to answer the
+// caller and write nothing, so a backend holding a helper error had no way to
+// learn where it came from — the shape of nocx-1w3my, one process over.
+func TestEveryHelperRefusalIsLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request proto.Request
+		code    string
+	}{
+		{"unknown service", proto.Request{ID: 1, Service: "nope", Op: "x", Corr: "c"}, proto.ErrCodeUnknownService},
+		{"unknown op", proto.Request{ID: 1, Service: "session", Op: "nope", Corr: "c"}, proto.ErrCodeUnknownOp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs strings.Builder
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			h := host.New(inR, outW, "h", "i",
+				slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			h.Register(&fakeService{
+				name: "session", ops: map[string]any{"open": struct{}{}},
+				callFn: func(context.Context, string, json.RawMessage) (any, error) { return nil, nil },
+			})
+			serveDone := make(chan error, 1)
+			go func() { serveDone <- h.Serve(context.Background()) }()
+
+			writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+			readSentinel(t, outR)
+			outCh := startReader(t, outR)
+			if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+				t.Fatalf("want HelloOK, got %v", f.ty)
+			}
+			writeFrame(t, inW, proto.TypeRequest, mustJSON(tc.request))
+			resp := readResponse(t, outCh)
+			if resp.Error == nil || resp.Error.Code != tc.code {
+				t.Fatalf("response = %+v, want code %q", resp, tc.code)
+			}
+			_ = inW.Close()
+			if err := <-serveDone; err != nil {
+				t.Fatalf("serve: %v", err)
+			}
+			written := logs.String()
+			if !strings.Contains(written, "helper refused the request") || !strings.Contains(written, tc.code) {
+				t.Fatalf("the refusal was not logged with its code:\n%s", written)
+			}
+		})
 	}
 }

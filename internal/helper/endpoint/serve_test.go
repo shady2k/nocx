@@ -43,7 +43,7 @@ func startDaemon(t *testing.T, shell session.Shell) *helperDaemon {
 	}
 	svc := session.New(session.Options{
 		Generation: gen,
-		Spawner:    session.NewLocalSpawner(discardLog(), shell, ""),
+		Spawner:    session.NewLocalSpawner(discardLog(), shell, "", ""),
 		Inspector:  session.NewInspector(),
 		Log:        discardLog(),
 		Limits:     session.DefaultLimits(),

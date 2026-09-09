@@ -50,6 +50,19 @@ type LocalSpawner struct {
 	// renders no NOCX_TOOL_SOCKET at all, and the shell's own refusal text
 	// is what a user sees, rather than a pane pointed at an empty path.
 	agentToolSocketPath string
+	// agentHelperPath is the executable a pane's shell should exec to reach
+	// this generation's MCP adapter. It is a path and never a bare name: the
+	// wrapper's own fallback is `${NOCX_AGENT_HELPER_PATH:-nocx-helper}`, and
+	// nothing in this product puts a `nocx-helper` on PATH — `make helpers`
+	// writes gzipped per-platform artifacts for deployment to a remote host.
+	// Unset, that fallback stands and an agent's MCP server fails to start
+	// with every other fact about it correct (nocx-o36tr).
+	//
+	// The DAEMON'S OWN executable, so the pane execs the generation that owns
+	// it. Nothing else in this process knows a better answer, and a path
+	// handed down from the coordinator could name a different generation than
+	// the one that forked the shell.
+	agentHelperPath string
 }
 
 // localPTY is everything Spawn and localProcess need from internal/pty, named
@@ -88,11 +101,12 @@ type Shell struct {
 // (cmd/nocx-helper's composition, inherited from the coordinator that
 // spawned it), that path as agentToolSocketPath — see the field's doc for
 // why it is a constructor argument rather than a per-Spawn one.
-func NewLocalSpawner(logger *slog.Logger, shell Shell, agentToolSocketPath string) *LocalSpawner {
+func NewLocalSpawner(logger *slog.Logger, shell Shell, agentToolSocketPath, agentHelperPath string) *LocalSpawner {
 	return &LocalSpawner{
 		log:                 log.NewSlogAdapter(logger),
 		shell:               shell,
 		agentToolSocketPath: agentToolSocketPath,
+		agentHelperPath:     agentHelperPath,
 		openPTY: func(l log.Logger, cfg pty.Config) (localPTY, error) {
 			// Returned through the named nil rather than as one expression:
 			// a (*pty.LocalPty)(nil) handed back as an interface is not nil,
@@ -173,6 +187,7 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 				SessionID:           req.SessionID,
 				Enhanced:            true,
 				AgentToolSocketPath: s.agentToolSocketPath,
+				AgentHelperPath:     s.agentHelperPath,
 			}
 			if req.Lifecycle != nil {
 				opts.Lane = req.Lifecycle.Lane

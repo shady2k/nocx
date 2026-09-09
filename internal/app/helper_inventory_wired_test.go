@@ -39,7 +39,7 @@ func TestHelperSessionInventoryIsWiredAtTheCompositionRoot(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := helper.New(helper.Options{
 		Generation: "generation-a",
-		Spawner:    helper.NewLocalSpawner(logger, helper.Shell{Path: "/bin/sh", Args: []string{"-i"}}, ""),
+		Spawner:    helper.NewLocalSpawner(logger, helper.Shell{Path: "/bin/sh", Args: []string{"-i"}}, "", ""),
 		Inspector:  helper.NewInspector(),
 		Log:        logger,
 		Limits:     helper.DefaultLimits(),

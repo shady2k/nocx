@@ -33,7 +33,7 @@ func TestHelperHostIntegrationWithoutInstalledScript(t *testing.T) {
 	}
 
 	sink := newSink()
-	spawner := session.NewLocalSpawner(discardLog(), session.Shell{Path: shellPath}, "")
+	spawner := session.NewLocalSpawner(discardLog(), session.Shell{Path: shellPath}, "", "")
 	svc := newService(t, sink, spawner, session.Limits{})
 	entry := call[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{
 		Cwd: home, Cols: 80, Rows: 24, Env: map[string]string{"HOME": home},

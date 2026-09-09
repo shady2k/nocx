@@ -36,7 +36,7 @@ func hostedSessions(t *testing.T) *client.Client {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, "", ""),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
@@ -197,7 +197,7 @@ func TestSessionInventorySurvivesCarrierLossUsesFreshDaemonHandshake(t *testing.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, "", ""),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})

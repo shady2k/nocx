@@ -1233,7 +1233,7 @@ func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	daemon := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
-		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
+		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, "", ""),
 		Log:        logger,
 	})
 	t.Cleanup(daemon.Close)

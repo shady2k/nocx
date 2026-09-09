@@ -164,9 +164,22 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	// for the daemon's whole life: it is a property of which coordinator
 	// started this generation, never of one spawn request.
 	agentToolSocketPath := os.Getenv(shellintegration.ToolSocketEnvVar)
+	// What a pane's shell must exec to reach this generation's MCP adapter:
+	// THIS binary. Read here, once, for the same reason the socket above is —
+	// it is a property of the daemon and not of one spawn request — and taken
+	// from os.Executable() rather than handed down, because a path from the
+	// coordinator could name a different generation than the one that forks
+	// the shell. Unreadable is not fatal: the wrapper's PATH fallback stands
+	// and the pane says its tool surface is unavailable, which is the honest
+	// degrade rather than a daemon that refuses to serve (nocx-o36tr).
+	agentHelperPath, err := os.Executable()
+	if err != nil {
+		log.Warn("nocx-helper: cannot name its own executable for a pane's agent", "error", err)
+		agentHelperPath = ""
+	}
 	sessions := session.New(session.Options{
 		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath, agentHelperPath),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),

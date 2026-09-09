@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -106,12 +107,16 @@ func TestEndpointRefusalLeavesAuditableAttempt(t *testing.T) {
 		Dispatch: dispatcher,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	// The reason is asserted by what it must SAY rather than word for word:
+	// these sentences are written for an agent to act on and are expected to
+	// be improved, while what each refusal is ABOUT must not drift. The
+	// vocabulary itself is pinned in errors_test.go.
 	cases := []struct {
-		id, method, reason string
-		code               int
+		id, method, says string
+		code             int
 	}{
-		{"refused", "workers.holdings", "method is not reachable for the bound grant", rpcDomainError},
-		{"unknown", "workers.nope", "method is not assembled", rpcMethodNotFound},
+		{"refused", "workers.holdings", "not offered to this session", rpcDomainError},
+		{"unknown", "workers.nope", "no tool by that name", rpcMethodNotFound},
 	}
 	for _, tc := range cases {
 		conn := dialEndpoint(t, ep)
@@ -123,8 +128,8 @@ func TestEndpointRefusalLeavesAuditableAttempt(t *testing.T) {
 		if response.Error == nil || response.Error.Code != tc.code {
 			t.Fatalf("%s response error = %+v, want code %d", tc.method, response.Error, tc.code)
 		}
-		if response.Error.Data == nil || response.Error.Data.Reason != tc.reason {
-			t.Fatalf("%s response refusal data = %+v, want reason %q", tc.method, response.Error.Data, tc.reason)
+		if response.Error.Data == nil || !strings.Contains(response.Error.Data.Reason, tc.says) {
+			t.Fatalf("%s response refusal data = %+v, want a reason saying %q", tc.method, response.Error.Data, tc.says)
 		}
 		_ = conn.Close()
 	}

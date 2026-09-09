@@ -841,8 +841,11 @@ func TestACoordinatorCannotCloseAWorkerItDoesNotHold(t *testing.T) {
 	w.driveTo(t, 11000, agentdriver.StateFreeText)
 	p := w.register(t, "belongs to this coordinator")
 
-	if err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, workers.ErrNotDelegated) {
-		t.Fatalf("close by a stranger = %v, want ErrNotDelegated", err)
+	// ErrNotHeld, which is what this test's own name says. Ownership got its
+	// own error when the wire was found spelling a delegation's STATE with
+	// the ownership sentence (nocx-e5e8q).
+	if err := w.record.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, workers.ErrNotHeld) {
+		t.Fatalf("close by a stranger = %v, want ErrNotHeld", err)
 	}
 	if _, err := w.reg.Get(session.ID(p.Liveness.SessionID)); err != nil {
 		t.Fatalf("a refused close ended the worker's session anyway: %v", err)

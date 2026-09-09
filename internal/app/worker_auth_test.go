@@ -360,8 +360,12 @@ func TestWorkerToolCallAfterLifecycleLossIsRefusedWithoutParticipant(t *testing.
 	// alive: the pane's enrolment interval closes, but no worker record exists.
 	grid.Withdraw(string(sess.ID()))
 	code, message, reason := call("after-loss", false)
+	// The reason is asserted by what it must SAY: the sentence is written for
+	// an agent to act on and is expected to be improved, while the fact it
+	// reports must not drift. internal/toolendpoint/errors_test.go pins the
+	// vocabulary itself.
 	if code != -32001 || message != "worker caller refused" ||
-		reason != "caller is not in an enrolled process tree" {
+		!strings.Contains(reason, "not in a pane nocx has enrolled") {
 		t.Fatalf("workers.holdings after lifecycle loss = %d/%q/%q, want the named refusal",
 			code, message, reason)
 	}

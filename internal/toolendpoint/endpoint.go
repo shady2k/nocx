@@ -408,6 +408,23 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 			}
 			if dispatchErr != nil {
 				code, message, reason := rpcErrorFor(dispatchErr)
+				if code == rpcInternalError {
+					// THE ONE ERROR NOBODY CLASSIFIED, and it used to be the
+					// only one that left no trace on either side: the caller
+					// got two words naming no cause, and nothing was written
+					// here. So the case that most needs diagnosis was the
+					// case with the least evidence (nocx-1w3my).
+					//
+					// The wire answer stays generic on purpose — an
+					// unclassified error must not spell a backend's internals
+					// to an agent — which is exactly why the log has to carry
+					// it.
+					e.log().Error("tool endpoint: unclassified dispatch failure",
+						"method", request.Method,
+						"session_id", requestInvocation.RunContext.Session,
+						"participant", requestInvocation.RunContext.Participant,
+						"error", dispatchErr)
+				}
 				e.writeError(conn, request.ID, code, message, reason)
 				return
 			}
@@ -533,29 +550,67 @@ func (e *Endpoint) write(conn *net.UnixConn, response rpcResponse) {
 
 var connWriteMu sync.Mutex
 
+// rpcErrorFor turns a dispatch failure into what an AGENT reads.
+//
+// THE REASON IS AN INSTRUCTION, NOT A LABEL. Every sentence here says three
+// things: what happened, why, and what the caller should do next. That is not
+// a preference — it is the standard this product already holds its own model
+// to. internal/assistant's refusalResult answers the built-in assistant with
+// "REFUSED: the person declined your call to X — it did not run. Say what you
+// needed in words instead", and an external coordinator was getting "method is
+// not assembled". A caller that cannot tell "you may never do this" from "try
+// again" does the wrong one, and the wrong one is usually the retry.
+//
+// What the model actually sees: on a domain refusal the MCP adapter shows the
+// reason (mcpstdio handleCall -> toolError); on everything else it shows the
+// message. Both are written for that reader.
+func (e *Endpoint) log() *slog.Logger {
+	if e != nil && e.cfg.Logger != nil {
+		return e.cfg.Logger
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func rpcErrorFor(err error) (code int, message, reason string) {
 	switch {
 	case errors.Is(err, assistant.ErrUnknownMethod):
-		return rpcMethodNotFound, "method not found", "method is not assembled"
+		return rpcMethodNotFound, "method not found",
+			"nocx has no tool by that name. Call tools.catalogue to see what this session is offered, and use one of those names."
 	case errors.Is(err, assistant.ErrInvalidParams):
-		return rpcInvalidParams, "invalid params", "params do not match the method contract"
+		return rpcInvalidParams, "invalid params",
+			"the arguments do not match this tool's schema. Read the tool's schema in tools.catalogue and call it again with corrected arguments."
 	case errors.Is(err, assistant.ErrUnreachableMethod):
-		return rpcDomainError, "worker request refused", "method is not reachable for the bound grant"
+		return rpcDomainError, "worker request refused",
+			"this tool exists but is not offered to this session, so calling it again will fail the same way. Work with the tools tools.catalogue lists for you, or say in words what you needed it for."
 	case errors.Is(err, assistant.ErrInvalidResult):
-		return rpcDomainError, "worker request refused", "dispatcher returned an invalid result"
+		return rpcDomainError, "worker request refused",
+			"the tool ran and produced a result nocx could not read, so nothing can be reported about it. Do not repeat the call; say what you were trying to find out."
+	case errors.Is(err, workers.ErrNotHeld):
+		// OWNERSHIP. Split from the state refusal below (nocx-e5e8q): one
+		// error used to carry both facts and the wire spelled them with this
+		// sentence, so a coordinator refused because a delegation had ended
+		// was told the participant belonged to somebody else — which it will
+		// not question, and which workers.holdings contradicts on the next
+		// call.
+		return rpcDomainError, "worker request refused",
+			"that participant is held by another session, so this session may not act on it. Call workers.holdings to see the participants that are yours."
 	case errors.Is(err, workers.ErrNotDelegated):
-		// A row this caller's capability never held. It belongs with the
-		// grant refusal above and not in the default: the two are one class —
-		// the request was understood and the authority for it is absent — and
-		// answering it as an internal error would tell a caller the backend
-		// had fallen over, which is the one reading that invites a retry of a
-		// call that must never succeed.
-		return rpcDomainError, "worker request refused", "the caller's session does not hold that participant"
+		// STATE. The participant IS this caller's; the authority over it is
+		// no longer active.
+		return rpcDomainError, "worker request refused",
+			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
 	case errors.Is(err, ErrSessionCallerActive):
-		return rpcPeerRefused, "worker caller refused", ErrSessionCallerActive.Error()
+		return rpcPeerRefused, "worker caller refused",
+			"another call from this session is still running, and nocx serves one at a time. Wait for that call to answer, then make this one."
 	case errors.Is(err, ErrNotEnrolled):
-		return rpcPeerRefused, "worker caller refused", "caller is not in an enrolled process tree"
+		return rpcPeerRefused, "worker caller refused",
+			"this process is not in a pane nocx has enrolled, so it has no worker tools. Nothing you can call will change that; tell the person their pane is not orchestrated."
 	default:
-		return rpcInternalError, "internal error", "worker request failed"
+		// Deliberately generic on the wire and fully logged at the call site:
+		// an error nobody classified must not spell a backend's internals to
+		// an agent. What it MUST do is stop the agent from retrying a call
+		// that failed for a reason it cannot affect.
+		return rpcInternalError, "internal error",
+			"nocx failed to complete this call for a reason inside nocx, not in what you sent. Do not repeat it; carry on without this tool and say what you could not do."
 	}
 }

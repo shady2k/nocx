@@ -719,14 +719,25 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 		return err
 	}
 	if del.ControllerSession != coordinatorSession {
-		return fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotDelegated)
-	}
-	if !del.Permits(EffectClose) {
-		return fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+		return fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
 	}
 	p, err := r.store.Participant(ctx, id)
 	if err != nil {
 		return err
+	}
+	// OWNERSHIP IS THE AUTHORITY QUESTION, AND IT IS ANSWERED ABOVE. The
+	// delegation's STATE is not a second authority to end something that is
+	// already over: this check used to run here and refuse first, so the
+	// branch below — "already finished, not an error, a coordinator tidying
+	// up" — could never be reached for the case it was written for, and a
+	// worker that ended badly stayed in holdings for ever with no way to
+	// close it (nocx-e5e8q).
+	//
+	// So the state gates only a LIVE participant. Ending one that is already
+	// terminal needs no live delegation, because there is nothing left to
+	// act on.
+	if !p.State.Terminal() && !del.Permits(EffectClose) {
+		return fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
 	}
 	if p.State.Terminal() {
 		// Already finished. Not an error: a coordinator tidying up should

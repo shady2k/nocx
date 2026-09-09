@@ -250,8 +250,13 @@ func TestCloseIsRefusedWithoutADelegationThatCarriesIt(t *testing.T) {
 		h := newHarnessBound(t, 5)
 		closer := withCloser(t, h)
 		p := mustRegister(t, h)
-		if err := h.reg.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, ErrNotDelegated) {
-			t.Fatalf("close by a stranger = %v, want ErrNotDelegated", err)
+		// ErrNotHeld and not ErrNotDelegated: ownership is its own fact, and
+		// the wire says a different sentence for it (nocx-e5e8q).
+		if err := h.reg.Close(ctx, "sess-somebody-else", p.ID); !errors.Is(err, ErrNotHeld) {
+			t.Fatalf("close by a stranger = %v, want ErrNotHeld", err)
+		}
+		if errors.Is(h.reg.Close(ctx, "sess-somebody-else", p.ID), ErrNotDelegated) {
+			t.Fatal("a stranger's close was reported as a delegation state, which is the caller's OWN participant's story")
 		}
 		if got := closer.seen(); len(got) != 0 {
 			t.Fatalf("a refused close ended %v anyway", got)
@@ -343,5 +348,60 @@ func TestABackendWithNoCloserRefuses(t *testing.T) {
 	p := mustRegister(t, h)
 	if err := h.reg.Close(context.Background(), coordSession, p.ID); err == nil {
 		t.Fatalf("a close with nothing wired to end anything was accepted")
+	}
+}
+
+// A COORDINATOR CAN ALWAYS TIDY UP ITS OWN ENDED WORKER (nocx-e5e8q).
+//
+// Close's own next step says so — "already finished. Not an error: a
+// coordinator tidying up should…" — and the delegation-state gate above it
+// refused first, so that branch could not be reached for the case it exists
+// for. Seen live: a worker in state `interrupted` was listed by
+// workers.holdings as the caller's own and could never be closed, so it stayed
+// in holdings for ever.
+//
+// The state gates a LIVE participant. Ending one that is already terminal
+// needs no live delegation, because there is nothing left to act on.
+func TestAnEndedParticipantCanBeClosedUnderADelegationThatIsNoLongerActive(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessBound(t, 5)
+	withCloser(t, h)
+	p := mustRegister(t, h)
+
+	// The state a compensation writes when a worker's start went wrong — the
+	// exact state the live participant was in when it could not be closed.
+	if err := h.store.Terminalize(ctx, p.ID, StateInterrupted); err != nil {
+		t.Fatalf("terminalize: %v", err)
+	}
+	if err := h.store.PutDelegation(ctx, Delegation{
+		ControllerSession: coordSession, Participant: p.ID,
+		Effects: DefaultBundle(), State: DelegationRevoked,
+	}); err != nil {
+		t.Fatalf("put delegation: %v", err)
+	}
+
+	if err := h.reg.Close(ctx, coordSession, p.ID); err != nil {
+		t.Fatalf("a coordinator could not tidy up its own ended worker: %v", err)
+	}
+}
+
+// And the gate still holds for one that is LIVE: a revoked delegation is a
+// coordinator that may no longer act, and killing a running worker is acting.
+func TestALiveParticipantIsStillRefusedUnderARevokedDelegation(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessBound(t, 5)
+	closer := withCloser(t, h)
+	p := mustRegister(t, h)
+	if err := h.store.PutDelegation(ctx, Delegation{
+		ControllerSession: coordSession, Participant: p.ID,
+		Effects: DefaultBundle(), State: DelegationRevoked,
+	}); err != nil {
+		t.Fatalf("put delegation: %v", err)
+	}
+	if err := h.reg.Close(ctx, coordSession, p.ID); !errors.Is(err, ErrNotDelegated) {
+		t.Fatalf("close of a LIVE participant under a revoked delegation = %v, want ErrNotDelegated", err)
+	}
+	if got := closer.seen(); len(got) != 0 {
+		t.Fatalf("a refused close ended %v anyway", got)
 	}
 }

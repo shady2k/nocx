@@ -289,8 +289,11 @@ func TestEndpointObservesNamedRefusal(t *testing.T) {
 	if observation.Kind != ObservationRefusal || observation.SessionID != "session-1" {
 		t.Fatalf("refusal observation = %+v", observation)
 	}
-	if observation.Reason != ErrSessionCallerActive.Error() {
-		t.Fatalf("refusal reason = %q, want %q", observation.Reason, ErrSessionCallerActive.Error())
+	// What the refusal is about, not its exact prose: the sentence is written
+	// for an agent to act on and may be improved, while the fact it reports
+	// must not drift. errors_test.go pins the vocabulary itself.
+	if !strings.Contains(observation.Reason, "still running") {
+		t.Fatalf("refusal reason = %q, want it to name the call already in flight", observation.Reason)
 	}
 }
 

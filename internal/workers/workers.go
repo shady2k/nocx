@@ -345,6 +345,15 @@ var (
 	// whole reason it is the first step: a bound checked after the fork
 	// leaves an orphan every time it refuses.
 	ErrBoundExceeded = errors.New("worker: participant bound exceeded")
+	// ErrNotHeld means the participant belongs to ANOTHER session. It is
+	// separate from ErrNotDelegated because the two are different facts and a
+	// caller acts differently on each: this one is final for this session,
+	// while a delegation that has ended is about a participant that is still
+	// the caller's own. They shared one error, and the wire spelled both with
+	// this one's sentence — so a coordinator refused because a delegation had
+	// ended was told the participant was somebody else's, which
+	// workers.holdings then contradicted (nocx-e5e8q).
+	ErrNotHeld = errors.New("worker: that participant is held by another session")
 	// ErrNotDelegated means the caller holds no delegation carrying the
 	// effect it tried to use.
 	ErrNotDelegated = errors.New("worker: no delegation carries that effect")

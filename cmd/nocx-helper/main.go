@@ -86,7 +86,14 @@ func main() {
 
 	switch {
 	case len(args) == 1 && args[0] == endpoint.ServeCommand:
-		os.Exit(serve(ctx, log, dir, generation, contentHash, exe))
+		// The DAEMON gets a file; the bridge keeps stderr alone, which is
+		// where D22 puts it and where somebody is actually reading (servelog.go).
+		serveLog, logFile := openServeLog(home, string(generation))
+		code := serve(ctx, serveLog, dir, generation, contentHash, exe)
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		os.Exit(code)
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:

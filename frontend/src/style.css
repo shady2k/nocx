@@ -119,7 +119,6 @@
 @import './styles/surfaces/assistant-permissions.css';
 @import './styles/surfaces/agent-emitting.css';
 @import './styles/surfaces/agent-calibration.css';
-@import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
 @import './styles/surfaces/skill-view.css';
 

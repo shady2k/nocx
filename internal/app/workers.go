@@ -137,7 +137,12 @@ func (s spawnedParticipant) Kill(context.Context) error {
 // never runs produces no enrolment, and a registration whose enrolment never
 // arrives is terminalized rather than left as a participant nobody can reach.
 // The enrolment is the proof the agent started; the write is only the attempt.
-func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (workers.Spawned, error) {
+func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ workers.Spawned, err error) {
+	ctx, lg, end := log.Start(ctx, s.log, "worker.spawn",
+		"participant", string(req.Participant), "group", string(req.Group),
+		"command", req.Command)
+	defer func() { end(err) }()
+
 	tabID, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a tab id: %w", err)
@@ -152,6 +157,8 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (wo
 	); tabErr != nil {
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
+	lg.Debug("worker spawn: the participant's tab exists",
+		"tab_id", tabID.String(), "pane_id", paneID.String(), "workspace", s.workspace)
 
 	opened, err := s.opener.OpenSession(ctx, transport.OpenSpec{
 		PaneID: paneID.String(),
@@ -161,6 +168,9 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (wo
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: opening the participant's session: %w", err)
 	}
+	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
+	lg.Debug("worker spawn: the participant's session is open",
+		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{sess: opened.Session, sessions: s.sessions}
 
 	// Told BEFORE the command is written, or an enrolment that arrives
@@ -178,9 +188,12 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (wo
 		}
 		return nil, errors.New("worker spawn: the participant's session refused its first line")
 	}
-	s.log.Info("worker participant spawned",
-		"participant", string(req.Participant), "worker", string(req.Group),
-		"session_id", string(opened.Session.ID()), "pane_id", paneID.String())
+	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
+	// launcher's own startup, over which this has no visibility at all, so the
+	// line says what was written rather than that anything ran.
+	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(req.Command)+1)
+	lg.Info("worker participant spawned",
+		"participant", string(req.Participant), "worker", string(req.Group))
 	return spawned, nil
 }
 

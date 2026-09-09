@@ -69,6 +69,14 @@ type Registrar struct {
 	// fact and says at Error that it has nothing to reach anyone with, which
 	// is the same stance the supervisor takes with an unwired destination.
 	attention *Backstop
+
+	// log is what the six steps of Register say they are doing. It is never
+	// nil, and a Registrar built without one writes to slog's default rather
+	// than to nothing: the failure that bought this field (nocx-4l2a5.4) was
+	// thirty seconds of silence between "worker participant spawned" and
+	// "enrolment never arrived", in which the record could not say which step
+	// was waiting or for how long.
+	log log.Logger
 }
 
 // Option configures a Registrar. The two numbers are injected rather than
@@ -78,6 +86,16 @@ type Option func(*Registrar)
 
 // WithBound sets how many non-terminal participants one worker may hold.
 func WithBound(n int) Option { return func(r *Registrar) { r.bound = n } }
+
+// WithLogger gives the record the composition root's logger, so its steps land
+// in the same file as everything else that serves the same call.
+func WithLogger(lg log.Logger) Option {
+	return func(r *Registrar) {
+		if lg != nil {
+			r.log = lg
+		}
+	}
+}
 
 // WithEnrolmentDeadline bounds step 4. Its VALUE is not decided here — it is
 // measured where fan-out is measured — but the procedure needs both ends of
@@ -108,6 +126,7 @@ func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Opt
 		deadline: defaultEnrolmentDeadline,
 		newID:    newParticipantID,
 		now:      time.Now,
+		log:      log.NewSlogAdapter(nil),
 		attention: NewBackstop(
 			log.NewSlogAdapter(nil),
 			// No routes. Every fact is still recorded and every missing
@@ -142,7 +161,11 @@ type RegisterRequest struct {
 // It returns the participant it left behind even on failure, because a caller
 // that cannot name the record cannot check what happened to it — and "a
 // registration that failed" is exactly when naming it matters.
-func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Participant, error) {
+func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Participant, err error) {
+	ctx, lg, end := log.Start(ctx, r.log, "workers.register",
+		"group", string(req.Group), "coordinator_session", req.CoordinatorSession,
+		"role", string(req.Role), "command", req.Command)
+	defer func() { end(err) }()
 	// The worker exists because a coordinator spawned into it, never because
 	// somebody opened one: a coordinator's first spawn is what a worker IS.
 	// Its id defaults to the coordinator's session, which is the identity D3
@@ -180,6 +203,7 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Particip
 	// Step 3. The id is already minted and travels with the request, so a
 	// launcher that fails to connect has registered nothing under a name we
 	// did not choose.
+	lg = lg.With("participant", string(p.ID))
 	spawned, spawnErr := r.spawn.Spawn(ctx, SpawnRequest{
 		Participant: p.ID,
 		Group:       req.Group,
@@ -194,12 +218,29 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Particip
 	// Step 4. Bounded, because an enrolment that never arrives must not hold
 	// the record open forever. The bound closes the interval; it does not
 	// decide anything about the participant.
+	// NAMED, because this is the step that was silent. A launcher that never
+	// enrols spends the whole deadline here, and until this line the log said
+	// only that a pane had been opened and, half a minute later, that the
+	// registration had failed.
+	lg.Info("worker: waiting for the participant's enrolment",
+		"deadline_ms", r.deadline.Milliseconds())
 	awaitCtx, cancel := context.WithTimeout(ctx, r.deadline)
+	// time.Now and not r.now: r.now is the RECORD's clock, the one that stamps
+	// a participant's RegisteredAt and that a test freezes to make records
+	// comparable. A stopwatch on a frozen clock measures nothing, and this
+	// number's whole job is to say how long the wait actually was.
+	waitStarted := time.Now()
 	live, enrolErr := r.enrol.Await(awaitCtx, p.ID)
 	cancel()
 	if enrolErr != nil {
+		lg.Warn("worker: the enrolment never arrived",
+			"waited_ms", time.Since(waitStarted).Milliseconds(),
+			"deadline_ms", r.deadline.Milliseconds(), "error", enrolErr)
 		return p, r.compensate(ctx, p, spawned, false, fmt.Errorf("worker: await enrolment: %w", enrolErr))
 	}
+	lg.Debug("worker: the participant enrolled",
+		"waited_ms", time.Since(waitStarted).Milliseconds(),
+		"session_id", live.SessionID, "lane", live.Lane, "epoch", live.Epoch)
 
 	// Step 5. Membership already exists; this is what makes the participant
 	// controllable, and the bundle deliberately withholds delegate-further.
@@ -233,6 +274,12 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (Particip
 // failed is a fact about the record, which the record itself then carries by
 // staying non-terminal.
 func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawned, enrolled bool, cause error) error {
+	// SAID, because an undo nobody can see is how a participant that outlived
+	// its own registration goes unnoticed: nocx-1w3my recorded a call that
+	// reported failure and left a participant behind.
+	r.log.WithContext(ctx).Info("worker: compensating a failed registration",
+		"participant", string(p.ID), "withdraw_enrolment", enrolled,
+		"kill_launcher", spawned != nil, "cause", cause)
 	if enrolled {
 		if err := r.enrol.Withdraw(ctx, p.ID); err != nil {
 			return errors.Join(cause, fmt.Errorf("worker: withdraw enrolment: %w", err))

@@ -2041,6 +2041,7 @@ func New(opts ...Option) (*App, error) {
 		},
 		workerEnrol,
 		workerSup,
+		workers.WithLogger(logger),
 		workers.WithBackstop(workerBackstop),
 		// The seam a coordinator's workers.close reaches. Unwired it refuses,
 		// which is the right answer: reporting a worker ended that is still

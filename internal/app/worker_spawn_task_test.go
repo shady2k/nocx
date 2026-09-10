@@ -10,8 +10,10 @@ package app
 // asserting that a fake permits typing.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -155,6 +158,61 @@ func (f fakePaneReadiness) Snapshot(string) (paneobserve.Observation, bool) {
 type fixedOutcomeTypist struct{ res agenttyping.Result }
 
 func (f fixedOutcomeTypist) Submit(string, string) agenttyping.Result { return f.res }
+
+// fixedStateReadiness answers every Snapshot with the SAME state, forever —
+// what a pane looks like when nocx is reading it just fine and it simply
+// never reaches free_text (state=working), or when the driver never
+// recognises its screen at all (state=unknown, nocx-qddv8). fakePaneReadiness
+// above cannot express either: its ready/not-ready pair only ever answers
+// free_text or "not observed".
+type fixedStateReadiness struct{ state agentdriver.State }
+
+func (f fixedStateReadiness) Snapshot(string) (paneobserve.Observation, bool) {
+	return paneobserve.Observation{State: f.state}, true
+}
+
+// neverObservedReadiness never answers for any pane at all — the grid
+// genuinely has no reading for it, as distinct from fixedStateReadiness's
+// "observed, and stuck".
+type neverObservedReadiness struct{}
+
+func (neverObservedReadiness) Snapshot(string) (paneobserve.Observation, bool) {
+	return paneobserve.Observation{}, false
+}
+
+// newBufferLogger is a log.Logger that writes to an in-memory buffer, so a
+// test can assert on the STRUCTURED log line awaitFreeText's own refusal
+// writes, beside the error text a coordinator reads — the two are asserted
+// separately because they serve different readers (workers.go's
+// refusePaneNeverTypable).
+func newBufferLogger(lvl slog.Level) (*log.SlogAdapter, *bytes.Buffer) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: lvl})
+	return log.NewSlogAdapter(slog.New(h)), &buf
+}
+
+// ctxSpyTabs and hangingTabs are declared in worker_late_failure_test.go and
+// used here too: both files are package app, and the compensation bound this
+// bead adds (killContext, workers.go) is exercised from both the early-failure
+// path (compensateSpawn, here) and the late-failure path (Registrar.compensate,
+// there) — one double serves both rather than two that could drift.
+
+// hangingTabs blocks DeleteTab until its own ctx ends, to prove Kill's own
+// compensation bound (killTimeout, workers.go) — not the caller's, which by
+// the time a compensation runs may already be expired or long gone — is what
+// ends a compensation whose store hangs (AGENTS.md testing rule 3: every
+// external call gets a test where it fails, and a call that never returns is
+// the sharpest version of that).
+type hangingTabs struct{}
+
+func (hangingTabs) CreateTab(_ context.Context, _ content.Tab, _ content.Pane) (content.Created[content.NewTab], error) {
+	return content.Created[content.NewTab]{}, nil
+}
+
+func (hangingTabs) DeleteTab(ctx context.Context, _ string, _ content.Replacement) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
 
 // Criterion: a spawn whose pane becomes free_text submits the task text into
 // that pane, AFTER the command line and never in the same write.
@@ -347,4 +405,163 @@ func TestASpawnerWithNoTypingSeamProceedsWithoutDeliveringTheTask(t *testing.T) 
 	waittest.WaitFor(t, "the command line to reach the pty", func() bool {
 		return pty.read() == "claude\n"
 	})
+}
+
+// Criterion: a spawn whose task delivery fails compensates COMPLETELY even
+// when the CALLER's own context is already done by the time compensation
+// runs (nocx-4gj5w). On the live stand this bead was filed from,
+// awaitFreeText spent the whole of Spawn's own budget waiting, so the ctx
+// compensateSpawn was handed was already context.DeadlineExceeded the moment
+// it mattered, and DeleteTab failed with exactly that error — leaving the
+// tab and its session behind for a person to find and a coordinator to close
+// by hand. Assert all three: no tab, no session, no live participant — and,
+// the part fakeAxisTabs cannot prove because it never looks at ctx at all,
+// that DeleteTab itself was handed a context that was NOT already done.
+func TestASpawnCompensatesCompletelyEvenWithAnAlreadyExpiredContext(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	spy := &ctxSpyTabs{}
+	stand.spawner.layout = spy
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := stand.spawner.Spawn(ctx, workers.SpawnRequest{
+		Participant: "p-expired-ctx", Group: "worker-1", Task: "do the thing", Command: "claude",
+	})
+	if err == nil {
+		t.Fatal("Spawn succeeded for a pane nocx never watched, let alone one that became typable")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test setup: the caller's own context should already be done by the time Spawn returns")
+	}
+
+	created, deleted := spy.snapshot()
+	if len(created) != 1 || len(deleted) != 1 || created[0] != deleted[0] {
+		t.Fatalf("tabs created=%v deleted=%v, want the one created tab deleted and nothing else", created, deleted)
+	}
+	if len(spy.deleteCtxDone) != 1 || spy.deleteCtxDone[0] {
+		t.Fatalf("DeleteTab was handed a context that was already done (%v); "+
+			"Kill's own compensation context must not inherit the caller's expired one", spy.deleteCtxDone)
+	}
+	if sid := stand.opener.lastSessionID(); sid != "" {
+		if _, getErr := stand.reg.Get(sid); getErr == nil {
+			t.Fatalf("session %s is still in the registry after compensating with an expired context", sid)
+		}
+	}
+}
+
+// Criterion: the compensation's own bound applies (AGENTS.md testing rule 3:
+// every external call gets a test where it fails, and a hang is the sharpest
+// version of that). A store whose DeleteTab hangs must not be able to hang
+// the spawn — killTimeout, not the caller's ctx, is what has to end it.
+func TestASpawnsCompensationIsNotHungByAHangingStore(t *testing.T) {
+	orig := killTimeout
+	killTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { killTimeout = orig })
+
+	stand := newTaskDeliveryStand(t)
+	stand.spawner.layout = hangingTabs{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := stand.spawner.Spawn(ctx, workers.SpawnRequest{
+		Participant: "p-hanging-store", Group: "worker-1", Task: "do the thing", Command: "claude",
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Spawn succeeded despite a pane that never becomes typable")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Spawn took %s to return; a hanging compensation store must not be able to hang it (killTimeout=%s)", elapsed, killTimeout)
+	}
+	if sid := stand.opener.lastSessionID(); sid != "" {
+		if _, getErr := stand.reg.Get(sid); getErr == nil {
+			t.Fatalf("session %s is still in the registry after a compensation whose store hung", sid)
+		}
+	}
+}
+
+// Criterion: a pane the driver reads just fine, that simply never reaches
+// free_text, names its last state and says nothing about the driver failing
+// to recognise the screen — that sentence belongs only to StateUnknown.
+func TestAPaneStuckWorkingForTheWholeBudgetNamesItsLastState(t *testing.T) {
+	logger, buf := newBufferLogger(slog.LevelDebug)
+	stand := newTaskDeliveryStand(t)
+	stand.spawner.readiness = fixedStateReadiness{state: agentdriver.StateWorking}
+	stand.spawner.log = logger
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := stand.spawner.deliverTask(ctx, "pane-working", "do the thing")
+	if err == nil {
+		t.Fatal("deliverTask succeeded for a pane stuck at working")
+	}
+	if !errors.Is(err, workers.ErrPaneNeverTypable) {
+		t.Fatalf("error %v does not wrap ErrPaneNeverTypable", err)
+	}
+	if !strings.Contains(err.Error(), `"working"`) {
+		t.Fatalf("error %q does not name the pane's last state", err)
+	}
+	if strings.Contains(err.Error(), "did not recognise") {
+		t.Fatalf("error %q reads like the unknown case; a screen the driver read fine must not say that", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "last_state=working") || !strings.Contains(got, "held_ms=") {
+		t.Fatalf("log line = %q, want it to name last_state=working and a held_ms duration", got)
+	}
+}
+
+// Criterion: `unknown` for the whole budget is a DIFFERENT sentence from
+// `working` for the whole budget (nocx-qddv8, nocx-4gj5w) — a rule that
+// cannot identify the screen is a different failure from an agent that is
+// simply busy, and only the former will never resolve on its own.
+func TestAPaneStuckUnknownForTheWholeBudgetNamesTheUnrecognisedScreen(t *testing.T) {
+	logger, buf := newBufferLogger(slog.LevelDebug)
+	stand := newTaskDeliveryStand(t)
+	stand.spawner.readiness = fixedStateReadiness{state: agentdriver.StateUnknown}
+	stand.spawner.log = logger
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := stand.spawner.deliverTask(ctx, "pane-unknown", "do the thing")
+	if err == nil {
+		t.Fatal("deliverTask succeeded for a pane stuck at unknown")
+	}
+	if !errors.Is(err, workers.ErrPaneNeverTypable) {
+		t.Fatalf("error %v does not wrap ErrPaneNeverTypable", err)
+	}
+	if !strings.Contains(err.Error(), "did not recognise") {
+		t.Fatalf("error %q does not say the driver could not recognise the screen", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "last_state=unknown") {
+		t.Fatalf("log line = %q, want it to name last_state=unknown", got)
+	}
+}
+
+// Criterion: a pane nocx never observed at all says exactly that, and names
+// no state — the grid not being fed is a third failure, distinct from both
+// of the above (nocx-4gj5w).
+func TestAPaneNeverObservedAtAllSaysSoRatherThanNamingAState(t *testing.T) {
+	logger, buf := newBufferLogger(slog.LevelDebug)
+	stand := newTaskDeliveryStand(t)
+	stand.spawner.readiness = neverObservedReadiness{}
+	stand.spawner.log = logger
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := stand.spawner.deliverTask(ctx, "pane-unwatched", "do the thing")
+	if err == nil {
+		t.Fatal("deliverTask succeeded for a pane nocx never observed")
+	}
+	if !errors.Is(err, workers.ErrPaneNeverTypable) {
+		t.Fatalf("error %v does not wrap ErrPaneNeverTypable", err)
+	}
+	if !strings.Contains(err.Error(), "never observed") {
+		t.Fatalf("error %q does not say the pane was never observed", err)
+	}
+	if strings.Contains(err.Error(), "held state") {
+		t.Fatalf("error %q names a state that was never seen", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "no observation ever recorded") {
+		t.Fatalf("log line = %q, want it to say no observation was ever recorded", got)
+	}
 }

@@ -41,6 +41,14 @@ type failableStore struct {
 	mu             sync.Mutex
 	failDelegation bool
 	failMarkLive   bool
+	// beforeMarkLiveFailure, when set, runs synchronously the instant a
+	// failMarkLive injection is about to return its error — before
+	// Registrar.compensate is ever called. A test uses it to cancel the SAME
+	// ctx Register is holding at that exact point, so what compensate is
+	// handed is provably the caller's own already-done context (nocx-4gj5w)
+	// rather than one raced against a background goroutine on a guess about
+	// timing.
+	beforeMarkLiveFailure func()
 }
 
 func (f *failableStore) PutDelegation(ctx context.Context, d workers.Delegation) error {
@@ -56,8 +64,12 @@ func (f *failableStore) PutDelegation(ctx context.Context, d workers.Delegation)
 func (f *failableStore) MarkLive(ctx context.Context, id workers.ParticipantID, l workers.Liveness) error {
 	f.mu.Lock()
 	fail := f.failMarkLive
+	hook := f.beforeMarkLiveFailure
 	f.mu.Unlock()
 	if fail {
+		if hook != nil {
+			hook()
+		}
 		return errors.New("injected: the mark-live store refused this write")
 	}
 	return f.Store.MarkLive(ctx, id, l)
@@ -77,20 +89,68 @@ func (f *failableSupervisor) Attach(ctx context.Context, p workers.Participant) 
 	return f.Supervisor.Attach(ctx, p)
 }
 
+// recordingTabs is the paneMinter double every test stand in this file wires
+// in: whatever else it does, it must record every CreateTab and DeleteTab
+// call so a test can assert the one created tab was the one deleted.
+// fakeAxisTabs (worker_spawn_axis_test.go) is the ordinary one; ctxSpyTabs
+// below additionally answers the question fakeAxisTabs cannot, because it
+// never looks at ctx at all — was DeleteTab's own context already done.
+type recordingTabs interface {
+	paneMinter
+	snapshot() (created, deleted []string)
+}
+
+// ctxSpyTabs records, for every DeleteTab call, whether the context it was
+// handed was ALREADY done. That is exactly what distinguishes Kill's own
+// derived compensation context (nocx-4gj5w, workers.go's killContext) from a
+// caller's context that expired before compensation ran — fakeAxisTabs
+// cannot tell the two apart because it ignores ctx entirely.
+type ctxSpyTabs struct {
+	mu            sync.Mutex
+	created       []string
+	deleted       []string
+	deleteCtxDone []bool
+}
+
+func (f *ctxSpyTabs) CreateTab(_ context.Context, tab content.Tab, _ content.Pane) (content.Created[content.NewTab], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, tab.ID)
+	return content.Created[content.NewTab]{}, nil
+}
+
+func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replacement) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, id)
+	f.deleteCtxDone = append(f.deleteCtxDone, ctx.Err() != nil)
+	return nil
+}
+
+func (f *ctxSpyTabs) snapshot() (created, deleted []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.created...), append([]string(nil), f.deleted...)
+}
+
 // lateFailureStand is the composition these tests assert against: a real
 // workerSpawner over a recording tab double and a real session registry,
 // behind a Registrar whose store and supervisor can be told to fail one late
 // step on demand.
 type lateFailureStand struct {
 	reg    *session.Reg
-	tabs   *fakeAxisTabs
+	tabs   recordingTabs
 	enrol  *workerEnrolments
 	store  *failableStore
 	sup    *failableSupervisor
 	record *workers.Registrar
 }
 
-func newLateFailureStand(t *testing.T) *lateFailureStand {
+// newLateFailureStandWithTabs is newLateFailureStand parameterised on the
+// tab double, so a test that needs to inspect DeleteTab's own ctx (the
+// cancelled-context case below) can swap in ctxSpyTabs without duplicating
+// the rest of the wiring.
+func newLateFailureStandWithTabs(t *testing.T, tabs recordingTabs) *lateFailureStand {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ptys := &workerTestPTYFactory{log: logger}
@@ -100,7 +160,6 @@ func newLateFailureStand(t *testing.T) *lateFailureStand {
 			_ = reg.Close(s.ID())
 		}
 	})
-	tabs := &fakeAxisTabs{}
 	opener := &fakeAxisOpener{reg: reg}
 	enrol := newWorkerEnrolments(logger, reg)
 	spawner := &workerSpawner{
@@ -114,6 +173,11 @@ func newLateFailureStand(t *testing.T) *lateFailureStand {
 		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
 	)
 	return &lateFailureStand{reg: reg, tabs: tabs, enrol: enrol, store: store, sup: sup, record: record}
+}
+
+func newLateFailureStand(t *testing.T) *lateFailureStand {
+	t.Helper()
+	return newLateFailureStandWithTabs(t, &fakeAxisTabs{})
 }
 
 // register runs a registration and supplies the enrolment as soon as the
@@ -192,6 +256,72 @@ func TestARegistrationRefusedAtMarkLiveLeavesNoTabNoSessionNoParticipant(t *test
 		t.Fatalf("register err = %v, want a mark-live failure", err)
 	}
 	stand.assertFullyUndone(t, p)
+}
+
+// Criterion: this is the assertion nocx-4gj5w exists for. Registrar.compensate
+// hands Kill the OUTER ctx Register was called with (registrar.go's own
+// compensate), and on the live stand this bead was filed from that ctx was
+// already context.DeadlineExceeded by the time a late failure reached it —
+// awaitFreeText had spent the whole spawn budget waiting, so the ctx
+// compensateSpawn (and, one level up, Registrar.compensate) received was
+// already dead, and DeleteTab failed with exactly that error, leaving the
+// tab and the participant behind for a person and a coordinator to clean up
+// by hand.
+//
+// This reproduces the shape directly: the ctx Register is given is
+// cancelled from INSIDE the injected mark-live failure, synchronously,
+// before compensate ever runs — not raced against a background goroutine on
+// a guess about timing. ctxSpyTabs then proves DeleteTab was handed a
+// context that was NOT already done, which is what Kill's own derived
+// compensation context (killContext, workers.go) guarantees regardless of
+// what the caller's ctx was doing.
+func TestARegistrationRefusedAtMarkLiveCompensatesEvenWithAnAlreadyCancelledContext(t *testing.T) {
+	tabs := &ctxSpyTabs{}
+	stand := newLateFailureStandWithTabs(t, tabs)
+	stand.store.failMarkLive = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stand.store.beforeMarkLiveFailure = cancel
+
+	type outcome struct {
+		p   workers.Participant
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		p, err := stand.record.Register(ctx, workers.RegisterRequest{
+			Group: "worker-1", CoordinatorSession: "sess-coordinator",
+			Role: workers.RoleWorker, Task: "t", Command: "claude",
+		})
+		done <- outcome{p, err}
+	}()
+	var sid session.ID
+	waittest.WaitFor(t, "the participant's session to exist", func() bool {
+		for _, sess := range stand.reg.List() {
+			sid = sess.ID()
+			return true
+		}
+		return false
+	})
+	stand.enrol.enrolled(sid, "lane-participant")
+	got := <-done
+
+	if got.err == nil || !strings.Contains(got.err.Error(), "mark live") {
+		t.Fatalf("register err = %v, want a mark-live failure", got.err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test setup: ctx should already be cancelled by the time Register returned")
+	}
+	stand.assertFullyUndone(t, got.p)
+
+	_, deleted := tabs.snapshot()
+	if len(deleted) != 1 {
+		t.Fatalf("DeleteTab calls = %v, want exactly one", deleted)
+	}
+	if tabs.deleteCtxDone[0] {
+		t.Fatal("DeleteTab was handed a context that was already done; " +
+			"Kill's own compensation context must not inherit the caller's cancelled one")
+	}
 }
 
 // Criterion: a refusal at Supervisor.Attach — the very last step, with the

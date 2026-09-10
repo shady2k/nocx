@@ -210,6 +210,47 @@ type paneReadiness interface {
 // never on this duration.
 const deliveryPoll = 40 * time.Millisecond
 
+// paneWaitState is what awaitFreeText has learned about a pane's own
+// classification by the time it gives up: whether the watcher ever answered
+// for it at all, and what it last held and for how long.
+//
+// A refusal built from anything less collapses three different failures into
+// one silence (nocx-4gj5w): the grid not being fed at all, the driver
+// settling on `working` or `unknown`, and there being no observation for this
+// pane whatsoever. "The pane never became typable inside the spawn's own
+// budget" was true in all three cases and told a reader nothing about which
+// one they were looking at — on the trace this bead was filed from, thirty
+// seconds of silence between "agent enrolled" and that one sentence.
+type paneWaitState struct {
+	observed bool
+	state    agentdriver.State
+	// since is when `state` was FIRST seen on this wait, so held (below)
+	// answers "how long has the pane held this reading", not "how long has
+	// this wait itself been running" — the two differ the moment a pane
+	// passes through more than one state before the budget runs out.
+	since time.Time
+}
+
+// held is how long the pane has shown `state`, as of now. Zero for a pane
+// never observed at all: there is no state to have held anything.
+func (w paneWaitState) held(now time.Time) time.Duration {
+	if !w.observed {
+		return 0
+	}
+	return now.Sub(w.since)
+}
+
+// note updates w for one fresh Snapshot reading, resetting the clock only on
+// a transition — a pane read as the SAME state on every poll must not look
+// like it just started holding it.
+func (w *paneWaitState) note(o paneobserve.Observation) {
+	if !w.observed || w.state != o.State {
+		w.observed = true
+		w.state = o.State
+		w.since = time.Now()
+	}
+}
+
 // awaitFreeText blocks until paneID's last-classified observation is
 // free_text, until ctx ends, or until the pane's agent is seen to have
 // exited.
@@ -221,12 +262,21 @@ const deliveryPoll = 40 * time.Millisecond
 // exactly once, after this returns, and it RE-VERIFIES the screen itself
 // (agenttyping's own documented guarantee) — this function only decides when
 // that one attempt is worth making, never whether it is allowed to write.
-func awaitFreeText(ctx context.Context, r paneReadiness, paneID string) error {
+//
+// lg is the ONE thing this function adds beyond its own return value
+// (nocx-4gj5w): the error it returns is for the coordinator, worded as a
+// sentence about what to do next; the log line at the same moment is for
+// whoever is reading this backend's log, and carries the same facts as
+// structured fields rather than prose, because the two readers are not
+// looking for the same thing.
+func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger) error {
+	var last paneWaitState
 	check := func() (bool, error) {
 		o, ok := r.Snapshot(paneID)
 		if !ok {
 			return false, nil
 		}
+		last.note(o)
 		switch o.State {
 		case agentdriver.StateFreeText:
 			return true, nil
@@ -244,13 +294,49 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return errors.New("the pane never became typable inside the spawn's own budget")
+			return refusePaneNeverTypable(lg, paneID, last)
 		case <-ticker.C:
 			if ready, err := check(); ready || err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// refusePaneNeverTypable builds the sentence a coordinator reads and the log
+// line a person reads, from the SAME facts — what the wait above saw of
+// paneID before its budget ran out. They serve different readers (the error
+// wraps workers.ErrPaneNeverTypable and is meant to be read once, out of
+// context; the log line is meant to be grepped, beside every other line this
+// spawn wrote) and so they say the same thing twice rather than one being
+// derived from the other.
+//
+// UNKNOWN AND WORKING ARE NOT THE SAME REFUSAL (nocx-qddv8, nocx-4gj5w):
+// `unknown` means the driver could not identify what was on screen at all —
+// a rule that does not recognise this agent's chrome, which will not resolve
+// itself no matter how long the budget runs — where every other non-typable
+// state (`working`, a permission menu, a modal) means the driver read the
+// screen just fine and the agent was doing something else. Retrying the
+// first is retrying a bug; retrying the second may just need a longer wait
+// or a busier machine.
+func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState) error {
+	if !last.observed {
+		lg.Warn("worker spawn: the pane's budget expired with no observation ever recorded for it",
+			"pane_id", paneID)
+		return errors.New("nocx never observed this pane at all inside the spawn's own budget; " +
+			"there is no reading to say why it did not become typable")
+	}
+	held := last.held(time.Now())
+	lg.Warn("worker spawn: the pane's budget expired before it became typable",
+		"pane_id", paneID, "last_state", string(last.state), "held_ms", held.Milliseconds())
+	if last.state == agentdriver.StateUnknown {
+		return fmt.Errorf(
+			"the pane's screen held state %q for %s of the spawn's budget: nocx's driver did not recognise what was on screen, and a pane it cannot read will never become typable on its own",
+			last.state, held.Round(time.Millisecond))
+	}
+	return fmt.Errorf(
+		"the pane held state %q for %s of the spawn's budget without becoming typable",
+		last.state, held.Round(time.Millisecond))
 }
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
@@ -308,7 +394,28 @@ func (s spawnedParticipant) Liveness() workers.Liveness {
 // window is already a no-op on the content side (sqliteContent.DeleteTab
 // finds no row and returns nil) — this only needs to add the matching
 // tolerance for the session half.
+//
+// THE CTX IT RUNS ON IS ITS OWN, NOT THE CALLER'S (nocx-4gj5w). Both callers
+// reach Kill only after their own budget for making the spawn succeed is
+// already spent: compensateSpawn below hands it Spawn's own ctx, and
+// awaitFreeText spends the whole of that budget waiting before returning —
+// so by the time a failed task delivery compensates, the ctx it is handed
+// can already be context.DeadlineExceeded, and DeleteTab used to fail with
+// exactly that, leaving the tab and its session behind for a person to find
+// and a coordinator to close by hand. internal/workers.Registrar.compensate
+// is no different: it hands Kill the OUTER ctx Register was called with,
+// which a caller may have cancelled (or which may have expired for the same
+// reason) by the time a LATE failure — at delegation, mark-live or
+// attach-supervision — is discovered. Either way, undoing what Spawn built
+// is the one thing that must still run to completion once the decision to
+// undo it is made, so killContext below carries the parent's VALUES but
+// never its cancellation or deadline, for the identical reason
+// detachedFinishContext does one layer up
+// (internal/assistant/attempt_dispatch.go, nocx-uhii1): "inherits nothing"
+// and "inherits the deadline" are both wrong here.
 func (s spawnedParticipant) Kill(ctx context.Context) error {
+	ctx, cancel := killContext(ctx)
+	defer cancel()
 	var errs []error
 	if s.sess != nil {
 		if _, getErr := s.sessions.Get(s.sess.ID()); getErr == nil {
@@ -327,6 +434,30 @@ func (s spawnedParticipant) Kill(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// killTimeout bounds Kill's own cleanup calls, once it has stopped trusting
+// the caller's context for anything but its VALUES (see killContext). A
+// package var and not a const, exactly like
+// internal/assistant/attempt_dispatch.go's finishAttemptTimeout, so a test
+// can shorten it and prove the bound actually applies without waiting out
+// the production value.
+var killTimeout = 10 * time.Second
+
+// killContext derives the context Kill's own cleanup calls run under, from
+// whatever context a caller hands it. See Kill's own doc for why neither
+// caller's ctx may be trusted here, and detachedFinishContext
+// (internal/assistant/attempt_dispatch.go) for the identical derivation one
+// layer up in the stack, over the identical reasoning: it carries the
+// parent's VALUES (context.WithoutCancel) but never its cancellation or
+// deadline, and is bounded instead by ITS OWN short timeout, so a wedged
+// store cannot hang Kill in the caller's place now that the caller's own ctx
+// can no longer do that job either.
+func killContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), killTimeout)
 }
 
 // killReplacement mints the identity content.Replacement wants in hand for
@@ -561,7 +692,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) er
 			"pane_id", paneID)
 		return nil
 	}
-	if waitErr := awaitFreeText(ctx, s.readiness, paneID); waitErr != nil {
+	if waitErr := awaitFreeText(ctx, s.readiness, paneID, s.log); waitErr != nil {
 		return fmt.Errorf("%w: %s", workers.ErrPaneNeverTypable, waitErr)
 	}
 	res := s.typist.Submit(paneID, task)

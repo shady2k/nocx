@@ -534,6 +534,19 @@ how two agents ship two answers to one question.
 4. **Decided in an ADR?** `ls docs/decisions/`. Re-deciding a settled question inside a
    bugfix is how it stops being settled.
 
+   **An accepted ADR is never edited. A change is a NEW record that supersedes it.**
+   The owner's rule, 2026-09-10. An ADR is evidence of what was decided and why, at a
+   date — edit it and the evidence is gone, while every citation written against it now
+   points at a decision nobody took. The index already carries the spelling
+   (`Superseded by ADR-NNNN`, and `Accepted (§7 superseded by ADR-0027)` where only a
+   section moved), so this costs one row. The new record names what it supersedes and
+   why the old answer stopped holding; citations elsewhere — `contracts/`, code
+   comments, protocol docs — move to the new number in the same commit.
+
+   This overrules the practice visible in the tree: ADR-0024 carries two `## Amendment`
+   sections written into the record itself. Do not copy them. They are what the rule
+   was made against.
+
 5. **Is the code reachable?** A file on `main` is not a feature in the product.
 
    ```bash

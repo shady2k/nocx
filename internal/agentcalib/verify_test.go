@@ -1,19 +1,22 @@
 package agentcalib_test
 
-// TYPING AUTHORITY IS EARNED, and the currency is the labelled set
-// (nocx-jse6x).
+// TYPING IS REFUSED ON EVIDENCE AGAINST THE RULE, not on the absence of a
+// calibration (nocx-9w0q0).
 //
 // A mistimed keystroke does not merely fail to arrive: it ANSWERS whatever
 // modal is on screen, and can approve a tool call the person never saw. So a
 // rule may light an indicator on nothing but its author's confidence — a wrong
-// dot costs nothing — and may gate typing only after it has classified every
-// frame a person produced and labelled, each to the state they were asked for.
+// dot costs nothing — and may be typed against unless something here amounts
+// to evidence it should not be believed: a labelled disagreement, or no rule
+// in this build at all. Never having been calibrated is not that evidence,
+// and neither is a set that is incomplete, unreadable, unreplayable, or names
+// a label this build does not map — each of those permits, with a reason.
 //
 // These tests are about what the API makes IMPOSSIBLE rather than about what
-// it answers when asked nicely. The authority is a value only Verify can
-// produce, so every other path — a missing set, an unreadable one, an agent
-// with no rule, a struct literal a caller wrote itself — denies typing without
-// anybody having remembered to check.
+// it answers when asked nicely. mayType is a value only Verify can produce,
+// so a struct literal a caller wrote itself still denies — that half of the
+// old design did not change. What changed is which FAILURES deny: only the
+// two that are evidence against the rule, disagreement and no-rule-at-all.
 
 import (
 	"os"
@@ -208,24 +211,11 @@ func TestChangingALabelRevokesAVerifiedRule(t *testing.T) {
 	}
 }
 
-// ── every other path denies, and none of them had to remember to ──────────
-
-func TestAnUncalibratedAgentMayNotBeTypedInto(t *testing.T) {
-	c, _, _, _ := newCalibrationsWith(t, registryOf(t, correct()))
-	v := c.Verify(agent)
-	if v.MayType() {
-		t.Fatal("an agent nobody has calibrated may be typed into")
-	}
-	if v.Reason == "" {
-		t.Fatal("an unverified verdict does not say why, so the product cannot state the consequence")
-	}
-	if v.Labelled != 0 || v.Agreed != 0 {
-		t.Fatalf("verdict counted %d of %d for a set that does not exist", v.Agreed, v.Labelled)
-	}
-}
+// ── evidence against the rule refuses ──────────────────────────────────────
 
 // The registry fails closed for an agent nothing was written for, and so does
-// this: there is no rule, so there is nothing that could have earned anything.
+// this: there is no rule, so there is no positive identification to type
+// against, whatever the labelled set says.
 func TestAnAgentWithNoRuleMayNotBeTypedInto(t *testing.T) {
 	c, sc, _, _ := newCalibrationsWith(t, registryOf(t, fixedRule{agent: "someone-else"}))
 	walkAll(t, c, sc, nil)
@@ -239,9 +229,58 @@ func TestAnAgentWithNoRuleMayNotBeTypedInto(t *testing.T) {
 	}
 }
 
-// A set whose capture cannot be replayed verifies nothing, and the direction
-// of that failure is a refusal.
-func TestASetThatCannotBeReplayedMayNotBeTypedAgainst(t *testing.T) {
+// ── absence of evidence permits, and says so ───────────────────────────────
+
+// An agent nobody has calibrated has nothing contradicting its rule, so it
+// may be typed into — and the verdict still carries a reason a surface can
+// show, because "may type" and "verified" are not the same claim.
+func TestAnUncalibratedAgentMayBeTypedInto(t *testing.T) {
+	c, _, _, _ := newCalibrationsWith(t, registryOf(t, correct()))
+	v := c.Verify(agent)
+	if !v.MayType() {
+		t.Fatal("an agent nobody has calibrated may not be typed into, though nothing contradicts its rule")
+	}
+	if v.Reason == "" {
+		t.Fatal("a permit that has not verified does not say so, so the product cannot state the caveat")
+	}
+	if v.Labelled != 0 || v.Agreed != 0 {
+		t.Fatalf("verdict counted %d of %d for a set that does not exist", v.Agreed, v.Labelled)
+	}
+}
+
+// A set missing a required label is incomplete evidence, not evidence against
+// the rule — and it permits, naming what is missing.
+func TestAnIncompleteLabelledSetMayStillBeTypedAgainst(t *testing.T) {
+	c, sc, store, _ := newCalibrationsWith(t, registryOf(t, correct()))
+	walkAll(t, c, sc, nil)
+
+	set, found, err := store.Load(agent)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	for i, rec := range set.Labels {
+		if rec.Label == agentcalib.LabelAsksYou {
+			set.Labels = append(set.Labels[:i], set.Labels[i+1:]...)
+			break
+		}
+	}
+	if err := store.Save(set); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	v := c.Verify(agent)
+	if !v.MayType() {
+		t.Fatalf("a set missing a required label may not be typed against: %+v", v)
+	}
+	if v.Reason == "" {
+		t.Fatal("a permit over an incomplete set does not say the set is incomplete")
+	}
+}
+
+// A set whose capture cannot be replayed is unreadable evidence, not evidence
+// against the rule — the direction of that failure used to be a refusal; it
+// now permits, and still says why nothing was checked.
+func TestASetThatCannotBeReplayedMayStillBeTypedAgainst(t *testing.T) {
 	c, sc, _, root := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 	if !c.Verify(agent).MayType() {
@@ -252,16 +291,21 @@ func TestASetThatCannotBeReplayedMayNotBeTypedAgainst(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{\"agent\":\"claude\"}\n"), 0o600); err != nil {
 		t.Fatalf("damage the capture: %v", err)
 	}
-	if v := c.Verify(agent); v.MayType() {
-		t.Fatalf("a set whose capture is unreadable kept its authority: %+v", v)
+	v := c.Verify(agent)
+	if !v.MayType() {
+		t.Fatalf("a set whose capture is unreadable may not be typed against: %+v", v)
+	}
+	if v.Reason == "" {
+		t.Fatal("a permit over an unreadable capture does not say the capture is unreadable")
 	}
 }
 
 // The one place the two vocabularies meet is total over the labels a walk can
 // ask for — and a set arrives from a file a person can edit. A label this
-// build cannot map is refused rather than skipped, because skipping it would
-// verify a rule against fewer states than the set claims to hold.
-func TestALabelThisBuildDoesNotAskForRefusesTheWholeSet(t *testing.T) {
+// build cannot map is a fact about the set, not about the rule: it still
+// permits, but it is refused WHOLE rather than skipped over, because skipping
+// it would verify a rule against fewer states than the set claims to hold.
+func TestALabelThisBuildDoesNotAskForStillPermitsWithAReason(t *testing.T) {
 	c, sc, store, _ := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 
@@ -275,11 +319,14 @@ func TestALabelThisBuildDoesNotAskForRefusesTheWholeSet(t *testing.T) {
 	}
 
 	v := c.Verify(agent)
-	if v.MayType() {
-		t.Fatal("a set carrying a label this build cannot map kept its authority")
+	if !v.MayType() {
+		t.Fatal("a set carrying a label this build cannot map may not be typed against")
 	}
 	if !strings.Contains(v.Reason, "invented-by-hand") {
 		t.Fatalf("reason %q does not name the label it could not map", v.Reason)
+	}
+	if v.Agreed != 0 || len(v.Disagreements) != 0 {
+		t.Fatalf("verdict = %+v, want the whole replay withheld rather than partially scored", v)
 	}
 }
 

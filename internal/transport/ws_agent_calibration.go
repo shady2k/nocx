@@ -35,15 +35,17 @@ package transport
 // indicator. It reads a screen the pane's own operator is looking at and
 // writes a file under the app directory.
 //
-// # And it carries the VERDICT of that file (nocx-jse6x)
+// # And it carries the VERDICT of that file (nocx-jse6x, refined by nocx-9w0q0)
 //
-// The result now says whether the agent's rule, replayed against every frame
-// the person labelled, answered each one with the state they were asked for —
-// and therefore whether nocx may type into a pane running it. It rides in the
-// same result as the set rather than in a method of its own, because a surface
-// that fetched them separately could draw a set beside a verdict about the one
-// before it, and the verdict is the half that decides whether a keystroke is
-// sent into a tool-approval dialog.
+// The result says whether anything the person labelled contradicts the
+// agent's rule — a disagreement, or no rule at all — and therefore whether
+// nocx may type into a pane running it. Never having been calibrated is not
+// itself a contradiction, so an agent nobody has checked yet reads mayType
+// true with a reason explaining that nothing has been verified either. It
+// rides in the same result as the set rather than in a method of its own,
+// because a surface that fetched them separately could draw a set beside a
+// verdict about the one before it, and the verdict is the half that decides
+// whether a keystroke is sent into a tool-approval dialog.
 //
 // This boundary carries the verdict and cannot make one. MayType comes off a
 // method whose backing field is unexported in internal/agentcalib, so there is
@@ -148,18 +150,27 @@ type agentCalibrationState struct {
 	Stored    *agentCalibrationStored `json:"stored,omitempty"`
 }
 
-// agentCalibrationVerdict is what the rule has EARNED against that set
-// (nocx-jse6x). It is a value rather than a pointer because there is always an
-// answer: an agent with no set has an unverified verdict, not no verdict, and
-// a surface that could receive nothing here would have to invent the safe
-// reading of nothing — which is the one place inventing is expensive.
+// agentCalibrationVerdict is what nocx currently knows about this rule
+// (nocx-9w0q0, superseding nocx-jse6x's "earned against that set"). MayType
+// no longer means the rule was checked against a labelled set and agreed with
+// every frame of it — it means nothing found here contradicts it, which is
+// also true of a rule nobody has ever calibrated. It is a value rather than a
+// pointer because there is always an answer: an agent with no set has a
+// permitted-but-uncalibrated verdict, not no verdict, and a surface that
+// could receive nothing here would have to invent the safe reading of
+// nothing — which is the one place inventing is expensive.
 type agentCalibrationVerdict struct {
 	MayType       bool                           `json:"mayType"`
 	Labelled      int                            `json:"labelled"`
 	Agreed        int                            `json:"agreed"`
 	Disagreements []agentCalibrationDisagreement `json:"disagreements"`
-	// Reason is omitted when the rule verified. Empty would be a claim that
-	// there was a reason and it was nothing.
+	// Reason is omitted only when the rule was replayed against a complete
+	// labelled set with no disagreement — truly verified, nothing left to
+	// say. It is present for every refusal, and it is ALSO present for a
+	// verdict that permits without having verified, so a person reading
+	// mayType true still learns whether that came from verification or from
+	// nothing having contradicted the rule. Empty would be a claim that there
+	// was a reason and it was nothing.
 	Reason string `json:"reason,omitempty"`
 }
 

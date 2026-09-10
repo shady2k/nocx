@@ -1,29 +1,63 @@
 package agentcalib
 
-// TYPING AUTHORITY IS EARNED, and the currency is the labelled set
-// (nocx-jse6x).
+// TYPING IS REFUSED ON EVIDENCE AGAINST THE RULE, not on the absence of a
+// calibration (nocx-9w0q0, superseding nocx-jse6x's "authority is earned by
+// the labelled set").
 //
-// # What this exists to prevent
+// # Why the old position stopped holding
 //
-// A mistimed keystroke does not merely fail to arrive. It ANSWERS whatever
-// modal is on screen, and the modal a coding agent puts up is a tool approval
-// whose first option is Yes — so the failure is not a lost keystroke, it is a
-// tool call the person never saw being approved on their behalf. An earlier
-// design proposed sending Escape first so a mistimed keystroke would be
-// recoverable; it is not, for the same reason.
+// Until nocx-qddv8 (commit a2545b0f), an agent this build could not identify
+// fell through to free_text — "you may type" about whatever was on screen,
+// answered by a driver that could no longer read it. Refusing to type without
+// a calibration was, until then, the only thing standing between that
+// fall-through and a keystroke landing in a tool-approval dialog whose first
+// option is Yes: a rule nobody had checked was indistinguishable from a rule
+// that could no longer read the screen at all. nocx-qddv8 closed the
+// fall-through at its source — an unidentified frame now classifies to
+// unknown, and free_text is a positive identification earned from the prompt
+// anchor rather than a default — so the two cases this file used to conflate
+// are now told apart before Verify is ever asked: "never calibrated" and
+// "cannot be believed" stopped being the same risk.
 //
-// So a rule may light an INDICATOR on nothing but its author's confidence — a
-// wrong dot costs nothing and is corrected by looking — and it may GATE TYPING
-// only once it has been replayed against every frame a person produced and
-// labelled, and has answered each one with the state they were asked for.
+// So the question this file answers changes from "has this rule earned belief"
+// to "is there evidence this rule should not be believed". Absence of evidence
+// is not evidence against: an agent nobody has sat down to calibrate — every
+// fresh install, and a rule shipped in this build that has not yet been
+// checked — is typed into exactly as any other rule is, because nothing has
+// told nocx its rule is wrong for this agent. Calibrating remains how a person
+// narrows that check to the states they actually produced; skipping it does
+// not turn typing off.
+//
+// # What still refuses, and why those two causes are not like the others
+//
+// A DISAGREEMENT — the person calibrated, and the rule answered a labelled
+// frame with something other than the state it was produced for — is real
+// evidence the rule is wrong for this agent, and it refuses. This is the
+// remedy working exactly as designed: a person who calibrates and finds a
+// disagreement has found a genuine defect, not failed to satisfy a
+// precondition.
+//
+// NO RULE IN THIS BUILD for the named agent refuses for a different reason:
+// nothing can read that pane's screen at all, so there is no positive
+// identification to type against — the frame gate in internal/agenttyping
+// requires one (free_text, positively classified), and nothing here can
+// manufacture it in a rule's absence.
+//
+// Everything else that keeps a replay from completing — the labelled set does
+// not exist yet, is missing a required label, could not be read, or names a
+// label this build does not ask for — is a fact about the SET, not about the
+// rule, and each of those PERMITS, carrying the reason so a surface can still
+// say what was not checked. A person reading "may type" for an uncalibrated
+// agent must be told exactly that: not verified, not contradicted either.
 //
 // # It is a property of the RULE, not of who wrote it
 //
 // Nothing here knows whether a rule shipped in the binary or was written by
-// the person at the keyboard. The claude rule earns its authority the same way
-// and loses it the same way, which is exactly what should happen when an
-// agent's update changes its chrome: the labelled set stops classifying, the
-// verdict flips, and nocx goes back to lighting a dot.
+// the person at the keyboard. The claude rule is checked the same way and can
+// be disproven the same way, which is exactly what should happen when an
+// agent's update changes its chrome: a calibrated set stops classifying, the
+// verdict flips to refuse, and nocx goes back to lighting a dot rather than
+// typing on a rule just shown to be wrong.
 //
 // # The two vocabularies meet in ONE place
 //
@@ -111,59 +145,89 @@ type Verdict struct {
 	// Disagreements is one entry per labelled frame that classified to
 	// something else, in the order the person was asked for them.
 	Disagreements []Disagreement
-	// Reason says why an unverified verdict is unverified, in the words the
-	// person reads. Empty exactly when the rule verified.
+	// Reason explains the verdict, in the words the person reads. Empty ONLY
+	// when the rule was replayed against a complete labelled set with no
+	// disagreement — truly verified, nothing left to say. It is non-empty for
+	// every refusal, and it is ALSO non-empty for a verdict that permits
+	// without having verified: nothing here is evidence against the rule, but
+	// a person reading "may type" still needs to know it was not checked.
 	Reason string
 
 	// mayType is unexported ON PURPOSE; see the file comment. It is written
-	// in one statement in verify and nowhere else, so the zero Verdict — and
+	// in one statement in Verify and nowhere else, so the zero Verdict — and
 	// every Verdict a caller builds itself — denies typing.
 	mayType bool
 }
 
-// MayType reports whether this rule has earned the right to be typed against.
-// False is the answer for everything that is not a rule replayed against a
-// complete labelled set with no disagreement in it, including every error.
+// MayType reports whether nocx may currently type into a pane running this
+// agent's rule. True unless something here amounts to evidence the rule
+// should not be believed: a labelled disagreement, or no rule in this build
+// at all. Everything else — never calibrated, an incomplete, unreadable or
+// unreplayable set, a label this build does not map — is a fact about the
+// evidence rather than about the rule, and permits. Reason, not this boolean,
+// is what says whether the permit came from verification or from the absence
+// of anything contradicting it; a surface must read both.
 func (v Verdict) MayType() bool { return v.mayType }
 
-// Verify replays the agent's labelled set against its rule and answers what
-// that rule may now do.
+// Verify replays the agent's labelled set against its rule, so far as one
+// exists and can be replayed, and answers whether anything found there
+// contradicts the rule.
 //
-// It returns no error, and that is deliberate: every failure here has the same
-// consequence — no typing — and a caller that had to distinguish an unreadable
-// capture from a missing one could get the distinction wrong in the direction
-// that types. The reason travels inside the verdict instead, where the surface
-// that shows the consequence also shows the cause.
+// It returns no error, and that is deliberate: a caller that had to
+// distinguish an unreadable capture from a missing one could get the
+// distinction wrong in the direction that refuses typing nocx has no reason
+// to refuse. The reason travels inside the verdict instead, where the surface
+// that shows the consequence also shows the cause — for a refusal and for a
+// permit alike.
 //
 // Nothing is cached, and the measurement is why: a six-label set at 120x40
 // verifies in 2.3ms, replay and all, so the settings page's half-second poll
 // spends half a percent of one core on it. A cache would have to be
-// invalidated by a set changing under it, and a stale "may type" is the one
+// invalidated by a set changing under it, and a stale verdict is the one
 // answer this file exists to prevent.
+//
+// mayType is written in exactly one statement below, guarded by refused —
+// every path that finds evidence against the rule returns early with refused
+// true and mayType left at its zero value; every other path only records why,
+// and falls through to it. See the file comment for what belongs on which
+// side.
 func (c *Calibrations) Verify(agent string) Verdict {
 	v := Verdict{Agent: agent}
 	if err := validAgent(agent); err != nil {
 		v.Reason = err.Error()
 		return v
 	}
+	refused := c.evaluate(agent, &v)
+	if !refused {
+		v.mayType = true
+	}
+	return v
+}
+
+// evaluate fills in v's Labelled, Agreed, Disagreements and Reason, and
+// reports whether what it found is evidence against the rule. Only a name
+// that already passed validAgent reaches this.
+func (c *Calibrations) evaluate(agent string, v *Verdict) (refused bool) {
 	set, found, err := c.store.Load(agent)
 	switch {
 	case err != nil:
+		// A fact about the file, not about the rule.
 		v.Reason = fmt.Sprintf("the labelled set could not be read: %v", err)
-		return v
+		return false
 	case !found:
+		// Absence of evidence is not evidence against.
 		v.Reason = fmt.Sprintf(
 			"%s has never been calibrated, so there is nothing to check its rule against", agent)
-		return v
+		return false
 	case !set.Complete():
 		v.Reason = fmt.Sprintf(
 			"%s's labelled set is missing a state a rule must classify, so it cannot verify one", agent)
-		return v
+		return false
 	}
 	frames, err := set.Frames(c.log)
 	if err != nil {
 		v.Reason = fmt.Sprintf("%s's labelled set could not be replayed: %v", agent, err)
-		return v
+		return false
 	}
 	v.Labelled = len(frames)
 	// AFTER the replay, so a surface can still say how many labelled states
@@ -171,19 +235,23 @@ func (c *Calibrations) Verify(agent string) Verdict {
 	// is the state a person is in while a rule is being written for a new
 	// agent, and "6 labelled states and no rule yet" is the useful sentence.
 	if _, has := c.rules.For(agent); !has {
+		// No positive identification is possible at all: refuse.
 		v.Reason = fmt.Sprintf(
 			"nothing in this build knows how to read %s's screen, so there is no rule to verify", agent)
-		return v
+		return true
 	}
 	for _, lf := range frames {
 		want, mapped := Expect(lf.Label)
 		if !mapped {
-			// Refused whole rather than skipped: see the file comment.
+			// A fact about the SET — it names a label this build does not
+			// ask for — so it permits; see the file comment. Refused whole
+			// rather than skipped: skipping would verify against fewer
+			// states than the set claims to hold.
 			v.Agreed, v.Disagreements = 0, nil
 			v.Reason = fmt.Sprintf(
 				"%s's labelled set names %q, which this build does not ask for, "+
 					"so there is no state that frame could be checked against", agent, lf.Label)
-			return v
+			return false
 		}
 		got := c.rules.Classify(agent, lf.Frame)
 		if got == want {
@@ -193,19 +261,19 @@ func (c *Calibrations) Verify(agent string) Verdict {
 		v.Disagreements = append(v.Disagreements, Disagreement{Label: lf.Label, Expected: want, Got: got})
 	}
 	if len(v.Disagreements) > 0 {
+		// Real evidence the rule is wrong for this agent: refuse.
 		v.Reason = fmt.Sprintf(
 			"%s's rule answered %d of the %d labelled states with something other than the state "+
 				"they were produced for", agent, len(v.Disagreements), v.Labelled)
-		return v
+		return true
 	}
 	if v.Labelled == 0 {
 		// Unreachable while Complete requires three labels with frames behind
-		// them, and stated anyway: a rule verified against nothing has
-		// verified nothing, and an invariant held only by a caller's good
+		// them, and stated anyway: a rule checked against nothing has learned
+		// nothing either way, and an invariant held only by a caller's good
 		// behaviour is held by nobody.
 		v.Reason = fmt.Sprintf("%s's labelled set holds no frame to check a rule against", agent)
-		return v
+		return false
 	}
-	v.mayType = true
-	return v
+	return false
 }

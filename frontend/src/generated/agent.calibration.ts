@@ -60,11 +60,11 @@ export interface AgentCalibration {
       expect: 'free_text' | 'permission_choice' | 'modal_choice' | 'working' | 'error'
     }[]
     /**
-     * What this agent's rule has EARNED against the labelled set (nocx-jse6x). Typing authority is not a property of who wrote a rule: it is replayed against every labelled frame, and each must classify to the state the person was asked to produce. A rule that has not done that may still light the indicator — a wrong dot costs nothing — and may not be typed against, because a mistimed keystroke does not merely fail to arrive, it answers whatever modal is on screen. Always present: an agent with no set has an unverified verdict rather than none.
+     * Whether anything found here contradicts this agent's rule (nocx-9w0q0, refining nocx-jse6x). mayType is refused only on evidence against the rule — a labelled disagreement, or no rule in this build at all — never on the absence of a calibration: an agent nobody has checked yet is typed into exactly as any other rule is, because nothing has told nocx it is wrong. A rule that has not classified some of what a person produced may still light the indicator regardless, because a mistimed keystroke does not merely fail to arrive, it answers whatever modal is on screen. Always present: an agent with no set has a permitted-but-uncalibrated verdict rather than none.
      */
     verification: {
       /**
-       * Whether nocx may type into a pane running this agent. It is the whole consequence of everything else here, and a surface must state it rather than leave a person to infer it from a count.
+       * Whether nocx may type into a pane running this agent. True unless something here is evidence the rule should not be believed. It is the whole consequence of everything else here, and a surface must state it rather than leave a person to infer it from a count — and it must be read alongside reason, because true does not by itself mean verified.
        */
       mayType: boolean
       /**
@@ -93,7 +93,7 @@ export interface AgentCalibration {
         got: string
       }[]
       /**
-       * Why an unverified verdict is unverified, in the words a person reads. ABSENT exactly when the rule verified — an empty string would be a claim that there was a reason and it was nothing.
+       * Why the verdict reads as it does, in the words a person reads. ABSENT only when the rule was replayed against a complete labelled set with no disagreement — truly verified. PRESENT for every refusal, and also present when mayType is true but nothing has actually been checked (never calibrated, or a set that is incomplete, unreadable, unreplayable, or names a label this build does not map) — so a person reading mayType true still learns whether that is a verification or an absence of contradiction. An empty string would be a claim that there was a reason and it was nothing.
        */
       reason?: string
     }

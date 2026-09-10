@@ -319,17 +319,18 @@ func requiredScreens() map[string]string {
 // agent really in them, and the answer says the rule may now be typed against.
 //
 // It also pins the state BEFORE the walk, which is the one a person is in on
-// first opening the page: no set, and therefore no authority — with a reason
-// rather than a bare false, because a surface has to state the consequence.
+// first opening the page: no set, so nothing has been checked — but nothing
+// contradicts the rule either, so it may type, with a reason on the wire
+// saying it was never calibrated rather than a bare true (nocx-9w0q0).
 func TestAgentCalibrationVerdictIsOnTheWireWithItsConsequence(t *testing.T) {
 	e := newCalibrationEnv(t)
 
 	before := e.call(t, "agent.calibration", map[string]any{"sessionId": e.sid}, 2)
-	if before.Calibration.Verified.MayType {
-		t.Fatal("an agent nobody has calibrated may be typed into")
+	if !before.Calibration.Verified.MayType {
+		t.Fatal("an agent nobody has calibrated, and whose rule nothing contradicts, may not be typed into")
 	}
 	if before.Calibration.Verified.Reason == "" {
-		t.Fatal("an unverified verdict crossed the wire with no reason in it")
+		t.Fatal("a permit that has not verified crossed the wire with no reason in it")
 	}
 
 	got := e.walkWith(t, requiredScreens(), 3)

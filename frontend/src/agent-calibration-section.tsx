@@ -129,18 +129,30 @@ function recordNote(rec: CalibrationRecord | undefined): string {
 }
 
 /**
- * THE VERDICT, SAID WITH ITS CONSEQUENCE (nocx-jse6x).
+ * THE VERDICT, SAID WITH ITS CONSEQUENCE (nocx-jse6x, refined by nocx-9w0q0).
  *
  * Not "verified" and "not verified", which are facts about a check nobody
  * asked for, but what nocx will and will not do — because the thing at stake
  * is a keystroke landing in a tool-approval dialog whose first option is Yes.
  * A soft degrade the UI does not state is how a feature that does not exist
- * survives a release, so the unverified sentence names what the person still
- * gets and what they do not.
+ * survives a release, so the sentence names what the person still gets and
+ * what they do not.
+ *
+ * mayType is now true in two different situations, and a person must be able
+ * to tell them apart: verified (reason absent — replayed against a complete
+ * labelled set and it agreed with every frame) and merely uncontradicted
+ * (reason present — nothing here has been checked, or checking it stopped
+ * short, but nothing found says the rule is wrong either). Saying "may type"
+ * for both without the distinction would read as "verified" to a person who
+ * has never calibrated anything, which is exactly the claim this file must
+ * not make.
  */
 function verdictSummary(v: CalibrationVerdict, agent: string): string {
-  if (v.mayType) {
+  if (v.mayType && v.reason === undefined) {
     return `Verified against ${v.agreed} of ${v.labelled} labelled ${v.labelled === 1 ? 'state' : 'states'} — nocx may type into a pane running ${agent}.`
+  }
+  if (v.mayType) {
+    return `Not checked, and nothing says it is wrong — nocx may type into a pane running ${agent}. ${sentence(v.reason!)}`
   }
   const consequence = `Not verified — indicator only: nocx will go on showing what this pane is doing and will not type into it.`
   return v.reason === undefined ? consequence : `${consequence} ${sentence(v.reason)}`
@@ -344,9 +356,11 @@ export function AgentCalibrationSection(props: AgentCalibrationSectionProps) {
                   </span>
                 </div>
                 <p class="st-calibration__detail">
-                  A rule earns the right to be typed against by classifying every state you produced
-                  for it, and it earns that again every time you look — so an agent whose update
-                  changes what its screen looks like loses it here, rather than somewhere a
+                  nocx types unless something here says its rule is wrong: a state you calibrated
+                  that it read differently, or no way to read this agent's screen at all.
+                  Calibrating narrows that check to the states you actually produced; skipping it
+                  does not turn typing off. So an agent whose update changes what its screen looks
+                  like loses typing here, the next time this is checked, rather than somewhere a
                   keystroke lands in a dialog.
                 </p>
                 <For each={s.verification.disagreements}>

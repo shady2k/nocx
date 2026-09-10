@@ -137,34 +137,53 @@ func TestAgentEmitting_OverTheWireConformsToContract(t *testing.T) {
 // TestAgentEmittingNamesTheBranchAndWhereEachStopped is the acceptance
 // criterion's own sentence, over the wire: the value AND the branch that
 // produced it, and for a branch that did not match, the predicate it stopped
-// at. An idle claude screen falls through every branch to the default, so
-// every branch here reports where it stopped.
+// at.
+//
+// free_text is a POSITIVE match now (nocx-qddv8), not the document's default:
+// an idle claude screen matches the last branch, which requires the "prompt"
+// anchor bound, rather than falling through every branch to a default none of
+// them reported reaching. This test asserted the opposite before that fix
+// landed; nocx-qddv8 updated agentdriver's own explain_test.go for the same
+// reason but missed this wire-level twin of it, so it was still red — found
+// while running this bead's required suite rather than caused by it.
 func TestAgentEmittingNamesTheBranchAndWhereEachStopped(t *testing.T) {
 	e := newEmittingEnv(t)
 	r := e.call(t, map[string]any{"sessionId": e.sid}, 2).Reading
 	if r == nil {
 		t.Fatal("no reading")
 	}
-	if r.MatchedBranch != nil {
-		t.Fatalf("matchedBranch = %d on a screen that falls through to the default", *r.MatchedBranch)
+	last := len(r.Branches) - 1
+	if r.MatchedBranch == nil || *r.MatchedBranch != last {
+		t.Fatalf("matchedBranch = %v, want %d: an idle screen positively matches the free_text branch",
+			r.MatchedBranch, last)
 	}
-	if r.Fallback != string(agentdriver.StateFreeText) {
+	if r.Fallback != string(agentdriver.StateUnknown) {
 		t.Fatalf("fallback = %q, want the document's own default", r.Fallback)
 	}
 	stopped := false
-	for _, b := range r.Branches {
-		if b.Matched {
-			t.Fatalf("a branch is reported matched while matchedBranch is absent: %+v", b)
+	for bi, b := range r.Branches {
+		if b.Matched != (bi == last) {
+			t.Fatalf("branch %d matched = %v, want %v", bi, b.Matched, bi == last)
 		}
 		if !b.Reached {
-			t.Fatalf("a branch is reported unreached while nothing matched: %+v", b)
+			t.Fatalf("a branch is reported unreached while its predecessors already ran: %+v", b)
 		}
-		for i, p := range b.Predicates {
+		if bi == last {
+			// The matched branch held every predicate it evaluated — there is
+			// nothing for it to report stopping at.
+			for _, p := range b.Predicates {
+				if p.Evaluated && !p.Held {
+					t.Fatalf("the matched branch %+v reports a predicate that did not hold", b)
+				}
+			}
+			continue
+		}
+		for pi, p := range b.Predicates {
 			if p.Evaluated && !p.Held {
 				stopped = true
 				// Everything after the failure was never asked, and saying
 				// otherwise points a person at the wrong line.
-				for _, after := range b.Predicates[i+1:] {
+				for _, after := range b.Predicates[pi+1:] {
 					if after.Evaluated {
 						t.Fatalf("branch %+v reports a predicate evaluated after it stopped", b)
 					}
@@ -174,7 +193,7 @@ func TestAgentEmittingNamesTheBranchAndWhereEachStopped(t *testing.T) {
 		}
 	}
 	if !stopped {
-		t.Fatal("no branch reports the predicate it stopped at, which is what an unknown has to say")
+		t.Fatal("no non-matching branch reports the predicate it stopped at")
 	}
 }
 

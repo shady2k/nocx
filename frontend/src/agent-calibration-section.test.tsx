@@ -44,15 +44,29 @@ const STEPS: NonNullable<AgentCalibration['calibration']>['steps'] = [
   },
 ]
 
-/** The verdict a never-calibrated agent has: no authority, and a reason
- *  saying why. There is no "absent" case to fixture — the wire always carries
- *  one, so a surface never has to invent the safe reading of nothing. */
-const UNVERIFIED: NonNullable<AgentCalibration['calibration']>['verification'] = {
-  mayType: false,
+/** The verdict a never-calibrated agent has (nocx-9w0q0): nothing has told
+ *  nocx its rule is wrong, so it permits — but it carries a reason saying
+ *  nothing was checked either, because "may type" is not "verified". There is
+ *  no "absent" case to fixture — the wire always carries one, so a surface
+ *  never has to invent the safe reading of nothing. */
+const UNCALIBRATED: NonNullable<AgentCalibration['calibration']>['verification'] = {
+  mayType: true,
   labelled: 0,
   agreed: 0,
   disagreements: [],
   reason: 'claude has never been calibrated, so there is nothing to check its rule against',
+}
+
+/** The verdict a rule earns when a labelled frame answers something other
+ *  than the state it was produced for: real evidence against the rule, and
+ *  the one case besides "no rule at all" that still refuses. */
+const REFUSED: NonNullable<AgentCalibration['calibration']>['verification'] = {
+  mayType: false,
+  labelled: 3,
+  agreed: 2,
+  disagreements: [{ label: 'asks-you', expected: 'permission_choice', got: 'free_text' }],
+  reason:
+    "claude's rule answered 1 of the 3 labelled states with something other than the state they were produced for",
 }
 
 function answer(
@@ -64,7 +78,7 @@ function answer(
       sessionId: 'sess-1',
       agent: 'claude',
       steps: STEPS,
-      verification: UNVERIFIED,
+      verification: UNCALIBRATED,
       ...over,
     },
   }
@@ -374,15 +388,35 @@ describe('the guided calibration', () => {
     expect(said.textContent).toContain('asking you to approve something')
   })
 
-  // And the button is not there at all for a rule that has not earned it, so
-  // the page never offers what the backend would refuse.
-  it('does not offer to type into a pane whose rule has not earned it', async () => {
-    const { client } = fakeClient(answer({ stored: { complete: true, labels: [] } }))
+  // And the button is not there at all for a rule the backend actually
+  // refused — evidence against it, not merely an agent nobody has calibrated
+  // (nocx-9w0q0: absence of a calibration no longer withholds the button).
+  it('does not offer to type into a pane whose rule was refused', async () => {
+    const { client } = fakeClient(
+      answer({ stored: { complete: true, labels: [] }, verification: REFUSED }),
+    )
     const container = mount(client)
     await settle()
     await choosePane(container)
 
     expect(container.querySelector('[data-typing-action="try"]')).toBeNull()
+  })
+
+  // The absence of a calibration is not evidence against the rule, so the
+  // page offers the button and says, in words rather than only in the
+  // boolean, that nothing was checked (nocx-9w0q0).
+  it('offers to type into a never-calibrated agent, and says nothing was checked', async () => {
+    const { client } = fakeClient(answer())
+    const container = mount(client)
+    await settle()
+    await choosePane(container)
+
+    const verdict = container.querySelector('#calibration-verdict')!
+    expect(verdict.querySelector('[data-may-type]')!.getAttribute('data-may-type')).toBe('true')
+    expect(verdict.textContent).toContain('nocx may type into a pane running claude')
+    expect(verdict.textContent).toContain('never been calibrated')
+    expect(verdict.textContent).not.toContain('Verified against')
+    expect(container.querySelector('[data-typing-action="try"]')).not.toBeNull()
   })
 
   // The soft degrade stated in the product rather than in a log: a rule that

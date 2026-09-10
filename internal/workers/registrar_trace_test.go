@@ -34,7 +34,7 @@ func TestARegistrationThatNeverEnrolsSaysWhichStepWasWaiting(t *testing.T) {
 	for _, want := range []string{
 		// The step, named while it is still waiting — so a log read DURING
 		// the wait says what is happening, not only afterwards.
-		"worker: waiting for the participant's enrolment",
+		"worker: the participant's budget opens",
 		"deadline_ms=50",
 		// The outcome, with how long it actually waited.
 		"worker: the enrolment never arrived",

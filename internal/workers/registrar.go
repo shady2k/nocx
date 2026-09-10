@@ -211,8 +211,16 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 	// here, before either step starts — never a second, smaller number
 	// invented for Spawn's own wait, which would only be a third bound for an
 	// interval that already has one.
-	lg.Info("worker: waiting for the participant's enrolment",
-		"deadline_ms", r.deadline.Milliseconds())
+	// The line says what it now precedes. It used to sit after the fork and
+	// read "waiting for the participant's enrolment", which was true there
+	// and is not true here: at this point nothing has been forked yet. A log
+	// line that describes the step after next is the kind of small lie that
+	// costs an hour when somebody reads the sequence back — this bead exists
+	// because "cause=hello-timeout" said the shell had not answered while the
+	// shell had answered.
+	lg.Info("worker: the participant's budget opens",
+		"deadline_ms", r.deadline.Milliseconds(),
+		"covers", "spawn and enrolment")
 	awaitCtx, cancel := context.WithTimeout(ctx, r.deadline)
 	defer cancel()
 

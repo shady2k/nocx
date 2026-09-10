@@ -86,7 +86,7 @@ func TestAFailingSpawnIsOneReadableTrace(t *testing.T) {
 		"worker.spawn: start",
 		"worker spawn: the participant's session is open",
 		"worker participant spawned",
-		"worker: waiting for the participant's enrolment",
+		"worker: the participant's budget opens",
 		"worker: the enrolment never arrived",
 		"worker: compensating a failed registration",
 		"tool endpoint: unclassified dispatch failure",

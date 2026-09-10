@@ -209,9 +209,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"ledger.query": {
 			[]byte(`{"scope":"everywhere"}`),
 		},
-		"lifecycle.establishAck": {
-			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","lane":"lane-1","domain":"domain-1","epoch":1,"generation":"generation-1"}`),
-		},
 		"lifecycle.recoverAck": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`),
 		},

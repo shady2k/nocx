@@ -158,43 +158,35 @@ func mustLifecycleIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycl
 	}
 }
 
-// ackEstablishmentFrom reads the published fact that CARRIES the
-// establishment being acknowledged, takes its generation and acknowledges it
-// — the renderer's decision-9 step, driven directly at the publisher (the
-// wire-level ack RPC is covered by the establishAck tests). The domain is not
-// live before this.
+// ackEstablishmentFrom waits for the published fact that names this
+// establishment (lane, domain, epoch) to reach the wire.
 //
-// It names that fact with a PREDICATE, for the reason readLifecycleWhere
-// gives, and it is not one emitter this time either: handleOpen's tail
-// replays the lane's current projection the moment the subscriber is
-// installed, so a test that registers its lane after `open` has RETURNED
-// races it. On an idle machine the replay finds no lane yet and the hello's
-// fact is the only one on the wire; under load the test wins and a native,
-// domain-less fact sits in front of it. "The next lifecycle.changed" then
-// means the replay, and the ack reads a fact that names no domain at all
-// (nocx-josaw). Reproduced exactly by calling replayLifecycleFacts where the
-// race would land it, which fails every establishing integration test.
+// It used to also send the renderer's establishment acknowledgement — the
+// backend withheld the accept until that ack landed (ADR-0024 decision 9's
+// old mechanism). ADR-0062 retired the wait: the accept is flushed
+// synchronously inside Ingest, before this fact is even published, so by the
+// time this function's read returns the domain is already live. The wait
+// itself stays load-bearing for every caller that uses it to synchronize
+// with the fact reaching the socket before driving the RPC that follows, so
+// the name and signature — pub included, though this function no longer
+// calls it — are kept rather than touching every call site.
 //
-// The predicate is the acknowledgement's OWN key. AcknowledgeEstablishment is
-// keyed on (lane, domain, epoch) and refuses a generation that does not match
-// the accept pending under it, so nothing weaker names the fact whose
-// generation may be sent: a later epoch of the same lane carries a different
-// establishment, and a fact naming no domain carries no generation to send.
-// A replay of the same establishment satisfies it too, and correctly — it
-// carries the very same generation, so either copy acknowledges the same
-// episode.
+// It names the fact with a PREDICATE, for the reason readLifecycleWhere
+// gives: handleOpen's tail replays the lane's current projection the moment
+// the subscriber is installed, so a test that registers its lane after
+// `open` has RETURNED races it. On an idle machine the replay finds no lane
+// yet and the hello's fact is the only one on the wire; under load the test
+// wins and a native, domain-less fact sits in front of it. "The next
+// lifecycle.changed" then means the replay, which is not this establishment
+// (nocx-josaw).
 func ackEstablishmentFrom(t *testing.T, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle, conn *websocket.Conn) {
 	t.Helper()
-	_, ready := readLifecycleWhere(t, conn,
-		fmt.Sprintf("the establishment fact for lane %s domain %s epoch %d, carrying its generation",
+	readLifecycleWhere(t, conn,
+		fmt.Sprintf("the establishment fact for lane %s domain %s epoch %d",
 			lane, h.Domain, h.Epoch),
 		func(f lifecyclepub.Fact) bool {
-			return f.Lane == string(lane) && f.Domain == string(h.Domain) &&
-				f.Epoch == h.Epoch && f.Generation != ""
+			return f.Lane == string(lane) && f.Domain == string(h.Domain) && f.Epoch == h.Epoch
 		})
-	if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); err != nil {
-		t.Fatalf("AcknowledgeEstablishment: %v", err)
-	}
 }
 
 // openLifecyclePTYFactory reproduces the production open race: the shell's
@@ -222,11 +214,19 @@ func (f *openLifecyclePTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty
 	return f.stub, nil
 }
 
-// The regression from nocx-upqz: the hello can beat the open result. The
-// renderer cannot acknowledge before it knows the session id, and a shared
-// WebSocket is not a tab-addressing boundary. The open result therefore comes
-// first, followed by a replay explicitly scoped to that session; acknowledging
-// the replay must release the pending ACCEPT.
+// The regression from nocx-upqz: the hello can beat the open result. A shared
+// WebSocket is not a tab-addressing boundary, so the open result must reach
+// the renderer before any fact scoped to that session's tab does — the open
+// result therefore comes first, followed by a replay explicitly scoped to
+// that session.
+//
+// This test used to also drive the renderer's establishment acknowledgement
+// and check that IT released the accept. ADR-0062 removed that mechanism:
+// the accept is flushed synchronously inside Ingest, which the PTY factory
+// below calls from inside session.Reg.Open — so the accept is already on the
+// wire by the time Open, and therefore openSessionOnConn, returns. What
+// remains worth asserting is the one property nocx-upqz was about: the open
+// result is not itself racing the fact.
 func TestLifecycleChanged_OpenResultPrecedesSessionScopedReplay(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	kernel := lifecycle.New(lifecycle.Options{})
@@ -254,14 +254,19 @@ func TestLifecycleChanged_OpenResultPrecedesSessionScopedReplay(t *testing.T) {
 	// lifecycle fact is sent too early, it is consumed here and the explicit
 	// read below fails: ordering is part of the observable contract.
 	sid := openSessionOnConn(t, e.ws, e.conn, 1)
+	// The accept is the backend's own now (ADR-0062): Ingest flushed it from
+	// inside the PTY factory, synchronously, before Open — and therefore this
+	// call — returned.
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("outbound after open = %v, want exactly one ACCEPT", got)
+	}
 	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var ready struct {
-		SessionID  string `json:"sessionId"`
-		Lane       string `json:"lane"`
-		Lifecycle  string `json:"lifecycle"`
-		Domain     string `json:"domain"`
-		Epoch      uint64 `json:"epoch"`
-		Generation string `json:"generation"`
+		SessionID string `json:"sessionId"`
+		Lane      string `json:"lane"`
+		Lifecycle string `json:"lifecycle"`
+		Domain    string `json:"domain"`
+		Epoch     uint64 `json:"epoch"`
 	}
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatalf("decode lifecycle.changed: %v\nraw: %s", err, raw)
@@ -270,28 +275,8 @@ func TestLifecycleChanged_OpenResultPrecedesSessionScopedReplay(t *testing.T) {
 		t.Fatalf("notification sessionId = %q, want %q", ready.SessionID, sid)
 	}
 	if ready.Lane != string(lane) || ready.Lifecycle != string(lifecyclepub.LifecyclePromptReady) ||
-		ready.Domain != string(h.Domain) || ready.Epoch != h.Epoch || ready.Generation == "" {
-		t.Fatalf("prompt_ready replay = %+v, want lane/domain/epoch/generation for the opened session", ready)
-	}
-
-	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.establishAck", map[string]any{
-		"sessionId":  sid,
-		"lane":       ready.Lane,
-		"domain":     ready.Domain,
-		"epoch":      ready.Epoch,
-		"generation": ready.Generation,
-	}, 2)
-	var ack struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &ack); err != nil {
-		t.Fatalf("decode establishAck: %v\nraw: %s", err, resp)
-	}
-	if ack.Error != nil {
-		t.Fatalf("establishAck refused: %+v", ack.Error)
-	}
-	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
-		t.Fatalf("outbound after ack = %v, want exactly one ACCEPT", got)
+		ready.Domain != string(h.Domain) || ready.Epoch != h.Epoch {
+		t.Fatalf("prompt_ready replay = %+v, want lane/domain/epoch for the opened session", ready)
 	}
 }
 
@@ -323,24 +308,13 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	fence := lifecycleFence(0x51)
 	fenceHex := hex.EncodeToString(fence[:])
 
-	// hello first: the domain must be past accept before an attempt can be
-	// submitted. The renderer's acknowledgement is what makes it live
-	// (decision 9); the hello's prompt_ready fact carries the generation
-	// and is itself checked for the no-capability/no-raw-frame property
-	// below, then acknowledged.
+	// hello first: the accept is flushed on the backend's own authority
+	// (ADR-0062) as part of Ingest, so the domain is already past accept by
+	// the time it returns — the hello's prompt_ready fact is itself checked
+	// for the no-capability/no-raw-frame property below.
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
 	first := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	checkFactClean(t, first, capHex, fenceHex, fence)
-	var ready lifecyclepub.Fact
-	if derr := json.Unmarshal(first, &ready); derr != nil {
-		t.Fatalf("decode prompt_ready: %v\nraw: %s", derr, first)
-	}
-	if ready.Generation == "" {
-		t.Fatal("the hello's fact must carry the establishment generation")
-	}
-	if aerr := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); aerr != nil {
-		t.Fatalf("AcknowledgeEstablishment: %v", aerr)
-	}
 	att, err := pub.SubmitAttempt(h.Domain, "make", "/work", "local", "")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
@@ -485,17 +459,11 @@ func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) 
 	if atEnv.Error != nil {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
-	// The attach replays the current projection to connB; its generation is
-	// what the renderer would acknowledge (decision 9), making the domain
-	// live so the post-close event below is a REAL fact with no route.
-	rawReplay := readNotification(t, connB, "lifecycle.changed", wantWithin)
-	var replay lifecyclepub.Fact
-	if err := json.Unmarshal(rawReplay, &replay); err != nil {
-		t.Fatalf("decode replay: %v", err)
-	}
-	if err := pub.AcknowledgeEstablishment("lane-1", h.Domain, h.Epoch, replay.Generation); err != nil {
-		t.Fatalf("AcknowledgeEstablishment: %v", err)
-	}
+	// The attach replays the current projection to connB. The domain is
+	// already live — the accept was flushed on the backend's own authority
+	// (ADR-0062) when the hello was ingested, well before this attach — so
+	// the post-close event below is a REAL fact with no route.
+	_ = readNotification(t, connB, "lifecycle.changed", wantWithin)
 	closeResp := jsonrpcCallWithID(t, connB, "close", map[string]string{"sessionId": sid}, 3)
 	var closeEnv struct {
 		Error *jsonrpcErrorObj `json:"error"`

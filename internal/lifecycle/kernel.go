@@ -24,10 +24,15 @@ type Options struct {
 // use: each public method serializes on an internal mutex, applies its
 // transition, and hands the outbound envelopes it produced (accept,
 // refresh_request) back to the caller UNSENT — the caller owns delivery
-// ordering (ADR-0024 decision 9: an accept must not reach the shell before
-// the renderer has acknowledged the published fact). Deliver sends one
-// such envelope to its transport's port, outside the lock. Invalid events
-// mutate nothing and return a sentinel error (errors.go).
+// ordering. Deliver sends one such envelope to its transport's port, outside
+// the lock, and is the closing event of ACCEPT's own gate: a domain is not
+// live — lifecycle events are rejected with ErrDomainPending — until its
+// minted accept has actually been delivered (decision 9's "live means past
+// ACCEPT", not merely minted). The publisher (internal/lifecyclepub) is the
+// caller in production and delivers an accept on its own authority as soon
+// as it is minted (ADR-0062); this package does not know or care when
+// Deliver is called, only that events are refused until it is. Invalid
+// events mutate nothing and return a sentinel error (errors.go).
 type Kernel struct {
 	mu       sync.Mutex
 	now      func() time.Time

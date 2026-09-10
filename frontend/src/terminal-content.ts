@@ -949,22 +949,6 @@ export class TerminalContent extends BasePaneContent {
     fence: string
     generation: string
   } | null = null
-  /** The establishment generation whose acknowledgement is in flight, and the
-   *  one whose acknowledgement the backend accepted. Replays are intentionally
-   *  idempotent — the same projection may arrive from a live transition and
-   *  again from the post-open or post-reattach replay — so a generation is
-   *  claimed once while its ack is outstanding and permanently once it lands.
-   *
-   *  The two are kept apart because a FAILED ack must not count as one. An
-   *  ack in flight when the socket drops is rejected by the dispatcher
-   *  (rejectAllPending), and the backend never saw it: its pending ACCEPT is
-   *  still unflushed, and the reattach replay carries that same generation
-   *  because only a fresh shell hello mints a new one. Collapsing both states
-   *  into "acknowledged" made the renderer suppress the one retry that could
-   *  have completed the handshake, leaving the tab conventional until the
-   *  accept expired. */
-  private _establishmentAckInFlight: string | null = null
-  private _establishmentAcked: string | null = null
   /** Monotonic identity for the pane's current session bind. Async
    *  acknowledgements from an old shell may settle after reconnect, but they
    *  must never mutate the new shell's episode. */
@@ -3638,18 +3622,15 @@ export class TerminalContent extends BasePaneContent {
       this._replayCompletions = []
       this._replayCommandOpen = false
       // The state that DESCRIBES the shell that is gone. The kernel's domains,
-      // the markers that point into a stream nobody is writing any more, the
-      // handshake generation that was acknowledged to a backend lane that no
-      // longer exists. Left standing, each of them would answer a question
-      // about the new shell with a fact about the old one.
+      // the markers that point into a stream nobody is writing any more.
+      // Left standing, each of them would answer a question about the new
+      // shell with a fact about the old one.
       this._recoveryAcking = false
       this._recoveryAckClaim = null
       this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       this._recovery = null
-      this._establishmentAcked = null
-      this._establishmentAckInFlight = null
       this._sessionExited = false
       this._sessionLost = false
       this._liveness = null
@@ -3715,7 +3696,12 @@ export class TerminalContent extends BasePaneContent {
     renderer: XtermRenderer,
     rebind: boolean,
   ): Promise<boolean> {
-    const bindGeneration = ++this._bindGeneration
+    // Bumped for every bind, including this one: the recovery-ack claim
+    // further below (_recoveryAckClaim) reads this._bindGeneration directly
+    // to tell its own bind apart from a later one. Advancing it here has no
+    // local reader any more — the establishment-acknowledgement closures
+    // that used to capture it were removed with the mechanism (ADR-0062).
+    ++this._bindGeneration
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -3757,76 +3743,20 @@ export class TerminalContent extends BasePaneContent {
       }
       // The kernel applies the fact and notifies onChange on a real
       // change; the ownership sync runs there, once.
+      //
+      // There used to be an establishment acknowledgement here (ADR-0024
+      // decision 9's old mechanism, a now-removed RPC call): the backend
+      // withheld the shell's accept until this renderer sent one back for
+      // the exact generation the fact carried. ADR-0062 removed it — the
+      // backend now flushes the accept on its own authority as soon as it
+      // is minted, because a pane the backend itself opens
+      // (WSServer.OpenSession) has no subscriber to ever send this
+      // acknowledgement, and such a pane could never establish. What made
+      // the removal safe is nocx-ui8q6.1: a pane whose axis reads
+      // `starting` shows no grid and drops keystrokes, so the window this
+      // mechanism used to guard — a suppressed prompt with an editor not
+      // yet ready — is now closed on the renderer's own side instead.
       this.lifecycle.applyFact(fact)
-      // ADR-0024 decision 9: the establishment is acknowledged only
-      // AFTER the presentation is committed — applyFact above is what
-      // makes the editor available (ownership syncs on its onChange).
-      // The backend flushes the pending accept, and the shell may
-      // suppress its native prompt, ONLY on this acknowledgement for
-      // this exact generation. Without it the handshake times out and
-      // the session stays conventional with a visible prompt, which is
-      // the fail-open direction: no window in which the prompt is
-      // suppressed and no editor exists.
-      if (
-        fact.lifecycle === 'prompt_ready' &&
-        fact.generation &&
-        fact.generation !== this._establishmentAckInFlight &&
-        fact.generation !== this._establishmentAcked &&
-        this.session
-      ) {
-        const generation = fact.generation
-        const sessionId = this.session.sessionId
-        this._establishmentAckInFlight = generation
-        new LifecycleClient(this.client.dispatcher)
-          .establishAck(sessionId, fact.lane, fact.domain ?? '', fact.epoch ?? 0, generation)
-          .then(() => {
-            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
-              return
-            }
-            // Only a landed acknowledgement retires the generation. The
-            // backend has flushed the accept, so a later replay of the
-            // same projection needs no second ack.
-            this._establishmentAcked = generation
-            if (this._establishmentAckInFlight === generation) {
-              this._establishmentAckInFlight = null
-            }
-          })
-          .catch((e: unknown) => {
-            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
-              return
-            }
-            // Release the claim: this generation was NOT acknowledged, and
-            // a replay carrying it again — the reattach case, where only a
-            // fresh shell hello would have minted a new one — is the retry
-            // that can still complete the handshake.
-            //
-            // A refusal is usually the backend's own bookkeeping (stale
-            // generation, superseded establishment, replaced subscriber),
-            // and then the replay simply does not come. Retrying costs one
-            // refused call in that case and recovers the session in the
-            // case that matters, so releasing is the safe direction.
-            //
-            // The MESSAGE, not just the error object: five distinct
-            // backend rules all refuse with -32603, and logging the
-            // error alone rendered as `{"code":-32603,"name":"RpcError"}`
-            // — identical for every one of them. A reader could see that
-            // the handshake had been refused and never which rule did it,
-            // which is how the cause of six failing specs stayed
-            // "unknown" across three triage rounds (nocx-cbtc). The
-            // backend names the rule in its own log; this is the half a
-            // trace carries.
-            if (this._establishmentAckInFlight === generation) {
-              this._establishmentAckInFlight = null
-            }
-            log.warn('nocx: establishment acknowledgement refused', {
-              reason: e instanceof Error ? e.message : String(e),
-              generation,
-              lane: fact.lane,
-              domain: fact.domain ?? '',
-              epoch: fact.epoch ?? 0,
-            })
-          })
-      }
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
     const session = await this.openSessionWithHostKeyRecovery(signal)

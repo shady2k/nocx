@@ -1461,13 +1461,6 @@ func New(opts ...Option) (*App, error) {
 	// so the rule a person is shown a verdict about is the rule that reads
 	// their pane.
 	paneCalibration := agentcalib.New(logger, paneGrid, calibrationStore, paneDrivers)
-	// The establishment bound is stated here for the same reason the hello
-	// timeouts below are: how long a minted accept may wait for the
-	// renderer's acknowledgement before the domain is rolled back and the
-	// session falls back to a conventional terminal (ADR-0024 decision 9) is
-	// a product decision, and the composition root is where product
-	// decisions belong. It is the shell's own handshake budget, so the
-	// backend never outwaits the shell it is gating.
 	paneEnrol, paneEnrolErr := newPaneEnroller(
 		logger, childSessions, paneGrid, paneWatch, agentApprovalService,
 	)
@@ -1476,7 +1469,6 @@ func New(opts ...Option) (*App, error) {
 	}
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
-		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout),
 		// The gate that decides every handshake gets a voice (nocx-n14oo.8).
 		lifecyclepub.WithLogger(logger),
 		// The child-domain bootstrap builder (nocx-u7uh.11): the single

@@ -146,12 +146,12 @@ func (s *shellSide) drain() {
 }
 
 // recordingEmitter is the renderer's side of the publication boundary: it
-// acknowledges every establishment immediately (decision 9 — a renderer that
-// commits the editor presentation on receipt) and keeps every fact, which is
-// what a block is drawn from.
+// keeps every fact, which is what a block is drawn from. It used to also
+// acknowledge every establishment immediately, as a renderer that commits
+// the editor presentation on receipt would; ADR-0062 removed that step,
+// since the accept now flushes on the backend's own authority as soon as
+// the kernel mints it.
 type recordingEmitter struct {
-	pub *lifecyclepub.Publisher
-
 	mu    sync.Mutex
 	facts []lifecyclepub.Fact
 }
@@ -160,11 +160,6 @@ func (e *recordingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 	e.mu.Lock()
 	e.facts = append(e.facts, f)
 	e.mu.Unlock()
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = e.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
 }
 
 func (e *recordingEmitter) completed() []lifecyclepub.Fact {
@@ -197,7 +192,7 @@ func newIntegratedCoordinator(t *testing.T, provider *fakeLaneProvider) *integra
 	t.Helper()
 	c := newCoordinator(t, provider)
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
-	em := &recordingEmitter{pub: pub}
+	em := &recordingEmitter{}
 	pub.SetEmitter(em)
 	c.reg.lifecycle = pub
 	return &integratedCoordinator{coordinator: c, emitter: em}

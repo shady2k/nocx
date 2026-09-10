@@ -29,32 +29,25 @@ func (r *seqRand) Read(p []byte) (int, error) {
 }
 
 // newTestKernel builds the adapter's kernel seam the way the composition root
-// does: the PUBLISHER wrapping the raw kernel, with an emitter that
-// acknowledges every establishment synchronously — the renderer applying the
-// published fact instantly (decision 9). The adapter drives the publisher;
-// the raw kernel no longer satisfies the adapter seam because it returns
-// outbound unsent.
+// does: the PUBLISHER wrapping the raw kernel. The adapter drives the
+// publisher; the raw kernel no longer satisfies the adapter seam because it
+// returns outbound unsent. The publisher flushes an accept on its own
+// authority now (ADR-0062), so the emitter has nothing left to acknowledge —
+// it stays only as the Emitter the publisher requires.
 func newTestKernel() *lifecyclepub.Publisher {
 	k := lifecycle.New(lifecycle.Options{Rand: &seqRand{}})
 	pub := lifecyclepub.New(k)
-	pub.SetEmitter(ackingEmitter{pub: pub})
+	pub.SetEmitter(ackingEmitter{})
 	return pub
 }
 
-// ackingEmitter acknowledges every published establishment fact immediately,
-// as a renderer that commits the editor presentation on receipt would. The
-// accept then flushes through the publisher (decision 9).
-type ackingEmitter struct {
-	pub *lifecyclepub.Publisher
-}
+// ackingEmitter used to acknowledge every published establishment fact
+// immediately, as a renderer that commits the editor presentation on receipt
+// would; ADR-0062 removed that step; the accept now flushes as soon as the
+// kernel mints it, so this emitter has nothing to do but exist.
+type ackingEmitter struct{}
 
-func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = e.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
-}
+func (ackingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
 
 // shellEnv builds an authenticated envelope for the adapter's minted domain.
 func shellEnv(a *Adapter, seq uint64, evt lifecycle.Event) lifecycle.Envelope {

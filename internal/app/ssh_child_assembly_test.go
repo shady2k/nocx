@@ -362,11 +362,11 @@ type sshChildHarness struct {
 	facts *factLog
 }
 
-// factLog records the published facts while acknowledging establishments
-// exactly as ackingEmitter does — the renderer's two jobs, in the order it
-// does them.
+// factLog records the published facts. It used to also acknowledge every
+// establishment, as ackingEmitter did; ADR-0062 removed that step, since the
+// accept now flushes on the backend's own authority as soon as the kernel
+// mints it.
 type factLog struct {
-	pub *lifecyclepub.Publisher
 	mu  sync.Mutex
 	all []lifecyclepub.Fact
 }
@@ -375,11 +375,6 @@ func (l *factLog) PublishLifecycle(f lifecyclepub.Fact) {
 	l.mu.Lock()
 	l.all = append(l.all, f)
 	l.mu.Unlock()
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = l.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
 }
 
 // attemptFor returns the id of the first attempt the given domain published
@@ -474,7 +469,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
 			func() *lifecyclepub.Publisher { return pub }, transports, sessions, typed)))
-	facts := &factLog{pub: pub}
+	facts := &factLog{}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
 	harness := &sshChildHarness{

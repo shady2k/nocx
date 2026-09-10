@@ -78,7 +78,6 @@ func establishedPub(t *testing.T, e lifecyclepub.AgentEnroller) (*lifecyclepub.P
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 	return pub, port, h
 }
 

@@ -53,7 +53,6 @@ func TestPublisherGrantEnrichedAndDelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSudo, "", "", 0)))
 
@@ -107,7 +106,6 @@ func TestPublisherGrantRefusedDeliversEmptyBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "box", "", 22)))
 
@@ -138,7 +136,6 @@ func TestPublisherGrantWithoutBuilderDeliversEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	mustIngest(t, pub, "T", env("L", h, 2, requestEvt("r-dom-1-0", lifecycle.EnvSu, "", "", 0)))
 
@@ -185,7 +182,6 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", parent, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", parent)
 
 	// The parent asks for a child at pi@192.168.0.93, suspends, and the far
 	// shell establishes the child.
@@ -194,7 +190,6 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
 	}))
 	mustIngest(t, pub, "T", env("L", child, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", child)
 
 	// Every fact naming the child names where the child IS.
 	var named int

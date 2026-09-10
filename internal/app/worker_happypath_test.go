@@ -398,21 +398,13 @@ func (happyEndpointOwner) OwnerUID(string) (uint32, error) {
 	return uint32(os.Getuid()), nil //nolint:gosec // test owner must match the current process uid
 }
 
-type happyLifecycleEmitter struct {
-	publisher *lifecyclepub.Publisher
-}
+// happyLifecycleEmitter used to acknowledge every published establishment
+// immediately; ADR-0062 removed that step, since the accept now flushes on
+// the backend's own authority as soon as the kernel mints it. It stays only
+// as the Emitter the publisher requires.
+type happyLifecycleEmitter struct{}
 
-func (e happyLifecycleEmitter) PublishLifecycle(f lifecyclepub.Fact) {
-	if f.Generation == "" {
-		return
-	}
-	_ = e.publisher.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane),
-		lifecycle.DomainID(f.Domain),
-		f.Epoch,
-		f.Generation,
-	)
-}
+func (happyLifecycleEmitter) PublishLifecycle(lifecyclepub.Fact) {}
 
 // happyStandOption tunes the stand for a test that needs something other than
 // the happy path's own values — a logger it can read back, or a deadline it can
@@ -490,7 +482,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		lifecyclepub.WithAgentEnroller(paneEnrol),
 		lifecyclepub.WithAgentReporter(report),
 	)
-	pub.SetEmitter(happyLifecycleEmitter{publisher: pub})
+	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
 	opener := &happyRealHelperOpener{reg: reg, factory: factory}
 	tp := transport.NewWSServer(logger, reg, transport.WithHelperSessionOpener(opener))

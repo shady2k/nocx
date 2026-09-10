@@ -534,7 +534,12 @@ func protectedSignalServer(t *testing.T) (*websocket.Conn, *socketTap, *WSServer
 }
 
 // tapAckEstablishment is ackEstablishmentFrom for a tapped socket: the tap
-// owns the reader, so the establishment fact arrives through it.
+// owns the reader, so it waits for the establishment fact to arrive through
+// it rather than through a plain read. It used to also send the renderer's
+// establishment acknowledgement; ADR-0062 removed that step, since the
+// accept is flushed synchronously inside Ingest, before this fact is even
+// published. pub is unused now but kept in the signature to avoid touching
+// every call site.
 func tapAckEstablishment(t *testing.T, tap *socketTap, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -552,11 +557,8 @@ func tapAckEstablishment(t *testing.T, tap *socketTap, pub *lifecyclepub.Publish
 				continue
 			}
 			f := env.Params
-			if f.Lane != string(lane) || f.Domain != string(h.Domain) || f.Epoch != h.Epoch || f.Generation == "" {
+			if f.Lane != string(lane) || f.Domain != string(h.Domain) || f.Epoch != h.Epoch {
 				continue
-			}
-			if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, f.Generation); err != nil {
-				t.Fatalf("AcknowledgeEstablishment: %v", err)
 			}
 			return
 		case <-time.After(100 * time.Millisecond):

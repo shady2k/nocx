@@ -1315,6 +1315,40 @@ func TestEstablishmentUndeliveredAcceptNotLive(t *testing.T) {
 	}
 }
 
+// TestEstablishmentUndeliveredAcceptRefusesAgentEnrolment is the same
+// property for agent_enrol specifically, named explicitly because nocx-ui8q6.2
+// removed the mechanism that used to hold the accept for a renderer
+// acknowledgement (ADR-0062) and this is the assertion that must survive
+// that removal: the kernel's own past-ACCEPT gate (decision 9) is
+// unchanged, and agent enrolment is refused exactly like every other
+// lifecycle event while the accept is minted but undelivered.
+func TestEstablishmentUndeliveredAcceptRefusesAgentEnrolment(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h, err := k.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outs, err := k.Ingest("T", env("L", h, 1, helloEvt("bash")))
+	if err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if len(outs) != 1 || outs[0].Envelope.Event.Kind != KindAccept {
+		t.Fatalf("hello must produce exactly one accept outbound, got %v", outboundKinds(outs))
+	}
+	// The accept was minted but not delivered: agent_enrol must be refused
+	// exactly like start and prompt_ready above.
+	if _, err := k.Ingest("T", env("L", h, 2, enrolEvt("r-agent-0", "claude"))); !errors.Is(err, ErrDomainPending) {
+		t.Fatalf("agent_enrol before accept delivery must be rejected as not past accept, got %v", err)
+	}
+	// Delivering the accept is the closing event: enrolment is then legal.
+	if err := k.Deliver(outs[0]); err != nil {
+		t.Fatalf("Deliver(accept): %v", err)
+	}
+	mustIngest(t, k, "T", env("L", h, 2, enrolEvt("r-agent-0", "claude")))
+}
+
 // TestEstablishmentTimeoutRevokesUndeliveredAccept: an accept that never
 // reaches the shell (no renderer acknowledgement) is rolled back by
 // EstablishmentTimeout — the domain is revoked, the lane falls to Native,

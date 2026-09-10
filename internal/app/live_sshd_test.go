@@ -659,30 +659,24 @@ func (r *recordingKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle
 	return h, err
 }
 
-// ackingEmitter acknowledges every published establishment immediately, as
-// the renderer does after committing the editor presentation (decision 9).
-// The live-sshd proofs drive the real shell over the real sshd against the
-// production composition; without the acknowledgement the accept is never
-// flushed and the session never enters enhanced mode, so the proofs would
-// assert against a conventional terminal.
-type ackingEmitter struct {
-	pub *lifecyclepub.Publisher
-}
+// ackingEmitter used to acknowledge every published establishment
+// immediately, as the renderer does after committing the editor presentation
+// — required for the live-sshd proofs, which drive the real shell over the
+// real sshd against the production composition, to ever see enhanced mode.
+// ADR-0062 removed the wait the acknowledgement used to release: the accept
+// is now flushed on the backend's own authority as soon as the kernel mints
+// it, so this emitter has nothing left to do but exist as the Emitter the
+// publisher requires.
+type ackingEmitter struct{}
 
-func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
-	if f.Generation == "" || f.Domain == "" {
-		return
-	}
-	_ = e.pub.AcknowledgeEstablishment(
-		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
-}
+func (ackingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
 
 // newRecordingKernel builds the observation seam the way production wires
 // it: publisher over the raw kernel, acking emitter bound, the publisher
 func newRecordingKernel(opts ...lifecyclepub.Option) *recordingKernel {
 	k := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(k, opts...)
-	pub.SetEmitter(ackingEmitter{pub: pub})
+	pub.SetEmitter(ackingEmitter{})
 	return &recordingKernel{Publisher: pub}
 }
 

@@ -172,13 +172,34 @@ A listener existing is not a channel being live (decision 3). The sequence:
    the capability.
 3. The shell connects and sends `hello` (sequence 1, bearer = capability).
 4. nocx validates version, domain, epoch, capability, lane legality and parent
-   state, and answers `accept`.
+   state, and answers `accept` — flushed to the transport on the backend's own
+   authority, as soon as it is minted (ADR-0062). Nothing external gates this
+   step: not a renderer, not a subscriber, not an acknowledgement of any kind.
 5. **Only after `accept`** may the shell suppress its prompt or emit lifecycle
    events. The kernel enforces this: lifecycle events for a domain that is not
    `Established` are rejected. Enhanced mode is entered only after the frontend
    has the published `domain_established` fact.
 6. Timeout (`hello_timeout`, 10 s) or any failure leaves the visible native
    prompt in place.
+
+**Step 5 is two separate conditions, and only one of them ever needed a wire
+round trip.** The shell's prompt-suppression authority and the frontend's
+enhanced mode are gated independently: the kernel enforces the first on its
+own read model (`requireActive` refusing `ErrDomainPending` while the domain
+is `acceptPending`), and the second is a fact about what the frontend has
+received, which the frontend already knows without telling the backend.
+Until 2026-09-10 the backend nonetheless withheld the accept itself until a
+renderer sent `lifecycle.establishAck` — a mechanism, not part of this
+document's normative shape, recorded in ADR-0024 decision 9's history and
+retired by [ADR-0062](decisions/0062-the-backend-flushes-the-accept-on-its-own-authority.md).
+It collapsed the two conditions into one: an accept-producing hello opened
+an establishment episode and the accept sat unflushed until an
+acknowledgement for that exact generation arrived, which meant a session
+with no subscriber — a pane `WSServer.OpenSession` opens on the backend's
+own initiative, which creates no ring and no subscriber by design — could
+never be acknowledged and therefore could never establish. ADR-0062 removed
+the wait; step 4 above is what replaced it, and step 5's kernel-side gate is
+unchanged by the removal — read ADR-0062 before touching either.
 
 `accept`, `refresh_request`, `domain_grant`, `agent_enrolled`,
 `agent_withdrawn` and `agent_reported` are kernel-originated; ingesting them from a shell is a

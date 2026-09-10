@@ -403,7 +403,7 @@ func (fx *liveSshd) recording(t *testing.T, name, what string) string {
 func newCanaryKernel() *recordingKernel {
 	k := lifecycle.New(lifecycle.Options{Rand: canaryRand{}})
 	pub := lifecyclepub.New(k)
-	pub.SetEmitter(ackingEmitter{pub: pub})
+	pub.SetEmitter(ackingEmitter{})
 	return &recordingKernel{Publisher: pub}
 }
 

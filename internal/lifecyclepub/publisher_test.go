@@ -3,7 +3,6 @@ package lifecyclepub_test
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // noopPort swallows outbound envelopes (accept, refresh_request). The shell
@@ -111,27 +109,6 @@ func mustIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycle.Transpo
 	}
 }
 
-// mustAckEstablishment acknowledges the latest published establishment
-// generation for the lane, exactly as the renderer does after committing
-// the editor presentation (decision 9).
-func mustAckEstablishment(t *testing.T, pub *lifecyclepub.Publisher, r *recorder, lane lifecycle.LaneID, h lifecycle.DomainHandle) {
-	t.Helper()
-	facts := r.all()
-	var gen string
-	for i := len(facts) - 1; i >= 0; i-- {
-		if facts[i].Lane == string(lane) && facts[i].Generation != "" {
-			gen = facts[i].Generation
-			break
-		}
-	}
-	if gen == "" {
-		t.Fatalf("no published fact carries an establishment generation; facts=%+v", facts)
-	}
-	if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, gen); err != nil {
-		t.Fatalf("AcknowledgeEstablishment: %v", err)
-	}
-}
-
 // The publisher is the kernel-shaped seam the lifecyclechannel adapter
 // consumes: the composition root injects it where it would have injected the
 // kernel, and every mutation an adapter drives is projected. This assertion
@@ -174,13 +151,11 @@ func TestPublisherPublishesOnTransitions(t *testing.T) {
 	if f.Domain != string(h.Domain) || f.Epoch != h.Epoch {
 		t.Fatalf("fact must carry the established domain and epoch, got %+v", f)
 	}
-	if f.Generation == "" {
-		t.Fatalf("prompt_ready fact must carry the establishment generation, got %+v", f)
-	}
-	// The renderer acknowledges the published fact; only then is the accept
-	// flushed and the domain live (decision 9).
-	mustAckEstablishment(t, pub, r, "L", h)
 
+	// The accept was flushed on the backend's own authority as part of the
+	// same Ingest call (ADR-0062): the domain is already live, and the
+	// submit below succeeding is the proof — a domain still acceptPending
+	// would refuse it with ErrDomainPending.
 	// App-originated submit: Running(attempt) with the app-owned text.
 	att, err := pub.SubmitAttempt(h.Domain, "make", "/work/nocx", "local", "sub-0123456789abcdef")
 	if err != nil {
@@ -425,7 +400,6 @@ func TestPublisherAbandonPublishesUnknown(t *testing.T) {
 	_ = pub.BindTransport("T", noopPort{})
 	h, _ := pub.RequestDomain("L", nil, "T")
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 	att, err := pub.SubmitAttempt(h.Domain, "sleep 1000", "/", "local", "")
 	if err != nil {
 		t.Fatal(err)
@@ -458,7 +432,6 @@ func TestPublisherReplayLane(t *testing.T) {
 	_ = pub.BindTransport("T", noopPort{})
 	h, _ := pub.RequestDomain("L", nil, "T")
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, r, "L", h)
 
 	pub.ReplayLane("L")
 	if got := len(r.all()); got != 2 {
@@ -548,180 +521,98 @@ func TestPublisherRecoveryProjection(t *testing.T) {
 	}
 }
 
-// --- decision 9: no acknowledgement, no accept ------------------------------
+// --- ADR-0062: the backend flushes the accept on its own authority ---------
+//
+// These replace the old "no acknowledgement, no accept" (decision 9)
+// coverage above. The measurement that bought the change: a pane the
+// backend itself opens (WSServer.OpenSession) creates no ring and no
+// subscriber by its own doc comment, so the old mechanism — hold the accept
+// until a renderer acknowledges it — made such a pane unable to ever
+// establish (nocx-ui8q6.2, trace 051ee139c2d6e716566cecfe54bd5607).
 
-// TestPublisherAcceptFlushedOnlyOnAcknowledgement proves the acceptance
-// criterion "no acknowledgement means no accept" at the publication
-// boundary: the accept sits pending while no ack has landed, a stale
-// generation cannot release it, and the exact generation's ack is the
-// closing event that flushes it — once.
-func TestPublisherAcceptFlushedOnlyOnAcknowledgement(t *testing.T) {
+// TestPublisherFlushesAcceptWithNoEmitter proves the fix directly: even with
+// NO emitter bound at all — the publication-layer stand-in for "nobody is
+// subscribed" — a hello still gets its accept, and the domain establishes.
+func TestPublisherFlushesAcceptWithNoEmitter(t *testing.T) {
 	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k)
-	r := &recorder{}
-	pub.SetEmitter(r)
+	pub := lifecyclepub.New(k) // no SetEmitter
 	port := &recordingPort{}
 	_ = pub.BindTransport("T", port)
 	h, _ := pub.RequestDomain("L", nil, "T")
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	facts := r.all()
-	gen := facts[0].Generation
-	if gen == "" {
-		t.Fatal("hello must publish a fact carrying the establishment generation")
-	}
-	// No acknowledgement: the accept has not reached the transport.
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("accept flushed before any acknowledgement: %v", got)
-	}
-	// A stale generation is refused and releases nothing.
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, "est-0000000000000000"); !errors.Is(err, lifecyclepub.ErrEstablishmentGeneration) {
-		t.Fatalf("stale generation = %v, want ErrEstablishmentGeneration", err)
-	}
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("stale ack flushed the accept: %v", got)
-	}
-	// The domain is not live before the ack: events are rejected.
-	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); !errors.Is(err, lifecycle.ErrDomainPending) {
-		t.Fatalf("submit before the ack = %v, want not past accept", err)
-	}
-	// The exact generation's ack is the closing event.
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, gen); err != nil {
-		t.Fatalf("AcknowledgeEstablishment: %v", err)
-	}
 	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
-		t.Fatalf("after ack: %v, want exactly one accept", got)
+		t.Fatalf("accept not flushed with no emitter bound: %v", got)
+	}
+	if d, ok := pub.Domain(h.Domain); !ok || d.State != lifecycle.DomainEstablished {
+		t.Fatalf("domain = %+v, want Established", d)
+	}
+}
+
+// TestPublisherFlushesAcceptWithSubscriberAndNoAcknowledgement is the same
+// proof for a session WITH a subscriber: the accept flushes and the domain
+// is immediately usable, with no acknowledgement sent by anyone — there is
+// no such call left to make.
+func TestPublisherFlushesAcceptWithSubscriberAndNoAcknowledgement(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(k)
+	pub.SetEmitter(&recorder{})
+	port := &recordingPort{}
+	_ = pub.BindTransport("T", port)
+	h, _ := pub.RequestDomain("L", nil, "T")
+	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("accept not flushed: %v", got)
 	}
 	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); err != nil {
-		t.Fatalf("submit after the ack must succeed, got %v", err)
-	}
-	// A duplicate ack is refused — the establishment is resolved.
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, gen); !errors.Is(err, lifecyclepub.ErrNoPendingEstablishment) {
-		t.Fatalf("duplicate ack = %v, want ErrNoPendingEstablishment", err)
+		t.Fatalf("submit right after hello must succeed, got %v", err)
 	}
 }
 
-// TestPublisherEstablishmentTimeoutRollsBack is fault variant 3: the
-// publication path is stalled — an ack that never returns. The accept never
-// reaches the transport, the domain is rolled back (decision 9), and the
-// resulting safe state (native) is published. There is no window in which a
-// suppressed prompt could exist without an editor: the accept simply never
-// went out.
-func TestPublisherEstablishmentTimeoutRollsBack(t *testing.T) {
-	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k, lifecyclepub.WithEstablishmentTimeout(40*time.Millisecond))
-	r := &recorder{}
-	pub.SetEmitter(r)
-	port := &recordingPort{}
-	_ = pub.BindTransport("T", port)
-	h, _ := pub.RequestDomain("L", nil, "T")
-	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("accept flushed without an ack: %v", got)
-	}
-	// The establishment bound expires: the domain is revoked, the lane
-	// falls to native, and the accept never goes out.
-	waittest.WaitForDetail(t, "establishment timeout to close the domain",
-		func() string {
-			d, ok := pub.Domain(h.Domain)
-			return fmt.Sprintf("the timeout never rolled the domain back; known=%t state=%v", ok, d.State)
-		},
-		func() bool {
-			d, ok := pub.Domain(h.Domain)
-			return ok && d.State == lifecycle.DomainClosed
-		})
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("accept flushed after the rollback: %v", got)
-	}
-	// The rollback's native fact follows the Closed state in the same
-	// timer tick — wait for it, then assert it is the final word.
-	var last lifecyclepub.Fact
-	waittest.WaitForDetail(t, "rollback to publish the native state",
-		func() string {
-			facts := r.all()
-			if len(facts) == 0 {
-				return "the rollback published no fact at all"
-			}
-			return fmt.Sprintf("last fact = %+v", facts[len(facts)-1])
-		},
-		func() bool {
-			facts := r.all()
-			if len(facts) == 0 {
-				return false
-			}
-			last = facts[len(facts)-1]
-			return last.Lifecycle == lifecyclepub.LifecycleNative
-		})
-	if last.Domain != "" {
-		t.Fatalf("final fact = %+v, want native with no domain", last)
-	}
-}
-
-// TestPublisherReconnectHelloMintsFreshGeneration proves the reconnect
-// decision: every accept-producing hello is a fresh establishment episode
-// with a fresh generation and a replayed fact, so the shell's reconnect
-// accept can never be released by an old connection's (old generation)
-// acknowledgement — and the replay is what carries the fresh generation to
-// the renderer, so there is no deadlock (the brief's permitted path).
-func TestPublisherReconnectHelloMintsFreshGeneration(t *testing.T) {
+// TestPublisherLeavesDomainPendingWhenTheAcceptCannotBeDelivered is the
+// other half: flushing on the backend's own authority is not forging
+// liveness. When the send itself fails, the domain stays acceptPending and
+// the kernel goes on refusing lifecycle events under it — the same
+// assertion internal/lifecycle's TestEstablishmentUndeliveredAcceptNotLive
+// makes at the kernel, reproduced here through the publisher's own surface.
+func TestPublisherLeavesDomainPendingWhenTheAcceptCannotBeDelivered(t *testing.T) {
 	k := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(k)
-	r := &recorder{}
-	pub.SetEmitter(r)
+	pub.SetEmitter(&recorder{})
+	_ = pub.BindTransport("T", failingSendPort{})
+	h, _ := pub.RequestDomain("L", nil, "T")
+	if err := pub.Ingest("T", env("L", h, 1, helloEvt())); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); !errors.Is(err, lifecycle.ErrDomainPending) {
+		t.Fatalf("submit against an undelivered accept = %v, want ErrDomainPending", err)
+	}
+}
+
+// failingSendPort refuses every send: the transport is bound but cannot
+// carry a frame, standing in for a dead connection at the exact moment the
+// accept would go out.
+type failingSendPort struct{}
+
+func (failingSendPort) Send(lifecycle.Envelope) error { return errors.New("transport gone") }
+
+// TestPublisherReconnectFlushesFreshAccept proves the reconnect case still
+// works with no ack round trip: a second hello within the epoch mints and
+// flushes a second accept immediately, exactly like the first.
+func TestPublisherReconnectFlushesFreshAccept(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(k)
+	pub.SetEmitter(&recorder{})
 	port := &recordingPort{}
 	_ = pub.BindTransport("T", port)
 	h, _ := pub.RequestDomain("L", nil, "T")
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	gen1 := r.all()[0].Generation
-	mustAckEstablishment(t, pub, r, "L", h)
 	if got := port.kinds(); len(got) != 1 {
 		t.Fatalf("initial accept not flushed, got %v", got)
 	}
-
-	// The shell reconnects within the epoch: a fresh accept is minted with
-	// a fresh generation, and the unchanged projection is replayed carrying
-	// it (the dedupe lets the fresh generation through).
+	// The shell reconnects within the epoch: a fresh accept is minted and
+	// flushed immediately.
 	mustIngest(t, pub, "T", env("L", h, 2, helloEvt()))
-	facts := r.all()
-	replay := facts[len(facts)-1]
-	if replay.Generation == "" || replay.Generation == gen1 {
-		t.Fatalf("reconnect must publish a fact with a FRESH generation, got %q (was %q)", replay.Generation, gen1)
-	}
-	// The old generation can no longer release anything.
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, gen1); !errors.Is(err, lifecyclepub.ErrEstablishmentGeneration) {
-		t.Fatalf("old-generation ack = %v, want ErrEstablishmentGeneration", err)
-	}
-	if got := port.kinds(); len(got) != 1 {
-		t.Fatalf("old ack flushed a second accept: %v", got)
-	}
-	// The fresh generation's ack flushes the reconnect accept.
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, replay.Generation); err != nil {
-		t.Fatalf("reconnect ack: %v", err)
-	}
-	if got := port.kinds(); len(got) != 2 {
-		t.Fatalf("after reconnect ack: %v, want two accepts", got)
-	}
-}
-
-// TestPublisherTransportLostCancelsPendingAccept proves a pending accept can
-// never outlive its transport: loss cancels it, and a late acknowledgement
-// is refused.
-func TestPublisherTransportLostCancelsPendingAccept(t *testing.T) {
-	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k)
-	r := &recorder{}
-	pub.SetEmitter(r)
-	port := &recordingPort{}
-	_ = pub.BindTransport("T", port)
-	h, _ := pub.RequestDomain("L", nil, "T")
-	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	gen := r.all()[0].Generation
-	if err := pub.TransportLost("T"); err != nil {
-		t.Fatalf("TransportLost: %v", err)
-	}
-	if err := pub.AcknowledgeEstablishment("L", h.Domain, h.Epoch, gen); !errors.Is(err, lifecyclepub.ErrNoPendingEstablishment) {
-		t.Fatalf("ack after loss = %v, want ErrNoPendingEstablishment", err)
-	}
-	if got := port.kinds(); len(got) != 0 {
-		t.Fatalf("accept flushed after transport loss: %v", got)
+	if got := port.kinds(); len(got) != 2 || got[0] != lifecycle.KindAccept || got[1] != lifecycle.KindAccept {
+		t.Fatalf("reconnect accept not flushed, got %v", got)
 	}
 }

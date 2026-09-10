@@ -49,7 +49,6 @@ func reportingPub(t *testing.T, r lifecyclepub.AgentReporter) (*lifecyclepub.Pub
 		t.Fatal(err)
 	}
 	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
-	mustAckEstablishment(t, pub, rec, "L", h)
 	return pub, port, h
 }
 

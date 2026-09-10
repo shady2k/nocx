@@ -104,6 +104,7 @@
 @import './styles/components/toggle-matrix.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
+@import './styles/surfaces/integration-waiting.css';
 @import './styles/surfaces/recovery-notice.css';
 @import './styles/surfaces/unreconciled-notice.css';
 @import './styles/surfaces/update-notice.css';

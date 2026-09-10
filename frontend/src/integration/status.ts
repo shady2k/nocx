@@ -86,6 +86,27 @@ export function isDegraded(fact: SessionIntegrationChanged | null): boolean {
   return fact !== null && (fact.status === 'conventional' || fact.status === 'lost')
 }
 
+/** True for exactly the interval the contract calls "the honest interval
+ *  before the shell has proved itself": a session begins here and stays
+ *  until it either integrates or gives up (nocx-ui8q6.1). This is the ONE
+ *  place that reads `starting` off the fact — a pane that hid its terminal
+ *  and dropped keystrokes on a second, locally-derived guess would be the
+ *  two-answers defect AD-8 exists to prevent.
+ *
+ *  `null` is false, deliberately and permanently: a session that never asked
+ *  for integration never receives a status at all, so treating absence as an
+ *  open question would leave such a session waiting on an answer that is
+ *  never coming — the exact defect rule 2 of the bead warns about. */
+export function isAwaitingIntegration(fact: SessionIntegrationChanged | null): boolean {
+  return fact !== null && fact.status === 'starting'
+}
+
+/** The one sentence the product says while `starting` is still open. It is
+ *  not a diagnosis — nothing has failed — so it lives beside `isDegraded`
+ *  and `MESSAGES` rather than inside either: MESSAGES answers "what went
+ *  wrong", and nothing has, yet. */
+export const INTEGRATION_STARTING_MESSAGE = 'Checking this shell…'
+
 export type ToolSurfaceFactHandler = (fact: SessionToolSurfaceChanged) => void
 
 /** Subscribe to the endpoint's settled worker tool-surface result. */

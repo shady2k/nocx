@@ -4,6 +4,7 @@ import {
   INTEGRATION_REASONS,
   IntegrationSilenceStore,
   integrationMessage,
+  isAwaitingIntegration,
   isDegraded,
   observationSentence,
   recordingSentence,
@@ -135,6 +136,17 @@ describe('what the product says about a degraded session', () => {
 
   it('treats lost as degraded — an integration that ended is still a plain terminal', () => {
     expect(isDegraded(fact({ status: 'lost', reason: 'channel-lost' }))).toBe(true)
+  })
+
+  it('is awaiting only for starting, and never for absence (nocx-ui8q6.1)', () => {
+    expect(isAwaitingIntegration(fact({ status: 'starting', reason: undefined }))).toBe(true)
+    expect(isAwaitingIntegration(fact({ status: 'integrated', reason: undefined }))).toBe(false)
+    expect(isAwaitingIntegration(fact({ status: 'conventional' }))).toBe(false)
+    expect(isAwaitingIntegration(fact({ status: 'lost' }))).toBe(false)
+    // A session that never asked for integration never receives a status at
+    // all: null must never be treated as an open question, or a plain
+    // terminal would wait on an answer that is never coming.
+    expect(isAwaitingIntegration(null)).toBe(false)
   })
 
   // An unrenderable reason is still a degraded session. Silence is the

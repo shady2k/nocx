@@ -58,6 +58,7 @@ import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
   integrationMessage,
+  isAwaitingIntegration,
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
@@ -65,6 +66,7 @@ import {
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountIntegrationWaiting } from './integration/waiting'
 import { mountToolSurfaceNotice } from './tool-surface-notice'
 import { mountRecoveryNotice } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
@@ -1047,6 +1049,10 @@ export class TerminalContent extends BasePaneContent {
   private _toolSurfaceNoticeDispose: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
+  /** The disposer for the waiting card, mounted for exactly as long as the
+   *  axis reads `starting` (nocx-ui8q6.1). Null means the terminal grid is
+   *  showing — either the axis has answered, or this session never asked. */
+  private _integrationWaitingDispose: (() => void) | null = null
   /** The disposer for the reclaimed-pane card that names the output this
    *  session produced and nothing kept (nocx-fz4qa). Separate from the card
    *  above because the two report different KINDS of fact: that one is a
@@ -4036,7 +4042,16 @@ export class TerminalContent extends BasePaneContent {
     // Held, never dropped, while a submitted command is still on its way to
     // the pty: the keyboard changed hands at the commit and the command
     // goes out an RPC later, so these bytes belong AFTER it (_heldRaw).
+    //
+    // DROPPED, never held, while the axis reads `starting` (nocx-ui8q6.1):
+    // that is a different mechanism for a different moment. `_heldRaw`
+    // reorders bytes around a submit that WILL be sent; a keystroke typed
+    // before the shell has proved itself has nowhere good to land — the
+    // owner rejected queueing it for later delivery on 2026-09-10 ("хранить
+    // там какие-то клавиши, а потом их куда-то отправлять — это странная
+    // идея"). So it is read, and then it is gone.
     renderer.onData((data: string) => {
+      if (isAwaitingIntegration(this._integration)) return
       if (this._heldRaw !== null) {
         this._heldRaw.push(data)
         return
@@ -4948,6 +4963,7 @@ export class TerminalContent extends BasePaneContent {
     if (this._sessionExited) return
     this._integration = fact
     this._updateCapability()
+    this._syncIntegrationWaiting()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
       // raised it and goes with it — and the terminal gets the space back,
@@ -5061,6 +5077,33 @@ export class TerminalContent extends BasePaneContent {
     if (!this._noticeDispose) return
     this._noticeDispose()
     this._noticeDispose = null
+    this.scheduleLiveResize()
+  }
+
+  /** Show the waiting card and hide the terminal grid for exactly as long as
+   *  the axis reads `starting` (nocx-ui8q6.1) — ADR-0024 decision 8's "worst
+   *  of both": a raw, half-bootstrapped prompt a keystroke could land on
+   *  before the shell has proved itself either way. `isAwaitingIntegration`
+   *  is the ONE read of the fact (AD-8); the keystroke drop at the renderer's
+   *  onData reads the same fact rather than a flag mirrored from here.
+   *
+   *  A session that never asked for integration keeps `_integration` null
+   *  forever, `isAwaitingIntegration` is false for it, and this method is
+   *  never asked to hide anything — the terminal is live from its first
+   *  frame, which is what "absence is conventional by design" requires. */
+  private _syncIntegrationWaiting(): void {
+    const waiting = isAwaitingIntegration(this._integration)
+    if (waiting) {
+      if (this._integrationWaitingDispose || !this._paneTarget) return
+      this._integrationWaitingDispose = mountIntegrationWaiting(this._paneTarget)
+      if (this.scrollback) this.scrollback.scrollbackLayout.style.display = 'none'
+      this.scheduleLiveResize()
+      return
+    }
+    if (!this._integrationWaitingDispose) return
+    this._integrationWaitingDispose()
+    this._integrationWaitingDispose = null
+    if (this.scrollback) this.scrollback.scrollbackLayout.style.display = ''
     this.scheduleLiveResize()
   }
 
@@ -6642,6 +6685,8 @@ export class TerminalContent extends BasePaneContent {
     this._toolSurfaceNoticeDispose = null
     this._noticeDispose?.()
     this._noticeDispose = null
+    this._integrationWaitingDispose?.()
+    this._integrationWaitingDispose = null
     this._recoveryNoticeDispose?.()
     this._recoveryNoticeDispose = null
     this._unreconciledNoticeDispose?.()

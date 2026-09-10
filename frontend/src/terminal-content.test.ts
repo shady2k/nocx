@@ -1884,6 +1884,158 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   })
 })
 
+// The pane's waiting state for the `starting` interval (nocx-ui8q6.1):
+// ADR-0024 decision 8's "worst of both" — a raw, half-bootstrapped prompt a
+// keystroke could land on before the shell has proved itself either way.
+// These assert through the seams a user actually reaches (AGENTS.md rule 1):
+// the send seam a keystroke reaches or does not, and the DOM a person would
+// see — never the implementation's own bookkeeping.
+describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
+  const WAITING = '.nocx-integration-waiting'
+
+  it('shows the waiting state and no terminal grid while the axis is starting', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a key pressed while starting reaches no send path', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the axis reaching integrated reveals the terminal and takes the next keypress', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'starting', shell: '/bin/zsh' })
+      integrationHandler(client)({ sessionId, status: 'integrated', shell: '/bin/zsh' })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the axis reaching conventional reveals a working terminal, takes input, and still says why', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'starting', shell: '/bin/zsh' })
+      integrationHandler(client)({
+        sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: '/bin/zsh',
+      })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      // The reason surface is a different axis from the waiting state and
+      // must keep working: `conventional` still raises the degraded-session
+      // card that says why there are no command blocks.
+      expect(tab.pane.querySelector('.nocx-integration-notice')).not.toBeNull()
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a session that never emits on the axis is never made to wait', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('a')
+      expect(session.send).toHaveBeenCalledWith('a')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a reattach that replays an already-integrated status never flashes the waiting state', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The backend replays the CURRENT status on attach (replayIntegration)
+      // rather than restarting the handshake at `starting` — reattach is a
+      // state, not an event, and this pane must never have seen `starting`
+      // at all for this to be a faithful reattach.
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('lost is not starting: a session that integrated and lost its channel keeps its terminal and input', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const sessionId = client._sessions[0].sessionId
+      integrationHandler(client)({ sessionId, status: 'integrated', shell: '/bin/zsh' })
+      integrationHandler(client)({
+        sessionId,
+        status: 'lost',
+        reason: 'channel-lost',
+        shell: '/bin/zsh',
+      })
+
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('b')
+      expect(session.send).toHaveBeenCalledWith('b')
+    } finally {
+      teardown()
+    }
+  })
+})
+
 // Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The
 // authority axis moves only on published facts; the buffer axis is a
 // renderer-owned presentation fact; no stream marker, submit or passport

@@ -1159,6 +1159,80 @@ func (s *workerScreener) ReadScreen(_ context.Context, p workers.Participant) (w
 	return out, nil
 }
 
+// paneChooser is the app's narrow view of the menu half of the typing gate
+// (nocx-f545a.4). It is a second one-method interface beside paneTypist rather
+// than a second method on it, so every double that only ever submitted text
+// goes on satisfying what it satisfied.
+type paneChooser interface {
+	Choose(paneID, option string) agenttyping.Result
+}
+
+// workerAnswerer is the composition root's half of workers.answer
+// (nocx-f545a.4, ADR-0064 §1): the typing gate that decides every key, and the
+// grid it waits on between a movement and its confirm.
+//
+// THE WAIT IS HERE AND NOT IN THE GATE. A TUI repaints after it reads its
+// input, so the frame read straight after a movement key can still show the
+// old selection. agenttyping.Choose therefore moves OR confirms, never both on
+// one belief; this waits for the screen to show the selection on the named
+// option — asked through agenttyping.ReadMenu, the same reading Choose
+// confirms against — and only then chooses again, which confirms from that
+// frame. Choosing again on a stale frame would move a second time and overshoot.
+type workerAnswerer struct {
+	grid   panegrid.Observer
+	typist paneChooser
+}
+
+func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, option string) (workers.PaneAnswer, error) {
+	sid := p.Liveness.SessionID
+	if sid == "" || a.grid == nil || a.typist == nil {
+		return workers.PaneAnswer{}, errors.New("worker answer: this participant has no pane nocx can answer")
+	}
+	res := a.typist.Choose(sid, option)
+	if res.Outcome != agenttyping.OutcomeTyped {
+		return paneAnswerOf(res), nil
+	}
+	if err := awaitSelectionOn(ctx, a.grid, sid, option); err != nil {
+		res.Reason = "the selection was moved and the menu never showed it on that option, so nothing was confirmed (" + err.Error() + ")"
+		return paneAnswerOf(res), nil
+	}
+	return paneAnswerOf(a.typist.Choose(sid, option)), nil
+}
+
+// awaitSelectionOn blocks until paneID's screen shows a menu whose selection is
+// on option, or until ctx ends. It reads the grid, not the watcher: the
+// watcher's answer is a state, and what is being waited for is a position.
+func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
+	on := func() bool {
+		f, err := grid.Frame(paneID)
+		if err != nil {
+			return false
+		}
+		m := agenttyping.ReadMenu(f)
+		i := m.Index(option)
+		return i >= 0 && m.Selected == i
+	}
+	if on() {
+		return nil
+	}
+	ticker := time.NewTicker(deliveryPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if on() {
+				return nil
+			}
+		}
+	}
+}
+
+func paneAnswerOf(r agenttyping.Result) workers.PaneAnswer {
+	return workers.PaneAnswer{Outcome: string(r.Outcome), State: string(r.State), Reason: r.Reason}
+}
+
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────
 //
 // internal/worker says WHO must be told and ABOUT WHAT. It says nothing about

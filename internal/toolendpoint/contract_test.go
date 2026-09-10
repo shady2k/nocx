@@ -74,6 +74,10 @@ func (contractWorkerRecord) Screen(context.Context, string, workers.ParticipantI
 	}, nil
 }
 
+func (contractWorkerRecord) Answer(context.Context, string, workers.ParticipantID, string) (workers.PaneAnswer, error) {
+	return workers.PaneAnswer{Outcome: "submitted", State: "permission_choice"}, nil
+}
+
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
 		ID:    "worker-1",
@@ -184,6 +188,7 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.wait", params: `{}`, result: "workers.wait"},
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
 		{method: "workers.screen", params: `{"worker":"worker-1"}`, result: "workers.screen"},
+		{method: "workers.answer", params: `{"worker":"worker-1","option":"Yes, I trust this folder"}`, result: "workers.answer"},
 	}
 
 	for i, tc := range cases {

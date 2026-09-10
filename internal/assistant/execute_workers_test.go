@@ -28,19 +28,24 @@ type fakeWorkerRecord struct {
 	screen      workers.PaneScreen
 	screenErr   error
 	screenedFor []workers.ParticipantID
-	registered  []workers.RegisterRequest
-	held        []workers.Participant
-	registerFn  func(workers.RegisterRequest) (workers.Participant, error)
-	heldErr     error
-	heldFor     []string
-	owed        []workers.Fact
-	mail        map[workers.ReaderID][]workers.Message
-	sent        []workers.Message
-	unread      []workers.Message
-	fetchedBy   []workers.ReaderID
-	acked       []int64
-	closed      []workers.ParticipantID
-	closeErr    error
+	// answer and answerErr are what Answer answers (nocx-f545a.4), and
+	// answeredWith records the option each answer named.
+	answer       workers.PaneAnswer
+	answerErr    error
+	answeredWith []string
+	registered   []workers.RegisterRequest
+	held         []workers.Participant
+	registerFn   func(workers.RegisterRequest) (workers.Participant, error)
+	heldErr      error
+	heldFor      []string
+	owed         []workers.Fact
+	mail         map[workers.ReaderID][]workers.Message
+	sent         []workers.Message
+	unread       []workers.Message
+	fetchedBy    []workers.ReaderID
+	acked        []int64
+	closed       []workers.ParticipantID
+	closeErr     error
 	// waitedFor records the worker a wait was opened on, and waitHeld is what
 	// it answers with — a double that returned HeldBy's rows would hide a
 	// carrier that never waited at all.
@@ -55,6 +60,11 @@ type fakeWorkerRecord struct {
 func (f *fakeWorkerRecord) Screen(_ context.Context, _ string, id workers.ParticipantID) (workers.PaneScreen, error) {
 	f.screenedFor = append(f.screenedFor, id)
 	return f.screen, f.screenErr
+}
+
+func (f *fakeWorkerRecord) Answer(_ context.Context, _ string, _ workers.ParticipantID, option string) (workers.PaneAnswer, error) {
+	f.answeredWith = append(f.answeredWith, option)
+	return f.answer, f.answerErr
 }
 
 func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {

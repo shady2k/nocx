@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/workers.answer.schema.json",
+  "title": "WorkersAnswerParams",
+  "description": "Parameters for the workers.answer agent tool: answer a question one of your workers' panes is asking, by naming the option exactly as its screen shows it. nocx turns the name into the keys that menu offers and refuses an option that is not on the screen; it never picks one for you. You can only answer workers your own session started, and not while a person is at that worker's keyboard.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker", "option"],
+  "properties": {
+    "worker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The worker's id, exactly as workers.spawn returned it or workers.holdings listed it."
+    },
+    "option": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "The option to choose, as the worker's screen shows it — for example `Yes, I trust this folder`. Leave off the selection marker and any number in front of it: `1. Yes` is chosen as `Yes`."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "WorkersAnswerResult",
+      "description": "What became of the answer. A refusal is an answer too: nothing was written, and the reason says why.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "outcome"],
+      "properties": {
+        "worker": {
+          "type": "string",
+          "description": "The worker whose menu this was."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["submitted", "typed", "refused"],
+          "description": "submitted: the option was chosen and confirmed. typed: the selection was moved and nothing was confirmed — look at the screen again before deciding anything. refused: nothing was written at all."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "free_text",
+            "permission_choice",
+            "modal_choice",
+            "working",
+            "error",
+            "unknown",
+            "exited"
+          ],
+          "description": "The state the worker's pane was in when the answer was decided."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why, when the answer was not confirmed."
+        }
+      }
+    }
+  }
+}

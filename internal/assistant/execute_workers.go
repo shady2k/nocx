@@ -54,6 +54,9 @@ type WorkerRecord interface {
 	// Screen reads what a participant's pane is showing, for the session
 	// that holds it (nocx-f545a.6). It writes nothing and keeps nothing.
 	Screen(ctx context.Context, coordinatorSession string, id workers.ParticipantID) (workers.PaneScreen, error)
+	// Answer answers a participant's menu by naming one of its options
+	// (nocx-f545a.4). It writes nothing into the record.
+	Answer(ctx context.Context, coordinatorSession string, id workers.ParticipantID, option string) (workers.PaneAnswer, error)
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -148,6 +151,21 @@ type workerScreenResult struct {
 	Readable bool     `json:"readable"`
 	State    string   `json:"state,omitempty"`
 	Rows     []string `json:"rows"`
+}
+
+type workerAnswerParams struct {
+	Worker string `json:"worker"`
+	Option string `json:"option"`
+}
+
+// workerAnswerResult is what became of an answer. A refusal at the typing
+// gate is a RESULT — outcome refused, with its reason — for the reason
+// agent.type answers one: a refusal is an answer a caller acts on, not a fault.
+type workerAnswerResult struct {
+	Worker  string `json:"worker"`
+	Outcome string `json:"outcome"`
+	State   string `json:"state,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type workerCloseResult struct {
@@ -488,6 +506,40 @@ func executeWorkerScreen(ctx context.Context, cap agenttools.Capability, args js
 	})
 	if err != nil {
 		return "", fmt.Errorf("workers.screen: result: %w", err)
+	}
+	return string(raw), nil
+}
+
+// executeWorkerAnswer answers one of a coordinator's workers' menus by naming
+// an option as the screen drew it (nocx-f545a.4, ADR-0064 §1).
+//
+// Authority is the record's — ownership, and a delegation that still permits
+// send-input — and what may be written is the typing gate's: the keys that
+// menu offers, decided from a frame read at the moment of each key.
+func executeWorkerAnswer(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := workerCoordinatorFrom(cap, "workers.answer")
+	if err != nil {
+		return "", err
+	}
+	if seams.workerStore == nil {
+		return "", errors.New("workers.answer: this backend keeps no worker record")
+	}
+	var p workerAnswerParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("workers.answer: %w", argErr)
+	}
+	if p.Worker == "" || p.Option == "" {
+		return "", errors.New("workers.answer: name the worker, and the option to choose exactly as its screen shows it")
+	}
+	answer, err := seams.workerStore.Answer(ctx, coordinator.Session(), workers.ParticipantID(p.Worker), p.Option)
+	if err != nil {
+		return "", fmt.Errorf("workers.answer: %w", err)
+	}
+	raw, err := json.Marshal(workerAnswerResult{
+		Worker: p.Worker, Outcome: answer.Outcome, State: answer.State, Reason: answer.Reason,
+	})
+	if err != nil {
+		return "", fmt.Errorf("workers.answer: result: %w", err)
 	}
 	return string(raw), nil
 }

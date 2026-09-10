@@ -2063,6 +2063,10 @@ func New(opts ...Option) (*App, error) {
 		// act opens and the typing gate reads, so what a coordinator is shown
 		// is the screen every other decision about that pane is made from.
 		workers.WithScreener(&workerScreener{grid: paneGrid, watch: paneWatch}),
+		// And the seam workers.answer reaches (nocx-f545a.4): paneTyping is the
+		// SAME Typist agent.type, a wake and a spawn's task delivery go through,
+		// so an answer is one more act through the one gate onto a pane's input.
+		workers.WithAnswerer(&workerAnswerer{grid: paneGrid, typist: paneTyping}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)

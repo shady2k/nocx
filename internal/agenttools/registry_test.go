@@ -469,9 +469,14 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// is the delegation's EffectObserve, which a human takeover leaves in
 		// place, and it writes nothing anywhere.
 		"workers.screen": {content.EffectObserve},
+		// MUTATE-DESTRUCTIVE for the answer (nocx-f545a.4), for close's
+		// reason and one more: the option a coordinator names can approve a
+		// tool call in the worker, or trust a directory on the person's
+		// behalf, and a person who wants to be asked first has a row to say so.
+		"workers.answer": {content.EffectMutateDestructive},
 	}
-	if len(declarations) != 31 {
-		t.Fatalf("declaration count = %d, want 31", len(declarations))
+	if len(declarations) != 32 {
+		t.Fatalf("declaration count = %d, want 32", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -599,6 +604,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		// The screen takes one worker id, exactly the shape close takes
 		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
 		"workers.screen.schema.json": workerCloseSchema,
+		"workers.answer.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -662,7 +668,8 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// mutate-destructive alone. That asymmetry is the point: ending a worker
 	// is not something a run permitted only to look may do.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	wantDestructive := []string{"session.run", "workers.close"}
+	// workers.answer joins close here: mutate-destructive over a session.
+	wantDestructive := []string{"session.run", "workers.close", "workers.answer"}
 	if got := toolNames(reg.ForGrant(runGrant)); !reflect.DeepEqual(got, wantDestructive) {
 		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly %v", got, wantDestructive)
 	}
@@ -766,6 +773,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		// The screen takes one worker id, exactly the shape close takes
 		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
 		"workers.screen.schema.json": workerCloseSchema,
+		"workers.answer.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

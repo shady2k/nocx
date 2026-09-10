@@ -83,6 +83,26 @@
 // because the gate has already established there is nothing on screen to
 // answer.
 //
+// # A menu is answered by NAME, with its own keys, and nothing else (ADR-0064)
+//
+// Choose is the second case of the first power and the only other door onto a
+// pane's input queue. It is reached on a positively identified menu —
+// permission_choice or modal_choice — through the same two gates as text, and
+// what it may write is the closed set a menu offers: a key that moves the
+// selection one row, and the key that confirms it. Never text, never a digit,
+// never Escape.
+//
+// The caller names the option as the screen drew it. nocx turns that name into
+// keys from a frame read inside the call, which is what keeps the set closed: a
+// caller that could send a key could send any key, and a caller that named a
+// row could name a row the menu no longer has. Every key is gated on its own
+// frame, and the confirm key on a frame that shows the selection ON the named
+// option — never on the belief that the movement keys landed. A TUI repaints
+// after it reads its input, so a frame read straight after a movement key can
+// still show the old selection; a caller that moved the selection waits for the
+// screen to show it and then chooses again, and a second Choose on a stale frame
+// is exactly the overshoot this refuses to perform on its own.
+//
 // # Delivery is UNACKNOWLEDGED
 //
 // Accepted is not delivered. The queue taking a job says the bytes are in line
@@ -99,6 +119,7 @@ package agenttyping
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
@@ -120,6 +141,19 @@ const (
 	pasteEnd   = "\x1b[201~"
 	submitKey  = "\r"
 )
+
+// The keys a menu answer may send, spelled once: the closed set ADR-0064 admits
+// for a positively identified menu. Move the selection one row, and confirm it.
+const (
+	keyUp    = "\x1b[A"
+	keyDown  = "\x1b[B"
+	keyEnter = "\r"
+)
+
+// maxMenuRows bounds how far from the cursor's row a menu's options are read,
+// in each direction. The bound is the engine's for the reason a region's is: it
+// keeps a transcript that abuts the chrome from being read as options.
+const maxMenuRows = 16
 
 // Screens is the seam onto a pane's live grid (AD-8). One method, because
 // typing may READ a screen and may not enrol, withdraw, resize or classify one.
@@ -296,9 +330,26 @@ type permit struct {
 // answer (without a verified rule nocx does not know what the pane is) and is
 // what every other consumer already treats as busy.
 func (t *Typist) grant(paneID string) (permit, *Result) {
+	agent, refusal := t.authority(paneID)
+	if refusal != nil {
+		return permit{}, refusal
+	}
+	if _, lookRefusal := t.look(paneID, agent); lookRefusal != nil {
+		return permit{}, lookRefusal
+	}
+	// Both answers are in. This is the only statement in this package that
+	// builds a permit with a Typist in it.
+	return permit{by: t, pane: paneID, agent: agent}, nil
+}
+
+// authority is the half of both grants that is not about the screen: the pane
+// is enrolled, and its agent's rule has earned the right to be believed. One
+// derivation for text and for a menu, because a second would drift from the
+// first on the agent nobody tried.
+func (t *Typist) authority(paneID string) (string, *Result) {
 	agent, watched := t.enrolled.AgentOn(paneID)
 	if !watched {
-		return permit{}, t.refuse(paneID, "", agentdriver.StateUnknown,
+		return "", t.refuse(paneID, "", agentdriver.StateUnknown,
 			"nocx is not watching that pane, so there is no rule to ask about it")
 	}
 	if v := t.calib.Verify(agent); !v.MayType() {
@@ -306,14 +357,9 @@ func (t *Typist) grant(paneID string) (permit, *Result) {
 		if reason == "" {
 			reason = fmt.Sprintf("%s's rule has not earned the right to be typed against", agent)
 		}
-		return permit{}, t.refuse(paneID, agent, agentdriver.StateUnknown, reason)
+		return "", t.refuse(paneID, agent, agentdriver.StateUnknown, reason)
 	}
-	if _, refusal := t.look(paneID, agent); refusal != nil {
-		return permit{}, refusal
-	}
-	// Both answers are in. This is the only statement in this package that
-	// builds a permit with a Typist in it.
-	return permit{by: t, pane: paneID, agent: agent}, nil
+	return agent, nil
 }
 
 // look reads the pane's screen NOW and answers whether nocx may write into it.
@@ -356,6 +402,192 @@ func (p permit) write(b []byte) *Result {
 	if !p.by.input.Accept(p.pane, b) {
 		return p.by.refuse(p.pane, p.agent, agentdriver.StateFreeText,
 			"that pane is not accepting input at the moment, so nothing was written")
+	}
+	return nil
+}
+
+// Menu is a menu's options as the screen drew them, and which one the cursor
+// is on (ADR-0064 §1).
+type Menu struct {
+	// Options are the option rows, top to bottom, each without its selection
+	// marker and without any "N. " numbering — how a menu labels an option is
+	// not what the option says.
+	Options []string
+	// Selected is the index of the cursor's row among Options, and -1 when the
+	// cursor is not on an option row at all.
+	Selected int
+}
+
+// Index answers where option sits among the menu's options, and -1 when the
+// menu does not offer it.
+func (m Menu) Index(option string) int {
+	want := strings.TrimSpace(option)
+	for i, o := range m.Options {
+		if o == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// ReadMenu reads a menu off a frame: the rows contiguous with the cursor's row,
+// up and down to the first blank row, bounded by maxMenuRows each way.
+//
+// It is exported because the wait between a movement and its confirm belongs
+// to the caller (the package doc says why), and a caller that waits for "the
+// selection is on the option" must ask the SAME reading Choose confirms
+// against, not a second one written beside it.
+func ReadMenu(f panegrid.Frame) Menu {
+	y := f.CursorY
+	if y < 0 || y >= len(f.Lines) || strings.TrimSpace(f.Text(y)) == "" {
+		return Menu{Selected: -1}
+	}
+	top, bottom := y, y
+	for i := 0; i < maxMenuRows && top-1 >= 0 && strings.TrimSpace(f.Text(top-1)) != ""; i++ {
+		top--
+	}
+	for i := 0; i < maxMenuRows && bottom+1 < len(f.Lines) && strings.TrimSpace(f.Text(bottom+1)) != ""; i++ {
+		bottom++
+	}
+	m := Menu{Selected: y - top}
+	for row := top; row <= bottom; row++ {
+		m.Options = append(m.Options, optionText(f.Text(row)))
+	}
+	return m
+}
+
+// optionText is one option row as the option says it: surrounding space off, a
+// leading selection marker off, and a leading "N. " numbering off.
+func optionText(row string) string {
+	s := strings.TrimSpace(row)
+	if s == "" {
+		return ""
+	}
+	if r, size := utf8.DecodeRuneInString(s); !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+		s = strings.TrimSpace(s[size:])
+	}
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits > 0 && digits+1 < len(s) && s[digits] == '.' && s[digits+1] == ' ' {
+		s = strings.TrimSpace(s[digits+2:])
+	}
+	return s
+}
+
+// Choose answers a positively identified menu by naming the option as the
+// screen drew it (ADR-0064 §1).
+//
+// Three outcomes, the same closed set text has, and they mean the analogous
+// things: submitted — the selection was on the option and the confirm key was
+// accepted; typed — the selection was moved toward the option and nothing was
+// confirmed, so the caller waits for the screen to show it and chooses again;
+// refused — nothing at all was written.
+func (t *Typist) Choose(paneID, option string) Result {
+	want := strings.TrimSpace(option)
+	if want == "" {
+		return *t.refuse(paneID, "", agentdriver.StateUnknown,
+			"name the option to choose, exactly as the menu shows it")
+	}
+	agent, refusal := t.authority(paneID)
+	if refusal != nil {
+		return *refusal
+	}
+	p := menuPermit{by: t, pane: paneID, agent: agent}
+	m, state, refusal := p.menu(want)
+	if refusal != nil {
+		return *refusal
+	}
+	target := m.Index(want)
+	if target == m.Selected {
+		if r := p.confirm(want); r != nil {
+			return *r
+		}
+		t.log.Info("nocx answered a menu in a pane", "pane_id", paneID, "agent", agent, "state", string(state))
+		return Result{PaneID: paneID, Agent: agent, Outcome: OutcomeSubmitted, State: state}
+	}
+	key, steps := keyDown, target-m.Selected
+	if m.Selected < 0 {
+		return *t.refuse(paneID, agent, state,
+			"the cursor is not on any of that menu's options, so nocx cannot tell how far to move it")
+	}
+	if steps < 0 {
+		key, steps = keyUp, -steps
+	}
+	for i := 0; i < steps; i++ {
+		if r := p.move(key, want); r != nil {
+			if i > 0 {
+				r.Outcome = OutcomeTyped
+			}
+			return *r
+		}
+	}
+	t.log.Info("nocx moved a menu's selection in a pane", "pane_id", paneID, "agent", agent, "rows", steps)
+	return Result{
+		PaneID: paneID, Agent: agent, Outcome: OutcomeTyped, State: state,
+		Reason: "the selection was moved to that option and nothing was confirmed yet; choose it again once the menu shows it selected",
+	}
+}
+
+// menuPermit is the authority to answer ONE pane's menu. It is a type of its
+// own rather than a flag on permit, so a text permit cannot be asked to write a
+// key and a menu permit has no method that writes text.
+type menuPermit struct {
+	by    *Typist
+	pane  string
+	agent string
+}
+
+// menu reads the pane NOW and answers whether it is still a positively
+// identified menu offering want.
+func (p menuPermit) menu(want string) (Menu, agentdriver.State, *Result) {
+	f, err := p.by.screens.Frame(p.pane)
+	if err != nil {
+		return Menu{}, agentdriver.StateUnknown, p.by.refuse(p.pane, p.agent, agentdriver.StateUnknown,
+			"nocx has no live screen for that pane, so it cannot see what an answer would choose")
+	}
+	state := p.by.rules.Classify(p.agent, f)
+	if state != agentdriver.StatePermissionChoice && state != agentdriver.StateModalChoice {
+		return Menu{}, state, p.by.refuse(p.pane, p.agent, state,
+			fmt.Sprintf("that pane is %s, and nocx answers only a menu it has identified", said(state)))
+	}
+	m := ReadMenu(f)
+	if m.Index(want) < 0 {
+		return m, state, p.by.refuse(p.pane, p.agent, state,
+			fmt.Sprintf("that menu does not offer %q; it offers %q", want, m.Options))
+	}
+	return m, state, nil
+}
+
+// move writes one movement key, gated on a frame read here that still shows the
+// menu offering want.
+func (p menuPermit) move(key, want string) *Result {
+	_, state, refusal := p.menu(want)
+	if refusal != nil {
+		return refusal
+	}
+	if !p.by.input.Accept(p.pane, []byte(key)) {
+		return p.by.refuse(p.pane, p.agent, state,
+			"that pane is not accepting input at the moment, so nothing more was written")
+	}
+	return nil
+}
+
+// confirm writes the confirm key, gated on a frame read here that shows the
+// selection ON want — never on the belief that earlier keys landed.
+func (p menuPermit) confirm(want string) *Result {
+	m, state, refusal := p.menu(want)
+	if refusal != nil {
+		return refusal
+	}
+	if m.Selected != m.Index(want) {
+		return p.by.refuse(p.pane, p.agent, state,
+			fmt.Sprintf("that menu's selection is not on %q, so nothing was confirmed", want))
+	}
+	if !p.by.input.Accept(p.pane, []byte(keyEnter)) {
+		return p.by.refuse(p.pane, p.agent, state,
+			"that pane is not accepting input at the moment, so nothing was confirmed")
 	}
 	return nil
 }

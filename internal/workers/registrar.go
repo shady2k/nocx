@@ -68,6 +68,10 @@ type Registrar struct {
 	// reason: the grid is the composition root's, not this package's.
 	screener Screener
 
+	// answerer answers a participant's menu (nocx-f545a.4), for the same
+	// reason.
+	answerer Answerer
+
 	// attention is the undispatched fact set and its two routes out
 	// (nocx-dkawo.3). It is never nil: an unwired one still records every
 	// fact and says at Error that it has nothing to reach anyone with, which
@@ -118,6 +122,10 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 // Screen refuses and says so, rather than answering an empty screen that a
 // coordinator would read as a pane with nothing on it.
 func WithScreener(s Screener) Option { return func(r *Registrar) { r.screener = s } }
+
+// WithAnswerer wires the seam that answers a participant's menu. Without it
+// Answer refuses and says so.
+func WithAnswerer(a Answerer) Option { return func(r *Registrar) { r.answerer = a } }
 
 // WithBackstop replaces the undispatched fact set. The composition root
 // supplies one wired to the pane typist and to the notification pipeline; the
@@ -387,6 +395,45 @@ func (r *Registrar) Screen(ctx context.Context, coordinatorSession string, id Pa
 		return PaneScreen{}, fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
 	}
 	return r.screener.ReadScreen(ctx, p)
+}
+
+// Answer answers a participant's menu by naming one of its options
+// (nocx-f545a.4, ADR-0064 §1).
+//
+// The authority questions are Close's and Screen's, in their order — is it
+// this session's (ErrNotHeld), does the delegation still permit the act
+// (ErrNotDelegated) — and the act is EffectSendInput: answering a menu is
+// putting keys into the pane, and that is exactly what a human takeover
+// suspends. A person at the worker's keyboard is answering it themselves.
+//
+// A participant that has ended has no menu, and unlike a screen that is not an
+// answer: a coordinator that tried to answer something is told there was
+// nothing there, with ErrTerminal.
+//
+// It writes nothing into the record. What the answer causes reaches the record
+// the way any fact does.
+func (r *Registrar) Answer(ctx context.Context, coordinatorSession string, id ParticipantID, option string) (PaneAnswer, error) {
+	if r.answerer == nil {
+		return PaneAnswer{}, errors.New("worker: this backend cannot answer a participant's menu")
+	}
+	del, err := r.store.Delegation(ctx, id)
+	if err != nil {
+		return PaneAnswer{}, err
+	}
+	if del.ControllerSession != coordinatorSession {
+		return PaneAnswer{}, fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
+	}
+	p, err := r.store.Participant(ctx, id)
+	if err != nil {
+		return PaneAnswer{}, err
+	}
+	if p.State.Terminal() {
+		return PaneAnswer{}, fmt.Errorf("worker: participant %q has ended, so there is no menu to answer: %w", id, ErrTerminal)
+	}
+	if !del.Permits(EffectSendInput) {
+		return PaneAnswer{}, fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+	}
+	return r.answerer.Answer(ctx, p, option)
 }
 
 // Declared admits the participant's own terminal fact and reduces.

@@ -56,6 +56,7 @@ export interface AgentApprovalRequested {
     | 'workers.inbox'
     | 'workers.close'
     | 'workers.screen'
+    | 'workers.answer'
   /**
    * The model's call id for the proposed call — part of the binding.
    */

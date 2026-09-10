@@ -243,6 +243,27 @@ type Screener interface {
 	ReadScreen(ctx context.Context, p Participant) (PaneScreen, error)
 }
 
+// PaneAnswer is what became of an answer to a participant's menu
+// (nocx-f545a.4, ADR-0064 §1).
+type PaneAnswer struct {
+	// Outcome is the typing gate's closed set: "submitted" — the option was
+	// chosen and confirmed; "typed" — the selection moved and nothing was
+	// confirmed; "refused" — nothing was written.
+	Outcome string
+	// State is the pane state that decided.
+	State string
+	// Reason is why, in the words a caller reads; empty when the answer was
+	// confirmed.
+	Reason string
+}
+
+// Answerer answers a participant's menu by naming an option. It is a seam for
+// Closer's reason: the pane, its screen and its input queue are the
+// composition root's.
+type Answerer interface {
+	Answer(ctx context.Context, p Participant, option string) (PaneAnswer, error)
+}
+
 // Supervisor is the watch that outlives the coordinator's turn. It is attached
 // to a record that ALREADY EXISTS, which is what makes step 6 race-free: a
 // process exiting between the mark and the attach is still observed, because

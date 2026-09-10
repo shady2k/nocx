@@ -93,12 +93,29 @@ export function isDegraded(fact: SessionIntegrationChanged | null): boolean {
  *  and dropped keystrokes on a second, locally-derived guess would be the
  *  two-answers defect AD-8 exists to prevent.
  *
- *  `null` is false, deliberately and permanently: a session that never asked
- *  for integration never receives a status at all, so treating absence as an
- *  open question would leave such a session waiting on an answer that is
- *  never coming — the exact defect rule 2 of the bead warns about. */
-export function isAwaitingIntegration(fact: SessionIntegrationChanged | null): boolean {
-  return fact !== null && fact.status === 'starting'
+ *  `fact` alone used to be the whole answer, and `null` was read as false
+ *  "deliberately and permanently" — which was wrong for one interval nobody
+ *  had named yet (nocx-ui8q6.6): the gap between the open ack and the FIRST
+ *  session.integrationChanged, which arrives strictly after it (AD-7). A
+ *  session about to start `starting` is `null` in that gap for exactly the
+ *  same reason a session that will never integrate at all is `null` forever
+ *  — absence meant both "not yet" and "not ever", and a pane read the second
+ *  meaning while it was living the first.
+ *
+ *  `awaitsFirstFact` is what tells the two apart, and it answers only while
+ *  `fact` is still null: the open ack's own `awaitsIntegration` (contracts/
+ *  open.schema.json), stating whether THIS session entered the axis in
+ *  `starting` before the ack was even built. It is not a second opinion on
+ *  the fact — it is the same owner (the transport's integration axis)
+ *  speaking through the ack instead of through the notification, for the one
+ *  instant before the notification can have arrived. Once a fact exists it
+ *  is read instead and `awaitsFirstFact` is ignored: a session's own later
+ *  transitions are the notification's news, never the ack's. */
+export function isAwaitingIntegration(
+  fact: SessionIntegrationChanged | null,
+  awaitsFirstFact: boolean,
+): boolean {
+  return fact !== null ? fact.status === 'starting' : awaitsFirstFact
 }
 
 /** The one sentence the product says while `starting` is still open. It is

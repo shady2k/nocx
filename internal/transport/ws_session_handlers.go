@@ -102,8 +102,13 @@ type openMachine interface {
 	replayLifecycleFacts(sid session.ID)
 	// The session integration axis (nocx-dvql): the remote registration
 	// from the connect path's own decision, and the first emission — which
-	// must happen AFTER the open ack (AD-7).
+	// must happen AFTER the open ack (AD-7). registerOpenedIntegration itself
+	// carries no such constraint — it only writes the map, it does not
+	// notify — so handleOpen calls it before the ack is built and reads
+	// sessionAwaitsIntegration to state, IN the ack, whether this session
+	// has just entered the axis `starting` (nocx-ui8q6.6).
 	registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen)
+	sessionAwaitsIntegration(sid session.ID) bool
 	emitIntegration(sid session.ID)
 	replayToolSurface(sid session.ID)
 }
@@ -161,6 +166,23 @@ type openResult struct {
 	// schema requires the key: an omitempty here would drop it for every root
 	// session and leave "no parent" indistinguishable from "an old backend".
 	Parent *openParentResult `json:"parent"`
+	// AwaitsIntegration is true when this open has just entered the session
+	// into the integration axis in the `starting` state, which guarantees a
+	// session.integrationChanged notification follows this ack (nocx-ui8q6.6).
+	// It is NOT the answer nocx-dvql removed from this ack: it never says
+	// integrated, conventional or why — only whether a fact is coming at
+	// all — and it cannot go stale the way a reason could, because whether a
+	// session entered the axis at `starting` is decided once, synchronously,
+	// before this ack is built, and never revised afterward (a later
+	// transition is what the notification is for). False covers both a
+	// session that never asked for integration (nothing is ever coming) and
+	// one already resolved to conventional at open (a fact is coming, but
+	// isAwaitingIntegration on the renderer only ever gates `starting`, so
+	// there is nothing for either to wait on). This is what lets the
+	// renderer distinguish "no fact yet" from "no fact ever" at the one
+	// moment — before the first fact — that the two used to be one value
+	// (null).
+	AwaitsIntegration bool `json:"awaitsIntegration"`
 }
 
 // sizeResult is a session's geometry on the wire, in the same four words
@@ -392,6 +414,23 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// the session rather than echoed from the params: the two agree only
 	// because the claim was admitted, and reading the record is what makes the
 	// ack an answer instead of a repetition (nocx-9hu9d).
+	//
+	// awaitsIntegration rides it too, and this is where it is decided
+	// (nocx-ui8q6.6): registerOpenedIntegration is called HERE, before the ack
+	// is built, rather than after it as it used to be. That move is safe
+	// because registering is not notifying — it only writes s.integrations,
+	// under its own lock, and emits nothing — so nothing about AD-7 changes:
+	// the actual notification is still emitIntegration below, still after the
+	// ack. What moves earlier is only the READ of the decision this call
+	// already makes synchronously, so the ack can state it. A remote
+	// session's launch-time refusal is registered here rather than at the
+	// dial because ShellIntegrationReason is the ssh channel's own answer and
+	// this is where the session first exists as a session. A HOSTED session
+	// brings its own answer instead, because the opener is the only thing
+	// that saw which binary the daemon started; registering it twice is what
+	// AD-8 forbids, so one function decides between the two.
+	h.sess.registerOpenedIntegration(sess, cfg, hosted)
+	awaitsIntegration := h.sess.sessionAwaitsIntegration(sess.ID())
 	ident := sess.Identity()
 	result := openResult{
 		SessionID:    string(sess.ID()),
@@ -403,8 +442,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		// Read off the SESSION, never echoed from the params: the two agree
 		// only when the report was adopted, and reading the record is what
 		// makes the ack an answer instead of a repetition.
-		EffectiveSize: sizeResultOf(sess.EffectiveSize()),
-		Parent:        parentResultFor(sess),
+		EffectiveSize:     sizeResultOf(sess.EffectiveSize()),
+		Parent:            parentResultFor(sess),
+		AwaitsIntegration: awaitsIntegration,
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -425,14 +465,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// cannot happen must not be dressed up as one that did.
 	_, _ = rx.setSubscriber(wconn, state)
 	h.sess.replayLifecycleFacts(sess.ID())
-	// A remote session's launch-time refusal is registered here rather than
-	// at the dial because ShellIntegrationReason is the ssh channel's own
-	// answer and this is where the session first exists as a session. A
-	// HOSTED session — every local pane, and a helper-backed remote one —
-	// brings its own answer instead, because the opener is the only thing
-	// that saw which binary the daemon started; registering it twice is what
-	// AD-8 forbids, so one function decides between the two.
-	h.sess.registerOpenedIntegration(sess, cfg, hosted)
+	// The axis was already entered above, before the ack — only the
+	// NOTIFICATION waits for AD-7. This is the first fact this session's
+	// subscriber can hear, so it runs once the subscriber above is attached.
 	h.sess.emitIntegration(sess.ID())
 
 	// Stored forwards (nocx-wzc4.5): replay the profile's configured

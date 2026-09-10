@@ -1025,6 +1025,16 @@ export class TerminalContent extends BasePaneContent {
    *  channel lost mid-session. null means the session never asked for
    *  integration and there is nothing to say about it. */
   private _integration: SessionIntegrationChanged | null = null
+  /** The open ack's own `awaitsIntegration` (nocx-ui8q6.6): whether THIS
+   *  session has just entered the axis `starting`, read before `_integration`
+   *  can hold a fact — the first session.integrationChanged arrives strictly
+   *  after the ack (AD-7), so there is a gap in which `_integration` is still
+   *  null and this is the only thing that says whether null means "not yet"
+   *  or "not ever". Consulted by isAwaitingIntegration ONLY while
+   *  `_integration` is null; once a fact exists this is ignored; and it is
+   *  set fresh on every `_bindSession` call — first bind and rebind alike —
+   *  so a reconnect's new session is never judged by the old one's answer. */
+  private _awaitsIntegration = false
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
   /** The launch-owned worker tool-surface result, independent of shell integration. */
@@ -3845,6 +3855,18 @@ export class TerminalContent extends BasePaneContent {
     // backend's own resolution, never from a second fetch that could
     // disagree with it.
     this._policy = session.desiredMode ?? 'auto'
+    // awaitsIntegration rides the SAME ack (nocx-ui8q6.6), and it is read
+    // and acted on HERE, before the subscription below and before anything
+    // has a chance to paint — this is what closes the gap nocx-ui8q6.1 left
+    // open: without it, `_integration` is null until the first fact and
+    // isAwaitingIntegration read that null as "conventional by design" even
+    // for a session the ack already said would start `starting`. Calling
+    // _syncIntegrationWaiting synchronously, in the same tick as the ack,
+    // means a session that IS about to start `starting` never has a frame in
+    // which its grid is live before its axis has answered — the fact just
+    // arrives a moment later on the subscription installed next.
+    this._awaitsIntegration = session.awaitsIntegration
+    this._syncIntegrationWaiting()
     // The integration axis is a SUBSCRIPTION, not a field of the ack: the
     // backend revises it as it learns (starting → integrated, or →
     // conventional with a reason, or → lost). Subscribed before anything
@@ -3981,7 +4003,7 @@ export class TerminalContent extends BasePaneContent {
     // там какие-то клавиши, а потом их куда-то отправлять — это странная
     // идея"). So it is read, and then it is gone.
     renderer.onData((data: string) => {
-      if (isAwaitingIntegration(this._integration)) return
+      if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
       if (this._heldRaw !== null) {
         this._heldRaw.push(data)
         return
@@ -5015,14 +5037,23 @@ export class TerminalContent extends BasePaneContent {
    *  of both": a raw, half-bootstrapped prompt a keystroke could land on
    *  before the shell has proved itself either way. `isAwaitingIntegration`
    *  is the ONE read of the fact (AD-8); the keystroke drop at the renderer's
-   *  onData reads the same fact rather than a flag mirrored from here.
+   *  onData reads the same two inputs rather than a flag mirrored from here.
    *
-   *  A session that never asked for integration keeps `_integration` null
-   *  forever, `isAwaitingIntegration` is false for it, and this method is
-   *  never asked to hide anything — the terminal is live from its first
-   *  frame, which is what "absence is conventional by design" requires. */
+   *  Called from two moments (nocx-ui8q6.6): once synchronously in
+   *  `_bindSession`, right after the open ack sets `_awaitsIntegration` and
+   *  before this pane can paint a frame, and again from `_applyIntegration`
+   *  whenever a fact arrives. The first call is what closes the gap between
+   *  the ack and the first session.integrationChanged — before it, this
+   *  method only ever ran on a fact, so a session the ack already knew would
+   *  start `starting` still had one live frame with nothing hiding it.
+   *
+   *  A session the ack said never entered the axis keeps `_integration` null
+   *  and `_awaitsIntegration` false, `isAwaitingIntegration` is false for it
+   *  on both calls, and this method is never asked to hide anything — the
+   *  terminal is live from its first frame, which is what "absence is
+   *  conventional by design" requires. */
   private _syncIntegrationWaiting(): void {
-    const waiting = isAwaitingIntegration(this._integration)
+    const waiting = isAwaitingIntegration(this._integration, this._awaitsIntegration)
     if (waiting) {
       if (this._integrationWaitingDispose || !this._paneTarget) return
       this._integrationWaitingDispose = mountIntegrationWaiting(this._paneTarget)

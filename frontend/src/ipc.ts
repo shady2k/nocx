@@ -49,6 +49,13 @@ type OpenResult = {
    *  is the one message that carries it. PROVENANCE ONLY — see
    *  SessionHandle.parent. */
   parent?: Open['parent']
+  /** Whether this open has just entered the session into the integration
+   *  axis `starting` (nocx-ui8q6.6): the fact that lets a pane tell "no
+   *  status yet" apart from "no status ever coming" in the gap before the
+   *  first session.integrationChanged, which arrives strictly after this ack
+   *  (AD-7). See SessionHandle.awaitsIntegration for what it does and does
+   *  not answer. */
+  awaitsIntegration?: Open['awaitsIntegration']
 }
 
 /**
@@ -425,6 +432,18 @@ export class SessionHandle {
      *  the ranges nothing kept. A recovered scrollback with a silent hole
      *  in it is the one outcome worse than a short one. */
     readonly recovered: SessionRecovery | null = null,
+    /** Whether THIS open has just entered the session into the integration
+     *  axis `starting` (nocx-ui8q6.6, contracts/open.schema.json). It answers
+     *  one question only — is a session.integrationChanged notification
+     *  guaranteed to follow this ack — and only for the gap before the first
+     *  one arrives: once a fact exists, the pane reads the fact
+     *  (isAwaitingIntegration in integration/status.ts) and this is ignored.
+     *
+     *  False for a reclaimed handle (the reattach ack this bead does not
+     *  cover), which is the safe default: a reclaim never hides the grid on
+     *  this field alone, so a false default here can only ever show a
+     *  terminal a fact later says to hide, never the other way round. */
+    readonly awaitsIntegration: boolean = false,
   ) {}
 
   send(data: string): void {
@@ -966,6 +985,8 @@ export class WSClient {
       result?.desiredMode ?? 'script',
       result?.parent ?? null,
       result?.workspaceId ?? '',
+      null,
+      result?.awaitsIntegration ?? false,
     )
   }
 

@@ -2034,6 +2034,71 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       teardown()
     }
   })
+
+  // The gap this bead closes (nocx-ui8q6.6): the open ack's own
+  // awaitsIntegration answers, before the FIRST session.integrationChanged
+  // can possibly have arrived (it is sent strictly after the ack, AD-7),
+  // whether this pane's grid should already be held. Without it, `_integration`
+  // is null from mount until that first fact and null read as "conventional
+  // by design" — the exact frame nocx-ui8q6.1 could not close, because it
+  // only ever acted on a fact that had not arrived yet.
+  it('a session the ack says will start `starting` never shows a live grid, even before the first fact', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // No integrationHandler call yet — this is the ack's own promise
+      // acted on alone, before any session.integrationChanged exists.
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The fact the ack promised, now arriving: nothing about the pane's
+      // state changes, because it was already waiting on it.
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'starting',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The other half of the same acceptance: an ack that says false must not
+  // wait either, whatever a stray fact says later this test does not send —
+  // the case this bead's brief names as most likely to regress.
+  it('a session the ack says never entered the axis is never made to wait, ack alone', async () => {
+    const session = makeSession({ awaitsIntegration: false })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
 })
 
 // Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The

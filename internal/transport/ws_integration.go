@@ -174,6 +174,37 @@ func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.C
 	s.RegisterIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason)
 }
 
+// sessionAwaitsIntegration answers whether sid has just entered the
+// integration axis in the `starting` state (nocx-ui8q6.6). It is read
+// immediately after registerOpenedIntegration decides sid's entry, before the
+// open ack is built, so the ack can state — as its own `awaitsIntegration`
+// field — whether a session.integrationChanged notification is guaranteed to
+// follow it.
+//
+// It is not a second opinion on the axis: registerOpenedIntegration already
+// wrote the one map this reads, under the one lock that guards it, and
+// nothing between that write and this read can move the axis — the launch
+// that produced the entry is still on this same goroutine, before the ack it
+// is answering has even been marshalled. Everything that COULD move it later
+// (noteIntegrationLive, applyIntegrationLoss, applyBootstrapOutcome,
+// applyShellReplaced) needs the session registered in this transport's
+// registry first, which does not happen until after this handler returns.
+//
+// False covers two different sessions on purpose: one that never entered the
+// axis at all (RegisterIntegration was never called — nothing is ever
+// coming), and one that entered it already resolved to `conventional` at
+// open (a fact IS coming, moments after this ack, but isAwaitingIntegration
+// on the renderer only ever gates `starting`, so neither has anything to make
+// a pane wait on). The renderer does not need to tell those two apart; it
+// only needs to know whether to hold the grid for the FIRST fact, and
+// `starting` is the only status that means yes.
+func (s *WSServer) sessionAwaitsIntegration(sid session.ID) bool {
+	s.integrationMu.Lock()
+	defer s.integrationMu.Unlock()
+	st, ok := s.integrations[sid]
+	return ok && st.status == IntegrationStarting
+}
+
 // remoteShellName is what the connect path asked the far host to run. A
 // profile pin is a real shell name; unpinned, the launcher emits a POSIX
 // dispatcher that detects the login shell AT THE FAR END, so the honest

@@ -75,4 +75,8 @@ export interface Open {
      */
     sessionEpoch: number
   } | null
+  /**
+   * Whether this open has just entered the session into the integration axis in the `starting` state, which guarantees a session.integrationChanged notification follows this ack (nocx-ui8q6.6). This is NOT the answer nocx-dvql removed from this ack: it never carries integrated, conventional or a reason — only whether a fact is coming at all — and it cannot go stale the way that field could, because whether a session enters the axis at `starting` is decided once, synchronously, before this ack is built, and is never revised afterward (a later transition is what the notification is for, not this field). False covers two different sessions on purpose: one that never asked for integration (registerOpenedIntegration never ran for it, and nothing is ever coming — absence is conventional by design) and one already resolved to conventional at open (a fact IS coming, moments after this ack, but nothing needs to wait for it — a renderer's grid is held only for `starting`, never for an outcome already known). Before this field, the interval between this ack and the first session.integrationChanged notification had no fact distinguishing 'not yet answered' from 'never will be': both read as the same absence, and a pane could show a live terminal grid for the one frame in which a `starting` session's shell had not yet proved itself either way.
+   */
+  awaitsIntegration: boolean
 }

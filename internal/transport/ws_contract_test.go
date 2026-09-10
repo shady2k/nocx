@@ -2068,12 +2068,24 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
 	var got struct {
-		SessionID     string     `json:"sessionId"`
-		DesiredMode   string     `json:"desiredMode"`
-		EffectiveSize sizeResult `json:"effectiveSize"`
+		SessionID         string     `json:"sessionId"`
+		DesiredMode       string     `json:"desiredMode"`
+		EffectiveSize     sizeResult `json:"effectiveSize"`
+		AwaitsIntegration bool       `json:"awaitsIntegration"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+
+	// The channel refuses at open (ReasonNoSecureTemp below), so this
+	// session enters the axis already resolved to `conventional` rather than
+	// `starting` — the ack must say so honestly rather than promise a wait
+	// that closes on its very next fact (nocx-ui8q6.6). It is still true
+	// that a session.integrationChanged is coming (asserted below); false
+	// here says only that the renderer has nothing to hold the grid FOR,
+	// because isAwaitingIntegration never gates anything but `starting`.
+	if got.AwaitsIntegration {
+		t.Error("awaitsIntegration = true, want false: this session was already resolved to conventional at open, not left starting")
 	}
 
 	// The ack's size is READ OFF THE SESSION, not echoed from the params
@@ -2143,6 +2155,119 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	opened := sizeResult{Cols: cfg.Cols, Rows: cfg.Rows, XPixel: cfg.XPixel, YPixel: cfg.YPixel}
 	if want := sizeResultOf(sess.EffectiveSize()); opened != want {
 		t.Errorf("ssh channel opened at %+v, want the session's effective size %+v", opened, want)
+	}
+}
+
+// TestOpen_AwaitsIntegrationWhenStarting is the other half of nocx-ui8q6.6's
+// contract: TestOpen_OverTheWireConformsToContract proves awaitsIntegration
+// is false when this open already resolved to conventional; this proves it
+// is true when the open leaves the session `starting`, off the real socket,
+// and — the assertion this bead exists for — that the field's promise and
+// the actual first session.integrationChanged agree. Before this field, a
+// renderer reading the ack alone could not tell "a fact is coming" from "one
+// never will", which is exactly the interval nocx-ui8q6.1's grid-hiding
+// depended on and could not close from the ack side.
+//
+// integrationPTYFactory (ws_integration_test.go) registers the session as
+// `starting` from inside NewPTY — the open call itself — which is the real
+// composition root's own shape: the local factory is the only thing that
+// knows which binary it exec'd, and it says so before the open that spawned
+// it has even returned.
+func TestOpen_AwaitsIntegrationWhenStarting(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	ws := NewWSServer(logger, session.New(logger, f))
+	f.ws.Store(ws)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (starting)")
+	var got struct {
+		SessionID         string `json:"sessionId"`
+		AwaitsIntegration bool   `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = false, want true: the factory registered this session as starting before the ack was marshalled")
+	}
+
+	// The promise the ack just made, kept: the first fact this session's own
+	// subscriber hears is the one awaitsIntegration said was coming.
+	first := readIntegration(t, conn, got.SessionID)
+	if first.Status != IntegrationStarting {
+		t.Errorf("first session.integrationChanged status = %q, want %q — the ack promised one and this is it",
+			first.Status, IntegrationStarting)
+	}
+}
+
+// TestOpen_AwaitsIntegrationFalseWhenNeverAsked proves the third case: a
+// plain local open with no launch-time integration record at all — the
+// production shape of a raw-mode session, or any pane whose factory never
+// calls RegisterIntegration — states awaitsIntegration false, and no
+// session.integrationChanged notification follows it. Absence is
+// "conventional by design" (registerOpenedIntegration's own words), and this
+// is the ack-side half of that: a renderer must never be left waiting on a
+// fact that registerOpenedIntegration decided, at open, would never come.
+func TestOpen_AwaitsIntegrationFalseWhenNeverAsked(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "open result (never asked)")
+	var got struct {
+		SessionID         string `json:"sessionId"`
+		AwaitsIntegration bool   `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = true, want false: nothing registered this session onto the axis")
+	}
+
+	// Nothing is coming: a short, bounded wait finding no notification is
+	// the honest way to check an absence over a socket that could otherwise
+	// hang forever waiting for a frame nobody is going to send.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	if msg, err := awaitFrame(conn, deadline, isNotification("session.integrationChanged")); err == nil {
+		t.Errorf("received session.integrationChanged for a session that never entered the axis: %s", msg)
 	}
 }
 

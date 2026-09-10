@@ -138,15 +138,27 @@ describe('what the product says about a degraded session', () => {
     expect(isDegraded(fact({ status: 'lost', reason: 'channel-lost' }))).toBe(true)
   })
 
-  it('is awaiting only for starting, and never for absence (nocx-ui8q6.1)', () => {
-    expect(isAwaitingIntegration(fact({ status: 'starting', reason: undefined }))).toBe(true)
-    expect(isAwaitingIntegration(fact({ status: 'integrated', reason: undefined }))).toBe(false)
-    expect(isAwaitingIntegration(fact({ status: 'conventional' }))).toBe(false)
-    expect(isAwaitingIntegration(fact({ status: 'lost' }))).toBe(false)
+  it('is awaiting only for starting, whatever the ack said (nocx-ui8q6.1)', () => {
+    // Once a fact exists it is the only thing read — the ack's own promise
+    // is for the gap before the first fact, and is ignored once one arrives.
+    expect(isAwaitingIntegration(fact({ status: 'starting', reason: undefined }), false)).toBe(true)
+    expect(isAwaitingIntegration(fact({ status: 'integrated', reason: undefined }), true)).toBe(
+      false,
+    )
+    expect(isAwaitingIntegration(fact({ status: 'conventional' }), true)).toBe(false)
+    expect(isAwaitingIntegration(fact({ status: 'lost' }), true)).toBe(false)
+  })
+
+  it('before the first fact, defers to the ack — not to a guess (nocx-ui8q6.6)', () => {
+    // A session the open ack said would enter the axis `starting` is
+    // awaiting one from its very first frame, not only once the fact
+    // arrives — this is the gap nocx-ui8q6.1 could not close from the fact
+    // alone, because the fact does not exist yet.
+    expect(isAwaitingIntegration(null, true)).toBe(true)
     // A session that never asked for integration never receives a status at
-    // all: null must never be treated as an open question, or a plain
-    // terminal would wait on an answer that is never coming.
-    expect(isAwaitingIntegration(null)).toBe(false)
+    // all: the ack said so, and null must never be treated as an open
+    // question on its own — the exact defect rule 2 of the bead warns about.
+    expect(isAwaitingIntegration(null, false)).toBe(false)
   })
 
   // An unrenderable reason is still a degraded session. Silence is the

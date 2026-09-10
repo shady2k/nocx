@@ -409,6 +409,15 @@ export interface SessionFake {
    *  `childOf(parent)` builds the whole value from the parent's own fake, so
    *  no test spells the identity by hand. */
   parent: Open['parent']
+  /** The open ack's own `awaitsIntegration` (nocx-ui8q6.6): whether this
+   *  session has just entered the axis `starting`, before any
+   *  session.integrationChanged fact exists. False by default — most
+   *  fixtures are about something else and a session that defaulted to
+   *  "waiting" would hide the grid every test that never touches this axis
+   *  would otherwise not care about. A test proving the gap-close sets it
+   *  true and fires `integrationHandler` afterward, exactly as production
+   *  order requires. */
+  awaitsIntegration: boolean
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   /** Address a signal to the command running in this session (nocx-23rph).
@@ -468,6 +477,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     cwd: FIXTURE_CWD,
     desiredMode: 'script',
     parent: null,
+    awaitsIntegration: false,
     send: vi.fn(),
     sendResize: vi.fn(),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture

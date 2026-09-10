@@ -271,8 +271,18 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// An episode without a subscriber is not opened: the next attach replays
 	// the fact, and the episode opens then, when the ack can actually come
 	// back.
+	//
+	// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
+	// silence while the one below it said "no subscriber" out loud, and the
+	// difference is not cosmetic: a session opened by the BACKEND has no
+	// receiver at all — OpenSession creates no ring and no subscriber by
+	// design — so this is the branch a worker participant's pane takes, every
+	// time, and the whole establishment then expires with the only visible
+	// trace being the adapter's bare hello-timeout ten seconds later.
 	rx := s.getRx(sid)
 	if rx == nil {
+		s.log.Info("lifecycle.changed dropped: the session has no receiver",
+			"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
 	}
 	wconn, _ := rx.getSubscriber()

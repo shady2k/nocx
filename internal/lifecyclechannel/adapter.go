@@ -477,6 +477,16 @@ func (a *Adapter) pump() {
 			// flushed later, so the timer keeps bounding the whole
 			// handshake and stops only in Send, when the accept actually
 			// goes out.
+			//
+			// Which is why the ACCEPTED envelope is said as well as the
+			// rejected one (nocx-n14oo.8): between an ingest that succeeded
+			// and an accept that never went out lies the whole of decision
+			// 9, and while only the rejection was logged, "the kernel took
+			// the hello and is waiting on a renderer" was indistinguishable
+			// from "no envelope ever arrived".
+			a.log.Debug("lifecycle envelope ingested",
+				"domain", env.Domain, "kind", env.Event.Kind,
+				"after_ms", time.Since(a.openedAt).Milliseconds())
 			continue
 		}
 		switch {

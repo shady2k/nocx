@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
 // Fact is the published lifecycle fact: the params of the lifecycle.changed
@@ -271,6 +272,21 @@ type options struct {
 	grantBuilder     GrantBuilder
 	agentEnroller    AgentEnroller
 	agentReporter    AgentReporter
+	log              nocxlog.Logger
+}
+
+// WithLogger gives the publisher a voice (nocx-n14oo.8).
+//
+// This package decides every handshake in the product and, until this
+// existed, wrote nothing at all. Decision 9 holds a minted accept until the
+// renderer acknowledges it, so an accept nobody will ever acknowledge and an
+// accept lost in transit both ended as one bare `hello-timeout` line from the
+// adapter ten seconds later — which is the difference between a broken
+// transport and a session with no renderer attached to it, read as the same
+// event. Without a logger the default is silent, which is what a test and an
+// embedding without wiring want.
+func WithLogger(l nocxlog.Logger) Option {
+	return func(o *options) { o.log = l }
 }
 
 // WithEstablishmentTimeout bounds how long a minted accept may wait for the
@@ -400,6 +416,10 @@ type pendingAccept struct {
 	gen   string
 	out   lifecycle.Outbound
 	timer *time.Timer
+	// mintedAt is what turns the two outcomes into a measurement rather than
+	// a pair of events: how long a renderer that DID answer took, against the
+	// bound one that did not spent.
+	mintedAt time.Time
 }
 
 // Emitter is where published facts go: the WSServer at the composition root,
@@ -436,6 +456,7 @@ type Publisher struct {
 	grantBuilder     GrantBuilder
 	agentEnroller    AgentEnroller
 	agentReporter    AgentReporter
+	log              nocxlog.Logger
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
@@ -444,6 +465,9 @@ func New(k Kernel, opts ...Option) *Publisher {
 	o := options{establishTimeout: lifecycle.HelloTimeout}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if o.log == nil {
+		o.log = nocxlog.NewSlogAdapter(nil)
 	}
 	return &Publisher{
 		kernel:           k,
@@ -456,6 +480,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 		grantBuilder:     o.grantBuilder,
 		agentEnroller:    o.agentEnroller,
 		agentReporter:    o.agentReporter,
+		log:              o.log,
 	}
 }
 
@@ -752,8 +777,15 @@ func (p *Publisher) beginEstablishment(out lifecycle.Outbound) error {
 		cur.timer.Stop()
 	}
 	p.gen[key] = gen
-	p.pending[key] = pendingAccept{gen: gen, out: out}
+	p.pending[key] = pendingAccept{gen: gen, out: out, mintedAt: time.Now()}
 	p.mu.Unlock()
+	// SAID BEFORE THE WAIT, not after it. This is the moment the handshake
+	// stops depending on the shell and starts depending on a renderer, and
+	// nothing downstream can report that: the adapter only knows its bound
+	// expired.
+	p.log.Info("lifecycle: an accept awaits the renderer's acknowledgement",
+		"lane", string(env.Lane), "domain", string(env.Domain), "epoch", env.Epoch,
+		"generation", gen, "timeout_ms", p.establishTimeout.Milliseconds())
 	p.armEstablishmentTimer(key, gen)
 	return nil
 }
@@ -785,6 +817,13 @@ func (p *Publisher) establishmentTimedOut(key estKey, gen string) {
 	}
 	delete(p.pending, key)
 	p.mu.Unlock()
+	// WARN, and it names the party that did not answer. The adapter's
+	// hello-timeout fires on the same bound and reads as "the shell never
+	// authenticated", which is the opposite of what happened here: the shell
+	// authenticated and there was nobody to acknowledge it.
+	p.log.Warn("lifecycle: the renderer never acknowledged the accept; the domain is rolled back",
+		"lane", string(key.lane), "domain", string(key.domain), "epoch", key.epoch,
+		"generation", gen, "waited_ms", time.Since(pend.mintedAt).Milliseconds())
 	if err := p.kernel.EstablishmentTimeout(key.domain); err == nil {
 		p.publishLane(key.lane) // the revoke changed the lane; the dedupe suppresses a no-op
 	}
@@ -817,6 +856,13 @@ func (p *Publisher) AcknowledgeEstablishment(lane lifecycle.LaneID, domain lifec
 	delete(p.pending, key)
 	out := pend.out
 	p.mu.Unlock()
+	// The success carries the DURATION, because the failure alone cannot say
+	// whether a handshake is slow or is not happening. Measured on this
+	// machine, a renderer answers in tens of milliseconds against a ten-second
+	// bound — so a wait anywhere near the bound is already the wrong shape.
+	p.log.Debug("lifecycle: the accept was flushed on the renderer's acknowledgement",
+		"lane", string(lane), "domain", string(domain), "epoch", epoch,
+		"generation", generation, "waited_ms", time.Since(pend.mintedAt).Milliseconds())
 	return p.kernel.Deliver(out)
 }
 

@@ -1477,6 +1477,8 @@ func New(opts ...Option) (*App, error) {
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
 		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout),
+		// The gate that decides every handshake gets a voice (nocx-n14oo.8).
+		lifecyclepub.WithLogger(logger),
 		// The child-domain bootstrap builder (nocx-u7uh.11): the single
 		// owner of "how do we reach a host" (ADR-0022) behind the
 		// domain_grant outbound. The kernel stays the sole minter; this

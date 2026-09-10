@@ -120,6 +120,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0060 | [Supervision outlives the coordinator, not the backend](0060-supervision-outlives-the-coordinator-not-the-backend.md)             | Accepted (2026-09-04)                                                   |
 | 0061 | [W3C Trace Context identifiers, without the OpenTelemetry SDK](0061-w3c-trace-context-without-the-opentelemetry-sdk.md)           | Accepted (2026-09-10)                                                   |
 | 0062 | [The backend flushes the accept on its own authority](0062-the-backend-flushes-the-accept-on-its-own-authority.md)                | Accepted (2026-09-10)                                                   |
+| 0063 | [Typing is refused on evidence against the rule, not on its absence](0063-typing-is-refused-on-evidence-against-the-rule.md)      | Accepted (2026-09-10)                                                   |
 
 ## Adding one
 

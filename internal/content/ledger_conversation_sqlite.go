@@ -292,7 +292,7 @@ func (s *sqliteContent) turnProse(ctx context.Context, turnID string) (TurnProse
 	// made, and a sentence written after it is a conclusion drawn from its
 	// output. The eviction receipt rides the same row, read with the ONE
 	// expression that reads it anywhere (bodyEvictedExpr).
-	children := `SELECT c.payload, a.id, ` + bodyEvictedExpr("a") + //nolint:gosec // constant fragments; the only value is bound
+	children := `SELECT c.payload, a.id, ` + bodyEvictedExpr("a") + // #nosec -- constant fragments; the only value is bound
 		` FROM entries c JOIN artifacts a ON a.entry_id = c.id
 		   WHERE c.parent_id = ? AND c.kind = 'text'
 		   ORDER BY c.pos, a.id`

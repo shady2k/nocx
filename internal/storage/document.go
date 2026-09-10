@@ -210,7 +210,7 @@ func (s *documentStore) Write(name string, doc any) error {
 
 // syncDirectory opens dir and calls Sync to persist the rename.
 func syncDirectory(dir string) error {
-	f, err := os.Open(dir) //nolint:gosec // dir is always a path we created
+	f, err := os.Open(dir) // #nosec -- dir is always a path we created
 	if err != nil {
 		return err
 	}

@@ -31,10 +31,10 @@ import type {
 } from '../generated/layout.read'
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
-import type { ClipboardBanner } from '../banner'
-import type { SSHProfile } from '../profiles'
+import { type BannerChoice, type ClipboardBanner } from '../banner'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
+import type { SSHProfile } from '../profiles'
 import type { SessionLiveness } from '../generated/session.liveness'
 import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
@@ -746,8 +746,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface ClipboardFake extends ClipboardAccess {
-  readText: ReturnType<typeof vi.fn>
-  writeText: ReturnType<typeof vi.fn>
+  readText: Mock<() => Promise<string>>
+  writeText: Mock<(text: string) => Promise<void>>
 }
 
 /**
@@ -756,8 +756,8 @@ export interface ClipboardFake extends ClipboardAccess {
  */
 export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake {
   return {
-    readText: vi.fn().mockResolvedValue(''),
-    writeText: vi.fn().mockResolvedValue(undefined),
+    readText: vi.fn<() => Promise<string>>().mockResolvedValue(''),
+    writeText: vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined),
     ...overrides,
   }
 }
@@ -768,7 +768,7 @@ export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake
 
 export interface BannerFake extends ClipboardBanner {
   shown: boolean
-  show: ReturnType<typeof vi.fn>
+  show: Mock<() => Promise<BannerChoice>>
 }
 
 /**
@@ -778,7 +778,7 @@ export interface BannerFake extends ClipboardBanner {
 export function makeBanner(overrides?: Partial<BannerFake>): BannerFake {
   return {
     shown: false,
-    show: vi.fn().mockResolvedValue('dismiss' as const),
+    show: vi.fn<() => Promise<BannerChoice>>().mockResolvedValue('dismiss'),
     ...overrides,
   }
 }

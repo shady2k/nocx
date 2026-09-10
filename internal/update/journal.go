@@ -79,7 +79,7 @@ func journalPath(installPath string) string {
 // readJournal reads and parses the journal, or returns nil if the
 // journal file does not exist.
 func readJournal(path string) (*journalRecord, error) {
-	f, err := os.Open(path) //nolint:gosec // path is constructed from installPath (caller-controlled)
+	f, err := os.Open(path) // #nosec -- path is constructed from installPath (caller-controlled)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -105,7 +105,7 @@ func writeJournal(path string, r *journalRecord) error {
 	r.SchemaVersion = journalSchemaVersion
 
 	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath) //nolint:gosec // path is constructed from journalPath (caller-controlled)
+	f, err := os.Create(tmpPath) // #nosec -- path is constructed from journalPath (caller-controlled)
 	if err != nil {
 		return fmt.Errorf("create journal tmp %s: %w", tmpPath, err)
 	}

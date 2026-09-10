@@ -1360,7 +1360,7 @@ const (
 	patchUser                 patchPath = "options.user"
 	patchAuth                 patchPath = "options.auth"
 	patchPasswordSecret       patchPath = "options.passwordSecret"
-	patchKeySecret            patchPath = "options.keySecret" //nolint:gosec // a JSON patch path naming the key-secret field, not a credential
+	patchKeySecret            patchPath = "options.keySecret" // #nosec -- a JSON patch path naming the key-secret field, not a credential
 	patchKeyPassphraseSecret  patchPath = "options.keyPassphraseSecret"
 	patchKeepaliveInterval    patchPath = "options.keepaliveInterval"
 	patchKeepaliveCountMax    patchPath = "options.keepaliveCountMax"

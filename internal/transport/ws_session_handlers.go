@@ -742,7 +742,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// immediately: StartOutput installs the handler and starts that pump on
 	// its own goroutine rather than blocking, so nothing may hang off its
 	// return as though it meant "the output is over" (nocx-szb40.5).
-	go h.sess.pumpToRing(context.Background(), sess, rx.ring)
+	go h.sess.pumpToRing(context.Background(), sess, rx.ring) // #nosec G118 -- goroutine intentionally outlives the request to finish owned cleanup
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).
 	rx.monitorOnce.Do(func() {

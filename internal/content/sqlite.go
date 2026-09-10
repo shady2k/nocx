@@ -234,7 +234,8 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	}
 	// 0700 on the directory, always — not just at creation. G302's "0600 or
 	// less" is for files; a database directory must be traversable.
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // directory, not file
+	//nolint:gosec // This is a directory mode, not a file mode.
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directory, not file
 		return nil, fmt.Errorf("content: chmod %s: %w", dir, err)
 	}
 

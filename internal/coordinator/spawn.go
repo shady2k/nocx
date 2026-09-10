@@ -103,7 +103,7 @@ func (s *ExecSpawner) Spawn(ctx context.Context) (Spawned, error) {
 	// must not kill a daemon that is already up and serving other windows.
 	// The context bounds the launcher's WAIT, not the daemon's life.
 	//nolint:gosec // the path comes from the composition root, never from a caller or the wire
-	cmd := exec.Command(s.cfg.Path)
+	cmd := exec.Command(s.cfg.Path) // #nosec G204 -- executable and arguments are fixed or validated before execution
 	cmd.Env = SpawnEnvironment(s.environ())
 	// A nil Stdin/Stdout/Stderr is /dev/null for os/exec, which is exactly
 	// what is wanted and is stated here because "nil" does not say it.

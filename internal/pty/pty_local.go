@@ -62,6 +62,14 @@ var launcherSessionVars = []string{
 	"CLAUDE_CODE_CHILD_SESSION=",
 	"CLAUDE_PID=",
 	"CLAUDE_EFFORT=",
+	"NOCX_BOOTSTRAP_FD=",
+	"NOCX_LIFECYCLE_DOMAIN=",
+	"NOCX_LIFECYCLE_EPOCH=",
+	"NOCX_LIFECYCLE_FD=",
+	"NOCX_LIFECYCLE_LANE=",
+	"NOCX_PROMPT_MODE=",
+	"NOCX_SESSION_ID=",
+	"NOCX_SHELL_INTEGRATION=",
 	"NO_COLOR=",
 	"TERM=",
 }
@@ -130,7 +138,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	// deriving a second answer of its own (internal/loginshell).
 	var cmd *exec.Cmd
 	if cfg.Command != "" {
-		cmd = exec.Command(cfg.Command, cfg.Args...) //nolint:gosec // the launcher names its own shell
+		cmd = exec.Command(cfg.Command, cfg.Args...) // #nosec -- the launcher names its own shell
 	} else {
 		shell := loginshell.New().Resolve()
 		// Logged, not merely decided. Which shell a session runs is the single
@@ -141,7 +149,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		// tab completion ever learns a command name. This line is what lets a
 		// run's account answer that without inference (nocx-z9s9.9).
 		logger.Info("local pty shell resolved", "shell", shell.Path, "source", string(shell.Source))
-		cmd = exec.Command(shell.Path, "-i") //nolint:gosec // shell is from the account record or a detected path
+		cmd = exec.Command(shell.Path, "-i") // #nosec -- shell is from the account record or a detected path
 	}
 	cmd.Dir = resolveCwd(cfg.Cwd)
 	env := withUTF8Locale(append(

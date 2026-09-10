@@ -154,11 +154,18 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 | Wails CLI       | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`                                                 |
 | gofumpt         | latest            | `go install mvdan.cc/gofumpt@latest`                                                                               |
 | golangci-lint   | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8`                                           |
+| gosec           | **v2.28.0**       | `go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0`                                                        |
 | br (beads_rust) | latest            | `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh \| bash -s -- --verify` |
 | deja (deja-vu)  | **v0.19.3**       | release tarball into `~/.local/bin`, or `GOPROXY=direct go install github.com/vshulcz/deja-vu/cmd/deja@latest`     |
 
-> ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
+> golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
+
+> Make targets use Go 1.26.0 through `GOTOOLCHAIN` by default because the
+> pinned golangci-lint release cannot consume Go 1.27 export data. Override the
+> choice explicitly with `make GO_TOOLCHAIN=go1.27.0 ...` only when validating
+> a newer toolchain. Desktop targets enable CGO on Linux and macOS because Wails'
+> native bindings require it.
 
 > The tracker was `bd` (Go beads, embedded Dolt) until 2026-09-05 and is `br`
 > now. `br` is a single static binary with no daemon and no Dolt; it never runs
@@ -176,6 +183,7 @@ the rest through the language toolchains:
 ```bash
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
+go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
 
 # The tracker and the recall index: release binaries into ~/.local/bin.
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh?$(date +%s)" \

@@ -334,37 +334,51 @@ func parseFrontmatter(data []byte) (frontmatter, int, bool) {
 
 func hashSkillDirectory(base string) (string, error) {
 	h := sha256.New()
-	err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+
+	err = filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
 		}
 		rel = filepath.ToSlash(rel)
 		var data []byte
 		if entry.Type()&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
+			target, targetErr := os.Readlink(path)
+			if targetErr != nil {
+				return targetErr
 			}
 			data = []byte("symlink:" + target)
 		} else {
-			info, err := entry.Info()
-			if err != nil {
-				return err
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
 			}
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("%s is not a regular file", rel)
 			}
-			// #nosec G304 -- path is beneath the managed skill directory.
-			data, err = os.ReadFile(path)
-			if err != nil {
-				return err
+			file, openErr := root.Open(filepath.FromSlash(rel))
+			if openErr != nil {
+				return openErr
+			}
+			var readErr error
+			data, readErr = io.ReadAll(file)
+			closeErr := file.Close()
+			if readErr != nil {
+				return readErr
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 		}
 		writeDigestPart(h, []byte(rel))

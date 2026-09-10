@@ -129,7 +129,7 @@ func (s *sqliteContent) Skip(ctx context.Context, sessionID string, resumeAt uin
 	capBytes := int64(s.policy.OutputCapBytes())
 	// Offsets are byte counts of a stream one process produced; they cannot
 	// reach the int64 ceiling in any run this program survives.
-	at := int64(resumeAt) //nolint:gosec
+	at := int64(resumeAt) // #nosec
 
 	var out SessionOutputResult
 	err := s.run(ctx, func(ctx context.Context) error {
@@ -245,7 +245,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 	now := time.Now().UnixMilli()
 	// Offsets are byte counts of a stream one process produced; they cannot
 	// reach the int64 ceiling in any run this program survives.
-	offset := int64(in.Offset) //nolint:gosec
+	offset := int64(in.Offset) // #nosec
 	row, err := loadOrCreateSessionOutput(ctx, tx, in.SessionID, offset, offset, capBytes, now)
 	if err != nil {
 		return SessionOutputResult{}, err
@@ -307,7 +307,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 	if commitErr := tx.Commit(); commitErr != nil {
 		return SessionOutputResult{}, commitErr
 	}
-	return SessionOutputResult{Kept: true, Dropped: uint64(dropped)}, nil //nolint:gosec // dropped ≥ 0
+	return SessionOutputResult{Kept: true, Dropped: uint64(dropped)}, nil // #nosec -- dropped ≥ 0
 }
 
 // loadOrCreateSessionOutput reads the recording's row, creating it on the
@@ -596,8 +596,8 @@ func (s *sqliteContent) Read(ctx context.Context, sessionID string) (SessionOutp
 	if err != nil {
 		return SessionOutputRecording{}, fmt.Errorf("content: session output: read recording: %w", err)
 	}
-	out.Bytes = uint64(byteLen) //nolint:gosec // byte counts, never negative
-	out.Produced = uint64(next) //nolint:gosec
+	out.Bytes = uint64(byteLen) // #nosec -- byte counts, never negative
+	out.Produced = uint64(next) // #nosec
 	if truncated.Valid && truncated.String != "" {
 		t := Truncation(truncated.String)
 		out.Truncated = &t
@@ -626,12 +626,13 @@ func (s *sqliteContent) Read(ctx context.Context, sessionID string) (SessionOutp
 		// where the stream really has a hole.
 		if n := len(out.Runs); n > 0 {
 			prev := &out.Runs[n-1]
-			if prev.Offset+uint64(len(prev.Body)) == uint64(at) { //nolint:gosec
+			//nolint:gosec // The stored byte offset is non-negative.
+			if prev.Offset+uint64(len(prev.Body)) == uint64(at) { // #nosec G115 -- at is a non-negative persisted byte offset
 				prev.Body = append(prev.Body, body...)
 				continue
 			}
 		}
-		out.Runs = append(out.Runs, SessionOutputRun{Offset: uint64(at), Body: body}) //nolint:gosec
+		out.Runs = append(out.Runs, SessionOutputRun{Offset: uint64(at), Body: body}) // #nosec
 	}
 	if err := rows.Err(); err != nil {
 		return SessionOutputRecording{}, fmt.Errorf("content: session output: read chunks: %w", err)

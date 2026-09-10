@@ -35,7 +35,7 @@ func readFolderVariablesFile(full, rel string) ([]Param, bool, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, true, fmt.Errorf("%w: %q is not a regular file", ErrMalformedFolderVariables, rel)
 	}
-	raw, err := os.ReadFile(full) //nolint:gosec // full is derived beneath the opened root
+	raw, err := os.ReadFile(full) // #nosec -- full is derived beneath the opened root
 	if err != nil {
 		return nil, true, fmt.Errorf("%w: read %q: %v", ErrMalformedFolderVariables, rel, err)
 	}

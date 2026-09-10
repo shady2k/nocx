@@ -94,7 +94,7 @@ func readManifest(root string) (manifest, error) {
 		return manifest{}, fmt.Errorf("apicoll: manifest %s is not a regular file", p)
 	}
 
-	raw, err := os.ReadFile(p) //nolint:gosec // p is root/ManifestName and root is resolved
+	raw, err := os.ReadFile(p) // #nosec -- p is root/ManifestName and root is resolved
 	if err != nil {
 		return manifest{}, fmt.Errorf("apicoll: read manifest %s: %w", p, err)
 	}

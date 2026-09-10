@@ -1,12 +1,28 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
+        ci-backend ci-linux ci-os-split ci-mac ci-frontend ci-e2e helpers \
         print-os-pkgs print-portable-pkgs \
-        lint-ci test-ci build-ci root-ci frontend-ci
+        lint-ci security-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
+GOSEC ?= gosec
 PKG_CONFIG ?= pkg-config
+
+# The repository's Go 1.26 toolchain is intentional: the pinned
+# golangci-lint v1.64.8 cannot consume Go 1.27 export data. `GO_TOOLCHAIN`
+# remains an override for maintainers testing another toolchain.
+GO_TOOLCHAIN ?= go1.26.0
+export GOTOOLCHAIN := $(GO_TOOLCHAIN)
+
+# Wails' Linux and macOS desktop bindings are CGO-backed. An inherited
+# CGO_ENABLED=0 is otherwise especially confusing on Linux: the gtk3 tag
+# selects files that reference Wails' cgo-only `pointer` and `linuxApp`
+# definitions, producing compiler errors instead of a useful diagnosis.
+HOST_GOOS ?= $(shell $(GO) env GOOS)
+ifneq ($(filter linux darwin,$(HOST_GOOS)),)
+export CGO_ENABLED := 1
+endif
 
 # The Linux build targets webkit2gtk-4.1, the surface ADR-0007 decided for
 # this product. Wails v3 defaults to GTK4/WebKitGTK-6.0; the `gtk3` build tag
@@ -15,7 +31,6 @@ PKG_CONFIG ?= pkg-config
 # build against an installed 4.1 surface rather than a default that may not
 # match the distribution. When 4.1 is absent (a GTK4-only host), the tag is
 # empty and v3's GTK4 default is used.
-HOST_GOOS ?= $(shell $(GO) env GOOS)
 WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf gtk3; fi)
 GOLANGCI_BUILD_TAGS := $(if $(WAILS_PLATFORM_TAGS),--build-tags=$(WAILS_PLATFORM_TAGS))
 
@@ -224,7 +239,7 @@ hooks:
 #   go test -tags release ./internal/storage/...   added below
 #
 # `ci-full` runs all of them, each in the environment its job runs in.
-ci: lint-ci test-ci build-ci root-ci frontend-ci
+ci: lint-ci security-ci test-ci build-ci root-ci frontend-ci
 	@echo ""
 	@echo "=== host-side gates green ==="
 	@echo "NOT covered by this target: backend-linux, e2e, and the frontend job"
@@ -508,6 +523,10 @@ lint-ci:
 	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
 	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
 	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
+
+security-ci:
+	@echo "=== gosec ==="
+	$(GOSEC) ./...
 
 # THE ONE PACKAGE A HOST IS NOT REQUIRED TO BE ABLE TO RUN, and why this
 # target is no longer a bare `go test ./...`.

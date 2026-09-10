@@ -92,7 +92,7 @@ func listeners(ctx context.Context) ([]discovery.Listener, error) {
 // enumeration order.
 func procNet(ctx context.Context, path string, family discovery.AddressFamily) ([]sockEntry, error) {
 	//nolint:gosec // path is a fixed constant at every call site, or a test's own temp file
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is application-owned or validated beneath an authorized root
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -234,7 +234,7 @@ func socketOwners(ctx context.Context, entries []sockEntry) map[uint64]procOwner
 // content is untrusted size.
 func processName(pidDir string) string {
 	//nolint:gosec // pidDir is built from a /proc dirent name, never caller input
-	f, err := os.Open(pidDir + "/comm")
+	f, err := os.Open(pidDir + "/comm") // #nosec G304 -- path is application-owned or validated beneath an authorized root
 	if err != nil {
 		return ""
 	}

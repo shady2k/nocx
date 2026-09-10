@@ -56,7 +56,7 @@ type SecretSource struct {
 // guessing for them would send a header the user did not write.
 //
 //nolint:gosec // G101: this is a header NAME, not a key. The value it carries is resolved from a variable at Apply and appears nowhere in this file.
-const DefaultAPIKeyHeader = "X-API-Key"
+const DefaultAPIKeyHeader = "X-API-Key" // #nosec G101 -- identifier names a header or field, not credential material
 
 // Apply turns the request's auth into the ONE HEADER it becomes and clears
 // the auth, which is the form Send accepts: buildRequest refuses a request

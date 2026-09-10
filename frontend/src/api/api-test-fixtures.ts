@@ -5,7 +5,7 @@
 //
 // The values are the design's own worked example (§9.2, §11): an acme-api
 // collection with a POST that answers 201 in 184ms.
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type { ApiWorkbenchServices, CollectionWatchPort, NativeDropPort } from './api-client'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesDropped } from '../generated/files.dropped'
@@ -336,26 +336,32 @@ export interface WatchFixture {
 export function watchFixture(
   over: {
     localSession?: string | null
-    open?: ReturnType<typeof vi.fn>
-    watch?: ReturnType<typeof vi.fn>
-    close?: ReturnType<typeof vi.fn>
+    open?: Mock<(sessionId: string, rootPath?: string) => Promise<FilesOpenResult>>
+    watch?: Mock<(bindingId: string, paths: string[]) => Promise<FilesWatchResult>>
+    close?: Mock<(bindingId: string) => Promise<FilesCloseResult>>
   } = {},
 ): WatchFixture {
   let onChanged: ((p: FilesChanged) => void) | null = null
   let onConnect: (() => void) | null = null
   const open =
     over.open ??
-    vi.fn().mockResolvedValue({
+    vi.fn<(sessionId: string, rootPath?: string) => Promise<FilesOpenResult>>().mockResolvedValue({
       bindingId: WATCH_BINDING,
       endpointId: null,
+      revealAvailable: true,
       root: { path: '/', display: '/', inferred: false, inferredReason: '' },
     })
   // 'polling' with NO reason is what a healthy LOCAL binding answers today —
   // internal/transport says so in as many words, because a reason there would
   // light the degrade badge for every user forever. The default fixture is
   // therefore the case that must NOT warn.
-  const watch = over.watch ?? vi.fn().mockResolvedValue({ mode: 'polling' })
-  const close = over.close ?? vi.fn().mockResolvedValue({})
+  const watch =
+    over.watch ??
+    vi.fn<(bindingId: string, paths: string[]) => Promise<FilesWatchResult>>().mockResolvedValue({
+      mode: 'polling',
+    })
+  const close =
+    over.close ?? vi.fn<(bindingId: string) => Promise<FilesCloseResult>>().mockResolvedValue({})
   const port: CollectionWatchPort = {
     localSession: () => (over.localSession === undefined ? WATCH_SESSION : over.localSession),
     // The casts are the seam between a `vi.fn()` (which answers `any`) and

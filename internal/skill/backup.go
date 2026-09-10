@@ -189,7 +189,7 @@ func snapshotRoot(root string) ([]SnapshotTree, error) {
 			return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
 		}
 		for _, rel := range paths {
-			bytes, err := os.ReadFile(filepath.Join(treeRoot, filepath.FromSlash(rel))) //nolint:gosec // path is beneath a configured skill root
+			bytes, err := os.ReadFile(filepath.Join(treeRoot, filepath.FromSlash(rel))) // #nosec -- path is beneath a configured skill root
 			if err != nil {
 				return nil, fmt.Errorf("walk %q: %w", entry.Name(), err)
 			}

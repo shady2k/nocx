@@ -56,7 +56,7 @@ func WriteLocalRcfile(rc string) (string, error) {
 	//nolint:gosec // path is os.TempDir() plus a random name minted here, and
 	// O_EXCL with mode 0600 is precisely the defence: no pre-existing file is
 	// opened and no other user can read the capability it carries.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is application-owned or validated beneath an authorized root
 	if err != nil {
 		return "", fmt.Errorf("shellintegration: local rcfile: %w", err)
 	}
@@ -189,7 +189,7 @@ func WriteLocalZDOTDIR(rc string) (string, error) {
 // other user can read the capability the .zshrc carries.
 func writeTransientFile(path, body string) error {
 	//nolint:gosec // path is the caller's 0700 temp directory plus a fixed name.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is application-owned or validated beneath an authorized root
 	if err != nil {
 		return err
 	}

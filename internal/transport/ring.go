@@ -411,7 +411,7 @@ func (r *outputRing) bufIndex(offset uint64) int {
 	}
 	// offset - base - shift counts only bytes this buffer holds, and every
 	// term is bounded by RingCapacity, which is far below max int.
-	return int(offset - r.base - shift) //nolint:gosec
+	return int(offset - r.base - shift) // #nosec
 }
 
 // holeAtLocked returns the hole covering offset, if the offset names a byte

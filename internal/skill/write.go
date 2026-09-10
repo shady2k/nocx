@@ -80,7 +80,7 @@ func (OSFileSystem) MkdirAll(path string, perm os.FileMode) error {
 }
 
 func (OSFileSystem) OpenFile(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
-	return os.OpenFile(name, flag, perm) //nolint:gosec // the Store derives the path from a validated skill name
+	return os.OpenFile(name, flag, perm) // #nosec -- the Store derives the path from a validated skill name
 }
 
 func (OSFileSystem) Rename(oldPath, newPath string) error {
@@ -88,7 +88,7 @@ func (OSFileSystem) Rename(oldPath, newPath string) error {
 }
 
 func (OSFileSystem) Sync(path string) error {
-	file, err := os.Open(path) //nolint:gosec // the Store derives the path and opens only its own file or directory
+	file, err := os.Open(path) // #nosec -- the Store derives the path and opens only its own file or directory
 	if err != nil {
 		return err
 	}
@@ -746,7 +746,7 @@ func snapshotSkillDirectory(base string) (map[string][]byte, error) {
 		if relErr != nil {
 			return relErr
 		}
-		data, readErr := os.ReadFile(path) //nolint:gosec // path is beneath a contained skill directory
+		data, readErr := os.ReadFile(path) // #nosec -- path is beneath a contained skill directory
 		if readErr != nil {
 			return readErr
 		}

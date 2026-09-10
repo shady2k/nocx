@@ -82,7 +82,7 @@ func writeBackupFile(path string, contents []byte) error {
 }
 
 func syncBackupDirectory(dir string) error {
-	f, err := os.Open(dir) //nolint:gosec // directory is selected by the user
+	f, err := os.Open(dir) // #nosec -- directory is selected by the user
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,7 @@ func nativeSaveDialog(fileName string) (string, error) {
 
 func zenitySave(fileName string) (string, error) {
 	//nolint:gosec
-	cmd := exec.Command("zenity",
+	cmd := exec.Command("zenity", // #nosec G204 -- executable and arguments are fixed or validated before execution
 		"--file-selection",
 		"--save",
 		"--confirm-overwrite",
@@ -131,7 +131,7 @@ func osascriptCommand(fileName string) *exec.Cmd {
 	POSIX path of (choose file name with prompt "Save backup" default name (item 1 of argv))
 end run`
 	//nolint:gosec
-	return exec.Command("osascript", "-e", script, "--", fileName)
+	return exec.Command("osascript", "-e", script, "--", fileName) // #nosec G204 -- executable and arguments are fixed or validated before execution
 }
 
 func osascriptSave(fileName string) (string, error) {

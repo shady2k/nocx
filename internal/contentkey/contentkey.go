@@ -251,8 +251,8 @@ func deriveKeyWithSalt(cfg Config, salt []byte) ([]byte, error) {
 
 func appendUint64(b []byte, v uint64) []byte {
 	return append(b,
-		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
-		byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32), // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+		byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) // #nosec G115 -- value is range-bounded by the protocol or preceding validation
 }
 
 // writeSalt writes the salt atomically-enough: O_EXCL with 0600, so a racing
@@ -264,7 +264,7 @@ func writeSalt(path string, salt []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("content key: create salt dir: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is the app-owned config-dir salt, never caller input
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec -- path is the app-owned config-dir salt, never caller input
 	if err != nil {
 		return fmt.Errorf("content key: create salt: %w", err)
 	}

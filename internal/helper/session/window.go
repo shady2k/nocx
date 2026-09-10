@@ -110,7 +110,7 @@ func (w *window) write(p []byte) {
 		n := copy(w.pages[len(w.pages)-1][w.tail:], p)
 		w.tail += n
 		// copy returns 0 ≤ n ≤ pageSize; a stream offset is 64-bit.
-		w.written += proto.StreamOffset(n) //nolint:gosec
+		w.written += proto.StreamOffset(n) // #nosec
 		p = p[n:]
 
 		// Reclaim eagerly rather than on a low-water mark: an eager reclaim
@@ -146,7 +146,7 @@ func (w *window) read(offset proto.StreamOffset) ([]byte, proto.Resume) {
 	// base ≤ r.From < written, and written − base never exceeds
 	// maxPages × pageSize — the bound the window was built with, which is
 	// itself an int. The difference therefore fits an int on every platform.
-	rel := int(r.From - w.base) //nolint:gosec
+	rel := int(r.From - w.base) // #nosec
 	page := rel / pageSize
 	within := rel % pageSize
 	avail := pageSize - within

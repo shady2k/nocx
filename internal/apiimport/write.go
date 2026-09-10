@@ -377,7 +377,7 @@ func (osFS) Lstat(name string) (fs.FileInfo, error) { return os.Lstat(name) }
 // followed, so even a path that got past all of the above cannot pick the
 // file that gets overwritten.
 func (osFS) WriteFile(name string, b []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC, perm) //nolint:gosec // the path is minted by slug and re-checked by safeRelPath; O_EXCL refuses a symlink
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC, perm) // #nosec -- the path is minted by slug and re-checked by safeRelPath; O_EXCL refuses a symlink
 	if err != nil {
 		return err
 	}
@@ -395,7 +395,7 @@ func (osFS) WriteFile(name string, b []byte, perm os.FileMode) error {
 // path ImportInto has just created itself, and it reads nothing — the
 // handle exists to be fsynced and closed.
 func (osFS) Sync(name string) error {
-	f, err := os.Open(name) //nolint:gosec // reopens a path this package has just created, and reads none of it
+	f, err := os.Open(name) // #nosec -- reopens a path this package has just created, and reads none of it
 	if err != nil {
 		return err
 	}

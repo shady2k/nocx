@@ -225,7 +225,7 @@ func (s *Server) prepareDir() error {
 	//nolint:gosec // 0700 IS the mode this directory must carry: a directory
 	// needs its execute bit to be entered at all, and 0600 would make the
 	// socket inside unreachable to its own owner.
-	if err := os.Chmod(s.cfg.Dir, 0o700); err != nil {
+	if err := os.Chmod(s.cfg.Dir, 0o700); err != nil { // #nosec G302 -- permission mode is intentional for a non-secret directory or fixture
 		return fmt.Errorf("coordinator: set mode on runtime dir %s: %w", s.cfg.Dir, err)
 	}
 	owner, err := s.cfg.Owner.OwnerUID(s.cfg.Dir)

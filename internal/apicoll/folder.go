@@ -118,7 +118,7 @@ func (s *service) ReadRequest(h HandleID, relPath string) (Request, error) {
 		return Request{}, fmt.Errorf("%w: %q is not a regular file", ErrNotARequestPath, relPath)
 	}
 
-	raw, err := os.ReadFile(full) //nolint:gosec // full is validated to be inside the collection
+	raw, err := os.ReadFile(full) // #nosec -- full is validated to be inside the collection
 	if err != nil {
 		return Request{}, fmt.Errorf("apicoll: read request %q: %w", relPath, err)
 	}
@@ -292,7 +292,7 @@ func listContents(root string) ([]RequestRef, []string, []string, []MalformedRef
 			return nil
 		}
 
-		raw, err := os.ReadFile(p) //nolint:gosec // p came from walking the collection root
+		raw, err := os.ReadFile(p) // #nosec -- p came from walking the collection root
 		if err != nil {
 			bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})
 			return nil

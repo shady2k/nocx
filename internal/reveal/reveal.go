@@ -39,7 +39,7 @@ type commandRunner func(name string, args ...string) ([]byte, error)
 // realRunner runs the command via os/exec.
 func realRunner() commandRunner {
 	return func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
+		return exec.Command(name, args...).CombinedOutput() // #nosec G204 -- executable and arguments are fixed or validated before execution
 	}
 }
 

@@ -649,7 +649,7 @@ func writePacket(c net.Conn, body []byte) error {
 		return fmt.Errorf("mux: message body is %d bytes, outside 1..%d", len(body), maxPacket)
 	}
 	buf := make([]byte, 0, 4+len(body))
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(body))) //nolint:gosec // bounded to maxPacket immediately above
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(body))) // #nosec -- bounded to maxPacket immediately above
 	buf = append(buf, body...)
 	_, err := c.Write(buf)
 	return err
@@ -663,7 +663,7 @@ func (e *encoder) u32(v uint32) { e.b = binary.BigEndian.AppendUint32(e.b, v) }
 // it lands in is: writePacket refuses anything past maxPacket, so an
 // over-long string cannot leave this package.
 func (e *encoder) str(s string) {
-	e.u32(uint32(len(s))) //nolint:gosec // the enclosing body is bounded by writePacket
+	e.u32(uint32(len(s))) // #nosec -- the enclosing body is bounded by writePacket
 	e.b = append(e.b, s...)
 }
 
@@ -694,7 +694,7 @@ func (d *decoder) u32() uint32 {
 func (d *decoder) str() string {
 	n := d.u32()
 	//nolint:gosec // d.b came from readPacket, which bounds it to maxPacket
-	if d.err != nil || uint32(len(d.b)) < n {
+	if d.err != nil || uint32(len(d.b)) < n { // #nosec G115 -- value is range-bounded by the protocol or preceding validation
 		d.err = errors.New("mux: message ended mid-string")
 		return ""
 	}

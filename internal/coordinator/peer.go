@@ -82,5 +82,5 @@ func (SystemPathOwner) OwnerUID(path string) (uint32, error) {
 // and everything that compares uids uses uint32, and a cast repeated at
 // each call site is a cast that has to be argued about at each call site.
 func SelfUID() uint32 {
-	return uint32(os.Getuid()) //nolint:gosec // a uid is a uint32 on every platform this builds for
+	return uint32(os.Getuid()) // #nosec -- a uid is a uint32 on every platform this builds for
 }

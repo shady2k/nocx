@@ -795,7 +795,7 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		return
 	}
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
-	cmd := exec.Command(bash, "-c", command)
+	cmd := exec.Command(bash, "-c", command) // #nosec G204 -- executable and arguments are fixed or validated before execution
 	cmd.Env = sessionEnv(bash)
 	cmd.Stdin = slave
 	cmd.Stdout = slave
@@ -901,7 +901,7 @@ func startPipeCommand(ch gossh.Channel, st *sessionState, command string) {
 		return
 	}
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
-	cmd := exec.Command(bash, "-c", command)
+	cmd := exec.Command(bash, "-c", command) // #nosec G204 -- executable and arguments are fixed or validated before execution
 	cmd.Env = sessionEnv(bash)
 	// STDIN THROUGH AN os.Pipe, NOT THE CHANNEL ITSELF, and the indirection is
 	// the whole point. os/exec only hands a descriptor straight to the child

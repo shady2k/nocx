@@ -205,7 +205,7 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 	//
 	// placeholders is "?,?,…" derived from len(ids) alone: no value reaches
 	// the statement text, every id is bound.
-	prose := `DELETE FROM entries WHERE kind = 'text' AND parent_id IN (` + placeholders + `)` //nolint:gosec // see above
+	prose := `DELETE FROM entries WHERE kind = 'text' AND parent_id IN (` + placeholders + `)` // #nosec -- see above
 	proseRes, err := tx.ExecContext(ctx, prose, args...)
 	if err != nil {
 		return EvictionResult{}, fmt.Errorf("content: evict: remove the prose of the run: %w", err)
@@ -220,14 +220,14 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 	// its seat. The seat is derived from what is stored (AddCause) —
 	// a row with no parent has no place in any ordering — so the children
 	// of the victims are detached in their own UPDATE, before the DELETE.
-	detach := `UPDATE entries SET pos = NULL WHERE parent_id IN (` + placeholders + `)` //nolint:gosec // see above
+	detach := `UPDATE entries SET pos = NULL WHERE parent_id IN (` + placeholders + `)` // #nosec -- see above
 	if _, detErr := tx.ExecContext(ctx, detach, args...); detErr != nil {
 		return EvictionResult{}, fmt.Errorf("content: evict: detach the children of the run: %w", detErr)
 	}
 
 	// Edges, executions, artifacts, chunks and grants cascade from the
 	// entry (schema question 5) — the DELETE is the whole removal.
-	del := `DELETE FROM entries WHERE id IN (` + placeholders + `)` //nolint:gosec // see above
+	del := `DELETE FROM entries WHERE id IN (` + placeholders + `)` // #nosec -- see above
 	res, err := tx.ExecContext(ctx, del, args...)
 	if err != nil {
 		return EvictionResult{}, err
@@ -689,7 +689,7 @@ func unitBodies(ctx context.Context, tx *sql.Tx, units []string) ([]victimBody, 
 	// placeholders is "?,?,…" derived from len(units) alone, and unitKeyExpr
 	// is a package constant: no value reaches the statement text, every key
 	// is bound.
-	q := unitBodiesHead + placeholders + unitBodiesTail //nolint:gosec // see above
+	q := unitBodiesHead + placeholders + unitBodiesTail // #nosec -- see above
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("content: evict bodies: select bodies: %w", err)

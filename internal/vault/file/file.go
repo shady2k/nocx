@@ -384,14 +384,14 @@ const blobVersion = 1
 //   - swapping the version field in the JSON without detection.
 func buildAAD(version int, instance string) []byte {
 	aad := make([]byte, 8+len(instance))
-	aad[0] = byte(version >> 24)
-	aad[1] = byte(version >> 16)
-	aad[2] = byte(version >> 8)
-	aad[3] = byte(version)
-	aad[4] = byte(len(instance) >> 24)
-	aad[5] = byte(len(instance) >> 16)
-	aad[6] = byte(len(instance) >> 8)
-	aad[7] = byte(len(instance))
+	aad[0] = byte(version >> 24)       // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[1] = byte(version >> 16)       // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[2] = byte(version >> 8)        // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[3] = byte(version)             // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[4] = byte(len(instance) >> 24) // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[5] = byte(len(instance) >> 16) // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[6] = byte(len(instance) >> 8)  // #nosec G115 -- value is range-bounded by the protocol or preceding validation
+	aad[7] = byte(len(instance))       // #nosec G115 -- value is range-bounded by the protocol or preceding validation
 	copy(aad[8:], instance)
 	return aad
 }

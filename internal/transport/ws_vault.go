@@ -663,7 +663,7 @@ func readKeyFile(path string) (string, error) {
 	// why the contents go straight into the vault and are never echoed back:
 	// an attacker who could steer this call must not also be able to read what
 	// it found.
-	data, err := os.ReadFile(expanded) //nolint:gosec // see above: user-named path, user-owned file, contents never returned
+	data, err := os.ReadFile(expanded) // #nosec -- see above: user-named path, user-owned file, contents never returned
 	if err != nil {
 		return "", err
 	}

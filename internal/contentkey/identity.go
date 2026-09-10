@@ -51,7 +51,8 @@ func machineIDOrMinted(configDir string) (string, error) {
 // the winner's file rather than overwriting it, because an id that changes
 // between starts would strand the database exactly as a lost salt does.
 func loadOrMintMachineID(path string) (string, error) {
-	if b, err := os.ReadFile(path); err == nil && len(b) > 0 { //nolint:gosec // app-owned config path, never caller input
+	//nolint:gosec // The path is the app-owned machine-id location.
+	if b, err := os.ReadFile(path); err == nil && len(b) > 0 { // #nosec G304 -- app-owned config path, never caller input
 		return string(b), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -62,10 +63,11 @@ func loadOrMintMachineID(path string) (string, error) {
 		return "", fmt.Errorf("generate machine-id: %w", err)
 	}
 	id := hex.EncodeToString(raw[:])
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // app-owned config path, never caller input
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec -- app-owned config path, never caller input
 	if err != nil {
 		// Lost the race, or the file appeared between the read and now.
-		if b, readErr := os.ReadFile(path); readErr == nil && len(b) > 0 { //nolint:gosec // same app-owned path
+		//nolint:gosec // The path is the same app-owned machine-id location.
+		if b, readErr := os.ReadFile(path); readErr == nil && len(b) > 0 { // #nosec G304 -- same app-owned path
 			return string(b), nil
 		}
 		return "", fmt.Errorf("create machine-id: %w", err)

@@ -230,7 +230,7 @@ func validateEnvironmentPath(relPath string) error {
 // environment or request file is opened. A second version field here would
 // be a second answer to one question.
 func readEnvironmentFile(full string) (Environment, error) {
-	raw, err := os.ReadFile(full) //nolint:gosec // full is validated to be inside the collection
+	raw, err := os.ReadFile(full) // #nosec -- full is validated to be inside the collection
 	if err != nil {
 		return Environment{}, err
 	}

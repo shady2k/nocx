@@ -75,13 +75,13 @@ func (p *linuxPlatform) Preflight(_ context.Context, installPath string) error {
 func (p *linuxPlatform) Extract(_ context.Context, archivePath, destDir string) error {
 	staged := filepath.Join(destDir, filepath.Base(archivePath))
 
-	src, err := os.Open(archivePath) //nolint:gosec // archivePath is from manifest-download, integrity-verified
+	src, err := os.Open(archivePath) // #nosec -- archivePath is from manifest-download, integrity-verified
 	if err != nil {
 		return fmt.Errorf("open archive %s: %w", archivePath, err)
 	}
 	defer func() { _ = src.Close() }()
 
-	dst, err := os.Create(staged) //nolint:gosec // staged path is constructed in destDir
+	dst, err := os.Create(staged) // #nosec -- staged path is constructed in destDir
 	if err != nil {
 		return fmt.Errorf("create staged file %s: %w", staged, err)
 	}
@@ -95,8 +95,8 @@ func (p *linuxPlatform) Extract(_ context.Context, archivePath, destDir string) 
 		_ = os.Remove(staged)
 		return fmt.Errorf("close staged file: %w", err)
 	}
-
-	if err := os.Chmod(staged, 0o755); err != nil { //nolint:gosec // AppImage must be executable
+	//nolint:gosec // AppImage must be executable.
+	if err := os.Chmod(staged, 0o755); err != nil { // #nosec G302 -- AppImage must be executable
 		_ = os.Remove(staged)
 		return fmt.Errorf("set executable bit on staged AppImage %s: %w", staged, err)
 	}
@@ -123,7 +123,7 @@ func (p *linuxPlatform) VerifyExtracted(_ context.Context, bundlePath string) er
 	}
 
 	// Read the first 11 bytes to check ELF + AppImage magic.
-	f, err := os.Open(bundlePath) //nolint:gosec // bundlePath is caller-controlled, integrity already verified
+	f, err := os.Open(bundlePath) // #nosec -- bundlePath is caller-controlled, integrity already verified
 	if err != nil {
 		return fmt.Errorf("open staged bundle %s for magic check: %w", bundlePath, err)
 	}

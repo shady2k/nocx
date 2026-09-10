@@ -1126,7 +1126,7 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
 	}
-	document, err := os.ReadFile(srcPath) //nolint:gosec // the import document is the path the user chose; it is Lstat-checked as a regular file just above
+	document, err := os.ReadFile(srcPath) // #nosec -- the import document is the path the user chose; it is Lstat-checked as a regular file just above
 	if err != nil {
 		return nil, fmt.Errorf("capability: read the import document: %w", err)
 	}
@@ -1270,7 +1270,7 @@ func openImportArchive(srcPath string) (*os.File, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
 	}
-	f, err := os.Open(srcPath) //nolint:gosec // the archive path is chosen by the user and was Lstat-checked above
+	f, err := os.Open(srcPath) // #nosec -- the archive path is chosen by the user and was Lstat-checked above
 	if err != nil {
 		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
 	}
@@ -1341,7 +1341,7 @@ func (s *apiImportService) PreviewPostmanPath(ctx context.Context, srcPath strin
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
 	}
-	document, err := os.ReadFile(srcPath) //nolint:gosec // the path is the user's own choice and was Lstat-checked just above
+	document, err := os.ReadFile(srcPath) // #nosec -- the path is the user's own choice and was Lstat-checked just above
 	if err != nil {
 		return nil, fmt.Errorf("capability: read the import document: %w", err)
 	}

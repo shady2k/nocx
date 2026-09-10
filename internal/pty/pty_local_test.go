@@ -198,6 +198,14 @@ func TestScrubLauncherSession(t *testing.T) {
 		"CLAUDE_CODE_CHILD_SESSION=1",
 		"CLAUDE_CODE_SESSION_ID=abc",
 		"CLAUDE_PID=123",
+		"NOCX_BOOTSTRAP_FD=4",
+		"NOCX_LIFECYCLE_DOMAIN=domain",
+		"NOCX_LIFECYCLE_EPOCH=1",
+		"NOCX_LIFECYCLE_FD=3",
+		"NOCX_LIFECYCLE_LANE=lane",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=session",
+		"NOCX_SHELL_INTEGRATION=1",
 		// Coding agents export these for their own tools; leaking them into a
 		// PTY makes TUIs render black-and-white.
 		"TERM=dumb",
@@ -207,10 +215,24 @@ func TestScrubLauncherSession(t *testing.T) {
 		// tool this fix exists for.
 		"CLAUDE_API_KEY=secret",
 	}
-
 	got := scrubLauncherSession(env)
 
-	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID=", "TERM=", "NO_COLOR="} {
+	for _, unwanted := range []string{
+		"CLAUDECODE=",
+		"CLAUDE_CODE_CHILD_SESSION=",
+		"CLAUDE_CODE_SESSION_ID=",
+		"CLAUDE_PID=",
+		"NOCX_BOOTSTRAP_FD=",
+		"NOCX_LIFECYCLE_DOMAIN=",
+		"NOCX_LIFECYCLE_EPOCH=",
+		"NOCX_LIFECYCLE_FD=",
+		"NOCX_LIFECYCLE_LANE=",
+		"NOCX_PROMPT_MODE=",
+		"NOCX_SESSION_ID=",
+		"NOCX_SHELL_INTEGRATION=",
+		"TERM=",
+		"NO_COLOR=",
+	} {
 		for _, kv := range got {
 			if strings.HasPrefix(kv, unwanted) {
 				t.Errorf("launcher session marker survived: %q", kv)

@@ -236,7 +236,7 @@ func (u *updater) downloadVerified(ctx context.Context, url, sha256Hex string, s
 	if limit < 0 {
 		limit = size
 	}
-	f, err := os.Create(destPath) //nolint:gosec // destPath is constructed in the extraction dir
+	f, err := os.Create(destPath) // #nosec -- destPath is constructed in the extraction dir
 	if err != nil {
 		return fmt.Errorf("create download file %s: %w", destPath, err)
 	}

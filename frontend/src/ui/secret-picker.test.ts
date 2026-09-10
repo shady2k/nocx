@@ -5,7 +5,7 @@
 // silently, space closes, only Enter/Tab inserts. Keyboard-behavior tests
 // drive handleKey directly (the editor's arbiter chain is terminal-content's
 // wiring, tested there); rendering is asserted through the panel's DOM.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, type Mock } from 'vitest'
 import {
   SecretPicker,
   storeSecretLabel,
@@ -38,27 +38,29 @@ const UNSEALED: VaultStatus = {
 interface Harness {
   picker: SecretPicker
   source: {
-    status: ReturnType<typeof vi.fn>
-    list: ReturnType<typeof vi.fn>
-    requestUnseal: ReturnType<typeof vi.fn>
-    requestCreate: ReturnType<typeof vi.fn>
-    requestSetup: ReturnType<typeof vi.fn>
+    status: Mock<() => Promise<{ state: 'uninitialized' | 'sealed' | 'unsealed' }>>
+    list: Mock<() => Promise<InventoryEntry[]>>
+    requestUnseal: Mock<() => Promise<void>>
+    requestCreate: Mock<(name: string, value?: string) => Promise<InventoryEntry | undefined>>
+    requestSetup: Mock<() => Promise<boolean>>
   }
-  onInsert: ReturnType<typeof vi.fn>
+  onInsert: Mock<(name: string) => void>
   onError: (message: string, error: unknown) => unknown
   container: HTMLElement
 }
 
 function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): Harness {
   const source = {
-    status: vi.fn(() => Promise.resolve(status)),
-    list: vi.fn(() => Promise.resolve(entries)),
-    requestUnseal: vi.fn(() => Promise.resolve()),
-    requestCreate: vi.fn(),
-    requestSetup: vi.fn(() => Promise.resolve(false)),
+    status: vi
+      .fn<() => Promise<{ state: 'uninitialized' | 'sealed' | 'unsealed' }>>()
+      .mockResolvedValue(status),
+    list: vi.fn<() => Promise<InventoryEntry[]>>().mockResolvedValue(entries),
+    requestUnseal: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    requestCreate: vi.fn<(name: string, value?: string) => Promise<InventoryEntry | undefined>>(),
+    requestSetup: vi.fn<() => Promise<boolean>>().mockResolvedValue(false),
   } satisfies SecretPickerSource
-  const onInsert = vi.fn()
-  const onError = vi.fn()
+  const onInsert = vi.fn<(name: string) => void>()
+  const onError = vi.fn<(message: string, error: unknown) => void>()
   const callbacks: SecretPickerCallbacks = { onInsert, onError }
   const picker = new SecretPicker(source, callbacks)
   const container = document.createElement('div')

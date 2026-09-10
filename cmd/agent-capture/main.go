@@ -193,7 +193,7 @@ func runReplayCommand(args []string, stdout, stderr io.Writer) error {
 }
 
 func parseScript(path string) ([]scriptStep, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // the operator explicitly supplies the script path
+	data, err := os.ReadFile(path) // #nosec -- the operator explicitly supplies the script path
 	if err != nil {
 		return nil, fmt.Errorf("cannot read script: %w", err)
 	}
@@ -311,10 +311,10 @@ func parseMarks(text string) ([]int64, error) {
 
 func captureProgram(outPath string, argv []string, cols, rows int, timeout time.Duration, steps []scriptStep, scriptProvided bool, stderr io.Writer) error {
 	//nolint:gosec // the operator explicitly supplies the program and arguments
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.Command(argv[0], argv[1:]...) // #nosec G204 -- executable and arguments are fixed or validated before execution
 	cmd.Env = pinnedEnvironment(cols, rows)
 	//nolint:gosec // cols and rows are validated against uint16 bounds before this call
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- value is range-bounded by the protocol or preceding validation
 	if err != nil {
 		return fmt.Errorf("cannot start %q on a PTY: %w", argv[0], err)
 	}
@@ -500,7 +500,7 @@ func scriptLabels(steps []scriptStep) []string {
 }
 
 func writeCapture(path string, header captureHeader, chunks []captureChunk) error {
-	file, err := os.Create(path) //nolint:gosec // the operator explicitly supplies the capture path
+	file, err := os.Create(path) // #nosec -- the operator explicitly supplies the capture path
 	if err != nil {
 		return fmt.Errorf("cannot create capture %q: %w", path, err)
 	}
@@ -551,7 +551,7 @@ func replayCapture(path string, marks []int64, stdout io.Writer) (err error) {
 }
 
 func readCapture(path string) (captureHeader, []captureChunk, error) {
-	file, err := os.Open(path) //nolint:gosec // the operator explicitly supplies the capture path
+	file, err := os.Open(path) // #nosec -- the operator explicitly supplies the capture path
 	if err != nil {
 		return captureHeader{}, nil, fmt.Errorf("cannot open capture %q: %w", path, err)
 	}

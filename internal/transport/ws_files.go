@@ -430,7 +430,7 @@ func filesPollJitterForEndpoint(endpointID string) *rand.Rand {
 	if endpointID == "" {
 		return nil
 	}
-	return rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) //nolint:gosec // jitter only spaces remote polling; it cannot grant access, alter watched paths, or affect authorization
+	return rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) // #nosec -- jitter only spaces remote polling; it cannot grant access, alter watched paths, or affect authorization
 }
 
 // markVisibleCatchUp records the exact paths present at a visibility edge.

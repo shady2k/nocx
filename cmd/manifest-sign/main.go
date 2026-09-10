@@ -84,11 +84,11 @@ func run(keygen, verifyMode bool, in, out, sig string) error {
 // release is dead — so the workflow runs this between signing and publishing,
 // against the keyring compiled from the same tree it is building (nocx-1d54).
 func verify(in, sigPath string, keyring []ed25519.PublicKey) error {
-	body, err := os.ReadFile(in) //nolint:gosec // in is an explicit CLI argument: the manifest path
+	body, err := os.ReadFile(in) // #nosec -- in is an explicit CLI argument: the manifest path
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
 	}
-	raw, err := os.ReadFile(sigPath) //nolint:gosec // sigPath is an explicit CLI argument
+	raw, err := os.ReadFile(sigPath) // #nosec -- sigPath is an explicit CLI argument
 	if err != nil {
 		return fmt.Errorf("read signature: %w", err)
 	}
@@ -140,7 +140,7 @@ func sign(in, out string) error {
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
 
-	msg, err := os.ReadFile(in) //nolint:gosec // in is an explicit CLI argument: the manifest path
+	msg, err := os.ReadFile(in) // #nosec -- in is an explicit CLI argument: the manifest path
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
 	}
@@ -150,7 +150,7 @@ func sign(in, out string) error {
 		fmt.Print(sig)
 		return nil
 	}
-	if err := os.WriteFile(out, []byte(sig), 0o600); err != nil {
+	if err := os.WriteFile(out, []byte(sig), 0o600); err != nil { // #nosec G703 -- path is an explicit CLI input or validated repository path
 		return fmt.Errorf("write signature: %w", err)
 	}
 	return nil

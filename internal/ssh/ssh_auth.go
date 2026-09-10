@@ -363,7 +363,7 @@ func (rc *RealClient) agentMethods() []gossh.AuthMethod {
 		return nil
 	}
 
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.Dial("unix", sock) // #nosec G704 -- socket target is the user-selected local SSH agent endpoint
 	if err != nil {
 		return nil
 	}
@@ -371,7 +371,7 @@ func (rc *RealClient) agentMethods() []gossh.AuthMethod {
 
 	return []gossh.AuthMethod{
 		gossh.PublicKeysCallback(func() ([]gossh.Signer, error) {
-			conn, err := net.Dial("unix", sock)
+			conn, err := net.Dial("unix", sock) // #nosec G704 -- socket target is the user-selected local SSH agent endpoint
 			if err != nil {
 				return nil, err
 			}

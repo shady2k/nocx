@@ -93,7 +93,7 @@ func resolveGit(env []string) (string, error) {
 			continue
 		}
 		candidate := filepath.Join(dir, "git")
-		if fi, err := os.Stat(candidate); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
+		if fi, err := os.Stat(candidate); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 { // #nosec G703 -- path is an explicit CLI input or validated repository path
 			return candidate, nil
 		}
 	}

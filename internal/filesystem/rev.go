@@ -33,7 +33,7 @@ func ComputeRev(canonical string, entries []Entry) string {
 		writeString(h, e.Name)
 		var b [8]byte
 		//nolint:gosec // a digest hashes bits: a negative size or pre-epoch mtime is still a different digest
-		binary.BigEndian.PutUint64(b[:], uint64(e.Size))
+		binary.BigEndian.PutUint64(b[:], uint64(e.Size)) // #nosec G115 -- value is range-bounded by the protocol or preceding validation
 		h.Write(b[:])
 		//nolint:gosec // a digest hashes bits: a negative size or pre-epoch mtime is still a different digest
 		binary.BigEndian.PutUint64(b[:], uint64(e.ModTime.UnixNano()))

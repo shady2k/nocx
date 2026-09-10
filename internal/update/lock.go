@@ -19,7 +19,7 @@ type flock struct {
 // acquireLock acquires an exclusive advisory flock, blocking until
 // the lock is available.
 func acquireLock(path string) (*flock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) //nolint:gosec // path is caller-controlled, permission is read-only
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) // #nosec -- path is caller-controlled, permission is read-only
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}
@@ -34,7 +34,7 @@ func acquireLock(path string) (*flock, error) {
 // bounded timeout. It returns nil, nil if the lock cannot be
 // acquired within the timeout (another process is mid-update).
 func tryLock(ctx context.Context, path string) (*flock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) //nolint:gosec // path is caller-controlled, permission is read-only
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) // #nosec -- path is caller-controlled, permission is read-only
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}

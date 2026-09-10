@@ -20,13 +20,13 @@ func (osFS) Stat(path string) (iofs.FileInfo, error) { return os.Stat(path) }
 func (osFS) MkdirAll(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
 
 func (osFS) Open(path string) (io.ReadCloser, error) {
-	return os.Open(path) //nolint:gosec // the caller names the path; this seam has no policy of its own
+	return os.Open(path) // #nosec -- the caller names the path; this seam has no policy of its own
 }
 
 func (osFS) Create(path string, mode os.FileMode) (File, error) {
 	// O_EXCL: the temporary name carries a nonce, so an existing file
 	// under it is not a race we should write through.
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) //nolint:gosec // ditto
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) // #nosec -- ditto
 }
 
 func (osFS) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
@@ -38,7 +38,7 @@ func (osFS) ReadDir(path string) ([]iofs.DirEntry, error) { return os.ReadDir(pa
 // SyncDir fsyncs a directory so a rename into it is durable across a power
 // cut — the same step writeJournal takes for the same reason.
 func (osFS) SyncDir(path string) error {
-	d, err := os.Open(path) //nolint:gosec // caller-named directory
+	d, err := os.Open(path) // #nosec -- caller-named directory
 	if err != nil {
 		return err
 	}

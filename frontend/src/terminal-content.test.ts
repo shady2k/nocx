@@ -99,7 +99,9 @@ vi.mock('./capability', async () => {
 // The shared fixture mock implements the full TerminalRenderer surface,
 // including the recovery-fence seam and the _fire* test helpers.
 vi.mock('./renderers/xterm', () => ({
-  XtermRenderer: vi.fn(createRendererMock),
+  XtermRenderer: vi.fn(function () {
+    return createRendererMock()
+  }),
 }))
 
 // The refusal path calls showToast, which mounts a Solid root; the
@@ -12632,7 +12634,7 @@ describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () =>
    *  moment a subscription installed after the bind has already missed. */
   const reclaimingPaneReporting = async (cwd: string) => {
     const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         renderer._fireCwd('', cwd)
@@ -12691,7 +12693,7 @@ describe('a reclaimed pane shows the work that never stopped (nocx-ht15k)', () =
     // before the mount because that is when it is awaited.
     const { XtermRenderer } = await import('./renderers/xterm')
     let replayed = false
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         if (!replayed) {

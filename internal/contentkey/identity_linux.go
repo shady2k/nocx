@@ -14,7 +14,7 @@ import (
 // must never sit beside content.db.
 func readMachineID() (string, error) {
 	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
-		b, err := os.ReadFile(p) //nolint:gosec // p is a fixed constant path, never caller input
+		b, err := os.ReadFile(p) // #nosec -- p is a fixed constant path, never caller input
 		if err == nil {
 			if s := strings.TrimSpace(string(b)); s != "" {
 				return s, nil

@@ -28,7 +28,7 @@ type fileLock struct {
 // a second nocx-server against one app directory must refuse to start, not
 // queue behind the incumbent and become a second daemon when it exits.
 func acquireLock(path string) (*fileLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // app-owned runtime path, never caller input
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec -- app-owned runtime path, never caller input
 	if err != nil {
 		return nil, fmt.Errorf("coordinator: open lock %s: %w", path, err)
 	}

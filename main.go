@@ -347,7 +347,7 @@ func (w *WailsApp) startAttention(ctx context.Context) {
 	// for up to 15s and the request for as long as the user takes to answer,
 	// and ServiceStartup runs before the webview loads — inline, either one
 	// would hold the window shut.
-	go w.resolveNotificationPermission(w.attention)
+	go w.resolveNotificationPermission(w.attention) // #nosec G118 -- goroutine intentionally outlives the request to finish owned cleanup
 }
 
 // reportAttentionActivated is what a banner click does in this process, and

@@ -106,7 +106,7 @@ func (h askResolverHandlers) handlePasswordResolved(req jsonrpcRequest) {
 
 	switch params.Outcome {
 	case "submitted":
-		payload, err := json.Marshal(passwordAnswerPayload{Password: params.Password, Remember: params.Remember})
+		payload, err := json.Marshal(passwordAnswerPayload{Password: params.Password, Remember: params.Remember}) // #nosec G117 -- password is ephemeral transport payload and is never persisted or logged
 		if err != nil {
 			pa.ch <- askResolution{err: fmt.Errorf("encode password answer: %w", err)}
 		} else {

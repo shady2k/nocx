@@ -64,6 +64,10 @@ type Registrar struct {
 	// root; this package knows only that a participant has one.
 	closer Closer
 
+	// screener reads a participant's pane (nocx-f545a.6), for closer's
+	// reason: the grid is the composition root's, not this package's.
+	screener Screener
+
 	// attention is the undispatched fact set and its two routes out
 	// (nocx-dkawo.3). It is never nil: an unwired one still records every
 	// fact and says at Error that it has nothing to reach anyone with, which
@@ -109,6 +113,11 @@ func WithEnrolmentDeadline(d time.Duration) Option {
 // refuses and says so, rather than reporting a worker ended that is still
 // running.
 func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
+
+// WithScreener wires the seam that reads a participant's pane. Without it
+// Screen refuses and says so, rather than answering an empty screen that a
+// coordinator would read as a pane with nothing on it.
+func WithScreener(s Screener) Option { return func(r *Registrar) { r.screener = s } }
 
 // WithBackstop replaces the undispatched fact set. The composition root
 // supplies one wired to the pane typist and to the notification pipeline; the
@@ -339,6 +348,45 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 		return errors.Join(cause, fmt.Errorf("worker: terminalize: %w", err))
 	}
 	return cause
+}
+
+// Screen reads what a participant's pane is showing, for the session that
+// holds it (nocx-f545a.6, ADR-0064 §2).
+//
+// It asks the two questions Close asks and in the same order, because they
+// are the same authority question about the same participant: is it this
+// session's (ErrNotHeld when not), and does the delegation still permit the
+// act (ErrNotDelegated when not). The act here is EffectObserve, which a human
+// takeover leaves in place — a person helping a worker past a prompt does not
+// blind its coordinator to the prompt.
+//
+// A participant that has already ended has no pane to read, and that is an
+// answer rather than an error: the screener is not asked, and the screen says
+// it is not readable.
+//
+// It writes nothing, and nothing it reads is kept.
+func (r *Registrar) Screen(ctx context.Context, coordinatorSession string, id ParticipantID) (PaneScreen, error) {
+	if r.screener == nil {
+		return PaneScreen{}, errors.New("worker: this backend cannot read a participant's pane")
+	}
+	del, err := r.store.Delegation(ctx, id)
+	if err != nil {
+		return PaneScreen{}, err
+	}
+	if del.ControllerSession != coordinatorSession {
+		return PaneScreen{}, fmt.Errorf("worker: participant %q is held by another session: %w", id, ErrNotHeld)
+	}
+	p, err := r.store.Participant(ctx, id)
+	if err != nil {
+		return PaneScreen{}, err
+	}
+	if p.State.Terminal() {
+		return PaneScreen{}, nil
+	}
+	if !del.Permits(EffectObserve) {
+		return PaneScreen{}, fmt.Errorf("worker: participant %q, delegation is %s: %w", id, del.State, ErrNotDelegated)
+	}
+	return r.screener.ReadScreen(ctx, p)
 }
 
 // Declared admits the participant's own terminal fact and reduces.

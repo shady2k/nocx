@@ -2058,6 +2058,11 @@ func New(opts ...Option) (*App, error) {
 		// which is the right answer: reporting a worker ended that is still
 		// running is the one thing a close must never do.
 		workers.WithCloser(&workerCloser{sessions: sess, log: logger}),
+		// The seam a coordinator's workers.screen reaches (nocx-f545a.6):
+		// paneGrid and paneWatch are the SAME grid and watcher the enrolment
+		// act opens and the typing gate reads, so what a coordinator is shown
+		// is the screen every other decision about that pane is made from.
+		workers.WithScreener(&workerScreener{grid: paneGrid, watch: paneWatch}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)

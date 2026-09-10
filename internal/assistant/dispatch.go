@@ -159,6 +159,9 @@ var workerMethodNames = [...]string{
 	"workers.wait",
 	"workers.holdings",
 	"workers.close",
+	// A held worker's pane, read (nocx-f545a.6). Same surface, same authority
+	// as close: the coordinator's own participants and no other pane.
+	"workers.screen",
 	// The participant's one call (nocx-rowqt.9). It belongs on this list for
 	// the same reason the other five do — it is part of the worker surface the
 	// endpoint exposes — and NOT because it shares their authority: it

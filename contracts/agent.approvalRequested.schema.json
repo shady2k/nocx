@@ -61,7 +61,8 @@
         "workers.say",
         "workers.wait",
         "workers.inbox",
-        "workers.close"
+        "workers.close",
+        "workers.screen"
       ]
     },
     "callId": {

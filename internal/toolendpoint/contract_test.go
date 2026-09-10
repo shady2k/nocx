@@ -66,6 +66,14 @@ func (contractWorkerRecord) Close(context.Context, string, workers.ParticipantID
 
 func (contractWorkerRecord) Undispatched() []workers.Fact { return nil }
 
+func (contractWorkerRecord) Screen(context.Context, string, workers.ParticipantID) (workers.PaneScreen, error) {
+	return workers.PaneScreen{
+		Readable: true,
+		State:    "permission_choice",
+		Rows:     []string{"Quick safety check: Is this a project you created or one you trust?", "", "❯ No, exit", "  Yes, I trust this folder"},
+	}, nil
+}
+
 func contractWorkerParticipants() []workers.Participant {
 	return []workers.Participant{{
 		ID:    "worker-1",
@@ -175,6 +183,7 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 		{method: "workers.say", params: `{"worker":"worker-1","message":"the wire is a party"}`, result: "workers.say"},
 		{method: "workers.wait", params: `{}`, result: "workers.wait"},
 		{method: "workers.close", params: `{"worker":"worker-1"}`, result: "workers.close"},
+		{method: "workers.screen", params: `{"worker":"worker-1"}`, result: "workers.screen"},
 	}
 
 	for i, tc := range cases {

@@ -465,9 +465,13 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		// a message out of your own mailbox exercises no authority over
 		// anything but your own reading position.
 		"workers.inbox": {content.EffectObserve},
+		// OBSERVE for the screen (nocx-f545a.6): reading a held worker's pane
+		// is the delegation's EffectObserve, which a human takeover leaves in
+		// place, and it writes nothing anywhere.
+		"workers.screen": {content.EffectObserve},
 	}
-	if len(declarations) != 30 {
-		t.Fatalf("declaration count = %d, want 30", len(declarations))
+	if len(declarations) != 31 {
+		t.Fatalf("declaration count = %d, want 31", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -592,6 +596,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		// The screen takes one worker id, exactly the shape close takes
+		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
+		"workers.screen.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -642,7 +649,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	// workers.holdings joins them for the same reason session.wait did: it is
 	// an observe tool over a session, and "what is my session responsible
 	// for" is a question about the session the grant already named.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
+	// workers.screen joins them too (nocx-f545a.6): observe, over the same
+	// session, and the record refuses any pane that session does not hold.
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait", "workers.screen"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -754,6 +763,9 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"workers.close.schema.json":    workerCloseSchema,
 		"workers.spawn.schema.json":    workerSpawnSchema,
 		"workers.inbox.schema.json":    workerInboxSchema,
+		// The screen takes one worker id, exactly the shape close takes
+		// (nocx-f545a.6), so close's fixture is the right one to assemble it.
+		"workers.screen.schema.json": workerCloseSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

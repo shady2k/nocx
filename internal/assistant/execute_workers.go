@@ -51,6 +51,9 @@ type WorkerRecord interface {
 	// Close ends a participant. It writes no state: the exit it causes
 	// reaches the record by the ordinary path.
 	Close(ctx context.Context, coordinatorSession string, id workers.ParticipantID) error
+	// Screen reads what a participant's pane is showing, for the session
+	// that holds it (nocx-f545a.6). It writes nothing and keeps nothing.
+	Screen(ctx context.Context, coordinatorSession string, id workers.ParticipantID) (workers.PaneScreen, error)
 	// Undispatched is what the record still owes judgement on. It is read
 	// BEFORE HeldBy, because HeldBy is the fetch that clears it (D8): asking
 	// afterwards would always answer nothing, which is a truthful answer to
@@ -131,6 +134,20 @@ const defaultWorkerWait = 120 * time.Second
 
 type workerCloseParams struct {
 	Worker string `json:"worker"`
+}
+
+type workerScreenParams struct {
+	Worker string `json:"worker"`
+}
+
+// workerScreenResult is a held worker's pane, as rows of text (ADR-0064 §2).
+// Rows is always present, and empty when the pane cannot be read, so a
+// coordinator never has to tell an absent field from an empty screen.
+type workerScreenResult struct {
+	Worker   string   `json:"worker"`
+	Readable bool     `json:"readable"`
+	State    string   `json:"state,omitempty"`
+	Rows     []string `json:"rows"`
 }
 
 type workerCloseResult struct {
@@ -430,6 +447,47 @@ func executeWorkerClose(ctx context.Context, cap agenttools.Capability, args jso
 	raw, err := json.Marshal(workerCloseResult{ID: p.Worker, Ended: true})
 	if err != nil {
 		return "", fmt.Errorf("workers.close: result: %w", err)
+	}
+	return string(raw), nil
+}
+
+// executeWorkerScreen shows a coordinator one of its workers' panes
+// (nocx-f545a.6).
+//
+// It exists because what nocx CONCLUDED about a pane is exactly the thing that
+// can be wrong: a coordinator told its worker is waiting on a question has no
+// way to notice nocx misread the screen, and a pane nocx reads as `unknown` is
+// the one it cannot describe at all. The screen is the evidence behind the
+// verdict. Authority is the record's — the same ownership and delegation
+// questions workers.close asks — and nothing read here is kept.
+func executeWorkerScreen(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	coordinator, err := workerCoordinatorFrom(cap, "workers.screen")
+	if err != nil {
+		return "", err
+	}
+	if seams.workerStore == nil {
+		return "", errors.New("workers.screen: this backend keeps no worker record")
+	}
+	var p workerScreenParams
+	if argErr := json.Unmarshal(args, &p); argErr != nil {
+		return "", fmt.Errorf("workers.screen: %w", argErr)
+	}
+	if p.Worker == "" {
+		return "", errors.New("workers.screen: name the worker whose pane to read")
+	}
+	screen, err := seams.workerStore.Screen(ctx, coordinator.Session(), workers.ParticipantID(p.Worker))
+	if err != nil {
+		return "", fmt.Errorf("workers.screen: %w", err)
+	}
+	rows := screen.Rows
+	if rows == nil {
+		rows = []string{}
+	}
+	raw, err := json.Marshal(workerScreenResult{
+		Worker: p.Worker, Readable: screen.Readable, State: screen.State, Rows: rows,
+	})
+	if err != nil {
+		return "", fmt.Errorf("workers.screen: result: %w", err)
 	}
 	return string(raw), nil
 }

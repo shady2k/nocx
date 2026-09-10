@@ -141,7 +141,10 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 	// workers.holdings is here for the same reason session.wait is: it is an
 	// observe tool over the session this grant already named, and asking
 	// what your own session is responsible for reaches nothing else.
-	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait"}
+	// workers.screen joins it for the same reason (nocx-f545a.6): observe, over
+	// the same session, and the record refuses any pane that session does not
+	// hold.
+	wantSession := []string{"session.list", "session.read", "session.run", "session.wait", "workers.holdings", "workers.say", "workers.wait", "workers.screen"}
 	if !reflect.DeepEqual(got, wantSession) {
 		t.Fatalf("session grant declared tools %v, want exactly %v", got, wantSession)
 	}

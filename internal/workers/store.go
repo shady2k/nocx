@@ -217,6 +217,32 @@ type Closer interface {
 	Close(ctx context.Context, p Participant) error
 }
 
+// PaneScreen is what a participant's pane is showing, as its coordinator may
+// read it (nocx-f545a.6, ADR-0064 §2).
+//
+// Rows are text, top to bottom, one per screen row, rendered by the grid's
+// own row renderer — the same one a rule's predicates read — so a coordinator
+// is shown the rows nocx itself reasons about rather than a second rendering
+// of them. Nothing here is stored: it is answered to the caller that asked.
+type PaneScreen struct {
+	// Readable is false when nocx holds no reading of the pane — the session
+	// ended, or its observation closed. That is an answer, not a failure,
+	// for the reason agent.emitting answers the same race with no reading.
+	Readable bool
+	// State is what nocx reads the pane as, when it has classified it; empty
+	// when it has not yet.
+	State string
+	// Rows is the screen. Empty whenever Readable is false.
+	Rows []string
+}
+
+// Screener reads a participant's pane. It is a seam for Closer's reason: a
+// pane's grid belongs to the composition root, and this package knows only
+// that a participant has one.
+type Screener interface {
+	ReadScreen(ctx context.Context, p Participant) (PaneScreen, error)
+}
+
 // Supervisor is the watch that outlives the coordinator's turn. It is attached
 // to a record that ALREADY EXISTS, which is what makes step 6 race-free: a
 // process exiting between the mark and the attach is still observed, because

@@ -940,6 +940,26 @@ var declarations = []Declaration{
 		Params:           "workers.close.schema.json",
 		Narrow:           narrowWorkers,
 	},
+	{
+		Name:        "workers.screen",
+		Description: "Look at what one of your workers' panes is showing right now, as rows of text, and what nocx reads it as. Reach for it when a worker is not doing what you expect — when workers.spawn says its task was not typed because the pane is waiting on a question, or when it has gone quiet — so you can read the question in its own words instead of guessing at it. What you are shown is what is on that screen, and it becomes part of your conversation. You can only look at workers your own session started.",
+		// OBSERVE. Reading a pane is the delegation's EffectObserve, which a
+		// human takeover leaves in place: a person helping a worker past a
+		// prompt does not blind its coordinator to the prompt. ADR-0064 §2
+		// admits this read for a participant the caller holds and for no
+		// other pane, and records its cost — a screen handed to a model
+		// leaves the machine on its next request.
+		Effect:           []content.Effect{content.EffectObserve},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 16 << 10, Truncation: TruncationDropTail},
+		Deadline:         10 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceSession,
+		Executes:         InGo,
+		Params:           "workers.screen.schema.json",
+		Narrow:           narrowWorkers,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

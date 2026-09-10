@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
@@ -1117,6 +1119,44 @@ func (c *workerCloser) Close(_ context.Context, p workers.Participant) error {
 	}
 	c.log.Info("worker participant closed", "participant", string(p.ID), "session_id", string(sid))
 	return nil
+}
+
+// workerScreener is the composition root's half of workers.screen
+// (nocx-f545a.6): the grid a participant's pane is kept in, and the watcher
+// that says what nocx reads it as.
+//
+// The rows are panegrid.Frame.Text, right-trimmed — the one row renderer the
+// grid already offers and the one a rule's predicates read rows through — so
+// a coordinator is shown the rows nocx itself reasons about, not a second
+// rendering of them (ADR-0064 §2).
+type workerScreener struct {
+	grid  panegrid.Observer
+	watch paneReadiness
+}
+
+func (s *workerScreener) ReadScreen(_ context.Context, p workers.Participant) (workers.PaneScreen, error) {
+	sid := p.Liveness.SessionID
+	if sid == "" || s.grid == nil {
+		return workers.PaneScreen{}, nil
+	}
+	f, err := s.grid.Frame(sid)
+	if err != nil {
+		// The observation closed, or never opened: no reading, and an answer
+		// that says so rather than an error, exactly as agent.emitting
+		// answers the same race.
+		return workers.PaneScreen{}, nil //nolint:nilerr // an absent grid is an answer, not a failure
+	}
+	rows := make([]string, 0, len(f.Lines))
+	for y := range f.Lines {
+		rows = append(rows, strings.TrimRight(f.Text(y), " "))
+	}
+	out := workers.PaneScreen{Readable: true, Rows: rows}
+	if s.watch != nil {
+		if o, ok := s.watch.Snapshot(sid); ok {
+			out.State = string(o.State)
+		}
+	}
+	return out, nil
 }
 
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────

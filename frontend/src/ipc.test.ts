@@ -1574,6 +1574,30 @@ describe('reclaiming a live session', () => {
     expect(session.sessionId).toBe(SID)
   })
 
+  // nocx-ty0hc: the handle asks the attach ack, rather than defaulting —
+  // this is the exact gap the bead names (ipc.ts used to build the handle
+  // with a constant `false` here, never reading the field at all). Two
+  // cases, like open's own field: `starting` says a fact is coming and the
+  // pane must wait for it, and everything else says nothing is worth
+  // waiting for.
+  it('reads awaitsIntegration off the attach ack rather than defaulting it', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 42 }))
+    await refuseRecording(ws)
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 42, awaitsIntegration: true })
+    const session = await reclaiming
+    expect(session.awaitsIntegration).toBe(true)
+  })
+
+  it('reads awaitsIntegration false off the attach ack just as honestly', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 7 }))
+    await refuseRecording(ws)
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 7, awaitsIntegration: false })
+    const session = await reclaiming
+    expect(session.awaitsIntegration).toBe(false)
+  })
+
   // THE ACCEPTANCE AT THIS LAYER (nocx-22k1c.2): a window that opens an hour
   // into a run draws the hour. The recording is read before the claim, its
   // bytes are queued ahead of the live stream, and the attach starts where

@@ -25,4 +25,8 @@ export interface AttachResult {
    * The byte offset the stream resumes at. Equal to the requested offset when resumed; the ring's current end when reset, because everything before it is gone.
    */
   from: number
+  /**
+   * Whether this session's integration axis currently reads `starting`, which guarantees a session.integrationChanged notification follows this ack — replayIntegration resends the current status right after it, in the same order the open ack's emitIntegration follows that one (AD-7). This is the same field open.schema.json carries (nocx-ui8q6.6), read the same way — by the transport's own axis, never re-derived — and asked again here because attach is a second place a session can be handed to a renderer that has not yet seen a fact for it: a fresh client claiming a live pane (the nocx-server design D5 claim) is exactly as unseen as a session just opened. False covers the same two cases as open's: a session that never asked for integration, and one already resolved to conventional or lost by the time of this attach — neither has a `starting` fact to wait for, whatever this attach's own reconnect history is.
+   */
+  awaitsIntegration: boolean
 }

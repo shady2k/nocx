@@ -432,16 +432,21 @@ export class SessionHandle {
      *  the ranges nothing kept. A recovered scrollback with a silent hole
      *  in it is the one outcome worse than a short one. */
     readonly recovered: SessionRecovery | null = null,
-    /** Whether THIS open has just entered the session into the integration
-     *  axis `starting` (nocx-ui8q6.6, contracts/open.schema.json). It answers
-     *  one question only — is a session.integrationChanged notification
-     *  guaranteed to follow this ack — and only for the gap before the first
-     *  one arrives: once a fact exists, the pane reads the fact
-     *  (isAwaitingIntegration in integration/status.ts) and this is ignored.
+    /** Whether the session's integration axis currently reads `starting`
+     *  (nocx-ui8q6.6, contracts/open.schema.json and — for a reclaimed or
+     *  reattached handle, nocx-ty0hc — contracts/attach.schema.json). It
+     *  answers one question only — is a session.integrationChanged
+     *  notification guaranteed to follow this ack — and only for the gap
+     *  before the first one arrives: once a fact exists, the pane reads the
+     *  fact (isAwaitingIntegration in integration/status.ts) and this is
+     *  ignored.
      *
-     *  False for a reclaimed handle (the reattach ack this bead does not
-     *  cover), which is the safe default: a reclaim never hides the grid on
-     *  this field alone, so a false default here can only ever show a
+     *  An OPEN reads it off the open ack; a RECLAIM (ipc.ts reclaimSession)
+     *  reads it off the attach ack instead, because that is the call that
+     *  actually claims the session — the same axis, asked through the other
+     *  door. The default here is `false` only for a caller that supplied
+     *  neither, which no longer includes reclaimSession: it is the safe
+     *  direction regardless, since a false default can only ever show a
      *  terminal a fact later says to hide, never the other way round. */
     readonly awaitsIntegration: boolean = false,
   ) {}
@@ -1218,11 +1223,27 @@ export class WSClient {
             // already has. Inventing them here would be the second owner
             // (AD-8) — and the one that is wrong, because it would be
             // guessing.
-            return new SessionHandle(this, entry.sessionId, '', 'script', null, '', {
-              bytes: recovered.length,
-              gaps,
-              size: recording.size,
-            })
+            //
+            // awaitsIntegration is different: it is asked, not guessed
+            // (nocx-ty0hc). This attach ack is the claim itself, so it is the
+            // one place this handle can learn the session's axis before
+            // handing the pane a grid — a default here would have been the
+            // exact defect this bead exists to close, not a safe omission
+            // like the fields above.
+            return new SessionHandle(
+              this,
+              entry.sessionId,
+              '',
+              'script',
+              null,
+              '',
+              {
+                bytes: recovered.length,
+                gaps,
+                size: recording.size,
+              },
+              result.awaitsIntegration,
+            )
           })
           .catch((err) => {
             // A refused claim leaves NOTHING behind: the map must not hold a

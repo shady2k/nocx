@@ -2099,6 +2099,64 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       teardown()
     }
   })
+
+  // nocx-ty0hc: the RECLAIM half of the same gap. handleAttach's ack, like
+  // handleOpen's, precedes replayIntegration's resend (AD-7), and a reclaimed
+  // pane reads awaitsIntegration off that attach ack through the identical
+  // ADOPTION seam (TerminalContentHooks.adoptSession) a restored tab actually
+  // takes — not a fresh open. Before this bead, ipc.ts's reclaimSession never
+  // asked the question at all and SessionHandle defaulted the field to
+  // `false`, so a reclaimed `starting` session showed a live grid from its
+  // very first frame, unconditionally.
+  it('a reclaimed pane whose attach ack says starting never shows a live grid, even before the first fact', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: true })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
+    try {
+      // No integrationHandler call yet — the attach ack's own promise acted
+      // on alone, before any session.integrationChanged exists.
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      session.send.mockClear()
+      rendererOf(content)._fireData('x')
+      expect(session.send).not.toHaveBeenCalled()
+
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/zsh',
+      })
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('y')
+      expect(session.send).toHaveBeenCalledWith('y')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The assertion the bead's brief names as most likely to break something
+  // else, written first: a reclaim whose session never asked for integration
+  // — the ordinary shape of a raw-mode pane taken back on restart — must show
+  // its terminal immediately. reclaimSession must never invent a `true` for
+  // a session with nothing to wait on, the way a shared default easily could.
+  it('a reclaimed pane whose session never asked for integration shows its terminal immediately', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: false })
+    const hooks = { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) }
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks }, client)
+    try {
+      expect(tab.pane.querySelector(WAITING)).toBeNull()
+      expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('')
+      session.send.mockClear()
+      rendererOf(content)._fireData('z')
+      expect(session.send).toHaveBeenCalledWith('z')
+    } finally {
+      teardown()
+    }
+  })
 })
 
 // Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The

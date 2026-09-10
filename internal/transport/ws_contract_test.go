@@ -2271,6 +2271,161 @@ func TestOpen_AwaitsIntegrationFalseWhenNeverAsked(t *testing.T) {
 	}
 }
 
+// TestAttach_AwaitsIntegrationWhenStarting is attach's own half of
+// nocx-ui8q6.6's contract (nocx-ty0hc). The open ack precedes the open
+// handler's own first emission; the attach ack precedes replayIntegration's
+// resend for exactly the same reason (AD-7 orders every session-scoped
+// notification after its ack), so a renderer that attaches to a session
+// still `starting` needs the same promise the open ack already carries —
+// without it, a pane that reclaims or reattaches to a `starting` session has
+// nothing to hold its grid closed for the one frame before replayIntegration
+// arrives.
+//
+// The session is opened and drained on connA first so the test observes a
+// session that is STILL starting (nothing else has moved the axis), then
+// attached from connB — a fresh connection that has seen no fact for this
+// session yet, exactly the position a reclaiming pane is in.
+func TestAttach_AwaitsIntegrationWhenStarting(t *testing.T) {
+	schema := loadSchema(t, "attach.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	ws := NewWSServer(logger, session.New(logger, f))
+	f.ws.Store(ws)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	connA := connectWS(t, ws)
+	defer func() { _ = connA.Close() }()
+	openResp := jsonrpcCall(t, connA, "open", map[string]any{"cols": 80, "rows": 24})
+	var openEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openResp, &openEnvelope); err != nil {
+		t.Fatalf("unmarshal open: %v\nraw: %s", err, string(openResp))
+	}
+	if openEnvelope.Error != nil {
+		t.Fatalf("open: %+v", openEnvelope.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openEnvelope.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	// The open handler's own post-ack emission, drained here so the axis is
+	// known-starting rather than raced (integrationPTYFactory's own reason).
+	if first := readIntegration(t, connA, opened.SessionID); first.Status != IntegrationStarting {
+		t.Fatalf("first status = %q, want starting", first.Status)
+	}
+
+	connB := connectWS(t, ws)
+	defer func() { _ = connB.Close() }()
+	resp := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": opened.SessionID,
+		"offset":    0,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal attach: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("attach: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "attach result (starting)")
+	var got struct {
+		AwaitsIntegration bool `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = false, want true: the session is still starting at the moment of this attach")
+	}
+
+	// The promise the attach ack just made, kept: the fact replayIntegration
+	// resends to THIS connection is the one the ack said was coming.
+	replayed := awaitIntegration(t, connB, opened.SessionID, IntegrationStarting)
+	if replayed.Status != IntegrationStarting {
+		t.Errorf("replayed status = %q, want %q — the ack promised one and this is it",
+			replayed.Status, IntegrationStarting)
+	}
+}
+
+// TestAttach_AwaitsIntegrationFalseWhenNeverAsked is attach's other half: a
+// session with no launch-time integration record at all states
+// awaitsIntegration false on its attach ack too, and — like the open half —
+// no session.integrationChanged notification ever follows it, on the
+// attaching connection or any other.
+func TestAttach_AwaitsIntegrationFalseWhenNeverAsked(t *testing.T) {
+	schema := loadSchema(t, "attach.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	connA := connectWS(t, ws)
+	defer func() { _ = connA.Close() }()
+	openResp := jsonrpcCall(t, connA, "open", map[string]any{"cols": 80, "rows": 24})
+	var openEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openResp, &openEnvelope); err != nil {
+		t.Fatalf("unmarshal open: %v\nraw: %s", err, string(openResp))
+	}
+	if openEnvelope.Error != nil {
+		t.Fatalf("open: %+v", openEnvelope.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openEnvelope.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+
+	connB := connectWS(t, ws)
+	defer func() { _ = connB.Close() }()
+	resp := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": opened.SessionID,
+		"offset":    0,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal attach: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("attach: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "attach result (never asked)")
+	var got struct {
+		AwaitsIntegration bool `json:"awaitsIntegration"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AwaitsIntegration {
+		t.Fatal("awaitsIntegration = true, want false: nothing registered this session onto the axis")
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	if msg, err := awaitFrame(connB, deadline, isNotification("session.integrationChanged")); err == nil {
+		t.Errorf("received session.integrationChanged for a session that never entered the axis: %s", msg)
+	}
+}
+
 // fakeRemoteLauncher is the transport-side double: the transport must not
 // care which launcher it carries, only that it carries one.
 type fakeRemoteLauncher struct{}

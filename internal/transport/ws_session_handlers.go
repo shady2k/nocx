@@ -74,6 +74,12 @@ type sessionMachine interface {
 	// handshake expired must learn it is in a conventional terminal, and no
 	// further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
+	// sessionAwaitsIntegration answers whether sid's axis currently reads
+	// `starting` (nocx-ty0hc, the attach half of nocx-ui8q6.6): read by
+	// handleAttach before its ack is built, exactly as handleOpen already
+	// reads the same method before ITS ack. One method, both callers — never
+	// a second derivation of the same axis (AD-8).
+	sessionAwaitsIntegration(sid session.ID) bool
 	// replayToolSurface re-sends the retained tool-surface launch result on
 	// reattach, alongside the other session-scoped state projections.
 	replayToolSurface(sid session.ID)
@@ -846,10 +852,18 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			h.machine.takeSize(sid, sess, reported)
 		}
 
+		// Read before the ack is built, exactly as handleOpen reads it before
+		// ITS ack (nocx-ui8q6.6): registering, when this session ever
+		// registered at all, already happened at open — attach only reads the
+		// one axis map the transport keeps, under its own lock, and this read
+		// changes nothing about it. Nothing about AD-7 moves either: the
+		// notification a caller cares about is still replayIntegration below,
+		// unchanged in position.
 		_ = r.TryResult(req.ID, mustMarshal(attachResult{
-			Resumed: !needsReset,
-			Reset:   needsReset,
-			From:    from,
+			Resumed:           !needsReset,
+			Reset:             needsReset,
+			From:              from,
+			AwaitsIntegration: h.machine.sessionAwaitsIntegration(sid),
 		}))
 
 		// Files (fm-w8): deliver the dirty paths the session's bindings

@@ -8,9 +8,10 @@
 #
 #   VERSION=0.2.1 scripts/appimage/package-appimage.sh
 #
-# Expects to run from the repository root on a Debian-family host with
-# libwebkit2gtk-4.1 and its helper processes installed (the release job uses
-# ubuntu-22.04, which sets the glibc floor). Writes dist/nocx-$VERSION-linux-amd64.AppImage.
+# Expects to run from the repository root with libwebkit2gtk-4.1 and its helper
+# processes installed. The release job uses Ubuntu 22.04; other distributions
+# can provide their helper directory with WEBKIT_LIBEXEC. Writes
+# dist/nocx-$VERSION-linux-amd64.AppImage.
 #
 # The result is NOT verified here: scripts/appimage/verify-appimage.sh is the
 # gate, and it deliberately runs on a different distribution.
@@ -29,11 +30,14 @@ test -x "$BIN" || { echo "no binary at $BIN — build it first"; exit 1; }
 SERVER_BIN="${SERVER_BIN:-build/bin/nocx-server}"
 test -x "$SERVER_BIN" || { echo "no coordinator at $SERVER_BIN — run: make build-server"; exit 1; }
 base="nocx-${VERSION}-linux-amd64"
-mkdir -p dist
+root="$(pwd)"
+appdir="$root/AppDir"
+distdir="$root/dist"
+mkdir -p "$distdir"
 
 # ── AppDir skeleton ──────────────────────────────────────────
-mkdir -p AppDir/usr/bin
-cp "$BIN" AppDir/usr/bin/nocx
+mkdir -p "$appdir/usr/bin"
+cp "$BIN" "$appdir/usr/bin/nocx"
 
 # .desktop file — required for linuxdeploy to recognise the app.
 # `Icon` is not decoration: appimagetool refuses to package without
@@ -41,7 +45,7 @@ cp "$BIN" AppDir/usr/bin/nocx
 # name an icon actually installed in the AppDir. It is `nocx`, and
 # the resize below writes nocx.png so the basename answers it
 # (nocx-zvd7).
-cat > AppDir/nocx.desktop << 'DESKTOP'
+cat > "$appdir/nocx.desktop" << 'DESKTOP'
 [Desktop Entry]
 Name=nocx
 Exec=nocx
@@ -70,17 +74,17 @@ DESKTOP
 # Copy them first, so the linuxdeploy run below deploys THEIR
 # dependency closure too. Without that the failure merely moves from
 # "the helper is absent" to "the helper's own library is".
-webkit_libexec=/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1
+webkit_libexec="${WEBKIT_LIBEXEC:-/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1}"
 test -x "$webkit_libexec/WebKitNetworkProcess" \
   || { echo "webkit2gtk-4.1 helpers not found at $webkit_libexec"; exit 1; }
-mkdir -p "AppDir$webkit_libexec"
-cp -a "$webkit_libexec/." "AppDir$webkit_libexec/"
+mkdir -p "$appdir$webkit_libexec"
+cp -a "$webkit_libexec/." "$appdir$webkit_libexec/"
 # The injected bundle is shipped for runtime completeness — WebKit may
 # select it on configurations we do not exercise — but it is NOT
 # load-bearing for us and has no red test: measured on the stand, the
 # app reaches a working terminal without it, because our renderer
 # talks over our own websocket (AD-1) rather than a web extension.
-ls "AppDir$webkit_libexec/injected-bundle/"
+ls "$appdir$webkit_libexec/injected-bundle/"
 
 # ── linuxdeploy + GTK plugin, both pinned ────────────────────
 # The GTK plugin bundles libgtk-3, libwebkit2gtk-4.1 and their
@@ -157,10 +161,10 @@ convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
 # --appimage-extract-and-run so packaging does not need FUSE. The GitHub runner
 # happens to have it; a container does not, and packaging you cannot run in a
 # container is packaging you cannot test before tagging.
-./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir \
-  --desktop-file AppDir/nocx.desktop \
+"$root/linuxdeploy.AppImage" --appimage-extract-and-run --appdir "$appdir" \
+  --desktop-file "$appdir/nocx.desktop" \
   --icon-file "$icondir/nocx.png" \
-  --deploy-deps-only="AppDir$webkit_libexec" \
+  --deploy-deps-only="$appdir$webkit_libexec" \
   --plugin gtk
 
 # ── Point the bundled WebKitGTK back inside the AppDir ───────
@@ -175,11 +179,11 @@ convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
 # internal/pty/pty_local.go resolveCwd() falls back to $HOME when no
 # cwd is given, precisely because a GUI app's working directory is a
 # useless place to start a shell — and the release gate asserts it.
-python3 scripts/appimage/install-cwd-hook.py --appdir AppDir
-cat AppDir/AppRun
+python3 scripts/appimage/install-cwd-hook.py --appdir "$appdir"
+cat "$appdir/AppRun"
 
 python3 scripts/appimage/patch-webkit-path.py \
-  --library AppDir/usr/lib/libwebkit2gtk-4.1.so.0 \
+  --library "$appdir/usr/lib/libwebkit2gtk-4.1.so.0" \
   --libexec "$webkit_libexec" \
   --occurrences 2
 
@@ -193,29 +197,29 @@ python3 scripts/appimage/patch-webkit-path.py \
 # finished. It sits beside nocx because that is where the launcher looks:
 # internal/update/serverbin.SiblingPath is this layout stated once, and the
 # macOS bundle puts the same two files in one directory.
-cp "$SERVER_BIN" AppDir/usr/bin/nocx-server
-chmod +x AppDir/usr/bin/nocx-server
+cp "$SERVER_BIN" "$appdir/usr/bin/nocx-server"
+chmod +x "$appdir/usr/bin/nocx-server"
 
 # ── Package ──────────────────────────────────────────────────
-ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run \
-  --runtime-file runtime-x86_64 \
-  AppDir "dist/${base}.AppImage"
+ARCH=x86_64 "$root/appimagetool.AppImage" --appimage-extract-and-run \
+  --runtime-file "$root/runtime-x86_64" \
+  "$appdir" "$distdir/${base}.AppImage"
 
 # ── Cheap checks; the real gate is the next step ─────────────
-test -f "dist/${base}.AppImage"
-test -x "dist/${base}.AppImage"
+test -f "$distdir/${base}.AppImage"
+test -x "$distdir/${base}.AppImage"
 
 # A version check can only ever prove the binary runs: it never
 # creates a webview, which is how an AppImage that could not start
 # on Arch, Fedora or NixOS passed every check this job had (nocx-azxe.7).
 echo "=== version check ==="
-"./dist/${base}.AppImage" --appimage-extract-and-run --version 2>&1 | tee /dev/stderr | grep -qw "$VERSION"
+"$distdir/${base}.AppImage" --appimage-extract-and-run --version 2>&1 | tee /dev/stderr | grep -qw "$VERSION"
 
 # The coordinator must be INSIDE the packaged file, not merely in the AppDir
 # the packaging step was handed. Asserted by extracting it back out of the
 # artefact: an AppDir check would pass on an image that dropped it.
 echo "=== coordinator is in the image ==="
-artefact="$(pwd)/dist/${base}.AppImage"
+artefact="$distdir/${base}.AppImage"
 extracted="$(mktemp -d)"
 # A whole extract, not `--appimage-extract usr/bin/nocx-server`: the
 # pattern form exists but this is a release gate that cannot be rehearsed
@@ -227,4 +231,4 @@ test -x "$extracted/squashfs-root/usr/bin/nocx-server" \
 file "$extracted/squashfs-root/usr/bin/nocx-server" | grep -q 'ELF 64-bit'
 rm -rf "$extracted"
 
-sha256sum dist/*
+sha256sum "$distdir"/*

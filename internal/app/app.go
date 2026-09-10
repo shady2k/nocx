@@ -2025,7 +2025,11 @@ func New(opts ...Option) (*App, error) {
 		workers.NewMemoryStore(),
 		&workerSpawner{
 			layout: contentDB.Layout(), opener: tp, sessions: sess,
-			enrolments: workerEnrol,
+			// tp is also the shell-integration axis's one owner (AD-8): the
+			// same server instance that registers a session's axis at open
+			// is what a spawn asks whether it ever answered (nocx-ui8q6.4).
+			integration: tp,
+			enrolments:  workerEnrol,
 			// Participants are minted in the default workspace until a
 			// coordinator names its own. It is the workspace the ledger
 			// already records every session nobody named one for, so this

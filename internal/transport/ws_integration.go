@@ -38,6 +38,8 @@ package transport
 // the transport's. One owner per question, on each side of the seam.
 
 import (
+	"context"
+
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/profile"
@@ -188,10 +190,88 @@ func remoteShellName(cfg *ssh.ConnectConfig) string {
 
 // unregisterIntegration drops a session's axis, called from the same teardown
 // that drops its lanes so the map cannot grow with dead sessions.
+//
+// It wakes anyone in AwaitIntegration first: a session torn down mid-wait
+// (the tab closed, the process killed) is not going to answer, and a waiter
+// that only listened for a status change would hold its whole context
+// deadline for a session that no longer exists to change one.
 func (s *WSServer) unregisterIntegration(sid session.ID) {
 	s.integrationMu.Lock()
-	defer s.integrationMu.Unlock()
 	delete(s.integrations, sid)
+	waiters := s.integrationWaiters[sid]
+	delete(s.integrationWaiters, sid)
+	s.integrationMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
+}
+
+// IntegrationOutcome is what AwaitIntegration settles to.
+type IntegrationOutcome struct {
+	// Registered is false when sid never entered the axis at all — the same
+	// absence RegisterIntegration's own doc calls "conventional by design":
+	// a session that asked for nothing was refused nothing and has nothing
+	// to report. Status and Reason are meaningless when this is false.
+	Registered bool
+	// Status is one of the wire values above, always something other than
+	// IntegrationStarting: AwaitIntegration does not return while that is
+	// still current.
+	Status string
+	Reason ssh.RefusalReason
+}
+
+// AwaitIntegration blocks until sid's integration axis leaves `starting`, or
+// ctx ends first (nocx-ui8q6.4). It never derives that status itself — it
+// only reads the one map RegisterIntegration and emitIntegration already
+// write (AD-8) — and it wakes from the exact place those transitions already
+// converge: emitIntegration runs once after every actual change to the axis,
+// including the very first one a caller's RegisterIntegration produces, so
+// waking there needs no second classification of what counts as "resolved".
+//
+// ABSENCE IS A FAST ANSWER, not a wait. A session that never asked to be
+// tracked (RegisterIntegration never called for it) will never move, and
+// blocking on a map entry that will never exist would be waiting for an
+// event that cannot happen. The check and the registration below happen
+// under one lock acquisition, so a session that enters the axis, or leaves
+// `starting`, between the check and the wait is still observed: nothing here
+// can miss a transition that lands in the gap, because there is no gap.
+func (s *WSServer) AwaitIntegration(ctx context.Context, sid session.ID) (IntegrationOutcome, error) {
+	for {
+		s.integrationMu.Lock()
+		st, ok := s.integrations[sid]
+		if !ok {
+			s.integrationMu.Unlock()
+			return IntegrationOutcome{Registered: false}, nil
+		}
+		if st.status != IntegrationStarting {
+			out := IntegrationOutcome{Registered: true, Status: st.status, Reason: st.reason}
+			s.integrationMu.Unlock()
+			return out, nil
+		}
+		ch := make(chan struct{})
+		if s.integrationWaiters == nil {
+			s.integrationWaiters = make(map[session.ID][]chan struct{})
+		}
+		s.integrationWaiters[sid] = append(s.integrationWaiters[sid], ch)
+		s.integrationMu.Unlock()
+
+		select {
+		case <-ch:
+			// A wake is a "go look again", not an answer: the loop re-reads
+			// the map under the lock rather than trusting anything about why
+			// it fired, which is what lets the very first emission (still
+			// `starting`, for a session whose own launch reported that) cost
+			// one extra iteration instead of a second wake mechanism.
+		case <-ctx.Done():
+			// The channel this iteration registered is left in the map
+			// rather than removed here under a second lock acquisition: the
+			// next mutation (or unregisterIntegration on teardown) already
+			// pops and closes the whole per-session slice, so it is reclaimed
+			// on the very next event either way, and nothing reads a closed
+			// channel as a signal of anything.
+			return IntegrationOutcome{}, ctx.Err()
+		}
+	}
 }
 
 // NoteIntegrationLoss records why a session's lifecycle transport ended and
@@ -499,7 +579,19 @@ func (s *WSServer) emitIntegration(sid session.ID) {
 	if ok {
 		snap = *st
 	}
+	// AwaitIntegration's wake, from inside the same lock that just read the
+	// snapshot above: this function runs once after every actual change to
+	// the axis (RegisterIntegration's caller, then noteIntegrationLive,
+	// applyIntegrationLoss, applyShellReplaced and applyBootstrapOutcome each
+	// call it exactly when they changed something), so it is the one place a
+	// waiter needs to be told to look again — never a second reader deciding
+	// on its own when the axis has "really" moved.
+	waiters := s.integrationWaiters[sid]
+	delete(s.integrationWaiters, sid)
 	s.integrationMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
 	if !ok {
 		return
 	}

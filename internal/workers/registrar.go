@@ -200,11 +200,27 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		return Participant{}, fmt.Errorf("worker: commit prepared: %w", err)
 	}
 
+	// Steps 3 and 4 share ONE deadline, not two (nocx-ui8q6.4). A launcher
+	// that never enrols must not hold the record open forever, and that bound
+	// has to cover the fork AND the wait for its enrolment together: Spawn
+	// itself now blocks inside the fork for the pane's shell-integration axis
+	// to answer (a domain that has not finished establishing refuses the
+	// agent's own enrolment call, ErrDomainPending — the race this bead
+	// closes), and a spawn that spent the whole deadline there would leave
+	// Await nothing to wait with. r.deadline is that one bound, applied once,
+	// here, before either step starts — never a second, smaller number
+	// invented for Spawn's own wait, which would only be a third bound for an
+	// interval that already has one.
+	lg.Info("worker: waiting for the participant's enrolment",
+		"deadline_ms", r.deadline.Milliseconds())
+	awaitCtx, cancel := context.WithTimeout(ctx, r.deadline)
+	defer cancel()
+
 	// Step 3. The id is already minted and travels with the request, so a
 	// launcher that fails to connect has registered nothing under a name we
 	// did not choose.
 	lg = lg.With("participant", string(p.ID))
-	spawned, spawnErr := r.spawn.Spawn(ctx, SpawnRequest{
+	spawned, spawnErr := r.spawn.Spawn(awaitCtx, SpawnRequest{
 		Participant: p.ID,
 		Group:       req.Group,
 		Task:        req.Task,
@@ -215,23 +231,18 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		return p, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))
 	}
 
-	// Step 4. Bounded, because an enrolment that never arrives must not hold
-	// the record open forever. The bound closes the interval; it does not
-	// decide anything about the participant.
+	// Step 4. The bound closes the interval; it does not decide anything
+	// about the participant.
 	// NAMED, because this is the step that was silent. A launcher that never
 	// enrols spends the whole deadline here, and until this line the log said
 	// only that a pane had been opened and, half a minute later, that the
 	// registration had failed.
-	lg.Info("worker: waiting for the participant's enrolment",
-		"deadline_ms", r.deadline.Milliseconds())
-	awaitCtx, cancel := context.WithTimeout(ctx, r.deadline)
 	// time.Now and not r.now: r.now is the RECORD's clock, the one that stamps
 	// a participant's RegisteredAt and that a test freezes to make records
 	// comparable. A stopwatch on a frozen clock measures nothing, and this
 	// number's whole job is to say how long the wait actually was.
 	waitStarted := time.Now()
 	live, enrolErr := r.enrol.Await(awaitCtx, p.ID)
-	cancel()
 	if enrolErr != nil {
 		lg.Warn("worker: the enrolment never arrived",
 			"waited_ms", time.Since(waitStarted).Milliseconds(),

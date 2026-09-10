@@ -583,6 +583,18 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	if err != nil {
 		return OpenedSession{}, err
 	}
+	// THE AXIS IS ENTERED HERE TOO, and until nocx-ui8q6.4 it was not: this
+	// call started the lifecycle leg below but never called
+	// registerOpenedIntegration, so a backend-opened pane's shell-integration
+	// status was never written to s.integrations at all. Nothing noticed
+	// because nothing before nocx-ui8q6.4 ever read that axis for a
+	// backend-opened session — AwaitIntegration is the first reader. This
+	// does not double-register anything: the handler's own call to
+	// registerOpenedIntegration (ws_session_handlers.go) is for a SEPARATE
+	// session, the one a renderer's own `session.open` produced, never this
+	// one — the two callers each open a different session and each
+	// registers its own, exactly once.
+	s.registerOpenedIntegration(opened.Session, opened.Config, opened.Hosted)
 	// THE LIFECYCLE LEG IS STARTED HERE, and this is the one place the two
 	// callers legitimately differ in TIMING rather than in behaviour. The
 	// handler starts it after the ack, because AD-7 requires every

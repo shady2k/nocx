@@ -44,12 +44,19 @@ type sessionOpenerSeam interface {
 }
 
 // paneMinter is the spawner's narrow view of the layout chain (AD-8): mint a
-// tab and its first pane. A participant needs exactly that one call, and the
-// twenty-odd other things a layout repository can do — reordering strips,
-// recolouring workspaces, clearing the window — are not things a spawn may
-// reach for.
+// tab and its first pane, and undo that mint. A participant needs exactly
+// those two calls, and the twenty-odd other things a layout repository can
+// do — reordering strips, recolouring workspaces, clearing the window — are
+// not things a spawn may reach for.
+//
+// DeleteTab joined CreateTab here at nocx-ui8q6.4, closing a hole that
+// predated this bead: a session that failed to open, or a queue write that
+// was refused, left the tab CreateTab had just minted standing in the store
+// with nothing behind it — a person would see a tab and find it dead. Every
+// failure after CreateTab now compensates through this same seam.
 type paneMinter interface {
 	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
+	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 }
 
 // sessionCloser ends a session by id. The registry's own Close, named as the
@@ -57,6 +64,17 @@ type paneMinter interface {
 type sessionCloser interface {
 	Get(id session.ID) (session.Session, error)
 	Close(id session.ID) error
+}
+
+// integrationAwaiterSeam is the spawner's narrow view of the transport's
+// shell-integration axis (nocx-ui8q6.4): tell me when this pane's shell has
+// answered. It is a second sentence beside sessionOpenerSeam's, in the same
+// discipline — one verb, no other method of *transport.WSServer reachable
+// through it — because what a spawn needs to know is not "what is this
+// session's status" in general (that question has readers of its own on the
+// wire) but only "has it left `starting` yet, or should I keep waiting".
+type integrationAwaiterSeam interface {
+	AwaitIntegration(ctx context.Context, sid session.ID) (transport.IntegrationOutcome, error)
 }
 
 // participantGeometry is the size a participant's pane opens at.
@@ -81,6 +99,12 @@ type workerSpawner struct {
 	layout   paneMinter
 	opener   sessionOpenerSeam
 	sessions sessionCloser
+	// integration is asked, once per spawn, whether the pane's shell ever
+	// answered (nocx-ui8q6.4). Nil is treated the same as a session the axis
+	// never registered — proceed, nothing to wait for — never as licence to
+	// skip the question and guess the answer is yes: see the ABSENCE branch
+	// in Spawn for why that reading is safe rather than a hole.
+	integration integrationAwaiterSeam
 	// enrolments is told the participant → session mapping at spawn, because
 	// an enrolment arrives naming a SESSION and the record is keyed by
 	// participant. Telling it here rather than deriving it later keeps one
@@ -119,24 +143,53 @@ func (s spawnedParticipant) Kill(context.Context) error {
 	return s.sessions.Close(s.sess.ID())
 }
 
-// Spawn mints the pane and opens the session, in that order.
+// Spawn mints the pane, opens the session, waits for its shell to answer,
+// and only then writes the participant's command line.
 //
-// The order is the rollback here too: the pane row is written first, so a
-// session that fails to open leaves a pane a person can see and close, while a
-// session opened for a pane that was never recorded would be a live shell with
-// no durable identity to anchor its blocks to.
+// THE ORDER IS THE ROLLBACK, extended by one step at nocx-ui8q6.4. The pane
+// row is written first, so a session that fails to open leaves a pane a
+// person can see and close; the session is opened second, so nothing is
+// spawned for a pane that was never recorded; and every failure from here on
+// — the axis never resolving, resolving to `conventional`, or the queue
+// write itself refusing — compensates BOTH of those in reverse, through
+// compensateSpawn below. Before this bead only the session was undone: a
+// session that failed to open, or a queue write that was refused, left the
+// tab CreateTab had just minted standing in the store with nothing behind
+// it. That was already true and is fixed here rather than filed separately,
+// because this change is what turns it from a rare race into the common
+// path a refused spawn now takes.
 //
-// The agent's command line is written into the session's own input queue —
-// the same queue a person's keystrokes take — and NOT through
-// internal/agenttyping. That package exists to refuse a mistimed keystroke
-// into a running agent TUI, where the modal on screen answers Yes; here there
-// is no TUI and no modal, because the session was opened microseconds ago and
-// holds nothing but a shell that has not drawn its first prompt.
+// THE RACE THIS CLOSES. The agent's command line is written into the
+// session's own input queue — the same queue a person's keystrokes take —
+// and NOT through internal/agenttyping, whose refusal exists for a
+// mistimed keystroke into a running agent TUI with a modal already on
+// screen; here there is no TUI yet. What used to make the write "safe" was
+// only the INTERVAL argument — a command line that never runs produces no
+// enrolment, and a registration whose enrolment never arrives is
+// terminalized — and that argument covers the agent never starting, not the
+// agent starting and being refused its own enrolment. The agent wrapper
+// enrols over the SAME authenticated lifecycle channel the shell's own hello
+// establishes, and the kernel refuses an enrolment while that domain's
+// accept is still pending (lifecycle.kernel's requireActive, ErrDomainPending).
+// nocx-ui8q6.2 made the backend flush that accept on its own authority, so
+// the domain no longer stays pending forever — but flushing still takes on
+// the order of tens of milliseconds, and the command used to be written
+// microseconds after OpenSession returned. Waiting here for the axis to
+// leave `starting` is waiting for exactly the fact that says the domain is
+// past that window: `integrated` cannot be reported before the domain the
+// axis borrows its truth from (AD-8) is established.
 //
-// What makes this safe is not the timing but the INTERVAL: a command line that
-// never runs produces no enrolment, and a registration whose enrolment never
-// arrives is terminalized rather than left as a participant nobody can reach.
-// The enrolment is the proof the agent started; the write is only the attempt.
+// THE BOUND. This call's ctx is expected to already carry the enrolment
+// deadline (internal/workers.Registrar.Register wraps its call to Spawn and
+// its later Await of the enrolment in one shared context.WithTimeout, using
+// its own r.deadline — workerEnrolmentDeadline in production — precisely so
+// this wait is INSIDE that budget and not a second one beside it). No smaller
+// timeout is applied here: in the pathological case where a shell never
+// answers at all, lifecycle.HelloTimeout bounds the shell's own handshake
+// and the resulting loss report moves the axis to `conventional` well
+// inside the enrolment deadline, so this wait resolves on its own long
+// before ctx would. A third, invented bound would only be a second answer to
+// a question the enrolment deadline already answers.
 func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ workers.Spawned, err error) {
 	ctx, lg, end := log.Start(ctx, s.log, "worker.spawn",
 		"participant", string(req.Participant), "group", string(req.Group),
@@ -166,6 +219,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		Rows:   participantRows,
 	})
 	if err != nil {
+		s.compensateSpawn(ctx, tabID.String(), nil)
 		return nil, fmt.Errorf("worker spawn: opening the participant's session: %w", err)
 	}
 	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
@@ -177,15 +231,62 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// promptly would find nobody waiting for it.
 	s.enrolments.expect(req.Participant, opened.Session.ID())
 
+	// THE GATE. Nothing is written into the session's queue — and so the
+	// agent never execs and never races its own enrolment — until the axis
+	// says the domain behind it either can, or never will, accept one.
+	//
+	// A nil seam is treated exactly like AwaitIntegration's own "absence"
+	// answer below rather than as a third, special case: a spawner nobody
+	// wired an axis into cannot ask the question any more than a session that
+	// never registered on one can answer it, and the two must not diverge in
+	// what they let through.
+	var outcome transport.IntegrationOutcome
+	var awaitErr error
+	if s.integration != nil {
+		outcome, awaitErr = s.integration.AwaitIntegration(ctx, opened.Session.ID())
+	}
+	switch {
+	case awaitErr != nil:
+		// The shell never answered before the bound above ran out — distinct
+		// from answering `conventional`, because the two need different
+		// fixes: this one is worth retrying (a slow machine, a loaded
+		// helper), the other is not (the shell itself will never integrate).
+		s.compensateSpawn(ctx, tabID.String(), opened.Session)
+		return nil, fmt.Errorf(
+			"worker spawn: the participant's shell never answered its integration handshake within the deadline; retrying may succeed if this was transient: %w",
+			awaitErr)
+	case !outcome.Registered:
+		// ABSENCE IS NOT A REFUSAL. RegisterIntegration's own doc calls this
+		// "conventional by design": a session that never asked to be tracked
+		// on the axis was refused nothing and has nothing to answer. Every
+		// worker pane on this machine DOES ask (a local pane's launch always
+		// names a shell and a lane, internal/app/helper_local.go's
+		// localIntegrationStatus), so this is not the path a real spawn
+		// takes — it exists so a caller with no axis at all (a test double,
+		// or a future session kind that never wires one) is let through
+		// rather than hung or refused for a question it was never asked.
+		lg.Debug("worker spawn: no shell-integration axis is tracking this session; proceeding without a gate",
+			"session_id", string(opened.Session.ID()))
+	case outcome.Status != transport.IntegrationIntegrated:
+		// `conventional` (or the degenerate `lost`, if the shell answered and
+		// then the channel dropped before this call returned): a working
+		// terminal with no live domain behind it. No grid will ever open for
+		// it, so no coordinator could read or answer it — a silent degrade
+		// AGENTS.md's testing rules name as the failure to refuse rather than
+		// ship. Do not retry the same command unmodified: the shell itself is
+		// what did not integrate.
+		s.compensateSpawn(ctx, tabID.String(), opened.Session)
+		return nil, fmt.Errorf(
+			"worker spawn: the participant's shell answered %q (%s): this pane cannot be watched, so it cannot be a participant; do not retry the same command until the shell-integration failure is fixed",
+			outcome.Status, outcome.Reason)
+	}
+
 	if req.Command != "" && !opened.Session.EnqueueWrite([]byte(req.Command+"\n")) {
 		// A queue that refused is a session that is already going away.
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
 		// learning what we already know.
-		if err := spawned.Kill(ctx); err != nil {
-			s.log.Warn("worker spawn: could not close a session whose input queue refused",
-				"session_id", string(opened.Session.ID()), "error", err)
-		}
+		s.compensateSpawn(ctx, tabID.String(), opened.Session)
 		return nil, errors.New("worker spawn: the participant's session refused its first line")
 	}
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
@@ -195,6 +296,26 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Info("worker participant spawned",
 		"participant", string(req.Participant), "worker", string(req.Group))
 	return spawned, nil
+}
+
+// compensateSpawn undoes what Spawn built so far, in the reverse order of
+// building it: the session, if one was opened, then the tab (nocx-ui8q6.4).
+//
+// Both failures are only logged. Spawn's own error already says what to
+// report to the caller, and a compensation that also fails is not a second
+// verdict on top of it — it is a warning worth having, the same asymmetry
+// Kill's callers already accepted before this helper existed.
+func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess session.Session) {
+	if sess != nil {
+		if closeErr := s.sessions.Close(sess.ID()); closeErr != nil {
+			s.log.Warn("worker spawn: could not close a session left behind by a failed spawn",
+				"session_id", string(sess.ID()), "error", closeErr)
+		}
+	}
+	if delErr := s.layout.DeleteTab(ctx, tabID, content.Replacement{}); delErr != nil {
+		s.log.Warn("worker spawn: could not delete a tab left behind by a failed spawn",
+			"tab_id", tabID, "error", delErr)
+	}
 }
 
 // workerEnrolments turns "an enrolment arrived on this session" into "this

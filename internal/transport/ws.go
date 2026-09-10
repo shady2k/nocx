@@ -769,6 +769,13 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
+	// integrationWaiters holds, per session, the callers blocked in
+	// AwaitIntegration until that session's axis leaves `starting`
+	// (nocx-ui8q6.4, ws_integration.go). Guarded by integrationMu, the same
+	// lock as integrations: the two describe one fact — the axis is the
+	// stored answer and this is who is holding for the next revision of it —
+	// and a second lock would let a waiter miss a mutation that raced it.
+	integrationWaiters map[session.ID][]chan struct{}
 	// toolSurfaces is the retained launch result for the worker tool path.
 	// It is separate from integration because it answers a different question:
 	// whether the external coordinator can actually reach its tools.

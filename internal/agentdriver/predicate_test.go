@@ -127,6 +127,39 @@ func TestADocumentCanComposeRowOpensWith(t *testing.T) {
 	}
 }
 
+// anchorBound is the positive counterpart of anchorUnbound, and this is the
+// same composition assertion for it: a predicate the switch does not reach is
+// not part of the closed set no matter how carefully it is implemented and
+// tested in isolation.
+//
+// This is also, directly, the shape nocx-qddv8 asks a rule's free_text branch
+// to take: a state reached because an anchor POSITIVELY bound, never because
+// nothing else matched.
+func TestADocumentCanComposeAnchorBound(t *testing.T) {
+	doc := Document{
+		Agent:   "test",
+		Default: StateUnknown,
+		Anchors: []AnchorSpec{{
+			Name: "marker", Kind: "offset", Offset: 0,
+			RequireCell: "❯", RequireCol: 0,
+		}},
+		Branches: []Branch{{
+			State: StateFreeText,
+			When:  []Pred{{Kind: "anchorBound", RegionSpec: RegionSpec{Anchor: "marker"}}},
+		}},
+	}
+	d, err := newDocumentDriver(doc)
+	if err != nil {
+		t.Fatalf("newDocumentDriver: %v", err)
+	}
+	if got := d.Classify(grid(20, 1, []string{"❯ "}, 0, 0)); got != StateFreeText {
+		t.Errorf("the marker anchor bound = %q, want %q", got, StateFreeText)
+	}
+	if got := d.Classify(grid(20, 1, []string{"nothing chrome-shaped"}, 0, 0)); got != StateUnknown {
+		t.Errorf("the marker anchor did not bind = %q, want the document's default %q", got, StateUnknown)
+	}
+}
+
 func TestFullWidthRuleMatchesARowThatIsNothingElse(t *testing.T) {
 	f := grid(6, 2, []string{"──────"}, 0, 0)
 	if !fullWidthRule(f, 0, "─") {

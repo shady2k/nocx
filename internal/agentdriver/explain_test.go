@@ -96,8 +96,13 @@ func TestExplainSaysWhereEachBranchStopped(t *testing.T) {
 	if e.State != agentdriver.StateFreeText {
 		t.Fatalf("state = %q, want free_text", e.State)
 	}
-	if e.Matched != -1 {
-		t.Fatalf("matched = %d, want -1: an idle screen falls through every branch to the default", e.Matched)
+	// free_text is a POSITIVE match now (nocx-qddv8), not the document's
+	// default: an idle screen matches the last branch, which requires the
+	// "prompt" anchor bound, rather than falling through every branch with
+	// none of them reporting anything.
+	if e.Matched != len(e.Branches)-1 {
+		t.Fatalf("matched = %d, want %d: an idle screen positively matches the free_text branch",
+			e.Matched, len(e.Branches)-1)
 	}
 	first := e.Branches[0]
 	if first.Matched {

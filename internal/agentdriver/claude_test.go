@@ -152,6 +152,30 @@ func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
 	}
 }
 
+// free_text is a POSITIVE match on the prompt anchor now, not the document's
+// default — so an ordinary screen with no chrome this rule recognises at all
+// must land on unknown, the document's actual default, rather than on the
+// most permissive state in the set. This is the failure this bead exists for:
+// before it, "nothing matched" and "the box is idle" answered the same way.
+func TestAScreenWithNoRecognisedChromeIsUnknownNotFreeText(t *testing.T) {
+	lines := []string{
+		"just some ordinary text nocx has no rule for",
+		"an agent whose chrome moved out from under this rule",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 0, 0)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateUnknown {
+		t.Errorf("no recognised chrome at all = %q, want %q", got, agentdriver.StateUnknown)
+	}
+}
+
 // Every frame of every capture answers from the closed set, and never answers
 // "exited" — that one is a fact about the process and is deliberately not
 // taken from the screen.

@@ -325,6 +325,9 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 	case "anchorUnbound":
 		_, ok := anchors[p.Anchor]
 		return !ok
+	case "anchorBound":
+		_, ok := anchors[p.Anchor]
+		return ok
 	case "cursorAboveAnchorIfBound":
 		row, ok := anchors[p.Anchor]
 		if !ok {

@@ -107,6 +107,35 @@ package agentdriver
 // under only one. For the same reason no per-child running/finished flag
 // crosses this seam: the screen never draws one. A child that finishes leaves
 // the panel, and that is the whole of what it says.
+//
+// # free_text is identified, not assumed (nocx-qddv8)
+//
+// The document used to name "free_text" as its default — the answer when
+// every branch above had already failed to match. That made free_text the
+// most permissive state in the closed set reachable by having recognised
+// NOTHING: an update that moved claude's chrome enough to break every branch
+// still bound "meter" by coincidence would type into whatever was actually on
+// screen, because nothing distinguished "the box is genuinely idle" from "the
+// rule gave up".
+//
+// The fix is the last branch above: free_text is now a POSITIVE match on the
+// "prompt" anchor, the same one every other anchor here is ultimately
+// computed from — "meter" is an offset from "prompt", "boxBottom" requires
+// "meter" bound, and everything below the box is computed from "boxBottom".
+// So by the time evaluation reaches this branch, prompt was already implied
+// bound by every branch that ran before it; this branch says so explicitly
+// rather than leaving it as an inference a future edit could break by
+// reordering or removing one of the anchors in between. The document's
+// default is "unknown" now, so a rule that stops recognising the screen goes
+// quiet — the direction the package comment already promises for the whole
+// closed set — instead of answering the one state nocx is allowed to type
+// into.
+//
+// Replaying the whole corpus in testdata/captures against both the old and
+// the new document produces the same verdict on every frame: every case that
+// used to reach free_text through the old default already had "prompt" bound
+// on that frame, because it was, in fact, an idle input box. There was no
+// frame in the corpus reaching free_text by accident.
 
 import (
 	_ "embed"

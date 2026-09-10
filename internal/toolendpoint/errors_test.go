@@ -29,6 +29,8 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		assistant.ErrInvalidResult,
 		workers.ErrNotHeld,
 		workers.ErrNotDelegated,
+		workers.ErrPaneNeverTypable,
+		workers.ErrTaskSubmitRefused,
 		ErrSessionCallerActive,
 		ErrNotEnrolled,
 		context.Canceled,

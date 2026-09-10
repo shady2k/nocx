@@ -370,4 +370,16 @@ var (
 	// reservation's deadline. Failure is closed: the record is terminalized
 	// and nothing goes on being addressed.
 	ErrEnrolmentNeverArrived = errors.New("worker: enrolment never arrived")
+	// ErrPaneNeverTypable means a participant enrolled and its pane never
+	// reached a state nocx could type its task into, inside the spawn's own
+	// budget — the agent's TUI may still be booting, or showing something
+	// other than a plain prompt, when the budget ran out. Distinct from
+	// ErrTaskSubmitRefused below because the two need different fixes: this
+	// one is worth retrying (a slow machine, a loaded agent), the other names
+	// a screen that actively refused the submission.
+	ErrPaneNeverTypable = errors.New("worker: the participant's pane never became ready for its task")
+	// ErrTaskSubmitRefused means the pane became typable and nocx's own
+	// typing gate then refused the submission — reached the screen and was
+	// turned away, as against never reaching a typable screen at all.
+	ErrTaskSubmitRefused = errors.New("worker: nocx could not submit the participant's task")
 )

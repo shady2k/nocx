@@ -638,6 +638,20 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// no longer active.
 		return rpcDomainError, "worker request refused",
 			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
+	case errors.Is(err, workers.ErrPaneNeverTypable):
+		// WORTH RETRYING. The agent may simply not have finished booting its
+		// TUI inside the budget — a slower machine, a loaded helper. Split
+		// from the arm below for the same reason the axis's two refusals are
+		// split: a coordinator that cannot tell "not ready yet" from "your
+		// task was refused" fixes the wrong half.
+		return rpcDomainError, "worker request refused",
+			"the worker started but its pane never became ready to receive a task inside the budget, so nothing was typed into it and the worker was not left running unsupervised. Spawning again may succeed if this was transient."
+	case errors.Is(err, workers.ErrTaskSubmitRefused):
+		// NOT WORTH RETRYING UNMODIFIED. The pane opened for typing and nocx's
+		// own gate then refused the write — the screen said something other
+		// than "waiting for input" at the moment of the attempt.
+		return rpcDomainError, "worker request refused",
+			"the worker's pane became ready and nocx's own typing gate then refused to submit the task into it, so the worker was not left running with no task. Do not retry the same call unmodified until you understand why the gate refused it."
 	case errors.Is(err, ErrSessionCallerActive):
 		return rpcPeerRefused, "worker caller refused",
 			"another call from this session is still running, and nocx serves one at a time. Wait for that call to answer, then make this one."

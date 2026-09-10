@@ -24,12 +24,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
@@ -110,10 +112,88 @@ type workerSpawner struct {
 	// participant. Telling it here rather than deriving it later keeps one
 	// owner of that mapping and keeps it correct before the first frame.
 	enrolments *workerEnrolments
+	// readiness answers what a pane was last classified as (nocx-66gd0): the
+	// gate for KNOWING when the participant's TUI has a prompt up, so the
+	// task is typed only once there is one to type into rather than blind.
+	// Nil is treated exactly like integration's absence above — a caller with
+	// no observation wired at all was never asking the question, so deliverTask
+	// lets the spawn through rather than hanging on an answer that will never
+	// come. Production always wires the real watcher; only a test double built
+	// to exercise the axis gate or the tab bookkeeping alone leaves it nil.
+	readiness paneReadiness
+	// typist is what actually puts the task into the pane, once readiness
+	// says it may. The SAME Typist agent.type and the coordinator's own wake
+	// reach (workerWaker below) — a second one would be a second answer to
+	// "may nocx write into this pane", decided against a second grid.
+	typist paneTypist
 	// workspace is where a participant's tab is minted. The worker's own
 	// workspace, resolved by the caller, never guessed here.
 	workspace string
 	log       log.Logger
+}
+
+// paneReadiness is the spawner's narrow view of the pane-observation watcher
+// (AD-8): what has this pane last been classified as. One method, because
+// delivery needs to KNOW a state, never to classify one itself — that
+// decision belongs to internal/paneobserve, on a sweep it already runs for
+// every enrolled pane.
+type paneReadiness interface {
+	Snapshot(paneID string) (paneobserve.Observation, bool)
+}
+
+// deliveryPoll is how often deliverTask re-asks paneReadiness while it waits
+// for a pane to become typable.
+//
+// It is not a business number, and no test in this repository depends on it:
+// the watcher itself is fed by a 120ms coalescer
+// (internal/transport/ws_paneobserve.go's paneObserverSweep), so asking more
+// often than that buys nothing, and this is comfortably under it so the wait
+// notices a transition within one or two sweeps rather than missing a whole
+// one. A test drives the watcher's state directly and asserts on the change,
+// never on this duration.
+const deliveryPoll = 40 * time.Millisecond
+
+// awaitFreeText blocks until paneID's last-classified observation is
+// free_text, until ctx ends, or until the pane's agent is seen to have
+// exited.
+//
+// It asks the WATCHER rather than retrying agenttyping.Submit in a loop: a
+// refused Submit call would read the live screen and log a warning on every
+// attempt, where the watcher already tracks exactly this state for free, off
+// the same sweep the product's own indicator uses. Submit is still called
+// exactly once, after this returns, and it RE-VERIFIES the screen itself
+// (agenttyping's own documented guarantee) — this function only decides when
+// that one attempt is worth making, never whether it is allowed to write.
+func awaitFreeText(ctx context.Context, r paneReadiness, paneID string) error {
+	check := func() (bool, error) {
+		o, ok := r.Snapshot(paneID)
+		if !ok {
+			return false, nil
+		}
+		switch o.State {
+		case agentdriver.StateFreeText:
+			return true, nil
+		case agentdriver.StateExited:
+			return false, errors.New("the participant's agent exited before its pane ever became typable")
+		default:
+			return false, nil
+		}
+	}
+	if ready, err := check(); ready || err != nil {
+		return err
+	}
+	ticker := time.NewTicker(deliveryPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return errors.New("the pane never became typable inside the spawn's own budget")
+		case <-ticker.C:
+			if ready, err := check(); ready || err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
@@ -295,7 +375,53 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(req.Command)+1)
 	lg.Info("worker participant spawned",
 		"participant", string(req.Participant), "worker", string(req.Group))
+
+	// THE TASK, AFTER THE COMMAND AND NEVER IN THE SAME WRITE (nocx-66gd0).
+	// The schema promised delivery and the code only ever recorded the text;
+	// this is the fix. It cannot happen any earlier: the command line above
+	// is what starts the agent, and there is nothing running to type into
+	// before it has. deliverTask waits for the pane to say it is ready and
+	// then submits through the SAME gate agent.type and the coordinator's own
+	// wake go through — never a second door onto this pane's input queue.
+	if req.Task != "" {
+		if err := s.deliverTask(ctx, string(opened.Session.ID()), req.Task); err != nil {
+			s.compensateSpawn(ctx, tabID.String(), opened.Session)
+			return nil, fmt.Errorf("worker spawn: %w", err)
+		}
+		lg.Info("worker participant given its task", "bytes", len(req.Task))
+	}
 	return spawned, nil
+}
+
+// deliverTask waits for paneID to become typable and submits task into it.
+//
+// Nil readiness or nil typist is the ABSENCE case, exactly like
+// integrationAwaiterSeam's above: a spawner nobody wired an observation or a
+// typist into cannot ask whether a pane is ready any more than it could ask
+// whether a domain accepted, so the spawn proceeds rather than hanging or
+// refusing a question it was never asked. Production always wires both.
+func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) error {
+	if s.readiness == nil || s.typist == nil {
+		s.log.Debug("worker spawn: no pane-typing seam is wired; the task will not be typed at spawn",
+			"pane_id", paneID)
+		return nil
+	}
+	if waitErr := awaitFreeText(ctx, s.readiness, paneID); waitErr != nil {
+		return fmt.Errorf("%w: %s", workers.ErrPaneNeverTypable, waitErr)
+	}
+	res := s.typist.Submit(paneID, task)
+	if res.Outcome == agenttyping.OutcomeSubmitted {
+		return nil
+	}
+	// OutcomeTyped is a refusal here too, not a delivery: the text reached
+	// the input region and the submit key did not, so no turn started and the
+	// coordinator's task never reached the agent — exactly the distinction
+	// workerWaker's own doc draws for the identical outcome on a wake.
+	reason := res.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("nocx refused to submit the task (%s)", res.Outcome)
+	}
+	return fmt.Errorf("%w: %s", workers.ErrTaskSubmitRefused, reason)
 }
 
 // compensateSpawn undoes what Spawn built so far, in the reverse order of

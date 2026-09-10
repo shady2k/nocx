@@ -2030,6 +2030,14 @@ func New(opts ...Option) (*App, error) {
 			// is what a spawn asks whether it ever answered (nocx-ui8q6.4).
 			integration: tp,
 			enrolments:  workerEnrol,
+			// readiness and typist are what deliverTask uses to give a
+			// participant its task at spawn (nocx-66gd0): paneWatch is the
+			// SAME watcher the enrolment act opens an observation on, and
+			// paneTyping is the SAME Typist agent.type and the coordinator's
+			// own wake reach - one gate, never a second door onto a pane's
+			// input queue.
+			readiness: paneWatch,
+			typist:    paneTyping,
 			// Participants are minted in the default workspace until a
 			// coordinator names its own. It is the workspace the ledger
 			// already records every session nobody named one for, so this

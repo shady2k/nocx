@@ -255,9 +255,25 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string) error {
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
 // participant: nothing may be addressed until its enrolment arrives.
+//
+// It carries the TAB alongside the session (nocx-ui8q6.7), which is what lets
+// Kill undo the whole of what Spawn built rather than half of it. Before this
+// the tab lived only in Spawn's own locals and compensateSpawn's undo ran
+// beside Kill's rather than through it: Kill, reached by
+// internal/workers.Registrar.compensate() for every failure AFTER enrolment
+// arrives, closed the session and left the tab standing — a person was left
+// with a tab that had nothing behind it, for exactly the failures that had
+// built the MOST (delegation, mark-live, attach-supervision), because those
+// are the ones internal/workers reaches through the Spawned interface rather
+// than through workerSpawner's own locals.
 type spawnedParticipant struct {
+	tabID    string
 	sess     session.Session
 	sessions sessionCloser
+	// layout is asked for tabID's removal. It is the same paneMinter Spawn
+	// itself was given — one owner of "undo a spawn's tab" rather than two,
+	// which is why compensateSpawn below no longer calls DeleteTab itself.
+	layout paneMinter
 }
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
@@ -275,9 +291,81 @@ func (s spawnedParticipant) Liveness() workers.Liveness {
 
 // Kill is the compensation for every failure after the fork, and it is
 // available synchronously — which is why the register procedure needs no
-// journal.
-func (s spawnedParticipant) Kill(context.Context) error {
-	return s.sessions.Close(s.sess.ID())
+// journal. It undoes BOTH things Spawn may have built: the session, if one is
+// still open, and the tab, always — the two-step undo compensateSpawn used to
+// own alone, now the single implementation both callers reach (see the type
+// doc).
+//
+// IDEMPOTENT, because it has two callers that can both reach the same
+// participant: compensateSpawn already runs it (through this same method,
+// below) for a failure Spawn catches itself, before returning a Spawned to
+// internal/workers.Registrar at all — and a compensation that itself fails
+// is, by the package's own documented asymmetry, left non-terminal and
+// RETRIED, which calls Kill again over what the first attempt already
+// removed. So each half asks before it acts rather than reporting a second
+// party's tidying as a failure of its own: a session already gone from the
+// registry is not re-closed, and DeleteTab on a tab already out of the
+// window is already a no-op on the content side (sqliteContent.DeleteTab
+// finds no row and returns nil) — this only needs to add the matching
+// tolerance for the session half.
+func (s spawnedParticipant) Kill(ctx context.Context) error {
+	var errs []error
+	if s.sess != nil {
+		if _, getErr := s.sessions.Get(s.sess.ID()); getErr == nil {
+			if closeErr := s.sessions.Close(s.sess.ID()); closeErr != nil {
+				errs = append(errs, fmt.Errorf("close session: %w", closeErr))
+			}
+		}
+		// Already gone: the registry has no row to close, and asking it to
+		// close one anyway would report as a failure of THIS call something
+		// another close (ours, on a retry, or the ordinary exit path) already
+		// did.
+	}
+	if s.tabID != "" && s.layout != nil {
+		if delErr := s.layout.DeleteTab(ctx, s.tabID, killReplacement()); delErr != nil {
+			errs = append(errs, fmt.Errorf("delete tab: %w", delErr))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// killReplacement mints the identity content.Replacement wants in hand for
+// the case where the tab Kill is deleting turns out to be the last one left
+// in the whole window.
+//
+// content.Replacement's own doc names the pattern: "a caller that always
+// passes one is not asking for a tab it will not get" — mintReplacementIfEmpty
+// consults it ONLY when the delete would otherwise leave the window with no
+// tab anywhere, and ignores it on every other close. Kill cannot know in
+// advance which this is: the ordinary case is that it is not (the coordinator
+// that spawned this participant is running in a tab of its own, which the
+// delete leaves standing), but a compensation that assumed so and skipped the
+// replacement would fail with content's own ErrNoReplacement on the rare
+// window where it is wrong — and a failed DeleteTab here is not a warning
+// like the rest of Kill's failures are permitted to be: for the early
+// failures compensateSpawn covers it is logged and swallowed, but for the
+// late ones Registrar.compensate reaches through Kill it is joined into the
+// registration's own error and the record is left NON-TERMINAL, exactly the
+// state nocx-4l2a5.4's asymmetry says a failed compensation must be (see
+// Kill's own doc for why that is retried rather than papered over). This was
+// found, not designed in from the start: unifying Kill with compensateSpawn
+// exposed it, because the tab this method now always deletes was previously
+// only ever deleted by compensateSpawn's own early-failure paths, where
+// production topology (a coordinator tab already open) had never let the
+// case arise in a test.
+//
+// Minting can fail for the same reason Spawn's own minting can — an
+// exhausted or broken randomness source — and Kill must still make its best
+// effort rather than abandoning the whole undo over it: an empty Replacement
+// on that double failure costs nothing unless this tab really is the last
+// one AND minting failed, which is the same rare case squared.
+func killReplacement() content.Replacement {
+	tabID, tabErr := uuid.NewV7()
+	paneID, paneErr := uuid.NewV7()
+	if tabErr != nil || paneErr != nil {
+		return content.Replacement{}
+	}
+	return content.Replacement{TabID: tabID.String(), PaneID: paneID.String()}
 }
 
 // Spawn mints the pane, opens the session, waits for its shell to answer,
@@ -363,7 +451,9 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg = lg.With("session_id", string(opened.Session.ID()), "pane_id", paneID.String())
 	lg.Debug("worker spawn: the participant's session is open",
 		"cols", participantCols, "rows", participantRows)
-	spawned := spawnedParticipant{sess: opened.Session, sessions: s.sessions}
+	spawned := spawnedParticipant{
+		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
+	}
 
 	// Told BEFORE the command is written, or an enrolment that arrives
 	// promptly would find nobody waiting for it.
@@ -489,23 +579,29 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) er
 	return fmt.Errorf("%w: %s", workers.ErrTaskSubmitRefused, reason)
 }
 
-// compensateSpawn undoes what Spawn built so far, in the reverse order of
-// building it: the session, if one was opened, then the tab (nocx-ui8q6.4).
+// compensateSpawn undoes what Spawn built so far, for a failure Spawn catches
+// itself — before a Spawned is ever handed back for
+// internal/workers.Registrar.compensate() to reach through Kill instead.
 //
-// Both failures are only logged. Spawn's own error already says what to
-// report to the caller, and a compensation that also fails is not a second
-// verdict on top of it — it is a warning worth having, the same asymmetry
-// Kill's callers already accepted before this helper existed.
+// It is now a THIN CALLER OF Kill (nocx-ui8q6.7) rather than a second
+// implementation of "undo a spawn" beside it: the two used to disagree about
+// what that meant — this one undid the session and the tab, Kill undid only
+// the session — and the disagreement fell on exactly the failures that had
+// built the most, because those are the ones reaching Kill rather than this
+// helper. sess may be nil (OpenSession itself never returned one); Kill
+// already treats that as "nothing to close" rather than a nil dereference.
+//
+// The failure is only logged. Spawn's own error already says what to report
+// to the caller, and a compensation that also fails is not a second verdict
+// on top of it — it is a warning worth having, the same asymmetry Kill's
+// other caller (Registrar.compensate) resolves differently, by joining the
+// two errors instead: that caller has no Spawn error of its own to prefer,
+// this one does.
 func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess session.Session) {
-	if sess != nil {
-		if closeErr := s.sessions.Close(sess.ID()); closeErr != nil {
-			s.log.Warn("worker spawn: could not close a session left behind by a failed spawn",
-				"session_id", string(sess.ID()), "error", closeErr)
-		}
-	}
-	if delErr := s.layout.DeleteTab(ctx, tabID, content.Replacement{}); delErr != nil {
-		s.log.Warn("worker spawn: could not delete a tab left behind by a failed spawn",
-			"tab_id", tabID, "error", delErr)
+	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout}
+	if err := sp.Kill(ctx); err != nil {
+		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
+			"tab_id", tabID, "error", err)
 	}
 }
 

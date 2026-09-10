@@ -196,11 +196,11 @@ func (s *lateFailureStand) register(t *testing.T) (workers.Participant, error) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		p, err := s.record.Register(ctx, workers.RegisterRequest{
+		reg, err := s.record.Register(ctx, workers.RegisterRequest{
 			Group: "worker-1", CoordinatorSession: "sess-coordinator",
 			Role: workers.RoleWorker, Task: "t", Command: "claude",
 		})
-		done <- outcome{p, err}
+		done <- outcome{reg.Participant, err}
 	}()
 	var sid session.ID
 	waittest.WaitFor(t, "the participant's session to exist", func() bool {
@@ -297,7 +297,7 @@ func TestARegistrationRefusedAtMarkLiveCompensatesEvenWithAnAlreadyCancelledCont
 			Group: "worker-1", CoordinatorSession: "sess-coordinator",
 			Role: workers.RoleWorker, Task: "t", Command: "claude",
 		})
-		done <- outcome{p, err}
+		done <- outcome{p.Participant, err}
 	}()
 	var sid session.ID
 	waittest.WaitFor(t, "the participant's session to exist", func() bool {

@@ -17,16 +17,16 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "description": "What this worker is for, in your own words. nocx TYPES this into the worker's own pane as soon as it is ready for input — this is how the worker is told what to do, not only a record of it — and it is also recorded, so a later workers.holdings can tell you what you started even if you have lost the context you started it from. A pane that never becomes ready to receive it fails the whole call rather than leaving a worker nobody told anything; workers.say can hand a worker something more once it is running, but this is how its first task arrives.\n\nTELL THE WORKER HOW TO REPORT, in this task, or it cannot: nocx will know when its process ends and will never know what it produced, and the record will say `abandoned` rather than `completed`. The instruction to include is exactly this — when you are finished, write to the file named by the NOCX_AGENT_REPORT environment variable: the first line `ok` or `fail`, and after it a few lines saying what you produced. Nothing else counts as reporting, and a worker that never writes it is not a failure — it is a worker nobody was told about."
+      "description": "What this worker is for, in your own words. nocx TYPES this into the worker's own pane as soon as it is ready for input — this is how the worker is told what to do, not only a record of it — and it is also recorded, so a later workers.holdings can tell you what you started even if you have lost the context you started it from. A pane that stops on a question of its agent's own before it is ready — a folder-trust question, an approval — does not fail the call: the worker is live, nothing is typed, and the result says so in taskTyped and waitingOn. A pane that never becomes ready for any other reason fails the whole call rather than leaving a worker nobody told anything; workers.say can hand a worker something more once it is running, but this is how its first task arrives.\n\nTELL THE WORKER HOW TO REPORT, in this task, or it cannot: nocx will know when its process ends and will never know what it produced, and the record will say `abandoned` rather than `completed`. The instruction to include is exactly this — when you are finished, write to the file named by the NOCX_AGENT_REPORT environment variable: the first line `ok` or `fail`, and after it a few lines saying what you produced. Nothing else counts as reporting, and a worker that never writes it is not a failure — it is a worker nobody was told about."
     }
   },
   "$defs": {
     "result": {
       "title": "WorkersSpawnResult",
-      "description": "The worker that now exists. It is live: its enrolment arrived, which is what proves the agent started — never that this call returned.",
+      "description": "The worker that now exists. It is live: its enrolment arrived, which is what proves the agent started — never that this call returned. Live is not the same as told: taskTyped says whether the task reached the worker.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "state"],
+      "required": ["id", "state", "taskTyped"],
       "properties": {
         "id": {
           "type": "string",
@@ -36,6 +36,15 @@
           "type": "string",
           "enum": ["live"],
           "description": "Always live: a spawn that did not reach live is an error, not a result."
+        },
+        "taskTyped": {
+          "type": "boolean",
+          "description": "True when the task was typed into the worker's pane. False when its pane stopped on a question of its agent's own first — waitingOn then says which kind — and nothing was typed: the worker is live and supervised, and it has not been told what to do."
+        },
+        "waitingOn": {
+          "type": "string",
+          "enum": ["permission_choice", "modal_choice"],
+          "description": "Present only when taskTyped is false because the pane is asking something. permission_choice: the agent raised a question of its own, such as a tool approval or whether to trust the directory it was started in, and answering it answers the agent. modal_choice: a menu is open that the agent did not raise."
         }
       }
     }

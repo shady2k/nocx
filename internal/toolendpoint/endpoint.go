@@ -639,13 +639,23 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		return rpcDomainError, "worker request refused",
 			"that participant is yours, but its delegation is no longer active, so it can no longer be acted on. Call workers.holdings to see its state; a participant that has ended needs nothing further from you."
 	case errors.Is(err, workers.ErrPaneNeverTypable):
-		// WORTH RETRYING. The agent may simply not have finished booting its
-		// TUI inside the budget — a slower machine, a loaded helper. Split
-		// from the arm below for the same reason the axis's two refusals are
-		// split: a coordinator that cannot tell "not ready yet" from "your
-		// task was refused" fixes the wrong half.
+		var never *workers.PaneNeverTypable
+		if errors.As(err, &never) && never.Unreadable() {
+			// NOT WORTH RETRYING (nocx-f545a.3). nocx could not read the
+			// pane at all, and the error one layer down already said a pane
+			// it cannot read will not become typable on its own. This arm
+			// used to answer it with the retry sentence below, which sent a
+			// coordinator back to do exactly what could not work.
+			return rpcDomainError, "worker request refused",
+				"the worker started but nocx could not read what its pane was showing, so nothing was typed into it and the worker was not left running unsupervised. Spawning again the same way will fail the same way; say in words what you were trying to start, and that its pane showed something nocx does not recognise."
+		}
+		// WORTH RETRYING. nocx read the pane and the agent was still busy —
+		// a slower machine, a loaded helper. Split from the arm below for the
+		// same reason the axis's two refusals are split: a coordinator that
+		// cannot tell "not ready yet" from "your task was refused" fixes the
+		// wrong half.
 		return rpcDomainError, "worker request refused",
-			"the worker started but its pane never became ready to receive a task inside the budget, so nothing was typed into it and the worker was not left running unsupervised. Spawning again may succeed if this was transient."
+			"the worker started but its pane was still busy when the budget ran out, so nothing was typed into it and the worker was not left running unsupervised. Spawning again may succeed if this was transient."
 	case errors.Is(err, workers.ErrTaskSubmitRefused):
 		// NOT WORTH RETRYING UNMODIFIED. The pane opened for typing and nocx's
 		// own gate then refused the write — the screen said something other

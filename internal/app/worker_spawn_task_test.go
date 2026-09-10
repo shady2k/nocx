@@ -339,7 +339,7 @@ func TestASubmitTheRealGateRefusesIsNotDefeatedByAFalseReadySignal(t *testing.T)
 			ferr, stand.rules.Classify(wakeAgent, f))
 	}
 
-	deliverErr := stand.spawner.deliverTask(context.Background(), string(sid), "do the thing")
+	_, deliverErr := stand.spawner.deliverTask(context.Background(), string(sid), "do the thing")
 	if deliverErr == nil {
 		t.Fatal("deliverTask succeeded even though the real gate should have refused the submit")
 	}
@@ -497,7 +497,7 @@ func TestAPaneStuckWorkingForTheWholeBudgetNamesItsLastState(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	err := stand.spawner.deliverTask(ctx, "pane-working", "do the thing")
+	_, err := stand.spawner.deliverTask(ctx, "pane-working", "do the thing")
 	if err == nil {
 		t.Fatal("deliverTask succeeded for a pane stuck at working")
 	}
@@ -527,7 +527,7 @@ func TestAPaneStuckUnknownForTheWholeBudgetNamesTheUnrecognisedScreen(t *testing
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	err := stand.spawner.deliverTask(ctx, "pane-unknown", "do the thing")
+	_, err := stand.spawner.deliverTask(ctx, "pane-unknown", "do the thing")
 	if err == nil {
 		t.Fatal("deliverTask succeeded for a pane stuck at unknown")
 	}
@@ -553,7 +553,7 @@ func TestAPaneNeverObservedAtAllSaysSoRatherThanNamingAState(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	err := stand.spawner.deliverTask(ctx, "pane-unwatched", "do the thing")
+	_, err := stand.spawner.deliverTask(ctx, "pane-unwatched", "do the thing")
 	if err == nil {
 		t.Fatal("deliverTask succeeded for a pane nocx never observed")
 	}

@@ -23,13 +23,16 @@ const toolContractDir = "../../contracts/tools"
 
 type contractWorkerRecord struct{}
 
-func (contractWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Participant, error) {
-	return workers.Participant{
-		ID:    "worker-1",
-		Group: workers.ID("session-1"),
-		Role:  workers.RoleWorker,
-		State: workers.StateLive,
-		Task:  req.Task,
+func (contractWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {
+	return workers.Registration{
+		Participant: workers.Participant{
+			ID:    "worker-1",
+			Group: workers.ID("session-1"),
+			Role:  workers.RoleWorker,
+			State: workers.StateLive,
+			Task:  req.Task,
+		},
+		Delivery: workers.TaskDelivery{Typed: true},
 	}, nil
 }
 

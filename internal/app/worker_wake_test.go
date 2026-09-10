@@ -169,7 +169,7 @@ func (w *wakeStand) register(t *testing.T, task string) workers.Participant {
 			Group: w.workerID, CoordinatorSession: string(w.coordinator),
 			Role: workers.RoleWorker, Task: task, Command: wakeAgent,
 		})
-		done <- outcome{p, err}
+		done <- outcome{p.Participant, err}
 	}()
 	var sid session.ID
 	waittest.WaitFor(t, "a new worker session to exist", func() bool {

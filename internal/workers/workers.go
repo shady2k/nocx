@@ -372,14 +372,40 @@ var (
 	ErrEnrolmentNeverArrived = errors.New("worker: enrolment never arrived")
 	// ErrPaneNeverTypable means a participant enrolled and its pane never
 	// reached a state nocx could type its task into, inside the spawn's own
-	// budget — the agent's TUI may still be booting, or showing something
-	// other than a plain prompt, when the budget ran out. Distinct from
-	// ErrTaskSubmitRefused below because the two need different fixes: this
-	// one is worth retrying (a slow machine, a loaded agent), the other names
-	// a screen that actively refused the submission.
+	// budget. Distinct from ErrTaskSubmitRefused below because the two need
+	// different fixes: that one names a screen that actively refused the
+	// submission. Whether THIS one is worth retrying depends on what the pane
+	// held, which is why it arrives as a *PaneNeverTypable carrying the state
+	// — a pane nocx could not read will fail the same way again, and a pane
+	// that was merely busy may not. A pane that stopped on a question of its
+	// agent's own is not this error at all (nocx-f545a.3).
 	ErrPaneNeverTypable = errors.New("worker: the participant's pane never became ready for its task")
 	// ErrTaskSubmitRefused means the pane became typable and nocx's own
 	// typing gate then refused the submission — reached the screen and was
 	// turned away, as against never reaching a typable screen at all.
 	ErrTaskSubmitRefused = errors.New("worker: nocx could not submit the participant's task")
 )
+
+// PaneNeverTypable is ErrPaneNeverTypable with the state the pane held when
+// the spawn's budget ran out (nocx-f545a.3). The state is what tells a caller
+// whether retrying can help: `unknown`, or no reading at all, means nocx could
+// not read the screen and another attempt will fail the same way; `working`
+// or `error` mean it read the screen and the agent was busy or failing, which
+// a later attempt may not be.
+type PaneNeverTypable struct {
+	// State is the last state nocx read off the pane, or "" when it never
+	// read the pane at all.
+	State string
+	// Detail is the sentence a caller reads about what the wait saw.
+	Detail string
+}
+
+func (e *PaneNeverTypable) Error() string { return ErrPaneNeverTypable.Error() + ": " + e.Detail }
+
+// Unwrap makes errors.Is(err, ErrPaneNeverTypable) hold, so every caller that
+// already asks the sentinel goes on being answered.
+func (e *PaneNeverTypable) Unwrap() error { return ErrPaneNeverTypable }
+
+// Unreadable reports whether nocx could not read the pane at all — the case a
+// retry cannot fix.
+func (e *PaneNeverTypable) Unreadable() bool { return e.State == "" || e.State == "unknown" }

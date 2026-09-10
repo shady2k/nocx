@@ -166,6 +166,29 @@ type Spawned interface {
 	Kill(ctx context.Context) error
 }
 
+// TaskDelivery is what became of a participant's task at spawn (nocx-f545a.3).
+//
+// It is a fact about what nocx DID, reported beside the participant rather
+// than written into its record: the reason a task was not typed is read off
+// the pane's screen, and AD-6 forbids a screen reading from assigning status
+// to a participant (ADR-0064 §4). So it travels with the registration that
+// produced it, is answered to the caller once, and is kept nowhere.
+type TaskDelivery struct {
+	// Typed is true when the task was submitted into the participant's pane.
+	Typed bool
+	// WaitingOn names the pane state that kept the task from being typed — a
+	// question the participant's agent is asking of its own — and is empty
+	// whenever Typed is true, and when nothing was attempted at all.
+	WaitingOn string
+}
+
+// TaskDeliverer is the optional half of Spawned: a launcher that attempted to
+// deliver its task says what came of it. A Spawned that does not implement it
+// attempted nothing, which is the zero TaskDelivery.
+type TaskDeliverer interface {
+	TaskDelivery() TaskDelivery
+}
+
 // Spawner creates the session and starts the launcher inside it.
 type Spawner interface {
 	Spawn(ctx context.Context, req SpawnRequest) (Spawned, error)

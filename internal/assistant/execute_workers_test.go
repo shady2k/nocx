@@ -20,6 +20,8 @@ const testWorkerEnv = "env-local"
 
 // fakeWorkerRecord records what it was asked and answers what it is told to.
 type fakeWorkerRecord struct {
+	// delivery is what Register reports became of the task (nocx-f545a.3).
+	delivery   workers.TaskDelivery
 	registered []workers.RegisterRequest
 	held       []workers.Participant
 	registerFn func(workers.RegisterRequest) (workers.Participant, error)
@@ -44,12 +46,16 @@ type fakeWorkerRecord struct {
 	readOrder []string
 }
 
-func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Participant, error) {
+func (f *fakeWorkerRecord) Register(_ context.Context, req workers.RegisterRequest) (workers.Registration, error) {
 	f.registered = append(f.registered, req)
 	if f.registerFn != nil {
-		return f.registerFn(req)
+		p, err := f.registerFn(req)
+		return workers.Registration{Participant: p, Delivery: f.delivery}, err
 	}
-	return workers.Participant{ID: "p-1", State: workers.StateLive, Task: req.Task}, nil
+	return workers.Registration{
+		Participant: workers.Participant{ID: "p-1", State: workers.StateLive, Task: req.Task},
+		Delivery:    f.delivery,
+	}, nil
 }
 
 func (f *fakeWorkerRecord) HeldBy(_ context.Context, coordinatorSession string) ([]workers.Participant, error) {

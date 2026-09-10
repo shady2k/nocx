@@ -552,7 +552,7 @@ func newHarnessBound(t *testing.T, bound int) *harness {
 }
 
 func (h *harness) register(ctx context.Context) (Participant, error) {
-	return h.reg.Register(ctx, RegisterRequest{
+	reg, err := h.reg.Register(ctx, RegisterRequest{
 		Group:              testGroup,
 		CoordinatorSession: coordSession,
 		Role:               RoleWorker,
@@ -560,6 +560,7 @@ func (h *harness) register(ctx context.Context) (Participant, error) {
 		Environment:        "env-local",
 		CreatedByRunID:     "run-42",
 	})
+	return reg.Participant, err
 }
 
 // A fork nobody recorded is permanently undiscoverable, so the record has to

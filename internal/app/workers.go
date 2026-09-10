@@ -259,8 +259,10 @@ func (w *paneWaitState) note(o paneobserve.Observation) {
 }
 
 // awaitFreeText blocks until paneID's last-classified observation is
-// free_text, until ctx ends, or until the pane's agent is seen to have
-// exited.
+// free_text, until it is a QUESTION the pane's agent is asking of its own
+// (permission_choice or modal_choice, nocx-f545a.3), until ctx ends, or until
+// the pane's agent is seen to have exited. It answers the state that ended the
+// wait; a question is an answer, not a failure.
 //
 // It asks the WATCHER rather than retrying agenttyping.Submit in a loop: a
 // refused Submit call would read the live screen and log a warning on every
@@ -276,35 +278,44 @@ func (w *paneWaitState) note(o paneobserve.Observation) {
 // whoever is reading this backend's log, and carries the same facts as
 // structured fields rather than prose, because the two readers are not
 // looking for the same thing.
-func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger) error {
+func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger) (agentdriver.State, error) {
 	var last paneWaitState
-	check := func() (bool, error) {
+	// check answers the state that ENDS the wait, and "" while nothing has.
+	check := func() (agentdriver.State, error) {
 		o, ok := r.Snapshot(paneID)
 		if !ok {
-			return false, nil
+			return "", nil
 		}
 		last.note(o)
 		switch o.State {
 		case agentdriver.StateFreeText:
-			return true, nil
+			return o.State, nil
+		case agentdriver.StatePermissionChoice, agentdriver.StateModalChoice:
+			// A QUESTION ENDS THE WAIT, AND IT IS NOT A FAILURE (ADR-0064).
+			// The pane was positively identified as asking something: the
+			// agent is not busy, and nocx did not fail to read it. No budget
+			// changes that without somebody answering, and waiting one out
+			// and then deleting the pane is what threw away the only screen
+			// that said so (nocx-ty5ks).
+			return o.State, nil
 		case agentdriver.StateExited:
-			return false, errors.New("the participant's agent exited before its pane ever became typable")
+			return "", errors.New("the participant's agent exited before its pane ever became typable")
 		default:
-			return false, nil
+			return "", nil
 		}
 	}
-	if ready, err := check(); ready || err != nil {
-		return err
+	if state, err := check(); state != "" || err != nil {
+		return state, err
 	}
 	ticker := time.NewTicker(deliveryPoll)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return refusePaneNeverTypable(lg, paneID, last)
+			return "", refusePaneNeverTypable(lg, paneID, last)
 		case <-ticker.C:
-			if ready, err := check(); ready || err != nil {
-				return err
+			if state, err := check(); state != "" || err != nil {
+				return state, err
 			}
 		}
 	}
@@ -321,29 +332,32 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 // UNKNOWN AND WORKING ARE NOT THE SAME REFUSAL (nocx-qddv8, nocx-4gj5w):
 // `unknown` means the driver could not identify what was on screen at all —
 // a rule that does not recognise this agent's chrome, which will not resolve
-// itself no matter how long the budget runs — where every other non-typable
-// state (`working`, a permission menu, a modal) means the driver read the
+// itself no matter how long the budget runs — where every other state that
+// can still be held here (`working`, `error`) means the driver read the
 // screen just fine and the agent was doing something else. Retrying the
 // first is retrying a bug; retrying the second may just need a longer wait
-// or a busier machine.
+// or a busier machine. A question (a permission or a menu) never reaches
+// this function: it ends the wait as an answer (nocx-f545a.3). The state
+// rides the error as *workers.PaneNeverTypable, so a caller can choose its
+// sentence from a value rather than from this prose.
 func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState) error {
 	if !last.observed {
 		lg.Warn("worker spawn: the pane's budget expired with no observation ever recorded for it",
 			"pane_id", paneID)
-		return errors.New("nocx never observed this pane at all inside the spawn's own budget; " +
-			"there is no reading to say why it did not become typable")
+		return &workers.PaneNeverTypable{Detail: "nocx never observed this pane at all inside the spawn's own budget; " +
+			"there is no reading to say why it did not become typable"}
 	}
 	held := last.held(time.Now())
 	lg.Warn("worker spawn: the pane's budget expired before it became typable",
 		"pane_id", paneID, "last_state", string(last.state), "held_ms", held.Milliseconds())
 	if last.state == agentdriver.StateUnknown {
-		return fmt.Errorf(
+		return &workers.PaneNeverTypable{State: string(last.state), Detail: fmt.Sprintf(
 			"the pane's screen held state %q for %s of the spawn's budget: nocx's driver did not recognise what was on screen, and a pane it cannot read will never become typable on its own",
-			last.state, held.Round(time.Millisecond))
+			last.state, held.Round(time.Millisecond))}
 	}
-	return fmt.Errorf(
+	return &workers.PaneNeverTypable{State: string(last.state), Detail: fmt.Sprintf(
 		"the pane held state %q for %s of the spawn's budget without becoming typable",
-		last.state, held.Round(time.Millisecond))
+		last.state, held.Round(time.Millisecond))}
 }
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
@@ -367,7 +381,14 @@ type spawnedParticipant struct {
 	// itself was given — one owner of "undo a spawn's tab" rather than two,
 	// which is why compensateSpawn below no longer calls DeleteTab itself.
 	layout paneMinter
+	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
+	// read once by the registration through workers.TaskDeliverer.
+	delivery workers.TaskDelivery
 }
+
+// TaskDelivery is how the registration that started this participant learns
+// what became of its task, without anybody writing it into the record.
+func (s spawnedParticipant) TaskDelivery() workers.TaskDelivery { return s.delivery }
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
 	ident := s.sess.Identity()
@@ -677,11 +698,18 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// then submits through the SAME gate agent.type and the coordinator's own
 	// wake go through — never a second door onto this pane's input queue.
 	if req.Task != "" {
-		if err := s.deliverTask(ctx, string(opened.Session.ID()), req.Task); err != nil {
+		delivery, deliverErr := s.deliverTask(ctx, string(opened.Session.ID()), req.Task)
+		if deliverErr != nil {
 			s.compensateSpawn(ctx, tabID.String(), opened.Session)
-			return nil, fmt.Errorf("worker spawn: %w", err)
+			return nil, fmt.Errorf("worker spawn: %w", deliverErr)
 		}
-		lg.Info("worker participant given its task", "bytes", len(req.Task))
+		// A pane that asked a question keeps its tab, its session and its
+		// place in the registration: the participant goes live with its task
+		// untyped, and the caller is told so (nocx-f545a.3).
+		spawned.delivery = delivery
+		if delivery.Typed {
+			lg.Info("worker participant given its task", "bytes", len(req.Task))
+		}
 	}
 	// TOLD LAST, after every compensation-worthy step has passed. A
 	// notification sent any earlier could announce a tab that the next
@@ -749,18 +777,31 @@ func (s *workerSpawner) coordinatorCwd(ctx context.Context, coordinator string, 
 // typist into cannot ask whether a pane is ready any more than it could ask
 // whether a domain accepted, so the spawn proceeds rather than hanging or
 // refusing a question it was never asked. Production always wires both.
-func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) error {
+func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (workers.TaskDelivery, error) {
 	if s.readiness == nil || s.typist == nil {
 		s.log.Debug("worker spawn: no pane-typing seam is wired; the task will not be typed at spawn",
 			"pane_id", paneID)
-		return nil
+		return workers.TaskDelivery{}, nil
 	}
-	if waitErr := awaitFreeText(ctx, s.readiness, paneID, s.log); waitErr != nil {
-		return fmt.Errorf("%w: %s", workers.ErrPaneNeverTypable, waitErr)
+	state, waitErr := awaitFreeText(ctx, s.readiness, paneID, s.log)
+	if waitErr != nil {
+		var never *workers.PaneNeverTypable
+		if errors.As(waitErr, &never) {
+			return workers.TaskDelivery{}, waitErr
+		}
+		return workers.TaskDelivery{}, fmt.Errorf("%w: %s", workers.ErrPaneNeverTypable, waitErr)
+	}
+	if state != agentdriver.StateFreeText {
+		// The pane is asking something. Nothing is typed into a question —
+		// the gate would refuse it anyway, and answering it is the caller's
+		// choice under ADR-0064, never nocx's.
+		s.log.Info("worker spawn: the participant's pane is asking a question, so its task was not typed",
+			"pane_id", paneID, "state", string(state))
+		return workers.TaskDelivery{WaitingOn: string(state)}, nil
 	}
 	res := s.typist.Submit(paneID, task)
 	if res.Outcome == agenttyping.OutcomeSubmitted {
-		return nil
+		return workers.TaskDelivery{Typed: true}, nil
 	}
 	// OutcomeTyped is a refusal here too, not a delivery: the text reached
 	// the input region and the submit key did not, so no turn started and the
@@ -770,7 +811,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) er
 	if reason == "" {
 		reason = fmt.Sprintf("nocx refused to submit the task (%s)", res.Outcome)
 	}
-	return fmt.Errorf("%w: %s", workers.ErrTaskSubmitRefused, reason)
+	return workers.TaskDelivery{}, fmt.Errorf("%w: %s", workers.ErrTaskSubmitRefused, reason)
 }
 
 // compensateSpawn undoes what Spawn built so far, for a failure Spawn catches

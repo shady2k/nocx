@@ -30,7 +30,7 @@ import (
 // not on internal/worker's registrar, so a run can be tested against a double
 // that never opens a pane.
 type WorkerRecord interface {
-	Register(ctx context.Context, req workers.RegisterRequest) (workers.Participant, error)
+	Register(ctx context.Context, req workers.RegisterRequest) (workers.Registration, error)
 	HeldBy(ctx context.Context, coordinatorSession string) ([]workers.Participant, error)
 	// Say commits one message into a participant's mailbox. The sender is
 	// passed in and never taken from the arguments: a sender a model could
@@ -156,6 +156,13 @@ type workerSpawnParams struct {
 type workerSpawnResult struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
+	// TaskTyped and WaitingOn are what became of the task (nocx-f545a.3). A
+	// worker whose pane stopped on a question of its agent's own is still a
+	// worker — live, supervised, with its tab — and the coordinator is told
+	// that its task was not typed and what the pane is waiting on, rather
+	// than being handed an error for a pane nocx read perfectly.
+	TaskTyped bool   `json:"taskTyped"`
+	WaitingOn string `json:"waitingOn,omitempty"`
 }
 
 func workerCoordinatorFrom(cap agenttools.Capability, tool string) (*agenttools.WorkerCoordinator, error) {
@@ -484,6 +491,11 @@ func executeWorkerSay(ctx context.Context, cap agenttools.Capability, args json.
 
 // executeWorkerSpawn starts one worker and returns only when it is LIVE.
 //
+// Live is not the same as told. A worker whose pane stopped on a question of
+// its agent's own before it could take its task is live and untold, and the
+// result says which (nocx-f545a.3): the alternative, an error, would describe
+// a pane nocx read perfectly as one it could not start.
+//
 // Live means its enrolment arrived, which is what proves the agent started —
 // never that this call returned. A spawn that did not reach live is an error
 // and not a result, so there is no half-answer for a coordinator to
@@ -524,8 +536,10 @@ func executeWorkerSpawn(ctx context.Context, cap agenttools.Capability, args jso
 		return "", fmt.Errorf("workers.spawn: %w", err)
 	}
 	raw, err := json.Marshal(workerSpawnResult{
-		ID:    string(participant.ID),
-		State: string(participant.State),
+		ID:        string(participant.ID),
+		State:     string(participant.State),
+		TaskTyped: participant.Delivery.Typed,
+		WaitingOn: participant.Delivery.WaitingOn,
 	})
 	if err != nil {
 		return "", fmt.Errorf("workers.spawn: result: %w", err)

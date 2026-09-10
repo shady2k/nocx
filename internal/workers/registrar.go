@@ -156,12 +156,24 @@ type RegisterRequest struct {
 	CreatedByRunID string
 }
 
+// Registration is what Register hands back: the participant it left behind,
+// and what became of the participant's task at spawn.
+//
+// Participant is embedded so a caller that only ever asked for the record
+// reads it exactly as before. Delivery rides beside it rather than inside it
+// for TaskDelivery's own reason: it is answered once, to the caller that
+// registered, and it is not the record's.
+type Registration struct {
+	Participant
+	Delivery TaskDelivery
+}
+
 // Register runs the six steps above.
 //
 // It returns the participant it left behind even on failure, because a caller
 // that cannot name the record cannot check what happened to it — and "a
 // registration that failed" is exactly when naming it matters.
-func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Participant, err error) {
+func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Registration, err error) {
 	ctx, lg, end := log.Start(ctx, r.log, "workers.register",
 		"group", string(req.Group), "coordinator_session", req.CoordinatorSession,
 		"role", string(req.Role), "command", req.Command)
@@ -175,15 +187,15 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		req.Group = ID(req.CoordinatorSession)
 	}
 	if err := r.store.EnsureGroup(ctx, req.Group, req.CoordinatorSession); err != nil {
-		return Participant{}, fmt.Errorf("worker: ensure: %w", err)
+		return Registration{}, fmt.Errorf("worker: ensure: %w", err)
 	}
 	// Step 1. Nothing is forked and no record exists, so a refusal is free.
 	held, reserveErr := r.store.NonTerminal(ctx, req.Group)
 	if reserveErr != nil {
-		return Participant{}, fmt.Errorf("worker: reserve: %w", reserveErr)
+		return Registration{}, fmt.Errorf("worker: reserve: %w", reserveErr)
 	}
 	if len(held) >= r.bound {
-		return Participant{}, fmt.Errorf("worker %q holds %d of %d: %w", req.Group, len(held), r.bound, ErrBoundExceeded)
+		return Registration{}, fmt.Errorf("worker %q holds %d of %d: %w", req.Group, len(held), r.bound, ErrBoundExceeded)
 	}
 
 	// Step 2. From here on there is a record, and every later failure
@@ -197,7 +209,7 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		RegisteredAt: r.now(),
 	}
 	if err := r.store.CommitPrepared(ctx, p); err != nil {
-		return Participant{}, fmt.Errorf("worker: commit prepared: %w", err)
+		return Registration{}, fmt.Errorf("worker: commit prepared: %w", err)
 	}
 
 	// Steps 3 and 4 share ONE deadline, not two (nocx-ui8q6.4). A launcher
@@ -237,7 +249,7 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		Environment:        req.Environment,
 	})
 	if spawnErr != nil {
-		return p, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))
+		return Registration{Participant: p}, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))
 	}
 
 	// Step 4. The bound closes the interval; it does not decide anything
@@ -256,7 +268,7 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		lg.Warn("worker: the enrolment never arrived",
 			"waited_ms", time.Since(waitStarted).Milliseconds(),
 			"deadline_ms", r.deadline.Milliseconds(), "error", enrolErr)
-		return p, r.compensate(ctx, p, spawned, false, fmt.Errorf("worker: await enrolment: %w", enrolErr))
+		return Registration{Participant: p}, r.compensate(ctx, p, spawned, false, fmt.Errorf("worker: await enrolment: %w", enrolErr))
 	}
 	lg.Debug("worker: the participant enrolled",
 		"waited_ms", time.Since(waitStarted).Milliseconds(),
@@ -273,19 +285,28 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 		State:             DelegationActive,
 	}
 	if err := r.store.PutDelegation(ctx, del); err != nil {
-		return p, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: delegation: %w", err))
+		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: delegation: %w", err))
 	}
 
 	// Step 6, and the order inside it is the point.
 	if err := r.store.MarkLive(ctx, p.ID, live); err != nil {
-		return p, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: mark live: %w", err))
+		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: mark live: %w", err))
 	}
 	p.State = StateLive
 	p.Liveness = live
 	if err := r.sup.Attach(ctx, p); err != nil {
-		return p, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: attach supervision: %w", err))
+		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: attach supervision: %w", err))
 	}
-	return p, nil
+	// What became of the task travels OUT with the registration and is never
+	// written into the record (nocx-f545a.3): a task left untyped because the
+	// pane was asking a question is a screen reading, and a screen reading
+	// may not assign status to a participant (ADR-0064 §4). A Spawned that
+	// attempted no delivery says nothing, which is the zero value.
+	reg := Registration{Participant: p}
+	if d, ok := spawned.(TaskDeliverer); ok {
+		reg.Delivery = d.TaskDelivery()
+	}
+	return reg, nil
 }
 
 // compensate undoes what was built, in the reverse order of building it, and

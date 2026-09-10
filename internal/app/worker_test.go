@@ -241,7 +241,7 @@ func (w *workerStand) registerWithEnrolment(t *testing.T, task string) workers.P
 			Group: "worker-1", CoordinatorSession: "sess-coordinator",
 			Role: workers.RoleWorker, Task: task, Command: "claude",
 		})
-		done <- outcome{p, err}
+		done <- outcome{p.Participant, err}
 	}()
 
 	var sid session.ID

@@ -577,14 +577,14 @@ func TestARefusedAdmissionEntersNothingAndWakesNobody(t *testing.T) {
 // it did not reach live.
 func mustRegister(t *testing.T, h *harness) Participant {
 	t.Helper()
-	p, err := h.reg.Register(context.Background(), RegisterRequest{
+	reg, err := h.reg.Register(context.Background(), RegisterRequest{
 		Group: testGroup, CoordinatorSession: coordSession,
 		Role: RoleWorker, Task: "read AGENTS.md and report", Command: "claude",
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	return p
+	return reg.Participant
 }
 
 // A store that cannot say who coordinates the worker is a fact with nowhere to

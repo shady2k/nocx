@@ -31,7 +31,7 @@ func fanout(t *testing.T, h *harness, n int) []Participant {
 		if err != nil {
 			t.Fatalf("register worker %d: %v", i+1, err)
 		}
-		out = append(out, p)
+		out = append(out, p.Participant)
 	}
 	return out
 }

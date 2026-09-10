@@ -192,6 +192,28 @@ export class LayoutStore {
   }
 
   /**
+   * Fold a tab the BACKEND minted without being asked into the cache
+   * (nocx-ui8q6.3): workers.spawn's tab, arriving on workers.tabCreated
+   * rather than as this window's own createTab answer.
+   *
+   * Same merge openTab's own `.then()` performs — filter the id out, append
+   * the fresh row, notify — because the cache does not care which call
+   * learned of a row, only that it now holds one. There is no network call
+   * here and nothing to await: the row already exists on the backend by the
+   * time this notification arrives, so this is a pure merge, exactly like
+   * replaceTab/replacePane below it are for an answer this window itself
+   * asked for.
+   */
+  applyRemoteTab(tab: Tab, pane: Pane): void {
+    this.state = {
+      ...this.state,
+      tabs: [...this.state.tabs.filter((t) => t.id !== tab.id), tab],
+      panes: [...this.state.panes.filter((p) => p.id !== pane.id), pane],
+    }
+    this.changed()
+  }
+
+  /**
    * Create a workspace around a new pane — three ids, one call.
    *
    * CREATION IS ALWAYS CREATION-WITH-CONTENT (§4.1). "New workspace" mints

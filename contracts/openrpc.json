@@ -11147,6 +11147,9 @@
       "$ref": "https://nocx.local/contracts/vault.unlockRequest.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/workers.tabCreated.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/workspaces.close.schema.json"
     },
     {

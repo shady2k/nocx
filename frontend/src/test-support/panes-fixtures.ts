@@ -39,6 +39,7 @@ import type { SessionLiveness } from '../generated/session.liveness'
 import type { SessionEntry } from '../generated/sessions.inventory'
 import type { SessionObservationChanged } from '../generated/session.observationChanged'
 import type { DriverState } from '../pane-observation'
+import type { WorkersTabCreated } from '../generated/workers.tabCreated'
 import type { Open } from '../generated/open'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -599,6 +600,12 @@ export interface ClientFake {
   /** Deliver that news to every subscriber, so a test can drive the take the
    *  way a second window does. */
   _fireDisplaced: (d?: { sessionId: string; instanceId: string; sessionEpoch: number }) => void
+  /** A worker participant's tab has appeared (nocx-ui8q6.3). Returns an
+   *  unsubscribe, like the real one. */
+  onWorkerTabCreated: ReturnType<typeof vi.fn>
+  /** Deliver that fact to every subscriber, the way workers.tabCreated does
+   *  off the real socket. */
+  _fireWorkerTabCreated: (fact: WorkersTabCreated) => void
   readonly connected: boolean
   /** What the coordinator is still running, asked once before the chain is
    *  drawn (design D5). Answers an empty list by default, which is a cold
@@ -674,6 +681,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const reconnectHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
   type DisplacedFact = { sessionId: string; instanceId: string; sessionEpoch: number }
   const displacedHandlers = new Set<(d: DisplacedFact) => void>()
+  const workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
   const newSession = (): SessionFake => {
     const s = makeSession()
     sessions.push(s)
@@ -715,6 +723,13 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
       },
     ) => {
       for (const cb of [...displacedHandlers]) cb(d)
+    },
+    onWorkerTabCreated: vi.fn((cb: (fact: WorkersTabCreated) => void) => {
+      workerTabCreatedHandlers.add(cb)
+      return () => workerTabCreatedHandlers.delete(cb)
+    }),
+    _fireWorkerTabCreated: (fact: WorkersTabCreated) => {
+      for (const cb of [...workerTabCreatedHandlers]) cb(fact)
     },
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),

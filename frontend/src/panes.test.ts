@@ -3225,3 +3225,148 @@ describe('a restored pane and the session the backend still holds', () => {
     expect(returning.openSession).toHaveBeenCalledTimes(1)
   })
 })
+
+// ── nocx-ui8q6.3: a worker's tab appears while the person is looking ──────
+//
+// This is the seam a person actually reaches: workers.spawn mints a tab on
+// the backend, with nobody's own createTab call in flight to learn it from,
+// and workers.tabCreated is the only way this window is told before its next
+// layout.read. The tests below watch it happen in the renderer's own state —
+// the layout cache and the tab strip's DOM — never merely that a handler was
+// registered.
+describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
+  const workerFact = (tabId: string, paneId: string) => ({
+    tab: {
+      id: tabId,
+      workspaceId: 'workspace:default',
+      parentId: null,
+      name: null,
+      colour: null,
+      position: 1,
+      pinned: false,
+      layout: 'row' as const,
+      seenAt: null,
+    },
+    firstPane: {
+      id: paneId,
+      tabId,
+      cwd: '',
+      kind: 'local' as const,
+      endpoint: null,
+      sizeShare: 1,
+    },
+    sessionId: '99123456789abcdef0011223344556699',
+    instanceId: 'fedcba9876543210fedcba9876543210',
+    sessionEpoch: 1,
+    replayFrom: 0,
+    attached: false,
+  })
+
+  it('folds the tab into the layout cache and draws it in the strip', async () => {
+    const chain = makeLayoutStore()
+    const { client, bar, layout } = await mountPaneManager(
+      makeClient(),
+      undefined,
+      undefined,
+      undefined,
+      chain,
+    )
+    const before = bar.querySelectorAll('[role="tab"]').length
+
+    client._fireWorkerTabCreated(workerFact('worker-tab-1', 'worker-pane-1'))
+    await vi.waitFor(() => {
+      expect(layout.tabs().map((t) => t.id)).toContain('worker-tab-1')
+    })
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]').length).toBe(before + 1)
+    })
+  })
+
+  // THE DEFECT THIS CLOSES: a naive merge that only touched the layout cache
+  // would leave adoptionFor with nothing to find for the new pane, and the
+  // renderer would open a SECOND local shell over it — the agent process the
+  // tab is actually for keeps running with nobody attached. Wiring liveByPane
+  // before the cache is what makes the renderer reclaim instead.
+  it('reclaims the participant session already running, never opening a second one', async () => {
+    const chain = makeLayoutStore()
+    const { client } = await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const openCallsBefore = client.openSession.mock.calls.length
+
+    const fact = workerFact('worker-tab-2', 'worker-pane-2')
+    client._fireWorkerTabCreated(fact)
+
+    await vi.waitFor(() => {
+      expect(client.reclaimSession).toHaveBeenCalledTimes(1)
+    })
+    expect(client.reclaimSession.mock.calls[0][0]).toMatchObject({
+      sessionId: fact.sessionId,
+      instanceId: fact.instanceId,
+      sessionEpoch: fact.sessionEpoch,
+      paneId: 'worker-pane-2',
+    })
+    // No new pane took the ordinary open path for this fact.
+    expect(client.openSession.mock.calls.length).toBe(openCallsBefore)
+  })
+
+  it('drops a fact naming a different backend instance than the one already known', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9878)))
+    realClient.start()
+    await Promise.resolve()
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const socket: MockWebSocket = constructed
+    socket.serverAccepts()
+
+    try {
+      // Establish one session, which is what teaches this client its own
+      // backend instance id (AD-7: every session on one connection shares
+      // it).
+      const openPromise = realClient.openSession(80, 24)
+      const opened = await vi.waitFor(() => {
+        const req = socket.requests().find((r) => r.method === 'open')
+        if (!req || req.id === undefined) throw new Error('no open request yet')
+        return req
+      })
+      socket.deliverText({
+        jsonrpc: '2.0',
+        id: opened.id,
+        result: {
+          sessionId: '1123456789abcdef0011223344556677',
+          instanceId: 'fedcba9876543210fedcba9876543210',
+          sessionEpoch: 1,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+      await openPromise
+
+      const seen: unknown[] = []
+      realClient.onWorkerTabCreated((fact) => seen.push(fact))
+
+      const staleFact = workerFact('worker-tab-stale', 'worker-pane-stale')
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabCreated',
+        params: { ...staleFact, instanceId: '00000000000000000000000000000000' },
+      })
+      // A real one, from the SAME instance, proves the subscription itself
+      // works and that only the mismatched one was dropped.
+      const freshFact = workerFact('worker-tab-fresh', 'worker-pane-fresh')
+      socket.deliverText({
+        jsonrpc: '2.0',
+        method: 'workers.tabCreated',
+        params: freshFact,
+      })
+
+      await vi.waitFor(() => expect(seen).toHaveLength(1))
+      expect((seen[0] as { tab: { id: string } }).tab.id).toBe('worker-tab-fresh')
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
+  })
+})

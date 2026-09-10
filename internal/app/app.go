@@ -2043,7 +2043,12 @@ func New(opts ...Option) (*App, error) {
 			// already records every session nobody named one for, so this
 			// adds no new answer to "where does an unplaced thing go".
 			workspace: string(workspace.Default),
-			log:       logger,
+			// tp again (nocx-ui8q6.3): the same server instance that mints
+			// the tab's session is what tells a connected renderer the tab
+			// exists, over the same connection registry integration and
+			// opener already reach through.
+			announce: tp,
+			log:      logger,
 		},
 		workerEnrol,
 		workerSup,

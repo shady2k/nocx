@@ -56,6 +56,48 @@ type sessionOpenerSeam interface {
 // was refused, left the tab CreateTab had just minted standing in the store
 // with nothing behind it — a person would see a tab and find it dead. Every
 // failure after CreateTab now compensates through this same seam.
+//
+// THIS BYPASSES capability.LayoutOperation — a person's tabs.create goes
+// through it (internal/transport/ws_layout_handlers.go) and this does not —
+// and that is deliberate rather than a hole nobody closed (nocx-ui8q6.3
+// asked the question explicitly; this is the answer, with the evidence).
+// capability/layout.go's own package doc names what that operation's guard
+// actually is: a control.Admission gate composed for the JSON-RPC dispatch
+// layer, there to (a) serialize a logical sequence that reads the chain and
+// then writes it — a reorder checked against a snapshot, a rename racing
+// another rename — against other RENDERER-INITIATED requests on the same
+// domain, and (b) refuse into the control.saturated wire contract when that
+// queue is full, which is a statement about *dispatch backpressure on one
+// WebSocket's request stream*. Neither reads as an authorization check: the
+// guard's check() call trips only on a captured service handle escaping its
+// own Run, never on who is asking. The actual data-race protection for the
+// underlying SQLite tables is a layer BELOW capability entirely — every
+// content-domain mutation, called through the gate or not, is serialized by
+// the same single writer goroutine content's own docs describe
+// (internal/content/sqlite.go's writeCh, layout_sqlite.go's "every mutation
+// goes through the single writer goroutine") — so a spawn's CreateTab and a
+// person's concurrent tabs.rename cannot corrupt one row between them
+// whether or not the spawn also holds capability's admission gate.
+//
+// What capability's gate would add here is only backpressure participation:
+// letting a worker spawn queue and wait behind a saturated content-domain
+// dispatch queue, or be refused with control.saturated, exactly as a
+// person's own tabs.create would be. That is the wrong shape for THIS
+// caller. workers.spawn is already an authorized tool call by the time
+// Spawn runs — the delegate effect over the resource environment is checked
+// at the tool endpoint, before any pane is minted — and that check is a
+// different resource entirely (the run's own fence, not the JSON-RPC
+// dispatch lane a renderer's socket occupies). Routing a backend-internal
+// mint through capability.LayoutOperation would make a coordinator's spawn
+// compete for, and be throttled by, the queue depth a PERSON'S layout
+// clicks are bounded by — coupling two backpressure domains that have no
+// reason to share a budget, for a guard whose actual job (the escaped-handle
+// check) has nothing to do with any of this. So the two seams stay two
+// seams: tabs.create goes through the operation because it answers untrusted,
+// connection-scoped requests that need dispatch admission; workers.go calls
+// the repository directly because it is one already-authorized, backend-
+// internal write with no request to admit and no handle that could escape
+// anywhere capability's guard would catch it.
 type paneMinter interface {
 	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
@@ -77,6 +119,17 @@ type sessionCloser interface {
 // wire) but only "has it left `starting` yet, or should I keep waiting".
 type integrationAwaiterSeam interface {
 	AwaitIntegration(ctx context.Context, sid session.ID) (transport.IntegrationOutcome, error)
+}
+
+// tabAnnouncer is the spawner's narrow view of the transport's push to a
+// connected renderer (nocx-ui8q6.3): tell every connected client a
+// participant's tab exists. Nil is treated exactly like integration's and
+// readiness's absence elsewhere in this file — a spawner nobody wired one
+// into cannot announce a tab any more than it could await an axis, so the
+// spawn proceeds without telling anybody rather than panicking on a seam a
+// test double never needed. Production always wires the real one.
+type tabAnnouncer interface {
+	AnnounceWorkerTab(tab content.Tab, pane content.Pane, sess session.Session)
 }
 
 // participantGeometry is the size a participant's pane opens at.
@@ -129,7 +182,11 @@ type workerSpawner struct {
 	// workspace is where a participant's tab is minted. The worker's own
 	// workspace, resolved by the caller, never guessed here.
 	workspace string
-	log       log.Logger
+	// announce tells a connected renderer the tab exists, once Spawn has
+	// committed to succeeding (nocx-ui8q6.3). Nil is the absence case
+	// tabAnnouncer's own doc names.
+	announce tabAnnouncer
+	log      log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -284,10 +341,11 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
-	if _, tabErr := s.layout.CreateTab(ctx,
+	madeTab, tabErr := s.layout.CreateTab(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Kind: content.PaneLocal, SizeShare: 1},
-	); tabErr != nil {
+	)
+	if tabErr != nil {
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
 	}
 	lg.Debug("worker spawn: the participant's tab exists",
@@ -389,6 +447,13 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			return nil, fmt.Errorf("worker spawn: %w", err)
 		}
 		lg.Info("worker participant given its task", "bytes", len(req.Task))
+	}
+	// TOLD LAST, after every compensation-worthy step has passed. A
+	// notification sent any earlier could announce a tab that the next
+	// failure deletes moments later (nocx-ui8q6.3) — the same ordering
+	// discipline the doc above states for the pane row itself.
+	if s.announce != nil {
+		s.announce.AnnounceWorkerTab(madeTab.Object.Tab, madeTab.Object.FirstPane, opened.Session)
 	}
 	return spawned, nil
 }

@@ -263,6 +263,49 @@ describe('LayoutStore', () => {
     expect(creates[1]).toMatchObject({ workspaceId: DEFAULT_WS })
   })
 
+  // ── nocx-ui8q6.3: a worker's tab, told rather than asked for ──
+
+  it('folds a remotely-minted tab into the cache with no network call', async () => {
+    const client = fakeClient()
+    const store = new LayoutStore(client)
+    await store.load()
+    const before = client.calls.length
+
+    const remoteTab = tab('worker-tab-1', { name: 'codex-1' })
+    const remotePane = pane('worker-pane-1', 'worker-tab-1')
+    store.applyRemoteTab(remoteTab, remotePane)
+
+    expect(store.tabs().map((t) => t.id)).toContain('worker-tab-1')
+    expect(store.panesOf('worker-tab-1').map((p) => p.id)).toEqual(['worker-pane-1'])
+    // A pure merge: nothing here asks the backend anything.
+    expect(client.calls.length).toBe(before)
+  })
+
+  it('notifies its listeners when a remote tab is folded in, like every other mutation', async () => {
+    const store = new LayoutStore(fakeClient())
+    await store.load()
+    const listener = vi.fn()
+    store.onChange(listener)
+
+    store.applyRemoteTab(tab('worker-tab-2'), pane('worker-pane-2', 'worker-tab-2'))
+
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('replaces an existing row rather than duplicating it, for a replayed fact', async () => {
+    const store = new LayoutStore(fakeClient())
+    await store.load()
+
+    store.applyRemoteTab(tab('worker-tab-3'), pane('worker-pane-3', 'worker-tab-3'))
+    store.applyRemoteTab(
+      tab('worker-tab-3', { name: 'renamed' }),
+      pane('worker-pane-3', 'worker-tab-3'),
+    )
+
+    expect(store.tabs().filter((t) => t.id === 'worker-tab-3')).toHaveLength(1)
+    expect(store.tab('worker-tab-3')?.name).toBe('renamed')
+  })
+
   it('refuses to open a tab before it has been told where tabs go', () => {
     const store = new LayoutStore(fakeClient())
     expect(() => store.openTab({ kind: 'local', endpoint: null, cwd: '' })).toThrow(

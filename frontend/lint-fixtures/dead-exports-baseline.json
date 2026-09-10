@@ -430,6 +430,16 @@
     },
     {
       "kind": "types",
+      "file": "src/generated/workers.tabCreated.ts",
+      "symbol": "Pane"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workers.tabCreated.ts",
+      "symbol": "Tab"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/workspaces.create.ts",
       "symbol": "Pane"
     },

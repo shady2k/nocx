@@ -956,6 +956,35 @@ export class PaneManager {
       })
     })
 
+    // A worker participant's tab has appeared (nocx-ui8q6.3): workers.spawn
+    // minted it directly, with nobody's createTab in flight for this window
+    // to learn it from, so this notification is the only way it is told
+    // before its next layout.read.
+    //
+    // THE LIVE ENTRY GOES IN liveByPane BEFORE THE ROW REACHES THE CACHE,
+    // and that order is the point: applyRemoteTab's own changed() fires
+    // renderFromLayout synchronously, which — adopting being the ordinary
+    // running state, exactly as it is for any row arriving mid-session —
+    // calls adopt() on the new row in the SAME turn. adopt() asks
+    // adoptionFor(row.id) exactly as it does for a row restored at boot, and
+    // that answer only exists if the entry is already in the map before
+    // adopt runs. Skipping this and letting the pane fall through to
+    // adoptionFor's "nothing here" branch would open a SECOND local shell
+    // over the participant's pane while the agent process the tab is
+    // actually for keeps running with nobody attached — the exact class of
+    // defect a soft degrade the UI contradicts (AGENTS.md).
+    this.client.onWorkerTabCreated((fact) => {
+      this.liveByPane.set(fact.firstPane.id, {
+        sessionId: fact.sessionId,
+        instanceId: fact.instanceId,
+        sessionEpoch: fact.sessionEpoch,
+        paneId: fact.firstPane.id,
+        replayFrom: fact.replayFrom,
+        attached: fact.attached,
+      })
+      this.layout.applyRemoteTab(fact.tab, fact.firstPane)
+    })
+
     window.addEventListener('keydown', this.onKeydown, true)
   }
 

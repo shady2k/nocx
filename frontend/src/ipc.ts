@@ -18,6 +18,7 @@ import type { SessionObservationChanged } from './generated/session.observationC
 import { isDriverState, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
+import type { WorkersTabCreated } from './generated/workers.tabCreated'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -498,6 +499,12 @@ export class WSClient {
   // terminal it no longer has.
   private displacedHandlers = new Set<(displaced: SessionDisplaced) => void>()
 
+  // workers.tabCreated subscribers (nocx-ui8q6.3): a participant's tab has
+  // appeared in the shared layout chain. Same shape as displacedHandlers —
+  // a client-level set, because the notification is a broadcast rather than
+  // addressed to one session.
+  private workerTabCreatedHandlers = new Set<(fact: WorkersTabCreated) => void>()
+
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
@@ -753,6 +760,26 @@ export class WSClient {
         sessionEpoch: state.sessionEpoch,
       }
       for (const h of this.displacedHandlers) h(displaced)
+    })
+
+    // A participant's tab has appeared (nocx-ui8q6.3). Unlike session.displaced
+    // this names a session this client has never seen, so there is no prior
+    // SessionState to compare against — the check instead uses
+    // _currentInstanceId, which is ANY session already known on this
+    // connection: one WebSocket speaks to exactly one backend instance for
+    // its whole life (AD-7), so every session this client already holds
+    // shares the fact this notification carries, and an instanceId that
+    // disagrees with it can only be a fact queued before a reconnect this
+    // client has since completed. With no session known yet (a pathological
+    // first frame) there is nothing to judge it against, so it is accepted
+    // rather than refused for a question that cannot yet be asked.
+    this.dispatcher.subscribe('workers.tabCreated', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const known = this._currentInstanceId()
+      if (known !== null && raw.instanceId !== known) return
+      const fact = raw as unknown as WorkersTabCreated
+      for (const h of this.workerTabCreatedHandlers) h(fact)
     })
 
     // The backend dropped input for a session: its write queue is full,
@@ -1195,6 +1222,28 @@ export class WSClient {
   onSessionDisplaced(cb: (displaced: SessionDisplaced) => void): () => void {
     this.displacedHandlers.add(cb)
     return () => this.displacedHandlers.delete(cb)
+  }
+
+  /** This connection's own backend instance id, read from any session this
+   *  client already holds (AD-7: a connection speaks to exactly one
+   *  instance for its whole life, so any one of them answers for all).
+   *  Null before this client has ever registered a session — the only case
+   *  in which a workers.tabCreated staleness check has nothing to compare
+   *  against. */
+  private _currentInstanceId(): string | null {
+    for (const state of this.sessions.values()) return state.instanceId
+    return null
+  }
+
+  /** Fires when workers.spawn mints a participant's tab (nocx-ui8q6.3),
+   *  while this client is connected to watch it happen — before this
+   *  window's next layout.read would have shown it. Broadcast, not
+   *  addressed to a session: every connected window is the audience,
+   *  because the fact is about the shared layout chain rather than about
+   *  the session running inside the new pane. Returns an unsubscribe. */
+  onWorkerTabCreated(cb: (fact: WorkersTabCreated) => void): () => void {
+    this.workerTabCreatedHandlers.add(cb)
+    return () => this.workerTabCreatedHandlers.delete(cb)
   }
 
   // --- data plane ---------------------------------------------------------

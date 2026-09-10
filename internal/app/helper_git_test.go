@@ -41,6 +41,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -63,7 +64,7 @@ func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bridgeLifecycle(peer, carrier)
+	bridgeLifecycle(nil, lifecycle.TransportID("tpt-test"), peer, carrier)
 
 	const outbound = "opaque lifecycle bytes"
 	writeDone := make(chan error, 1)

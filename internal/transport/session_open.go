@@ -597,8 +597,25 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// shell says hello into a pipe nobody reads and the handshake bound
 	// expires ten seconds later, which is a working terminal with the
 	// integration silently off.
-	if opened.Hosted != nil && opened.Hosted.StartLifecycle != nil {
+	//
+	// SAID, and said in both directions (nocx-n14oo.7). A backend-opened pane
+	// whose lifecycle leg is never pumped is a working terminal with the
+	// integration silently off, and the log could not tell that apart from a
+	// pane that was pumped and heard nothing back: the call left no trace at
+	// all. The line names the lane, which is what joins it to the adapter's
+	// own "established" and "lost".
+	lg := s.log.WithContext(ctx)
+	switch {
+	case opened.Hosted == nil:
+		lg.Debug("backend open: the pane is not hosted, so it has no lifecycle leg",
+			"pane_id", spec.PaneID)
+	case opened.Hosted.StartLifecycle == nil:
+		lg.Warn("backend open: a hosted pane came back with no lifecycle leg to start",
+			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
+	default:
 		opened.Hosted.StartLifecycle()
+		lg.Info("backend open: the pane's lifecycle leg is pumping",
+			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
 	}
 	return opened, nil
 }

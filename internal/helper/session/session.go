@@ -519,8 +519,20 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 	}
 }
 
+// serveLifecycle is the FIRST of the three hops the shell's hello takes to
+// reach the coordinator's adapter, and until nocx-n14oo.7 it said nothing
+// about the two facts that matter: that a frame went out, and what it had
+// sent when it stopped. A pump that reports only a FAILED send cannot be told
+// apart from one that never had anything to send.
 func (s *hostSession) serveLifecycle(ctx context.Context, sub *subscriber, log *slog.Logger) {
-	defer close(sub.lifecycleDone)
+	log = log.With("session", s.id.Session, "subscriber", sub.id)
+	firstSent := true
+	var totalSent int
+	defer func() {
+		log.Info("lifecycle: the coordinator's pump stopped",
+			"bytes_total", totalSent, "sent_nothing", totalSent == 0)
+		close(sub.lifecycleDone)
+	}()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -560,6 +572,11 @@ func (s *hostSession) serveLifecycle(ctx context.Context, sub *subscriber, log *
 				log.Warn("lifecycle data not delivered", "session", s.id.Session, "err", err)
 				return
 			}
+			if firstSent {
+				log.Info("lifecycle: the shell's first bytes went to the coordinator", "bytes", len(data))
+				firstSent = false
+			}
+			totalSent += len(data)
 			sub.cursorMu.Lock()
 			sub.lifecycleSent += proto.StreamOffset(len(data))
 			sub.cursorMu.Unlock()

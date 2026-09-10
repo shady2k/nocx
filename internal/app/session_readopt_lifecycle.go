@@ -84,6 +84,11 @@ type lifecycleAdoption struct {
 	adapter *lifecyclechannel.Adapter
 	peer    net.Conn
 	lane    lifecycle.LaneID
+	// log is the readopt pass's own logger, carried so the bridge this
+	// adoption starts can say what it carries. It is bound here rather than
+	// reached for at attachTo, which runs on the transport's goroutine with
+	// no registry in scope.
+	log log.Logger
 }
 
 // adoptLifecycle asks the helper for the identity this session's shell is
@@ -150,6 +155,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, ent
 		adapter: adapter,
 		peer:    peerConn,
 		lane:    adapter.Lane(),
+		log:     log.NewSlogAdapter(rp.registry.log),
 	}
 }
 
@@ -165,7 +171,9 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 	var abortOnce sync.Once
 	open.LifecycleLane = a.lane
 	open.StartLifecycle = func() {
-		startOnce.Do(func() { bridgeLifecycle(peer, attached.Lifecycle()) })
+		startOnce.Do(func() {
+			bridgeLifecycle(a.log, adapter.TransportID(), peer, attached.Lifecycle())
+		})
 	}
 	open.AbortLifecycle = func() {
 		abortOnce.Do(func() {

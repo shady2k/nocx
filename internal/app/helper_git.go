@@ -565,7 +565,8 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 		var startOnce sync.Once
 		startLifecycle = func() {
 			startOnce.Do(func() {
-				bridgeLifecycle(lifecyclePeer, attached.Lifecycle())
+				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
+					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle())
 			})
 		}
 		var abortOnce sync.Once
@@ -590,7 +591,31 @@ func (r *helperRegistry) OpenHosted(ctx context.Context, cfg session.Config) (tr
 	}, true, nil
 }
 
-func bridgeLifecycle(peer net.Conn, carrier io.ReadWriteCloser) {
+// bridgeLifecycle carries the shell's lifecycle bytes between the helper
+// attachment and the adapter's end of the channel, and SAYS SO (nocx-n14oo.7).
+//
+// This hop was silent in both directions, and the cost was a diagnosis that
+// could not be made: on 2026-09-10 a worker pane's shell wrote 219 bytes of
+// hello — the helper logged it — and the coordinator's adapter timed out ten
+// seconds later having seen no envelope at all, accepted or rejected. Three
+// hops lie between those two facts and this is the last of them, so a bridge
+// that reported nothing could neither be blamed nor cleared.
+//
+// The three lines are chosen to make exactly that reading. Started names the
+// transport, which is the key the adapter's own "established" and "lost" lines
+// carry, so the bridge joins the channel it feeds rather than sitting beside
+// it. The FIRST bytes in each direction are said once, because the answer
+// needed is whether anything arrived at all and a per-frame line would bury
+// it. And each half says what it carried when it ends, with carried_nothing
+// stated as its own fact: a bridge that ran and moved nothing and a bridge
+// that never ran look identical in a byte count and must not read alike.
+func bridgeLifecycle(lg log.Logger, transport lifecycle.TransportID, peer net.Conn, carrier io.ReadWriteCloser) {
+	if lg == nil {
+		lg = log.NewSlogAdapter(nil)
+	}
+	lg = lg.With("transport", string(transport))
+	lg.Debug("lifecycle bridge started")
+
 	var once sync.Once
 	closeBoth := func() {
 		once.Do(func() {
@@ -599,13 +624,42 @@ func bridgeLifecycle(peer net.Conn, carrier io.ReadWriteCloser) {
 		})
 	}
 	go func() {
-		_, _ = io.Copy(carrier, peer)
+		n, err := io.Copy(carrier, countingFirst(lg, "the adapter's first bytes reached the shell", peer))
+		lg.Info("lifecycle bridge: the adapter's end closed",
+			"to_shell_bytes", n, "carried_nothing", n == 0, "error", err)
 		closeBoth()
 	}()
 	go func() {
-		_, _ = io.Copy(peer, carrier)
+		n, err := io.Copy(peer, countingFirst(lg, "the shell's first bytes reached the adapter", carrier))
+		lg.Info("lifecycle bridge: the shell's end closed",
+			"to_adapter_bytes", n, "carried_nothing", n == 0, "error", err)
 		closeBoth()
 	}()
+}
+
+// countingFirst wraps a reader so the FIRST read that yields anything is said
+// once, with its size. It is a reader rather than a counter inside the copy
+// because io.Copy is what moves the bytes and the arrival has to be reported
+// at the moment it happens, not when the direction ends — the whole failure
+// this exists for ends ten seconds after the byte that mattered.
+func countingFirst(lg log.Logger, what string, r io.Reader) io.Reader {
+	return &firstByteReader{lg: lg, what: what, r: r}
+}
+
+type firstByteReader struct {
+	lg   log.Logger
+	what string
+	r    io.Reader
+	said bool
+}
+
+func (f *firstByteReader) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if n > 0 && !f.said {
+		f.said = true
+		f.lg.Info("lifecycle bridge: "+f.what, "bytes", n)
+	}
+	return n, err
 }
 
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {

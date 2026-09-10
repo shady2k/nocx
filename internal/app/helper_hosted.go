@@ -173,7 +173,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 		out.LifecycleTransport = lifecycleAdapter.TransportID()
 		var startOnce sync.Once
 		out.StartLifecycle = func() {
-			startOnce.Do(func() { bridgeLifecycle(lifecyclePeer, attached.Lifecycle()) })
+			startOnce.Do(func() {
+				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
+					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle())
+			})
 		}
 		var abortOnce sync.Once
 		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }

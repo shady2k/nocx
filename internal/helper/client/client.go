@@ -374,6 +374,13 @@ func (c *Client) lifecycleData(payload []byte) {
 			"bytes", len(f.Payload))
 		return
 	}
+	// THE MIDDLE HOP SAYS IT ARRIVED (nocx-n14oo.7). Only the DROP was
+	// reported here, so "the frame never came" and "the frame came and the
+	// bridge behind it did not move it" were the same silence. The lifecycle
+	// stream is a handshake and a trickle of events, not the data plane, so
+	// one line per frame costs nothing and answers the question directly.
+	c.log.Debug("lifecycle data frame arrived",
+		"session", fmt.Sprintf("%x", f.Session), "bytes", len(f.Payload))
 	a.deliverLifecycle(f.Payload)
 }
 

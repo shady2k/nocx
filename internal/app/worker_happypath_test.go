@@ -16,6 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentcalib"
+	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	coordsock "github.com/shady2k/nocx/internal/coordinator"
@@ -24,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -327,9 +332,18 @@ func (f *happyRealPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty
 		return nil, closeErr
 	}
 	lp, err := pty.NewLocal(f.log, pty.Config{
-		Command:    shellPath,
-		Args:       []string{"--rcfile", rcPath, "-i"},
-		Cols:       cfg.Cols,
+		Command: shellPath,
+		Args:    []string{"--rcfile", rcPath, "-i"},
+		Cols:    cfg.Cols,
+		// Rows was missing here: every pane this stand ever opened got a
+		// real kernel window size of 0 rows regardless of cfg.Rows, silent
+		// because no test before nocx-ui8q6.5 read the geometry back —
+		// nocx.bash's own __nocx_agent_geometry falls to `stty size`
+		// whenever $LINES is unset, and 0 fails that call's own sanity
+		// check and falls further to a hardcoded 24, which is a real
+		// geometry mismatch against a 120x40 corpus capture rather than a
+		// missing field.
+		Rows:       cfg.Rows,
 		XPixel:     cfg.XPixel,
 		YPixel:     cfg.YPixel,
 		Enhanced:   cfg.Enhanced,
@@ -390,6 +404,13 @@ type happyStand struct {
 	record   *workers.Registrar
 	endpoint *toolendpoint.Endpoint
 	coord    session.Session
+	// paneWatch and typist are set only under withHappyStandRealTyping — the
+	// same paneobserve.Watcher and agenttyping.Typist the composition root
+	// builds, wired into workerSpawner's readiness/typist seams instead of
+	// leaving them nil (nocx-66gd0). nil for every other test, which keeps
+	// happyPaneWatch's cheaper recording in place for them.
+	paneWatch *paneobserve.Watcher
+	typist    *agenttyping.Typist
 }
 
 type happyEndpointOwner struct{}
@@ -414,6 +435,14 @@ type happyStandOption func(*happyStandConfig)
 type happyStandConfig struct {
 	slogger  *slog.Logger
 	deadline time.Duration
+	// realTyping asks the stand to wire the real pane-observation and
+	// typing stack (paneobserve.Watcher, agentdriver.Registry,
+	// agentcalib.Calibrations, agenttyping.Typist) into workerSpawner's
+	// readiness and typist seams, instead of leaving them nil. Only a test
+	// about nocx-66gd0's delivery gate needs this; it costs a real corpus
+	// replay and a background sweep goroutine that every other happy-path
+	// test has no reason to pay for.
+	realTyping bool
 }
 
 // logger is the stand's own logger, and endpointSlog is the same sink the tool
@@ -438,6 +467,111 @@ func withHappyStandLogger(sl *slog.Logger) happyStandOption {
 // a launcher which never enrols is given up on.
 func withHappyStandEnrolmentDeadline(d time.Duration) happyStandOption {
 	return func(c *happyStandConfig) { c.deadline = d }
+}
+
+// withHappyStandRealTyping wires workerSpawner's readiness and typist seams
+// to the real orchestration stack instead of leaving them nil (nocx-66gd0):
+// a real agentdriver.Registry classifying a real panegrid.Store, a real
+// paneobserve.Watcher, an agentcalib.Calibrations verified against real
+// corpus captures, and the real agenttyping.Typist every consumer of this
+// package's typing seam goes through. Nothing about the pane, the channel or
+// the enrolment changes; this only stops the spawner from treating the
+// absence of an observer as licence to skip typing.
+func withHappyStandRealTyping() happyStandOption {
+	return func(c *happyStandConfig) { c.realTyping = true }
+}
+
+// happyCalibStore is a calibration store holding one pre-verified set. It
+// exists because agentdriver's own verify_corpus_test.go builds the
+// equivalent (memSet) to prove the shipped claude rule earns its typing
+// authority — but that helper is unexported in a different package, and a
+// _test.go symbol cannot be imported across packages. Reimplementing the
+// same few lines here is cheaper and more honest than exporting a helper
+// whose only caller would be a test.
+type happyCalibStore struct {
+	set   agentcalib.Set
+	found bool
+}
+
+func (m *happyCalibStore) Load(agent string) (agentcalib.Set, bool, error) {
+	if !m.found || m.set.Agent != agent {
+		return agentcalib.Set{}, false, nil
+	}
+	return m.set, true, nil
+}
+
+func (m *happyCalibStore) Save(set agentcalib.Set) error {
+	m.set, m.found = set, true
+	return nil
+}
+
+// happyCorpusMoment names one labelled frame from the real corpus in
+// internal/agentdriver/testdata/captures, at a mark that package's own
+// claude_test.go and verify_corpus_test.go already assert a state for — this
+// file introduces no new claim about what the corpus contains.
+type happyCorpusMoment struct {
+	label   agentcalib.Label
+	capture string
+	atMs    int64
+}
+
+// happyReplayCapture replays a real capture from internal/agentdriver's own
+// corpus up to atMs, through agentcapture.Frames — the same replay path
+// agentdriver's own tests use, and the one that goes through a real
+// panegrid.Store rather than a bare emulator (agentcapture's own package doc
+// names why that distinction matters: ADR-0041's column geometry).
+func happyReplayCapture(t *testing.T, name string, atMs int64) panegrid.Frame {
+	t.Helper()
+	path := filepath.Join("..", "agentdriver", "testdata", "captures", name+".jsonl")
+	header, chunks, err := agentcapture.Read(path)
+	if err != nil {
+		t.Fatalf("read capture %s: %v", name, err)
+	}
+	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{atMs})
+	if err != nil {
+		t.Fatalf("replay capture %s at %dms: %v", name, atMs, err)
+	}
+	return moments[0].Frame
+}
+
+// newHappyVerifiedClaudeCalibration builds a labelled set for "claude" out of
+// the real corpus, exactly as a calibration walk would write one — a
+// capture, and one mark per label (agentcalib's own Set doc) — using
+// agentcapture.Paint so the set holds the BYTES that reproduce a frame,
+// never the frame itself, which is the round trip
+// TestPaintingAndReplayingAFrameDoesNotMoveTheVerdict already proves is
+// sound. Only the three REQUIRED labels are given (idle, working, asks-you);
+// the three optional ones are left uncalibrated on purpose, which is what
+// nocx-jse6x's design allows. The marks are the exact ones
+// internal/agentdriver/verify_corpus_test.go already verifies the shipped
+// claude rule against, so this is not a new claim about the rule either.
+func newHappyVerifiedClaudeCalibration(t *testing.T) agentcalib.Store {
+	t.Helper()
+	moments := []happyCorpusMoment{
+		{agentcalib.LabelIdle, "claude-idle", 11000},
+		{agentcalib.LabelWorking, "claude-working", 17000},
+		{agentcalib.LabelAsksYou, "claude-permission", 49000},
+	}
+	set := agentcalib.Set{
+		Agent:  "claude",
+		Header: agentcapture.Header{Agent: "claude", Argv: []string{"claude"}, Cols: 120, Rows: 40},
+	}
+	for _, m := range moments {
+		frame := happyReplayCapture(t, m.capture, m.atMs)
+		mark := int64(len(set.Chunks))
+		set.Chunks = append(set.Chunks, agentcapture.Chunk{
+			AtMs:   mark,
+			Offset: agentcapture.EndOffset(set.Chunks, len(set.Chunks)),
+			Data:   string(agentcapture.Paint(frame)),
+		})
+		at := mark
+		set.Labels = append(set.Labels, agentcalib.Record{Label: m.label, AtMs: &at})
+	}
+	store := &happyCalibStore{}
+	if err := store.Save(set); err != nil {
+		t.Fatalf("save calibration set: %v", err)
+	}
+	return store
 }
 
 func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
@@ -466,12 +600,42 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	stand.db = db
 
 	lanes := newSessionRegistry()
-	watch := &happyPaneWatch{}
+	var watch *happyPaneWatch
+	var paneWatcherSeam paneWatcher
 	grid := panegrid.New(logger)
 	factory := &happyRealPTYFactory{log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID)}
 	reg := session.New(logger, factory)
 	enrol := newWorkerEnrolments(logger, reg)
-	paneEnrol, err := newPaneEnroller(logger, lanes, grid, watch, allowPaneApproval{})
+
+	// The real observation and typing stack (nocx-66gd0), built before the
+	// enroller so its watcher can be the one paneEnrol.Enrol calls Watch on.
+	// Nil until proven otherwise, so the ordinary stand keeps costing nothing.
+	var (
+		realWatch   *paneobserve.Watcher
+		paneTyping  *agenttyping.Typist
+		stopSweep   context.CancelFunc
+		sweepStopCh chan struct{}
+	)
+	if cfg.realTyping {
+		paneDrivers, driversErr := agentdriver.NewRegistry(agentdriver.Claude())
+		if driversErr != nil {
+			t.Fatalf("pane drivers: %v", driversErr)
+		}
+		realWatch = paneobserve.New(logger, grid, paneDrivers)
+		paneWatcherSeam = realWatch
+		calibStore := newHappyVerifiedClaudeCalibration(t)
+		// Screens is nil deliberately, exactly as agentdriver's own
+		// verify_corpus_test.go leaves it: verification replays a stored
+		// set and never reads a live pane, so passing one would suggest it
+		// could.
+		paneCalibration := agentcalib.New(logger, nil, calibStore, paneDrivers)
+		paneTyping = newPaneTypist(logger, grid, paneDrivers, paneCalibration, realWatch, reg)
+	} else {
+		watch = &happyPaneWatch{}
+		paneWatcherSeam = watch
+	}
+
+	paneEnrol, err := newPaneEnroller(logger, lanes, grid, paneWatcherSeam, allowPaneApproval{})
 	if err != nil {
 		t.Fatalf("pane enroller: %v", err)
 	}
@@ -485,13 +649,54 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
 	opener := &happyRealHelperOpener{reg: reg, factory: factory}
-	tp := transport.NewWSServer(logger, reg, transport.WithHelperSessionOpener(opener))
+	tpOpts := []transport.WSServerOption{transport.WithHelperSessionOpener(opener)}
+	if cfg.realTyping {
+		tpOpts = append(tpOpts, transport.WithPaneGrid(grid), transport.WithPaneObserver(realWatch))
+	}
+	tp := transport.NewWSServer(logger, reg, tpOpts...)
+	if cfg.realTyping {
+		// Bound post-construction, exactly as the composition root binds it
+		// (app.go): the server is built after the things that enrol into
+		// it. Sweep does nothing at all until this is set (paneobserve's own
+		// doc), so without it readiness would never answer.
+		realWatch.SetEmitter(tp.EmitPaneObservation)
+		// Production drives Sweep from transport's own coalescing ticker,
+		// started by WSServer.Start — which this stand never calls, since it
+		// talks to the server in-process rather than over its listener. So
+		// this test drives Sweep directly, exactly as paneobserve's own
+		// package doc prescribes for a test ("a test drives it directly, and
+		// therefore asserts on a state change rather than on a duration").
+		// The classification itself is the real Sweep method against the
+		// real grid; only the clock that calls it is smaller than
+		// production's.
+		sweepCtx, cancel := context.WithCancel(context.Background())
+		stopSweep = cancel
+		sweepStopCh = make(chan struct{})
+		go func() {
+			defer close(sweepStopCh)
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-sweepCtx.Done():
+					return
+				case <-ticker.C:
+					realWatch.Sweep()
+				}
+			}
+		}()
+	}
 
 	store := workers.NewMemoryStore()
 	sup := &workerSupervisor{sessions: reg, log: logger}
+	spawner := &workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger}
+	if cfg.realTyping {
+		spawner.readiness = realWatch
+		spawner.typist = paneTyping
+	}
 	record := workers.NewRegistrar(
 		store,
-		&workerSpawner{layout: db.Layout(), opener: tp, sessions: reg, enrolments: enrol, workspace: string(workspace.Default), log: logger},
+		spawner,
 		enrol,
 		sup,
 		workers.WithEnrolmentDeadline(cfg.deadline),
@@ -546,6 +751,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 
 	stand.reg, stand.tp, stand.factory, stand.grid, stand.watch = reg, tp, factory, grid, watch
 	stand.store, stand.record, stand.endpoint, stand.coord = store, record, endpoint, coord
+	stand.paneWatch, stand.typist = realWatch, paneTyping
 	t.Cleanup(func() {
 		_ = endpoint.Close()
 		for _, sess := range reg.List() {
@@ -560,6 +766,14 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		_ = tp.Stop(context.Background())
 		_ = db.Close()
 	})
+	if cfg.realTyping {
+		// Stops the sweep goroutine BEFORE the cleanup above tears the grid
+		// and the sessions down — registered after, so LIFO runs it first.
+		t.Cleanup(func() {
+			stopSweep()
+			<-sweepStopCh
+		})
+	}
 	return stand
 }
 

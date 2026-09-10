@@ -629,5 +629,54 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 		lg.Info("backend open: the pane's lifecycle leg is pumping",
 			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
 	}
+	// THE DATA LEG IS STARTED HERE TOO, and until nocx-ui8q6.5 it was not
+	// (found writing that bead's own check, which is what this comment
+	// documents rather than a report written after the fact). session.Session
+	// is a single-consumer stream — StartOutput may be called exactly once,
+	// by whichever pump reads it — and the only caller that ever did was
+	// handleOpen (ws_session_handlers.go), reached exclusively by a
+	// RENDERER'S OWN `session.open`. A backend-opened session — every worker
+	// participant, since workerSpawner is this method's only caller — got no
+	// rx and no pump: its pty was never read, so panegrid never saw a byte of
+	// it, paneobserve could never classify it past its enrolled-but-blank
+	// starting state, and internal/agenttyping's free_text gate could never
+	// open. deliverTask's own awaitFreeText polls exactly that answer, so
+	// nocx-66gd0's "type the task once the pane says it is ready" waited out
+	// its whole deadline on every real spawn and failed the participant —
+	// not silently: the compensation path undid the tab and the caller saw
+	// "the pane never became typable". The same missing rx is also why a
+	// renderer could never attach to a worker's own tab afterwards either:
+	// handleAttach refuses when getRx answers nil, and getRx answers nil for
+	// exactly the sessions this method opens.
+	//
+	// The fix starts the same two things handleOpen starts — the ring pump
+	// and the exit monitor — unconditionally, for every session this method
+	// opens. It cannot double a renderer's own pump: a renderer never calls
+	// this method (its path is handleOpen, over session.open), and this
+	// method's own session ids are freshly minted, so getOrCreateRx always
+	// creates rather than joins here. What handleOpen additionally does —
+	// deferring the pump past a JSON-RPC ack, replaying lifecycle facts to a
+	// subscriber, installing a websocket subscriber — has no counterpart on
+	// this path, because there is no ack to order against and no connection
+	// subscribed yet; a renderer that later attaches does so through
+	// handleAttach, which joins the SAME rx this call creates.
+	//
+	// Background is deliberate, the same class handleOpen's own pump is in.
+	// Owner: the session and its replay ring, which outlive this call and
+	// (AD-9) every WebSocket that ever attaches to them. Closing event:
+	// session teardown — monitorExit below, started once per session, waits
+	// on the session's own Done and ends the read pump StartOutput starts.
+	if rx := s.getOrCreateRx(opened.Session.ID()); rx != nil {
+		if opened.Hosted != nil && opened.Hosted.ObserveOutputHoles != nil {
+			ring := rx.ring
+			opened.Hosted.ObserveOutputHoles(func(lost uint64, reason string) {
+				ring.hole(lost, sessionOutputHoleReason(reason))
+			})
+		}
+		go s.pumpToRing(context.Background(), opened.Session, rx.ring)
+		rx.monitorOnce.Do(func() {
+			go s.monitorExit(rx, opened.Session)
+		})
+	}
 	return opened, nil
 }

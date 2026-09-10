@@ -229,11 +229,12 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Partic
 	// did not choose.
 	lg = lg.With("participant", string(p.ID))
 	spawned, spawnErr := r.spawn.Spawn(awaitCtx, SpawnRequest{
-		Participant: p.ID,
-		Group:       req.Group,
-		Task:        req.Task,
-		Command:     req.Command,
-		Environment: req.Environment,
+		Participant:        p.ID,
+		Group:              req.Group,
+		CoordinatorSession: req.CoordinatorSession,
+		Task:               req.Task,
+		Command:            req.Command,
+		Environment:        req.Environment,
 	})
 	if spawnErr != nil {
 		return p, r.compensate(ctx, p, nil, false, fmt.Errorf("worker: spawn: %w", spawnErr))

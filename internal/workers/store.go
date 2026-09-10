@@ -132,7 +132,18 @@ type Store interface {
 type SpawnRequest struct {
 	Participant ParticipantID
 	Group       ID
-	Task        string
+	// CoordinatorSession is the session that ASKED, established by the
+	// authorizer from the peer's process tree and never sent by a caller.
+	//
+	// It is carried here rather than left to the group id, which defaults to
+	// it and may be set to anything else: the spawner needs the session to
+	// open the participant's pane where the coordinator is standing
+	// (nocx-ty5ks), and a group that a caller renamed would send the worker
+	// somewhere nobody chose. Empty is legitimate — a registration with no
+	// coordinator session behind it — and the spawner falls back to what it
+	// did before this field existed.
+	CoordinatorSession string
+	Task               string
 	// Command is the line the participant runs. It is carried rather than
 	// derived because what makes an agent is the caller's business and not
 	// this package's: nocx has no list of agents, and a record that decided

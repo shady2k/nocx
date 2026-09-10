@@ -98,9 +98,16 @@ type sessionOpenerSeam interface {
 // the repository directly because it is one already-authorized, backend-
 // internal write with no request to admit and no handle that could escape
 // anywhere capability's guard would catch it.
+// PaneCwd joined them at nocx-ty5ks, for the same reason and under the same
+// rule: a participant's pane opens where its coordinator is standing, and the
+// directory a pane is standing in has ONE owner already — the layout row the
+// renderer writes from a verified OSC 7 (content.Layout.SetPaneCwd). Reading
+// it here is asking that owner; deriving one would be a second answer to a
+// question already answered (AD-8).
 type paneMinter interface {
 	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
+	PaneCwd(ctx context.Context, paneID string) (string, error)
 }
 
 // sessionCloser ends a session by id. The registry's own Close, named as the
@@ -560,9 +567,15 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
+	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used twice (nocx-ty5ks):
+	// the pane's row records it, so a restore reopens the tab where it was,
+	// and the open below starts the program there. Two writes of one answer,
+	// never two answers — reading it a second time at the open could differ
+	// from what the row says, and the row is what a person sees afterwards.
+	cwd := s.coordinatorCwd(ctx, req.CoordinatorSession, lg)
 	madeTab, tabErr := s.layout.CreateTab(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
-		content.Pane{ID: paneID.String(), TabID: tabID.String(), Kind: content.PaneLocal, SizeShare: 1},
+		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: cwd, Kind: content.PaneLocal, SizeShare: 1},
 	)
 	if tabErr != nil {
 		return nil, fmt.Errorf("worker spawn: minting the participant's tab: %w", tabErr)
@@ -574,6 +587,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		PaneID: paneID.String(),
 		Cols:   participantCols,
 		Rows:   participantRows,
+		Cwd:    cwd,
 	})
 	if err != nil {
 		s.compensateSpawn(ctx, tabID.String(), nil)
@@ -677,6 +691,55 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		s.announce.AnnounceWorkerTab(madeTab.Object.Tab, madeTab.Object.FirstPane, opened.Session)
 	}
 	return spawned, nil
+}
+
+// coordinatorCwd is the directory a participant's pane opens in: the one the
+// coordinator's own pane is standing in (nocx-ty5ks).
+//
+// It walks session -> pane -> the layout row, and every rung of that walk can
+// legitimately be empty, so every one of them answers "" rather than failing
+// the spawn. Empty means the session registry's own fallback, which is the
+// user's home — what every participant got before this existed, and a worse
+// answer than the coordinator's directory but not a wrong one. A spawn is not
+// worth refusing over a directory: an agent that starts in the wrong place can
+// be told to move, and one that never started cannot.
+//
+// WHAT IT DOES NOT DO is derive a cwd of its own. The renderer owns the
+// verified answer (AD-5) and writes it through SetPaneCwd; this reads that row
+// and carries it. A pane nobody has reported a cwd for has no cwd here either,
+// and inventing one — the session's own opening directory, the process's,
+// $PWD — would be the second owner AGENTS.md's "look for the existing answer"
+// rule is about.
+func (s *workerSpawner) coordinatorCwd(ctx context.Context, coordinator string, lg log.Logger) string {
+	if coordinator == "" || s.sessions == nil || s.layout == nil {
+		return ""
+	}
+	sess, err := s.sessions.Get(session.ID(coordinator))
+	if err != nil {
+		lg.Debug("worker spawn: the coordinator's session is not held here, so its directory is unknown",
+			"coordinator_session", coordinator, "error", err)
+		return ""
+	}
+	paneID := sess.PaneID()
+	if paneID == "" {
+		lg.Debug("worker spawn: the coordinator's session belongs to no pane, so its directory is unknown",
+			"coordinator_session", coordinator)
+		return ""
+	}
+	cwd, err := s.layout.PaneCwd(ctx, paneID)
+	if err != nil {
+		lg.Debug("worker spawn: the coordinator's pane has no recorded directory",
+			"coordinator_session", coordinator, "pane_id", paneID, "error", err)
+		return ""
+	}
+	if cwd == "" {
+		lg.Debug("worker spawn: the coordinator's pane has never reported a directory",
+			"coordinator_session", coordinator, "pane_id", paneID)
+		return ""
+	}
+	lg.Debug("worker spawn: the participant opens where its coordinator is",
+		"coordinator_session", coordinator, "pane_id", paneID, "cwd", cwd)
+	return cwd
 }
 
 // deliverTask waits for paneID to become typable and submits task into it.

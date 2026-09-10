@@ -214,6 +214,11 @@ func (hangingTabs) DeleteTab(ctx context.Context, _ string, _ content.Replacemen
 	return ctx.Err()
 }
 
+// PaneCwd does not hang: this double exists for the DeleteTab bound, and a
+// second hanging method would only make which one a test is measuring
+// ambiguous.
+func (hangingTabs) PaneCwd(context.Context, string) (string, error) { return "", nil }
+
 // Criterion: a spawn whose pane becomes free_text submits the task text into
 // that pane, AFTER the command line and never in the same write.
 func TestASpawnWhosePaneBecomesFreeTextDeliversTheTask(t *testing.T) {

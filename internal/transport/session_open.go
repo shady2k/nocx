@@ -77,6 +77,16 @@ type OpenSpec struct {
 	// single owner of whether it may be recorded, and it refuses before
 	// anything is spawned.
 	Parent *session.Ref
+	// Cwd is the directory the pane's program starts in. Empty means the
+	// registry's own fallback, which is the user's home — the behaviour every
+	// caller had before this field existed (nocx-ty5ks).
+	//
+	// It is a directory the CALLER already holds evidence for, never one
+	// derived here: the renderer owns a verified cwd (AD-5, and
+	// content.Layout.SetPaneCwd's own doc), and a backend caller opening a
+	// pane beside an existing one reads it from that owner. This field
+	// carries the answer; it does not decide it.
+	Cwd string
 }
 
 // OpenedSession is a session that exists, together with the facts a caller
@@ -231,6 +241,11 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		// anchor every block it records without the caller restating it per
 		// event (nocx-rtg0.28).
 		PaneID: spec.PaneID,
+		// Where the program starts. Empty is the ordinary case and means the
+		// registry's fallback; a backend caller opening a pane beside an
+		// existing one names the directory it read from that pane's owner
+		// (nocx-ty5ks).
+		Cwd: spec.Cwd,
 	}
 	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
 	// claim; the registry is the single owner of whether it may be recorded,

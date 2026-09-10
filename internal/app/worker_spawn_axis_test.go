@@ -52,12 +52,21 @@ type fakeAxisTabs struct {
 	mu      sync.Mutex
 	created []string
 	deleted []string
+	// cwds and cwdErr are the pane-directory half (nocx-ty5ks): what the
+	// layout answers for a pane, and the failure a pane nobody recorded a
+	// cwd for produces. asked records every id the spawner looked up, so a
+	// test can assert it looked up the coordinator's pane and no other.
+	cwds      map[string]string
+	cwdErr    error
+	asked     []string
+	firstPane content.Pane
 }
 
-func (f *fakeAxisTabs) CreateTab(_ context.Context, tab content.Tab, _ content.Pane) (content.Created[content.NewTab], error) {
+func (f *fakeAxisTabs) CreateTab(_ context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, tab.ID)
+	f.firstPane = firstPane
 	return content.Created[content.NewTab]{}, nil
 }
 
@@ -68,10 +77,32 @@ func (f *fakeAxisTabs) DeleteTab(_ context.Context, id string, _ content.Replace
 	return nil
 }
 
+func (f *fakeAxisTabs) PaneCwd(_ context.Context, paneID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked = append(f.asked, paneID)
+	if f.cwdErr != nil {
+		return "", f.cwdErr
+	}
+	return f.cwds[paneID], nil
+}
+
 func (f *fakeAxisTabs) snapshot() (created, deleted []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.created...), append([]string(nil), f.deleted...)
+}
+
+func (f *fakeAxisTabs) createdPane() content.Pane {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.firstPane
+}
+
+func (f *fakeAxisTabs) cwdAsked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
 }
 
 // fakeAxisOpener opens a REAL session over a real registry (the same stub-pty
@@ -84,13 +115,18 @@ type fakeAxisOpener struct {
 	// to write its first line into it.
 	closeBeforeReturn bool
 
-	mu   sync.Mutex
-	last session.Session
+	mu       sync.Mutex
+	last     session.Session
+	lastOpen transport.OpenSpec
 }
 
 func (f *fakeAxisOpener) OpenSession(ctx context.Context, spec transport.OpenSpec) (transport.OpenedSession, error) {
+	f.mu.Lock()
+	f.lastOpen = spec
+	f.mu.Unlock()
 	sess, err := f.reg.Open(ctx, session.Config{
 		Kind: session.KindLocal, Cols: spec.Cols, Rows: spec.Rows, PaneID: spec.PaneID,
+		Cwd: spec.Cwd,
 	})
 	if err != nil {
 		return transport.OpenedSession{}, err
@@ -102,6 +138,12 @@ func (f *fakeAxisOpener) OpenSession(ctx context.Context, spec transport.OpenSpe
 	f.last = sess
 	f.mu.Unlock()
 	return transport.OpenedSession{Session: sess}, nil
+}
+
+func (f *fakeAxisOpener) lastSpec() transport.OpenSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastOpen
 }
 
 func (f *fakeAxisOpener) lastSessionID() session.ID {

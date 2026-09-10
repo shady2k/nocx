@@ -127,6 +127,10 @@ func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replace
 	return nil
 }
 
+// PaneCwd is the seam's third method and nothing here is about it: these
+// tests name no coordinator session, so the spawner never asks (nocx-ty5ks).
+func (f *ctxSpyTabs) PaneCwd(context.Context, string) (string, error) { return "", nil }
+
 func (f *ctxSpyTabs) snapshot() (created, deleted []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

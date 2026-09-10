@@ -483,6 +483,11 @@ func (s *layoutStub) MovePane(_ context.Context, paneID, tabID string) (Pane, er
 	return Pane{}, ErrNotImplemented
 }
 
+func (s *layoutStub) PaneCwd(_ context.Context, paneID string) (string, error) {
+	s.log.Info("content stub: LayoutRepository.PaneCwd", "pane", paneID)
+	return "", ErrNotImplemented
+}
+
 func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string, error) {
 	s.log.Info("content stub: LayoutRepository.WorkspaceForPane", "pane", paneID)
 	return "", ErrNotImplemented

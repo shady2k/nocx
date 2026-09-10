@@ -55,8 +55,10 @@ const (
 	// StateFreeText means an input box is on screen and waiting. It is the
 	// ONLY state nocx may type into.
 	StateFreeText State = "free_text"
-	// StatePermissionChoice means the agent has raised a tool-approval
-	// dialog and is waiting on a human. Answering it answers the agent.
+	// StatePermissionChoice means the agent has raised a question of its own
+	// — a tool approval, or the folder-trust question it asks before it will
+	// start in a directory — and is waiting on a human. Answering it answers
+	// the agent.
 	StatePermissionChoice State = "permission_choice"
 	// StateModalChoice means a menu is up that the agent did not raise — a
 	// user-opened one such as /model. Also waiting on a human, and answering

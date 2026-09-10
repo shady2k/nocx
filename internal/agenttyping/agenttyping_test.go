@@ -140,6 +140,7 @@ func TestEveryStateThatIsNotFreeTextReceivesNothing(t *testing.T) {
 		want    agentdriver.State
 	}{
 		{"a tool-approval dialog", "claude-permission", 49000, agentdriver.StatePermissionChoice},
+		{"the folder-trust question", "claude-trust", 11000, agentdriver.StatePermissionChoice},
 		{"a menu the person opened", "claude-modal", 20000, agentdriver.StateModalChoice},
 		{"a turn in flight", "claude-working", 17000, agentdriver.StateWorking},
 		{"the TUI's own error chrome", "claude-error", 41000, agentdriver.StateError},

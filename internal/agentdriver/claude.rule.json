@@ -93,6 +93,27 @@
       ]
     },
     {
+      "state": "permission_choice",
+      "when": [
+        {
+          "kind": "cursorOn",
+          "glyph": "❯"
+        },
+        {
+          "kind": "cursorOpensItsRow"
+        },
+        {
+          "kind": "cursorAboveAnchorIfBound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "belowCursorContains",
+          "maxRows": 4,
+          "text": "Enter to confirm"
+        }
+      ]
+    },
+    {
       "state": "unknown",
       "when": [
         {

@@ -1,6 +1,7 @@
 package agentdriver
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -157,6 +158,63 @@ func TestADocumentCanComposeAnchorBound(t *testing.T) {
 	}
 	if got := d.Classify(grid(20, 1, []string{"nothing chrome-shaped"}, 0, 0)); got != StateUnknown {
 		t.Errorf("the marker anchor did not bind = %q, want the document's default %q", got, StateUnknown)
+	}
+}
+
+// belowCursorContains, composed through a document for the same reason as the
+// two above (nocx-f545a.2): a predicate the evaluator's switch does not reach
+// is not part of the grammar. It reads DOWN from the cursor's row inside the
+// document's cap, and the cap is where the forged-row argument lives, so the
+// row just past it is asserted too.
+func TestADocumentCanComposeBelowCursorContains(t *testing.T) {
+	doc := Document{
+		Agent:   "test",
+		Default: StateUnknown,
+		Branches: []Branch{{
+			State: StatePermissionChoice,
+			When: []Pred{{
+				Kind: "belowCursorContains", Text: "Enter to confirm",
+				RegionSpec: RegionSpec{MaxRows: 2},
+			}},
+		}},
+	}
+	d, err := newDocumentDriver(doc)
+	if err != nil {
+		t.Fatalf("newDocumentDriver: %v", err)
+	}
+	lines := []string{"❯ No", "  Yes", "Enter to confirm", ""}
+	if got := d.Classify(grid(20, 4, lines, 0, 0)); got != StatePermissionChoice {
+		t.Errorf("the legend two rows below the cursor = %q, want %q", got, StatePermissionChoice)
+	}
+	if got := d.Classify(grid(20, 4, []string{"❯ No", "  Yes", "", "Enter to confirm"}, 0, 0)); got != StateUnknown {
+		t.Errorf("the legend three rows below a cap of two = %q, want %q", got, StateUnknown)
+	}
+	if got := d.Classify(grid(20, 4, []string{"Enter to confirm", "❯ No", "", ""}, 0, 1)); got != StateUnknown {
+		t.Errorf("the legend ABOVE the cursor = %q, want %q", got, StateUnknown)
+	}
+}
+
+// And the cap is not optional. A document that reads below the cursor with no
+// cap, or with one past the engine's ceiling, is refused at construction —
+// the same bound an extractor carries, for the same forged-row reason.
+func TestADocumentReadingBelowTheCursorWithoutABoundedCapIsRefused(t *testing.T) {
+	for _, maxRows := range []int{0, maxExtractorRows + 1} {
+		t.Run(fmt.Sprintf("maxRows=%d", maxRows), func(t *testing.T) {
+			doc := Document{
+				Agent:   "test",
+				Default: StateUnknown,
+				Branches: []Branch{{
+					State: StatePermissionChoice,
+					When: []Pred{{
+						Kind: "belowCursorContains", Text: "Enter to confirm",
+						RegionSpec: RegionSpec{MaxRows: maxRows},
+					}},
+				}},
+			}
+			if _, err := newDocumentDriver(doc); err == nil {
+				t.Fatalf("a document reading below the cursor with maxRows=%d was accepted", maxRows)
+			}
+		})
 	}
 }
 

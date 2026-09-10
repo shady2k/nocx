@@ -40,17 +40,18 @@ set (`internal/agentcalib`, nocx-etejh) is a capture too: one chunk per labelled
 one mark per label, so `agent-capture replay` reads a person's calibration as readily as it
 reads this corpus.
 
-| capture                | script              | what it holds                                                                       |
-| ---------------------- | ------------------- | ----------------------------------------------------------------------------------- |
-| `claude-idle`          | `idle.script`       | the idle input box — nothing typed, the TUI left to settle (`11000`)                |
-| `claude-idle-60`       | `idle.script`       | the same idle input box at the narrow 60×40 geometry (`11000`)                      |
-| `claude-idle-80`       | `idle.script`       | the same idle input box at the narrow 80×40 geometry (`11000`)                      |
-| `claude-working`       | `working.script`    | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)     |
-| `claude-permission`    | `permission.script` | the Write tool's approval dialog, waiting on a human (`49000`)                      |
-| `claude-permission-60` | `permission.script` | the Write tool's approval dialog at 60×40 (`49000`)                                 |
-| `claude-modal`         | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)            |
-| `claude-subagent`      | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`) |
-| `claude-error`         | `error.script`      | the TUI's own error: the API unreachable, retrying (`20000`, `30000`, `44000`)      |
+| capture                | script              | what it holds                                                                        |
+| ---------------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| `claude-idle`          | `idle.script`       | the idle input box — nothing typed, the TUI left to settle (`11000`)                 |
+| `claude-idle-60`       | `idle.script`       | the same idle input box at the narrow 60×40 geometry (`11000`)                       |
+| `claude-idle-80`       | `idle.script`       | the same idle input box at the narrow 80×40 geometry (`11000`)                       |
+| `claude-working`       | `working.script`    | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)      |
+| `claude-permission`    | `permission.script` | the Write tool's approval dialog, waiting on a human (`49000`)                       |
+| `claude-permission-60` | `permission.script` | the Write tool's approval dialog at 60×40 (`49000`)                                  |
+| `claude-modal`         | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)             |
+| `claude-subagent`      | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`)  |
+| `claude-error`         | `error.script`      | the TUI's own error: the API unreachable, retrying (`20000`, `30000`, `44000`)       |
+| `claude-trust`         | `trust.script`      | the folder-trust question, raised before the TUI will start in a directory (`11000`) |
 
 `claude-error` was captured against v2.1.245 by pointing `ANTHROPIC_BASE_URL` at a dead port,
 which is how the error chrome is reproduced without waiting for a real outage. What it settled:
@@ -62,8 +63,18 @@ exhaustion and overload draw their own chrome and are not in this corpus.
 
 Captured against Claude Code v2.1.238: the baseline five captures are 120×40;
 narrow captures cover idle at 60×40 and 80×40, plus the approval dialog at 60×40.
-All eight run on the ALTERNATE SCREEN, so `Frame.AltScreen` is true throughout and distinguishes
-nothing here.
+Every capture above runs on the ALTERNATE SCREEN except `claude-trust`, so `Frame.AltScreen`
+distinguishes nothing a rule may rely on: the trust question is drawn on the PRIMARY screen,
+before the TUI takes the alternate one, and a rule that required the alternate screen for a
+menu would miss exactly the menu that blocks an agent from starting at all.
+
+`claude-trust` was captured against v2.1.263, in a directory with no trusted ancestor. That
+second condition is not incidental: Claude Code inherits trust from a parent, and `/tmp` was
+trusted on the machine that took it, so the same script run under the capture tool's own
+scratch directory recorded an idle input box instead. It settled one thing reasoning did not:
+the trust question numbers none of its options, so it misses the numbered-menu branches by
+exactly that predicate and fell through to `unknown` — the verdict for a screen the driver
+could not read — while the driver read every cell of it (`nocx-f545a.2`).
 
 ## Four things the captures decided, which reasoning got wrong
 

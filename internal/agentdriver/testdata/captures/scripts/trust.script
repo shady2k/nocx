@@ -1,0 +1,4 @@
+# nothing sent: the trust dialog is what the agent opens by itself in a
+# directory it has not been trusted in, and answering it would destroy the
+# state this capture exists to hold
+12000

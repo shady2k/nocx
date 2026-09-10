@@ -33,6 +33,7 @@ var captureNames = []string{
 	"claude-error",
 	"claude-idle", "claude-idle-60", "claude-idle-80", "claude-working",
 	"claude-permission", "claude-permission-60", "claude-modal", "claude-subagent",
+	"claude-trust",
 }
 
 type captureHeader struct {

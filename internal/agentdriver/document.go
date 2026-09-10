@@ -337,6 +337,19 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 	case "nearestNonBlankAboveCursorContains":
 		text, ok := nearestNonBlankAbove(f, f.CursorY)
 		return ok && strings.Contains(text, p.Text)
+	case "belowCursorContains":
+		// A region read DOWN from the cursor's own row, capped by the
+		// document's maxRows and by nothing it can widen (validate refuses a
+		// missing or oversized cap). It is a predicate and not an anchor on
+		// purpose: the cursor exists on every screen, and an anchor that binds
+		// on every screen would tell a person reading the emitting view that
+		// chrome was found where none was. What it answers is narrower —
+		// whether chrome is drawn within a bounded distance BENEATH the row
+		// the cursor chose — which is how a menu that numbers none of its
+		// options is identified (nocx-f545a.2). Direction is fixed; Up and
+		// Anchor are ignored.
+		return region{anchor: f.CursorY, maxRows: p.MaxRows, col0Only: p.Col0Only, stopAtBlank: p.StopAtBlank}.
+			anyRow(f, func(text string) bool { return strings.Contains(text, p.Text) })
 	case "rowOpensWith":
 		row, ok := anchors[p.Anchor]
 		if !ok {
@@ -471,6 +484,10 @@ func (d Document) validate() error {
 		for _, p := range b.When {
 			if p.Anchor != "" && !seen[p.Anchor] {
 				return fmt.Errorf("agentdriver: branch %d names anchor %q, which no anchor binds", i, p.Anchor)
+			}
+			if p.Kind == "belowCursorContains" && (p.MaxRows <= 0 || p.MaxRows > maxExtractorRows) {
+				return fmt.Errorf("agentdriver: branch %d reads below the cursor with a cap of %d rows; the engine requires 1 to %d, because an uncapped region is how a forged row gets read",
+					i, p.MaxRows, maxExtractorRows)
 			}
 		}
 	}

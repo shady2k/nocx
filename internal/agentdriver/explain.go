@@ -351,6 +351,10 @@ func predDetail(p Pred) string {
 		parts = append(parts, fmt.Sprintf("glyph=%q", p.Glyph))
 	case "rowContains", "nearestNonBlankAboveCursorContains":
 		parts = append(parts, fmt.Sprintf("text=%q", p.Text))
+	case "belowCursorContains":
+		// The cap is half of what this predicate says, so a person repairing
+		// a rule sees how far beneath the cursor it was allowed to look.
+		parts = append(parts, fmt.Sprintf("text=%q maxRows=%d", p.Text, p.MaxRows))
 	case "regionAny":
 		if p.Text != "" {
 			parts = append(parts, fmt.Sprintf("text=%q", p.Text))

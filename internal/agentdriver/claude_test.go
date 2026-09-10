@@ -79,6 +79,56 @@ func TestAUserOpenedMenuIsAModalChoice(t *testing.T) {
 	}
 }
 
+// The folder-trust question (nocx-f545a.2). The agent raised it and answering
+// it answers the agent, so it is a permission choice — and until this branch
+// it was `unknown`, the verdict that means the driver could not read the
+// screen, on a screen it read perfectly. It misses the numbered-menu branches
+// by one predicate only: its options carry no "1." and "2.", they are chosen
+// with arrows and Enter. So it is identified by what IS there instead — the
+// cursor parked on the selected option, and the confirm legend drawn a bounded
+// distance beneath it.
+func TestTheFolderTrustQuestionIsAPermissionChoice(t *testing.T) {
+	if got := classify(t, replay(t, "claude-trust", 11000)); got != agentdriver.StatePermissionChoice {
+		t.Errorf("folder-trust question = %q, want %q", got, agentdriver.StatePermissionChoice)
+	}
+}
+
+// The branch rests on the cursor, and these are the two ways to be wrong about
+// that. A transcript may print the menu and its legend word for word; it
+// cannot park the cursor on the marker. And a cursor on a marker with no
+// legend beneath it is not identified as anything — it stays unknown, which
+// refuses every power, rather than being promoted to a choice on half the
+// evidence.
+func TestAPrintedTrustMenuIsNotAPermissionChoice(t *testing.T) {
+	lines := []string{
+		"", " Quick safety check: Is this a project you created or one you trust?", "",
+		" ❯ No, exit", "   Yes, I trust this folder", "", " Enter to confirm · Esc to cancel", "", "", "",
+	}
+	t.Run("the legend printed, the cursor elsewhere", func(t *testing.T) {
+		f := screen(t, 80, 10, lines, 0, 9)
+		if got := classify(t, f); got == agentdriver.StatePermissionChoice {
+			t.Errorf("a printed trust menu with the cursor parked away from it = %q", got)
+		}
+	})
+	t.Run("the cursor on the marker, no legend", func(t *testing.T) {
+		noLegend := append([]string(nil), lines...)
+		noLegend[6] = ""
+		f := screen(t, 80, 10, noLegend, 1, 3)
+		if got := classify(t, f); got != agentdriver.StateUnknown {
+			t.Errorf("a cursor on an unnumbered marker with no legend = %q, want %q", got, agentdriver.StateUnknown)
+		}
+	})
+	t.Run("the legend too far below the cursor", func(t *testing.T) {
+		far := make([]string, 12)
+		copy(far, lines[:5])
+		far[10] = " Enter to confirm · Esc to cancel"
+		f := screen(t, 80, 12, far, 1, 3)
+		if got := classify(t, f); got == agentdriver.StatePermissionChoice {
+			t.Errorf("a legend seven rows below the cursor was believed = %q", got)
+		}
+	})
+}
+
 // ── the subagent trap, which has TWO chrome forms and an end ──────────────
 
 // While the task panel is drawn under the footer. There is no spinner here at

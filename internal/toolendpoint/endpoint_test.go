@@ -410,6 +410,8 @@ func TestEndpointMapsDispatcherRefusalsToJSONRPC(t *testing.T) {
 		{name: "invalid params", err: assistant.ErrInvalidParams, code: -32602},
 		{name: "unreachable", err: assistant.ErrUnreachableMethod, code: -32000},
 		{name: "invalid result", err: assistant.ErrInvalidResult, code: -32000},
+		{name: "canceled", err: context.Canceled, code: -32000},
+		{name: "deadline exceeded", err: context.DeadlineExceeded, code: -32000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,6 +424,33 @@ func TestEndpointMapsDispatcherRefusalsToJSONRPC(t *testing.T) {
 			response := readResponse(t, conn)
 			if response.Error == nil || response.Error.Code != tc.code {
 				t.Fatalf("response error = %+v, want code %d", response.Error, tc.code)
+			}
+		})
+	}
+}
+
+// A cancelled dispatch is classified, not "unclassified" (nocx-uhii1): that
+// log line is reserved for a dispatch failure rpcErrorFor could not name, and
+// the endpoint now names this one.
+func TestEndpointDoesNotLogACancelledCallAsUnclassified(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(err.Error(), func(t *testing.T) {
+			var logs strings.Builder
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			dispatch := &testDispatcher{err: err}
+			cfg := endpointConfig(t, &testAuthorizer{}, dispatch)
+			cfg.Logger = logger
+			ep := startEndpoint(t, cfg)
+			conn := dialEndpoint(t, ep)
+			if _, writeErr := io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"method":"workers.holdings","params":{}}`+"\n"); writeErr != nil {
+				t.Fatalf("write request: %v", writeErr)
+			}
+			response := readResponse(t, conn)
+			if response.Error == nil || response.Error.Code == rpcInternalError {
+				t.Fatalf("response error = %+v, want a classified (non-internal) error", response.Error)
+			}
+			if strings.Contains(logs.String(), "unclassified dispatch failure") {
+				t.Fatalf("log still reports this cancellation as unclassified: %q", logs.String())
 			}
 		})
 	}

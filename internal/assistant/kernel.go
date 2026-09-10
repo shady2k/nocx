@@ -1621,7 +1621,16 @@ func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason co
 	if m.ledger == nil {
 		return nil
 	}
-	return m.ledger.FinishExecution(ctx, execID, content.FinishExecution{
+	// Same defect, same fix as attemptRecordingDispatcher.Dispatch
+	// (nocx-uhii1): by the time closeAttempt runs, the tool call it is
+	// closing out has already produced its terminal outcome, and this write
+	// must not be able to turn that into a failure just because the turn's
+	// own context ended in the meantime (a person closing the tab, or the
+	// turn's own deadline). detachedFinishContext carries this context's
+	// values but not its cancellation, bounded by its own short timeout.
+	finishCtx, cancel := detachedFinishContext(ctx)
+	defer cancel()
+	return m.ledger.FinishExecution(finishCtx, execID, content.FinishExecution{
 		EndedAt:           time.Now().UnixMilli(),
 		TerminationReason: reason,
 		Status:            status,

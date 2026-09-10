@@ -1,6 +1,7 @@
 package toolendpoint
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -30,6 +31,8 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		workers.ErrNotDelegated,
 		ErrSessionCallerActive,
 		ErrNotEnrolled,
+		context.Canceled,
+		context.DeadlineExceeded,
 		errors.New("something nobody has classified"),
 	}
 	seen := map[string]error{}
@@ -74,6 +77,32 @@ func TestOwnershipAndDelegationStateDoNotShareASentence(t *testing.T) {
 	// And it must not tell a caller its own participant is somebody else's.
 	if strings.Contains(notDelegated, "another session") {
 		t.Errorf("the state refusal claims the participant belongs elsewhere: %q", notDelegated)
+	}
+}
+
+// A cancellation is not an internal error (nocx-uhii1): the caller stopped
+// waiting, nothing inside nocx failed, and — the opposite of the unclassified
+// arm below — the honest instruction is that calling it again is legitimate.
+func TestCancellationIsAbandonmentNotAnInternalError(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(err.Error(), func(t *testing.T) {
+			code, message, reason := rpcErrorFor(err)
+			if code == rpcInternalError {
+				t.Fatalf("code = %d, a cancellation must not be classified as an internal error", code)
+			}
+			if strings.Contains(reason, "Do not repeat") {
+				t.Errorf("reason tells the agent not to retry a call that is safe to retry: %q", reason)
+			}
+			if strings.Contains(reason, "failed inside nocx") || strings.Contains(reason, "a reason inside nocx") {
+				t.Errorf("reason blames nocx for a call the caller itself abandoned: %q", reason)
+			}
+			if !strings.Contains(reason, "again") {
+				t.Errorf("reason does not say that calling it again is legitimate: %q", reason)
+			}
+			if message == "" || reason == "" {
+				t.Fatalf("message/reason = %q/%q, want both set", message, reason)
+			}
+		})
 	}
 }
 

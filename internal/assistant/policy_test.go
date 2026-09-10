@@ -52,8 +52,20 @@ type fakeLedger struct {
 	failSubmit          bool
 	failCause           bool
 	rejectCanceledCause bool
-	nextExec            int64
-	submissions         []fakeSubmission
+	// finishHang makes FinishExecution block on the context it is handed
+	// rather than returning immediately — nocx-uhii1's "a ledger whose
+	// write hangs does not hang the dispatcher" case. finishCalls records,
+	// for every FinishExecution call, the facts a test needs about the
+	// context it ran on — captured AT CALL TIME, not read back afterward:
+	// the caller cancels its own finish context via defer once Dispatch
+	// returns (releasing it, as context hygiene requires), so a context
+	// reference read back after the call reports canceled regardless of
+	// what it was detached from. Only what was true at call time answers
+	// the question these tests ask.
+	finishHang  bool
+	finishCalls []finishCallRecord
+	nextExec    int64
+	submissions []fakeSubmission
 	// causes is every (turn, caused) pair AddCause was asked for, in call
 	// order — the relation nocx-h1l4o records. The fake assigns positions
 	// the way the store does (one counter per turn) so a test can assert
@@ -119,11 +131,41 @@ func (f *fakeLedger) StartExecution(_ context.Context, in content.StartExecution
 	return f.nextExec, nil
 }
 
-func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.FinishExecution) error {
+// finishCallRecord is what a test can know about one FinishExecution call
+// without holding on to the context itself.
+type finishCallRecord struct {
+	errAtCall   error
+	hasDeadline bool
+}
+
+func (f *fakeLedger) FinishExecution(ctx context.Context, _ int64, end content.FinishExecution) error {
+	_, hasDeadline := ctx.Deadline()
+	record := finishCallRecord{errAtCall: ctx.Err(), hasDeadline: hasDeadline}
+	f.mu.Lock()
+	f.finishCalls = append(f.finishCalls, record)
+	hang := f.finishHang
+	f.mu.Unlock()
+	if hang {
+		// Simulate a wedged store: block until the caller's own context
+		// gives up, then report exactly that. If this were called with
+		// the invocation's own (already-cancelled) context, it would
+		// return immediately with context.Canceled instead of blocking.
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+// finishCallRecords is what FinishExecution's context looked like at the
+// moment of each call, in call order — what nocx-uhii1's detachment tests
+// inspect.
+func (f *fakeLedger) finishCallRecords() []finishCallRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]finishCallRecord(nil), f.finishCalls...)
 }
 
 // captures is every body CaptureOutput was handed, in call order — what a

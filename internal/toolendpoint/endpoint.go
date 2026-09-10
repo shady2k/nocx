@@ -644,6 +644,25 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 	case errors.Is(err, ErrNotEnrolled):
 		return rpcPeerRefused, "worker caller refused",
 			"this process is not in a pane nocx has enrolled, so it has no worker tools. Nothing you can call will change that; tell the person their pane is not orchestrated."
+	case errors.Is(err, context.Canceled):
+		// THE CALLER STOPPED WAITING; NOTHING FAILED INSIDE NOCX. This is
+		// what a dispatch reports when its own context ends before it
+		// produces an answer — a person interrupting the session that is
+		// holding a call (e.g. workers.wait) before it has reported is
+		// exactly that (nocx-uhii1). It is neither of the two things the
+		// default arm's sentence would tell an agent: not a backend
+		// fault, and not a call the agent should stop retrying. The
+		// honest fact is the opposite of "do not repeat it" — the call
+		// was abandoned before it could answer, and asking again is the
+		// normal way to get an answer this time. Split from the deadline
+		// arm below only so the two keep distinct sentences; a caller
+		// that cannot tell them apart cannot tell "somebody gave up
+		// waiting" from "the call's own bound ran out" either.
+		return rpcDomainError, "call abandoned",
+			"the caller stopped waiting for this call and its context was canceled before it produced an answer, so nocx never got to finish it — nothing here failed and nothing here was refused. Calling it again is legitimate; if you still need the result, ask again and wait for it."
+	case errors.Is(err, context.DeadlineExceeded):
+		return rpcDomainError, "call abandoned",
+			"this call ran past its own bound and its context expired before it produced an answer, so nocx never got to finish it — nothing here failed and nothing here was refused. Calling it again is legitimate; if you still need the result, ask again with time to wait for it."
 	default:
 		// Deliberately generic on the wire and fully logged at the call site:
 		// an error nobody classified must not spell a backend's internals to

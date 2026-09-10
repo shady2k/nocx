@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
@@ -221,5 +222,153 @@ func TestAttemptRecordingDispatcherRecordsRefusedDispatch(t *testing.T) {
 		if calls[i] != want[i] {
 			t.Fatalf("ledger call %d = %q, want %q; all calls = %v", i, calls[i], want[i], calls)
 		}
+	}
+}
+
+// succeedingToolDispatcher is the inner dispatcher for a call that already
+// produced its answer by the time the invocation context is examined again —
+// the shape nocx-uhii1's detachment tests need.
+type succeedingToolDispatcher struct {
+	result string
+}
+
+func (d succeedingToolDispatcher) Dispatch(ToolInvocation) (string, error) {
+	return d.result, nil
+}
+
+func (d succeedingToolDispatcher) Catalogue(content.Grant) []agenttools.Tool {
+	return nil
+}
+
+// A completed call must survive a caller who has already stopped waiting for
+// it (nocx-uhii1): a person can interrupt the session holding a call, which
+// cancels the invocation's context, after the inner dispatcher already
+// produced its answer. Recording that outcome is bookkeeping, not the
+// caller's business, and must not be able to turn the completed call into a
+// reported failure.
+func TestAttemptRecordingDispatcherSuccessSurvivesAnAbandonedInvocationContext(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	ledger := &fakeLedger{}
+	dispatcher, err := NewAttemptRecordingDispatcher(
+		reg,
+		succeedingToolDispatcher{result: "the answer"},
+		ledger,
+	)
+	if err != nil {
+		t.Fatalf("new attempt-recording dispatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has already stopped waiting by the time this runs
+	invocation := workerInvocationForTest("workers.holdings", workerGrantForTest(), `{}`)
+	invocation.Context = ctx
+
+	result, err := dispatcher.Dispatch(invocation)
+	if err != nil {
+		t.Fatalf("dispatch error = %v, want the completed call's own result, not an error manufactured by the caller having stopped waiting for it", err)
+	}
+	if result != "the answer" {
+		t.Fatalf("result = %q, want the completed call's own result", result)
+	}
+
+	calls := ledger.calls()
+	if len(calls) == 0 || calls[len(calls)-1] != "finish:success" {
+		t.Fatalf("ledger calls = %v, want the outcome recorded as a success", calls)
+	}
+
+	records := ledger.finishCallRecords()
+	if len(records) != 1 {
+		t.Fatalf("finish calls recorded = %d, want exactly one", len(records))
+	}
+	if records[0].errAtCall != nil {
+		t.Fatalf("outcome recorded on a context with Err()=%v at call time — it inherited the caller's cancellation instead of detaching from it", records[0].errAtCall)
+	}
+	if !records[0].hasDeadline {
+		t.Fatalf("outcome recorded on a context with no deadline of its own — a wedged ledger could hang the dispatcher")
+	}
+}
+
+// The failure twin of the test above: the inner dispatcher's own failure must
+// still be recorded (not silently dropped) when the invocation context is
+// already cancelled, and the original error must reach the caller unchanged.
+func TestAttemptRecordingDispatcherFailureRecordedWithAnAbandonedInvocationContext(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	ledger := &fakeLedger{}
+	innerErr := errors.New("dispatch: the tool itself failed")
+	dispatcher, err := NewAttemptRecordingDispatcher(
+		reg,
+		refusingToolDispatcher{err: innerErr},
+		ledger,
+	)
+	if err != nil {
+		t.Fatalf("new attempt-recording dispatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	invocation := workerInvocationForTest("workers.holdings", workerGrantForTest(), `{}`)
+	invocation.Context = ctx
+
+	_, err = dispatcher.Dispatch(invocation)
+	if !errors.Is(err, innerErr) {
+		t.Fatalf("dispatch error = %v, want the inner dispatcher's own error preserved", err)
+	}
+
+	calls := ledger.calls()
+	if len(calls) == 0 || calls[len(calls)-1] != "finish:failure" {
+		t.Fatalf("ledger calls = %v, want the failure outcome recorded despite the abandoned context", calls)
+	}
+	records := ledger.finishCallRecords()
+	if len(records) != 1 || records[0].errAtCall != nil {
+		t.Fatalf("outcome recorded on the caller's own cancelled context instead of a detached one: %+v", records)
+	}
+}
+
+// AGENTS.md testing rule 3: for the external call detachedFinishContext
+// makes, there is a test where that call fails. A ledger write that never
+// returns must not be able to hang the dispatcher forever just because the
+// caller who wanted the answer is gone — the detached context's own bound
+// has to apply regardless.
+func TestAttemptRecordingDispatcherFinishTimeoutBoundsAWedgedLedger(t *testing.T) {
+	reg, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	ledger := &fakeLedger{finishHang: true}
+	dispatcher, err := NewAttemptRecordingDispatcher(
+		reg,
+		succeedingToolDispatcher{result: "the answer"},
+		ledger,
+	)
+	if err != nil {
+		t.Fatalf("new attempt-recording dispatcher: %v", err)
+	}
+
+	previous := finishAttemptTimeout
+	finishAttemptTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { finishAttemptTimeout = previous })
+
+	invocation := workerInvocationForTest("workers.holdings", workerGrantForTest(), `{}`)
+
+	done := make(chan struct{})
+	var dispatchErr error
+	go func() {
+		_, dispatchErr = dispatcher.Dispatch(invocation)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch did not return — a wedged ledger write hung the dispatcher instead of being bounded")
+	}
+	if dispatchErr == nil {
+		t.Fatal("dispatch error = nil, want the bound to surface as an error since the ledger write never actually finished")
 	}
 }

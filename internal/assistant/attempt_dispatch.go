@@ -62,17 +62,60 @@ func (d *attemptRecordingDispatcher) Dispatch(invocation ToolInvocation) (string
 	}
 
 	result, dispatchErr := d.inner.Dispatch(invocation)
+
+	// By this point the inner dispatcher has already produced its terminal
+	// outcome — an answer, or its own typed failure. Recording that outcome
+	// must not depend on the caller still waiting for it (nocx-uhii1): a
+	// person can stop waiting on a call and interrupt the session that is
+	// holding it, which cancels the invocation's context, and that can land
+	// here well after Dispatch returned. finishCtx carries the invocation's
+	// values (so anything keyed off them still threads through) but not its
+	// cancellation, and is bounded by its own short timeout so a wedged
+	// ledger cannot hang the dispatcher in the caller's place.
+	finishCtx, cancel := detachedFinishContext(invocation.Context)
+	defer cancel()
 	if dispatchErr != nil {
 		// The outcome is already a refusal/failure owned by the inner
 		// dispatcher. Preserve its typed error for the JSON-RPC mapper; a
 		// close failure on this path must not hide the original answer.
-		_ = finishAttempt(contextOrBackground(invocation.Context), d.ledger, execID, dispatchErr)
+		_ = finishAttempt(finishCtx, d.ledger, execID, dispatchErr)
 		return "", dispatchErr
 	}
-	if err := finishAttempt(contextOrBackground(invocation.Context), d.ledger, execID, nil); err != nil {
+	if err := finishAttempt(finishCtx, d.ledger, execID, nil); err != nil {
 		return "", fmt.Errorf("assistant dispatch: record outcome: %w", err)
 	}
 	return result, nil
+}
+
+// finishAttemptTimeout bounds detachedFinishContext's own deadline. A local
+// ledger write that cannot complete within this is a wedged store, and that
+// must not be able to hang the dispatcher just because whoever asked for the
+// answer already has it (or gave up on it). A package var, not a const, so a
+// test can shorten it to prove the bound actually applies without waiting out
+// the production value.
+var finishAttemptTimeout = 10 * time.Second
+
+// detachedFinishContext derives the context a completed dispatch's outcome is
+// recorded under, from the invocation's own context.
+//
+// RECORDING THAT A CALL FINISHED MUST NOT DEPEND ON THE CALLER STILL WAITING
+// FOR IT. By the time this runs, the work is done and the outcome is known —
+// this write is the one thing that must not be able to convert a completed
+// call into a failure. It therefore carries the parent's VALUES (so a trace
+// id or similar keyed off the invocation context still resolves) but
+// deliberately NOT its cancellation or deadline (context.WithoutCancel):
+// inheriting the deadline would reproduce the exact bug this fixes, since the
+// invocation context can already be cancelled — a person stopped waiting and
+// interrupted the session — by the time a slow call finishes. It is not left
+// unbounded either — WithTimeout gives it a short deadline of its own, so a
+// wedged ledger cannot hang the dispatcher in the caller's place. "Inherits
+// nothing" and "inherits the deadline" are both wrong here, for these two
+// different reasons.
+func detachedFinishContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), finishAttemptTimeout)
 }
 
 func (d *attemptRecordingDispatcher) Catalogue(grant content.Grant) []agenttools.Tool {

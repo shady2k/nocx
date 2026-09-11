@@ -106,7 +106,7 @@ func TestCaptureProgramEndsWhenScriptExhausted(t *testing.T) {
 			label: `+30ms ""`,
 		},
 	}
-	if err := captureProgram(outPath, []string{"bash", "-i"}, 80, 24, 500*time.Millisecond, steps, true, &stderr); err != nil {
+	if err := captureProgram(captureOptions{OutPath: outPath, Argv: []string{"bash", "-i"}, Cols: 80, Rows: 24, Timeout: 500 * time.Millisecond, Steps: steps, ScriptProvided: true}, &stderr); err != nil {
 		t.Fatalf("captureProgram: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "capture ended because script ended") {

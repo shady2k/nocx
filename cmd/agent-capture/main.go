@@ -40,6 +40,21 @@ type scriptStep struct {
 	label string
 }
 
+// captureOptions is one capture. Env nil inherits the caller's environment, as
+// capture always has; a non-nil Env replaces it and turns on the Claude
+// configuration refusals.
+type captureOptions struct {
+	OutPath        string
+	Argv           []string
+	Cols, Rows     int
+	Timeout        time.Duration
+	Steps          []scriptStep
+	ScriptProvided bool
+	Env            []string
+	Dir            string
+	MetaPath       string
+}
+
 type usageError struct {
 	message string
 }
@@ -103,7 +118,7 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] -- PROGRAM [ARGS...]"); err != nil {
+		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] [-env-file FILE] [-dir DIR] [-meta FILE] -- PROGRAM [ARGS...]"); err != nil {
 			return
 		}
 		fs.PrintDefaults()
@@ -113,6 +128,9 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	cols := fs.Int("cols", 120, "PTY columns")
 	rows := fs.Int("rows", 40, "PTY rows")
 	timeout := fs.Duration("timeout", 90*time.Second, "hard stop after this duration")
+	envFile := fs.String("env-file", "", "replace the inherited environment with this file's KEY=VALUE lines, and refuse to start if Claude Code would read configuration outside the run")
+	dir := fs.String("dir", "", "working directory for the program (default: the current directory)")
+	metaPath := fs.String("meta", "", "with -env-file, write what ran and the variable names here")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -144,7 +162,18 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 			return fmt.Errorf("capture: script %q: %w", *scriptPath, err)
 		}
 	}
-	return captureProgram(*outPath, argv, *cols, *rows, *timeout, steps, *scriptPath != "", stderr)
+	opts := captureOptions{
+		OutPath: *outPath, Argv: argv, Cols: *cols, Rows: *rows, Timeout: *timeout,
+		Steps: steps, ScriptProvided: *scriptPath != "", Dir: *dir, MetaPath: *metaPath,
+	}
+	if *envFile != "" {
+		env, err := readEnvFile(*envFile)
+		if err != nil {
+			return fmt.Errorf("capture: %w", err)
+		}
+		opts.Env = env
+	}
+	return captureProgram(opts, stderr)
 }
 
 func runReplayCommand(args []string, stdout, stderr io.Writer) error {
@@ -296,10 +325,38 @@ func parseMarks(text string) ([]int64, error) {
 	return marks, nil
 }
 
-func captureProgram(outPath string, argv []string, cols, rows int, timeout time.Duration, steps []scriptStep, scriptProvided bool, stderr io.Writer) error {
+func captureProgram(opts captureOptions, stderr io.Writer) error {
+	outPath, argv, cols, rows, timeout, steps, scriptProvided := opts.OutPath, opts.Argv, opts.Cols, opts.Rows, opts.Timeout, opts.Steps, opts.ScriptProvided
+	base := os.Environ()
+	program := argv[0]
+	if opts.Env != nil {
+		base = opts.Env
+		root := opts.Dir
+		if root == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("refusing to start: cannot resolve the working directory: %w", err)
+			}
+			root = wd
+		}
+		if err := refuseOutsideClaudeConfig(root); err != nil {
+			return err
+		}
+		resolved, err := resolveProgram(argv[0], opts.Env)
+		if err != nil {
+			return fmt.Errorf("refusing to start: %w", err)
+		}
+		if opts.MetaPath != "" {
+			if err := writeRunMeta(opts.MetaPath, argv[0], resolved, opts.Env); err != nil {
+				return err
+			}
+		}
+		program = resolved
+	}
 	//nolint:gosec // the operator explicitly supplies the program and arguments
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = pinnedEnvironment(cols, rows)
+	cmd := exec.Command(program, argv[1:]...)
+	cmd.Dir = opts.Dir
+	cmd.Env = pinnedEnvironment(base, cols, rows)
 	//nolint:gosec // cols and rows are validated against uint16 bounds before this call
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
@@ -454,12 +511,12 @@ func killProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
-func pinnedEnvironment(cols, rows int) []string {
+func pinnedEnvironment(base []string, cols, rows int) []string {
 	keys := map[string]struct{}{
 		"TERM": {}, "LANG": {}, "LC_ALL": {}, "COLUMNS": {}, "LINES": {},
 	}
-	env := make([]string, 0, len(os.Environ())+5)
-	for _, entry := range os.Environ() {
+	env := make([]string, 0, len(base)+5)
+	for _, entry := range base {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue

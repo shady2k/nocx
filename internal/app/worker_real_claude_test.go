@@ -315,43 +315,56 @@ func realClaudeCall(t *testing.T, conn net.Conn, dec *json.Decoder, id, method s
 
 // closeRealClaudeWorker is the CLEANUP path (registered right after a spawn
 // succeeds, so a failing run still closes the real claude process): a
-// best-effort workers.close over its OWN short-lived connection, logged
-// rather than fatal, because a cleanup that panics on an already-closed
-// worker would hide whatever the test itself already reported.
-func closeRealClaudeWorker(t *testing.T, socket, worker string) {
+// workers.close sent over THE TEST'S OWN, ALREADY-AUTHORIZED conn — never a
+// fresh connection.
+//
+// Why not a fresh connection (this file's own regression, nocx-f545a.9): a
+// second, short-lived connection dialed here was refused EVERY TIME with
+// "worker caller refused", and it is not a peer-identity mismatch — a fresh
+// net.Dial from this same test process is still the same OS process, so
+// peerpin.SystemPinner (internal/peerpin) pins it to the very same enrolled
+// root as the first connection, every time. The real cause is one layer up:
+// toolendpoint.Endpoint.serve calls Auth.Admit exactly ONCE PER CONNECTION,
+// not once per call (internal/toolendpoint/endpoint.go), and
+// workerCallerSlots hands out one caller slot per session for the
+// CONNECTION's whole lifetime, released only when that connection's serve
+// loop ends. A second connection dialed while the first is still open, or
+// while the server has not yet finished tearing the first one down, finds
+// the slot already held and is refused with ErrSessionCallerActive — which
+// the wire spells identically to ErrNotEnrolled ("worker caller refused",
+// toolendpoint's rpcErrorFor), so the symptom reads as an auth failure
+// though the peer was never in question.
+//
+// So this reuses conn/dec — the same connection the test's own
+// workers.spawn, workers.screen and workers.answer calls already ran over —
+// and the caller arranges cleanup ordering (t.Cleanup is LIFO) so this runs
+// BEFORE conn's own close: this worker-close cleanup is registered AFTER
+// conn's close cleanup, so it fires first, while conn is still open.
+//
+// Calling this after the test's own explicit workers.close (the happy path)
+// is safe and not an error: workers.Registrar.Close treats an
+// already-terminal participant as success (registrar.go's own doc — "a
+// coordinator tidying up should not have to have raced the record to be
+// allowed to"), so a redundant close here reports Ended rather than a
+// refusal.
+func closeRealClaudeWorker(t *testing.T, conn net.Conn, dec *json.Decoder, worker string) {
 	t.Helper()
-	conn, err := net.Dial("unix", socket)
-	if err != nil {
-		t.Logf("cleanup: dial to close worker %s: %v", worker, err)
-		return
-	}
-	defer func() { _ = conn.Close() }()
-	params, err := json.Marshal(map[string]string{"worker": worker})
-	if err != nil {
-		t.Logf("cleanup: marshal close params for %s: %v", worker, err)
-		return
-	}
-	req, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": "cleanup-close", "method": "workers.close",
-		"params": json.RawMessage(params),
-	})
-	if err != nil {
-		t.Logf("cleanup: marshal close request for %s: %v", worker, err)
-		return
-	}
-	if _, writeErr := conn.Write(append(req, '\n')); writeErr != nil {
-		t.Logf("cleanup: write close request for %s: %v", worker, writeErr)
-		return
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	var resp realClaudeRPCResponse
-	if decodeErr := json.NewDecoder(conn).Decode(&resp); decodeErr != nil {
-		t.Logf("cleanup: decode close response for %s: %v", worker, decodeErr)
-		return
-	}
+	resp := realClaudeCall(t, conn, dec, "cleanup-close", "workers.close",
+		map[string]string{"worker": worker}, 15*time.Second)
 	if resp.Error != nil {
-		t.Logf("cleanup: workers.close for %s: %+v", worker, resp.Error)
+		// FAILS the test rather than t.Logf: a swallowed refusal here is
+		// exactly how this regressed silently once already — the real
+		// claude process was left running, unnoticed, because cleanup only
+		// logged it.
+		t.Errorf("cleanup: workers.close for %s: %+v", worker, resp.Error)
+		return
 	}
+	var closed realClaudeCloseResult
+	if unmarshalErr := json.Unmarshal(resp.Result, &closed); unmarshalErr != nil {
+		t.Errorf("cleanup: decode close result for %s: %s: %v", worker, resp.Result, unmarshalErr)
+		return
+	}
+	t.Logf("cleanup: workers.close for %s: ended=%v", worker, closed.Ended)
 }
 
 type realClaudeSpawnResult struct {
@@ -418,7 +431,12 @@ func TestARealClaudeCoordinatorAnswersTheFolderTrustDialog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial the tool socket: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	// t.Cleanup, not a bare defer: closeRealClaudeWorker below reuses THIS
+	// connection (its own doc says why a fresh one is refused), and needs it
+	// closed AFTER the worker is — t.Cleanup is LIFO, so registering this
+	// cleanup first and the worker-close cleanup second makes the worker
+	// close run before conn does.
+	t.Cleanup(func() { _ = conn.Close() })
 	dec := json.NewDecoder(conn)
 
 	const task = "Reply with the single word ok and nothing else."
@@ -444,7 +462,10 @@ func TestARealClaudeCoordinatorAnswersTheFolderTrustDialog(t *testing.T) {
 
 	// Registered NOW, so a failure anywhere below still closes the real
 	// claude process this test started — nocx-f545a.5's own instruction.
-	t.Cleanup(func() { closeRealClaudeWorker(t, stand.endpoint.SocketPath(), worker) })
+	// Registered AFTER conn's own close cleanup above, so LIFO runs this
+	// one first, while conn is still open — see closeRealClaudeWorker's doc
+	// for why it must be this connection and not a fresh one.
+	t.Cleanup(func() { closeRealClaudeWorker(t, conn, dec, worker) })
 
 	// THE CHECK REFUSING TO PASS VACUOUSLY. A recorded idle capture can never
 	// show a startup gate (this file's own header); the live equivalent of

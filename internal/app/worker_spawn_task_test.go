@@ -119,12 +119,20 @@ func (s *taskDeliveryStand) realTypist(t *testing.T) *agenttyping.Typist {
 // debt Spawn left (nocx-f545a.7). classify is the watcher's LIVE Classify,
 // never its cache — see paneClassifier's own doc (workers.go) for why the
 // answer path cannot read Snapshot the way deliverTask does at spawn.
+// answerer is a workerAnswerer wired exactly as app.go wires the shipped
+// one, plus settledClock (worker_answer_test.go): every test in this package
+// that does not itself exercise the nocx-f545a.8 settle wait gets a clock
+// that already reports the menu settled by its answerer's SECOND poll,
+// rather than either waiting out the real menuSettle interval (menuSettle's
+// own doc) or shrinking that interval globally, which would hide the gate
+// this bead adds from every one of them.
 func (s *taskDeliveryStand) answerer(t *testing.T) *workerAnswerer {
 	t.Helper()
 	typist := s.realTypist(t)
 	return &workerAnswerer{
 		grid: s.grid, typist: typist,
 		owed: s.owed, classify: s.watch, typing: typist, log: s.log,
+		now: settledClock(),
 	}
 }
 

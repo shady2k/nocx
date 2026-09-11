@@ -11,11 +11,14 @@ package app
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
+	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
@@ -416,6 +419,7 @@ func TestAnOwedTasksSubmitIsRefusedAtTheGate(t *testing.T) {
 	answerer := &workerAnswerer{
 		grid: stand.grid, typist: refusingSubmitTypist{choose: real},
 		owed: stand.owed, classify: stand.watch, typing: refusingSubmitTypist{choose: real}, log: stand.log,
+		now: settledClock(),
 	}
 
 	// The confirm needs the menu still on screen, so the pane repaints to
@@ -667,5 +671,433 @@ func TestOwedTaskWaitsOnADifferentQuestionWithoutASweepAfterTheConfirm(t *testin
 	// point: the modal_choice this answer reports came from a LIVE read.
 	if o, ok := stand.watch.Snapshot(string(sid)); !ok || o.State != agentdriver.StatePermissionChoice {
 		t.Fatalf("watcher cache = %+v (ok=%v), want it still stale at permission_choice", o, ok)
+	}
+}
+
+// ── the settle wait before an answer's FIRST key (nocx-f545a.8) ───────────
+//
+// menuSettle's own doc (workers.go) has the measurement: a real Claude Code's
+// menu can desync from what it repaints for up to ~100ms after it first
+// appears, invisibly, so Answer now waits for the menu to stand still before
+// it ever writes a key. Every test below drives that wait through an
+// INJECTED CLOCK — never a real sleep — per menuSettle's own doc: shrinking
+// the interval globally would hide the gate from every other test in this
+// file, which is why every other test in this file instead gets
+// settledClock() (below), through stand.answerer's own doc.
+
+// fakeClock is a manually-driven time source for exercising
+// workerAnswerer.awaitMenuSettled's own timing without ever sleeping: it
+// reports whatever value it was last set to, and only test code moves it
+// forward.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock(start time.Time) *fakeClock {
+	return &fakeClock{t: start}
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// settledClock is the clock every OTHER answer test in this package gets
+// (through stand.answerer, worker_spawn_task_test.go): each call advances by
+// menuSettle plus a little, so the SECOND poll of any one awaitMenuSettled
+// call already reports its menu settled, regardless of how many Answer calls
+// have already shared this same clock — every call restarts its own local
+// `since` baseline (awaitMenuSettled's own doc) and only needs the clock to
+// have moved forward by menuSettle between that call's first poll and its
+// second, which an ever-advancing clock guarantees no matter where it
+// started. Safe for concurrent Answer calls sharing one answerer: the mutex
+// serializes advances, and nobody reads two values expecting them to agree.
+func settledClock() func() time.Time {
+	var mu sync.Mutex
+	t := time.Now()
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		t = t.Add(menuSettle + time.Millisecond)
+		return t
+	}
+}
+
+// pollCounter counts awaitMenuSettled's own polls, for tests that need to
+// know at least one MORE poll has happened since a point they name — never
+// for tests to count exactly how many, which would make them depend on the
+// real deliveryPoll cadence rather than on the fake clock they actually
+// drive.
+type pollCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (p *pollCounter) hook() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.n++
+}
+
+func (p *pollCounter) load() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.n
+}
+
+// waitForNextPoll blocks until pc has counted a poll after before — always a
+// value pc.load() itself returned earlier in the same test, taken AFTER
+// whatever mutation (a clock advance, a changed frame) the caller wants the
+// next poll to observe.
+func waitForNextPoll(t *testing.T, pc *pollCounter, before int) {
+	t.Helper()
+	waittest.WaitFor(t, "an awaitMenuSettled poll", func() bool {
+		return pc.load() > before
+	})
+}
+
+// fakeMenuFrame builds a panegrid.Frame agenttyping.ReadMenu reads back as a
+// menu offering exactly options, selected on options[selected] — synthetic,
+// for testing awaitMenuSettled's own timing directly rather than through a
+// real terminal capture, which has no scripted way to change a menu's option
+// list mid-render on demand.
+func fakeMenuFrame(options []string, selected int) panegrid.Frame {
+	lines := make([][]panegrid.Cell, len(options))
+	for i, opt := range options {
+		marker := "  "
+		if i == selected {
+			marker = "❯ " // "❯ ", the same marker selectYesRepaint moves in this file's other tests
+		}
+		text := marker + opt
+		cells := make([]panegrid.Cell, 0, len(text))
+		for _, r := range text {
+			cells = append(cells, panegrid.Cell{Text: string(r), Width: 1})
+		}
+		lines[i] = cells
+	}
+	return panegrid.Frame{Cols: 80, Rows: len(options), CursorX: 0, CursorY: selected, Lines: lines}
+}
+
+// fakeSettleGrid is a minimal panegrid.Observer whose Frame is swappable
+// live, so a test can change what a pane shows mid-wait without a real
+// terminal behind it. Only Frame is exercised by awaitMenuSettled; the rest
+// exist to satisfy the interface.
+type fakeSettleGrid struct {
+	mu    sync.Mutex
+	frame panegrid.Frame
+}
+
+func (g *fakeSettleGrid) set(f panegrid.Frame) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.frame = f
+}
+
+func (g *fakeSettleGrid) Frame(string) (panegrid.Frame, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.frame, nil
+}
+func (g *fakeSettleGrid) Enrol(string, int, int) error  { return nil }
+func (g *fakeSettleGrid) Withdraw(string)               {}
+func (g *fakeSettleGrid) Feed(string, []byte)           {}
+func (g *fakeSettleGrid) Resize(string, int, int) error { return nil }
+func (g *fakeSettleGrid) Enrolled(string) bool          { return true }
+
+// fakeSettleClassifier is a minimal paneClassifier whose state is swappable
+// live, the classify-side twin of fakeSettleGrid above.
+type fakeSettleClassifier struct {
+	mu    sync.Mutex
+	state agentdriver.State
+}
+
+func (c *fakeSettleClassifier) set(s agentdriver.State) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = s
+}
+
+func (c *fakeSettleClassifier) Classify(string) (paneobserve.Observation, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return paneobserve.Observation{State: c.state}, true
+}
+
+// Criterion: a menu first seen by an answer writes NOTHING while its own
+// clock has not yet advanced past menuSettle — polls happen (proven via
+// pollCounter) and the pane stays untouched — and once the clock is advanced
+// past it, the ordinary move-then-confirm sequence runs exactly as every
+// other test in this file already proves it does.
+func TestAnAnswerWaitsForTheMenuToSettleBeforeItsFirstMove(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	sess, err := stand.reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: participantCols, Rows: participantRows,
+	})
+	if err != nil {
+		t.Fatalf("open the worker's session: %v", err)
+	}
+	sid := sess.ID()
+	stand.enrolWorkerPane(t, sid)
+	stand.feedCapture(t, sid, "claude-trust", 11000)
+	stand.watch.Sweep()
+
+	typist := stand.realTypist(t)
+	clock := newFakeClock(time.Now())
+	var pc pollCounter
+	answerer := &workerAnswerer{
+		grid: stand.grid, typist: typist,
+		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
+		now: clock.now, pollHook: pc.hook,
+	}
+	participant := workers.Participant{ID: "p-settle", Liveness: workers.Liveness{SessionID: string(sid)}}
+
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		a, err := answerer.Answer(ctx, participant, "Yes, I trust this folder")
+		done <- outcome{a, err}
+	}()
+
+	before := pc.load()
+	waitForNextPoll(t, &pc, before) // the first observation, baseline set
+	before = pc.load()
+	waitForNextPoll(t, &pc, before) // a second poll, the clock unmoved
+
+	pty := stand.ptys.last()
+	if b := pty.read(); b != "" {
+		t.Fatalf("bytes reached the pane before the menu settled: %q", b)
+	}
+	select {
+	case <-done:
+		t.Fatal("Answer returned before the menu ever settled")
+	default:
+	}
+
+	before = pc.load()
+	clock.advance(menuSettle)
+	waitForNextPoll(t, &pc, before)
+
+	waittest.WaitFor(t, "the movement key to reach the pane", func() bool {
+		return strings.Contains(pty.read(), "\x1b[B")
+	})
+	if strings.Contains(pty.read(), "\r") {
+		t.Fatalf("the confirm key was sent before the screen showed the selection: %q", pty.read())
+	}
+	stand.grid.Feed(string(sid), []byte(selectYesRepaint))
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Answer: %v", got.err)
+	}
+	if got.a.Outcome != string(agenttyping.OutcomeSubmitted) {
+		t.Fatalf("answer = %+v, want submitted", got.a)
+	}
+	waittest.WaitFor(t, "the confirm key to reach the pane", func() bool {
+		return pty.read() == "\x1b[B\r"
+	})
+}
+
+// Criterion: a menu whose OPTIONS change mid-settle — a row appears that was
+// not there before, even though the classification and the named option are
+// both still present — restarts the clock. What would have completed the
+// ORIGINAL interval is not enough for the restarted one; a full interval
+// counted from the change is what settles it. Exercises awaitMenuSettled
+// directly, off fakes: no real terminal can be scripted to change a menu's
+// option list on a signal from the test rather than on a timer of its own.
+func TestAwaitMenuSettledRestartsTheClockWhenTheMenusOptionsChange(t *testing.T) {
+	const option = "Yes, I trust this folder"
+	grid := &fakeSettleGrid{}
+	grid.set(fakeMenuFrame([]string{"No, exit", option}, 0))
+	classify := &fakeSettleClassifier{}
+	classify.set(agentdriver.StatePermissionChoice)
+
+	clock := newFakeClock(time.Now())
+	var pc pollCounter
+	answerer := &workerAnswerer{
+		grid: grid, classify: classify,
+		now: clock.now, pollHook: pc.hook,
+	}
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		done <- answerer.awaitMenuSettled(ctx, "pane-1", option)
+	}()
+
+	before := pc.load()
+	waitForNextPoll(t, &pc, before) // the first observation sets the baseline
+
+	half := menuSettle / 2
+	before = pc.load()
+	clock.advance(half)
+	waitForNextPoll(t, &pc, before)
+	select {
+	case <-done:
+		t.Fatal("awaitMenuSettled returned before its own interval elapsed")
+	default:
+	}
+
+	// The OPTIONS change: a third row appears. The classification (still
+	// permission_choice) and the named option (still offered) are both
+	// unchanged, and the clock must restart anyway.
+	grid.set(fakeMenuFrame([]string{"No, exit", option, "Yes, and don't ask again"}, 1))
+	before = pc.load()
+	waitForNextPoll(t, &pc, before) // the poll that notices the changed options
+
+	before = pc.load()
+	clock.advance(menuSettle - half)
+	waitForNextPoll(t, &pc, before)
+	select {
+	case <-done:
+		t.Fatal("the changed menu's clock was not restarted: it settled on time accrued against the old menu")
+	default:
+	}
+
+	before = pc.load()
+	clock.advance(menuSettle)
+	waitForNextPoll(t, &pc, before)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("awaitMenuSettled: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitMenuSettled never returned after the restarted interval elapsed")
+	}
+}
+
+// Criterion: a menu that disappears mid-settle — the pane repaints to
+// free_text before the interval could ever elapse — ends the wait at once
+// with nothing written, and Choose is left to refuse the confirm on its own
+// screen read and its own reason, never a second one invented by the wait.
+func TestAnAnswerWritesNothingWhenTheMenuDisappearsDuringTheSettle(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	sess, err := stand.reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: participantCols, Rows: participantRows,
+	})
+	if err != nil {
+		t.Fatalf("open the worker's session: %v", err)
+	}
+	sid := sess.ID()
+	stand.enrolWorkerPane(t, sid)
+	stand.feedCapture(t, sid, "claude-trust", 11000)
+	stand.watch.Sweep()
+
+	typist := stand.realTypist(t)
+	var pc pollCounter
+	answerer := &workerAnswerer{
+		grid: stand.grid, typist: typist,
+		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
+		// now is left nil (real time.Now) deliberately: this wait must end
+		// because the pane stopped offering the menu, never because the
+		// clock reached menuSettle, so the real interval is never actually
+		// waited out by this test.
+		pollHook: pc.hook,
+	}
+	participant := workers.Participant{ID: "p-settle-vanish", Liveness: workers.Liveness{SessionID: string(sid)}}
+
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		a, err := answerer.Answer(ctx, participant, "Yes, I trust this folder")
+		done <- outcome{a, err}
+	}()
+
+	before := pc.load()
+	waitForNextPoll(t, &pc, before)
+
+	// The trust question is gone before any settle could complete.
+	stand.repaintAsIdle(t, sid)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Answer: %v", got.err)
+	}
+	if got.a.Outcome != string(agenttyping.OutcomeRefused) {
+		t.Fatalf("answer = %+v, want Choose's own refusal for a pane that stopped offering the menu", got.a)
+	}
+	if b := stand.ptys.last().read(); b != "" {
+		t.Fatalf("bytes reached the pane whose menu disappeared during the settle: %q", b)
+	}
+}
+
+// Criterion: a ctx cancelled mid-settle ends the wait promptly, with an
+// error and with nothing written — the settle wait obeys the same
+// cancellation contract awaitFreeText, awaitSelectionOn and
+// awaitMenuLeftScreen already do.
+func TestAnAnswerReturnsPromptlyWhenCtxIsCancelledDuringTheSettle(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	sess, err := stand.reg.Open(context.Background(), session.Config{
+		Kind: session.KindLocal, Cols: participantCols, Rows: participantRows,
+	})
+	if err != nil {
+		t.Fatalf("open the worker's session: %v", err)
+	}
+	sid := sess.ID()
+	stand.enrolWorkerPane(t, sid)
+	stand.feedCapture(t, sid, "claude-trust", 11000)
+	stand.watch.Sweep()
+
+	typist := stand.realTypist(t)
+	// The clock never advances: nothing but ctx cancellation can end this
+	// wait, because settling never happens on its own.
+	clock := newFakeClock(time.Now())
+	var pc pollCounter
+	answerer := &workerAnswerer{
+		grid: stand.grid, typist: typist,
+		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
+		now: clock.now, pollHook: pc.hook,
+	}
+	participant := workers.Participant{ID: "p-settle-cancel", Liveness: workers.Liveness{SessionID: string(sid)}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
+	start := time.Now()
+	go func() {
+		a, err := answerer.Answer(ctx, participant, "Yes, I trust this folder")
+		done <- outcome{a, err}
+	}()
+
+	before := pc.load()
+	waitForNextPoll(t, &pc, before)
+	cancel()
+
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatalf("Answer = %+v, <nil>, want an error for a settle wait ended by ctx cancellation", got.a)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Answer took %s to return after ctx was cancelled during the settle", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Answer did not return promptly after ctx was cancelled during the settle")
+	}
+	if b := stand.ptys.last().read(); b != "" {
+		t.Fatalf("bytes reached the pane despite ctx being cancelled during the settle: %q", b)
 	}
 }

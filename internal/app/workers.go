@@ -1330,6 +1330,12 @@ type paneChooser interface {
 // option — asked through agenttyping.ReadMenu, the same reading Choose
 // confirms against — and only then chooses again, which confirms from that
 // frame. Choosing again on a stale frame would move a second time and overshoot.
+//
+// A SECOND WAIT, BEFORE ANY OF THAT, GATES THE FIRST KEY (nocx-f545a.8):
+// menuSettle's own doc has the measurement, but the shape of it here is that
+// Answer no longer writes into a menu the instant it is asked to — it first
+// confirms, on the live grid and the live classification, that the menu has
+// been standing still for menuSettle. See awaitMenuSettled.
 type workerAnswerer struct {
 	grid   panegrid.Observer
 	typist paneChooser
@@ -1342,20 +1348,41 @@ type workerAnswerer struct {
 	owed *owedTasks
 	// classify is a LIVE reading, never the watcher's cache — see
 	// paneClassifier's own doc for why typeOwedTask cannot use the same
-	// paneReadiness deliverTask reads at spawn.
+	// paneReadiness deliverTask reads at spawn. awaitMenuSettled reads it for
+	// the identical reason: the menu it is timing must be the one on screen
+	// right now, never a cached belief about an earlier frame.
 	classify paneClassifier
 	// typing is the same *agenttyping.Typist as typist above, reached
 	// through Submit rather than Choose: the one gate, never a second door
 	// onto this pane's input queue, exactly as workerWaker and deliverTask
 	// already share it.
 	typing paneTypist
-	log    log.Logger
+	// now is the clock awaitMenuSettled measures menuSettle against. Nil
+	// means time.Now — production wires nothing here, exactly like
+	// killTimeout's sibling seams elsewhere in this file are package vars
+	// rather than constructor arguments every caller must supply. A test
+	// injects a fake clock so it can prove the gate applies, and does not
+	// apply too early, without ever sleeping out menuSettle's own real
+	// interval (menuSettle's own doc says why shrinking it globally instead
+	// would hide the gate from every other test in this file).
+	now func() time.Time
+	// pollHook, when set, is called once per awaitMenuSettled poll, after
+	// that poll's fresh reading is taken. It exists for tests only: with now
+	// injected, a test observes a poll having happened before it advances the
+	// fake clock, rather than sleeping out deliveryPoll's own real interval
+	// and hoping it landed after this loop's next tick.
+	pollHook func()
+	log      log.Logger
 }
 
 func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, option string) (workers.PaneAnswer, error) {
 	sid := p.Liveness.SessionID
 	if sid == "" || a.grid == nil || a.typist == nil {
 		return workers.PaneAnswer{}, errors.New("worker answer: this participant has no pane nocx can answer")
+	}
+	if err := a.awaitMenuSettled(ctx, sid, option); err != nil {
+		return workers.PaneAnswer{}, fmt.Errorf(
+			"worker answer: waiting for the menu to settle before its first key: %w", err)
 	}
 	res := a.typist.Choose(sid, option)
 	if res.Outcome != agenttyping.OutcomeTyped {
@@ -1366,6 +1393,136 @@ func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, opti
 		return paneAnswerOf(res), nil
 	}
 	return a.withOwedTask(ctx, p, option, a.typist.Choose(sid, option)), nil
+}
+
+// menuSettle is the minimum time a menu must have been shown, continuously
+// and unchanged, before workerAnswerer.Answer writes its FIRST key into it.
+//
+// MEASURED, not guessed (nocx-f545a.8, 2026-09-11, against the installed
+// Claude Code 2.1.266). Reproduced outside nocx in a bare pty (python
+// pty.fork) on the real CLI's own folder-trust dialog, in a directory it had
+// never seen: a down key written within ~100 ms of the dialog's FIRST paint
+// is repainted CORRECTLY on screen — the marker and the cursor move to the
+// intended row — but Claude's own internal selection stays on the original
+// default ("No, exit") PERMANENTLY. An Enter written 5 ms, 300 ms or even 1 s
+// later still confirms "No, exit"; a later up/down pair 0.5 s or 1 s
+// afterwards does not resync it either. Sequential trials: 0.10 s failed
+// twice in a row (and failed again under CPU contention); 0.15 s, 0.30 s and
+// 0.50 s each succeeded twice in a row. A down key written >=150 ms after
+// first paint works even with an Enter written 5 ms after IT.
+//
+// THE DESYNC IS INVISIBLE ON SCREEN — the repaint after a "bad" down key is
+// indistinguishable from the repaint after a "good" one — so, unlike every
+// other wait in this file, no observable state can gate this one: there is
+// no frame, no classification and no submit outcome that differs between the
+// two cases. A DURATION is the only honest signal left, which is also why
+// this is not a business number nocx picked for its own convenience: it is
+// what the measurement above required.
+//
+// 1 second is roughly 6x the measured ~150 ms threshold, deliberately loose
+// rather than tight against it, because even 100 ms already failed once on
+// an unloaded machine and failed again under load — a margin that thin is
+// not a margin. It costs the interval once per Answer call, which is well
+// inside workers.answer's own 30 s Deadline alongside answerTaskBudget (see
+// that var's own doc); no change to answerTaskBudget was needed for it.
+var menuSettle = 1 * time.Second
+
+// awaitMenuSettled blocks, before workerAnswerer's FIRST Choose call for this
+// Answer, until sid's pane has shown a menu (permission_choice or
+// modal_choice) offering option CONTINUOUSLY for menuSettle. See menuSettle's
+// own doc for the measurement that makes a duration the only honest gate
+// here.
+//
+// THE AGE IS COUNTED FROM WHEN THIS CALL FIRST SAW THE MENU, never from any
+// history kept across calls or across answers. That is strictly SAFE, unlike
+// the delay an earlier version of a sibling wait tried and had to retract
+// (awaitFreeText's own doc, nocx-f545a.7, on why counting from a cache
+// narrows a race instead of closing it): a menu this wait has only just
+// started watching cannot have desynced before this wait began watching it,
+// so "settled since I started looking" can only UNDERcount a menu that was
+// already on screen for a while before Answer was called, never overcount
+// one that just appeared. It needs no state beyond this one call's own
+// locals, which is what makes it safe to keep this simple.
+//
+// A menu whose OPTIONS change mid-wait — a different set of rows than the one
+// this wait started timing — is a DIFFERENT menu and restarts the clock: it
+// has not been sitting still for menuSettle just because something that
+// classifies the same (permission_choice, say) was on screen before it. A
+// pane that stops being a menu offering option AT ALL ends the wait early
+// with no error: Choose itself decides the refusal for that case, with its
+// own reason, never a second sentence invented here.
+//
+// A nil classify or grid is the same ABSENCE case every optional seam in
+// this file already treats: a caller that wired no observation in was never
+// asking this question, so Answer proceeds exactly as it did before this
+// bead rather than hanging on one.
+func (a *workerAnswerer) awaitMenuSettled(ctx context.Context, sid, option string) error {
+	if a.classify == nil || a.grid == nil {
+		return nil
+	}
+	now := a.now
+	if now == nil {
+		now = time.Now
+	}
+	var since time.Time
+	var sinceOptions string
+	// tick takes one fresh reading and reports whether the wait is over —
+	// settled because the menu has now stood still for menuSettle, or
+	// stopped because it no longer offers option at all and there is
+	// nothing left to time.
+	tick := func() (settled, stopped bool) {
+		offers, options := a.menuOffersOption(sid, option)
+		if a.pollHook != nil {
+			a.pollHook()
+		}
+		if !offers {
+			return false, true
+		}
+		if since.IsZero() || options != sinceOptions {
+			since, sinceOptions = now(), options
+			return false, false
+		}
+		return now().Sub(since) >= menuSettle, false
+	}
+	if settled, stopped := tick(); settled || stopped {
+		return nil
+	}
+	ticker := time.NewTicker(deliveryPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if settled, stopped := tick(); settled || stopped {
+				return nil
+			}
+		}
+	}
+}
+
+// menuOffersOption is one fresh, live reading of whether sid's pane is
+// CURRENTLY a menu (permission_choice or modal_choice) offering option — the
+// same two facts Choose's own menuPermit.menu asks, off the same
+// agenttyping.ReadMenu, so "does this menu offer that option" is decided once
+// rather than twice by two readings that could disagree. options is the
+// menu's own option list, joined by a separator no option text can contain,
+// so a caller can tell "the same menu, read again" from "a different menu
+// that happens to classify the same".
+func (a *workerAnswerer) menuOffersOption(sid, option string) (offers bool, options string) {
+	o, ok := a.classify.Classify(sid)
+	if !ok || (o.State != agentdriver.StatePermissionChoice && o.State != agentdriver.StateModalChoice) {
+		return false, ""
+	}
+	f, err := a.grid.Frame(sid)
+	if err != nil {
+		return false, ""
+	}
+	m := agenttyping.ReadMenu(f)
+	if m.Index(option) < 0 {
+		return false, ""
+	}
+	return true, strings.Join(m.Options, "\x00")
 }
 
 // withOwedTask turns the gate's own result into the answer, and — only when

@@ -53,6 +53,7 @@ type captureOptions struct {
 	Env            []string
 	Dir            string
 	MetaPath       string
+	VersionArg     string
 }
 
 type usageError struct {
@@ -118,7 +119,7 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] [-env-file FILE] [-dir DIR] [-meta FILE] -- PROGRAM [ARGS...]"); err != nil {
+		if _, err := fmt.Fprintln(stderr, "usage: agent-capture capture -out FILE [-script FILE] [-cols N] [-rows N] [-timeout DURATION] [-env-file FILE] [-dir DIR] [-meta FILE] [-version-arg ARG] -- PROGRAM [ARGS...]"); err != nil {
 			return
 		}
 		fs.PrintDefaults()
@@ -131,6 +132,7 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	envFile := fs.String("env-file", "", "replace the inherited environment with this file's KEY=VALUE lines, and refuse to start if Claude Code would read configuration outside the run")
 	dir := fs.String("dir", "", "working directory for the program (default: the current directory)")
 	metaPath := fs.String("meta", "", "with -env-file, write what ran and the variable names here")
+	versionArg := fs.String("version-arg", "", "with -meta, also run the resolved program once with this argument under the same environment and record its output as the program version")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -164,7 +166,7 @@ func runCaptureCommand(args []string, stderr io.Writer) error {
 	}
 	opts := captureOptions{
 		OutPath: *outPath, Argv: argv, Cols: *cols, Rows: *rows, Timeout: *timeout,
-		Steps: steps, ScriptProvided: *scriptPath != "", Dir: *dir, MetaPath: *metaPath,
+		Steps: steps, ScriptProvided: *scriptPath != "", Dir: *dir, MetaPath: *metaPath, VersionArg: *versionArg,
 	}
 	if *envFile != "" {
 		env, err := readEnvFile(*envFile)
@@ -331,6 +333,9 @@ func captureProgram(opts captureOptions, stderr io.Writer) error {
 	program := argv[0]
 	if opts.Env != nil {
 		base = opts.Env
+		if err := refuseEnvOutsideClaudeConfig(opts.Env); err != nil {
+			return err
+		}
 		root := opts.Dir
 		if root == "" {
 			wd, err := os.Getwd()
@@ -347,7 +352,14 @@ func captureProgram(opts captureOptions, stderr io.Writer) error {
 			return fmt.Errorf("refusing to start: %w", err)
 		}
 		if opts.MetaPath != "" {
-			if err := writeRunMeta(opts.MetaPath, argv[0], resolved, opts.Env); err != nil {
+			version := ""
+			if opts.VersionArg != "" {
+				version, err = probeVersion(resolved, opts.VersionArg, opts.Env)
+				if err != nil {
+					return fmt.Errorf("record program version: %w", err)
+				}
+			}
+			if err := writeRunMeta(opts.MetaPath, argv[0], resolved, opts.Env, version); err != nil {
 				return err
 			}
 		}
@@ -511,9 +523,16 @@ func killProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
+// pinnedEnvironmentKeys are the variables captureProgram pins regardless of
+// what -env-file supplies, so the capture's terminal size and locale never
+// depend on the caller. TestAnEnvFileIsTheWholeEnvironment asserts the exact
+// resulting environment against this list.
+var pinnedEnvironmentKeys = []string{"TERM", "LANG", "LC_ALL", "COLUMNS", "LINES"}
+
 func pinnedEnvironment(base []string, cols, rows int) []string {
-	keys := map[string]struct{}{
-		"TERM": {}, "LANG": {}, "LC_ALL": {}, "COLUMNS": {}, "LINES": {},
+	keys := make(map[string]struct{}, len(pinnedEnvironmentKeys))
+	for _, k := range pinnedEnvironmentKeys {
+		keys[k] = struct{}{}
 	}
 	env := make([]string, 0, len(base)+5)
 	for _, entry := range base {

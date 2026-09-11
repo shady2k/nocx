@@ -56,14 +56,14 @@ func recordedChrome(t *testing.T, capture string, atMs int64) string {
 // internal/agentcapture's package doc gives for going through panegrid at
 // all).
 //
-// The API-wait frame is sourced from claude-lmstudio-turn, the nocx-nru89.7
+// The API-wait frame is sourced from claude-lmstudio-turn, the nocx-nru89.2
 // recording, rather than one of the nocx-nru89.8 captures: this corpus's only
 // evidence of Claude's "Waiting for API response · will retry in" chrome is
-// that capture (see manifest.json's api-waiting entry, unverified for
-// nocx-nru89.8 because the moment could not be reproduced against a
-// never-answering listener within record.sh's capture window). The capture
-// itself remains a valid, committed nocx-nru89.7 recording of Claude Code
-// 2.1.266; only the manifest inventory mark moved off it.
+// that capture (see manifest.json's api-waiting entry — the owner's decision,
+// 2026-09-12, because a never-answering listener does not reproduce this
+// chrome within record.sh's capture window; nocx-nru89.9). The capture itself
+// remains a valid, committed nocx-nru89.2 recording of Claude Code 2.1.266;
+// nocx-nru89.9 is what gave the manifest entry the "api-waiting" moment name.
 func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 	ws, store, watch, term := newObservedWS(t)
 	conn := connectWS(t, ws)

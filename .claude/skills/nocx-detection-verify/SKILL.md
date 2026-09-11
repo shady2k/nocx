@@ -22,8 +22,18 @@ Use after `claude --version` changes, or when a pane's reported state looks wron
    `internal/agentdriver/testdata/captures/scripts/lmstudio-*.script`.
    - `claude` must be on `PATH`; the script fails immediately, with a message, if it is not.
    - API refused: endpoint `http://127.0.0.1:9`.
-   - API waiting: start `python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",18999));s.listen();c=[s.accept() for _ in range(64)]'`
-     in another pane and use endpoint `http://127.0.0.1:18999`.
+   - API waiting ("Waiting for API response · will retry in"): do NOT use a listener that
+     accepts a connection and never answers (`python3 -c 'import socket;s=socket.socket();
+     s.bind(("127.0.0.1",18999));s.listen();c=[s.accept() for _ in range(64)]'`) — tried twice
+     for nocx-nru89.9, once at `lmstudio-api.script`'s documented 40s final wait and once with
+     the wait extended to 190s (~228s of real elapsed time, just under this script's 240s hard
+     capture ceiling), and in both runs Claude's TUI never advances past a plain, ever-growing
+     spinner. It treats an accepted-but-silent connection as still in flight, not a failure, so
+     it never draws this chrome. The corpus's only recorded evidence of it is
+     `claude-lmstudio-turn@72000` (manifest.json's `api-waiting` entry), where it appeared
+     incidentally during a real slow LM Studio response. Reproducing it deliberately likely
+     needs a connection that answers with a mid-stream failure rather than one that never
+     answers at all — untried as of nocx-nru89.9.
    - `<out without .jsonl>.meta.json`, beside the capture itself (not in the `/var/tmp` run
      directory, which is deleted along with everything else once the run is done), records what
      actually ran: the resolved `claude` binary and its digest, the run's own environment variable

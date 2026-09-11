@@ -362,6 +362,9 @@ func predDetail(p Pred) string {
 		if p.Suffix != "" {
 			parts = append(parts, fmt.Sprintf("suffix=%q", p.Suffix))
 		}
+		if len(p.Glyphs) > 0 {
+			parts = append(parts, fmt.Sprintf("opensWith=%q", p.Glyphs))
+		}
 		parts = append(parts, regionDetail(p.RegionSpec))
 	}
 	return strings.Join(parts, " ")

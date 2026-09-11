@@ -67,7 +67,6 @@ reads this corpus.
 | `claude-2.1.266-permission`         | `lmstudio-permission.script`        | onboarding, a Bash permission dialog for `touch marker.txt` (timed spinner at `46000`, the dialog at `48000`-`49000`, cancelled with Esc), then a Write permission dialog for `note.txt` (`118000`), also cancelled                                                            |
 | `claude-2.1.266-subagent-finished`  | `lmstudio-subagent-finished.script` | the same shape as `claude-lmstudio-subagent-finished`: task panel while a background agent runs (`70000`), panel and mode-line hint both cleared (`110000`), a second turn's natural completion (`126000`)                                                                     |
 | `claude-2.1.266-api-refused`        | `lmstudio-api.script`               | the TUI's own error against a dead port, `http://127.0.0.1:9` (`40000`)                                                                                                                                                                                                        |
-| `claude-2.1.266-api-waiting`        | `lmstudio-api.script`               | attempted reproduction of the "Waiting for API response" chrome against a never-answering listener; does not reach that chrome (see the nocx-nru89.8 section below) — not pointed at by any manifest inventory moment                                                          |
 
 `claude-error` was captured against v2.1.245 by pointing `ANTHROPIC_BASE_URL` at a dead port,
 which is how the error chrome is reproduced without waiting for a real outage. What it settled:
@@ -131,7 +130,10 @@ above it shifts every row below up by one; that part is real Claude repaint beha
 followed at `60000` (`❯ 1. Yes` becoming ` marker.txt creation`, cursor position
 unchanged) was nocx-nru89.5: the run set the window title `✳ marker.txt creation`, and `✳`
 (U+2733) encodes as UTF-8 `E2 9C B3` — the middle byte, `0x9C`, is also the 8-bit form of
-the ANSI String Terminator. x/vt's parser could not tell a raw 8-bit ST from a UTF-8
+the ANSI String Terminator. The trigger is that byte value, not the glyph: any UTF-8
+character whose continuation byte is `0x9C` reproduces it, dingbat or not — `“` (U+201C,
+left double quotation mark, `E2 80 9C`) does too, confirmed by probe alongside the dingbat
+range during the epic review. x/vt's parser could not tell a raw 8-bit ST from a UTF-8
 continuation byte of the same value, so it ended the OSC title early on that byte and
 printed the remainder of the title (`marker.txt creation`) onto the grid at the cursor,
 which Claude had parked on the dialog's `❯`. Fixed in nocx-nru89.5 by disambiguating the two
@@ -181,14 +183,17 @@ is about the isolation and metadata hardening, not a new Claude build.
 
 **Naming.** Each new capture is named `claude-<claude-version>-<what>.jsonl` — the version
 that produced it, then the same descriptive suffix the `claude-lmstudio-*` name already used
-(`turn`, `idle-80`, `idle-60`, `model`, `permission`, `subagent-finished`, `api-refused`,
-`api-waiting`). Every prior recorded entry, from the `claude-lmstudio-*` (nocx-nru89.7) and
+(`turn`, `idle-80`, `idle-60`, `model`, `permission`, `subagent-finished`, `api-refused`). A
+`claude-2.1.266-api-waiting` was attempted with the same suffix and removed (see below) when
+it turned out to record a failed reproduction rather than the chrome itself; `api-waiting`'s
+manifest entry points at `claude-lmstudio-turn` instead. Every prior recorded entry, from the
+`claude-lmstudio-*` (nocx-nru89.2) and
 older captures, is kept as an anonymous (no `moment`) regression entry in `manifest.json`
 rather than deleted, exactly as the nocx-nru89.2 round kept the captures before it.
 
 **Marks moved because this run's model answered faster.** The LM Studio endpoint used for
-this round returned tokens sooner than the nocx-nru89.7 recording, so several marks sit
-earlier or later than their nocx-nru89.7 counterparts, each re-derived by reading the replay
+this round returned tokens sooner than the nocx-nru89.2 recording, so several marks sit
+earlier or later than their nocx-nru89.2 counterparts, each re-derived by reading the replay
 rather than copied from the old timestamp:
 
 - `turn-with-timer` moved from `48000` to `46000`: by `48000` the Bash dialog had already
@@ -201,39 +206,45 @@ rather than copied from the old timestamp:
   `(7s · thinking)` suffix breaks the match. At `53500` the row still reads a bare
   `✻ Hyperspacing…`, which matches.
 - `write-permission` moved from `110000` to `118000`: the second (Write) turn took longer to
-  reach its own permission dialog than in the nocx-nru89.7 recording.
-- `subagent-finished`'s `/tasks to see subagents` mode-line hint cleared much sooner this time
-  (between `100000` and `105000`ms of real time, against nocx-nru89.7's 20-30s-after-panel
-  window), so its mark moved from `112000` to `110000`, still placed after the hint clears, for
-  the same reason nocx-nru89.6's report gives: the frame right after the panel collapses but
-  before the hint clears is chrome-identical, under this rule's closed predicate set, to a real
-  still-running background agent (`internal/paneobserve`'s
+  reach its own permission dialog than in the nocx-nru89.2 recording.
+- `subagent-finished`'s second turn completes by `84000` and its `/tasks to see subagents`
+  mode-line hint clears between `100000` and `105000`ms of real time — about 16-21s after the
+  turn's own completion, the same 20-30s-after-panel window the nocx-nru89.2 recording
+  measured, not a shorter one — so its mark moved from `112000` to `110000`, still placed
+  after the hint clears, for the same reason nocx-nru89.6's report gives: the frame right
+  after the panel collapses but before the hint clears is chrome-identical, under this rule's
+  closed predicate set, to a real still-running background agent (`internal/paneobserve`'s
   `TestAChildAppearingOrVanishingDoesNotChangeTheParentsState`).
-- `turn-finished` moved from the nocx-nru89.7 mark's capture and offset entirely: this round's
+- `turn-finished` moved from the nocx-nru89.2 mark's capture and offset entirely: this round's
   second turn (`ok`) completed naturally by `126000` (`✻ Worked for 5s · done`), so that mark
-  sources the moment instead of re-deriving a timestamp on the same capture nocx-nru89.7 used.
+  sources the moment instead of re-deriving a timestamp on the same capture nocx-nru89.2 used.
 
-**`api-waiting` could not be reproduced and is `unverified`.** The new `claude-2.1.266-turn`
-capture's real generation never stalled, so the chrome that appeared incidentally in the
-nocx-nru89.7 recording (`claude-lmstudio-turn@72000`) did not recur here. Following SKILL.md's
-documented fallback — a listener that accepts a connection and never answers
-(`127.0.0.1:18999`) — was tried twice: once with the `lmstudio-api.script` procedure's
-documented 40s final wait, and once with the wait extended to 190s (about 228s of total real
-elapsed time, just under `record.sh`'s 240s hard capture ceiling). In both runs the screen
-never advances past a plain, ever-growing spinner; it never draws "Waiting for API response ·
-will retry in" or "check your network". Per SKILL.md step 5, this is left to the owner rather
-than resolved by guessing: either a longer wait than one `record.sh` invocation allows
-reproduces it, or the chrome needs an actual mid-request network failure (a reset connection,
-tried as a debugging probe, instead produces a third, already-covered grammar — `API error ·
-Retrying in Xs`, matching the existing `· Retrying in` branch, not this one). The old
-`claude-lmstudio-turn@72000` entry is kept as the corpus's only evidence of this chrome, and
-`claude-2.1.266-api-waiting.jsonl` is committed as the record of what was tried, referenced by
-no manifest moment.
+**`api-waiting` could not be reproduced on 2.1.266, and the owner decided the manifest entry
+rather than the capture (2026-09-12, nocx-nru89.9).** The new `claude-2.1.266-turn` capture's
+real generation never stalled, so the chrome that appeared incidentally in the nocx-nru89.2
+recording (`claude-lmstudio-turn@72000`) did not recur here. A listener that accepts a
+connection and never answers (`127.0.0.1:18999`) was tried twice — once with
+`lmstudio-api.script`'s documented 40s final wait, and once with the wait extended to 190s
+(about 228s of total real elapsed time, just under `record.sh`'s 240s hard capture ceiling).
+In both runs the screen never advances past a plain, ever-growing spinner; it never draws
+"Waiting for API response · will retry in" or "check your network" — the TUI treats an
+accepted-but-silent connection as still in flight rather than a failure, so a never-answering
+listener does not draw this chrome and SKILL.md no longer prescribes it as a way to get there.
+The owner's decision keeps `claude-lmstudio-turn@72000` as the corpus's only recorded evidence
+of this chrome, carrying a `moment: "api-waiting"` entry directly rather than an anonymous
+regression: that capture was recorded under `env -i` with a fresh `HOME` and
+`CLAUDE_CONFIG_DIR` (nocx-nru89.2), before this corpus's isolation refusal checks and
+per-capture `.meta.json` existed (nocx-nru89.7/.8) — it has neither, and the manifest entry
+says so. `claude-2.1.266-api-waiting.jsonl`, the record of the failed reproduction attempt,
+came from an uncommitted edit of `lmstudio-api.script` (its committed final wait is still
+`40000`, not the `190000` the capture needed), so it could not be regenerated to be committed
+alongside a fixed script; it was removed rather than kept as an uncommitted-provenance
+capture, along with its `.meta.json` and its row in `capture_test.go`'s `captureNames`.
 
 **The Bash permission capture uses a settings file.** `claude-2.1.266-permission` was recorded
 with `.claude/skills/nocx-detection-verify/permission-ask-settings.json` as `record.sh`'s
 `[settings]` argument (`{"permissions": {"ask": ["Bash(touch marker.txt)"]}}`), the same rule
-the nocx-nru89.7 recording used, so the Bash tool call still surfaces a real approval dialog
+the nocx-nru89.2 recording used, so the Bash tool call still surfaces a real approval dialog
 rather than running unattended.
 
 **No LAN address and no real email is committed.** `record.sh`'s endpoint argument is never

@@ -273,6 +273,32 @@ func TestAnAPIWaitPrintedBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 	}
 }
 
+// stopAtBlank alone, on the PLAIN ellipsis branch rather than the API-wait
+// one: the test above forges "Waiting for API response," which only the
+// API-wait branch's Text condition reads, so it says nothing about whether
+// the bare ellipsis-and-glyph branch has its own stopAtBlank bound. This
+// forges a real glyph and a bare ellipsis, at column zero, with nothing else
+// in the row — separated from the meter by a blank row.
+func TestAColZeroEllipsisSpinnerBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"✻ Blanching…",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an ellipsis spinner line beyond a blank row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
 // The glyph bound: this is the exact probe the epic review recorded against
 // the committed rule ("a col-0 '● Let me check the files…' directly above
 // the meter row reads working"). The row sits at column zero, directly
@@ -365,5 +391,141 @@ func TestAnOverlayWithNoTurnAboveItIsNotWorking(t *testing.T) {
 	f := screen(t, 40, 10, lines, 0, 9)
 	if got := agentdriver.Claude().Classify(f); got == agentdriver.StateWorking {
 		t.Fatalf("an overlay with no running turn above it = %q", got)
+	}
+}
+
+// ── the row must OPEN with a spinner glyph, not merely contain one (nocx-nru89.9) ──
+//
+// The epic review's second reader found that the glyph bound nocx-nru89.6
+// added checked Contains, not "opens with": two of the six glyphs, "·" and
+// "*", are ordinary characters an agent's own prose uses constantly, so a
+// transcript line that merely CONTAINS one of them anywhere satisfied the
+// bound as completely as a row a real spinner actually opened. These two
+// probes are the review's own, replayed against a real, committed 2.1.266
+// idle frame (claude-2.1.266-turn@36000, before its own turn ever starts a
+// spinner, so row 34 — directly above the meter at row 35 — is genuinely
+// blank) with that one row overwritten exactly the way
+// TestTextTheAgentPrintedCannotForgeAnyVerdict overwrites the input box:
+// ESC 7 / ESC 8 around the write, so the cursor — the other marker this
+// driver trusts — is left exactly where the TUI parked it. Both were
+// confirmed red before the "glyphs" field and opensWithGlyph existed: the
+// pre-fix rule's Contains check matched "·" and "●" respectively wherever
+// they sat in the row.
+func TestAToolCallBulletEndingInAnEllipsisWithAMidRowDotIsNotWorking(t *testing.T) {
+	r := replayer(t, "claude-2.1.266-turn", 36000)
+	forged := "\x1b7\x1b[35;1H\x1b[2K● step 1 · reading…\x1b8"
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if got := classify(t, fr); got != agentdriver.StateFreeText {
+		t.Errorf("a tool-call bullet ending in an ellipsis, with a real spinner glyph mid-row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestAToolCallBulletNamingTheAPIWaitWithAMidRowDotIsNotError(t *testing.T) {
+	r := replayer(t, "claude-2.1.266-turn", 36000)
+	forged := "\x1b7\x1b[35;1H\x1b[2K● Waiting for API response · …\x1b8"
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if got := classify(t, fr); got != agentdriver.StateFreeText {
+		t.Errorf("a tool-call bullet naming the API wait, with a real spinner glyph mid-row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// ── branches 10 and 17 had a rule but no bound-isolated test (nocx-nru89.9) ──
+//
+// "· Retrying in" and "… ( ... )" carry only col0Only and stopAtBlank — no
+// glyph requirement, because neither forged text needs one to be a real
+// hazard. TestAnErrorPrintedIntoTheTranscriptIsIdleNotError put an indent AND
+// a blank row between the forgery and the meter at once, so it could not say
+// which bound was doing the work. These four isolate one bound each, on each
+// branch, the same way the ellipsis-working branch's four tests already do.
+
+func TestAnIndentedRetryingLineIsKeptOutByColumnZeroOnly(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"  Error: connection refused · Retrying in 4s",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 4)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an indented retry line, adjacent to the meter = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestARetryingLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"Error: connection refused · Retrying in 4s",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("a retry line beyond a blank row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestAnIndentedTimedSpinnerLineIsKeptOutByColumnZeroOnly(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"  Reading… (12s)",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 4)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an indented timed-spinner line, adjacent to the meter = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestATimedSpinnerLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"Reading… (12s)",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("a timed-spinner line beyond a blank row = %q, want %q", got, agentdriver.StateFreeText)
 	}
 }

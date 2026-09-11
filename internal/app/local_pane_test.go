@@ -213,11 +213,25 @@ type pane struct {
 }
 
 // openLocalPane opens one through the backend's own way in — the SAME opener
-// the `open` JSON-RPC handler uses, with no ring and no ack, which is what
-// transport.OpenSession is (nocx-dkawo.6). Going through it rather than over
-// the WebSocket is what lets these tests hold the session and ask it things;
-// what it does NOT do is take a shortcut past anything the product does, and
-// TestALocalPaneEntersTheIntegrationAxis goes over the real socket to say so.
+// the `open` JSON-RPC handler uses (transport.OpenSession, nocx-dkawo.6).
+// Going through it rather than over the WebSocket is what lets these tests
+// hold the session and ask it things; what it does NOT do is take a
+// shortcut past anything the product does, and
+// TestALocalPaneEntersTheIntegrationAxis goes over the real socket to say
+// so.
+//
+// OpenSession itself starts the session's ONE read pump — pumpToRing,
+// unconditionally, for every session it opens (nocx-ie23r.3's own comment in
+// session_open.go). A pty's output is a single-consumer stream, so a second
+// StartOutput call here raced that pump for the one admission
+// realSession.StartOutput hands out: whichever goroutine arrived second was
+// refused with "output already started for session <id>", intermittently,
+// per run (nocx-7vx5t) — and on the runs where the TEST lost that race, it
+// silently exercised nothing, because the ring the shipped path reads was
+// fed by the winner regardless. So this reads the ring OpenSession's pump
+// already fills, through transport.WatchSessionOutput, the same source
+// ringToConn drains for a renderer and recordSessionOutput drains for the
+// store — never a second StartOutput.
 func openLocalPane(t *testing.T, a *App) *pane {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -227,15 +241,30 @@ func openLocalPane(t *testing.T, a *App) *pane {
 		t.Fatalf("opening a local pane through the shipped opener: %v", err)
 	}
 	p := &pane{sess: opened.Session}
-	if err := opened.Session.StartOutput(context.Background(), func(data []byte) error {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		p.out.Write(data)
-		return nil
-	}); err != nil {
-		t.Fatalf("reading the pane's output: %v", err)
-	}
-	t.Cleanup(func() { _ = opened.Session.Close() })
+	// The ring already holds everything the pump has written since offset
+	// zero — nothing acks here, so nothing trims it — so this goroutine
+	// need not win a race to start before the pane's shell says anything;
+	// it catches up.
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- a.Transport.WatchSessionOutput(watchCtx, opened.Session.ID(), func(data []byte) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.out.Write(data)
+		})
+	}()
+	t.Cleanup(func() {
+		// Cancelled and WAITED FOR before the test reports done: t.Errorf
+		// from a goroutine that outlives the test panics, and a bare
+		// cancel() with nobody reading `done` would race this goroutine's
+		// exit against that report.
+		cancelWatch()
+		if werr := <-done; werr != nil && !errors.Is(werr, context.Canceled) {
+			t.Errorf("reading the pane's output from its ring: %v", werr)
+		}
+		_ = opened.Session.Close()
+	})
 	return p
 }
 

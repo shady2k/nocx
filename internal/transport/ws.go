@@ -2014,6 +2014,59 @@ func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	return rx
 }
 
+// WatchSessionOutput drains a session's replay ring into fn, from the ring's
+// oldest retained byte, until the ring closes or ctx is done.
+//
+// It exists so a caller that needs to SEE what a session produced never
+// has to become a second StartOutput admission. A session's PTY output is a
+// single-consumer stream — session.Session.StartOutput installs the one
+// handler that reads it, and OpenSession already starts that handler itself
+// (pumpToRing, in session_open.go) for every session it opens. A second
+// caller racing pumpToRing for that same admission is refused by
+// realSession.StartOutput on whichever goroutine loses, which is exactly
+// the bug this method exists to make impossible to write again
+// (nocx-7vx5t): the ring pumpToRing already fills is the one place
+// everybody downstream of it reads from, the way ringToConn reads it for a
+// renderer and recordSessionOutput reads it for the store.
+//
+// Used today by internal/app's local-pane tests, which open a pane through
+// the shipped Transport.OpenSession and need to read back what the shell
+// said without contending with the product's own pump for the session.
+//
+// Unlike ringToConn this applies no AD-10 credit flow control and takes no
+// subscriber slot — there is nothing here to protect a socket from, and
+// nothing here ever acks, so the ring is freed by the recorder or by a
+// real subscriber's acks alone, same as if this reader did not exist. A
+// hole or a reset in the ring — the execution-host cases ringToConn and
+// recordSessionOutput both handle — is reported as an error rather than
+// replayed, because neither can happen on a session this method's own
+// caller opened moments ago.
+func (s *WSServer) WatchSessionOutput(ctx context.Context, id session.ID, fn func(data []byte)) error {
+	rx := s.getRx(id)
+	if rx == nil {
+		return fmt.Errorf("transport: no output ring for session %s", id)
+	}
+	ring := rx.ring
+	pos := ring.oldestLocked()
+	for {
+		data, from, needsReset, hole := ring.snapshot(pos)
+		if hole != nil || needsReset {
+			return fmt.Errorf("transport: session %s output lost its place in the ring", id)
+		}
+		if len(data) == 0 {
+			if ring.waitForData(ctx, pos) {
+				return nil // ring closed
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		fn(data)
+		pos = from + uint64(len(data))
+	}
+}
+
 // removeRx drops a session's receiver and returns it, or nil when another
 // goroutine removed it first.
 //

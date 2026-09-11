@@ -176,16 +176,17 @@ func TestAnOwedTaskIsTypedOnceTheAnswerConfirmsAndThePaneReachesFreeText(t *test
 	if got.a.Task == nil || got.a.Task.Delivery != "typed" {
 		t.Fatalf("task = %+v, want delivery typed", got.a.Task)
 	}
+	// Waited for the SUBMIT key too, not only the paste text: the paste and
+	// the submit are two separate writes through the session's own queue,
+	// and a wait that stopped at Contains(task) could observe the paste
+	// alone, mid-write, exactly as often as it observed both.
 	var typed string
-	waittest.WaitFor(t, "the task text to reach the pane", func() bool {
+	waittest.WaitFor(t, "the task text and its submit key to reach the pane", func() bool {
 		typed = pty.read()
-		return strings.Contains(typed, task)
+		return strings.Contains(typed, task) && strings.HasSuffix(typed, "\r")
 	})
 	if n := strings.Count(typed, task); n != 1 {
 		t.Fatalf("the task reached the pane %d times, want exactly 1: %q", n, typed)
-	}
-	if !strings.HasSuffix(typed, "\r") {
-		t.Fatalf("the task was typed but never submitted, so no turn started: %q", typed)
 	}
 	if stand.owed.take(sid) {
 		t.Fatal("the task is still marked owed after it was typed")
@@ -414,7 +415,7 @@ func TestAnOwedTasksSubmitIsRefusedAtTheGate(t *testing.T) {
 	real := stand.realTypist(t)
 	answerer := &workerAnswerer{
 		grid: stand.grid, typist: refusingSubmitTypist{choose: real},
-		owed: stand.owed, readiness: stand.watch, typing: refusingSubmitTypist{choose: real}, log: stand.log,
+		owed: stand.owed, classify: stand.watch, typing: refusingSubmitTypist{choose: real}, log: stand.log,
 	}
 
 	// The confirm needs the menu still on screen, so the pane repaints to
@@ -449,42 +450,222 @@ func TestAnOwedTasksSubmitIsRefusedAtTheGate(t *testing.T) {
 	}
 }
 
-// Criterion: a pane that never becomes typable inside the (shortened)
-// sub-budget answers "waiting" rather than failing the call — the task stays
-// owed, and Answer itself returns no error, exactly as workers.answer's own
-// Deadline requires (see answerTaskBudget's doc in workers.go).
+// Criterion: a pane whose confirmed menu genuinely leaves the screen but
+// then never reaches free_text — it settles on "working" and stays there —
+// answers "waiting" rather than failing the call, inside the (shortened)
+// sub-budget, with the LIVE state Classify reads. The task stays owed, and
+// Answer itself returns no error, exactly as workers.answer's own Deadline
+// requires (see answerTaskBudget's doc in workers.go). Both waits inside
+// typeOwedTask are exercised here off the real grid: the menu really does
+// leave (a fresh idle-then-working repaint), so it is the SECOND wait — the
+// pane never reaching free_text — that times out.
 func TestAnOwedTaskWaitsWhenThePaneNeverBecomesTypableWithinTheSubBudget(t *testing.T) {
 	stand := newTaskDeliveryStand(t)
 	const task = "an owed task the pane never becomes ready for"
 	sid, participant, _ := spawnStuckOnQuestion(t, stand, "p-owed-never-typable", task)
 
 	original := answerTaskBudget
-	answerTaskBudget = 150 * time.Millisecond
+	answerTaskBudget = 200 * time.Millisecond
 	t.Cleanup(func() { answerTaskBudget = original })
 
-	real := stand.realTypist(t)
-	answerer := &workerAnswerer{
-		grid: stand.grid, typist: real,
-		owed: stand.owed, readiness: fixedStateReadiness{state: agentdriver.StateWorking},
-		typing: real, log: stand.log,
-	}
+	answerer := stand.answerer(t)
 
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
 	start := time.Now()
-	got, err := answerer.Answer(context.Background(), participant, "No, exit")
+	go func() {
+		a, err := answerer.Answer(context.Background(), participant, "No, exit")
+		done <- outcome{a, err}
+	}()
+
+	pty := stand.ptys.last()
+	waittest.WaitFor(t, "the confirm key to reach the pane", func() bool {
+		return strings.Contains(pty.read(), "\r")
+	})
+	// The confirmed menu leaves the screen — a real repaint, off the real
+	// corpus — but the pane settles on "working" and goes no further: a
+	// stub pty, unlike a real agent, never reaches free_text on its own.
+	stand.grid.Withdraw(string(sid))
+	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+		t.Fatalf("re-enrol the worker's pane: %v", err)
+	}
+	stand.feedCapture(t, sid, "claude-working", 17000)
+
+	got := <-done
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("Answer: %v", err)
+	if got.err != nil {
+		t.Fatalf("Answer: %v", got.err)
 	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("Answer took %s; the shortened sub-budget should have ended the wait quickly", elapsed)
 	}
-	if got.Task == nil || got.Task.Delivery != "waiting" || got.Task.State != string(agentdriver.StateWorking) {
-		t.Fatalf("task = %+v, want delivery waiting with state %q", got.Task, agentdriver.StateWorking)
+	if got.a.Task == nil || got.a.Task.Delivery != "waiting" || got.a.Task.State != string(agentdriver.StateWorking) {
+		t.Fatalf("task = %+v, want delivery waiting with state %q", got.a.Task, agentdriver.StateWorking)
 	}
-	if strings.Contains(stand.ptys.last().read(), task) {
-		t.Fatalf("the task reached a pane that never became typable: %q", stand.ptys.last().read())
+	if strings.Contains(pty.read(), task) {
+		t.Fatalf("the task reached a pane that never became typable: %q", pty.read())
 	}
 	if !stand.owed.take(sid) {
 		t.Fatal("the task is no longer owed after the sub-budget expired")
+	}
+}
+
+// ── the regression: the watcher's cache is stale and the answer path must
+// never read it (nocx-f545a.7, a review of 1ffd3a56) ──────────────────────
+//
+// Red on 1ffd3a56: that commit's workerAnswerer read paneReadiness.Snapshot —
+// the watcher's CACHE — with only a one-tick "don't trust the very first
+// reading" workaround. Neither test below ever calls Touch or Sweep after
+// the confirm, so on 1ffd3a56 the cache the answerer reads stays
+// permission_choice for the whole test: TestOwedTaskIsTypedWithoutASweepAfterTheConfirm
+// failed with
+//
+//	task = &{Delivery:waiting State:permission_choice Reason:}, want delivery typed
+//
+// (quoted from a run against 1ffd3a56 before this fix, kept here as the
+// record the review asked for). Green here because workerAnswerer no longer
+// reads the cache at all for this decision: it waits for the confirmed menu
+// to leave the GRID (awaitMenuLeftScreen) and then classifies the CURRENT
+// frame (paneobserve.Watcher.Classify) — both live, neither touched by a
+// Sweep this test never runs.
+
+// Criterion: an owed participant's answer confirms, nothing ever Touches or
+// Sweeps the watcher afterward — its cached Snapshot for this pane is
+// asserted to stay permission_choice for the whole test — and the pane is
+// then fed straight to free_text. The task is typed exactly once and the
+// result says "typed".
+func TestOwedTaskIsTypedWithoutASweepAfterTheConfirm(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	const task = "read AGENTS.md and report what it says about workers"
+	sid, participant, _ := spawnStuckOnQuestion(t, stand, "p-owed-no-sweep-typed", task)
+	answerer := stand.answerer(t)
+
+	assertCacheStillStale := func() {
+		t.Helper()
+		o, ok := stand.watch.Snapshot(string(sid))
+		if !ok || o.State != agentdriver.StatePermissionChoice {
+			t.Fatalf("watcher cache = %+v (ok=%v), want it still stale at permission_choice — "+
+				"something Touched or Swept it, which this regression must not need", o, ok)
+		}
+	}
+	assertCacheStillStale()
+
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		// "No, exit" is already selected at this timestamp, so this
+		// confirms at once — no movement, and so no chance for a movement's
+		// own frame read to have coincidentally kept the cache "fresh".
+		a, err := answerer.Answer(context.Background(), participant, "No, exit")
+		done <- outcome{a, err}
+	}()
+
+	pty := stand.ptys.last()
+	waittest.WaitFor(t, "the confirm key to reach the pane", func() bool {
+		return strings.Contains(pty.read(), "\r")
+	})
+	assertCacheStillStale()
+
+	// The pane is reset and fed straight to free_text — Withdraw, Enrol,
+	// Feed only. No Touch, no Sweep: exactly what a review of 1ffd3a56
+	// asked this test to prove is enough.
+	stand.grid.Withdraw(string(sid))
+	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+		t.Fatalf("re-enrol the worker's pane: %v", err)
+	}
+	stand.feedCapture(t, sid, "claude-idle", 11000)
+	assertCacheStillStale()
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Answer: %v", got.err)
+	}
+	if got.a.Task == nil || got.a.Task.Delivery != "typed" {
+		t.Fatalf("task = %+v, want delivery typed", got.a.Task)
+	}
+	var typed string
+	waittest.WaitFor(t, "the task text and its submit key to reach the pane", func() bool {
+		typed = pty.read()
+		return strings.Contains(typed, task) && strings.HasSuffix(typed, "\r")
+	})
+	if n := strings.Count(typed, task); n != 1 {
+		t.Fatalf("the task reached the pane %d times, want exactly 1: %q", n, typed)
+	}
+	if !strings.Contains(typed, "\x1b[200~"+task+"\x1b[201~") {
+		t.Fatalf("the task did not arrive as one bracketed paste: %q", typed)
+	}
+
+	// The cache is STILL stale, even now: nothing this test did ever swept
+	// it, and the answer above did not need it to.
+	assertCacheStillStale()
+	if stand.owed.take(sid) {
+		t.Fatal("the task is still marked owed after it was typed")
+	}
+}
+
+// Criterion, paired with the one above: an owed participant's answer
+// confirms, nothing Touches or Sweeps the watcher afterward, and the pane is
+// then fed a DIFFERENT question. The result is "waiting" with that state,
+// the task stays owed, and no task bytes reach the pane — the watcher's
+// cache is asserted stale throughout, the identical regression from the
+// other side.
+func TestOwedTaskWaitsOnADifferentQuestionWithoutASweepAfterTheConfirm(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	const task = "read AGENTS.md and report what it says about workers"
+	sid, participant, _ := spawnStuckOnQuestion(t, stand, "p-owed-no-sweep-waiting", task)
+	answerer := stand.answerer(t)
+
+	if o, ok := stand.watch.Snapshot(string(sid)); !ok || o.State != agentdriver.StatePermissionChoice {
+		t.Fatalf("watcher cache = %+v (ok=%v), want permission_choice before the answer", o, ok)
+	}
+
+	type outcome struct {
+		a   workers.PaneAnswer
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		a, err := answerer.Answer(context.Background(), participant, "No, exit")
+		done <- outcome{a, err}
+	}()
+
+	pty := stand.ptys.last()
+	waittest.WaitFor(t, "the confirm key to reach the pane", func() bool {
+		return strings.Contains(pty.read(), "\r")
+	})
+
+	// A DIFFERENT question — a menu the agent did not raise itself, off the
+	// real corpus — reset onto the pane with no Touch and no Sweep.
+	stand.grid.Withdraw(string(sid))
+	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+		t.Fatalf("re-enrol the worker's pane: %v", err)
+	}
+	stand.feedCapture(t, sid, "claude-modal", 20000)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Answer: %v", got.err)
+	}
+	if got.a.Task == nil || got.a.Task.Delivery != "waiting" || got.a.Task.State != string(agentdriver.StateModalChoice) {
+		t.Fatalf("task = %+v, want delivery waiting with state %q", got.a.Task, agentdriver.StateModalChoice)
+	}
+	if strings.Contains(pty.read(), task) {
+		t.Fatalf("the task reached a pane that was asking a different question: %q", pty.read())
+	}
+	if !stand.owed.take(sid) {
+		t.Fatal("the task is no longer owed after an answer that could not pay it")
+	}
+
+	// The watcher's own cache never moved off what spawnStuckOnQuestion left
+	// it at — nothing in this test Touched or Swept it — which is the whole
+	// point: the modal_choice this answer reports came from a LIVE read.
+	if o, ok := stand.watch.Snapshot(string(sid)); !ok || o.State != agentdriver.StatePermissionChoice {
+		t.Fatalf("watcher cache = %+v (ok=%v), want it still stale at permission_choice", o, ok)
 	}
 }

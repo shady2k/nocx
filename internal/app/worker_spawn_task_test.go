@@ -116,13 +116,15 @@ func (s *taskDeliveryStand) realTypist(t *testing.T) *agenttyping.Typist {
 // one: the real gate for both Choose and Submit, the real grid, and this
 // stand's OWN owed set and watcher — the same ones spawner marks a question
 // against, so an owed task answered through this answerer pays the identical
-// debt Spawn left (nocx-f545a.7).
+// debt Spawn left (nocx-f545a.7). classify is the watcher's LIVE Classify,
+// never its cache — see paneClassifier's own doc (workers.go) for why the
+// answer path cannot read Snapshot the way deliverTask does at spawn.
 func (s *taskDeliveryStand) answerer(t *testing.T) *workerAnswerer {
 	t.Helper()
 	typist := s.realTypist(t)
 	return &workerAnswerer{
 		grid: s.grid, typist: typist,
-		owed: s.owed, readiness: s.watch, typing: typist, log: s.log,
+		owed: s.owed, classify: s.watch, typing: typist, log: s.log,
 	}
 }
 
@@ -208,6 +210,12 @@ func (s *taskDeliveryStand) feedCapture(t *testing.T, sid session.ID, name strin
 // replay is what makes the frame this typist reads a screen the shipped rule
 // was actually written against, the same guarantee feedCapture's own doc
 // states for the untouched case.
+//
+// It neither Touches nor Sweeps the watcher — deliberately (nocx-f545a.7, a
+// review of 1ffd3a56): the answer path reads the pane LIVE
+// (paneobserve.Watcher.Classify, through workerAnswerer's classify field),
+// never from the watcher's cache, so there is nothing here for a Sweep to
+// need to have run before an owed task's own wait can see this repaint.
 func (s *taskDeliveryStand) repaintAsIdle(t *testing.T, sid session.ID) {
 	t.Helper()
 	s.grid.Withdraw(string(sid))
@@ -215,19 +223,6 @@ func (s *taskDeliveryStand) repaintAsIdle(t *testing.T, sid session.ID) {
 		t.Fatalf("re-enrol the worker's pane: %v", err)
 	}
 	s.feedCapture(t, sid, "claude-idle", 11000)
-	// The watcher's own dirty flag is what makes Sweep reclassify a pane at
-	// all (paneobserve.Watcher.Touch's own doc), and nothing here re-marks
-	// it on a SECOND feed the way a real pane's byte-write path does — the
-	// transport touches the watcher beside every grid.Feed, and this stand
-	// feeds the grid directly. So it is done by hand, and the wait that
-	// follows drives BOTH this call's own Snapshot and any awaitFreeText
-	// poll a concurrently-running Answer is spinning on.
-	s.watch.Touch(string(sid))
-	waittest.WaitFor(t, "the worker's pane to be classified free_text", func() bool {
-		s.watch.Sweep()
-		o, ok := s.watch.Snapshot(string(sid))
-		return ok && o.State == agentdriver.StateFreeText
-	})
 }
 
 // waitForNewSession blocks until a session other than any already known

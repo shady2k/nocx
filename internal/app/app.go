@@ -2076,14 +2076,17 @@ func New(opts ...Option) (*App, error) {
 		// And the seam workers.answer reaches (nocx-f545a.4): paneTyping is the
 		// SAME Typist agent.type, a wake and a spawn's task delivery go through,
 		// so an answer is one more act through the one gate onto a pane's input.
-		// owed, paneWatch and paneTyping (again, as typing) are what lets a
-		// confirmed answer also pay a task it left owed (nocx-f545a.7): the
-		// SAME watcher and gate deliverTask itself uses, so an answer's own
-		// delivery is decided by the one reading and the one door this design
-		// has ever had for a pane's input.
+		// owed and paneTyping (again, as typing) are what lets a confirmed
+		// answer also pay a task it left owed (nocx-f545a.7): the SAME gate
+		// deliverTask itself uses. paneWatch is handed as classify rather than
+		// readiness — workerAnswerer reads it LIVE (paneWatch.Classify), never
+		// from its cache, which is what closes the race a review of 1ffd3a56
+		// found: nothing marks a pane dirty as a side effect of typing a
+		// confirm into it, so the cache is guaranteed stale the instant after
+		// one.
 		workers.WithAnswerer(&workerAnswerer{
 			grid: paneGrid, typist: paneTyping,
-			owed: workerOwed, readiness: paneWatch, typing: paneTyping, log: logger,
+			owed: workerOwed, classify: paneWatch, typing: paneTyping, log: logger,
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),

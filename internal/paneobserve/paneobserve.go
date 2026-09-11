@@ -305,6 +305,61 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 	return Observation{PaneID: paneID, Agent: p.agent, State: p.seen, Children: p.seenChildren}, true
 }
 
+// Classify reads paneID's CURRENT frame and answers what it is classified as
+// RIGHT NOW — the live reading Sweep would produce if it ran this instant,
+// rather than the cache Snapshot answers from. It touches none of dirty,
+// seen or seenChildren, and it emits nothing: it is a READ, not a second
+// sweep, and must never make a later real Sweep believe this pane was
+// already reported.
+//
+// It exists for exactly one caller (nocx-f545a.7, the race a review of
+// 1ffd3a56 found): a wait that has just written a confirm key into a pane
+// and needs to know what the screen shows now, not what a coalescer last
+// swept it as. Touch is called only on the session's OWN READ side (this
+// package's own doc) — nothing about writing into a pane touches it — so
+// immediately after such a write, Snapshot's cache is, with certainty,
+// still the reading from before the write. A caller that cannot afford that
+// staleness asks here instead; internal/app's classifyingReadiness is the
+// adapter that lets it reuse the same wait Snapshot's callers use.
+//
+// EVERY ORDINARY READER KEEPS USING SNAPSHOT. A settled pane's cache is
+// exactly as current as this call would be, at a fraction of the cost, and
+// re-running the driver on every read is precisely what this package's own
+// "only changes travel" design exists to avoid — see the package doc.
+//
+// Same two absence answers as Snapshot, so a caller cannot tell which of the
+// two methods produced a false or an exited reading from its shape alone:
+// false for a pane nobody watches, and StateExited — with no read of the
+// grid at all — for one whose agent has already gone. A frame the grid
+// cannot currently produce (the ordinary race: the session ended and the
+// grid was withdrawn a moment ago) is answered as an absent reading too,
+// which is stricter than Sweep's own handling of the same race — Sweep
+// clears the pane's dirty flag when this happens because it owns that
+// bookkeeping; Classify owns none of it and leaves the pane exactly as it
+// found it.
+func (w *Watcher) Classify(paneID string) (Observation, bool) {
+	w.mu.Lock()
+	p, ok := w.panes[paneID]
+	if !ok {
+		w.mu.Unlock()
+		return Observation{}, false
+	}
+	if p.gone {
+		agent := p.agent
+		w.mu.Unlock()
+		return Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited}, true
+	}
+	agent := p.agent
+	w.mu.Unlock()
+
+	f, err := w.grid.Frame(paneID)
+	if err != nil {
+		return Observation{}, false
+	}
+	o := w.drivers.Observe(agent, f)
+	return Observation{PaneID: paneID, Agent: agent, State: o.State, Children: o.Subagents()}, true
+}
+
 // Enrolled is one pane under observation: which pane, and which agent's rule
 // governs it. Both halves come from the enrolment act and neither is inferred.
 type Enrolled struct {

@@ -293,36 +293,30 @@ func (w *paneWaitState) note(o paneobserve.Observation) {
 // owes once a menu is confirmed. A hardcoded "worker spawn:" in the answer's
 // own log line would describe a call that never happened.
 //
-// THE FIRST READING OF A QUESTION IS NOT TRUSTED, AND EVERY LATER ONE IS
-// (nocx-f545a.7). r is the WATCHER's own cache (paneReadiness.Snapshot), which
-// only ever changes on a Sweep, and nothing here — nor a menu's own confirm,
-// nor deliverTask's command write — marks the pane dirty as a side effect
-// of writing to it: production ties that to the session's own READ side
-// (internal/transport/ws_paneobserve.go's Touch, on the SHELL's next output),
-// which runs on its own coalescer and has not necessarily fired even once by
-// the time this function is called a heartbeat after the write that would
-// prompt it. For a SPAWN this is harmless: the reading, if there is one at
-// all, is the pane's first ever classification and nothing about it is
-// stale. For an ANSWER it is not: the cached reading immediately after a
-// confirm is, with certainty, the MENU THAT WAS JUST CONFIRMED — Choose
-// writes nothing that could have produced a fresher one — and trusting it
-// as this call's own verdict would report "still waiting on the question
-// you just answered" on every confirmed menu, never once giving the real
-// screen's own next paint a chance to be observed. So the very first check,
-// before this function has looped even once, answers only on free_text or
-// an exit — both are evidence nothing here just caused — and treats a
-// question as "not decided yet" instead of ending the wait on it; every
-// check from the first tick onward trusts a question exactly as before.
-// One extra deliveryPoll of latency on the rare race where a fresh
-// classification already landed before this function was ever called is the
-// whole cost, and no test in this repository asserts on that duration.
+// r MUST ALREADY BE A LIVE READING for a caller that has just written into
+// the pane. A question is trusted the moment this function sees it — the
+// FIRST check included, exactly as before nocx-f545a.7 — which is correct
+// for a fresh classification (a spawn's first observation has nothing to be
+// stale relative to) and would be wrong for the watcher's own cache read
+// immediately after a menu confirm: Touch fires only on the session's own
+// READ side, nothing about WRITING into a pane touches it, so that cache is,
+// with certainty, still the reading of the menu that was just confirmed. An
+// earlier version of this function tried to paper over that by distrusting
+// the very first check and delaying one deliveryPoll — which only narrowed
+// the race by one tick rather than closing it, and AGENTS.md's own rule is
+// that a test may not depend on timing to be right eventually. The actual
+// fix lives one layer up, in workerAnswerer.typeOwedTask: it does not call
+// this with the watcher's cache at all. It waits, on the GRID, for the
+// confirmed menu to leave the screen first (awaitMenuLeftScreen), and only
+// then classifies the CURRENT frame (paneobserve.Watcher.Classify, adapted
+// by classifyingReadiness) and hands THAT live reading here. So by the time
+// r.Snapshot is ever asked, the answer to "is this pane still showing what I
+// just confirmed" is already known to be no — freshness is established by
+// two facts, not by waiting a little and hoping.
 func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger, label string) (agentdriver.State, error) {
 	var last paneWaitState
 	// check answers the state that ENDS the wait, and "" while nothing has.
-	// trustQuestion gates whether a positively identified question counts as
-	// that answer — see the function doc for why the very first call passes
-	// false and every other call passes true.
-	check := func(trustQuestion bool) (agentdriver.State, error) {
+	check := func() (agentdriver.State, error) {
 		o, ok := r.Snapshot(paneID)
 		if !ok {
 			return "", nil
@@ -337,11 +331,7 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 			// agent is not busy, and nocx did not fail to read it. No budget
 			// changes that without somebody answering, and waiting one out
 			// and then deleting the pane is what threw away the only screen
-			// that said so (nocx-ty5ks). Untrusted on the first call only —
-			// see the function doc.
-			if !trustQuestion {
-				return "", nil
-			}
+			// that said so (nocx-ty5ks).
 			return o.State, nil
 		case agentdriver.StateExited:
 			return "", errors.New("the participant's agent exited before its pane ever became typable")
@@ -349,7 +339,7 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 			return "", nil
 		}
 	}
-	if state, err := check(false); state != "" || err != nil {
+	if state, err := check(); state != "" || err != nil {
 		return state, err
 	}
 	ticker := time.NewTicker(deliveryPoll)
@@ -359,7 +349,7 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 		case <-ctx.Done():
 			return "", refusePaneNeverTypable(lg, paneID, last, label)
 		case <-ticker.C:
-			if state, err := check(true); state != "" || err != nil {
+			if state, err := check(); state != "" || err != nil {
 				return state, err
 			}
 		}
@@ -1343,13 +1333,17 @@ type paneChooser interface {
 type workerAnswerer struct {
 	grid   panegrid.Observer
 	typist paneChooser
-	// owed, readiness and typing are what pays a task this participant's
-	// spawn left owed, once THIS answer is the one that confirms the
-	// question it was waiting on (nocx-f545a.7). All three nil is the
-	// ordinary absence case every optional seam in this file already uses —
-	// nothing is paid, and Answer behaves exactly as it did before this bead.
-	owed      *owedTasks
-	readiness paneReadiness
+	// owed and typing are what pays a task this participant's spawn left
+	// owed, once THIS answer is the one that confirms the question it was
+	// waiting on (nocx-f545a.7). classify is the third: nil on all of them
+	// is the ordinary absence case every optional seam in this file already
+	// uses — nothing is paid, and Answer behaves exactly as it did before
+	// this bead.
+	owed *owedTasks
+	// classify is a LIVE reading, never the watcher's cache — see
+	// paneClassifier's own doc for why typeOwedTask cannot use the same
+	// paneReadiness deliverTask reads at spawn.
+	classify paneClassifier
 	// typing is the same *agenttyping.Typist as typist above, reached
 	// through Submit rather than Choose: the one gate, never a second door
 	// onto this pane's input queue, exactly as workerWaker and deliverTask
@@ -1365,13 +1359,13 @@ func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, opti
 	}
 	res := a.typist.Choose(sid, option)
 	if res.Outcome != agenttyping.OutcomeTyped {
-		return a.withOwedTask(ctx, p, res), nil
+		return a.withOwedTask(ctx, p, option, res), nil
 	}
 	if err := awaitSelectionOn(ctx, a.grid, sid, option); err != nil {
 		res.Reason = "the selection was moved and the menu never showed it on that option, so nothing was confirmed (" + err.Error() + ")"
 		return paneAnswerOf(res), nil
 	}
-	return a.withOwedTask(ctx, p, a.typist.Choose(sid, option)), nil
+	return a.withOwedTask(ctx, p, option, a.typist.Choose(sid, option)), nil
 }
 
 // withOwedTask turns the gate's own result into the answer, and — only when
@@ -1384,9 +1378,9 @@ func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, opti
 // workers.Store could be asked — it lives in owed, this call's own in-memory
 // debt, and take is what makes paying it happen at most once even under two
 // concurrent Answer calls racing the same participant.
-func (a *workerAnswerer) withOwedTask(ctx context.Context, p workers.Participant, res agenttyping.Result) workers.PaneAnswer {
+func (a *workerAnswerer) withOwedTask(ctx context.Context, p workers.Participant, option string, res agenttyping.Result) workers.PaneAnswer {
 	ans := paneAnswerOf(res)
-	if res.Outcome != agenttyping.OutcomeSubmitted || a.readiness == nil || a.typing == nil {
+	if res.Outcome != agenttyping.OutcomeSubmitted || a.classify == nil || a.typing == nil {
 		// No seam to pay a debt with is the same absence case as everywhere
 		// else in this file — never a reason to dereference one.
 		return ans
@@ -1395,35 +1389,61 @@ func (a *workerAnswerer) withOwedTask(ctx context.Context, p workers.Participant
 	if !a.owed.take(sid) {
 		return ans
 	}
-	ans.Task = a.typeOwedTask(ctx, sid, p.Task)
+	ans.Task = a.typeOwedTask(ctx, sid, option, p.Task)
 	return ans
 }
 
-// answerTaskBudget bounds how long typeOwedTask waits for the pane to reach
-// free_text after THIS answer confirmed, once the confirmation itself is
+// answerTaskBudget bounds how long typeOwedTask waits — both for the
+// confirmed menu to leave the screen and, once it has, for the pane to reach
+// free_text — after THIS answer confirmed, once the confirmation itself is
 // already committed (nocx-f545a.7).
 //
 // It must stay under workers.answer's own declared Deadline
 // (internal/agenttools/registry.go, 30s) so a pane that never becomes
-// typable inside it is answered as itself — "waiting", with the state and
-// reason the wait ended on — rather than the whole tool call timing out and
-// reporting a failure for an answer nocx actually confirmed. A package var
-// and not a const, exactly like killTimeout above, so a test can shorten it
-// and prove the bound applies without waiting out the production value —
-// the test still asserts on the STATE the answer reports, never on how long
-// it took.
+// typable inside it is answered as itself — "waiting", with the state the
+// wait ended on — rather than the whole tool call timing out and reporting a
+// failure for an answer nocx actually confirmed. A package var and not a
+// const, exactly like killTimeout above, so a test can shorten it and prove
+// the bound applies without waiting out the production value — the test
+// still asserts on the STATE the answer reports, never on how long it took.
 var answerTaskBudget = 20 * time.Second
 
-// typeOwedTask pays sid's debt: it waits for the pane to become typable,
-// under answerTaskBudget, and submits task through the SAME gate a spawn's
-// own delivery and a wake both reach. Every branch below either pays the
-// debt (Delivery: "typed") or restores it for a later answer to try again —
-// except the one case where restoring would be wrong: the participant's
-// agent has exited, and there will be no later answer to pay it with.
-func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, task string) *workers.TaskOutcome {
+// typeOwedTask pays sid's debt, under answerTaskBudget, and submits task
+// through the SAME gate a spawn's own delivery and a wake both reach.
+//
+// FRESHNESS IS TWO FACTS, NOT A DELAY (nocx-f545a.7, a review of an earlier
+// version of this bead that tried the delay and left the race open — see
+// awaitFreeText's own doc for the full account). First: the menu THIS answer
+// just confirmed has actually left the screen — awaitMenuLeftScreen polls
+// the grid for the SAME reading Choose's own confirm decided against, so
+// "the menu is still showing" is asked once, the mirror of
+// awaitSelectionOn's own wait rather than a second answer to it. Second:
+// once it has, the pane's state is read LIVE (paneClassifier.Classify),
+// never from the watcher's cache — Snapshot's own cache is exactly what the
+// first fact already proved cannot be trusted here. Only past both does
+// awaitFreeText run, over classifyingReadiness's adapter onto that live
+// reading.
+//
+// Every branch below either pays the debt (Delivery: "typed") or restores it
+// for a later answer to try again — except the one case where restoring
+// would be wrong: the participant's agent has exited, and there will be no
+// later answer to pay it with.
+func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, option, task string) *workers.TaskOutcome {
 	subCtx, cancel := context.WithTimeout(ctx, answerTaskBudget)
 	defer cancel()
-	state, waitErr := awaitFreeText(subCtx, a.readiness, string(sid), a.log, "worker answer")
+
+	if err := awaitMenuLeftScreen(subCtx, a.grid, string(sid), option); err != nil {
+		// The sub-budget ran out with the confirmed menu still on screen —
+		// a slow repaint, or a screen nocx cannot read at all. Either way
+		// this is an answer, not a failure: whatever Classify says right now
+		// is what a coordinator would see by looking, so that is what is
+		// reported, and the debt is restored for a later answer to try again.
+		a.owed.restore(sid)
+		o, _ := a.classify.Classify(string(sid))
+		return &workers.TaskOutcome{Delivery: "waiting", State: string(o.State)}
+	}
+
+	state, waitErr := awaitFreeText(subCtx, classifyingReadiness{classify: a.classify}, string(sid), a.log, "worker answer")
 	if waitErr != nil {
 		var never *workers.PaneNeverTypable
 		if errors.As(waitErr, &never) {
@@ -1453,20 +1473,27 @@ func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, task 
 	return &workers.TaskOutcome{Delivery: "refused", State: string(res.State), Reason: reason}
 }
 
-// awaitSelectionOn blocks until paneID's screen shows a menu whose selection is
-// on option, or until ctx ends. It reads the grid, not the watcher: the
-// watcher's answer is a state, and what is being waited for is a position.
-func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
-	on := func() bool {
-		f, err := grid.Frame(paneID)
-		if err != nil {
-			return false
-		}
-		m := agenttyping.ReadMenu(f)
-		i := m.Index(option)
-		return i >= 0 && m.Selected == i
+// menuSelectedOn reads paneID's CURRENT frame and reports whether it shows a
+// menu with its selection on option — live, off the grid, never the
+// watcher's cache: a TUI repaints after it reads input, so what decides a
+// movement, a confirm, or (nocx-f545a.7) whether a just-confirmed menu is
+// still showing must be what the screen shows right now. Shared by
+// awaitSelectionOn and awaitMenuLeftScreen so "is the menu on this option"
+// is decided once rather than twice.
+func menuSelectedOn(grid panegrid.Observer, paneID, option string) bool {
+	f, err := grid.Frame(paneID)
+	if err != nil {
+		return false
 	}
-	if on() {
+	m := agenttyping.ReadMenu(f)
+	i := m.Index(option)
+	return i >= 0 && m.Selected == i
+}
+
+// awaitSelectionOn blocks until paneID's screen shows a menu whose selection is
+// on option, or until ctx ends.
+func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
+	if menuSelectedOn(grid, paneID, option) {
 		return nil
 	}
 	ticker := time.NewTicker(deliveryPoll)
@@ -1476,7 +1503,32 @@ func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, optio
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if on() {
+			if menuSelectedOn(grid, paneID, option) {
+				return nil
+			}
+		}
+	}
+}
+
+// awaitMenuLeftScreen blocks until paneID's screen NO LONGER shows a menu
+// with its selection on option, or until ctx ends. It is the mirror of
+// awaitSelectionOn, over the identical predicate: that one waits for a
+// reading to become true, this one waits for the SAME reading to become
+// false, which is the first of the two facts typeOwedTask establishes
+// freshness from (nocx-f545a.7) — the confirmed menu has actually left the
+// screen, rather than the wait merely having let some time pass.
+func awaitMenuLeftScreen(ctx context.Context, grid panegrid.Observer, paneID, option string) error {
+	if !menuSelectedOn(grid, paneID, option) {
+		return nil
+	}
+	ticker := time.NewTicker(deliveryPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if !menuSelectedOn(grid, paneID, option) {
 				return nil
 			}
 		}
@@ -1485,6 +1537,33 @@ func awaitSelectionOn(ctx context.Context, grid panegrid.Observer, paneID, optio
 
 func paneAnswerOf(r agenttyping.Result) workers.PaneAnswer {
 	return workers.PaneAnswer{Outcome: string(r.Outcome), State: string(r.State), Reason: r.Reason}
+}
+
+// paneClassifier is the answerer's narrow view of a LIVE classification
+// (nocx-f545a.7, a review of 1ffd3a56): read paneID's CURRENT frame and
+// classify it now, never from a cache. It is satisfied by
+// *paneobserve.Watcher's Classify method, whose own doc has the full
+// argument; the short version is that paneReadiness.Snapshot (deliverTask's
+// own seam, above) answers from the watcher's cache, which only changes on
+// a Sweep, and nothing about writing a confirm key into a pane marks it
+// dirty — so the instant after workerAnswerer confirms a menu, Snapshot is
+// guaranteed to still describe the menu that was just confirmed. Only the
+// answer path needs this: deliverTask's first observation at spawn is never
+// stale, because nothing preceded it.
+type paneClassifier interface {
+	Classify(paneID string) (paneobserve.Observation, bool)
+}
+
+// classifyingReadiness adapts a paneClassifier into the paneReadiness seam
+// awaitFreeText already takes, so the answer path reuses that ONE wait
+// rather than writing a second one — only the reading it is handed differs
+// from deliverTask's.
+type classifyingReadiness struct {
+	classify paneClassifier
+}
+
+func (c classifyingReadiness) Snapshot(paneID string) (paneobserve.Observation, bool) {
+	return c.classify.Classify(paneID)
 }
 
 // ── the two routes out of the undispatched set (nocx-dkawo.3) ─────────────

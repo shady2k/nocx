@@ -267,6 +267,89 @@ func TestSnapshotAnswersTheCurrentStateForAReattachingClient(t *testing.T) {
 	}
 }
 
+// ── Classify: a live reading, never the cache (nocx-f545a.7) ──────────────
+
+// Criterion: a frame changed with no Sweep in between. Snapshot still says
+// the OLD state — it is the cache, and nothing re-ran the driver — while
+// Classify, reading the grid right now, says the NEW one. This is the exact
+// race a review of 1ffd3a56 found: the answer path cannot trust Snapshot the
+// instant after a write, because nothing marks a pane dirty as a side effect
+// of writing into it.
+func TestClassifyReadsTheCurrentFrameAndSnapshotStaysStale(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Enrol("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(idleScreen(40)))
+	w.Touch("p1")
+	w.Sweep()
+
+	if o, ok := w.Snapshot("p1"); !ok || o.State != agentdriver.StateFreeText {
+		t.Fatalf("snapshot before the change = %+v, want free_text", o)
+	}
+
+	// The screen changes. Deliberately NOT touched and NOT swept — that is
+	// the whole point: nothing marks this pane dirty as a side effect of the
+	// write that produced this frame, in this test or in production.
+	grid.Feed("p1", []byte(workingScreen(40)))
+
+	if o, ok := w.Snapshot("p1"); !ok || o.State != agentdriver.StateFreeText {
+		t.Fatalf("snapshot after the change (no sweep) = %+v, want it to STILL say free_text", o)
+	}
+	got, ok := w.Classify("p1")
+	if !ok || got.State != agentdriver.StateWorking {
+		t.Fatalf("Classify = %+v (ok=%v), want the live working state", got, ok)
+	}
+
+	// And nothing was emitted, and a later real Sweep still reports the
+	// change as news — Classify is a read, not a second sweep.
+	rec := &recorder{}
+	w.SetEmitter(rec.emit)
+	w.Touch("p1")
+	w.Sweep()
+	after := rec.drain()
+	if len(after) != 1 || after[0].State != agentdriver.StateWorking {
+		t.Fatalf("the sweep after Classify = %+v, want one working observation — Classify must not have marked it seen", after)
+	}
+}
+
+// An unwatched pane answers false, the same as Snapshot — a caller cannot
+// tell which of the two methods it asked from the shape of the result.
+func TestClassifyOfAnUnwatchedPaneAnswersFalse(t *testing.T) {
+	w, _, _ := newFixture(t)
+	if _, ok := w.Classify("never-watched"); ok {
+		t.Error("an unwatched pane answered a classification")
+	}
+}
+
+// An exited pane answers StateExited without reading the grid at all — the
+// SAME retained answer Snapshot gives, because the agent's withdrawal (not
+// the screen) is what decided this, and the shell underneath may have gone
+// on repainting whatever it likes.
+func TestClassifyOfAnExitedPaneAnswersExitedWithoutReadingTheGrid(t *testing.T) {
+	w, grid, _ := newFixture(t)
+	if err := grid.Enrol("p1", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	defer grid.Withdraw("p1")
+	w.Watch("p1", "claude")
+	grid.Feed("p1", []byte(idleScreen(40)))
+	w.Touch("p1")
+	w.Sweep()
+	w.Exited("p1")
+
+	// The shell goes on painting after the agent is gone (Exited's own doc);
+	// Classify must still answer exited, not whatever this says.
+	grid.Feed("p1", []byte(workingScreen(40)))
+
+	got, ok := w.Classify("p1")
+	if !ok || got.State != agentdriver.StateExited {
+		t.Fatalf("Classify of an exited pane = %+v (ok=%v), want exited", got, ok)
+	}
+}
+
 // A watcher with nowhere to report does not quietly consume the state it would
 // have sent. The window between construction and SetEmitter is real — the
 // transport is built after the publisher that enrols into this — and a sweep

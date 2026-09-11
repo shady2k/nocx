@@ -47,6 +47,13 @@
       "name": "taskPanelHead",
       "kind": "firstNonBlankBelow",
       "from": "modeLine"
+    },
+    {
+      "name": "overlayTop",
+      "kind": "searchUp",
+      "ruleGlyph": "▔",
+      "floor": 0,
+      "minRow": 1
     }
   ],
   "branches": [
@@ -110,6 +117,30 @@
           "kind": "belowCursorContains",
           "maxRows": 4,
           "text": "Enter to confirm"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "…"
         }
       ]
     },

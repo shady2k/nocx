@@ -259,3 +259,47 @@ func TestAnEllipsisTheAgentPrintedIsNotATurnStarting(t *testing.T) {
 		t.Fatalf("an ellipsis in the transcript was read as a turn: %q, want %q", got, agentdriver.StateFreeText)
 	}
 }
+
+// The overlay branch requires the input box to be GONE (nocx-nru89.4). An idle
+// box whose agent printed a full-width ▔ row, "Esc to close" and a spinner
+// line into its transcript is still an idle box.
+func TestAForgedOverlayAboveALiveBoxIsNotWorking(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	lines := []string{
+		"✻ Burrowing…",
+		strings.Repeat("▔", 40),
+		"    Esc to close",
+		"",
+		"                           0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+	}
+	f := screen(t, 40, 10, lines, 2, 6)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("a forged overlay above a live box = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// And an overlay with no running turn above it is not working: the overlay
+// alone says a side question is open, not that the agent is busy.
+func TestAnOverlayWithNoTurnAboveItIsNotWorking(t *testing.T) {
+	lines := []string{
+		"",
+		"",
+		strings.Repeat("▔", 40),
+		"",
+		"    /btw what is 2+2?",
+		"",
+		"    Esc to close",
+		"",
+		"",
+		"",
+	}
+	f := screen(t, 40, 10, lines, 0, 9)
+	if got := agentdriver.Claude().Classify(f); got == agentdriver.StateWorking {
+		t.Fatalf("an overlay with no running turn above it = %q", got)
+	}
+}

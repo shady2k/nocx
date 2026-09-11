@@ -76,8 +76,12 @@
     },
     {
       "moment": "btw-overlay",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.4)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 55000,
+      "state": "working",
+      "note": "the overlay replaces the box; the main turn's spinner is drawn above its full-width ▔ row (nocx-nru89.4)"
     },
+    { "capture": "claude-lmstudio-turn", "atMs": 58000, "state": "working" },
     {
       "moment": "transcript-viewer",
       "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"

@@ -261,6 +261,26 @@ so a length-changing edit would have corrupted the capture. `go run ./cmd/agent-
 and the full `internal/agentdriver` suite were re-run against all five afterwards to confirm
 the redaction changed nothing a rule reads.
 
+## Every committed `.meta.json` predates nocx-nru89.10's launcher reader
+
+Every `.meta.json` in this directory carries `"launcherEnvNames": []` and a `launcherNote`
+along the lines of `"/run/current-system/sw/bin/claude is not a text script; its
+environment additions, if any, could not be read"`. That is not a missing recording — it is
+what `writeRunMeta` (`cmd/agent-capture/isolation.go`) wrote at the time, because every
+capture here was taken before nocx-nru89.10 taught `inspectLauncher` to parse the launcher
+`claude` actually resolves to on a Nix machine: a compiled `makeBinaryWrapper` binary, not
+the text shell script the earlier parser assumed — it gave up at the binary's first ELF
+magic byte, so it found nothing there and said so honestly rather than guessing.
+
+The field is not backfilled here. Nothing in this corpus can say what environment variables
+those launchers actually added, because nobody read the binary at capture time — fabricating
+`launcherEnvNames` for a run that never recorded it would assert something the run itself
+never checked, and there is no dedicated-recording reason to re-record this whole corpus just
+to populate one metadata field on captures that are otherwise still valid. A capture taken
+from now on, through the current `record.sh`/`cmd/agent-capture capture`, lists the
+launcher's variable names in `launcherEnvNames`, the same way `.meta.json`'s `envNames`
+already lists the run's own environment.
+
 ## Four things the captures decided, which reasoning got wrong
 
 **The approval dialog uses the same glyph as the input marker, and replaces the input box

@@ -2,9 +2,12 @@ package panegrid_test
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
+
+	xvt "github.com/charmbracelet/x/vt"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
@@ -374,6 +377,252 @@ func TestAGenuineStandaloneStringTerminatorStillEndsTheTitle(t *testing.T) {
 	}
 	if got := strings.TrimRight(f.Text(0), " "); got != "visible" {
 		t.Errorf("row 0 = %q, want %q — a genuine 8-bit ST must still end the OSC string", got, "visible")
+	}
+}
+
+// nocx-nru89.11. The second review of nocx-nru89 (.internal/sdd/fix-review.md
+// findings 7 and 8) found that c1filter.go's own byte-by-byte state
+// tracking was a SECOND, independent guess at "are we inside an OSC/DCS
+// string" that disagreed with x/ansi's real transition table
+// (github.com/charmbracelet/x/ansi/parser, v0.11.7) in both directions: it
+// missed starts x/ansi recognises, and it corrupted text x/ansi's Utf8State
+// already decoded correctly. The tests below are every case the review
+// named, run both as one Feed and fed one byte at a time (this bead's
+// Method step 3) — the persistent, cross-call state is exactly what
+// TestAStreamSplitAcrossFeedsLandsWhereAWholeOneDoes already requires of
+// the grid itself.
+
+// feedWhole and feedPerByte are the two delivery shapes a live PTY stream
+// can arrive in: one Feed call, or split at every byte boundary. Both must
+// land identically.
+func feedWhole(s *panegrid.Store, paneID string, b []byte) {
+	s.Feed(paneID, b)
+}
+
+func feedPerByte(s *panegrid.Store, paneID string, b []byte) {
+	for _, c := range b {
+		s.Feed(paneID, []byte{c})
+	}
+}
+
+var feedShapes = []struct {
+	name string
+	fn   func(*panegrid.Store, string, []byte)
+}{
+	{"whole", feedWhole},
+	{"byte-by-byte", feedPerByte},
+}
+
+// rawXVTRows feeds b directly into a fresh x/vt emulator, bypassing
+// panegrid entirely (no c1Filter in front of it), and returns the text of
+// every row. It is the "what x/vt alone shows" side of the parity tests
+// below — the reply-drain goroutine mirrors Store.Enrol's own, because
+// x/vt's emulator replies upstream through an unbuffered pipe and a title
+// sequence with a device-attributes-like prefix would otherwise deadlock
+// the write.
+func rawXVTRows(t *testing.T, cols, rows int, b []byte) []string {
+	t.Helper()
+	term := xvt.NewEmulator(cols, rows)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		buf := make([]byte, 4096)
+		for {
+			if _, err := term.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	if _, err := term.Write(b); err != nil {
+		t.Fatalf("raw x/vt write: %v", err)
+	}
+	if c, ok := term.InputPipe().(io.Closer); ok {
+		_ = c.Close()
+	}
+	<-drained
+	out := make([]string, rows)
+	for y := 0; y < rows; y++ {
+		var sb strings.Builder
+		for x := 0; x < cols; x++ {
+			cell := term.CellAt(x, y)
+			switch {
+			case cell == nil, cell.Width == 0 && cell.Content == "":
+				sb.WriteByte(' ')
+			case cell.Width == 0:
+				// continuation cell of a double-width grapheme already
+				// written; nothing to add.
+			case cell.Content == "":
+				sb.WriteByte(' ')
+			default:
+				sb.WriteString(cell.Content)
+			}
+		}
+		out[y] = sb.String()
+	}
+	_ = term.Close()
+	return out
+}
+
+// x/ansi's Anywhere transitions start an OSC string on the 8-bit introducer
+// 0x9D from any state (transition_table.go:111), exactly like the 7-bit
+// `ESC ]` the tests above already cover — c1filter.go recognised only the
+// 7-bit form, so a title opened this way still painted into the grid
+// (fix-review.md finding 7).
+func TestAn8BitOSCIntroducerCarryingATitleDoesNotPaintIntoTheGrid(t *testing.T) {
+	// 0x9D, then "0;", then U+2733 (✳, E2 9C B3 — the same ambiguous middle
+	// byte as the 7-bit tests), then ordinary text, terminated by BEL.
+	title := []byte("\x9d0;\xe2\x9c\xb3 title text\x07")
+	for _, feed := range feedShapes {
+		t.Run(feed.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", 40, 3); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			s.Feed("p1", []byte("0123456789"))
+			feed.fn(s, "p1", title)
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			for y := 0; y < f.Rows; y++ {
+				if got := f.Text(y); strings.Contains(got, "title text") {
+					t.Errorf("row %d = %q: the title's text painted into the grid", y, got)
+				}
+			}
+			if got := strings.TrimRight(f.Text(0), " "); got != "0123456789" {
+				t.Errorf("row 0 = %q, want %q — the screen changed", got, "0123456789")
+			}
+		})
+	}
+}
+
+// x/ansi's Anywhere transitions likewise start a DCS from the 8-bit
+// introducer 0x90 (transition_table.go:109), landing in DcsEntryState —
+// which needs one more byte (here 'q', a Sixel-style final byte,
+// transition_table.go:187) to actually reach the string state that carries
+// the title bytes. c1filter.go recognised only `ESC P`.
+func TestAn8BitDCSIntroducerCarryingATitleDoesNotPaintIntoTheGrid(t *testing.T) {
+	dcs := []byte("\x90q\xe2\x9c\xb3 title text\x1b\\")
+	for _, feed := range feedShapes {
+		t.Run(feed.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", 40, 3); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			s.Feed("p1", []byte("0123456789"))
+			feed.fn(s, "p1", dcs)
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			for y := 0; y < f.Rows; y++ {
+				if got := f.Text(y); strings.Contains(got, "title text") {
+					t.Errorf("row %d = %q: the title's text painted into the grid", y, got)
+				}
+			}
+			if got := strings.TrimRight(f.Text(0), " "); got != "0123456789" {
+				t.Errorf("row 0 = %q, want %q — the screen changed", got, "0123456789")
+			}
+		})
+	}
+}
+
+// x/ansi's EscapeState executes every C0 control byte and STAYS in
+// EscapeState (transition_table.go:135-137); c1filter.go instead reset to
+// ground on any byte other than ']', 'P' or ESC (c1filter.go:99-100,
+// before this change), so `ESC CR ]` never registered as an OSC introducer
+// at all and the title painted (fix-review.md finding 7).
+func TestAControlByteBetweenEscapeAndTheOSCBracketStillOpensTheTitle(t *testing.T) {
+	title := []byte("\x1b\r]0;\xe2\x9c\xb3 title text\x07")
+	for _, feed := range feedShapes {
+		t.Run(feed.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", 40, 3); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			s.Feed("p1", []byte("0123456789"))
+			feed.fn(s, "p1", title)
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			for y := 0; y < f.Rows; y++ {
+				if got := f.Text(y); strings.Contains(got, "title text") {
+					t.Errorf("row %d = %q: the title's text painted into the grid", y, got)
+				}
+			}
+			if got := strings.TrimRight(f.Text(0), " "); got != "0123456789" {
+				t.Errorf("row 0 = %q, want %q — the screen changed", got, "0123456789")
+			}
+		})
+	}
+}
+
+// x/ansi's Utf8State bypasses the transition table entirely once a lead
+// byte diverts into it (x/ansi/parser.go:181-204, advanceUtf8): every byte
+// that follows — ESC included — is consumed as a raw rune byte until the
+// rune is complete, and x/vt never leaves ground state at all. So in
+// `AB E2 ESC ] E2 9C BB Working BEL`, the ESC and `]` are the 2nd and 3rd
+// bytes of an (invalid, hence replacement-charactered) rune, not an OSC
+// introducer, and Claude's own spinner glyph (E2 9C BB) that follows is a
+// second, valid rune — never an OSC string at all. c1filter.go did not
+// track UTF-8 in ground state, believed an OSC had started, and corrupted
+// the spinner glyph's own 0x9C byte to '?' (fix-review.md finding 8). The
+// fix must match x/vt with no filter in front of it, byte for byte.
+func TestTheGridMatchesXVTAloneWhenAnEscapeIsSwallowedInsideAnUnfinishedRune(t *testing.T) {
+	stream := []byte("AB\xe2\x1b]\xe2\x9c\xbb Working\x07")
+	const cols, rows = 40, 3
+	want := rawXVTRows(t, cols, rows, stream)
+	for _, feed := range feedShapes {
+		t.Run(feed.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", cols, rows); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			feed.fn(s, "p1", stream)
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			for y := 0; y < rows; y++ {
+				if got := f.Text(y); got != want[y] {
+					t.Errorf("row %d = %q, want %q (x/vt alone)", y, got, want[y])
+				}
+			}
+		})
+	}
+}
+
+// `ESC P` leaves EscapeState for DcsEntryState (transition_table.go:153),
+// which does not override the 0x80-0xFF byte range (:171-187) — so a raw
+// UTF-8 lead byte there still takes the Anywhere -> Utf8State transition
+// (:112-115), and advanceUtf8 unconditionally returns to GroundState once
+// the rune completes (x/ansi/parser.go:200), regardless of the DCS that
+// never got to start: the rune is printed as ordinary ground text and the
+// DCS is simply abandoned. Real x/vt does this with no filter at all;
+// c1filter.go instead believed a DCS string was open and corrupted the
+// rune (fix-review.md finding 8).
+func TestTheGridMatchesXVTAloneWhenADCSEntryMeetsARawUTF8Character(t *testing.T) {
+	stream := []byte("\x1bP\xe2\x9c\xb3 shown\x1b\\")
+	const cols, rows = 40, 3
+	want := rawXVTRows(t, cols, rows, stream)
+	for _, feed := range feedShapes {
+		t.Run(feed.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", cols, rows); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			feed.fn(s, "p1", stream)
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			for y := 0; y < rows; y++ {
+				if got := f.Text(y); got != want[y] {
+					t.Errorf("row %d = %q, want %q (x/vt alone)", y, got, want[y])
+				}
+			}
+		})
 	}
 }
 

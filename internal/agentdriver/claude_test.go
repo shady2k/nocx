@@ -215,6 +215,28 @@ func TestAnErrorPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
 	}
 }
 
+// The same words the agent printed into its transcript are content, not the
+// TUI's own error: indented, above a blank row, with the box live (nocx-emors).
+func TestAnAPIWaitPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"  Waiting for API response · will retry in 4s",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an API wait in the transcript was read as chrome: %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
 // The ellipsis branch reads the STATUS STACK, not the transcript (nocx-ys9jd).
 // An agent that printed "Loading…" into its own output, indented and above a
 // blank row, with the box live beneath it, is idle.

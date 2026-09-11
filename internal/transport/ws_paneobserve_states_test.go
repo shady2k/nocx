@@ -17,6 +17,15 @@ func claudeTurnStartingChrome(cols int) string {
 		"\x1b[9;3H"
 }
 
+// claudeAPIWaitingChrome is the status row Claude Code 2.1.266 draws while a
+// request to its API has gone unanswered (nocx-emors).
+func claudeAPIWaitingChrome(cols int) string {
+	return claudeIdleChrome(cols) +
+		"\x1b[6;1H✻ Waiting for API response · will retry in 4m 36s · check your network" +
+		"\x1b[12;1H  ⏸ manual mode on · esc to interrupt" +
+		"\x1b[9;3H"
+}
+
 // THE SEAM A PERSON REACHES (nocx-nru89). Nobody calls Explain: a person sees a
 // pane's state because the watcher classifies the grid and the transport sends
 // session.observationChanged. So the readings the rule fixes are proved here,
@@ -37,6 +46,7 @@ func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 		want   agentdriver.State
 	}{
 		{"a turn before its elapsed timer", claudeTurnStartingChrome(80), agentdriver.StateWorking},
+		{"the API waiting for a response", claudeAPIWaitingChrome(80), agentdriver.StateError},
 		{"the turn finished", claudeIdleChrome(80), agentdriver.StateFreeText},
 	}
 	for _, step := range steps {

@@ -137,6 +137,20 @@
       ]
     },
     {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        }
+      ]
+    },
+    {
       "state": "working",
       "when": [
         {

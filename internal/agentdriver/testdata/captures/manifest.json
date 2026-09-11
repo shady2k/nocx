@@ -133,7 +133,10 @@
     { "capture": "claude-error", "atMs": 44000, "state": "error" },
     {
       "moment": "api-waiting",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-emors)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 72000,
+      "state": "error",
+      "note": "Waiting for API response · will retry in; a second chrome of an unreachable API (nocx-emors)"
     },
     {
       "capture": "claude-idle",

@@ -200,6 +200,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// 49: fail-open lifecycle initialization must not abort a shell running
 		// under errexit when no channel is configured or the channel fails.
 		"49": "4e2e4e3b628401720875b77fc3072d5a6c9b9d4f874265b58581ac01c7901214",
+		// 50: bash and zsh wait on a pending enrolment — the question nocx is
+		// asking — before they start the agent, and Ctrl+C cancels the launch
+		// (nocx-cyhfw). A shell still sourcing 49 reads the wait as a refusal
+		// and starts the agent before anybody has answered.
+		"50": "cfc9be48045ec8c8d505d4bd3446f406e3652c10463857c1ec359269d833e1c4",
 	}
 
 	h := sha256.New()

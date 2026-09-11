@@ -84,6 +84,14 @@ type nestedKernel struct {
 	// enrolReason is the sentence a refusal carries, which is what the pane
 	// prints. Empty means the kernel refuses without one.
 	enrolReason string
+	// pendingEnrolment answers the FIRST agent_enrol with the verdict that
+	// waits on a person (nocx-cyhfw), and holds that question open until the
+	// test calls closeQuestion. Every later enrolment is answered as usual —
+	// enrolled, or refused with enrolReason when refuseAfterQuestion is set —
+	// which is what the stored answer makes of the start after a question.
+	pendingEnrolment    bool
+	refuseAfterQuestion bool
+	question            *frame
 	// rejected counts frames the kernel rejects: a wrong addressing tuple,
 	// a stale (non-increasing) sequence, or a frame addressed to the child
 	// domain after the parent restored (the child's interval ended — it
@@ -185,6 +193,20 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 			k.sendMalformedAgentAnswerLocked()
 			return
 		}
+		if k.pendingEnrolment && k.question == nil {
+			raised := f
+			k.question = &raised
+			k.encodeAgentAnswerLocked(f, lifecycle.Event{
+				Kind: lifecycle.KindAgentEnrolled,
+				AgentEnrolled: &lifecycle.AgentEnrolled{
+					RequestID: lifecycle.RequestID(f.Request),
+					Agent:     f.Agent,
+					Pending:   true,
+					Reason:    "nocx is asking whether " + f.Agent + " may use its tools",
+				},
+			})
+			return
+		}
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
 	case "agent_report":
 		k.sendAgentAnswerLocked(f, lifecycle.KindAgentReported)
@@ -281,12 +303,13 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 	var evt lifecycle.Event
 	switch kind {
 	case lifecycle.KindAgentEnrolled:
+		refuse := k.refuseEnrolment || (k.question != nil && k.refuseAfterQuestion)
 		ans := &lifecycle.AgentEnrolled{
 			RequestID: lifecycle.RequestID(f.Request),
 			Agent:     f.Agent,
-			Enrolled:  !k.refuseEnrolment,
+			Enrolled:  !refuse,
 		}
-		if k.refuseEnrolment {
+		if refuse {
 			ans.Reason = k.enrolReason
 		}
 		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
@@ -303,6 +326,32 @@ func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) 
 			RequestID: lifecycle.RequestID(f.Request),
 		}}
 	}
+	k.encodeAgentAnswerLocked(f, evt)
+}
+
+// closeQuestion is the person answering, or nocx failing to put the question:
+// the frame that closes the question raised on the first enrolment, on that
+// enrolment's request id. It carries no verdict — reason is empty for an
+// answer and a sentence for a question nobody could be shown.
+func (k *nestedKernel) closeQuestion(reason string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.question == nil {
+		k.t.Fatal("closeQuestion before any question was raised")
+	}
+	f := *k.question
+	k.encodeAgentAnswerLocked(f, lifecycle.Event{
+		Kind: lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{
+			RequestID: lifecycle.RequestID(f.Request),
+			Agent:     f.Agent,
+			Reason:    reason,
+		},
+	})
+}
+
+func (k *nestedKernel) encodeAgentAnswerLocked(f frame, evt lifecycle.Event) {
+	kind := evt.Kind
 	env := lifecycle.Envelope{
 		Version: lifecycle.ProtocolVersion,
 		Lane:    lifecycle.LaneID(testLane),

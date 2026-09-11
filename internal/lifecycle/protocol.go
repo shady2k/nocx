@@ -395,8 +395,16 @@ type (
 		RequestID RequestID `json:"request"`
 		Agent     string    `json:"agent"`
 		Enrolled  bool      `json:"enrolled"`
+		// Pending says the verdict waits on a person (nocx-cyhfw): nocx is
+		// asking whether this agent may use its tools, and the caller is to
+		// wait rather than start the agent. A second AgentEnrolled on the
+		// same request closes the question; it carries neither Enrolled nor
+		// Pending, and the caller enrols again to learn what the answer
+		// made of it. Pending is never set together with Enrolled.
+		Pending bool `json:"pending,omitempty"`
 		// Reason says why not, for a person reading a refusal in their own
-		// pane. Empty on success.
+		// pane — or, on a pending answer, what they are being asked. Empty on
+		// success, and on the frame closing a question a person answered.
 		Reason string `json:"reason,omitempty"`
 	}
 

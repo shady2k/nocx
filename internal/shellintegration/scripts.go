@@ -240,7 +240,11 @@ var (
 // non-strict MCP configuration, so variadic parsing cannot consume prompts.
 // 48: identify private launch leases with pid and start time, preserve the
 // user's signal traps, and prove interruption cleans the launch directory.
-const version = "49"
+// 50: a pending enrolment holds the agent until the question closes, and
+// Ctrl+C cancels the launch (nocx-cyhfw). Every installed copy must be
+// rewritten: a shell still sourcing 49 reads a pending answer as a refusal and
+// starts the agent before the person has answered.
+const version = "50"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

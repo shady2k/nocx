@@ -30,6 +30,7 @@ package lifecyclepub
 
 import (
 	"encoding/hex"
+	"errors"
 	"reflect"
 	"sync"
 	"time"
@@ -338,6 +339,28 @@ type AgentEnroller interface {
 	Withdraw(lane lifecycle.LaneID)
 }
 
+// EnrolmentPending is the verdict an enroller returns when the answer waits on
+// a person: nocx is asking whether the agent may use its tools (nocx-cyhfw).
+//
+// It exists because the two waits cannot nest. The enrolment is a handshake
+// between programs, bounded at seconds by the shell; the question waits on
+// somebody reading it and has no deadline. Blocking the first on the second
+// meant nobody could answer in time (nocx-t7xds), and refusing instead meant
+// the agent started before anybody had answered. So the caller is told to wait
+// — inside the handshake's bound — and told again, on the same request, when
+// the question closes.
+//
+// Settled delivers exactly once: nothing when a person answered, and a
+// sentence when the question could not be put or its answer could not be kept.
+// It opens nothing and admits nothing. The caller enrols again after it, and
+// that enrolment is the one a grid opens for.
+type EnrolmentPending struct {
+	Reason  string
+	Settled <-chan string
+}
+
+func (p *EnrolmentPending) Error() string { return p.Reason }
+
 // AgentReporter records what a worker participant says its own work produced
 // (nocx-dkawo.7). It is a SEPARATE seam from the enroller above, not a third
 // method on it, because the two answer different questions and one of them is
@@ -569,10 +592,23 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 		case req == nil:
 			ans.Reason = "the enrolment carried no request"
 		default:
-			if err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows); err != nil {
-				ans.Reason = err.Error()
-			} else {
+			err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows)
+			var pending *EnrolmentPending
+			switch {
+			case err == nil:
 				ans.Enrolled = true
+			case errors.As(err, &pending) && pending.Settled != nil:
+				// The caller is told to wait, now, inside the handshake's
+				// bound — and told again when the question closes. A wait
+				// with no channel to close it would hold the caller for ever,
+				// so it falls to the refusal below instead.
+				ans.Pending = true
+				ans.Reason = pending.Reason
+				_ = p.kernel.Deliver(out)
+				go p.closeQuestion(out, ans.RequestID, ans.Agent, pending.Settled)
+				return
+			default:
+				ans.Reason = err.Error()
 			}
 		}
 	case lifecycle.KindAgentWithdrawn:
@@ -581,6 +617,29 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 		}
 	}
 	_ = p.kernel.Deliver(out)
+}
+
+// closeQuestion tells the caller that the question its enrolment waited on has
+// closed, on the same request and to the same domain. It runs on a goroutine of
+// its own because a person is not on the pump's clock.
+//
+// The frame is built from the request's identity and nothing else. It carries
+// no Enrolled and no Pending, so nothing in it can be read as consent: consent
+// only ever answers an enrolment that opened a grid, and the caller sends that
+// enrolment after reading this. A domain that ended while the person was
+// reading is not an error here — the shell that asked is gone with it.
+func (p *Publisher) closeQuestion(asked lifecycle.Outbound, rid lifecycle.RequestID, agent string, settled <-chan string) {
+	reason := <-settled
+	closing := asked
+	closing.Envelope.Event = lifecycle.Event{
+		Kind:          lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{RequestID: rid, Agent: agent, Reason: reason},
+	}
+	if err := p.kernel.Deliver(closing); err != nil {
+		p.log.Debug("lifecycle: the frame closing an agent question was not delivered",
+			"lane", string(closing.Envelope.Lane), "domain", string(closing.Envelope.Domain),
+			"request", string(rid), "error", err)
+	}
 }
 
 // answerAgentReport fills the verdict and delivers it.

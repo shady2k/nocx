@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/session"
@@ -87,6 +88,13 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 		return errors.New("nocx does not know which pane this shell is")
 	}
 	if err := e.approval.Approve(context.Background(), session.ID(sid), agent); err != nil {
+		var pending *lifecyclepub.EnrolmentPending
+		if errors.As(err, &pending) {
+			// Not a refusal: the shell waits for the answer and enrols again.
+			e.log.Info("agent enrolment waits on a person",
+				"lane", string(lane), "session_id", sid, "agent", agent, "question", pending.Reason)
+			return err
+		}
 		e.log.Warn("agent enrolment refused: human approval was not granted",
 			"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
 		return err

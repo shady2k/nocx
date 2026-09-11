@@ -31,7 +31,7 @@ import (
 // integration/, lock polls) are measured separately by
 // TestMeasurePublishScaling and TestMeasureLockLoopCost and are NOT folded
 // into these constants.
-// measuredMaxPublishBytes has moved twelve times, and every move is the ratchet
+// measuredMaxPublishBytes has moved thirteen times, and every move is the ratchet
 // working rather than failing. Every byte of each move is the launch carrier,
 // which is the only bundle file these changes touched.
 //
@@ -139,14 +139,18 @@ import (
 // sourcing when the shell enables errexit; the fail-closed assertions add the
 // coordinator-side lifecycle-loss proof. The assertions do not add bundle
 // bytes, but are part of the same round.
+// 2026-09-11, thirteenth move (nocx-cyhfw): 83,788 -> 87,233, +3,445 across
+// the two generation scripts. bash and zsh wait on a pending enrolment — the
+// question nocx is asking a person — before they start the agent, and Ctrl+C
+// cancels the launch.
 //
 // The CALL counts did not move on this occasion — the bundle changed size, not
 // the filesystem work.
 //
-// The CALL counts did not move on any of the twelve occasions —
+// The CALL counts did not move on any of the thirteen occasions —
 // 57/17/49/58/58/63/63 on every path — so N = 90 is untouched: the bundle
 // changed size, not the work. B = 256 KiB still holds, and the new maximum
-// leaves 3.13x headroom.
+// leaves 3.00x headroom.
 //
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
@@ -154,7 +158,7 @@ import (
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 83788
+	measuredMaxPublishBytes = 87233
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

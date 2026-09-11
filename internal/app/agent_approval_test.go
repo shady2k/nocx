@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage"
@@ -21,7 +24,11 @@ import (
 // records came to be one thing and the identity the dialog promises another
 // (nocx-opiq5).
 
-type approvalDocStore struct{ docs map[string][]byte }
+type approvalDocStore struct {
+	docs map[string][]byte
+	// failWrites is a disk that will not keep an answer.
+	failWrites bool
+}
 
 func (s *approvalDocStore) Read(name string, into any) (bool, error) {
 	raw, ok := s.docs[name]
@@ -32,6 +39,9 @@ func (s *approvalDocStore) Read(name string, into any) (bool, error) {
 }
 
 func (s *approvalDocStore) Write(name string, doc any) error {
+	if s.failWrites {
+		return errors.New("the disk is full")
+	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -102,10 +112,44 @@ func fakeAgent(t *testing.T, name string) string {
 
 func approvalServiceForTest(t *testing.T, requester hostApprovalRequester) *agentApprovalService {
 	t.Helper()
-	store := agentapproval.NewStore(log.NewSlogAdapter(nil), &approvalDocStore{}, "agent-approvals.json")
+	return approvalServiceOver(t, &approvalDocStore{}, requester)
+}
+
+func approvalServiceOver(t *testing.T, docs *approvalDocStore, requester hostApprovalRequester) *agentApprovalService {
+	t.Helper()
+	store := agentapproval.NewStore(log.NewSlogAdapter(nil), docs, "agent-approvals.json")
 	svc := newAgentApprovalService(approvalSessions{pid: os.Getpid()}, store, "workspace:default")
 	svc.SetRequester(requester)
 	return svc
+}
+
+// pendingOf reads the verdict an unanswered identity gets: not a refusal but a
+// wait, holding the channel that closes it (nocx-cyhfw).
+func pendingOf(t *testing.T, err error) *lifecyclepub.EnrolmentPending {
+	t.Helper()
+	var pending *lifecyclepub.EnrolmentPending
+	if !errors.As(err, &pending) {
+		t.Fatalf("verdict = %v, want one that waits on the person", err)
+	}
+	return pending
+}
+
+// settledOf waits for the question behind a wait to close, and returns what it
+// closed with: nothing when a person answered, a sentence when nobody could.
+func settledOf(t *testing.T, pending *lifecyclepub.EnrolmentPending) string {
+	t.Helper()
+	select {
+	case reason := <-pending.Settled:
+		return reason
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question never closed, so the pane waiting on it would wait for ever")
+		return ""
+	}
+}
+
+func isPending(err error) bool {
+	var pending *lifecyclepub.EnrolmentPending
+	return errors.As(err, &pending)
 }
 
 // THE DEFECT, stated as the thing it costs a person: they admitted ONE agent
@@ -116,9 +160,6 @@ func TestApprovingOneAgentDoesNotAdmitAnother(t *testing.T) {
 	requester := &recordingRequester{answer: true}
 	svc := approvalServiceForTest(t, requester)
 
-	// Each start raises its own question and refuses this enrolment
-	// (nocx-t7xds): the person answers, and the NEXT start enrols. What is
-	// under test is that the second agent gets a question of its own.
 	first := fakeAgent(t, "claude")
 	admit(t, svc, "pane-a", first)
 	second := fakeAgent(t, "codex")
@@ -176,17 +217,24 @@ func TestTheSameAgentIsNotAskedTwice(t *testing.T) {
 }
 
 // A no is remembered, and it is remembered about the agent it was said of.
+// After it the verdict is a refusal, never another wait: a person who said no
+// is not asked again every time the agent starts.
 func TestARefusalIsRememberedForThatAgentAlone(t *testing.T) {
 	requester := &recordingRequester{answer: false}
 	svc := approvalServiceForTest(t, requester)
 
 	refused := fakeAgent(t, "claude")
-	if err := svc.Approve(context.Background(), session.ID("pane-a"), refused); err == nil {
-		t.Fatal("a refused agent was admitted")
+	if reason := settledOf(t, pendingOf(t, svc.Approve(context.Background(), session.ID("pane-a"), refused))); reason != "" {
+		t.Fatalf("the question closed with %q, want the person's answer", reason)
 	}
-	waitFor(t, func() bool { return len(requester.seen()) == 1 })
-	if err := svc.Approve(context.Background(), session.ID("pane-b"), refused); err == nil {
-		t.Fatal("a refused agent was admitted on a second pane")
+	for _, pane := range []session.ID{"pane-a", "pane-b"} {
+		err := svc.Approve(context.Background(), pane, refused)
+		if err == nil {
+			t.Fatalf("a refused agent was admitted on %s", pane)
+		}
+		if isPending(err) {
+			t.Fatalf("a refused agent was asked again on %s instead of refused", pane)
+		}
 	}
 	if len(requester.seen()) != 1 {
 		t.Fatalf("a refusal was re-asked: %d questions, want 1", len(requester.seen()))
@@ -197,25 +245,21 @@ func TestARefusalIsRememberedForThatAgentAlone(t *testing.T) {
 	admit(t, svc, "pane-c", other)
 }
 
-// admit puts an agent through the two starts the product now takes: the first
-// raises the question and refuses, the person answers, the second enrols. It
-// fails the test if the second start is still refused.
+// admit puts an agent through what a start now is: the first enrolment waits
+// on the question, the person answers, and the enrolment after the answer is
+// admitted. It fails the test if that second enrolment is not.
 func admit(t *testing.T, svc *agentApprovalService, sid session.ID, agent string) {
 	t.Helper()
-	if err := svc.Approve(context.Background(), sid, agent); err == nil {
-		t.Fatalf("the first start of %s enrolled without anybody answering", agent)
+	pending := pendingOf(t, svc.Approve(context.Background(), sid, agent))
+	if reason := settledOf(t, pending); reason != "" {
+		t.Fatalf("the question about %s closed with %q, want an answer", agent, reason)
 	}
-	// Waited on the ANSWER landing rather than by re-calling Approve: a retry
-	// while the question is outstanding is a legitimate thing for a person to
-	// do and must not be how this helper polls.
-	waitFor(t, func() bool { return svc.answered(agent) })
 	if err := svc.Approve(context.Background(), sid, agent); err != nil {
 		t.Fatalf("the start after the answer was still refused for %s: %v", agent, err)
 	}
 }
 
-// A test-only read of whether the store now holds an answer for this agent,
-// so the helper above waits on the fact rather than on a side effect.
+// A test-only read of whether the store now holds an answer for this agent.
 func (s *agentApprovalService) answered(agent string) bool {
 	executable, err := agentapproval.IdentityForExecutable(agent)
 	if err != nil {
@@ -227,16 +271,18 @@ func (s *agentApprovalService) answered(agent string) bool {
 
 // Starting an agent again while its question is still on screen must not
 // queue a second copy of it: same decision, same dialog, and a stack of
-// identical questions is how a person clicks one without reading it.
+// identical questions is how a person clicks one without reading it. And
+// every pane that waited is told when it closes, not only the one that raised
+// it — each of them has a person's command held behind that one answer.
 func TestARetryWhileTheQuestionIsUpDoesNotAskTwice(t *testing.T) {
 	requester := &blockingRequester{asked: make(chan transport.HostAsk, 4), release: make(chan struct{})}
 	svc := approvalServiceForTest(t, requester)
 	agent := fakeAgent(t, "claude")
 
+	var waits []*lifecyclepub.EnrolmentPending
 	for i := 0; i < 3; i++ {
-		if err := svc.Approve(context.Background(), session.ID("pane-a"), agent); err == nil {
-			t.Fatal("an unanswered identity was enrolled")
-		}
+		pane := session.ID(fmt.Sprintf("pane-%d", i))
+		waits = append(waits, pendingOf(t, svc.Approve(context.Background(), pane, agent)))
 	}
 	select {
 	case <-requester.asked:
@@ -249,13 +295,18 @@ func TestARetryWhileTheQuestionIsUpDoesNotAskTwice(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(requester.release)
+	for i, wait := range waits {
+		if reason := settledOf(t, wait); reason != "" {
+			t.Fatalf("pane-%d's question closed with %q, want the answer", i, reason)
+		}
+	}
 }
 
 // THE HANDSHAKE MUST NOT WAIT ON A PERSON (nocx-t7xds). The shell gives an
 // enrolment five seconds (nocx.bash __nocx_lc_grant_timeout_s); the approval
 // question has no deadline at all, deliberately, because it waits on somebody
-// reading it. So an unanswered identity must return AT ONCE with a reason
-// that says a question is up, and the ask must still go out.
+// reading it. So an unanswered identity must return AT ONCE, with a wait that
+// says a question is up, and the ask must still go out.
 type blockingRequester struct {
 	asked   chan transport.HostAsk
 	release chan struct{}
@@ -281,20 +332,17 @@ func TestAnUnansweredIdentityDoesNotBlockTheEnrolment(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("an identity nobody has answered for was enrolled")
-		}
-		// The sentence is what the pane prints, so it must say what is
-		// happening rather than that something timed out.
-		if !strings.Contains(err.Error(), "asking") {
-			t.Fatalf("refusal reads %q; want it to say a question is up", err)
+		// The sentence is what the pane prints while it waits, so it must
+		// say what is happening rather than that something timed out.
+		if pending := pendingOf(t, err); !strings.Contains(pending.Reason, "asking") {
+			t.Fatalf("the wait reads %q; want it to say a question is up", pending.Reason)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Approve blocked on the person: the shell would have given up at five seconds")
 	}
 
 	// And the question still went out, or the person would have nothing to
-	// answer and the next start would refuse for ever.
+	// answer and the pane would wait for ever.
 	select {
 	case ask := <-requester.asked:
 		if !strings.Contains(ask.Executable, agent) {
@@ -306,24 +354,69 @@ func TestAnUnansweredIdentityDoesNotBlockTheEnrolment(t *testing.T) {
 	close(requester.release)
 }
 
-// And the answer, once given, is recorded — so the next start enrols with no
-// question at all. This is the half that makes the refusal above acceptable.
+// And the answer, once given, is recorded before the question closes — so
+// the enrolment the shell sends on the close is admitted with no question at
+// all, on this pane or any other.
 func TestTheAnswerGivenLateIsStillRecorded(t *testing.T) {
 	requester := &recordingRequester{answer: true}
 	svc := approvalServiceForTest(t, requester)
 	agent := fakeAgent(t, "claude")
 
-	if err := svc.Approve(context.Background(), session.ID("pane-a"), agent); err == nil {
-		t.Fatal("the first enrolment did not refuse while the question was unanswered")
+	if reason := settledOf(t, pendingOf(t, svc.Approve(context.Background(), session.ID("pane-a"), agent))); reason != "" {
+		t.Fatalf("the question closed with %q, want the answer", reason)
 	}
-	// The recording requester answers at once, so by the time the ask has
-	// been seen the answer is stored.
-	waitFor(t, func() bool { return len(requester.seen()) == 1 })
-	waitFor(t, func() bool {
-		return svc.Approve(context.Background(), session.ID("pane-b"), agent) == nil
-	})
+	if err := svc.Approve(context.Background(), session.ID("pane-b"), agent); err != nil {
+		t.Fatalf("the start after the answer was refused: %v", err)
+	}
 	if len(requester.seen()) != 1 {
 		t.Fatalf("the second start asked again: %d questions, want 1", len(requester.seen()))
+	}
+}
+
+// failingRequester is a client that cannot put a question on screen.
+type failingRequester struct {
+	mu   sync.Mutex
+	asks int
+}
+
+func (r *failingRequester) RequestHost(context.Context, transport.HostAsk) (transport.HostAnswer, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.asks++
+	return transport.HostAnswer{}, errors.New("no window is open to ask in")
+}
+
+// A question nobody could be shown closes WITH A SENTENCE, so the pane waiting
+// on it starts the agent without tools and says why. Closing it as answered
+// would send the shell back to enrol, find no answer, and wait again on a
+// question that can never appear. And nothing is recorded: an unanswerable ask
+// is not a "no" the person said (nocx-6jbad), so the next start asks afresh.
+func TestAQuestionNobodyCouldBeShownClosesWithAReason(t *testing.T) {
+	svc := approvalServiceForTest(t, &failingRequester{})
+	agent := fakeAgent(t, "claude")
+
+	reason := settledOf(t, pendingOf(t, svc.Approve(context.Background(), session.ID("pane-a"), agent)))
+	if !strings.Contains(reason, "no window is open to ask in") {
+		t.Fatalf("the question closed with %q, want the reason nobody could be asked", reason)
+	}
+	if svc.answered(agent) {
+		t.Fatal("a question nobody saw was recorded as an answer")
+	}
+	if again := pendingOf(t, svc.Approve(context.Background(), session.ID("pane-a"), agent)); again.Reason == "" {
+		t.Fatal("the next start waited on a question that says nothing about what it asks")
+	}
+}
+
+// An answer that could not be kept closes with a sentence too, for the same
+// reason: closed as answered, the shell would enrol, find nothing stored, and
+// put the question the person just answered back on screen.
+func TestAnAnswerThatCouldNotBeKeptClosesWithAReason(t *testing.T) {
+	svc := approvalServiceOver(t, &approvalDocStore{failWrites: true}, &recordingRequester{answer: true})
+	agent := fakeAgent(t, "claude")
+
+	reason := settledOf(t, pendingOf(t, svc.Approve(context.Background(), session.ID("pane-a"), agent)))
+	if !strings.Contains(reason, "the disk is full") {
+		t.Fatalf("the question closed with %q, want the reason the answer was not kept", reason)
 	}
 }
 

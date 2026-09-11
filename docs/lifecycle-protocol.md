@@ -104,7 +104,7 @@ child — and it is a separate question with a separate answer.
 | `domain_request`     | shell → kernel  | `request`, `env`, `host`/`user`/`port` (ssh)                             | The parent asks for a child domain for a nested environment it is entering. §9.    |
 | `domain_grant`       | kernel → shell  | `request`, `domain`, `epoch`, `bootstrap`                                | The answer: the child's identity and the opaque bootstrap the parent executes. §9. |
 | `agent_enrol`        | shell → kernel  | `request`, `agent`, `cols`, `rows`                                       | The pane is about to run an agent; keep its screen. §15.                           |
-| `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `reason`                                 | The verdict, and the reason when it is no. §15.                                    |
+| `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `pending`, `reason`                      | The verdict, a wait on a question, or that question closing. §15.4.                |
 | `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
 | `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
 | `agent_report`       | shell → kernel  | `request`, `ok`, `summary`                                               | A wave participant says what its own work produced, from the drop. §16.            |
@@ -685,6 +685,31 @@ And the agent **still runs**, unorchestrated. "Failure is closed" means no enrol
 implies no orchestration; it does not mean a terminal declines to start the program its
 user asked for because a feature of its own is unavailable. A bare agent started outside a
 nocx panel session is the same case and reads the same way.
+
+**A question is not a refusal** (`nocx-cyhfw`). The first start of an agent nobody has
+answered for puts a question on screen — may this agent use nocx's tools — and that
+question waits on a person, with no deadline, while the enrolment is a handshake the shell
+bounds at seconds. The two waits cannot nest: holding the answer until a person clicked
+meant nobody could click in time (`nocx-t7xds`), and refusing at once meant the shell
+started the agent before anybody had answered. So the answer is a third shape:
+
+1. `agent_enrolled` with `"pending":true` and a `reason` saying what is being asked, sent
+   inside the handshake's bound. It never carries `enrolled`. The shell prints the sentence
+   and **does not start the agent**.
+2. The shell waits, outside the handshake, for a second `agent_enrolled` on the **same
+   request**. That frame closes the question and carries neither `enrolled` nor `pending`,
+   so nothing read after waiting can be consent. Every pane waiting on the same agent gets
+   one, and the question is asked once however many wait.
+3. If the closing frame has no `reason`, a person answered: the shell sends a fresh
+   `agent_enrol`, which the stored answer settles like any other — enrolled after a yes,
+   refused (the agent then runs without tools, and the pane says why) after a no. If it
+   has a `reason`, nobody could be asked or the answer could not be kept: the shell prints
+   it and runs the agent without tools, and does not ask again.
+
+Ctrl+C during the wait **cancels the launch**: the agent does not run and the command
+returns 130. The question stays on screen, and an answer given later is still kept for the
+next start; its closing frame reaches a shell no longer waiting for that request and is
+skipped like any other stale answer.
 
 ### 15.5 What enrolment may never decide
 

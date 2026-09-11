@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -55,11 +56,12 @@ type agentApprovalService struct {
 	// withdrawn must stop admitting live panes, not only new ones.
 	mu       sync.Mutex
 	enrolled map[session.ID]agentapproval.Executable
-	// Identities with a question already on screen. Starting the agent again
-	// while the person is still reading must not put a second copy of the
-	// same question in the queue: it is the same decision, and a stack of
-	// identical dialogs is how a person clicks one without reading it.
-	asking map[string]bool
+	// Identities with a question on screen, and every enrolment waiting on
+	// it. Starting the agent again while the person is still reading must not
+	// put a second copy of the question in the queue — it is the same
+	// decision, and a stack of identical dialogs is how a person clicks one
+	// without reading it — so a second start joins the first one's wait.
+	asking map[string][]chan string
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -68,7 +70,7 @@ func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.S
 		scope:     agentToolEndpointScopePrefix + scope,
 		workspace: scope,
 		enrolled:  map[session.ID]agentapproval.Executable{},
-		asking:    map[string]bool{},
+		asking:    map[string][]chan string{},
 	}
 }
 
@@ -118,51 +120,64 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if err != nil {
 		return err
 	}
-	answer, found := s.store.Lookup(executable, s.scope)
-	if found {
-		if answer == agentapproval.Granted {
-			s.remember(sid, executable)
-			return nil
-		}
-		return fmt.Errorf("agent approval was denied for %s", agent)
-	}
-	if s.requester == nil {
-		return errors.New("nocx has no client to ask for agent approval")
-	}
-	// THE QUESTION IS RAISED, AND THIS RETURNS WITHOUT IT (nocx-t7xds).
+	// THE QUESTION COMES FIRST, AND THE HANDSHAKE DOES NOT WAIT FOR IT.
 	//
 	// The two deadlines are irreconcilable and both are right. The shell gives
 	// an enrolment five seconds (nocx.bash __nocx_lc_grant_timeout_s) because
 	// a handshake between two programs must be bounded. The approval question
 	// has no deadline at all (transport.hostTimeoutFor) because it waits on
 	// somebody reading it. Waiting for the second inside the first meant a
-	// person could never answer in time: the pane printed "nocx did not
-	// answer", the agent started without tools, the dialog stayed up, and the
-	// click that eventually came was recorded against an enrolment that no
-	// longer existed. It worked on the NEXT start, which made a rule look like
-	// a fluke.
+	// person could never answer in time (nocx-t7xds). Refusing instead meant
+	// the shell did what it does with a refusal — it started the agent without
+	// tools while the dialog was still up, and told the person to start it
+	// again after answering (nocx-cyhfw).
 	//
-	// So the ask goes out on its own and the enrolment refuses now, saying
-	// what is happening. D4 holds — no enrolment, no orchestration, and the
-	// pane says so — and the sentence is an instruction rather than a report
-	// about a timeout. The answer is durable, so starting the agent again
-	// after answering enrols with no question at all.
-	if s.beginAsking(executable) {
+	// So the verdict is a WAIT: returned now, inside the handshake's bound,
+	// holding a channel that closes when the question does. The shell waits
+	// on it outside the handshake and enrols again once it closes, and that
+	// enrolment reads the stored answer here like any other.
+	//
+	// Decided under the lock, the store read included. An ask that finished
+	// between a lookup and joining its wait would otherwise leave this
+	// enrolment waiting on a question that had already closed, or put the
+	// question the person had just answered back on screen. The ask records
+	// before it settles, so under the lock the store is never behind.
+	s.mu.Lock()
+	answer, found := s.store.Lookup(executable, s.scope)
+	switch {
+	case found && answer == agentapproval.Granted:
+		s.enrolled[sid] = executable
+		s.mu.Unlock()
+		return nil
+	case found:
+		s.mu.Unlock()
+		return fmt.Errorf("agent approval was denied for %s", agent)
+	case s.requester == nil:
+		s.mu.Unlock()
+		return errors.New("nocx has no client to ask for agent approval")
+	}
+	k := askingKey(executable)
+	waiters, up := s.asking[k]
+	settled := make(chan string, 1)
+	s.asking[k] = append(waiters, settled)
+	s.mu.Unlock()
+	if !up {
 		go s.ask(executable, agent)
 	}
-	return fmt.Errorf("nocx is asking you whether %s may use its tools; answer that, then start it again", agent)
+	return &lifecyclepub.EnrolmentPending{
+		Reason:  fmt.Sprintf("nocx is asking whether %s may use its tools", agent),
+		Settled: settled,
+	}
 }
 
-// ask puts the question and records what comes back. It outlives the
-// enrolment that raised it, deliberately: a person reading a consent dialog
-// is not on the shell's clock.
+// ask puts the question, records what comes back, and closes the question for
+// everybody waiting on it. It outlives the enrolment that raised it,
+// deliberately: a person reading a consent dialog is not on the shell's clock.
 //
 // Its own context, for the same reason. The enrolment's is finished by the
 // time anybody clicks, and cancelling the question with it would take the
-// dialog off the screen mid-read and leave the person's next start refusing
-// for ever with nothing to answer.
+// dialog off the screen mid-read.
 func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string) {
-	defer s.doneAsking(executable)
 	response, err := s.requester.RequestHost(context.Background(), transport.HostAsk{
 		Capability: transport.HostCapAgentApproval,
 		Executable: executable.Path,
@@ -173,14 +188,24 @@ func (s *agentApprovalService) ask(executable agentapproval.Executable, agent st
 		// Nothing is recorded. An unanswerable question — no client, a window
 		// that went away — must not become a durable "no": the person never
 		// said it, and a denial is never silently retried, so it would be
-		// permanent (nocx-6jbad).
+		// permanent (nocx-6jbad). It closes WITH A SENTENCE, so the pane
+		// starts the agent without tools and says why, rather than enrolling
+		// again into a question that cannot appear.
+		s.settle(executable, fmt.Sprintf("nocx could not ask whether %s may use its tools: %v", agent, err))
 		return
 	}
 	decision := agentapproval.Denied
 	if response.Approved {
 		decision = agentapproval.Granted
 	}
-	_ = s.store.Record(executable, s.scope, decision)
+	if err := s.store.Record(executable, s.scope, decision); err != nil {
+		// A sentence here too. Closed as answered, the shell would enrol, find
+		// nothing stored, and put the question the person just answered back
+		// on screen.
+		s.settle(executable, fmt.Sprintf("nocx could not keep your answer about %s: %v", agent, err))
+		return
+	}
+	s.settle(executable, "")
 }
 
 // ListAgentAccess is the answers a person gave, in the terms the surface
@@ -228,30 +253,24 @@ func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace s
 	return s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
 }
 
-// beginAsking claims the question for one identity, and answers false when
-// somebody else already holds it. The claim is released when the ask returns,
-// answered or not: a question nobody could deliver must be askable again.
-func (s *agentApprovalService) beginAsking(executable agentapproval.Executable) bool {
+// settle closes the question for every enrolment waiting on it — nothing when
+// a person's answer was kept, a sentence when there is none — and releases the
+// identity, answered or not: a question nobody could deliver must be askable
+// again. Each channel is buffered and settled exactly once, so a pane that
+// stopped waiting costs nothing.
+func (s *agentApprovalService) settle(executable agentapproval.Executable, reason string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := executable.Path + "\x00" + executable.SHA256
-	if s.asking[k] {
-		return false
-	}
-	s.asking[k] = true
-	return true
-}
-
-func (s *agentApprovalService) doneAsking(executable agentapproval.Executable) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.asking, executable.Path+"\x00"+executable.SHA256)
-}
-
-func (s *agentApprovalService) remember(sid session.ID, executable agentapproval.Executable) {
-	s.mu.Lock()
-	s.enrolled[sid] = executable
+	k := askingKey(executable)
+	waiters := s.asking[k]
+	delete(s.asking, k)
 	s.mu.Unlock()
+	for _, settled := range waiters {
+		settled <- reason
+	}
+}
+
+func askingKey(executable agentapproval.Executable) string {
+	return executable.Path + "\x00" + executable.SHA256
 }
 
 var _ agentApproval = (*agentApprovalService)(nil)

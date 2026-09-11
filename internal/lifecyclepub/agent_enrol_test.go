@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -165,6 +166,122 @@ func TestASeamRefusalReachesTheCallerWithItsReason(t *testing.T) {
 	}
 	if a.Reason != "too many panes are already watched" {
 		t.Errorf("reason = %q, want the seam's own", a.Reason)
+	}
+}
+
+// pendingEnroller answers every enrolment with a verdict that waits on a
+// person, and holds the channel that closes the question.
+type pendingEnroller struct {
+	settled chan string
+}
+
+func (p *pendingEnroller) Enrol(lifecycle.LaneID, string, int, int) error {
+	return &lifecyclepub.EnrolmentPending{
+		Reason:  "nocx is asking whether claude may use its tools",
+		Settled: p.settled,
+	}
+}
+
+func (p *pendingEnroller) Withdraw(lifecycle.LaneID) {}
+
+// enrolmentAnswers waits until n agent_enrolled frames have gone out and
+// returns them in order. Read under the port's lock, because the frame that
+// closes a question is delivered from a goroutine of the publisher's own.
+func enrolmentAnswers(t *testing.T, port *recordingPort, n int) []lifecycle.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		port.mu.Lock()
+		var got []lifecycle.Envelope
+		for _, e := range port.sent {
+			if e.Event.Kind == lifecycle.KindAgentEnrolled {
+				got = append(got, e)
+			}
+		}
+		port.mu.Unlock()
+		if len(got) >= n {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d agent_enrolled frame(s) went out, want %d; sent kinds=%v", len(got), n, port.kinds())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A VERDICT THAT WAITS ON A PERSON (nocx-cyhfw). The handshake is bounded and
+// the question is not, so the caller is told at once that it is waiting — not
+// refused, which is what started the agent before anybody had answered — and
+// told again on the same request id when the question closes, so it can enrol
+// afresh against the answer.
+func TestAnEnrolmentWaitingOnAPersonIsAnsweredPendingAndThenClosed(t *testing.T) {
+	e := &pendingEnroller{settled: make(chan string, 1)}
+	pub, port, h := establishedPub(t, e)
+
+	mustIngest(t, pub, "T", env("L", h, 2, enrolEvt("r-agent-0", "claude")))
+
+	first := enrolmentAnswers(t, port, 1)[0].Event.AgentEnrolled
+	if first == nil || first.Enrolled || !first.Pending {
+		t.Fatalf("first answer = %+v, want a wait and not an enrolment", first)
+	}
+	if first.Reason == "" {
+		t.Error("a wait with no reason cannot tell the person what they are being asked")
+	}
+	if n := len(enrolmentAnswers(t, port, 1)); n != 1 {
+		t.Fatalf("%d answers went out before anybody answered, want 1", n)
+	}
+
+	e.settled <- ""
+
+	closing := enrolmentAnswers(t, port, 2)[1]
+	if closing.Domain != h.Domain || closing.Epoch != h.Epoch {
+		t.Fatalf("the closing frame must be addressed to the asking domain, got dom=%s epoch=%d", closing.Domain, closing.Epoch)
+	}
+	a := closing.Event.AgentEnrolled
+	if a == nil || a.RequestID != "r-agent-0" || a.Agent != "claude" {
+		t.Fatalf("closing frame = %+v, want it echoing claude's r-agent-0", a)
+	}
+	// Never consent, and never a second wait: consent answers only an
+	// enrolment that opened a grid, and this one opened nothing.
+	if a.Enrolled || a.Pending {
+		t.Fatalf("closing frame = %+v, want neither enrolled nor pending", a)
+	}
+	if a.Reason != "" {
+		t.Errorf("a question a person answered closes with no reason, got %q", a.Reason)
+	}
+}
+
+// A question nobody could be shown closes with the sentence that says so,
+// which is what the pane prints before it starts the agent without tools.
+func TestAQuestionThatCouldNotBeSettledClosesWithItsReason(t *testing.T) {
+	e := &pendingEnroller{settled: make(chan string, 1)}
+	pub, port, h := establishedPub(t, e)
+
+	mustIngest(t, pub, "T", env("L", h, 2, enrolEvt("r-agent-0", "claude")))
+	e.settled <- "nocx could not ask whether claude may use its tools: no window is open"
+
+	a := enrolmentAnswers(t, port, 2)[1].Event.AgentEnrolled
+	if a == nil || a.Enrolled || a.Pending {
+		t.Fatalf("closing frame = %+v, want neither enrolled nor pending", a)
+	}
+	if a.Reason != "nocx could not ask whether claude may use its tools: no window is open" {
+		t.Errorf("reason = %q, want the seam's own", a.Reason)
+	}
+}
+
+// A wait with nothing to wait on would hold the caller for ever, so it is an
+// ordinary refusal: here too the silent paths are refusals.
+func TestAPendingVerdictWithNothingToWaitOnIsARefusal(t *testing.T) {
+	pub, port, h := establishedPub(t, &pendingEnroller{})
+
+	mustIngest(t, pub, "T", env("L", h, 2, enrolEvt("r-agent-0", "claude")))
+
+	a := enrolmentAnswers(t, port, 1)[0].Event.AgentEnrolled
+	if a == nil || a.Enrolled || a.Pending {
+		t.Fatalf("answer = %+v, want a refusal", a)
+	}
+	if a.Reason == "" {
+		t.Error("a refusal with no reason cannot be shown to the person it refuses")
 	}
 }
 

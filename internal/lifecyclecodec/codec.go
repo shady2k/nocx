@@ -335,7 +335,10 @@ type wireEnvelope struct {
 	Cols     *int    `json:"cols,omitempty"`
 	Rows     *int    `json:"rows,omitempty"`
 	Enrolled bool    `json:"enrolled,omitempty"`
-	Reason   *string `json:"reason,omitempty"`
+	// Pending is a value for the same reason: absent is "not waiting", so
+	// only a frame that says so holds a shell on a question (nocx-cyhfw).
+	Pending bool    `json:"pending,omitempty"`
+	Reason  *string `json:"reason,omitempty"`
 	// Agent report (nocx-dkawo.7): what a worker participant says its own work
 	// produced, and the answer saying it was recorded. OK and Recorded are
 	// VALUES rather than pointers for the reason Enrolled is: a missing field
@@ -453,6 +456,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 			RequestID: lifecycle.RequestID(str(w.Request)),
 			Agent:     str(w.Agent),
 			Enrolled:  w.Enrolled,
+			Pending:   w.Pending,
 			Reason:    str(w.Reason),
 		}
 	case lifecycle.KindAgentWithdraw:
@@ -593,6 +597,7 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			we.Request = new(string(p.RequestID))
 			we.Agent = new(p.Agent)
 			we.Enrolled = p.Enrolled
+			we.Pending = p.Pending
 			if p.Reason != "" {
 				we.Reason = new(p.Reason)
 			}

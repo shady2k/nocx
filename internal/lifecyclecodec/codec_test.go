@@ -606,6 +606,39 @@ func TestAgentEnrolmentRefusalIsAbsenceOnTheWire(t *testing.T) {
 	}
 }
 
+// A verdict that waits on a person travels as `"pending":true` and only then,
+// for the reason consent does: a reader finds the field, so a frame without it
+// is not a wait. The frame that CLOSES the question carries neither field —
+// nothing a shell reads after waiting can be mistaken for consent, which only
+// ever answers an enrolment that opened a grid (nocx-cyhfw).
+func TestAgentEnrolmentPendingIsPresenceOnTheWire(t *testing.T) {
+	var pending, closing bytes.Buffer
+	if _, err := Encode(&pending, env(lifecycle.KindAgentEnrolled, lifecycle.Event{
+		Kind: lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{
+			RequestID: "r-0", Agent: "claude", Pending: true,
+			Reason: "nocx is asking whether claude may use its tools",
+		},
+	}, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Encode(&closing, env(lifecycle.KindAgentEnrolled, lifecycle.Event{
+		Kind:          lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{RequestID: "r-0", Agent: "claude"},
+	}, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pending.String(), `"pending":true`) {
+		t.Errorf("a wait must be on the wire as \"pending\":true, got %s", pending.String())
+	}
+	if strings.Contains(pending.String(), `"enrolled":`) {
+		t.Errorf("a wait must carry no enrolled field, got %s", pending.String())
+	}
+	if strings.Contains(closing.String(), `"pending":`) || strings.Contains(closing.String(), `"enrolled":`) {
+		t.Errorf("the frame closing a question must carry neither pending nor enrolled, got %s", closing.String())
+	}
+}
+
 // TestNoOutboundFrameCarriesBearerMaterial is the assertion nocx-aqz7o asks
 // for, made where the bytes actually are: a REAL kernel is driven through
 // every path that answers a shell, every envelope it produces is encoded with

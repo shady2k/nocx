@@ -434,6 +434,9 @@ __nocx_lc_json_unescape() {
 
 __nocx_agent_n=0
 __nocx_agent_enrolled=0
+__nocx_agent_pending=0
+__nocx_agent_cancelled=0
+__nocx_agent_rid=
 __nocx_agent_reason=
 __nocx_agent_helper_path="${NOCX_AGENT_HELPER_PATH:-nocx-helper}"
 __nocx_agent_tool_socket="${NOCX_TOOL_SOCKET:-}"
@@ -443,19 +446,31 @@ __nocx_agent_old_int=
 __nocx_agent_old_term=
 __nocx_agent_old_hup=
 
+# Read the answer to agent request $1, bounded like a grant. With $2 = wait it
+# has no deadline, because it waits on a person — the frame closing a question
+# nocx is asking (nocx-cyhfw) — and only Ctrl+C ends it early, returning 130.
+# The wait polls with a blocking zselect rather than a sleep, so the interrupt
+# lands on this shell and not on a child.
 __nocx_lc_read_agent_answer() {
-    local __rid="$1" __t=0 __reason
+    local __rid="$1" __wait="${2:-}" __t=0 __reason
     __nocx_agent_enrolled=0
+    __nocx_agent_pending=0
     __nocx_agent_reason=
-    while (( __t < __nocx_lc_grant_timeout_s )); do
+    while [[ "$__wait" == wait ]] || (( __t < __nocx_lc_grant_timeout_s )); do
+        (( __nocx_agent_cancelled )) && return 130
         if zmodload zsh/zselect 2>/dev/null; then
-            if ! zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null; then
+            if [[ "$__wait" == wait ]]; then
+                zselect -t 100 -r "$__nocx_lc_fd" 2>/dev/null || continue
+            elif ! zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null; then
                 sleep 1
                 __t=$(( __t + 1 ))
                 continue
             fi
         fi
-        __nocx_lc_read_frame 1 || return 1
+        if ! __nocx_lc_read_frame 1; then
+            (( __nocx_agent_cancelled )) && return 130
+            return 1
+        fi
         case "$__nocx_lc_frame" in
             *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*|*'"evt":"agent_reported"'*) : ;;
             *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
@@ -471,6 +486,11 @@ __nocx_lc_read_agent_answer() {
         case "$__nocx_lc_frame" in
             *'"enrolled":true'*) __nocx_agent_enrolled=1 ;;
         esac
+        # A wait is never consent, and a frame carrying both is not resolved in
+        # the agent's favour.
+        case "$__nocx_lc_frame" in
+            *'"pending":true'*) __nocx_agent_pending=1; __nocx_agent_enrolled=0 ;;
+        esac
         case "$__nocx_lc_frame" in
             *'"reason":"'*)
                 __reason="${__nocx_lc_frame#*\"reason\":\"}"
@@ -479,6 +499,7 @@ __nocx_lc_read_agent_answer() {
                 __nocx_agent_reason="$__nocx_lc_json_unescaped"
                 ;;
         esac
+        (( __nocx_agent_cancelled )) && return 130
         return 0
     done
     return 1
@@ -652,10 +673,54 @@ __nocx_agent_restore_traps() {
     __nocx_agent_old_hup=
 }
 
+# Wait for the question raised on request $1 to close. Ctrl+C cancels the
+# launch and returns 130; the question stays on screen and a later answer is
+# still kept. LOCAL_TRAPS puts back whatever INT trap was there before, however
+# the wait ends.
+__nocx_agent_await_answer() {
+    setopt localoptions localtraps
+    local __rc
+    __nocx_agent_cancelled=0
+    trap '__nocx_agent_cancelled=1' INT
+    __nocx_lc_read_agent_answer "$1" wait
+    __rc=$?
+    __nocx_agent_cancelled=0
+    return $__rc
+}
+
+# Enrol this pane for agent $1: 0 when enrolled (request id in
+# __nocx_agent_rid), 130 when the person cancelled while nocx was asking, 1 for
+# a refusal (the backend's sentence in __nocx_agent_reason). The bash script
+# carries the long form of why the wait for a question is here, outside the
+# handshake (nocx-cyhfw, nocx-t7xds).
+__nocx_agent_enrol() {
+    local __agent="$1" __told=0 __rc
+    while :; do
+        __nocx_agent_reason=
+        __nocx_agent_geometry
+        __nocx_agent_rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
+        __nocx_lc_send agent_enrol ',"request":"'"$__nocx_agent_rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
+            || return 1
+        __nocx_lc_read_agent_answer "$__nocx_agent_rid" || return 1
+        (( __nocx_agent_enrolled == 1 )) && return 0
+        (( __nocx_agent_pending == 1 )) || return 1
+        if (( ! __told )); then
+            builtin printf 'nocx: %s — answer it in nocx to start %s, or press Ctrl+C to cancel\n' \
+                "${__nocx_agent_reason:-nocx is asking a question}" "$__agent" >&2
+            __told=1
+        fi
+        __nocx_agent_await_answer "$__nocx_agent_rid"
+        __rc=$?
+        (( __rc == 0 )) || return $__rc
+        [[ -z "$__nocx_agent_reason" ]] || return 1
+    done
+}
+
 # Run agent $1 with the pane enrolled for its lifetime. The refusal is visible
 # and the agent still runs: "failure is closed" means no enrolment implies no
 # orchestration, not that a terminal declines to start the program it was asked
-# for.
+# for. A question is not a refusal: the agent starts when it closes, and not at
+# all if the person cancels the wait.
 __nocx_agent_run() {
     local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
@@ -664,10 +729,14 @@ __nocx_agent_run() {
         command "$__agent" "$@"
         return $?
     fi
-    __nocx_agent_geometry
-    __rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
-    if ! __nocx_lc_send agent_enrol ',"request":"'"$__rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
-        || ! __nocx_lc_read_agent_answer "$__rid" || (( __nocx_agent_enrolled != 1 )); then
+    __nocx_agent_enrol "$__agent"
+    __rc=$?
+    if (( __rc == 130 )); then
+        builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
+        return 130
+    fi
+    __rid="$__nocx_agent_rid"
+    if (( __rc != 0 )); then
         if [[ -n "$__nocx_agent_reason" ]]; then
             builtin printf 'nocx: not orchestrated — %s\n' "$__nocx_agent_reason" >&2
         else

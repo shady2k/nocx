@@ -214,3 +214,26 @@ func TestAnErrorPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
 		t.Fatalf("an indented transcript line was read as chrome: %q, want %q", got, agentdriver.StateFreeText)
 	}
 }
+
+// The ellipsis branch reads the STATUS STACK, not the transcript (nocx-ys9jd).
+// An agent that printed "Loading…" into its own output, indented and above a
+// blank row, with the box live beneath it, is idle.
+func TestAnEllipsisTheAgentPrintedIsNotATurnStarting(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"  Loading…",
+		"",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 5)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an ellipsis in the transcript was read as a turn: %q, want %q", got, agentdriver.StateFreeText)
+	}
+}

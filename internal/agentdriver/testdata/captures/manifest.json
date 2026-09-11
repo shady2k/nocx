@@ -54,8 +54,12 @@
     },
     {
       "moment": "turn-before-timer",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-ys9jd)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 49000,
+      "state": "working",
+      "note": "spinner row before the elapsed timer draws (nocx-ys9jd)"
     },
+    { "capture": "claude-lmstudio-turn", "atMs": 47500, "state": "working" },
     {
       "moment": "turn-with-timer",
       "capture": "claude-working",

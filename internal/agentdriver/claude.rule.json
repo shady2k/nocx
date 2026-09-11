@@ -152,6 +152,20 @@
       ]
     },
     {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "suffix": "…"
+        }
+      ]
+    },
+    {
       "below": {
         "anchor": "boxBottom",
         "glyphs": ["●", "◯"],

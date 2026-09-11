@@ -1,0 +1,346 @@
+{"agent":"claude","argv":["claude"],"cols":120,"rows":40,"started":"2026-09-11T13:02:20.278789722Z","script":["+14000ms \"\\\\r\"","+6000ms \"\\\\r\"","+7000ms \"\\\\x1b[B\"","+1500ms \"\\\\r\"","+9000ms \"\\\\x0f\"","+5000ms \"\\\\x0f\"","+4000ms \"Write a 400 word story about a lighthouse keeper.\"","+800ms \"\\\\r\"","+5000ms \"/btw what is 2+2?\"","+600ms \"\\\\r\"","+9000ms \"\\\\x1b\"","+30000ms \"\""]}
+{"atMs":169,"offset":0,"data":"\u001b[33m\"qwen/qwen3.6-35b-a3b\" isn't described by this version's model catalog; update Claude Code, or map it with behavesAs on a modelPicker row (or modelOverrides, if it is a provider id of a model this version knows). Until then auto-compact keeps this session within 200k tokens (the context window it assumes); if the model accepts more, append [1m] to the model name for 1M, or set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 restores the previous wait-for-the-API behavior.\u001b[39m\r\n"}
+{"atMs":170,"offset":546,"data":"\u001b7\u001b[r\u001b8\u001b[?25h"}
+{"atMs":189,"offset":559,"data":"\u001b[?25l"}
+{"atMs":189,"offset":565,"data":"\u001b[?2004h\u001b[?2031h\u001b[?1004h"}
+{"atMs":200,"offset":589,"data":"\u001b[38;5;174mWelcome\u001b[9Gto\u001b[12GClaude\u001b[19GCode\u001b[24G\u001b[38;5;246mv2.1.266\u001b[39m\r\r\n..........................................................\r\r\n\r\r\n\u001b[6G*\u001b[46G█████▓▓░\r\r\n\u001b[34G*\u001b[44G███▓░\u001b[54G░░\r\r\n\u001b[13G░░░░░░\u001b[43G███▓░\r\r\n\u001b[5G░░░\u001b[11G░░░░░░░░░░\u001b[43G███▓░\r\r\n\u001b[4G░░░░░░░░░░░░░░░░░░░\u001b[27G\u001b[1m*\u001b[44G\u001b[22m██▓░░\u001b[55G▓\r\r\n\u001b[46G░▓▓███▓▓░\r\r\n\u001b[38;5;246m *\u001b[36G░░░░\u001b[39m\r\r\n\u001b[38;5;246m \u001b[34G░░░░░░░░\u001b[39m\r\r\n\u001b[38;5;246m \u001b[32G░░░░░░░░░░░░░░░░\u001b[39m\r\r\n\u001b[7G\u001b[38;5;174m █████████\u001b[57G\u001b[38;5;246m*\u001b[39m\r\r\n\u001b[7G\u001b[38;5;174m██▄█████▄██\u001b[42G\u001b[39m\u001b[1m*\u001b[22m\r\r\n\u001b[7G\u001b[38;5;174m █████████\u001b[23G\u001b[39m*\r\r\n.......\u001b[38;5;174m█\u001b[10G█\u001b[14G█\u001b[16G█\u001b[39m..........................................\r\r\n\r\r\n\u001b[2GLet's\u001b[8Gget\u001b[12Gstarted.\r\r\n\r\r\n\u001b[2G\u001b[1mChoose\u001b[9Gthe\u001b[13Gtext\u001b[18Gstyle\u001b[24Gthat\u001b[29Glooks\u001b[35Gbest\u001b[40Gwith\u001b[45Gyour\u001b[50Gterminal\u001b[22m\r\r\n\u001b[2G\u001b[38;5;246mTo\u001b[5Gchange\u001b[12Gthis\u001b[17Glater,\u001b[24Grun\u001b[28G/theme\u001b[39m\r\r\n\r\r\n\u001b[4G\u001b[38;5;246m1.\u001b[7G\u001b[39mAuto\u001b[12G(match\u001b[19Gterminal)\r\r\n\u001b[2G\u001b[38;5;153m❯\u001b[4G\u001b[38;5;246m2.\u001b[7G\u001b[38;5;114mDark\u001b[12Gmode\u001b[17G✔\u001b[39m\r\r\n\u001b[4G\u001b[38;5;246m3.\u001b[7G\u001b[39mLight\u001b[13Gmode\r\r\n\u001b[4G\u001b[38;5;246m4.\u001b[7G\u001b[39mDark\u001b[12Gmode\u001b[17G(colorblind-friendly)\r\r\n\u001b[4G\u001b[38;5;246m5.\u001b[7G\u001b[39mLight\u001b[13Gmode\u001b[18G(colorblind-friendly)\r\r\n\u001b[4G\u001b[38;5;246m6.\u001b[7G\u001b[39mDark\u001b[12Gmode\u001b[17G(ANSI\u001b[23Gcolors\u001b[30Gonly)\r\r\n\u001b[4G\u001b[38;5;246m7.\u001b[7G\u001b[39mLight\u001b[13Gmode\u001b[18G(ANSI\u001b[24Gcolors\u001b[31Gonly)\r\r\n\r\r\n\u001b[2G\u001b[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\u001b[39m\r\r\n\u001b[2G\u001b[38;5;231m\u001b[2m 1\u001b[5G\u001b[22m \u001b[38;5;81mfunction\u001b[38;5;231m \u001b[38;5;148mgreet\u001b[38;5;231m()\u001b[23G{\u001b[39m\r\r\n\u001b[2G\u001b[38;5;167m\u001b[48;5;52m 2 -\u001b[38;5;231m  console.log(\"Hello, World!\");                                                                               \u001b[49m\u001b[39m\r\r\n\u001b[2G\u001b[38;5;77m\u001b[48;5;22m 2 +\u001b[38;5;231m  console.\u001b[38;5;148mlog\u001b[38;5;231m(\u001b[38;5;186m\"Hello, \u001b[48;5;28mClaude\u001b[48;5;22m!\"\u001b[38;5;231m);                                                                              \u001b[49m\u001b[39m\r\r\n\u001b[2G\u001b[38;5;231m\u001b[2m 3\u001b[5G\u001b[22m }\u001b[39m\r\r\n\u001b[2G\u001b[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\u001b[39m\r\r\n\u001b[2G\u001b[38;5;246m Syntax\u001b[10Gtheme:\u001b[17GMonokai\u001b[25GExtended\u001b[34G(ctrl+t\u001b[42Gto\u001b[45Gdisable)\u001b[39m\r\r\n\u001b[1C\u001b[14A"}
+{"atMs":201,"offset":3599,"data":"\u001b[\u003e0q\u001b[c"}
+{"atMs":14009,"offset":3607,"data":"\u001b(B\u000f"}
+{"atMs":14016,"offset":3611,"data":"\u001b[1D\u001b[14B\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\r\u001b[1C\u001b[10A\u001b[1mSecurity notes:\u001b[22m\u001b[K\r\u001b[1C\u001b[2B\u001b[38;5;246m1.\u001b[39m Claude can make mistakes.\u001b[K\r\u001b[1C\u001b[1B   \u001b[38;5;246mYou'r\u001b[12Gresponsible\u001b[24Gfor\u001b[28GClaud\u001b[34G's actions and should always\r\u001b[4C\u001b[1Breview them, especially when running code.\r\u001b[3C\u001b[1B\u001b[39m\u001b[K\r\u001b[1C\u001b[1B\u001b[38;5;246m2.\u001b[39m Due to prompt\u001b[19Ginjection\u001b[29Grisks,\u001b[36Gonly\u001b[41Guse\u001b[45Git\u001b[48Gwith\u001b[53Gcode\u001b[58Gyou\u001b[62Gtrust\r\u001b[3C\u001b[1B \u001b[38;5;246mLearn more: https://code.claude.com/docs/en/security\r\u001b[3C\u001b[1B\u001b[39m\u001b[K\r\u001b[1C\u001b[1B\u001b[38;5;153mPress \u001b[1mEnter\u001b[22m to continue…\u001b[39m\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[9A"}
+{"atMs":20014,"offset":4323,"data":"\u001b(B\u000f"}
+{"atMs":20016,"offset":4327,"data":"\u001b[\u003e4m\u001b[\u003cu\u001b[?1004l\u001b[?2031l\u001b[?2004l"}
+{"atMs":20017,"offset":4360,"data":"\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[26A"}
+{"atMs":20020,"offset":4796,"data":"\u001b[?2004h\u001b[?2031h\u001b[?1004h"}
+{"atMs":20023,"offset":4820,"data":"\u001b[\u003e0q\u001b[c"}
+{"atMs":20034,"offset":4828,"data":"\r\r\n\u001b[38;5;220m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\u001b[39m\r\r\n\u001b[2G\u001b[38;5;220m\u001b[1mAccessing\u001b[12Gworkspace:\u001b[22m\u001b[39m\r\r\n\r\r\n\u001b[2G\u001b[1m/var/tmp/nocx-detect-discovery-1789131534/work\u001b[22m\r\r\n\r\r\n\u001b[2GQuick\u001b[8Gsafety\u001b[15Gcheck:\u001b[22GIs\u001b[25Gthis\u001b[30Ga\u001b[32Gproject\u001b[40Gyou\u001b[44Gcreated\u001b[52Gor\u001b[55Gone\u001b[59Gyou\u001b[63Gtrust?\u001b[70G(Like\u001b[76Gyour\u001b[81Gown\u001b[85Gcode,\u001b[91Ga\u001b[93Gwell-known\u001b[104Gopen\u001b[109Gsource\r\r\n\u001b[2Gproject,\u001b[11Gor\u001b[14Gwork\u001b[19Gfrom\u001b[24Gyour\u001b[29Gteam).\u001b[36GIf\u001b[39Gnot,\u001b[44Gtake\u001b[49Ga\u001b[51Gmoment\u001b[58Gto\u001b[61Greview\u001b[68Gwhat's\u001b[75Gin\u001b[78Gthis\u001b[83Gfolder\u001b[90Gfirst.\r\r\n\r\r\n\u001b[2GClaude\u001b[9GCode'll\u001b[17Gbe\u001b[20Gable\u001b[25Gto\u001b[28Gread,\u001b[34Gedit,\u001b[40Gand\u001b[44Gexecute\u001b[52Gfiles\u001b[58Ghere.\r\r\n\r\r\n\u001b[2G\u001b[38;5;246mSecurity\u001b[11Gguide\u001b[39m\r\r\n\r\r\n\u001b[2G\u001b[38;5;153m❯\u001b[4GNo,\u001b[8Gexit\u001b[39m\r\r\n\u001b[4GYes,\u001b[9GI\u001b[11Gtrust\u001b[17Gthis\u001b[22Gfolder\r\r\n\r\r\n\u001b[2G\u001b[38;5;246mEnter\u001b[8Gto\u001b[11Gconfirm\u001b[19G·\u001b[21GEsc\u001b[25Gto\u001b[28Gcancel\u001b[39m\r\r\n\u001b[1C\u001b[4A"}
+{"atMs":27021,"offset":6038,"data":"\u001b(B\u000f"}
+{"atMs":27024,"offset":6042,"data":"\u001b[1D\u001b[4B\r\u001b[1C\u001b[4A \u001b[4GNo, exit\r\u001b[1C\u001b[1B\u001b[38;5;153m❯\u001b[4GYes, I trust this folder\u001b[39m\r\r\n\r\n\r\n\u001b[1C\u001b[3A"}
+{"atMs":28524,"offset":6143,"data":"\u001b[\u003e4m\u001b[\u003cu\u001b[?1004l\u001b[?2031l\u001b[?2004l"}
+{"atMs":28525,"offset":6176,"data":"\u001b[1D\u001b[3B\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[G\u001b[1A\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[16A"}
+{"atMs":28605,"offset":6460,"data":"\u001b[?2004h\u001b[?2031h\u001b[?1004h"}
+{"atMs":28609,"offset":6484,"data":"\u001b[?1049h\u001b[2J\u001b[H\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":28612,"offset":6531,"data":"\u001b]0;✳ Claude Code\u0007"}
+{"atMs":28638,"offset":6551,"data":"\u001b[H\r\u001b[11C\u001b[1B\u001b[1mClaude Code\u001b[24G\u001b[22m\u001b[38;5;246mv2.1.266\r\u001b[11C\u001b[1Bqwen/qwen3.6-35b-a3b · API Usage Billing\r\u001b[11C\u001b[1B/var/tmp/nocx-detect-discovery-1789131534/work\r\u001b[102C\u001b[32B● high · /effort\r\u001b[1B\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[1B\u001b[39m❯ \u001b[7m \r\u001b[1B\u001b[27m\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[1B\u001b[38;5;246m⏸ manual mode on · ? for shortcuts · ← for agents\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":28652,"offset":7617,"data":"\u001b[\u003e0q\u001b[c"}
+{"atMs":28800,"offset":7625,"data":"\u001b[H\r\u001b[1B\u001b[48;5;16m\u001b[38;5;174m▛█\u001b[49m▄\r\u001b[1B\u001b[48;5;16m█\u001b[49m█▘\r\u001b[1B▝  \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":28917,"offset":7726,"data":"\u001b[H\r\u001b[2C\u001b[1B \r\u001b[2C\u001b[1B\u001b[38;5;174m▀\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":28978,"offset":7781,"data":"\u001b[H\r\u001b[1B  \r\u001b[1B\u001b[48;5;16m\u001b[38;5;174m▛█\u001b[39m\u001b[49m \r\u001b[1B\u001b[48;5;16m\u001b[38;5;174m█\u001b[49m█▀\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29040,"offset":7893,"data":"\u001b[H\r\u001b[1B\u001b[48;5;16m\u001b[38;5;174m███▛█\u001b[49m▄\r\u001b[1B\u001b[48;5;16m█\u001b[3G██\u001b[49m█▘\r\u001b[1B▝ ▝▝  \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29165,"offset":8020,"data":"\u001b[H\r\u001b[5C\u001b[1B \r\u001b[5C\u001b[1B\u001b[38;5;174m▀\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29226,"offset":8075,"data":"\u001b[H\r\u001b[1B     \r\u001b[3C\u001b[1B\u001b[48;5;16m\u001b[38;5;174m▛█\u001b[39m\u001b[49m \r\u001b[1B\u001b[48;5;16m\u001b[38;5;174m████\u001b[49m█▀\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29287,"offset":8203,"data":"\u001b[H\r\u001b[1B\u001b[38;5;174m▗▟\u001b[48;5;16m▛███▛█\u001b[49m▄\r\u001b[1B ▜\u001b[4G\u001b[48;5;16m█\u001b[6G██\u001b[49m█▘\r\u001b[1B  ▝▝ ▝▝  \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29410,"offset":8352,"data":"\u001b[H\r\u001b[1B         \r\u001b[1C\u001b[1B\u001b[38;5;174m▐\u001b[48;5;16m▛\u001b[7G▛█\u001b[39m\u001b[49m \r\u001b[1B\u001b[38;5;246m·\u001b[38;5;174m▜\u001b[48;5;16m█████\u001b[49m█\u001b[38;5;246m·\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29471,"offset":8523,"data":"\u001b[H\r\u001b[3B\u001b[38;5;246m~\u001b[9G~\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":29532,"offset":8567,"data":"\u001b[H\r\u001b[1B\u001b[38;5;174m ▐\u001b[48;5;16m▛███▛█\r\u001b[1B\u001b[49m▝▜\u001b[48;5;16m█\u001b[7G█\u001b[49m█▀\r\u001b[1B  ▝▝ ▝▝  \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":37531,"offset":8706,"data":"\u001b(B\u000f\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":37540,"offset":8742,"data":"\u001b[H\r\u001b[102C\u001b[35B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[1B\u001b[22m\u001b[38;5;246mShowing detailed\u001b[20Gtransc\u001b[27Gipt · \u001b[34Gtrl+o\u001b[40Gto toggl\u001b[49G · ↑↓ scroll · v to open in vi · ? for shortcuts\u001b[113Gverbose \u001b[39m\u001b[40;1H"}
+{"atMs":42531,"offset":9318,"data":"\u001b(B\u000f\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":42545,"offset":9354,"data":"\u001b[H\r\u001b[102C\u001b[35B\u001b[38;5;246m● high · /effort\r\u001b[1B\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[1B\u001b[39m❯ \u001b[7m \r\u001b[1B\u001b[27m\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[1B\u001b[38;5;246m⏸ manual mode on\u001b[20G· ? fo\u001b[27G short\u001b[34Guts ·\u001b[40G← for ag\u001b[49Gnts\u001b[39m\u001b[K\u001b[40;1H\u001b[38;3H"}
+{"atMs":46541,"offset":10293,"data":"\u001b[H\r\u001b[2C\u001b[37BWrite\u001b[9Ga\u001b[11G400\u001b[15Gword\u001b[20Gstory\u001b[26Gabout\u001b[32Ga\u001b[34Glighthouse\u001b[45Gkeeper.\u001b[7m \r\u001b[18C\u001b[2B\u001b[27m\u001b[K\u001b[40;1H\u001b[38;52H"}
+{"atMs":47385,"offset":10424,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":47387,"offset":10444,"data":"\u001b[H\r\u001b[6B\u001b[48;5;237m\u001b[38;5;239m❯ \u001b[38;5;231mWrite a 400 word story about a lighthouse keeper.\u001b[39m                                                                     \r\u001b[28B\u001b[49m\u001b[38;5;174m✽\u001b[3GBurrowing… \r\u001b[3B\u001b[38;5;246m❯ \u001b[39m\u001b[7m \u001b[27m\u001b[K\r\u001b[18C\u001b[2B\u001b[38;5;246m · esc to interrupt · ← for agents\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":47451,"offset":10771,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":47563,"offset":10813,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":47788,"offset":10855,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":47901,"offset":10895,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":48013,"offset":10937,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m·\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":48345,"offset":10978,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":48454,"offset":10998,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":48567,"offset":11040,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":48792,"offset":11080,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":48905,"offset":11122,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":49017,"offset":11164,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✽\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":49305,"offset":11206,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":49462,"offset":11226,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":49574,"offset":11268,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":49687,"offset":11310,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":49912,"offset":11350,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50024,"offset":11392,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m·\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50252,"offset":11433,"data":"\u001b[H\r\u001b[11C\u001b[34B\u001b[38;5;216m…\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50265,"offset":11480,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":50477,"offset":11500,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[11G\u001b[38;5;216mg\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50589,"offset":11559,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[10G\u001b[38;5;216mn\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50702,"offset":11616,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50798,"offset":11658,"data":"\u001b[H\r\u001b[8C\u001b[34B\u001b[38;5;216mi\u001b[12G\u001b[38;5;174m…\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":50911,"offset":11721,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51024,"offset":11763,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✽\u001b[8G\u001b[38;5;216mw\u001b[11G\u001b[38;5;174mg\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51225,"offset":11838,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":51251,"offset":11858,"data":"\u001b[H\r\u001b[6C\u001b[34B\u001b[38;5;216mo\u001b[10G\u001b[38;5;174mn\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51476,"offset":11919,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[6G\u001b[38;5;216mr\u001b[9G\u001b[38;5;174mi\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51589,"offset":11993,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[5G\u001b[38;5;216mr\u001b[8G\u001b[38;5;174mw\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51701,"offset":12067,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":51814,"offset":12107,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[4G\u001b[38;5;216mu\u001b[7G\u001b[38;5;174mo\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":52039,"offset":12181,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m·\u001b[3G\u001b[38;5;216mB\u001b[6G\u001b[38;5;174mr\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":52185,"offset":12254,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":52267,"offset":12274,"data":"\u001b[H\r\u001b[4C\u001b[34B\u001b[38;5;174mr\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":52335,"offset":12318,"data":"\u001b(B\u000f\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":52341,"offset":12354,"data":"\u001b[H\r\u001b[2C\u001b[37B\u001b[38;5;220m/btw\u001b[8G\u001b[39mwhat\u001b[13Gis\u001b[16G2+2?\u001b[7m \r\u001b[18C\u001b[2B\u001b[27m\u001b[K\u001b[40;1H\u001b[38;20H"}
+{"atMs":52493,"offset":12449,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[4Gu\u001b[39m\u001b[40;1H\u001b[38;20H"}
+{"atMs":52544,"offset":12497,"data":"\u001b[H\r\u001b[102C\u001b[35B\u001b[K\u001b[40;1H\u001b[38;20H"}
+{"atMs":52605,"offset":12530,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[3GB\u001b[39m\u001b[40;1H\u001b[38;20H"}
+{"atMs":52718,"offset":12576,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;20H"}
+{"atMs":52814,"offset":12619,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;20H"}
+{"atMs":52943,"offset":12662,"data":"\u001b[H\r\u001b[2C\u001b[37B\u001b[7m \u001b[27m\u001b[K\r\u001b[18C\u001b[2B\u001b[38;5;246m · esc to interrupt · ← for agents\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":52971,"offset":12766,"data":"\u001b[H\r\u001b[33B\u001b[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\r\u001b[1B\u001b[39m\u001b[K\r\u001b[4C\u001b[1B\u001b[38;5;220m\u001b[1m/btw \u001b[22m\u001b[38;5;246mwhat is 2+2?\r\u001b[1B\u001b[39m\u001b[K\r\u001b[1B   \u001b[7G\u001b[38;5;220m·\u001b[9GAnswering…\r\u001b[1B\u001b[39m\u001b[K\r\u001b[2C\u001b[1B  \u001b[38;5;246mEsc to\u001b[12Gclose\u001b[39m\u001b[K\u001b[40;1H"}
+{"atMs":53036,"offset":13336,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":53052,"offset":13375,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✽\u001b[3GBurrowing… \u001b[39m\u001b[40;1H"}
+{"atMs":53116,"offset":13427,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":53145,"offset":13464,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":53196,"offset":13484,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":53286,"offset":13523,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":53356,"offset":13562,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":53496,"offset":13601,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":53516,"offset":13636,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":53597,"offset":13675,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":53613,"offset":13714,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":53677,"offset":13749,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":53721,"offset":13786,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":53757,"offset":13819,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":53833,"offset":13858,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":53849,"offset":13893,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":53997,"offset":13931,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":54062,"offset":13970,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m·\u001b[39m\u001b[40;1H"}
+{"atMs":54077,"offset":14004,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":54106,"offset":14041,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":54157,"offset":14061,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":54238,"offset":14100,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":54318,"offset":14139,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":54384,"offset":14178,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":54478,"offset":14213,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":54558,"offset":14252,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":54609,"offset":14291,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":54638,"offset":14324,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":54718,"offset":14361,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":54735,"offset":14400,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":54799,"offset":14435,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":54834,"offset":14473,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":54965,"offset":14508,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":55039,"offset":14547,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":55062,"offset":14584,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✽\u001b[39m\u001b[40;1H"}
+{"atMs":55065,"offset":14619,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":55119,"offset":14639,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":55199,"offset":14678,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":55279,"offset":14717,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":55400,"offset":14756,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":55439,"offset":14791,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":55529,"offset":14830,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":55600,"offset":14869,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":55625,"offset":14906,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":55680,"offset":14941,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":55738,"offset":14980,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":55760,"offset":15013,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":55856,"offset":15051,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":55920,"offset":15086,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":56000,"offset":15125,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":56026,"offset":15162,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":56062,"offset":15182,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m·\u001b[39m\u001b[40;1H"}
+{"atMs":56080,"offset":15216,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":56160,"offset":15255,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":56176,"offset":15294,"data":"\u001b[H\r\u001b[11C\u001b[32B\u001b[38;5;216m…\u001b[39m\u001b[40;1H"}
+{"atMs":56240,"offset":15334,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":56401,"offset":15373,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":56417,"offset":15412,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[11G\u001b[38;5;216mg\u001b[39m\u001b[40;1H"}
+{"atMs":56481,"offset":15464,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":56561,"offset":15503,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":56627,"offset":15540,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[10G\u001b[38;5;216mn\u001b[39m\u001b[40;1H"}
+{"atMs":56643,"offset":15590,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":56721,"offset":15629,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":56739,"offset":15667,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":56852,"offset":15702,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[9G\u001b[38;5;216mi\u001b[12G\u001b[38;5;174m…\u001b[39m\u001b[40;1H"}
+{"atMs":56882,"offset":15772,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":56962,"offset":15811,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":56986,"offset":15848,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":57042,"offset":15868,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":57079,"offset":15907,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✽\u001b[8G\u001b[38;5;216mw\u001b[11G\u001b[38;5;174mg\u001b[39m\u001b[40;1H"}
+{"atMs":57122,"offset":15975,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":57192,"offset":16014,"data":"\u001b[H\r\u001b[6C\u001b[32B\u001b[38;5;216mo\u001b[10G\u001b[38;5;174mn\u001b[39m\u001b[40;1H"}
+{"atMs":57208,"offset":16068,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":57362,"offset":16107,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":57418,"offset":16146,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[7Gowi\u001b[39m\u001b[40;1H"}
+{"atMs":57442,"offset":16188,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":57522,"offset":16227,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":57602,"offset":16264,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":57642,"offset":16303,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":57683,"offset":16338,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":57755,"offset":16376,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":57843,"offset":16409,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":57867,"offset":16448,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":57923,"offset":16483,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":57946,"offset":16520,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":58003,"offset":16540,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":58079,"offset":16579,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m·\u001b[39m\u001b[40;1H"}
+{"atMs":58095,"offset":16613,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":58164,"offset":16652,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":58324,"offset":16691,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":58404,"offset":16730,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":58422,"offset":16769,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":58484,"offset":16804,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":58564,"offset":16841,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":58641,"offset":16880,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":58657,"offset":16913,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":58754,"offset":16951,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":58805,"offset":16986,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":58867,"offset":17025,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":58884,"offset":17060,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":58906,"offset":17097,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":58965,"offset":17117,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":58981,"offset":17156,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✽\u001b[39m\u001b[40;1H"}
+{"atMs":59045,"offset":17191,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":59125,"offset":17230,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":59285,"offset":17269,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":59365,"offset":17308,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":59425,"offset":17347,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":59445,"offset":17382,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":59525,"offset":17419,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":59606,"offset":17458,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":59651,"offset":17496,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":59763,"offset":17531,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":59779,"offset":17564,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":59846,"offset":17603,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":59866,"offset":17640,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":59875,"offset":17660,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":59926,"offset":17695,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":59989,"offset":17734,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m·\u001b[39m\u001b[40;1H"}
+{"atMs":60006,"offset":17768,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":60086,"offset":17807,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":60246,"offset":17846,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":60326,"offset":17885,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":60406,"offset":17924,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":60441,"offset":17961,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":60487,"offset":17996,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":60570,"offset":18035,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":60666,"offset":18073,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":60727,"offset":18106,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":60779,"offset":18145,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":60807,"offset":18180,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":60826,"offset":18217,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":60887,"offset":18237,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":60903,"offset":18276,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":60967,"offset":18311,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":61004,"offset":18350,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✽\u001b[39m\u001b[40;1H"}
+{"atMs":61047,"offset":18385,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✽\u001b[39m\u001b[40;1H"}
+{"atMs":61208,"offset":18424,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":61288,"offset":18463,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":61368,"offset":18502,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":61448,"offset":18539,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":61464,"offset":18578,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H"}
+{"atMs":61528,"offset":18613,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m·\u001b[39m\u001b[40;1H"}
+{"atMs":61550,"offset":18651,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H"}
+{"atMs":61688,"offset":18686,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✢\u001b[39m\u001b[40;1H"}
+{"atMs":61768,"offset":18725,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m*\u001b[39m\u001b[40;1H"}
+{"atMs":61785,"offset":18762,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m*\u001b[39m\u001b[40;1H"}
+{"atMs":61786,"offset":18795,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":61849,"offset":18815,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✶\u001b[39m\u001b[40;1H"}
+{"atMs":61888,"offset":18854,"data":"\u001b[H\r\u001b[32B\u001b[38;5;174m✢\u001b[39m\u001b[40;1H"}
+{"atMs":61929,"offset":18889,"data":"\u001b[H\r\u001b[6C\u001b[37B\u001b[38;5;220m✻\u001b[39m\u001b[40;1H"}
+{"atMs":61936,"offset":18928,"data":"\u001b(B\u000f\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":61992,"offset":18964,"data":"\u001b[H\r\u001b[32B\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[38;5;174m✢\u001b[3GBurrowing… \r\u001b[4C\u001b[1B\u001b[39m\u001b[K\r\u001b[1B\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[1B\u001b[38;5;246m❯ \u001b[39m\u001b[7m \u001b[7G\u001b[27m\u001b[K\r\u001b[1B\u001b[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[1B\u001b[38;5;246m⏸ manual\u001b[12Gmode on · esc to interrupt · ← for agents\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62007,"offset":19931,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m·\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62230,"offset":19972,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m·\u001b[3GBurrowing… \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62455,"offset":20030,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62567,"offset":20072,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62746,"offset":20112,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":62793,"offset":20132,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":62906,"offset":20174,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63018,"offset":20216,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m✽\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63359,"offset":20258,"data":"\u001b[H\r\u001b[13C\u001b[34B\u001b[38;5;246m(16s)\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63455,"offset":20307,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✻\u001b[3GBurrowing… \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63567,"offset":20366,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63680,"offset":20408,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":63707,"offset":20448,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":63905,"offset":20468,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64018,"offset":20510,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m·\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64358,"offset":20551,"data":"\u001b[H\r\u001b[15C\u001b[34B\u001b[38;5;246m7\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64470,"offset":20596,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64583,"offset":20638,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64667,"offset":20678,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":64695,"offset":20698,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":64921,"offset":20740,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65033,"offset":20782,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✽\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65373,"offset":20824,"data":"\u001b[H\r\u001b[15C\u001b[34B\u001b[38;5;246m8\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65486,"offset":20869,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65582,"offset":20911,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65627,"offset":20953,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":65695,"offset":20973,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":65808,"offset":21013,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66033,"offset":21055,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m·\u001b[3GBurrowing… \u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66374,"offset":21113,"data":"\u001b[H\r\u001b[15C\u001b[34B\u001b[38;5;246m9\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66486,"offset":21158,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m✢\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66587,"offset":21200,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":66599,"offset":21220,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66711,"offset":21260,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":66824,"offset":21302,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":67051,"offset":21344,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m✽\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":67375,"offset":21386,"data":"\u001b[H\r\u001b[14C\u001b[34B\u001b[38;5;246m20\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":67418,"offset":21432,"data":"\u001b[H\r\u001b[34B\u001b[38;5;211m✻\u001b[3GWaiting for API response\u001b[38;5;246m · will retry in 4m 40s · check your network\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":67547,"offset":21559,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":68506,"offset":21579,"data":"\u001b[H\r\u001b[46C\u001b[34B\u001b[38;5;246m39\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":68507,"offset":21625,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":69467,"offset":21645,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":69506,"offset":21665,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m8\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":70427,"offset":21710,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":70526,"offset":21730,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m7\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":71387,"offset":21775,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":71527,"offset":21795,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m6\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":72348,"offset":21840,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":72528,"offset":21860,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m5\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":73308,"offset":21905,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":73432,"offset":21925,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m4\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":74268,"offset":21970,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":74432,"offset":21990,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m3\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":75228,"offset":22035,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":75447,"offset":22055,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m2\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":76188,"offset":22100,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":76447,"offset":22120,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m1\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":77148,"offset":22165,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":77463,"offset":22185,"data":"\u001b[H\r\u001b[47C\u001b[34B\u001b[38;5;246m0\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78108,"offset":22230,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":78125,"offset":22250,"data":"\u001b[H\r\u001b[34B\u001b[38;5;131m·\u001b[3GUndulating… \u001b[38;5;246m(30s)\u001b[39m\u001b[K\u001b[40;1H\u001b[38;3H"}
+{"atMs":78141,"offset":22328,"data":"\u001b[H\r\u001b[34B\u001b[38;5;167m·\u001b[3GUndulating… \u001b[19G\u001b[38;5;246m · \u001b[38;5;248mthinking\u001b[38;5;246m)\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78239,"offset":22438,"data":"\u001b[H\r\u001b[21C\u001b[34B\u001b[38;5;247mthinking\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78352,"offset":22490,"data":"\u001b[H\r\u001b[34B\u001b[38;5;173m·\u001b[3GUndulating… \u001b[17G\u001b[38;5;246m1\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78464,"offset":22566,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✢\u001b[3GUndulating… \u001b[22G\u001b[38;5;246mthinking\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78577,"offset":22650,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78690,"offset":22690,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":78915,"offset":22732,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79028,"offset":22774,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✽\u001b[22G\u001b[38;5;247mthinking\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79069,"offset":22840,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":79256,"offset":22860,"data":"\u001b[H\r\u001b[21C\u001b[34B\u001b[38;5;248mthinking\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79369,"offset":22912,"data":"\u001b[H\r\u001b[16C\u001b[34B\u001b[38;5;246m2\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79482,"offset":22957,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✻\u001b[22G\u001b[38;5;249mthinking\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79594,"offset":23023,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m✶\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79649,"offset":23065,"data":"\u001b[H\r\u001b[8B\u001b[38;5;246m \u001b[3G\u001b[39mThinking\u001b[12Gfor\u001b[16G\u001b[1m32s\u001b[22m…\r\u001b[1B\u001b[38;5;246m  ⎿  \u001b[39m\u001b[2m\u001b[3mThe user wants me to write a 400-word story about a lighthouse keeper. This is a creative writing task that doesn't\r\u001b[5C\u001b[1Brequire any code exploration or planning tools. I'll just write the story directly.\u001b[23m\u001b[22m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79697,"offset":23397,"data":"\u001b[H\r\u001b[34B\u001b[38;5;174m*\u001b[22G\u001b[38;5;246m↓\u001b[39m \u001b[38;5;246m25 tokens · \u001b[38;5;249mthinking\u001b[38;5;246m)\u001b[39m\u001b[40;1H\u001b[38;3H"}
+{"atMs":79744,"offset":23517,"data":"\u001b[H\r\u001b[8B \u001b[3G\u001b[38;5;246mThought for \u001b[1m32s\u001b[22m \u001b[39m\u001b[K\r\u001b[1B\u001b[K\r\u001b[1B\u001b[38;5;231m●\u001b[6G\u001b[39m\u001b[K\r\u001b[24B\u001b[K\u001b[40;1H\u001b[38;3H"}
+{"atMs":80005,"offset":23636,"data":"\u001b[H\r\u001b[2C\u001b[10B\u001b[1mThe Keeper of Blackwood Light\u001b[22m\u001b[40;1H\u001b[38;3H"}
+{"atMs":80029,"offset":23701,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":80966,"offset":23721,"data":"\u001b[H\r\u001b[2C\u001b[12BFor\u001b[7Gthirty-seven\u001b[20Gyears,\u001b[27GElias\u001b[33Ghad\u001b[37Gclimbed\u001b[45Gthe\u001b[49G142\u001b[53Gsteps\u001b[59Gto\u001b[62Gthe\u001b[66Gtop\u001b[70Gof\u001b[73GBlackwood\u001b[83GLight\u001b[89Gevery\u001b[95Gevening\u001b[103Gat\u001b[106Gdusk,\u001b[112Gand\u001b[116Gevery\u001b[40;1H\u001b[38;3H"}
+{"atMs":80989,"offset":23949,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":81695,"offset":23969,"data":"\u001b[H\r\u001b[2C\u001b[13Bmorning\u001b[11Gat\u001b[14Gfirst\u001b[20Glight\u001b[26Ghe\u001b[29Ghad\u001b[33Gdescended\u001b[43Gthem\u001b[48Gagain.\u001b[55GThe\u001b[59Grhythm\u001b[66Gof\u001b[69Gthose\u001b[75Gsteps\u001b[81Gwas\u001b[85Gthe\u001b[89Grhythm\u001b[96Gof\u001b[99Ghis\u001b[103Glife—steady,\u001b[40;1H\u001b[38;3H"}
+{"atMs":81949,"offset":24187,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":82434,"offset":24207,"data":"\u001b[H\r\u001b[2C\u001b[14Binevitable,\u001b[15Gas\u001b[18Gcertain\u001b[26Gas\u001b[29Gthe\u001b[33Gtide\u001b[38Gthat\u001b[43Gpounded\u001b[51Gagainst\u001b[59Gthe\u001b[63Gbasalt\u001b[70Gcliffs\u001b[77Gthree\u001b[83Ghundred\u001b[91Gfeet\u001b[96Gbelow.\u001b[40;1H\u001b[38;3H"}
+{"atMs":82909,"offset":24393,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":83292,"offset":24413,"data":"\u001b[H\r\u001b[2C\u001b[16BThe\u001b[7Glighthouse\u001b[18Ghad\u001b[22Gshrunk\u001b[29Garound\u001b[36Ghim,\u001b[41Gas\u001b[44Gold\u001b[48Gthings\u001b[55Gdo.\u001b[59GThe\u001b[63Gbrass\u001b[69Gfittings\u001b[78Gdarkened\u001b[87Gdespite\u001b[95Ghis\u001b[99Gpolishing.\u001b[110GThe\u001b[114Ggallery\u001b[40;1H\u001b[38;3H"}
+{"atMs":83869,"offset":24631,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":84056,"offset":24651,"data":"\u001b[H\r\u001b[2C\u001b[17Brailings\u001b[12Ggrew\u001b[17Gthinner\u001b[25Gwith\u001b[30Geach\u001b[35Gcoat\u001b[40Gof\u001b[43Gpaint.\u001b[50GBut\u001b[54Gthe\u001b[58Glamp\u001b[63Gstill\u001b[69Gburned,\u001b[77Gand\u001b[81Gthe\u001b[85Ggreat\u001b[91GFresnel\u001b[99Glens\u001b[104Gstill\u001b[110Gthrew\u001b[116Gits\u001b[40;1H\u001b[38;3H"}
+{"atMs":84829,"offset":24877,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":84886,"offset":24897,"data":"\u001b[H\r\u001b[2C\u001b[18Bbeam\u001b[8Gacross\u001b[15Gthe\u001b[19Gdark\u001b[24Gwater\u001b[30Gin\u001b[33Gfour-second\u001b[45Gintervals:\u001b[56Gflash,\u001b[63Gsweep,\u001b[70Gdarkness.\u001b[80GFlash,\u001b[87Gsweep,\u001b[94Gdarkness.\u001b[40;1H\u001b[38;3H"}
+{"atMs":85729,"offset":25075,"data":"\u001b[H\r\u001b[2C\u001b[20BNo\u001b[6Gships\u001b[12Ghad\u001b[16Gcalled\u001b[23Gat\u001b[26GBlackwood\u001b[36Gin\u001b[39Gtwenty\u001b[46Gyears—not\u001b[56Gsince\u001b[62Gthe\u001b[66Gautomated\u001b[76Gbeacon\u001b[83Gwent\u001b[88Gup\u001b[91Gon\u001b[94GCape\u001b[99GMeridian,\u001b[109Gforty\u001b[115Gmiles\u001b[40;1H\u001b[38;3H"}
+{"atMs":85789,"offset":25298,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":86475,"offset":25318,"data":"\u001b[H\r\u001b[2C\u001b[21Bto\u001b[6Gthe\u001b[10Gsouth.\u001b[17GThe\u001b[21Gshipping\u001b[30Glanes\u001b[36Ghad\u001b[40Gmoved\u001b[46Ginland\u001b[53Gwith\u001b[58Gthe\u001b[62Gnew\u001b[66Gchannels.\u001b[76GBut\u001b[80GElias\u001b[86Gkept\u001b[91Gclimbing,\u001b[101Gbecause\u001b[109Gsomeone\u001b[117Ghad\u001b[40;1H\u001b[38;3H"}
+{"atMs":86749,"offset":25540,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":86907,"offset":25560,"data":"\u001b[H\r\u001b[2C\u001b[22Bto\u001b[6Gkeep\u001b[11Gclimbing,\u001b[21Gand\u001b[25Gthat\u001b[30Gsomeone\u001b[38Gwas\u001b[42Ghim.\u001b[40;1H\u001b[38;3H"}
+{"atMs":87703,"offset":25657,"data":"\u001b[H\r\u001b[2C\u001b[24BThe\u001b[7Gstorm\u001b[13Gcame\u001b[18Gon\u001b[21Ga\u001b[23GNovember\u001b[32Gnight\u001b[38Gwith\u001b[43Gteeth\u001b[49Gsharp\u001b[55Genough\u001b[62Gto\u001b[65Gscare\u001b[71Gthe\u001b[75Ggulls\u001b[81Ginland.\u001b[89GWind\u001b[94Ghowled\u001b[101Gthrough\u001b[109Gthe\u001b[113Glantern\u001b[40;1H\u001b[38;3H"}
+{"atMs":87710,"offset":25883,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":88516,"offset":25903,"data":"\u001b[H\r\u001b[2C\u001b[25Broom\u001b[8Gglass\u001b[14Glike\u001b[19Ga\u001b[21Gchoir\u001b[27Gof\u001b[30Gthe\u001b[34Gdamned.\u001b[42GRain\u001b[47Glashed\u001b[54Ghorizontally,\u001b[68Gand\u001b[72Gfor\u001b[76Gthree\u001b[82Ghours\u001b[88Gthe\u001b[92Gsea\u001b[96Grose\u001b[101Ghigh\u001b[106Genough\u001b[113Gto\u001b[116Glick\u001b[40;1H\u001b[38;3H"}
+{"atMs":88670,"offset":26134,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":88747,"offset":26154,"data":"\u001b[H\r\u001b[2C\u001b[26Bthe\u001b[7Ggallery\u001b[15Gfloor.\u001b[40;1H\u001b[38;3H"}
+{"atMs":89588,"offset":26206,"data":"\u001b[H\r\u001b[2C\u001b[28BElias\u001b[9Gclimbed\u001b[17Gevery\u001b[23Ghour\u001b[28Gon\u001b[31Gthe\u001b[35Ghour,\u001b[41Gthough\u001b[48Gnot\u001b[52Ga\u001b[54Gsingle\u001b[61Gvessel\u001b[68Gsailed\u001b[75Gthose\u001b[81Gwaters.\u001b[89GHe\u001b[92Gwound\u001b[98Gthe\u001b[102Gclockwork\u001b[112Grotation\u001b[40;1H\u001b[38;3H"}
+{"atMs":89630,"offset":26427,"data":"\u001b]0;◐ Claude Code\u0007"}
+{"atMs":90336,"offset":26447,"data":"\u001b[H\r\u001b[2C\u001b[29Bmechanism,\u001b[14Ghe\u001b[17Gwiped\u001b[23Gcondensation\u001b[36Gfrom\u001b[41Gthe\u001b[45Glens\u001b[50Gpanels,\u001b[58Ghe\u001b[61Gchecked\u001b[69Gthe\u001b[73Gfuel\u001b[78Ggauge\u001b[84Gand\u001b[88Glogged\u001b[95Gthe\u001b[99Gbarometric\u001b[110Gpressure\u001b[119Gin\u001b[40;1H\u001b[38;3H"}
+{"atMs":90590,"offset":26666,"data":"\u001b]0;◑ Claude Code\u0007"}
+{"atMs":90655,"offset":26686,"data":"\u001b]0;◑ Lighthouse keeper story\u0007"}
+{"atMs":90815,"offset":26718,"data":"\u001b[H\r\u001b[2C\u001b[30Bhis\u001b[7Gleather-bound\u001b[21Gnotebook.\u001b[40;1H\u001b[38;3H"}
+{"atMs":91182,"offset":26779,"data":"\u001b[H\r\u001b[2C\u001b[32BAt\u001b[6G3:17\u001b[11GAM,\u001b[15Gduring\u001b[22Gthe\u001b[26Gfourth\u001b[33Ghourly\u001b[40Gclimb,\u001b[47Ghe\u001b[50Gsaw\u001b[54Git—a\u001b[59Gsingle\u001b[66Gyellow\u001b[73Glight,\u001b[80Gmoving\u001b[87Gslowly\u001b[94Geastward\u001b[103Gon\u001b[106Gthe\u001b[110Ghorizon.\u001b[119GA\u001b[40;1H\u001b[38;3H"}
+{"atMs":91550,"offset":27008,"data":"\u001b]0;◐ Lighthouse keeper story\u0007"}
+{"atMs":91652,"offset":27040,"data":"\u001b[H\r\u001b[2C\u001b[33Bfishing\u001b[11Gboat,\u001b[17Goff\u001b[21Gcourse,\u001b[29Gcaught\u001b[36Gin\u001b[39Gthe\u001b[43Grip\u001b[47Gcurrent.\u001b[56GIts\u001b[60Gnavigation\u001b[71Glights\u001b[78Gflickered\u001b[88Gweakly\u001b[95Gagainst\u001b[103Gthe\u001b[107Gstorm.\u001b[40;1H\u001b[38;3H"}

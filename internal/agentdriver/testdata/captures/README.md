@@ -40,18 +40,19 @@ set (`internal/agentcalib`, nocx-etejh) is a capture too: one chunk per labelled
 one mark per label, so `agent-capture replay` reads a person's calibration as readily as it
 reads this corpus.
 
-| capture                | script              | what it holds                                                                        |
-| ---------------------- | ------------------- | ------------------------------------------------------------------------------------ |
-| `claude-idle`          | `idle.script`       | the idle input box — nothing typed, the TUI left to settle (`11000`)                 |
-| `claude-idle-60`       | `idle.script`       | the same idle input box at the narrow 60×40 geometry (`11000`)                       |
-| `claude-idle-80`       | `idle.script`       | the same idle input box at the narrow 80×40 geometry (`11000`)                       |
-| `claude-working`       | `working.script`    | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)      |
-| `claude-permission`    | `permission.script` | the Write tool's approval dialog, waiting on a human (`49000`)                       |
-| `claude-permission-60` | `permission.script` | the Write tool's approval dialog at 60×40 (`49000`)                                  |
-| `claude-modal`         | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)             |
-| `claude-subagent`      | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`)  |
-| `claude-error`         | `error.script`      | the TUI's own error: the API unreachable, retrying (`20000`, `30000`, `44000`)       |
-| `claude-trust`         | `trust.script`      | the folder-trust question, raised before the TUI will start in a directory (`11000`) |
+| capture                | script                 | what it holds                                                                                                                                                |
+| ---------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `claude-idle`          | `idle.script`          | the idle input box — nothing typed, the TUI left to settle (`11000`)                                                                                         |
+| `claude-idle-60`       | `idle.script`          | the same idle input box at the narrow 60×40 geometry (`11000`)                                                                                               |
+| `claude-idle-80`       | `idle.script`          | the same idle input box at the narrow 80×40 geometry (`11000`)                                                                                               |
+| `claude-working`       | `working.script`       | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)                                                                              |
+| `claude-permission`    | `permission.script`    | the Write tool's approval dialog, waiting on a human (`49000`)                                                                                               |
+| `claude-permission-60` | `permission.script`    | the Write tool's approval dialog at 60×40 (`49000`)                                                                                                          |
+| `claude-modal`         | `modal.script`         | the `/model` menu, opened by the user rather than by the agent (`20000`)                                                                                     |
+| `claude-subagent`      | `subagent.script`      | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`)                                                                          |
+| `claude-error`         | `error.script`         | the TUI's own error: the API unreachable, retrying (`20000`, `30000`, `44000`)                                                                               |
+| `claude-lmstudio-turn` | `lmstudio-turn.script` | onboarding, trust accepted, idle, ctrl+o transcript viewer (40000), a turn before its timer (47500, 49000), /btw overlay (55000, 58000), API waiting (72000) |
+| `claude-trust`         | `trust.script`         | the folder-trust question, raised before the TUI will start in a directory (`11000`)                                                                         |
 
 `claude-error` was captured against v2.1.245 by pointing `ANTHROPIC_BASE_URL` at a dead port,
 which is how the error chrome is reproduced without waiting for a real outage. What it settled:
@@ -75,6 +76,10 @@ scratch directory recorded an idle input box instead. It settled one thing reaso
 the trust question numbers none of its options, so it misses the numbered-menu branches by
 exactly that predicate and fell through to `unknown` — the verdict for a screen the driver
 could not read — while the driver read every cell of it (`nocx-f545a.2`).
+
+`claude-lmstudio-turn` was captured 2026-09-11 against Claude Code 2.1.266 with
+`qwen/qwen3.6-35b-a3b` on LM Studio through `ANTHROPIC_BASE_URL`, under `env -i` with a
+fresh `HOME` and `CLAUDE_CONFIG_DIR` in `/var/tmp`, 120×40.
 
 ## Four things the captures decided, which reasoning got wrong
 

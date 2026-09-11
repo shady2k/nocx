@@ -24,33 +24,69 @@
   "entries": [
     {
       "moment": "theme-picker",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 8000,
+      "state": "modal_choice",
+      "note": "the onboarding theme list, before the first Enter dismisses it (nocx-nru89.2)"
     },
     {
       "moment": "security-notes",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 17000,
+      "state": "unknown",
+      "note": "Press Enter to continue; not a numbered menu and not the input box (nocx-nru89.2)"
     },
     {
       "moment": "folder-trust",
+      "capture": "claude-lmstudio-turn",
+      "atMs": 20500,
+      "state": "permission_choice",
+      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-trust",
       "atMs": 11000,
       "state": "permission_choice",
-      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2)"
+      "note": "the same moment on Claude Code 2.1.263, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "idle-120",
+      "capture": "claude-lmstudio-turn",
+      "atMs": 36000,
+      "state": "free_text",
+      "note": "the idle input box is where nocx may type; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-idle",
       "atMs": 11000,
       "state": "free_text",
-      "note": "the idle input box is where nocx may type"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
-    { "moment": "idle-80", "capture": "claude-idle-80", "atMs": 11000, "state": "free_text" },
+    {
+      "moment": "idle-80",
+      "capture": "claude-lmstudio-idle-80",
+      "atMs": 38000,
+      "state": "free_text",
+      "note": "re-recorded on Claude Code 2.1.266 at 80x40 (nocx-nru89.2)"
+    },
+    {
+      "capture": "claude-idle-80",
+      "atMs": 11000,
+      "state": "free_text",
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
+    },
     {
       "moment": "idle-60",
+      "capture": "claude-lmstudio-idle-60",
+      "atMs": 38000,
+      "state": "free_text",
+      "note": "the narrow geometry of a side-by-side worker pane; re-recorded on Claude Code 2.1.266 at 60x40 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-idle-60",
       "atMs": 11000,
       "state": "free_text",
-      "note": "the narrow geometry of a side-by-side worker pane"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "turn-before-timer",
@@ -62,17 +98,29 @@
     { "capture": "claude-lmstudio-turn", "atMs": 47500, "state": "working" },
     {
       "moment": "turn-with-timer",
+      "capture": "claude-lmstudio-permission",
+      "atMs": 48000,
+      "state": "working",
+      "note": "the spinner with its elapsed timer (Blanching… (9s · ...)); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-working",
       "atMs": 17000,
       "state": "working",
-      "note": "the spinner with its elapsed timer"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "turn-finished",
+      "capture": "claude-lmstudio-permission",
+      "atMs": 101000,
+      "state": "free_text",
+      "note": "the box never went away; this separates the box being on screen from the box waiting; re-recorded on Claude Code 2.1.266, after Esc cancels the first Bash dialog and the turn's own box returns (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-working",
       "atMs": 44000,
       "state": "free_text",
-      "note": "the box never went away; this separates the box being on screen from the box waiting"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "btw-overlay",
@@ -84,34 +132,71 @@
     { "capture": "claude-lmstudio-turn", "atMs": 58000, "state": "working" },
     {
       "moment": "transcript-viewer",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "capture": "claude-lmstudio-turn",
+      "atMs": 40000,
+      "state": "unknown",
+      "note": "Showing detailed transcript · ctrl+o to toggle, opened during the ctrl+o steps of the same onboarding run (nocx-nru89.2)"
     },
     {
       "moment": "model-menu",
+      "capture": "claude-lmstudio-model",
+      "atMs": 49000,
+      "state": "modal_choice",
+      "note": "a menu the user opened, not a tool approval; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-modal",
       "atMs": 20000,
       "state": "modal_choice",
-      "note": "a menu the user opened, not a tool approval"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "bash-permission",
-      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "capture": "claude-lmstudio-permission",
+      "atMs": 49000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "Bash command / touch marker.txt, only 2 options because the settings ask-rule names this exact command (nocx-nru89.2)"
     },
     {
       "moment": "write-permission",
+      "capture": "claude-lmstudio-permission",
+      "atMs": 110000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "replaces the input box; its selected row opens with the input marker; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-permission",
       "atMs": 49000,
       "state": "permission_choice",
       "branch": 0,
-      "note": "replaces the input box; its selected row opens with the input marker"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
-    { "capture": "claude-permission-60", "atMs": 49000, "state": "permission_choice" },
+    {
+      "capture": "claude-permission-60",
+      "atMs": 49000,
+      "state": "permission_choice",
+      "note": "the same moment on Claude Code 2.1.238 at 60x40, kept as a regression (nocx-nru89.2)"
+    },
     {
       "moment": "subagent-running",
+      "capture": "claude-lmstudio-subagent-finished",
+      "atMs": 75000,
+      "state": "working",
+      "note": "task panel below the mode line, the main turn only saying 'Waiting for 1 background agent to finish' (no elapsis, not a spinner line); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
+      "capture": "claude-lmstudio-subagent",
+      "atMs": 65000,
+      "state": "working",
+      "note": "the same corpus's other onboarding-scripted subagent run, main turn still generating above the task panel (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-subagent",
       "atMs": 30000,
       "state": "working",
-      "note": "task panel below the mode line, no spinner"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "capture": "claude-subagent",
@@ -121,17 +206,29 @@
     },
     {
       "moment": "subagent-finished",
+      "capture": "claude-lmstudio-subagent-finished",
+      "atMs": 112000,
+      "state": "free_text",
+      "note": "the interval's second end; a finished turn's summary in the status slot is not an error; on Claude Code 2.1.266 the /tasks-to-see-subagents mode-line hint outlives the task panel by roughly 20-30s of real time before it too clears (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-subagent",
       "atMs": 70000,
       "state": "free_text",
-      "note": "the interval's second end; a finished turn's summary in the status slot is not an error"
+      "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
       "moment": "api-refused",
+      "capture": "claude-lmstudio-api-refused",
+      "atMs": 40000,
+      "state": "error",
+      "note": "the TUI's own error, in the spinner's slot, told apart by grammar; re-recorded on Claude Code 2.1.266 against http://127.0.0.1:9 (nocx-nru89.2)"
+    },
+    {
       "capture": "claude-error",
       "atMs": 30000,
       "state": "error",
-      "note": "the TUI's own error, in the spinner's slot, told apart by grammar"
+      "note": "the same moment on Claude Code 2.1.245, kept as a regression (nocx-nru89.2)"
     },
     { "capture": "claude-error", "atMs": 20000, "state": "error" },
     { "capture": "claude-error", "atMs": 44000, "state": "error" },
@@ -140,7 +237,7 @@
       "capture": "claude-lmstudio-turn",
       "atMs": 72000,
       "state": "error",
-      "note": "Waiting for API response · will retry in; a second chrome of an unreachable API (nocx-emors)"
+      "note": "Waiting for API response · will retry in; a second chrome of an unreachable API (nocx-emors); already on Claude Code 2.1.266, so not re-recorded for nocx-nru89.2"
     },
     {
       "capture": "claude-idle",

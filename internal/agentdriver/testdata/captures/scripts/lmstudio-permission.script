@@ -1,0 +1,11 @@
+14000 \r
+6000 \r
+7000 \x1b[B
+1500 \r
+9000 Run exactly this shell command and nothing else: touch marker.txt
+800 \r
+60000 \x1b
+6000 Create a file named note.txt containing exactly the word hi
+800 \r
+60000 \x1b
+5000

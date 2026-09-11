@@ -1,7 +1,8 @@
 # What nocx lets a coordinator do, measured against herdr — design
 
-- **Status:** Draft for review, 2026-09-11. Decisions in §4 are the owner's, taken in conversation
-  the same day; §6 is part 1's design, section A approved, section B drafted from decisions §4.9–§4.10.
+- **Status:** Draft, second revision, 2026-09-11. §4 holds the owner's decisions of that day. §6
+  designs part 1a in full. §7 is the brief for part 1b, which gets a design of its own. §9 records
+  the codex review of the first revision and what became of each finding.
 - **Brainstorm bead:** `nocx-34r0i` (its notes carry the decisions verbatim).
 - **Triggered by:** `nocx-9f1d4`, with `nocx-tlaft` and `nocx-tdiqs` found in the same run.
 
@@ -10,8 +11,8 @@
 **What the owner saw, 2026-09-11.** A coordinator Claude (session `a71215c4`) called
 `workers.spawn` with a task telling its worker to write `NOCX_AGENT_REPORT`, then
 `workers.wait(600)`. The worker (session `b8c6748d`) wrote `ok` and a summary at 10:43:46Z and
-finished its turn at 10:44:00Z. The wait did not return; it came back at 10:48:14Z only because
-the coordinator's own Claude was closed and the MCP connection dropped. `nocx.log` records
+finished its turn at 10:44:00Z. The wait did not return; it came back at 10:48:14Z only because the
+coordinator's own Claude was closed and the MCP connection dropped. `nocx.log` records
 `worker participant reported ok=true` at 13:48:20 local — when the worker's Claude was closed too.
 Meanwhile `workers.screen`, called to find out why, sat behind the wait (`nocx-tlaft`), and the
 worker's tab opened to the left of the coordinator's (`nocx-tdiqs`).
@@ -19,257 +20,309 @@ worker's tab opened to the left of the coordinator's (`nocx-tdiqs`).
 **Why it could not have worked.** The shell wrapper sends a declaration only after the agent
 returns (`internal/shellintegration/scripts/nocx.bash`, `__nocx_agent_run`), per
 `docs/lifecycle-protocol.md` §16. `workers.spawn` starts an interactive Claude, which does not exit
-when its turn ends. So the coordinator waits for a declaration, the declaration waits for an exit,
-and the exit waits for the coordinator's `workers.close`.
+when its turn ends. The coordinator waits for a declaration, the declaration waits for an exit, and
+the exit waits for the coordinator's `workers.close`.
 
 **How the answer was lost.** The 2026-08-15 design
-(`.internal/specs/2026-08-15-workspaces-lineage-and-orchestration-design.md`) had it: **D11** —
-state is evidence, not a value — and a provenance table in which a hook on the authenticated channel
-is `declared` and a pattern match on the screen is `inferred`. On 2026-09-04 the owner confirmed
-that hooks are staged at launch. The later designs narrowed that without the owner asking for it:
-**D6** and **D9** of `2026-08-24-orchestration-mechanism-design.md` ("no vendor-specific route
-carries anything required"; "the screen decides typing and lighting, and nothing else") and **D5**
-of `2026-09-05-the-tool-surface-at-launch-design.md` ("hooks are optional and non-load-bearing").
-No hook is staged anywhere in the tree today. The product nocx replaces does the opposite, and
-this document starts from what it does.
+(`.internal/specs/2026-08-15-workspaces-lineage-and-orchestration-design.md`) had it: **D11**, state
+is evidence and not a value, with a provenance table in which a hook on the authenticated channel is
+`declared` and a pattern match on the screen is `inferred`. On 2026-09-04 the owner confirmed that
+hooks are staged at launch. Later designs narrowed that without the owner asking: **D6** and **D9**
+of `2026-08-24-orchestration-mechanism-design.md` ("no vendor-specific route carries anything
+required"; "the screen decides typing and lighting, and nothing else") and **D5** of
+`2026-09-05-the-tool-surface-at-launch-design.md` ("hooks are optional and non-load-bearing"). No
+hook is staged anywhere in the tree today.
 
 ## 2. The references
 
 ### 2.1 herdr (`~/repos/herdr`, v0.8.2)
 
-- **One status authority per pane** (`docs/.../agents.mdx`, "Status authority"): an agent's
-  lifecycle hooks when installed and reporting; otherwise a screen manifest evaluated against the
-  bottom of the buffer. For Claude Code the manifest is the authority
-  (`src/detect/manifests/claude.toml`): title spinner and `/btw` are `working`, the prompt box is
-  `idle`, forms and permission prompts are `blocked`, the transcript viewer and model picker are
-  `unknown` with `skip_state_update`. Claude's hooks give herdr session identity only.
-- **States** `idle | working | blocked | done | unknown`; `done` is `idle` not yet seen.
-- **Control surface** (`agent-automation.mdx`): `agent wait`, `agent prompt [--wait]` (submits
-  while the agent is working), `agent read`, `agent send-keys` (any logical key), `pane wait-output`.
+- **One status authority per pane** (`agents.mdx`, "Status authority"): lifecycle hooks when
+  installed and reporting, otherwise a screen manifest over the bottom of the buffer. For Claude
+  Code the manifest is the authority; Claude's hooks give herdr session identity only.
+- **Control surface** (`agent-automation.mdx`): `agent wait`, `agent prompt [--wait]` (submits while
+  the agent works), `agent read`, `agent send-keys` (any logical key).
 - **How detection is kept correct** (`AGENTS.md`, "Agent Detection Updates"): CI holds unit tests
-  of manifest mechanics with short inline screens, and explicitly no large per-agent full-screen
-  fixture suites. Rule evidence is gathered live, outside CI, in a throwaway session
-  (`.agents/skills/herdr-throwaway-repro`): drive the real agent into the state, read it with
-  `agent read --source detection`, inspect it with `agent explain --json`, edit the manifest as a
-  local override, hot-reload, verify, restore the override, commit. Paid tokens only with approval, cheap model, nothing
-  destructive approved.
+  of manifest mechanics with short inline screens and no large per-agent fixture suites; rule
+  evidence is gathered live, outside CI, by driving the real agent in a throwaway session
+  (`.agents/skills/herdr-throwaway-repro`).
+- **Why herdr is not a comparator here.** Its Claude `working` rules are `osc_title_working` and
+  `btw_overlay_working` only (`src/detect/manifests/claude.toml`); `agent explain --file` evaluates
+  text with empty title and progress inputs (`src/detect/manifest.rs`), so an ordinary working
+  screen reads there as `idle`; and it has no `error` state. Its method is taken, its verdicts are
+  not.
 
-### 2.2 nelix (`~/repos/nelix`) — sending keys into a screen that keeps changing
+### 2.2 nelix (`~/repos/nelix`) — keys into a screen that keeps changing
 
-A frame is never compared whole: spinners and timers change it continuously. The driver normalises
-the frame (chrome zeroed) and fingerprints regions (`daemon/fingerprints.py`). A modal's identity
-is `(prompt kind, options, body fingerprint)`. An answer is enqueued with the identity it targets;
-one monitor thread is the sole writer and re-observes the frame immediately before writing — same
-identity, write; different modal, no modal or no body fingerprint, abort with nothing typed
-(`daemon/session.py`, `_drain_pending_answer`). Free text is written only while the input box is
-on screen and confirmed from frames produced after the write: the echo appears and leaves
-(`_drain_pending_submit`), and an echo that never leaves is escalated.
+Nelix normalises a frame (chrome zeroed) and fingerprints it whole and by region
+(`daemon/fingerprints.py`); a modal's identity is `(prompt kind, options, body fingerprint)`. On the
+queued pre-delivery answer path, one monitor thread is the sole writer: it re-observes and writes
+only when the on-screen modal has the answer's identity and a non-empty body fingerprint, otherwise
+aborts with nothing typed (`daemon/session.py`, `_drain_pending_answer`). Free text on the
+monitor-owned path is written while the input box is on screen and confirmed from later frames —
+the echo leaving, or a high-confidence state transition — with a stuck echo escalated
+(`_drain_pending_submit`). Other post-delivery answers still write from the RPC thread. What 1b
+takes from it is the separation of identity from the preconditions of an action, not the claim that
+observation and input can be made atomic: they cannot, because the application runs on its own.
 
 ## 3. Binding documents this crosses
 
-| Document                                         | What it decided                                                                                                                                 | What this design does                                                                                                                                                                                    |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **AD-6** amendment, `docs/architecture.md`       | An enrolled pane's grid may decide exactly two things: whether nocx may write, and the indicator. It "may not … assign status to a wave state". | **Amended, deliberately** (part 2): worker state takes screen-inferred and hook-declared events. Part 1 restates power (1): a write is permitted by a re-classified **target**, not only by `free_text`. |
-| **ADR-0024** decision 2                          | The authenticated channel carries enrolment and declarations; no bearer material in the environment.                                            | Kept. The carrier for hook events is decided in part 6, not here.                                                                                                                                        |
-| **ADR-0063**                                     | Typing is refused on evidence against the rule, not on its absence; the frame is re-read before a write.                                        | Kept and extended: re-classification before every write, now against a named target.                                                                                                                     |
-| **ADR-0064** §1                                  | Writes into a pane: text into positively identified `free_text`, or keys from the closed set a menu offers.                                     | **Superseded** by a new ADR: any key, conditional on its target (§6.1).                                                                                                                                  |
-| **ADR-0064** §2                                  | A coordinator reads only panes it holds; a person's own pane is readable by nobody.                                                             | Kept for screens. Part 5 adds a neighbour **list** within a workspace, which carries no screen.                                                                                                          |
-| **ADR-0020**                                     | Authority is granted per run.                                                                                                                   | Kept: which sessions a tool may touch is the grant's answer, never the tool's name (§6.1).                                                                                                               |
-| 2026-08-15 design §6, **D11**, **D12**           | One dispatcher, two callers; state is evidence; detection rules are local and user-editable.                                                    | **Restored.** `session.*` serves both callers; worker state is evidence (part 2); rules stay local (no manifest catalogue).                                                                              |
-| 2026-08-24 design **D6**, **D9**, §7.2           | Hooks carry nothing required; only exit and declaration decide state; `wait` is a convenience.                                                  | **D6/D9 superseded** (new ADR, part 2). `workers.wait` removed (part 2).                                                                                                                                 |
-| 2026-09-05 design **D5**                         | Hooks optional and non-load-bearing; first Claude adapter stages MCP only.                                                                      | **Superseded** (part 6).                                                                                                                                                                                 |
-| 2026-09-03 mesh design **M1**, **M2**, **P1–P7** | Talk is mesh, act is star; progress is appended checkpoints that wake nobody.                                                                   | Kept: neighbours may talk (part 5), only a coordinator acts on its workers; checkpoints per P1–P7 (part 3).                                                                                              |
-| `AGENTS.md`, "Look for the existing answer"      | One owner per behaviour.                                                                                                                        | `workers.screen` and `session.read` are two readings of one screen; they become one tool (§6.1).                                                                                                         |
+| Document                                         | What it decided                                                                                                                                 | Where this design touches it                                                                                                                                                              |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **AD-6** amendment, `docs/architecture.md`       | A grid decides two powers only; power (1) has two cases — text into `free_text`, keys from a menu's closed set; the grid assigns no wave state. | **1a: untouched** (no write). **1b: amended** — arbitrary keys and input during a turn are new cases of power (1). **Part 2: amended** — worker state takes inferred and declared events. |
+| **AD-1**                                         | Raw bytes on the data plane, JSON-RPC on the control plane.                                                                                     | 1b: keys are semantic control operations encoded at the input seam, never raw PTY bytes carried over JSON-RPC.                                                                            |
+| **AD-7**, **AD-8**                               | Server-authoritative sessions; every module behind an interface at one composition root.                                                        | 1b: an own-session and a delegated-session capability behind one interface, wired at the root.                                                                                            |
+| **ADR-0024** decision 2                          | The authenticated channel carries enrolment and declarations.                                                                                   | Kept. The carrier for hook events is part 6's decision.                                                                                                                                   |
+| **ADR-0029** (proposed)                          | A keystroke is bound to what makes it meaningful.                                                                                               | 1b must settle it: accept, supersede or fold into the new ADR.                                                                                                                            |
+| **ADR-0063**, **ADR-0064**                       | Typing refused on evidence against the rule; answers named by option text; reads only by the holding session.                                   | 1b supersedes ADR-0064 §1's closed key set and must re-home its answer path (selection check, owed task). §2's read boundary is kept.                                                     |
+| **ADR-0020**                                     | Authority granted per run.                                                                                                                      | 1b: which sessions a tool reaches is the capability's answer, never the tool's name.                                                                                                      |
+| 2026-08-15 design §6, **D11**, **D12**           | One dispatcher, two callers; state is evidence, reduced over, never one field with source priority; rules local.                                | §6 keeps D12 (no catalogue). Part 2 and part 6 restore D11 including its rejection of a priority field: hook authority needs activation, expiry and per-turn identity.                    |
+| 2026-08-24 design **D6**, **D9**, §7.2           | Hooks carry nothing required; only exit and declaration decide state; `wait` is a convenience.                                                  | Superseded in parts 2 and 6 by new records.                                                                                                                                               |
+| 2026-09-05 design **D5**                         | Hooks optional and non-load-bearing.                                                                                                            | §6 stages hooks only as measurement labels in a throwaway run; part 6 supersedes D5.                                                                                                      |
+| 2026-09-03 mesh design **M1**, **M2**, **P1–P7** | Talk is mesh, act is star; checkpoints wake nobody and are expressly **not** completion reports; structural reporting kept.                     | Part 3 conflicts with P1's "not a completion report" if the drop goes (§4.5): part 2/3 must decide what carries a final outcome and supersede the provision it replaces.                  |
+| `AGENTS.md` testing rules 1–5                    | User-path tests, a happy path per epic, failure paths as intervals, independent tests, the wire in the contract.                                | §6.4 for 1a; §7 carries them into 1b's brief.                                                                                                                                             |
 
 ## 4. Decisions (owner, 2026-09-11)
 
-1. **Worker state is two-tier.** A hook-declared event is authoritative while the agent's hooks
+1. **Worker state is two-tier.** Hook-declared events are authoritative while the agent's hooks
    report; the screen classifier (`internal/paneobserve`, `internal/agentdriver`) is the fallback;
-   process exit is its own event. Screen detection is verified first, hooks come after.
-2. **nocx wakes the coordinator without an LLM call** on `blocked`, turn finished and exited, by
-   typing a pointer line into its pane — never the worker's content (the principle already in
-   `internal/workers/backstop.go` `wakeText`).
-3. **At spawn nocx gives the worker a preamble:** who its coordinator is, how to reach it, which
-   tools it has.
-4. **Checkpoints** come from the worker through a tool, per P1–P7: appended, waking nobody.
-5. **`workers.wait` is removed. The `NOCX_AGENT_REPORT` drop is removed;** a worker's final word is
-   its last checkpoint and its screen.
-6. **Scope.** Over its own workers a coordinator has every right: list, mail, turn-starting
-   message, screen, keys, close. Agents enrolled in the same nocx **workspace** are neighbours:
-   listed, reachable by quiet mail and by a nocx **pointer** wake only — never typed content,
-   because a turn-starting message borrows the recipient's permissions (an agent in auto mode runs
-   what it is told). Plain shells are never listed.
-7. **A message to an agent has two deliveries:** at its next free prompt, and during its turn
-   (Claude Code queues typed input). During a turn the text is pasted, the frame re-read to confirm
-   it landed in the input box, and only then Enter is sent.
-8. **`workers.close` also closes the tab.** A worker's tab opens to the right of its coordinator's
-   (`nocx-tdiqs`). The MCP bridge serves calls concurrently (`nocx-tlaft`).
-9. **Any key may be sent,** conditional on its **target**, never on the frame (§2.2).
-10. **Part 1's method.** CI runs mocks only. Correctness is verified live, outside CI, by a
-    coordinator Claude in a nocx dev-stand pane inside a throwaway folder, through the worker MCP
-    tools, following a repository skill so the run repeats after every Claude update. Labels come
-    from Claude Code hooks staged for the run and from the script's own causation; herdr is a second
-    reader; the owner arbitrates only disagreements. Tokens may be spent: cheap model, nothing
-    approved.
-11. **Interaction with a pane lives in `session.*`,** one tool per act for both callers, with
-    authority from the grant (§6.1).
+   process exit is its own event. Screen detection is verified first, hooks after.
+2. **nocx wakes the coordinator without an LLM call** on blocked, turn finished and exited, by typing
+   a pointer line into its pane, never the worker's content (`internal/workers/backstop.go`
+   `wakeText`).
+3. **At spawn nocx gives the worker a preamble:** its coordinator, how to reach it, its tools.
+4. **Checkpoints** come from the worker through a tool, per P1–P7.
+5. **`workers.wait` is removed; the `NOCX_AGENT_REPORT` drop is removed,** a worker's final word being
+   its last checkpoint and its screen — subject to the mesh conflict in §3, settled in part 2/3.
+6. **Scope.** Over its own workers a coordinator has every right. Agents enrolled in the same nocx
+   **workspace** are neighbours: listed, reachable by quiet mail and a nocx pointer wake only, never
+   typed content, because a turn-starting message borrows the recipient's permissions. Plain shells
+   are never listed.
+7. **A message has two deliveries:** at the next free prompt, and during a turn.
+8. **`workers.close` closes the tab too;** a worker's tab opens right of its coordinator's; the MCP
+   bridge serves calls concurrently.
+9. **Any key may be sent,** conditional on what the caller saw, not on the frame.
+10. **Interaction with a pane lives in `session.*`,** one tool per act for both callers.
+11. **Part 1 is split.** 1a verifies classification with no new write power; 1b is the pane
+    interaction tools. The owner verifies after the whole implementation, not between them.
+12. **CI runs mocks only;** correctness is verified live, outside CI, by a repeatable procedure.
+13. **herdr is not a comparator** (§2.1).
+14. **Live runs never touch the owner's Claude account or configuration.** Claude Code talks to the
+    owner's LM Studio (Anthropic-compatible `/v1/messages`) with a fresh `CLAUDE_CONFIG_DIR` per run.
+    Verified 2026-09-11: `/v1/messages` answered 200, a tool definition produced
+    `stop_reason: tool_use`, and Claude Code 2.1.266 in print mode answered `ok` from a fresh config
+    directory, printing an unrecognized-model notice.
 
 ## 5. Order of work
 
-1. **Screen detection, verified** (this document, §6).
-2. **Event-driven worker state and the coordinator wake:** amend AD-6, supersede D6/D9, remove
-   `workers.wait` and the drop, `workers.close` closes the tab.
-3. **Spawn preamble and checkpoints.**
-4. **Messages:** `when=free` and `when=now` delivered as §4.7 (the tool itself lands in part 1).
-5. **Workspace neighbours:** list, mail, pointer wake.
+1. **1a — classification, verified** (§6).
+2. **1b — pane interaction tools** (§7 is its brief; `nocx-tlaft` is its prerequisite).
+3. **Event-driven worker state and the coordinator wake;** `workers.wait` and the drop removed;
+   `workers.close` closes the tab.
+4. **Spawn preamble and checkpoints.**
+5. **Workspace neighbours.**
 6. **Hooks as the authoritative tier.**
 
-`nocx-tlaft` and `nocx-tdiqs` are standalone bugs and are not blocked by any of these.
+`nocx-tdiqs` is a standalone bug.
 
-## 6. Part 1 — screen detection, verified before hooks
+## 6. Part 1a — the classification, verified
 
-### 6.1 Section A: the tools the verification needs (approved)
+### 6.1 What is verified, and what is not
 
-**What exists.** `agentdriver.Explanation` (`internal/agentdriver/explain.go`) already carries the
-rule's reading — branches reached and matched, predicates, anchors, extractor rows — and
-`agent.emitting` serves it to the calibration view. `agenttyping.ReadMenu` extracts a menu's
-options; `Typist.Submit/Type/Choose` re-read the frame before writing and confirm nothing after it.
-`workerSpawner.deliverTask` delivers a task by waiting for `free_text` and calling `Typist.Submit`.
-The built-in assistant reaches a pane through `session.list`, `session.read`, `session.run` and
-`session.wait`, each bound to `runCtx.Session` with no session parameter; `session.read` takes its
-screen from the renderer (`executeSessionScreen`, `RequestScreen`). The coordinator reaches its
-workers' panes through `workers.screen` (the backend grid) and `workers.answer`.
+Verified: that the shipped rule (`internal/agentdriver/claude.rule.json`) classifies every state in
+§6.3 correctly on the Claude Code version installed at the time of the run. Not verified here: any
+write into a pane (1b), worker state reduction (part 3) or hook authority (part 6). 1a adds no
+permission to write into any pane and no product surface.
 
-**The tools.**
+### 6.2 The harness
 
-1. **`session.read`** gains an optional `session` (default: the caller's own). For a pane with an
-   enrolled agent the result also carries:
-   - `reading` — the rule's reading, the same projection `agent.emitting` renders, never a second
-     renderer of it;
-   - `target` — the identity a key or message may be conditioned on (below).
+**Driving Claude: `cmd/agent-capture`, unchanged in how it drives.** It already runs a program on a
+real PTY, sends a timed-keystroke script (`<delayMs> [input]` per line), and records every chunk
+with its offset from `Header.Started`; the corpus in `internal/agentdriver/testdata/captures` was
+made by it. Replay goes through `internal/panegrid`, the path the product uses.
 
-   Source of rows: the backend grid when the pane is enrolled (it exists without a connected
-   client), the renderer otherwise (AD-6: the renderer owns the VT state of an unenrolled pane).
-   A row's text is produced the same way on both paths. **`workers.screen` is removed.**
+**One new subcommand, `agent-capture verify`.** Inputs: a capture, its hook log and the scenario's
+marks. For each mark it replays the moment through `panegrid`, classifies it with the shipped rule
+through the same entry point the rule tests use, takes the `agentdriver.Explanation`, computes the
+label (§6.3), and appends one line to `report.jsonl`:
 
-2. **`session.message(session, text, when)`** — `when=free` waits for the free input box and
-   submits, the path `deliverTask` already takes; `when=now` pastes during a turn, confirms the echo
-   in the input box from frames produced after the paste, and only then sends Enter. No echo, or a
-   menu on screen at the Enter, refuses with nothing further written.
-3. **`session.keys(session, keys | option, target)`** — any keys, or a menu option named by its
-   text as the screen drew it (what `workers.answer` does today). **`workers.answer` is removed.**
+```
+{scenario, markMs, label: {state, source: "hook"|"script", evidence}, verdict: "agree"|"disagree"|"unsupported"|"failed",
+ nocx: {state, matchedBranch}, rows, reason}
+```
 
-**The target.** Computed by nocx from the rule's reading, never supplied by the caller's own idea
-of the screen:
+**The procedure: a skill, `.claude/skills/nocx-detection-verify/`,** with the scenario scripts and
+the pre-flight script, so the run is the same after every Claude update.
 
-| On screen          | Target identity                                                                                                                                                               |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a menu             | state (`permission_choice` / `modal_choice`), the question, the options, a digest of the menu body rows the rule's extractors bound — spinner, timer and token meter excluded |
-| the free input box | `free_text`                                                                                                                                                                   |
-| a turn in flight   | `working`, and no menu                                                                                                                                                        |
-| anything else      | `error` / `unknown` — a key conditioned on it is refused                                                                                                                      |
+**The run directory,** `/var/tmp/nocx-detect-<timestamp>/`: `work/` (the agent's cwd),
+`claude-config/` (a fresh `CLAUDE_CONFIG_DIR`), `hooks.json`, `hook-events.jsonl`, one capture per
+scenario, `report.jsonl`, `versions.json`.
 
-**The write.** Immediately before writing, nocx re-classifies the frame and recomputes the target.
-Equal: the keys are written. Not equal: nothing is written, and the refusal names the target now
-on screen, so the caller can look again. A spinner or a timer never changes a target. A menu with
-no body rows bound has no identity and refuses, as in nelix.
+**Environment of every Claude started:** `CLAUDE_CONFIG_DIR=<run>/claude-config`,
+`ANTHROPIC_BASE_URL=<endpoint>` (the skill's input; the owner's LM Studio is recorded in
+`nocx-34r0i`), a dummy `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`
+set to one model the endpoint lists, and `--settings <run>/hooks.json`. With a fresh config
+directory and an empty `work/`, `hooks.json` is the only settings source there is, so no merge with
+the person's settings can occur, no permission was granted before the run, and no credential
+exists to use.
 
-**Authority is the grant's.**
+**Pre-flight, before any keystroke; any failure stops the run with nothing started:**
 
-| Caller                                | May touch                                                 | Through                                                                                                                                          |
-| ------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| nocx's built-in assistant             | its own session                                           | its approval policy; `session.keys` and `session.message` declare the same effects as `session.run`, since a keystroke into a shell is a command |
-| an external coordinator               | sessions of workers it holds                              | the delegation check `workers.answer` uses today (`ErrNotHeld` / `ErrNotDelegated`)                                                              |
-| a neighbour in the workspace (part 5) | none of `session.read`, `session.message`, `session.keys` | —                                                                                                                                                |
+1. The run directory is new and under `/var/tmp`; `claude-config/` and `work/` are empty.
+2. `GET <endpoint>/v1/models` answers and lists the configured model.
+3. `POST <endpoint>/v1/messages` with one tool definition answers `stop_reason: tool_use`.
+4. `hook-events.jsonl` is writable and a probe hook line lands in it.
+5. `versions.json` records `claude --version`, the model id, the nocx commit.
 
-`workers.*` keeps what concerns worker records: `spawn`, `holdings`, `close`, mail, and (part 3)
-checkpoints.
+**Labels, and when a label is not one.** The hook command appends
+`{event, atMs (wall clock), session_id, tool_name, notification_type}`. `Header.Started` plus a
+chunk's `AtMs` is the same clock. A mark is labelled from a hook only when the last relevant event
+precedes the mark, no contrary event lies between them, and the screen changed between the event
+and the mark. Otherwise the mark is labelled from the script's causation if the scenario names one,
+and `unsupported` if not. A missing hook, a denied tool or an unchanged screen yields `unsupported`
+or `failed`, never an inferred agreement. Which hooks fire in an interactive Claude is itself the
+first measurement (§6.3, scenario 0), because the only measurement so far is of a print-mode turn.
 
-**Records and contracts.** A new ADR: a key is conditional on its target; it supersedes ADR-0064 §1
-and restates power (1) of the AD-6 amendment. `contracts/` gains the result of `session.read` and
-the params and results of `session.message` and `session.keys`, each with the DTO and the
-over-the-wire conformance tests (`AGENTS.md` rule 5). The pinned product-grant tool list
-(`05bb0c11`) moves with the renames.
+### 6.3 The scenarios
 
-### 6.2 Section B: the verification procedure
+Expected states for the rows marked **owner** are fixed by the owner before the plan is written, so
+no row is decided after its result is seen.
 
-**Where it runs.** A coordinator Claude started in a nocx dev-stand pane whose working directory is
-a throwaway folder, `/var/tmp/nocx-detect-<timestamp>`. Its workers open there (`coordinatorCwd`).
-Never in CI, never in a real repository, never in the default profile of the installed app.
+| #   | Scenario                            | Reached by                                                                                        | Label from                          | nocx expected                                                         |
+| --- | ----------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------- |
+| 0   | hook coverage                       | one short prompt with a Bash call declined                                                        | —                                   | measurement only: which events fire, with which fields                |
+| 1   | first-run screens of a fresh config | starting Claude with `claude-config/` empty                                                       | script                              | **owner**, once the screens are captured                              |
+| 2   | folder trust, answered yes          | fresh `work/` (untrusted: the config directory trusts nothing); select "Yes, I trust this folder" | script                              | `permission_choice` (`TestTheFolderTrustQuestionIsAPermissionChoice`) |
+| 3   | folder trust, answered no           | as 2, select "No, exit"; Claude exits                                                             | script, then process exit           | `permission_choice`, then nothing enrolled                            |
+| 4   | idle at 120, 80 and 60 columns      | after 2, nothing typed                                                                            | script; `Stop` absent               | `free_text`                                                           |
+| 5   | a turn in flight                    | a prompt the model answers at length                                                              | `UserPromptSubmit`, screen changed  | `working`                                                             |
+| 6   | the turn finished                   | 5 completing                                                                                      | `Stop`, screen changed              | `free_text`                                                           |
+| 7   | Bash permission                     | a prompt asking to run `ls` in `work/`; declined with Esc                                         | `Notification` if scenario 0 has it | `permission_choice`                                                   |
+| 8   | write permission                    | a prompt asking to create `work/note.txt`; declined with Esc                                      | `Notification` if scenario 0 has it | `permission_choice`                                                   |
+| 9   | `/model` menu                       | typing `/model`                                                                                   | script                              | `modal_choice`                                                        |
+| 10  | transcript viewer                   | `ctrl+o` at idle                                                                                  | script                              | **owner**                                                             |
+| 11  | `/btw` overlay                      | `/btw` during 5                                                                                   | script                              | **owner**                                                             |
+| 12  | background subagent                 | a prompt asking for an Explore agent                                                              | `PreToolUse` with the agent tool    | `working`; `unsupported` if the model never starts one                |
+| 13  | API unreachable, retrying           | `ANTHROPIC_BASE_URL` at a closed loopback port in a separate run directory                        | script                              | `error`                                                               |
 
-**The skill.** `.claude/skills/nocx-detection-verify/SKILL.md` with its scripts, modelled on
-`herdr-throwaway-repro`:
+A scenario whose state cannot be reached on the model or version at hand is recorded `unsupported`
+with its reason, and part 1a does not close with an `unsupported` row the owner has not accepted.
 
-- **Safety:** throwaway folder only; cheap model (`claude --model haiku`); never approve anything —
-  decline with `session.keys`; close only the workers and tabs this run created; never edit the
-  person's configuration — hooks reach the worker only through `--settings <throwaway>/hooks.json`.
-- **Versions:** record `claude --version`, `herdr --version` and the nocx commit in the report.
-- **Labels:** the hooks file writes each event with a timestamp to `<throwaway>/hook-events.jsonl`.
-  Where a state has no hook, the label is the script's causation (the keystroke that opens it).
+### 6.4 From a disagreement to the tree
 
-**The states.**
+A `disagree` goes to the owner. Each decided one becomes a rule change and a unit test on that
+moment — a committed capture moment or a painted text frame in `internal/agentdriver` tests — that
+fails on the previous rule and passes on the new one. No large fixture suite is added. The rule is
+embedded (`go:embed`), so the verification re-runs by replaying the run's own captures with
+`agent-capture verify` against the rebuilt binary; hot reload stays `nocx-y6w66`.
 
-| State                       | Reached by                                              | Label from                  | nocx expected                                                                    | herdr rule                         |
-| --------------------------- | ------------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------- | ---------------------------------- |
-| folder trust question       | a fresh throwaway folder                                | script                      | `permission_choice` (as `TestTheFolderTrustQuestionIsAPermissionChoice` asserts) | to be read in the run              |
-| idle, 120 / 80 / 60 columns | start, nothing typed                                    | script                      | `free_text`                                                                      | `live_prompt_box`                  |
-| working                     | a short prompt                                          | `UserPromptSubmit`          | `working`                                                                        | screen fallback (no title in file) |
-| turn finished               | the same prompt completing                              | `Stop`                      | `free_text`                                                                      | `live_prompt_box`                  |
-| bash permission             | a prompt that needs a shell command                     | `Notification` (to measure) | `permission_choice`                                                              | `bash_permission_prompt`           |
-| write permission            | a prompt that writes a file in the throwaway folder     | `Notification` (to measure) | `permission_choice`                                                              | `generic_permission_prompt`        |
-| `/model` menu               | typing `/model`                                         | script                      | `modal_choice`                                                                   | `model_picker_menu` (skip)         |
-| transcript viewer           | `ctrl+o`                                                | script                      | to decide                                                                        | `transcript_viewer` (skip)         |
-| `/btw` overlay              | `/btw` during a turn                                    | script                      | to decide                                                                        | `btw_overlay_working`              |
-| background subagent         | a prompt that starts an Explore agent                   | `PreToolUse`                | `working`                                                                        | —                                  |
-| API error, retrying         | `ANTHROPIC_BASE_URL` pointed at a dead port             | script                      | `error`                                                                          | idle fallback                      |
-| dynamic workflow prompt     | a prompt that triggers it, if reachable on this version | script                      | `modal_choice`                                                                   | `dynamic_workflow_prompt`          |
+### 6.5 Acceptance, as assertions
 
-"To decide" rows are decided by the owner when the run shows what nocx and herdr read there.
+1. **Pre-flight refuses** — tested against a fake endpoint and temporary directories, each case
+   asserting no `claude` process was started and no capture written: run directory not new or not
+   under `/var/tmp`; non-empty `claude-config/`; `/v1/models` unreachable or missing the model;
+   `/v1/messages` answering without `tool_use`; hook log not writable. **And on a normal machine it
+   succeeds:** the same checks against a fake endpoint that behaves pass and start the capture.
+2. **Labels are never inferred** — `agent-capture verify` on a committed capture with a synthetic
+   hook log: a matching event followed by a screen change labels the mark; a missing event, a
+   contrary event in between, or no screen change after the event yields `unsupported`; a
+   truncated capture (offsets disagree) yields `failed`.
+3. **One classification path** — for every mark of every committed capture, `verify`'s nocx state and
+   matched branch equal the state the rule tests assert for that moment.
+4. **The live run is complete** — the run on the Claude version installed when 1a closes produces a
+   `report.jsonl` with every row of §6.3 either `agree` or an `unsupported` the owner accepted, with
+   `versions.json` recorded; every earlier `disagree` has its red-then-green unit test from §6.4,
+   and replaying the run's captures against the final binary gives `agree` on those rows.
+5. **Failure mid-run** — the endpoint closing during a scenario, a capture hitting its timeout, and a
+   Claude process exiting early each record `failed` with a reason, keep the capture, and continue
+   with the next scenario; tested with a fake endpoint and a fake program.
+6. **CI stays on mocks** — no test in CI starts `claude` or reaches a network model endpoint.
 
-**For every state** the coordinator writes one line to `<throwaway>/report.jsonl`: the rows as
-`session.read` returned them, `reading` and `target`, the matching hook events, and
-`herdr agent explain --file <rows.txt> --agent claude --json`. States map `free_text↔idle`,
-`working↔working`, `permission_choice`/`modal_choice↔blocked`, `unknown↔unknown`; herdr's
-`skip_state_update` rules are recorded as such, not as disagreements.
+## 7. Part 1b — brief for its own design
 
-**Three things the run must measure** and write into the report: whether each listed hook fires in
-an interactive Claude; whether a Claude menu reacts to pasted text (§4.7); how long the echo of a
-`when=now` paste takes to appear and leave.
+Section A of the first revision (approved in intent by the owner) moves pane interaction into
+`session.read`, `session.message` and `session.keys` for both callers, removing `workers.screen` and
+`workers.answer`. The review showed it cannot be built as written. Its design must satisfy:
 
-**Disagreements** — label against nocx, or nocx against herdr — go to the owner. Each one decided
-becomes a rule change plus one small mock in `internal/agentdriver` tests (a text frame or a moment
-of a capture), never a full-screen suite. The rule is embedded (`go:embed`), so a change means
-rebuilding the stand; hot reload stays `nocx-y6w66`.
+1. **The race.** `Typist` re-reads the frame and then only `Accept`s bytes into the session's write
+   queue; a separate goroutine writes them later (`internal/app/panetyping.go`,
+   `internal/session/session.go` `startWriteLoop`). Conditional operations go through the session's
+   single writer and are revalidated when consumed; competing automated operations on one pane are
+   serialised; the result reports what was actually written; and the design says plainly which race
+   with the running application remains.
+2. **Preconditions, not only identity.** A menu's identity does not say what Enter will do: the
+   selection can move while question, options and body stay the same (`agenttyping.go` `confirm`
+   checks the selection today). Confirmation binds the selected option, text submission the input
+   contents, every operation the session and enrolment incarnation; each key in a sequence is
+   revalidated. ADR-0029 is settled in the same record.
+3. **Menu extraction first.** The Claude rule's only extractor is `subagents`; `ReadMenu` derives
+   options around the cursor with no question or body boundary. Question, options and body regions
+   per supported menu are added to the rule engine, and `ReadMenu` and the target both consume that
+   one result, with a real menu answered successfully beside the unbound-body refusal.
+4. **AD-6 amended in 1b,** naming the ADR-0064 provisions superseded, and stating whether an
+   unenrolled pane refuses the write tools or gets a separately designed renderer-owned gate —
+   never a backend classifier for it.
+5. **Capabilities.** `resourceSession` resolves only `runCtx.Session`; the coordinator's grant holds
+   its own session; worker access narrows to `WorkerCoordinator` through the record. One capability
+   interface with an own-session and a delegated-worker implementation, server-side resolution of
+   session to participant, revocation checked throughout a waiting operation.
+6. **Approval of opaque input** for the built-in assistant: `session.run`'s approval derives effects
+   from `CommandArg`; a key has none. Conservative effects, a readable action and target in the
+   existing approval flow, revalidation after approval; permit, refuse, decline, resume and
+   target-changed paths tested.
+7. **One read, two sources, a contract.** `session.read` keeps its item and window behaviour and its
+   existing schema (`contracts/tools/session.read.schema.json`); rows, reading and target come from
+   one snapshot; normalisation is stated (the worker path right-trims, the renderer keeps blanks);
+   missing renderer, missing grid and unknown classification are distinct outcomes.
+8. **The answer path re-homed.** Answering a spawn-blocking question today also delivers the task
+   spawn left owed (`workerAnswerer.withOwedTask`), after waiting for selection movement and the menu
+   to settle; that survives `workers.answer`'s removal, exactly once, with partial failure and retry.
+9. **Messages as a state machine.** `panegrid.Frame` has no generation or offset, so "frames after
+   the write" needs an ordering mechanism; outcomes are refused, partially typed, written, submission
+   confirmed or unconfirmed; stale echo, multiline and truncated paste, cancellation and duplicates
+   are specified.
+10. **Concurrency is a prerequisite:** a waiting `when=free` must not stop the same coordinator
+    reading the pane or answering the menu that blocks it. `nocx-tlaft` (the bridge's chain and the
+    endpoint's one-caller-per-session rule) lands first, and 1b proves a read and a corrective key
+    through the real bridge and endpoint while another call waits.
+11. **Tests:** user-path assertions that pass, not merely exist; a mock-agent end-to-end test through
+    production wiring; the failing-call matrix (renderer request, lost or malformed frame, delegation
+    store, revoked grant during a wait, queue refusal, PTY write failure, disconnect after paste) with
+    bytes written, remaining input, outcome and cleanup for each; each paired with its ordinary
+    success.
 
-### 6.3 Acceptance, as assertions
+## 8. Open for later parts
 
-1. `session.read` from the external endpoint on a held worker returns `rows`, `reading` and
-   `target`; on a session the caller does not hold it is refused with `ErrNotHeld`, and on a
-   neighbour's session too.
-2. `session.read` by the built-in assistant on its own unenrolled pane returns the renderer's rows;
-   on an enrolled pane it returns the grid's rows with the same text for the same screen.
-3. `session.keys` whose target no longer matches writes zero bytes to the pty and names the current
-   target; with a matching target on a frame whose spinner moved, the keys are written.
-4. `session.keys` with a menu target whose body rows are unbound refuses.
-5. `session.message when=now`: with a menu appearing between the paste and the Enter, no Enter is
-   written; with the echo observed and no menu, Enter is written once.
-6. `session.message when=free` on a working pane writes nothing until `free_text`, then submits.
-7. `workers.screen` and `workers.answer` no longer exist in the registry, the dispatcher's worker
-   list or the product-grant pin; the schemas and over-the-wire tests exist for the three tools.
-8. The skill's run produces `report.jsonl` covering every row of §6.2 with a label, nocx's reading
-   and herdr's verdict, and part 1 closes with no disagreement left undecided.
-9. No test in CI starts `claude` or `herdr`.
+- **Final outcome and terminal state** (parts 3–4): without a declaration an exit reduces to
+  `abandoned` (`internal/workers/registrar.go` `reduce`), and a terminal participant is no longer
+  readable through `Screen`; turn completion, exit, declared outcome and checkpoint need separate
+  semantics before the drop is deleted.
+- **Hook authority** (part 6): activation, expiry, per-turn identity, stale-event rejection and the
+  hand-over to fresh screen evidence, with the case of a `Stop` followed by unhooked activity.
+- **The carrier for hook events** (part 6).
 
-## 7. Out of scope for part 1
+## 9. Review of the first revision (codex, 2026-09-11)
 
-Parts 2–6. A keystroke surface in nocx's own UI. Hot reload of rules (`nocx-y6w66`). Any network
-catalogue of rules (D12). The built-in assistant's approval page for the new effects beyond
-declaring them like `session.run`.
+Every claim below was checked against the tree before it was accepted.
 
-## 8. Open questions
-
-- **Body digest region per menu** — which extractor rows bound a menu body, per menu kind; settled
-  in the plan against the corpus.
-- **Transcript viewer and `/btw`** — what nocx should call them (§6.2 "to decide").
-- **The carrier for hook events** (part 6): the authenticated lifecycle channel, the tool endpoint
-  under the enrolled pin, or a drop the shell forwards.
+| #   | Finding                                                                     | Disposition                                                             |
+| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 1   | Re-check before `Accept` does not close the race; writes are queued         | Accepted; §7.1                                                          |
+| 2   | Menu identity does not bind the selection, input contents or incarnation    | Accepted; §7.2                                                          |
+| 3   | No menu extractor exists to compute a menu target                           | Accepted; §7.3                                                          |
+| 4   | AD-6 must be amended where the new write cases land, not in part 2          | Accepted; §3, §7.4                                                      |
+| 5   | A throwaway cwd does not isolate Claude's home, credentials and settings    | Accepted; §4.14, §6.2 (LM Studio, fresh `CLAUDE_CONFIG_DIR`)            |
+| 6   | The authority table is not implementable on the current narrowing           | Accepted; §3, §7.5                                                      |
+| 7   | Declaring `session.run`'s effects does not carry its approval semantics     | Accepted; §7.6                                                          |
+| 8   | Merging the reads needs a source contract                                   | Accepted; §7.7                                                          |
+| 9   | Removing `workers.answer` drops the owed-task delivery                      | Accepted; §7.8                                                          |
+| 10  | `session.message` has no state machine                                      | Accepted; §7.9                                                          |
+| 11  | Concurrency is a prerequisite                                               | Accepted; §5, §7.10                                                     |
+| 12  | Trust inheritance, "No, exit" and `coordinatorCwd` break the state sequence | Accepted; §6.3 scenarios 2–3 in a fresh config; 1a needs no coordinator |
+| 13  | Hook timestamps are not labels by themselves                                | Accepted; §6.2 label rule, scenario 0                                   |
+| 14  | herdr's file verdict is partial and its working row was wrong               | Accepted; herdr dropped (§2.1, §4.13)                                   |
+| 15  | Acceptance permits a green review without a working feature                 | Accepted; §6.5.4, §7.11                                                 |
+| 16  | Failing-call matrix and success pairs missing                               | Accepted; §6.5.1, §6.5.5, §7.11                                         |
+| 17  | Removing the declaration conflicts with the mesh design and `reduce`        | Accepted; §3, §8                                                        |
+| 18  | Two-tier authority does not restore D11 as stated                           | Accepted; §3, §8                                                        |
+| 19  | §2.2 overstated nelix                                                       | Accepted; §2.2 rewritten                                                |

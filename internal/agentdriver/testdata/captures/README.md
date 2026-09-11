@@ -114,13 +114,24 @@ names `Bash(touch marker.txt)` under `ask`. The write-file request went through 
 tool as expected, giving `write-permission` at `110000`. Both were left with Esc — the
 recording never approved a tool call.
 
-**The Bash dialog's own layout reflows under your feet.** Between the dialog first drawing
-(`49000`) and roughly `58000`, the collapsing of a multi-line "thinking" preview above it
-shifts every row below up by one, and by `60000` the option row's text has visibly
-corrupted (`❯ 1. Yes` becomes ` marker.txt creation`) while the cursor position is
-unchanged — a real rendering artifact of this Claude version under heavy relative-cursor
-ANSI, not a nocx defect. The mark for `bash-permission` is placed at `49000`, before either
-of these repaints, where the dialog is clean.
+**The Bash dialog's own layout reflows under your feet, and by `60000` its option row was
+also corrupted — but that corruption was ours, not Claude's.** Between the dialog first
+drawing (`49000`) and roughly `58000`, the collapsing of a multi-line "thinking" preview
+above it shifts every row below up by one; that part is real Claude repaint behaviour. What
+followed at `60000` (`❯ 1. Yes` becoming ` marker.txt creation`, cursor position
+unchanged) was nocx-nru89.5: the run set the window title `✳ marker.txt creation`, and `✳`
+(U+2733) encodes as UTF-8 `E2 9C B3` — the middle byte, `0x9C`, is also the 8-bit form of
+the ANSI String Terminator. x/vt's parser could not tell a raw 8-bit ST from a UTF-8
+continuation byte of the same value, so it ended the OSC title early on that byte and
+printed the remainder of the title (`marker.txt creation`) onto the grid at the cursor,
+which Claude had parked on the dialog's `❯`. Fixed in nocx-nru89.5 by disambiguating the two
+in `internal/panegrid` before the bytes reach x/vt; a manifest entry pins
+`claude-lmstudio-permission@60000` to `permission_choice` so it cannot regress. The mark for
+`bash-permission` is placed at `49000` regardless, before either repaint, where the dialog
+is clean — and the same defect explains phantom idle-prompt content elsewhere in this
+corpus (`claude-lmstudio-subagent-finished` briefly showed `❯  Claude Code` and
+`❯  Background Explore subagent execution` on its idle row, from the same window-title
+mechanism), also fixed by the same change.
 
 **The subagent's `/tasks to see subagents` mode-line hint outlives the task panel by
 roughly 20-30s of real time, not until the next interaction.** `claude-lmstudio-subagent`

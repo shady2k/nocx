@@ -157,6 +157,12 @@ type grid struct {
 	// drained closes when the reply-drain goroutine has returned, so Withdraw
 	// can be sure nothing is still touching the emulator.
 	drained chan struct{}
+	// c1 disambiguates x/vt's OSC/DCS string parsing from a UTF-8
+	// continuation byte valued like the 8-bit String Terminator (nocx-nru89.5,
+	// see c1filter.go). It must persist across Feed calls, the same way the
+	// emulator's own parser state does, because the ambiguous byte can arrive
+	// in a Feed call separate from the one that opened the string.
+	c1 c1Filter
 }
 
 // Store is the Observer implementation.
@@ -253,7 +259,8 @@ func (s *Store) Feed(paneID string, b []byte) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, err := g.term.Write(b); err != nil {
+	filtered := g.c1.filter(b)
+	if _, err := g.term.Write(filtered); err != nil {
 		s.log.Debug("panegrid write failed", "pane_id", paneID, "error", err)
 	}
 }

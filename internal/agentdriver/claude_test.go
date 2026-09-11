@@ -215,14 +215,25 @@ func TestAnErrorPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
 	}
 }
 
-// The same words the agent printed into its transcript are content, not the
-// TUI's own error: indented, above a blank row, with the box live (nocx-emors).
-func TestAnAPIWaitPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
+// ── the status stack's three bounds, tested one at a time (nocx-nru89.6) ──
+//
+// TestAnEllipsisTheAgentPrintedIsNotATurnStarting and
+// TestAnAPIWaitPrintedIntoTheTranscriptIsIdleNotError used to put BOTH an
+// indent and a blank row between the forged line and the meter, so removing
+// either col0Only or stopAtBlank alone left them green: the other bound was
+// still doing the job. The four tests below each isolate ONE bound — the
+// forged row is built to defeat every OTHER bound already, so only the named
+// one stands between it and a false "working"/"error". Each was confirmed red
+// by temporarily deleting that bound from claude.rule.json and rerunning.
+
+// col0Only alone: the forged row carries a real spinner glyph and ends in an
+// ellipsis, directly adjacent to the meter (no blank row to hide behind), but
+// it is INDENTED — exactly what col0Only exists to skip.
+func TestAnIndentedForgedSpinnerLineIsKeptOutByColumnZeroOnly(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"  Waiting for API response · will retry in 4s",
-		"",
+		"  ✻ Let me check the files…",
 		"                                                   0 tokens",
 		rule,
 		"❯ ",
@@ -230,21 +241,23 @@ func TestAnAPIWaitPrintedIntoTheTranscriptIsIdleNotError(t *testing.T) {
 		"",
 		"  ⏵⏵ auto mode on",
 		"",
+		"",
 	}
-	f := screen(t, 60, 10, lines, 2, 5)
+	f := screen(t, 60, 10, lines, 2, 4)
 	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
-		t.Fatalf("an API wait in the transcript was read as chrome: %q, want %q", got, agentdriver.StateFreeText)
+		t.Fatalf("an indented forged spinner line, adjacent to the meter = %q, want %q", got, agentdriver.StateFreeText)
 	}
 }
 
-// The ellipsis branch reads the STATUS STACK, not the transcript (nocx-ys9jd).
-// An agent that printed "Loading…" into its own output, indented and above a
-// blank row, with the box live beneath it, is idle.
-func TestAnEllipsisTheAgentPrintedIsNotATurnStarting(t *testing.T) {
+// stopAtBlank alone: the forged row carries a real spinner glyph and the
+// exact API-wait phrase, sits at column zero (col0Only would not touch it),
+// but a blank row separates it from the meter — exactly what stopAtBlank
+// exists to refuse crossing.
+func TestAnAPIWaitPrintedBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"  Loading…",
+		"✻ Waiting for API response · will retry in 4s",
 		"",
 		"                                                   0 tokens",
 		rule,
@@ -256,7 +269,58 @@ func TestAnEllipsisTheAgentPrintedIsNotATurnStarting(t *testing.T) {
 	}
 	f := screen(t, 60, 10, lines, 2, 5)
 	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
-		t.Fatalf("an ellipsis in the transcript was read as a turn: %q, want %q", got, agentdriver.StateFreeText)
+		t.Fatalf("an API wait beyond a blank row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// The glyph bound: this is the exact probe the epic review recorded against
+// the committed rule ("a col-0 '● Let me check the files…' directly above
+// the meter row reads working"). The row sits at column zero, directly
+// adjacent to the meter, and ends in an ellipsis — col0Only and stopAtBlank
+// both let it through. What still keeps it out is that "●" is not one of the
+// glyphs Claude's own status stack actually opens with (✻ ✢ ✽ ✶ · *, read off
+// testdata/captures) — "●" is the transcript's own tool-call marker.
+func TestAColZeroEllipsisWithNoRealSpinnerGlyphIsNotWorking(t *testing.T) {
+	rule := strings.Repeat("─", 60)
+	lines := []string{
+		"",
+		"● Let me check the files…",
+		"                                                   0 tokens",
+		rule,
+		"❯ ",
+		rule,
+		"",
+		"  ⏵⏵ auto mode on",
+		"",
+		"",
+	}
+	f := screen(t, 60, 10, lines, 2, 4)
+	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
+		t.Fatalf("an ellipsis line opening with the transcript's own bullet = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// The overlay's own ellipsis bound: the epic review's third probe was "the
+// overlay branch's contains-… text above ▔ reads working for an idle pane
+// with /btw open" — a forged line above the overlay's rule, ending in an
+// ellipsis but opening with the transcript's own bullet rather than a real
+// spinner glyph, must not turn a side question into "working".
+func TestAColZeroEllipsisAboveTheOverlayWithNoRealSpinnerGlyphIsNotWorking(t *testing.T) {
+	lines := []string{
+		"",
+		"● Let me check the files…",
+		strings.Repeat("▔", 40),
+		"",
+		"    /btw what is 2+2?",
+		"",
+		"    Esc to close",
+		"",
+		"",
+		"",
+	}
+	f := screen(t, 40, 10, lines, 0, 9)
+	if got := agentdriver.Claude().Classify(f); got == agentdriver.StateWorking {
+		t.Fatalf("a forged ellipsis above the overlay, no real spinner glyph = %q", got)
 	}
 }
 

@@ -140,7 +140,133 @@
           "maxRows": 2,
           "col0Only": true,
           "stopAtBlank": true,
-          "text": "…"
+          "text": "✻",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✢",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✽",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✶",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "·",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "anchorUnbound",
+          "anchor": "meter"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "maxRows": 8,
+          "text": "Esc to close"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "overlayTop",
+          "up": true,
+          "maxRows": 2,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "*",
+          "suffix": "…"
         }
       ]
     },
@@ -178,6 +304,130 @@
           "col0Only": true,
           "stopAtBlank": true,
           "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✻"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✢"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✽"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✶"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "·"
+        }
+      ]
+    },
+    {
+      "state": "error",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "Waiting for API response"
+        },
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "*"
         }
       ]
     },
@@ -206,6 +456,82 @@
           "maxRows": 4,
           "col0Only": true,
           "stopAtBlank": true,
+          "text": "✻",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✢",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✽",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "✶",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "·",
+          "suffix": "…"
+        }
+      ]
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "regionAny",
+          "anchor": "meter",
+          "up": true,
+          "maxRows": 4,
+          "col0Only": true,
+          "stopAtBlank": true,
+          "text": "*",
           "suffix": "…"
         }
       ]
@@ -217,6 +543,16 @@
         "allMatched": "working",
         "counterexample": "unknown"
       }
+    },
+    {
+      "state": "working",
+      "when": [
+        {
+          "kind": "rowContains",
+          "anchor": "modeLine",
+          "text": "esc to interrupt"
+        }
+      ]
     },
     {
       "state": "working",

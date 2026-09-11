@@ -114,30 +114,53 @@ names `Bash(touch marker.txt)` under `ask`. The write-file request went through 
 tool as expected, giving `write-permission` at `110000`. Both were left with Esc — the
 recording never approved a tool call.
 
-**The Bash dialog's own layout reflows under your feet.** Between the dialog first drawing
-(`49000`) and roughly `58000`, the collapsing of a multi-line "thinking" preview above it
-shifts every row below up by one, and by `60000` the option row's text has visibly
-corrupted (`❯ 1. Yes` becomes ` marker.txt creation`) while the cursor position is
-unchanged — a real rendering artifact of this Claude version under heavy relative-cursor
-ANSI, not a nocx defect. The mark for `bash-permission` is placed at `49000`, before either
-of these repaints, where the dialog is clean.
+**The Bash dialog's own layout reflows under your feet, and by `60000` its option row was
+also corrupted — but that corruption was ours, not Claude's.** Between the dialog first
+drawing (`49000`) and roughly `58000`, the collapsing of a multi-line "thinking" preview
+above it shifts every row below up by one; that part is real Claude repaint behaviour. What
+followed at `60000` (`❯ 1. Yes` becoming ` marker.txt creation`, cursor position
+unchanged) was nocx-nru89.5: the run set the window title `✳ marker.txt creation`, and `✳`
+(U+2733) encodes as UTF-8 `E2 9C B3` — the middle byte, `0x9C`, is also the 8-bit form of
+the ANSI String Terminator. x/vt's parser could not tell a raw 8-bit ST from a UTF-8
+continuation byte of the same value, so it ended the OSC title early on that byte and
+printed the remainder of the title (`marker.txt creation`) onto the grid at the cursor,
+which Claude had parked on the dialog's `❯`. Fixed in nocx-nru89.5 by disambiguating the two
+in `internal/panegrid` before the bytes reach x/vt; a manifest entry pins
+`claude-lmstudio-permission@60000` to `permission_choice` so it cannot regress. The mark for
+`bash-permission` is placed at `49000` regardless, before either repaint, where the dialog
+is clean — and the same defect explains phantom idle-prompt content elsewhere in this
+corpus (`claude-lmstudio-subagent-finished` briefly showed `❯  Claude Code` and
+`❯  Background Explore subagent execution` on its idle row, from the same window-title
+mechanism), also fixed by the same change.
 
 **The subagent's `/tasks to see subagents` mode-line hint outlives the task panel by
 roughly 20-30s of real time, not until the next interaction.** `claude-lmstudio-subagent`
 (scripted exactly per `lmstudio-subagent.script`) shows the task panel from about `50000` to
-`90000` and the main turn's own completion by `90000`, but 47s of subsequent silence on the
-wire never clears the hint before the run ends — a plain re-run under the same script can
-reach `subagent-finished` and can also not, depending on how long the process is left
-running past completion. `claude-lmstudio-subagent-finished` extends the same script's final
-wait and is long enough to watch the hint itself clear at idle, around `110000`, entirely
-without a second keystroke — so the clearing is a matter of enough real time elapsing, not
-of a follow-up turn. `subagent-finished` is marked on that capture, at `112000`.
+`90000` and the main turn's own completion by `90000`; the hint DOES clear on its own, at
+`110631` ms (chunk 389) — the run is simply long enough to watch it happen, with no
+follow-up keystroke in between. `claude-lmstudio-subagent-finished`'s script is not a passive
+extension of the same wait either: it also types `ok` and Enter at `118.3` s, a genuine
+second turn, and on that capture the hint clears at `106312` ms (chunk 372), before that
+second turn is sent — so both captures show the clearing is a matter of enough real time
+elapsing, not of a follow-up turn. `subagent-finished` is marked on
+`claude-lmstudio-subagent-finished`, at `112000` — after the hint has already cleared on its
+own, which is why a rule that reads `working` from the hint alone (nocx-nru89.6) cannot be
+told apart, from a single frame, from a pane where a background agent has genuinely just
+lost its task panel and is still running (`internal/paneobserve`'s
+`TestAChildAppearingOrVanishingDoesNotChangeTheParentsState` pins exactly that second case as
+`working`); nocx-nru89.6's report has the evidence for why the mark did not move inside the
+20-30s window this paragraph describes.
 
-**`turn-with-timer` and `turn-finished` are sourced from `claude-lmstudio-permission`
-instead of a dedicated recording**, because its first Bash-tool turn already draws a timed
-spinner (`✻ Blanching… (9s · thinking)`, `48000`) and, once the dialog is cancelled with Esc,
-the same box returns to `free_text` without leaving the alternate screen (`101000`) — the
-same predicate the old `claude-working` capture existed to cover.
+**`turn-with-timer` is sourced from `claude-lmstudio-permission` instead of a dedicated
+recording**, because its first Bash-tool turn already draws a timed spinner
+(`✻ Blanching… (9s · thinking)`, `48000`) — the same predicate the old `claude-working`
+capture existed to cover. `turn-finished` used to be sourced from the same capture too, at
+`101000`, once the dialog is cancelled with Esc and the same box returns to `free_text`
+without leaving the alternate screen — but that moment is an Esc-INTERRUPTED turn
+(`⎿ Interrupted · What should Claude do instead?`), not one that completed on its own.
+nocx-nru89.6 moved it to `claude-lmstudio-subagent-finished` at `125600`
+(`✻ Churned for 6s · done`), a turn that finished without an Esc anywhere in its history, and
+kept the old mark as an anonymous regression entry.
 
 ## Four things the captures decided, which reasoning got wrong
 

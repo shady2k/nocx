@@ -292,6 +292,91 @@ func TestAResizedPaneAnswersAtTheNewSize(t *testing.T) {
 	}
 }
 
+// nocx-nru89.5. Claude Code 2.1.266 sets a window title such as
+// `\x1b]0;✳ marker.txt creation\x07`. ✳ is U+2733, UTF-8 `E2 9C B3`, and
+// `0x9C` is also the 8-bit form of the ANSI String Terminator. x/vt's parser
+// does not distinguish "a raw 8-bit ST" from "a UTF-8 continuation byte that
+// happens to have the same numeric value" — it dispatches the OSC title on
+// the first `0x9C` it sees, wherever that byte falls, and prints whatever
+// follows at the cursor. The dialog underneath is real; the corruption is on
+// top of it.
+func TestATitleWithAUtf8ContinuationByteValuedLikeTheStringTerminatorDoesNotPaintIntoTheGrid(t *testing.T) {
+	s := newStore(t)
+	if err := s.Enrol("p1", 40, 3); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	s.Feed("p1", []byte("0123456789"))
+	// U+2733 (✳) encodes as E2 9C B3; the middle byte is 0x9C.
+	s.Feed("p1", []byte("\x1b]0;\xe2\x9c\xb3 title text\x07"))
+	f, err := s.Frame("p1")
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	for y := 0; y < f.Rows; y++ {
+		if got := f.Text(y); strings.Contains(got, "title text") {
+			t.Errorf("row %d = %q: the title's text painted into the grid", y, got)
+		}
+	}
+	if got := strings.TrimRight(f.Text(0), " "); got != "0123456789" {
+		t.Errorf("row 0 = %q, want %q — the screen changed", got, "0123456789")
+	}
+}
+
+// The paired success cases (AGENTS.md rule 1): a title carrying no byte that
+// collides with the ST cannot regress by the fix above. Confirmed by the
+// coordinator's repro to already work; asserted so a future change to the
+// filter cannot silently break them.
+func TestATitleWithNoAmbiguousByteAlsoLeavesTheScreenUnchanged(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{"ascii", "marker.txt creation"},
+		{"non-ambiguous unicode", "◐ marker.txt creation"}, // ◐, E2 97 90 — no 0x9C byte
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore(t)
+			if err := s.Enrol("p1", 40, 3); err != nil {
+				t.Fatalf("enrol: %v", err)
+			}
+			s.Feed("p1", []byte("0123456789"))
+			s.Feed("p1", []byte("\x1b]0;"+c.title+"\x07"))
+			f, err := s.Frame("p1")
+			if err != nil {
+				t.Fatalf("frame: %v", err)
+			}
+			if got := strings.TrimRight(f.Text(0), " "); got != "0123456789" {
+				t.Errorf("row 0 = %q, want %q — the screen changed", got, "0123456789")
+			}
+			for y := 1; y < f.Rows; y++ {
+				if got := strings.TrimRight(f.Text(y), " "); got != "" {
+					t.Errorf("row %d = %q, want empty", y, got)
+				}
+			}
+		})
+	}
+}
+
+// A genuine standalone 8-bit ST — not part of any multi-byte UTF-8 sequence —
+// must still terminate the OSC string exactly as x/vt already does correctly.
+// The fix narrows the ambiguity; it must not remove 8-bit ST support outright.
+func TestAGenuineStandaloneStringTerminatorStillEndsTheTitle(t *testing.T) {
+	s := newStore(t)
+	if err := s.Enrol("p1", 40, 3); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	// OSC title terminated by a bare 8-bit ST (0x9C), then ordinary text.
+	s.Feed("p1", []byte("\x1b]0;ignored title\x9cvisible"))
+	f, err := s.Frame("p1")
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if got := strings.TrimRight(f.Text(0), " "); got != "visible" {
+		t.Errorf("row 0 = %q, want %q — a genuine 8-bit ST must still end the OSC string", got, "visible")
+	}
+}
+
 // A resize for a pane with no grid is the ordinary case, not a failure: most
 // panes never have one and every one of them is resized.
 func TestResizingAPaneWithNoGridIsNotAnError(t *testing.T) {

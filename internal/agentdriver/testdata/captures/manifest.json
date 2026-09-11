@@ -10,6 +10,7 @@
     "idle-60",
     "turn-before-timer",
     "turn-with-timer",
+    "turn-streaming",
     "turn-finished",
     "btw-overlay",
     "transcript-viewer",
@@ -110,11 +111,24 @@
       "note": "the same moment on Claude Code 2.1.238, kept as a regression (nocx-nru89.2)"
     },
     {
+      "moment": "turn-streaming",
+      "capture": "claude-lmstudio-turn",
+      "atMs": 85000,
+      "state": "working",
+      "note": "Claude has erased the spinner row and streams its reply with no ellipsis; the mode line still reads esc to interrupt, which is what a dedicated branch now reads (nocx-nru89.6, owner's decision 2026-09-11)"
+    },
+    {
       "moment": "turn-finished",
+      "capture": "claude-lmstudio-subagent-finished",
+      "atMs": 125600,
+      "state": "free_text",
+      "note": "a turn that completed on its own (\"Churned for 6s · done\"), box idle with no spinner and no esc to interrupt; moved off the Esc-interrupted moment so the mark tests a natural completion (nocx-nru89.6)"
+    },
+    {
       "capture": "claude-lmstudio-permission",
       "atMs": 101000,
       "state": "free_text",
-      "note": "the box never went away; this separates the box being on screen from the box waiting; re-recorded on Claude Code 2.1.266, after Esc cancels the first Bash dialog and the turn's own box returns (nocx-nru89.2)"
+      "note": "the box never went away after Esc cancels the first Bash dialog; kept as an anonymous entry once turn-finished moved to a natural completion (nocx-nru89.2, nocx-nru89.6)"
     },
     {
       "capture": "claude-working",
@@ -167,6 +181,13 @@
       "note": "replaces the input box; its selected row opens with the input marker; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
     },
     {
+      "capture": "claude-lmstudio-permission",
+      "atMs": 60000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "the window title ✳ marker.txt creation carries the UTF-8 byte 0x9C, which x/vt's parser once took for an 8-bit String Terminator and painted the rest of the title over row 21, hiding the Bash dialog from the rule; fixed by nocx-nru89.5"
+    },
+    {
       "capture": "claude-permission",
       "atMs": 49000,
       "state": "permission_choice",
@@ -209,7 +230,7 @@
       "capture": "claude-lmstudio-subagent-finished",
       "atMs": 112000,
       "state": "free_text",
-      "note": "the interval's second end; a finished turn's summary in the status slot is not an error; on Claude Code 2.1.266 the /tasks-to-see-subagents mode-line hint outlives the task panel by roughly 20-30s of real time before it too clears (nocx-nru89.2)"
+      "note": "the interval's second end; a finished turn's summary in the status slot is not an error; on Claude Code 2.1.266 the /tasks-to-see-subagents mode-line hint outlives the task panel by roughly 20-30s of real time before it too clears (nocx-nru89.2). nocx-nru89.6 could not move this mark inside that window: the hint-alone branch is required by internal/paneobserve's TestAChildAppearingOrVanishingDoesNotChangeTheParentsState (a real herdr regression guard for a subagent still running with the panel just collapsed), and that frame is chrome-identical to this one under the closed predicate set — see the nocx-nru89.6 report for the evidence."
     },
     {
       "capture": "claude-subagent",

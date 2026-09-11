@@ -49,6 +49,21 @@ package agentdriver
 // capped at four so an agent whose printed lines abut the meter cannot extend
 // the area a forged spinner would be looked for in.
 //
+// THIRD CORRECTION (nocx-nru89.6). "… (" / suffix "…" alone is not the row's
+// grammar — it is also every sentence an agent happens to end in an ellipsis,
+// col0Only and stopAtBlank hold only when a blank or an indent already
+// separates the transcript from the meter, and a corpus never showed one
+// pressed directly against it. So the status-stack and overlay branches that
+// decide from an ellipsis or a fixed phrase also require the row to OPEN
+// with one of the glyphs Claude's own spinner actually cycles through in
+// testdata/captures — ✻ ✢ ✽ ✶ · * — read empirically rather than assumed,
+// because "●" is the transcript's own tool-call marker and matches an
+// ellipsis-ending sentence just as easily. The predicate grammar has no
+// "starts with" test bounded to a searched region (Contains and Suffix are
+// the whole of it), so each glyph is its own branch rather than one branch
+// with an alternation; six near-identical branches is the shape "a person
+// composes, and cannot invent a predicate" takes here.
+//
 // # The background agent is the trap, and it has two halves and two ends
 //
 // THIRD CORRECTION, and the half that was not predicted. With a backgrounded
@@ -136,6 +151,38 @@ package agentdriver
 // used to reach free_text through the old default already had "prompt" bound
 // on that frame, because it was, in fact, an idle input box. There was no
 // frame in the corpus reaching free_text by accident.
+//
+// # A streaming turn has no spinner, and the mode line is the only tell
+//
+// FOURTH CORRECTION. Once Claude starts printing its reply, the status stack
+// is erased outright — no spinner, no elapsed timer, nothing directly above
+// the meter — and the box stays an ordinary-looking idle box in every other
+// respect. What still says a turn is live is the mode line: it carries
+// "esc to interrupt" for as long as the turn can be interrupted, which is
+// exactly as long as it is running. So the mode line is where this reads it,
+// bounded to its own row (rowContains), the same way the "/tasks to see
+// subagents" branch already reads that row rather than the transcript.
+//
+// # The hint has one signal and two meanings, and the frame alone cannot tell
+// them apart
+//
+// The mode-line hint "/tasks to see subagents" is drawn for as long as a
+// background agent was ever spawned this session and stays up to 20-30s of
+// real time AFTER both the subagent and the main turn have finished
+// (nocx-nru89.6) — Claude's own repaint delay, not this rule's. The honest
+// fix would read "working" from the task panel and never from the hint
+// alone. It cannot: a frame with the panel gone and only the hint left is
+// BYTE-FOR-BYTE the same shape whether the subagent just lost its panel and
+// is still genuinely running (claude-subagent at 40s, kept in the manifest)
+// or whether it and the main turn have both been done for a while (the
+// lmstudio corpus's lingering window) — same anchors, same blank status
+// stack, same mode-line text. internal/paneobserve's
+// TestAChildAppearingOrVanishingDoesNotChangeTheParentsState pins the first
+// case as "working" for a real herdr regression (typing into a pane whose
+// background agent is still working is the expensive direction), so the
+// hint branch stays exactly as permissive as it always was. The
+// `subagent-finished` manifest mark could not move inside the lingering
+// window for the same reason; nocx-nru89.6's report has the full account.
 
 import (
 	_ "embed"

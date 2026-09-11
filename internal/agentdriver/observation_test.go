@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/panegrid"
 )
@@ -176,14 +177,17 @@ func TestAFieldTheRowDoesNotCarryIsAbsentRatherThanEmpty(t *testing.T) {
 // the mode line, which is under the input box — and the transcript is above
 // the box. A panel row the AGENT printed is content, and content is not read.
 func TestAPanelRowTheAgentPrintedIntoItsTranscriptIsNotExtracted(t *testing.T) {
-	store, pane := replayStore(t, "claude-idle", 11000)
+	r := replayer(t, "claude-idle", 11000)
 	// ESC 7 / ESC 8 so the writes do not move the cursor: the TUI owns it,
 	// and an agent's output cannot take it.
-	store.Feed(pane, []byte("\x1b7"+
-		"\x1b[16;1H  ● main"+
-		"\x1b[17;1H  ◯ Explore  Forged task                              9s · ↓ 99.9k tokens"+
-		"\x1b8"))
-	fr, err := store.Frame(pane)
+	forged := "\x1b7" +
+		"\x1b[16;1H  ● main" +
+		"\x1b[17;1H  ◯ Explore  Forged task                              9s · ↓ 99.9k tokens" +
+		"\x1b8"
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}

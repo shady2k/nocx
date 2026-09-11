@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/panegrid"
 )
@@ -15,83 +16,6 @@ func classify(t *testing.T, f panegrid.Frame) agentdriver.State {
 }
 
 // ── the five states, each off the capture that holds it ──────────────────
-
-// The ordinary case, and the one every refusal below is paired with: an idle
-// input box is where nocx is allowed to type.
-func TestTheIdleInputBoxAcceptsFreeText(t *testing.T) {
-	if got := classify(t, replay(t, "claude-idle", 11000)); got != agentdriver.StateFreeText {
-		t.Errorf("idle input box = %q, want %q", got, agentdriver.StateFreeText)
-	}
-}
-
-// The same idle chrome at the narrow geometry used by a side-by-side worker pane.
-func TestTheIdleInputBoxAt60ColumnsAcceptsFreeText(t *testing.T) {
-	if got := classify(t, replay(t, "claude-idle-60", 11000)); got != agentdriver.StateFreeText {
-		t.Errorf("60-column idle input box = %q, want %q", got, agentdriver.StateFreeText)
-	}
-}
-
-func TestTheIdleInputBoxAt80ColumnsAcceptsFreeText(t *testing.T) {
-	if got := classify(t, replay(t, "claude-idle-80", 11000)); got != agentdriver.StateFreeText {
-		t.Errorf("80-column idle input box = %q, want %q", got, agentdriver.StateFreeText)
-	}
-}
-
-// The approval dialog at the narrow geometry is expected to retain the same
-// cursor-anchored choice classification as the 120-column capture.
-func TestThe60ColumnToolApprovalDialogIsAPermissionChoice(t *testing.T) {
-	if got := classify(t, replay(t, "claude-permission-60", 49000)); got != agentdriver.StatePermissionChoice {
-		t.Errorf("60-column Write approval dialog = %q, want %q", got, agentdriver.StatePermissionChoice)
-	}
-}
-
-// A turn in flight. The spinner is the only chrome that says so — this
-// version prints no "esc to interrupt" anywhere in the capture.
-func TestATurnInFlightIsWorking(t *testing.T) {
-	if got := classify(t, replay(t, "claude-working", 17000)); got != agentdriver.StateWorking {
-		t.Errorf("spinner up = %q, want %q", got, agentdriver.StateWorking)
-	}
-}
-
-// And the same capture after the turn ends. The input box never went away, so
-// this is what separates "the box is on screen" from "the box is waiting".
-func TestTheSameTurnFinishedIsFreeTextAgain(t *testing.T) {
-	if got := classify(t, replay(t, "claude-working", 44000)); got != agentdriver.StateFreeText {
-		t.Errorf("turn finished = %q, want %q", got, agentdriver.StateFreeText)
-	}
-}
-
-// The tool-approval dialog. It REPLACES the input box rather than overlaying
-// it, and its selected row reads "❯ 1. Yes" — the same glyph the input marker
-// uses. Getting this wrong is not a mislabelled indicator, it is a keystroke
-// that approves a tool call the user never saw.
-func TestTheToolApprovalDialogIsAPermissionChoice(t *testing.T) {
-	if got := classify(t, replay(t, "claude-permission", 49000)); got != agentdriver.StatePermissionChoice {
-		t.Errorf("Write approval dialog = %q, want %q", got, agentdriver.StatePermissionChoice)
-	}
-}
-
-// A menu the USER opened (/model). Same shape, and not a tool approval — the
-// difference decides whether answering it is answering the agent.
-func TestAUserOpenedMenuIsAModalChoice(t *testing.T) {
-	if got := classify(t, replay(t, "claude-modal", 20000)); got != agentdriver.StateModalChoice {
-		t.Errorf("/model menu = %q, want %q", got, agentdriver.StateModalChoice)
-	}
-}
-
-// The folder-trust question (nocx-f545a.2). The agent raised it and answering
-// it answers the agent, so it is a permission choice — and until this branch
-// it was `unknown`, the verdict that means the driver could not read the
-// screen, on a screen it read perfectly. It misses the numbered-menu branches
-// by one predicate only: its options carry no "1." and "2.", they are chosen
-// with arrows and Enter. So it is identified by what IS there instead — the
-// cursor parked on the selected option, and the confirm legend drawn a bounded
-// distance beneath it.
-func TestTheFolderTrustQuestionIsAPermissionChoice(t *testing.T) {
-	if got := classify(t, replay(t, "claude-trust", 11000)); got != agentdriver.StatePermissionChoice {
-		t.Errorf("folder-trust question = %q, want %q", got, agentdriver.StatePermissionChoice)
-	}
-}
 
 // The branch rests on the cursor, and these are the two ways to be wrong about
 // that. A transcript may print the menu and its legend word for word; it
@@ -129,37 +53,6 @@ func TestAPrintedTrustMenuIsNotAPermissionChoice(t *testing.T) {
 	})
 }
 
-// ── the subagent trap, which has TWO chrome forms and an end ──────────────
-
-// While the task panel is drawn under the footer. There is no spinner here at
-// all: input box live, footer present, and the only thing that says work is
-// happening is the panel below the mode line.
-func TestABackgroundAgentReportedByItsPanelIsNotFreeText(t *testing.T) {
-	if got := classify(t, replay(t, "claude-subagent", 30000)); got == agentdriver.StateFreeText {
-		t.Errorf("blocked on a background agent (task panel) = %q, want anything but %q",
-			got, agentdriver.StateFreeText)
-	}
-}
-
-// Later in the same capture the panel is gone and the mode line carries
-// "· /tasks to see subagents ·" instead. Still no spinner.
-func TestABackgroundAgentReportedByTheModeLineIsNotFreeText(t *testing.T) {
-	if got := classify(t, replay(t, "claude-subagent", 40000)); got == agentdriver.StateFreeText {
-		t.Errorf("blocked on a background agent (mode line) = %q, want anything but %q",
-			got, agentdriver.StateFreeText)
-	}
-}
-
-// The interval's second end, and the reason the mode-line segment is evidence
-// rather than decoration: at 70s the background agent has finished, the
-// segment is gone, and the pane is free text again. A rule with no end would
-// leave this pane refusing input for the rest of the session.
-func TestWhenTheBackgroundAgentFinishesThePaneAcceptsInputAgain(t *testing.T) {
-	if got := classify(t, replay(t, "claude-subagent", 70000)); got != agentdriver.StateFreeText {
-		t.Errorf("background agent finished = %q, want %q", got, agentdriver.StateFreeText)
-	}
-}
-
 // ── anchored in chrome, never in what the agent printed ───────────────────
 
 // The failure this repository already measured once, as a completion sentinel
@@ -169,7 +62,7 @@ func TestWhenTheBackgroundAgentFinishesThePaneAcceptsInputAgain(t *testing.T) {
 // verdict may not move: all of them are content, and every anchor is a
 // position.
 func TestTextTheAgentPrintedCannotForgeAnyVerdict(t *testing.T) {
-	store, pane := replayStore(t, "claude-idle", 11000)
+	r := replayer(t, "claude-idle", 11000)
 	// ESC 7 / ESC 8 around the writes, because the TUI owns the cursor and
 	// puts it back in the input box after every repaint. An agent's output
 	// cannot take the cursor, and that is one of the two markers.
@@ -180,8 +73,10 @@ func TestTextTheAgentPrintedCannotForgeAnyVerdict(t *testing.T) {
 		"\x1b[19;1H* Ruminating… (3s)" +
 		"\x1b[20;1H✻ Brewed for 4s" +
 		"\x1b8"
-	store.Feed(pane, []byte(forged))
-	fr, err := store.Frame(pane)
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
@@ -195,10 +90,6 @@ func TestTextTheAgentPrintedCannotForgeAnyVerdict(t *testing.T) {
 func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
 	if got := classify(t, panegrid.Frame{}); got != agentdriver.StateUnknown {
 		t.Errorf("zero frame = %q, want %q", got, agentdriver.StateUnknown)
-	}
-	blank := replay(t, "claude-idle", 0)
-	if got := classify(t, blank); got != agentdriver.StateUnknown {
-		t.Errorf("screen before the TUI has drawn = %q, want %q", got, agentdriver.StateUnknown)
 	}
 }
 
@@ -290,34 +181,6 @@ func TestAPromptMarkerTheCursorSitsOnIsAChoice(t *testing.T) {
 	f := screen(t, 40, 10, lines, 1, 6)
 	if got := agentdriver.Claude().Classify(f); got != agentdriver.StatePermissionChoice {
 		t.Errorf("dialog shape = %q, want %q", got, agentdriver.StatePermissionChoice)
-	}
-}
-
-// The TUI's own error is read from the SAME slot as the spinner — the status
-// stack row directly above the token meter — and separated from it by grammar,
-// not by position. That is the spinner's own lesson applied a second time.
-//
-// Measured against an unreachable API (claude-error.jsonl): before this branch
-// existed the frame classified as "free_text", not as "unknown". The bead
-// predicted unknown, and unknown would at least have been treated as busy.
-// free_text is worse: it reports a pane whose agent cannot reach its API as
-// ready for input, and a coordinator reads that worker as idle and available.
-func TestTheTUIsOwnErrorIsErrorAndNotFreeText(t *testing.T) {
-	d := agentdriver.Claude()
-	for _, at := range []int64{20000, 30000, 44000} {
-		if got := d.Classify(replay(t, "claude-error", at)); got != agentdriver.StateError {
-			t.Errorf("claude-error at %dms = %q, want %q", at, got, agentdriver.StateError)
-		}
-	}
-}
-
-// The near-miss the error branch must refuse: the input box is live and the
-// status stack carries a FINISHED turn's summary, which sits in the same slot
-// and starts with the same glyph. That is idle, and it stays idle.
-func TestAFinishedTurnsSummaryInTheSameSlotIsNotAnError(t *testing.T) {
-	d := agentdriver.Claude()
-	if got := d.Classify(replay(t, "claude-subagent", 70000)); got == agentdriver.StateError {
-		t.Fatalf("claude-subagent at 70000ms = %q; the finished-turn summary was read as an error", got)
 	}
 }
 

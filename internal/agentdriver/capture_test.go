@@ -13,14 +13,12 @@ package agentdriver_test
 // would be asserting about a screen the product never produces.
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
 )
@@ -36,73 +34,40 @@ var captureNames = []string{
 	"claude-trust",
 }
 
-type captureHeader struct {
-	Agent string `json:"agent"`
-	Cols  int    `json:"cols"`
-	Rows  int    `json:"rows"`
+// capturePath names a committed capture.
+func capturePath(name string) string {
+	return filepath.Join("testdata", "captures", name+".jsonl")
 }
 
-type captureChunk struct {
-	AtMs int64  `json:"atMs"`
-	Data string `json:"data"`
-}
-
-// replayStore feeds a capture up to atMs into a real Store and hands back both,
-// so a test that wants to print something MORE onto that screen can.
-func replayStore(t *testing.T, name string, atMs int64) (*panegrid.Store, string) {
+// replayer feeds a capture up to atMs through internal/agentcapture — the one
+// reader of the format, the same one calibration and cmd/agent-capture use —
+// and hands the replayer back, so a test that wants to paint something MORE
+// onto that screen can Feed it.
+func replayer(t *testing.T, name string, atMs int64) *agentcapture.Replayer {
 	t.Helper()
-	path := filepath.Join("testdata", "captures", name+".jsonl")
-	f, err := os.Open(path) //nolint:gosec // a fixture path this test builds
+	header, chunks, err := agentcapture.Read(capturePath(name))
 	if err != nil {
-		t.Fatalf("open capture: %v", err)
+		t.Fatalf("read capture %s: %v", name, err)
 	}
-	defer func() { _ = f.Close() }()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<20), 1<<24)
-	if !sc.Scan() {
-		t.Fatalf("%s: empty capture", path)
+	r, err := agentcapture.NewReplayer(log.NewSlogAdapter(nil), header)
+	if err != nil {
+		t.Fatalf("replayer for %s: %v", name, err)
 	}
-	var h captureHeader
-	if err := json.Unmarshal(sc.Bytes(), &h); err != nil {
-		t.Fatalf("%s: header: %v", path, err)
+	t.Cleanup(r.Close)
+	if err := r.Feed(chunks[:agentcapture.ChunksThrough(chunks, atMs, 0)]); err != nil {
+		t.Fatalf("feed %s to %dms: %v", name, atMs, err)
 	}
-	if h.Cols <= 0 || h.Rows <= 0 {
-		t.Fatalf("%s: header has no geometry (%dx%d)", path, h.Cols, h.Rows)
-	}
-
-	store := panegrid.New(log.NewSlogAdapter(nil))
-	const pane = "capture"
-	if err := store.Enrol(pane, h.Cols, h.Rows); err != nil {
-		t.Fatalf("enrol: %v", err)
-	}
-	t.Cleanup(func() { store.Withdraw(pane) })
-
-	for sc.Scan() {
-		var c captureChunk
-		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
-			t.Fatalf("%s: chunk: %v", path, err)
-		}
-		if c.AtMs > atMs {
-			break
-		}
-		store.Feed(pane, []byte(c.Data))
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("%s: read: %v", path, err)
-	}
-	return store, pane
+	return r
 }
 
 // replay is the common case: the screen at a moment, and nothing else.
 func replay(t *testing.T, name string, atMs int64) panegrid.Frame {
 	t.Helper()
-	store, pane := replayStore(t, name, atMs)
-	fr, err := store.Frame(pane)
+	f, err := replayer(t, name, atMs).Frame()
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
-	return fr
+	return f
 }
 
 // screen paints rows onto a real emulator and parks the cursor, for the shapes

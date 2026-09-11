@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "agent": "claude",
+  "inventory": [
+    "theme-picker",
+    "security-notes",
+    "folder-trust",
+    "idle-120",
+    "idle-80",
+    "idle-60",
+    "turn-before-timer",
+    "turn-with-timer",
+    "turn-finished",
+    "btw-overlay",
+    "transcript-viewer",
+    "model-menu",
+    "bash-permission",
+    "write-permission",
+    "subagent-running",
+    "subagent-finished",
+    "api-refused",
+    "api-waiting"
+  ],
+  "entries": [
+    {
+      "moment": "theme-picker",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
+      "moment": "security-notes",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
+      "moment": "folder-trust",
+      "capture": "claude-trust",
+      "atMs": 11000,
+      "state": "permission_choice",
+      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2)"
+    },
+    {
+      "moment": "idle-120",
+      "capture": "claude-idle",
+      "atMs": 11000,
+      "state": "free_text",
+      "note": "the idle input box is where nocx may type"
+    },
+    { "moment": "idle-80", "capture": "claude-idle-80", "atMs": 11000, "state": "free_text" },
+    {
+      "moment": "idle-60",
+      "capture": "claude-idle-60",
+      "atMs": 11000,
+      "state": "free_text",
+      "note": "the narrow geometry of a side-by-side worker pane"
+    },
+    {
+      "moment": "turn-before-timer",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-ys9jd)"
+    },
+    {
+      "moment": "turn-with-timer",
+      "capture": "claude-working",
+      "atMs": 17000,
+      "state": "working",
+      "note": "the spinner with its elapsed timer"
+    },
+    {
+      "moment": "turn-finished",
+      "capture": "claude-working",
+      "atMs": 44000,
+      "state": "free_text",
+      "note": "the box never went away; this separates the box being on screen from the box waiting"
+    },
+    {
+      "moment": "btw-overlay",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.4)"
+    },
+    {
+      "moment": "transcript-viewer",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
+      "moment": "model-menu",
+      "capture": "claude-modal",
+      "atMs": 20000,
+      "state": "modal_choice",
+      "note": "a menu the user opened, not a tool approval"
+    },
+    {
+      "moment": "bash-permission",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+    },
+    {
+      "moment": "write-permission",
+      "capture": "claude-permission",
+      "atMs": 49000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "replaces the input box; its selected row opens with the input marker"
+    },
+    { "capture": "claude-permission-60", "atMs": 49000, "state": "permission_choice" },
+    {
+      "moment": "subagent-running",
+      "capture": "claude-subagent",
+      "atMs": 30000,
+      "state": "working",
+      "note": "task panel below the mode line, no spinner"
+    },
+    {
+      "capture": "claude-subagent",
+      "atMs": 40000,
+      "state": "working",
+      "note": "panel gone, mode line says /tasks to see subagents"
+    },
+    {
+      "moment": "subagent-finished",
+      "capture": "claude-subagent",
+      "atMs": 70000,
+      "state": "free_text",
+      "note": "the interval's second end; a finished turn's summary in the status slot is not an error"
+    },
+    {
+      "moment": "api-refused",
+      "capture": "claude-error",
+      "atMs": 30000,
+      "state": "error",
+      "note": "the TUI's own error, in the spinner's slot, told apart by grammar"
+    },
+    { "capture": "claude-error", "atMs": 20000, "state": "error" },
+    { "capture": "claude-error", "atMs": 44000, "state": "error" },
+    {
+      "moment": "api-waiting",
+      "unverified": "not yet recorded on Claude Code 2.1.266 (nocx-emors)"
+    },
+    {
+      "capture": "claude-idle",
+      "atMs": 0,
+      "state": "unknown",
+      "note": "the screen before the TUI has drawn"
+    }
+  ]
+}

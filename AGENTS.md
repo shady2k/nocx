@@ -66,6 +66,27 @@ resolves that without deleting anything. If your database and a pulled JSONL bot
 `br sync --merge` does the three-way; `--force-db`, `--force-jsonl` and `--force` are the
 explicit policies.
 
+**`br sync --merge` DELETES every issue your database holds that the JSONL does not**, and
+the ordinary shape of a session here is exactly that. It reads their absence as a deletion
+upstream and writes a tombstone over each one, `delete_reason: "merge deletion"` — but you
+created those beads minutes ago, and the JSONL has never seen them. Measured 2026-09-11: a
+fast-forward of 139 commits followed by `br sync --merge` tombstoned 70 records — 51 closed
+that day, 18 open, 1 in progress — and the flush after it published them dead, so anybody
+pulling would have retired a day's backlog including beads named by commits already on
+`main`. **Merge is for a database and a JSONL that both changed the SAME records. For a
+database that is merely AHEAD, `--reconcile-additive` is the one that adds without
+deleting.**
+
+**A tombstone is not undone by the tracker's ordinary commands**, so know the repair before
+you need it. `br update <id> --status open` answers `cannot update tombstone issue`;
+`br sync --import-only` over a corrected JSONL answers `Tombstone protected: N issues` and
+skips them. What survives is the record — only `status` is overwritten, and the title, body,
+labels and edges are all still on the line — so: rebuild the JSONL with each tombstoned line
+replaced by its last live version out of `git show`, `br delete --hard` those ids to prune
+the tombstone rows and free the ids, then `br sync --import-only`, which recreates each
+issue with its own id, labels and dependency edges. Verify with `br ready` rather than with
+the exporter: an id that reads `open` in `br show` is not yet proof its edges came back.
+
 **Publish every backlog write immediately** — a create, an edit, an edge, a close — not at
 session close. An unpushed bead does not exist for anybody else, and the afternoon it costs
 is somebody else's. Batch your writes if you like (`br update` and `br close` take several

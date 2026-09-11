@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -432,6 +433,34 @@ func TestInspectLauncherRecordsWhenItCannotReadABinary(t *testing.T) {
 	if got.Note == "" {
 		t.Fatalf("inspectLauncher(binary).Note is empty, want a could-not-read note")
 	}
+}
+
+// TestIsolationRefusesWhenTheRealHomeCannotBeDetermined covers the fail-open
+// found in review: refuseEnvOutsideClaudeConfig used to treat an
+// os.UserHomeDir error, or an empty result, as "nothing to check against" and
+// let the run proceed. A source that cannot be inspected is a refusal, the
+// same rule refuseIfPresent already applies to every other check in this
+// file — this closes the one place that instead failed open.
+func TestIsolationRefusesWhenTheRealHomeCannotBeDetermined(t *testing.T) {
+	setManagedDirs(t, t.TempDir())
+	saved := userHomeDir
+	t.Cleanup(func() { userHomeDir = saved })
+
+	env := isolatedEnv(t)
+	t.Run("UserHomeDir errors", func(t *testing.T) {
+		userHomeDir = func() (string, error) { return "", errors.New("no passwd entry") }
+		err := refuseEnvOutsideClaudeConfig(env)
+		if err == nil || !strings.Contains(err.Error(), "refusing to start") || !strings.Contains(err.Error(), "real home directory") {
+			t.Fatalf("refuseEnvOutsideClaudeConfig error = %v, want a refusal naming the real home directory", err)
+		}
+	})
+	t.Run("UserHomeDir returns empty", func(t *testing.T) {
+		userHomeDir = func() (string, error) { return "", nil }
+		err := refuseEnvOutsideClaudeConfig(env)
+		if err == nil || !strings.Contains(err.Error(), "refusing to start") || !strings.Contains(err.Error(), "real home directory") {
+			t.Fatalf("refuseEnvOutsideClaudeConfig error = %v, want a refusal naming the real home directory", err)
+		}
+	})
 }
 
 // TestCaptureRecordsTheProgramVersionWhenAsked covers finding 7's record.sh

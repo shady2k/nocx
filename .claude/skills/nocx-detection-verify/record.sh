@@ -20,8 +20,10 @@ DISABLE_TELEMETRY=1
 EOF
 args=()
 if [[ -n $settings ]]; then cp "$settings" "$run/settings.json"; args=(--settings "$run/settings.json"); fi
+meta="${out%.jsonl}.meta.json"
 go build -o "$run/agent-capture" "$repo/cmd/agent-capture"
-"$run/agent-capture" capture -env-file "$run/run.env" -dir "$run/work" -meta "$run/meta.json" \
+"$run/agent-capture" capture -env-file "$run/run.env" -dir "$run/work" -meta "$meta" \
   -out "$out" -script "$script" -cols "$cols" -rows 40 -timeout 240s -version-arg --version \
   -- claude "${args[@]+"${args[@]}"}"
-echo "run directory: $run (meta.json holds what ran, the launcher's own env additions and the Claude version)"
+echo "run directory: $run"
+echo "metadata: $meta (what ran, the launcher's own env additions and the Claude version)"

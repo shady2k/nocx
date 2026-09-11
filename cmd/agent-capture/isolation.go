@@ -22,6 +22,10 @@ import (
 // point the check at directories it made.
 var managedClaudeDirs = []string{"/etc/claude-code", "/Library/Application Support/ClaudeCode"}
 
+// userHomeDir is os.UserHomeDir, indirected so a test can make it fail or
+// return empty without needing an actual passwd entry with no home.
+var userHomeDir = os.UserHomeDir
+
 var (
 	managedClaudeEntries = []string{"managed-settings.json", "managed-settings.d", "CLAUDE.md", filepath.Join(".claude", "rules")}
 	localClaudeEntries   = []string{"CLAUDE.md", "CLAUDE.local.md", ".claude"}
@@ -164,6 +168,12 @@ func refuseIfPresent(path string) error {
 //   - CLAUDE_CONFIG_DIR is checked against the operator's real home
 //     directory: it must not be, or sit inside, the real ~/.claude, which is
 //     the specific "outside the run" source the flag's promise names.
+//
+// Finding the real home directory itself the same source that cannot be
+// inspected refuses too: an os.UserHomeDir error or an empty result used to
+// be read as "nothing to compare against" and let the run proceed, which is
+// the one fail-open this function had against the not-knowing-is-not-absence
+// rule every other check here follows.
 func refuseEnvOutsideClaudeConfig(env []string) error {
 	home, homeSet := lookupEnv(env, "HOME")
 	if !homeSet || home == "" {
@@ -178,9 +188,12 @@ func refuseEnvOutsideClaudeConfig(env []string) error {
 			return err
 		}
 	}
-	realHome, err := os.UserHomeDir()
-	if err != nil || realHome == "" {
-		return nil
+	realHome, err := userHomeDir()
+	if err != nil {
+		return fmt.Errorf("refusing to start: cannot determine this machine's real home directory: %w", err)
+	}
+	if realHome == "" {
+		return errors.New("refusing to start: this machine's real home directory came back empty")
 	}
 	realConfig := filepath.Join(realHome, ".claude")
 	within, err := isSameOrWithin(configDir, realConfig)

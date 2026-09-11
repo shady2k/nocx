@@ -628,6 +628,9 @@ test-ci:
 	    echo ""; \
 	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \
 	    $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./$(CLAUDE_CONFORMANCE_PKG)/...; \
+	    echo ""; \
+	    echo "--- TestARealClaudeCoordinatorAnswersTheFolderTrustDialog alone (nocx-f545a.5): a real Claude Code worker meets and answers its own folder-trust dialog ---"; \
+	    NOCX_REAL_CLAUDE_WORKER=1 $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -run '^TestARealClaudeCoordinatorAnswersTheFolderTrustDialog$$' ./internal/app; \
 	  fi; \
 	  if [ -n "$$notice" ]; then echo ""; printf '%b\n' "$$notice"; fi; \
 	  if [ -n "$$claude_notice" ]; then echo ""; printf '%b\n' "$$claude_notice"; fi

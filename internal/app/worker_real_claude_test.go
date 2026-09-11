@@ -86,6 +86,24 @@ package app
 // it" (contracts/tools/workers.spawn.schema.json), so the spawned command is
 // `cd '<dir>' && claude` — a `cd` a person could type, not a synthetic seam.
 //
+// # THE ASSERTION THIS CHECK EXISTS TO MAKE (nocx-f545a.8)
+//
+// The first version of this check trusted nocx's OWN report — workers.answer
+// coming back "submitted" — as proof the folder was trusted. Against the
+// real, installed Claude Code 2.1.266 it was not: a down key written within
+// ~100ms of the dialog's first paint repaints correctly (the marker moves to
+// "Yes, I trust this folder") while Claude's own internal selection stays on
+// its original default ("No, exit") permanently, so nocx wrote down, saw the
+// repaint, confirmed with Enter, and Claude recorded NO trust and exited —
+// invisibly, because the screen after the "bad" key is indistinguishable
+// from the screen after a "good" one (menuSettle's own doc, workers.go, has
+// the full measurement). workerAnswerer.Answer now waits for the menu to
+// settle before its first key (nocx-f545a.8's fix); this test's own
+// assertion is the other half — it no longer takes nocx's report on faith,
+// and instead reads ~/.claude.json, the file and field the real CLI itself
+// consults, to confirm the trust was ACTUALLY recorded. That read is what
+// would have caught nocx-f545a.8 directly.
+//
 // # The cost this check has (stated once, here, per nocx-f545a.5's own
 // instruction)
 //
@@ -485,6 +503,24 @@ func TestARealClaudeCoordinatorAnswersTheFolderTrustDialog(t *testing.T) {
 			answer, diag.State, strings.Join(diag.Rows, "\n"), logs.String())
 	}
 	t.Logf("answer: outcome=%q task.delivery=%q", answer.Outcome, answer.Task.Delivery)
+
+	// THE ASSERTION nocx-f545a.8 ADDS: nocx's own "submitted" report is not
+	// proof the folder was actually trusted (this file's own header, "THE
+	// ASSERTION THIS CHECK EXISTS TO MAKE", has the full account of why not).
+	// ~/.claude.json is the file and field the real CLI itself consults
+	// before it ever draws this dialog again, so reading it back is what
+	// would have caught the desync directly rather than trusting the screen.
+	// Waited on state, never on a duration: the CLI writes the file some
+	// short time after it accepts the confirm key.
+	waittest.WaitForTimeoutDetail(t, "Claude Code to record this directory as trusted in ~/.claude.json", 15*time.Second,
+		func() string {
+			trusted := realClaudeTrustedProjects(t)
+			return fmt.Sprintf("trusted projects = %v; want %q present\nlog:\n%s", trusted, workDir, logs.String())
+		},
+		func() bool {
+			return realClaudeTrustedProjects(t)[workDir]
+		})
+	t.Logf("Claude Code recorded %s as trusted in ~/.claude.json", workDir)
 
 	// THE OBSERVABLE CONSEQUENCE. answer.Task.Delivery == "typed" is nocx's
 	// own report; with a real agent nothing here can capture its stdin the

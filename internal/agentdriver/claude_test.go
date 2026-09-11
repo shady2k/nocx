@@ -443,18 +443,25 @@ func TestAToolCallBulletNamingTheAPIWaitWithAMidRowDotIsNotError(t *testing.T) {
 
 // ── branches 10 and 17 had a rule but no bound-isolated test (nocx-nru89.9) ──
 //
-// "· Retrying in" and "… ( ... )" carry only col0Only and stopAtBlank — no
-// glyph requirement, because neither forged text needs one to be a real
-// hazard. TestAnErrorPrintedIntoTheTranscriptIsIdleNotError put an indent AND
-// a blank row between the forgery and the meter at once, so it could not say
-// which bound was doing the work. These four isolate one bound each, on each
-// branch, the same way the ellipsis-working branch's four tests already do.
+// "· Retrying in" and "… ( ... )" carried only col0Only and stopAtBlank at the
+// time these four were written — no glyph requirement yet, because neither
+// forged text needed one to be a real hazard. TestAnErrorPrintedIntoTheTranscriptIsIdleNotError
+// put an indent AND a blank row between the forgery and the meter at once, so
+// it could not say which bound was doing the work. These four isolate one
+// bound each, on each branch, the same way the ellipsis-working branch's four
+// tests already do.
+//
+// nocx-nru89.12 added a glyph bound to both branches, so each forged row here
+// now OPENS with a real spinner glyph ("✻", read off the api-refused and
+// turn-with-timer captures) — otherwise the glyph bound alone would keep the
+// row out and removing col0Only/stopAtBlank would no longer turn the test
+// red, which is exactly the isolation failure this section exists to catch.
 
 func TestAnIndentedRetryingLineIsKeptOutByColumnZeroOnly(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"  Error: connection refused · Retrying in 4s",
+		"  ✻ Connection refused · Retrying in 4s",
 		"                                                   0 tokens",
 		rule,
 		"❯ ",
@@ -474,7 +481,7 @@ func TestARetryingLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"Error: connection refused · Retrying in 4s",
+		"✻ Connection refused · Retrying in 4s",
 		"",
 		"                                                   0 tokens",
 		rule,
@@ -494,7 +501,7 @@ func TestAnIndentedTimedSpinnerLineIsKeptOutByColumnZeroOnly(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"  Reading… (12s)",
+		"  ✻ Reading… (12s)",
 		"                                                   0 tokens",
 		rule,
 		"❯ ",
@@ -514,7 +521,7 @@ func TestATimedSpinnerLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 	rule := strings.Repeat("─", 60)
 	lines := []string{
 		"",
-		"Reading… (12s)",
+		"✻ Reading… (12s)",
 		"",
 		"                                                   0 tokens",
 		rule,
@@ -527,5 +534,49 @@ func TestATimedSpinnerLineBeyondABlankRowIsKeptOutByStopAtBlank(t *testing.T) {
 	f := screen(t, 60, 10, lines, 2, 5)
 	if got := agentdriver.Claude().Classify(f); got != agentdriver.StateFreeText {
 		t.Fatalf("a timed-spinner line beyond a blank row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// ── branches 10 and 17 had no glyph bound at all (nocx-nru89.12) ──────────
+//
+// nocx-nru89.9 gave "· Retrying in" and "… ( ... )" their own col0Only and
+// stopAtBlank tests but, by its own scope, left both branches accepting any
+// row that carried the phrase — no requirement that the row itself opens with
+// a real spinner glyph. These two probes are the bead's own forgeries,
+// replayed against the same real, committed 2.1.266 idle frame the
+// nocx-nru89.9 probes use (claude-2.1.266-turn@36000, where row 34 — directly
+// above the meter at row 35 — is genuinely blank), with that row overwritten
+// the same way: ESC 7 / ESC 8 around the write, so the cursor is left exactly
+// where the TUI parked it. Both are red before opensWithGlyph is applied to
+// these branches: the pre-fix rule's Text/Suffix checks alone match a row an
+// agent printed into its own transcript exactly as well as a row a real
+// spinner opened.
+func TestARetryPhraseWithNoRealSpinnerGlyphIsNotError(t *testing.T) {
+	r := replayer(t, "claude-2.1.266-turn", 36000)
+	forged := "\x1b7\x1b[35;1H\x1b[2K· Retrying in 5s\x1b8"
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if got := classify(t, fr); got != agentdriver.StateFreeText {
+		t.Errorf("a retry phrase with no real spinner glyph opening the row = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestATimedSpinnerPhraseWithNoRealSpinnerGlyphIsNotWorking(t *testing.T) {
+	r := replayer(t, "claude-2.1.266-turn", 36000)
+	forged := "\x1b7\x1b[35;1H\x1b[2KReading… (12s)\x1b8"
+	if err := r.Feed([]agentcapture.Chunk{{Data: forged}}); err != nil {
+		t.Fatalf("feed forged text: %v", err)
+	}
+	fr, err := r.Frame()
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if got := classify(t, fr); got != agentdriver.StateFreeText {
+		t.Errorf("a timed-spinner phrase with no real spinner glyph opening the row = %q, want %q", got, agentdriver.StateFreeText)
 	}
 }

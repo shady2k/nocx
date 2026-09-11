@@ -91,6 +91,36 @@ func nearestNonBlankAbove(f panegrid.Frame, row int) (string, bool) {
 	return "", false
 }
 
+// opensWithGlyph answers whether a scanned row's own first NON-BLANK
+// character is one of the given glyphs — the region-scanned counterpart of
+// rowOpensWith, needed because regionAny visits rows the region found rather
+// than one fixed anchor row.
+//
+// It is Contains's replacement where the grammar needs identity of the row's
+// OPENING content rather than mere presence anywhere in it: "·" and "*" are
+// ordinary characters an agent's own prose uses constantly, so Contains let a
+// transcript line that merely mentioned one of Claude's six spinner glyphs
+// satisfy a bound meant to recognise the spinner itself (nocx-nru89.9).
+//
+// It is deliberately independent of col0Only, and TrimLeft rather than a
+// stricter column-0 check is why: col0Only decides which rows the region even
+// VISITS — a POSITION property, enforced by skipping indented candidates
+// before this ever runs — while this decides what a visited row's own content
+// OPENS with — an IDENTITY property. Folding the two together would leave a
+// region that never sets col0Only unable to ask "opens with" at all, and
+// would make col0Only a mere restatement of this check wherever both are set
+// on the same predicate — which is exactly what the col0Only-alone bound
+// tests exist to catch when this function is temporarily removed instead.
+func opensWithGlyph(text string, glyphs []string) bool {
+	trimmed := strings.TrimLeft(text, " ")
+	for _, g := range glyphs {
+		if strings.HasPrefix(trimmed, g) {
+			return true
+		}
+	}
+	return false
+}
+
 // region is a search area computed from an anchor rather than from a fixed
 // row, and its bounds belong to the engine.
 //

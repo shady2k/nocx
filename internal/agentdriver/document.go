@@ -136,6 +136,15 @@ type Pred struct {
 	Glyph  string `json:"glyph,omitempty"`
 	Text   string `json:"text,omitempty"`
 	Suffix string `json:"suffix,omitempty"`
+	// Glyphs is regionAny's "opens with" bound: a set rather than one glyph,
+	// because a status row's own grammar is one of several dingbats (nocx
+	// reads six off testdata/captures) and the document has no alternation —
+	// a set is how "a person composes, and cannot invent a predicate" grows
+	// to cover an OR without a branch per member. Checked against the row's
+	// own opening content (opensWithGlyph), never against presence anywhere
+	// in it — that distinction is the whole reason this field exists rather
+	// than one more use of Text.
+	Glyphs []string `json:"glyphs,omitempty"`
 
 	RegionSpec
 }
@@ -372,6 +381,9 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 				return false
 			}
 			if p.Suffix != "" && !strings.HasSuffix(text, p.Suffix) {
+				return false
+			}
+			if len(p.Glyphs) > 0 && !opensWithGlyph(text, p.Glyphs) {
 				return false
 			}
 			return true

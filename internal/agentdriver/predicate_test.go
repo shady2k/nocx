@@ -98,6 +98,34 @@ func TestCellAtColRefusesAnIndentedGlyphThatRowOpensWithWouldAccept(t *testing.T
 	}
 }
 
+// opensWithGlyph is regionAny's "opens with" bound (nocx-nru89.9): the
+// region-scanned counterpart of rowOpensWith, checked against a row's own
+// opening content rather than the anchor's fixed row.
+func TestOpensWithGlyphMatchesTheRowsOwnOpeningCharacter(t *testing.T) {
+	if !opensWithGlyph("✻ Blanching…", []string{"✻", "✢"}) {
+		t.Fatal("the row opens with a glyph in the set and opensWithGlyph said no")
+	}
+}
+
+// The exact defect the epic review found: Contains let "·" or "*" surface
+// anywhere in an ordinary sentence. opensWithGlyph must refuse a glyph that is
+// merely PRESENT, not the row's own opening character.
+func TestOpensWithGlyphRefusesAGlyphThatIsMerelyContained(t *testing.T) {
+	if opensWithGlyph("● step 1 · reading…", []string{"·", "*"}) {
+		t.Fatal("the glyph is mid-row, not the opening character, and opensWithGlyph said yes")
+	}
+}
+
+// Deliberately independent of col0Only: this checks IDENTITY of the row's
+// opening content, not its POSITION on the screen, so it still sees past
+// indentation. col0Only is what decides whether an indented row is even
+// visited at all — a different, engine-owned bound, tested separately.
+func TestOpensWithGlyphSkipsLeadingIndentationRegardlessOfCol0Only(t *testing.T) {
+	if !opensWithGlyph("  ✻ Blanching…", []string{"✻"}) {
+		t.Fatal("opensWithGlyph is independent of col0Only and should still see past the indent")
+	}
+}
+
 // And a predicate no branch of holds() could reach is not in the closed set at
 // all — it is Go somebody wrote and no document can name. rowOpensWith was
 // exactly that when the rule became a document: implemented, tested directly,

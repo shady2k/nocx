@@ -37,7 +37,6 @@ var captureNames = []string{
 	"claude-lmstudio-api-refused",
 	"claude-2.1.266-turn", "claude-2.1.266-idle-80", "claude-2.1.266-idle-60", "claude-2.1.266-model",
 	"claude-2.1.266-permission", "claude-2.1.266-subagent-finished", "claude-2.1.266-api-refused",
-	"claude-2.1.266-api-waiting",
 }
 
 // capturePath names a committed capture.

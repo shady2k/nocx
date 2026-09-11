@@ -54,15 +54,30 @@ package agentdriver
 // col0Only and stopAtBlank hold only when a blank or an indent already
 // separates the transcript from the meter, and a corpus never showed one
 // pressed directly against it. So the status-stack and overlay branches that
-// decide from an ellipsis or a fixed phrase also require the row to OPEN
-// with one of the glyphs Claude's own spinner actually cycles through in
+// decide from an ellipsis or a fixed phrase also require the row to carry one
+// of the glyphs Claude's own spinner actually cycles through in
 // testdata/captures — ✻ ✢ ✽ ✶ · * — read empirically rather than assumed,
 // because "●" is the transcript's own tool-call marker and matches an
-// ellipsis-ending sentence just as easily. The predicate grammar has no
-// "starts with" test bounded to a searched region (Contains and Suffix are
-// the whole of it), so each glyph is its own branch rather than one branch
-// with an alternation; six near-identical branches is the shape "a person
-// composes, and cannot invent a predicate" takes here.
+// ellipsis-ending sentence just as easily.
+//
+// nocx-nru89.6 shipped that requirement as Contains, not "opens with", and the
+// epic review's second reader found the gap it leaves open: two of the six
+// glyphs, "·" and "*", are ordinary characters, so "● step 1 · reading…" —
+// the transcript's own bullet, with a middle dot three words later —
+// satisfied Contains as completely as a row a real spinner opened.
+// nocx-nru89.9's fix is a "starts with" test the grammar did not have:
+// Pred's "glyphs" field on regionAny, checked by predicate.go's
+// opensWithGlyph against the row's own first non-blank character rather than
+// against presence anywhere in it. It is a set rather than one glyph for the
+// same reason Below already carries one — a document composes, and cannot
+// invent a predicate, so an OR across six dingbats needs one field that reads
+// a list rather than a branch per member. What this rule GUARANTEES is
+// narrower than "cannot be forged": a row an agent prints into its own
+// transcript is chrome only if that row's own opening content is one of these
+// six exact glyphs; a glyph merely mentioned later in the row no longer
+// counts. Genuinely reproducing one of Claude's own spinner glyphs as the
+// very first character of a printed line remains open in principle and is
+// not the corpus's demonstrated attack.
 //
 // # The background agent is the trap, and it has two halves and two ends
 //

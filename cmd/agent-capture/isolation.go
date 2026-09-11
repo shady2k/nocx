@@ -153,6 +153,28 @@ func refuseIfPresent(path string) error {
 	}
 }
 
+// refuseIfNonEmpty refuses when dir already exists and holds anything. A
+// directory that does not exist yet is not a refusal -- the caller
+// (record.sh, a test) routinely creates CLAUDE_CONFIG_DIR immediately before
+// this check runs. A source that cannot be inspected refuses too, the same
+// not-knowing-is-not-absence rule every other check in this file follows;
+// that also covers dir existing as a plain file, which os.ReadDir reports as
+// an error rather than an empty listing.
+func refuseIfNonEmpty(dir string) error {
+	entries, err := os.ReadDir(dir)
+	switch {
+	case err == nil:
+		if len(entries) > 0 {
+			return fmt.Errorf("refusing to start: CLAUDE_CONFIG_DIR %q already holds configuration; Claude Code must read only what this run creates", dir)
+		}
+		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("refusing to start: cannot inspect CLAUDE_CONFIG_DIR %q: %w", dir, err)
+	}
+}
+
 // refuseEnvOutsideClaudeConfig refuses when the run's HOME or
 // CLAUDE_CONFIG_DIR could route Claude to configuration the run did not
 // create. Both are required: Claude falls back to the passwd home (and from
@@ -183,10 +205,32 @@ func refuseEnvOutsideClaudeConfig(env []string) error {
 	if !configSet || configDir == "" {
 		return errors.New("refusing to start: the env file sets no CLAUDE_CONFIG_DIR; Claude Code would fall back to this machine's real ~/.claude")
 	}
+	// A relative value has no fixed meaning here: agent-capture's own cwd is
+	// not the program's -- it is started with cmd.Dir set to -dir, which is
+	// what every other check in this function inspects. Refusing outright
+	// (nocx-nru89.10 finding 2) is simpler and stricter than resolving a
+	// relative path against some base, and it is what the operator meant
+	// anyway: HOME and CLAUDE_CONFIG_DIR are absolute paths by convention on
+	// every platform Claude Code runs on.
+	if !filepath.IsAbs(home) {
+		return fmt.Errorf("refusing to start: HOME %q is not an absolute path", home)
+	}
+	if !filepath.IsAbs(configDir) {
+		return fmt.Errorf("refusing to start: CLAUDE_CONFIG_DIR %q is not an absolute path", configDir)
+	}
 	for _, entry := range localClaudeEntries {
 		if err := refuseIfPresent(filepath.Join(home, entry)); err != nil {
 			return err
 		}
+	}
+	// Claude must read only configuration this run creates, so a
+	// CLAUDE_CONFIG_DIR that already holds anything -- wherever it lives, not
+	// only inside the real ~/.claude -- is exactly the "outside the run"
+	// source the flag promises against (nocx-nru89.10 finding 2). A
+	// directory that does not exist yet (the common case: the caller creates
+	// it fresh right before this check) is not a refusal.
+	if err := refuseIfNonEmpty(configDir); err != nil {
+		return err
 	}
 	realHome, err := userHomeDir()
 	if err != nil {
@@ -213,22 +257,48 @@ func refuseEnvOutsideClaudeConfig(env []string) error {
 	return nil
 }
 
-// resolveMaybe resolves p to an absolute, symlink-free path when p exists,
-// and to a Cleaned absolute path when it does not (CLAUDE_CONFIG_DIR and a
-// fresh HOME are routinely created after this check runs).
+// resolveMaybe resolves p to an absolute, symlink-free path. When p exists in
+// full, that is exactly filepath.EvalSymlinks(p). When it does not --
+// CLAUDE_CONFIG_DIR and a fresh HOME are routinely created after this check
+// runs -- it resolves symlinks through the nearest ancestor that DOES exist
+// and rejoins the missing suffix unresolved (a path component that does not
+// exist cannot itself be a symlink). Stopping at the first ENOENT and
+// returning the unresolved lexical path, as an earlier version did, missed
+// exactly the case a run-owned directory hits on every use: a symlinked
+// parent (nocx-nru89.10 finding 2) whose not-yet-created child is checked
+// before the caller creates it.
 func resolveMaybe(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
 	}
-	real, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return filepath.Clean(abs), nil
+	abs = filepath.Clean(abs)
+	suffix := ""
+	dir := abs
+	for {
+		real, evalErr := filepath.EvalSymlinks(dir)
+		if evalErr == nil {
+			if suffix == "" {
+				return real, nil
+			}
+			return filepath.Join(real, suffix), nil
 		}
-		return "", err
+		if !errors.Is(evalErr, fs.ErrNotExist) {
+			return "", evalErr
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached the root without finding an existing ancestor; return
+			// the error from the shallowest, most informative attempt.
+			return "", evalErr
+		}
+		if suffix == "" {
+			suffix = filepath.Base(dir)
+		} else {
+			suffix = filepath.Join(filepath.Base(dir), suffix)
+		}
+		dir = parent
 	}
-	return real, nil
 }
 
 // isSameOrWithin reports whether candidate is base itself or a descendant of
@@ -268,15 +338,21 @@ func resolveProgram(name string, env []string) (string, error) {
 	return "", fmt.Errorf("%q is not on the env file's PATH", name)
 }
 
-// probeVersion runs resolved once with versionArg under env, the same
-// isolated environment the capture itself uses, and returns its trimmed
-// combined output. It is the tool's own answer to "which build produced this
-// capture", so record.sh no longer needs a second, differently-isolated
-// invocation of the program to learn its version.
-func probeVersion(resolved, versionArg string, env []string) (string, error) {
+// probeVersion runs resolved once with versionArg under env and dir, the same
+// isolated environment and working directory the capture itself uses, and
+// returns its trimmed combined output. It is the tool's own answer to "which
+// build produced this capture", so record.sh no longer needs a second,
+// differently-isolated invocation of the program to learn its version.
+//
+// dir must be the same directory refuseOutsideClaudeConfig already inspected
+// (nocx-nru89.10 finding 3 / epic review finding 9): an empty dir here left
+// the probe running in agent-capture's own, uninspected cwd -- under
+// record.sh, the nocx checkout with its own CLAUDE.md above it.
+func probeVersion(resolved, versionArg string, env []string, dir string) (string, error) {
 	//nolint:gosec // the operator explicitly supplies the program and the version flag
 	cmd := exec.Command(resolved, versionArg)
 	cmd.Env = env
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("run %q %s: %w", resolved, versionArg, err)
@@ -298,20 +374,64 @@ type launcherInspection struct {
 }
 
 var (
-	exportPattern = regexp.MustCompile(`(?m)^[ \t]*export[ \t]+([A-Za-z_][A-Za-z0-9_]*)=`)
+	// exportPattern matches nixpkgs makeShellWrapper's two export shapes:
+	// `export VAR=...` (from --set/--set-default, always has an `=`) and the
+	// bare `export VAR` nixpkgs' addValue emits at the end of every
+	// --prefix/--suffix block (setup-hooks/make-wrapper.sh: five plain
+	// `VAR=...` assignment lines with no `export` keyword at all, followed
+	// by one `export VAR` with no `=`). The `=` arm and the end-of-line arm
+	// are alternatives so a bare `export VAR` is matched too -- the gap
+	// nocx-nru89.10 finding 1 named: the old pattern required `=` right
+	// after the name, so PATH and LD_LIBRARY_PATH additions (always
+	// --prefix, never --set) were silently missed on every real Nix
+	// makeShellWrapper output.
+	exportPattern = regexp.MustCompile(`(?m)^[ \t]*export[ \t]+([A-Za-z_][A-Za-z0-9_]*)(?:=|[ \t]*\r?$)`)
 	execPattern   = regexp.MustCompile(`(?m)^[ \t]*exec[ \t]+(?:-a[ \t]+\S+[ \t]+)?"?([^"'\s]+)"?`)
+
+	// binaryWrapperFlagPattern and binaryWrapperExecPattern read the
+	// makeBinaryWrapper docstring a compiled Nix wrapper embeds in its own
+	// .rodata (nixpkgs pkgs/by-name/ma/makeBinaryWrapper/make-binary-wrapper.sh,
+	// docstring()/formatArgs()): a `makeCWrapper '<executable>' \` line
+	// followed by one `--set`/`--set-default`/`--unset`/`--prefix`/`--suffix`
+	// line per flag, each with its variable name single-quoted (bash `@Q`
+	// quoting, which never needs anything but plain single quotes for a
+	// valid environment-variable name). Verified against
+	// /run/current-system/sw/bin/claude's resolved store path with
+	// `strings -n8` (nocx-nru89.10 finding 1): the file is ELF, so
+	// looksLikeScript reports it as binary, but its own documentation of
+	// itself is plain, greppable text.
+	binaryWrapperFlagPattern = regexp.MustCompile(`(?m)^[ \t]*--(?:set-default|set|unset|prefix|suffix)[ \t]+'([A-Za-z_][A-Za-z0-9_]*)'`)
+	binaryWrapperExecPattern = regexp.MustCompile(`(?m)^[ \t]*makeCWrapper[ \t]+'([^']*)'`)
 )
 
-// inspectLauncher reads resolved and, when it is a text launcher script
-// (the shape the Nix `claude` wrapper takes: `export`/`wrapProgram`-style
-// lines ending in an `exec` of the real program), reports the names of the
-// variables it sets or prefixes. It follows one launcher exec'ing another —
-// a chain nix wrappers are built as — up to a handful of hops, and never
+// maxWrapperHopBytes bounds how much of a hop's file inspectLauncher will
+// read. A real Nix wrapper -- shell script or compiled makeBinaryWrapper
+// binary -- is a few KB to a few tens of KB; the program at the end of the
+// chain (the real `claude`, a bundled ~200MB Node/Bun executable on this
+// machine) is not, and is not itself a further wrapper. Stopping the chain
+// at a hop over this bound, rather than reading it fully looking for a
+// pattern it cannot contain, is the deliberate boundary between "still
+// might be a wrapper" and "this is the program" -- distinct from an
+// unreadable hop, which is a real I/O failure and is noted as one.
+const maxWrapperHopBytes = 8 * 1024 * 1024
+
+// inspectLauncher reads resolved and, when it is a launcher whose own
+// environment additions are readable as text -- either a shell script (the
+// nixpkgs makeShellWrapper shape: `export`/bare-`export` lines ending in an
+// `exec` of the real program) or a compiled makeBinaryWrapper binary (whose
+// own generating command is embedded as a readable docstring) -- reports the
+// names of the variables it sets, defaults, unsets or prefixes/suffixes. It
+// follows one launcher naming another as its wrapped executable -- a chain
+// Nix wrappers are routinely built as -- up to a handful of hops, and never
 // executes anything: running the launcher to see what it does would run
-// Claude.
+// Claude. Names already found survive a later hop that cannot be read; only
+// hop 0 being unreadable, or being neither shape, empties the result --
+// losing an earlier hop's real findings because a later one failed was
+// nocx-nru89.10 finding 1's second gap.
 func inspectLauncher(resolved string) launcherInspection {
 	names := map[string]struct{}{}
 	visited := map[string]struct{}{}
+	note := ""
 	path := resolved
 	for hop := 0; hop < 5; hop++ {
 		if path == "" {
@@ -321,25 +441,57 @@ func inspectLauncher(resolved string) launcherInspection {
 			break
 		}
 		visited[path] = struct{}{}
-		data, err := os.ReadFile(path) //nolint:gosec // resolved is what this run resolved to start
-		if err != nil {
-			return launcherInspection{Note: fmt.Sprintf("could not read %s: %v", path, err)}
-		}
-		if !looksLikeScript(data) {
+
+		info, statErr := os.Stat(path)
+		if statErr != nil {
 			if hop == 0 {
-				return launcherInspection{Note: fmt.Sprintf("%s is not a text script; its environment additions, if any, could not be read", path)}
+				return launcherInspection{Note: fmt.Sprintf("could not read %s: %v", path, statErr)}
+			}
+			note = fmt.Sprintf("could not read %s: %v", path, statErr)
+			break
+		}
+		if info.Size() > maxWrapperHopBytes {
+			if hop == 0 {
+				return launcherInspection{Note: fmt.Sprintf("%s is too large (%d bytes) to inspect as a launcher; its environment additions, if any, could not be read", path, info.Size())}
 			}
 			break
 		}
-		for _, m := range exportPattern.FindAllSubmatch(data, -1) {
-			names[string(m[1])] = struct{}{}
-		}
-		next := ""
-		if m := execPattern.FindSubmatch(data); m != nil {
-			candidate := string(m[1])
-			if strings.Contains(candidate, string(filepath.Separator)) && !strings.HasPrefix(candidate, "$") {
-				next = candidate
+
+		data, err := os.ReadFile(path) //nolint:gosec // resolved is what this run resolved to start, size-bounded above
+		if err != nil {
+			if hop == 0 {
+				return launcherInspection{Note: fmt.Sprintf("could not read %s: %v", path, err)}
 			}
+			note = fmt.Sprintf("could not read %s: %v", path, err)
+			break
+		}
+
+		next := ""
+		switch {
+		case looksLikeScript(data):
+			for _, m := range exportPattern.FindAllSubmatch(data, -1) {
+				names[string(m[1])] = struct{}{}
+			}
+			if m := execPattern.FindSubmatch(data); m != nil {
+				candidate := string(m[1])
+				if strings.Contains(candidate, string(filepath.Separator)) && !strings.HasPrefix(candidate, "$") {
+					next = candidate
+				}
+			}
+		case binaryWrapperExecPattern.Match(data):
+			for _, m := range binaryWrapperFlagPattern.FindAllSubmatch(data, -1) {
+				names[string(m[1])] = struct{}{}
+			}
+			if m := binaryWrapperExecPattern.FindSubmatch(data); m != nil {
+				next = string(m[1])
+			}
+		default:
+			if hop == 0 {
+				return launcherInspection{Note: fmt.Sprintf("%s is not a text script or a makeBinaryWrapper binary; its environment additions, if any, could not be read", path)}
+			}
+			// Neither shape: the chain has reached the real program, not a
+			// further wrapper. Not an error -- there is nothing more to
+			// learn, and the names already collected stand.
 		}
 		path = next
 	}
@@ -348,7 +500,11 @@ func inspectLauncher(resolved string) launcherInspection {
 		sorted = append(sorted, n)
 	}
 	sort.Strings(sorted)
-	return launcherInspection{Names: sorted}
+	result := launcherInspection{Names: sorted}
+	if note != "" {
+		result.Note = note
+	}
+	return result
 }
 
 // looksLikeScript is a cheap, deliberately narrow text/binary test: a
@@ -380,10 +536,37 @@ func looksLikeScript(data []byte) bool {
 	return !bytes.ContainsRune(probe, 0)
 }
 
-// writeRunMeta records what ran — the program, where it resolved, its digest,
-// the NAMES of the variables it was given (never their values), what its own
-// launcher adds on top (also names only), and, when probeVersion supplied
-// one, the program's version string.
+// redactHomePrefix replaces this machine's real home directory prefix in p
+// with "~", the same way a shell prints it. A default native install
+// (`~/.local/bin/claude`) puts resolved's value under the operator's own
+// home, and nothing else about meta.json identifies whose machine it is
+// (nocx-nru89.10 finding 4 / epic review finding 12) -- SKILL.md's promise is
+// names, not values, and a full home path is close enough to an identifying
+// value to redact the same way. If the real home cannot be determined, or p
+// is not under it, p is returned unchanged: redaction is a courtesy on top
+// of the refusals above, not itself a safety boundary.
+func redactHomePrefix(p string) string {
+	home, err := userHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	cleanHome := filepath.Clean(home)
+	cleanPath := filepath.Clean(p)
+	if cleanPath == cleanHome {
+		return "~"
+	}
+	rel, err := filepath.Rel(cleanHome, cleanPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return filepath.Join("~", rel)
+}
+
+// writeRunMeta records what ran — the program, where it resolved (its home
+// directory prefix, if any, replaced with "~"), its digest, the NAMES of the
+// variables it was given (never their values), what its own launcher adds on
+// top (also names only), and, when probeVersion supplied one, the program's
+// version string.
 func writeRunMeta(path, program, resolved string, env []string, version string) error {
 	f, err := os.Open(resolved) //nolint:gosec // the program this run resolved
 	if err != nil {
@@ -407,7 +590,7 @@ func writeRunMeta(path, program, resolved string, env []string, version string) 
 		launcherNames = []string{}
 	}
 	meta := map[string]any{
-		"program": program, "resolved": resolved, "sha256": hex.EncodeToString(h.Sum(nil)),
+		"program": program, "resolved": redactHomePrefix(resolved), "sha256": hex.EncodeToString(h.Sum(nil)),
 		"envNames": names, "launcherEnvNames": launcherNames,
 	}
 	if launcher.Note != "" {

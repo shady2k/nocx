@@ -195,7 +195,13 @@ type workerSpawner struct {
 	// committed to succeeding (nocx-ui8q6.3). Nil is the absence case
 	// tabAnnouncer's own doc names.
 	announce tabAnnouncer
-	log      log.Logger
+	// owed is marked when deliverTask ends on a question rather than typing
+	// the task (nocx-f545a.7): the debt workerAnswerer pays once the
+	// coordinator's own answer to that question is confirmed. A nil owed set
+	// is the same absence case as every other optional seam here — nothing
+	// is tracked, which only matters to a caller that never wires one in.
+	owed *owedTasks
+	log  log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -280,10 +286,43 @@ func (w *paneWaitState) note(o paneobserve.Observation) {
 // whoever is reading this backend's log, and carries the same facts as
 // structured fields rather than prose, because the two readers are not
 // looking for the same thing.
-func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger) (agentdriver.State, error) {
+//
+// label names the CALLER in that log line — "worker spawn" or "worker
+// answer" — because this same wait now runs from two places (nocx-f545a.7):
+// a spawn typing a task for the first time, and an answerer paying a task it
+// owes once a menu is confirmed. A hardcoded "worker spawn:" in the answer's
+// own log line would describe a call that never happened.
+//
+// THE FIRST READING OF A QUESTION IS NOT TRUSTED, AND EVERY LATER ONE IS
+// (nocx-f545a.7). r is the WATCHER's own cache (paneReadiness.Snapshot), which
+// only ever changes on a Sweep, and nothing here — nor a menu's own confirm,
+// nor deliverTask's command write — marks the pane dirty as a side effect
+// of writing to it: production ties that to the session's own READ side
+// (internal/transport/ws_paneobserve.go's Touch, on the SHELL's next output),
+// which runs on its own coalescer and has not necessarily fired even once by
+// the time this function is called a heartbeat after the write that would
+// prompt it. For a SPAWN this is harmless: the reading, if there is one at
+// all, is the pane's first ever classification and nothing about it is
+// stale. For an ANSWER it is not: the cached reading immediately after a
+// confirm is, with certainty, the MENU THAT WAS JUST CONFIRMED — Choose
+// writes nothing that could have produced a fresher one — and trusting it
+// as this call's own verdict would report "still waiting on the question
+// you just answered" on every confirmed menu, never once giving the real
+// screen's own next paint a chance to be observed. So the very first check,
+// before this function has looped even once, answers only on free_text or
+// an exit — both are evidence nothing here just caused — and treats a
+// question as "not decided yet" instead of ending the wait on it; every
+// check from the first tick onward trusts a question exactly as before.
+// One extra deliveryPoll of latency on the rare race where a fresh
+// classification already landed before this function was ever called is the
+// whole cost, and no test in this repository asserts on that duration.
+func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.Logger, label string) (agentdriver.State, error) {
 	var last paneWaitState
 	// check answers the state that ENDS the wait, and "" while nothing has.
-	check := func() (agentdriver.State, error) {
+	// trustQuestion gates whether a positively identified question counts as
+	// that answer — see the function doc for why the very first call passes
+	// false and every other call passes true.
+	check := func(trustQuestion bool) (agentdriver.State, error) {
 		o, ok := r.Snapshot(paneID)
 		if !ok {
 			return "", nil
@@ -298,7 +337,11 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 			// agent is not busy, and nocx did not fail to read it. No budget
 			// changes that without somebody answering, and waiting one out
 			// and then deleting the pane is what threw away the only screen
-			// that said so (nocx-ty5ks).
+			// that said so (nocx-ty5ks). Untrusted on the first call only —
+			// see the function doc.
+			if !trustQuestion {
+				return "", nil
+			}
 			return o.State, nil
 		case agentdriver.StateExited:
 			return "", errors.New("the participant's agent exited before its pane ever became typable")
@@ -306,7 +349,7 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 			return "", nil
 		}
 	}
-	if state, err := check(); state != "" || err != nil {
+	if state, err := check(false); state != "" || err != nil {
 		return state, err
 	}
 	ticker := time.NewTicker(deliveryPoll)
@@ -314,9 +357,9 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 	for {
 		select {
 		case <-ctx.Done():
-			return "", refusePaneNeverTypable(lg, paneID, last)
+			return "", refusePaneNeverTypable(lg, paneID, last, label)
 		case <-ticker.C:
-			if state, err := check(); state != "" || err != nil {
+			if state, err := check(true); state != "" || err != nil {
 				return state, err
 			}
 		}
@@ -342,24 +385,119 @@ func awaitFreeText(ctx context.Context, r paneReadiness, paneID string, lg log.L
 // this function: it ends the wait as an answer (nocx-f545a.3). The state
 // rides the error as *workers.PaneNeverTypable, so a caller can choose its
 // sentence from a value rather than from this prose.
-func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState) error {
+//
+// label is the same word awaitFreeText was given, and it names the caller in
+// both the log line and the error's own Detail — no longer hardcoded to
+// "spawn" — which is what makes both readings true of a call that came from
+// workerAnswerer's paid debt as much as from a spawn (see awaitFreeText's
+// doc). Neither existing caller's test asserts on this prose, only on the
+// structured fields beside it and on the state named inside it.
+func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState, label string) error {
 	if !last.observed {
-		lg.Warn("worker spawn: the pane's budget expired with no observation ever recorded for it",
+		lg.Warn(label+": the pane's budget expired with no observation ever recorded for it",
 			"pane_id", paneID)
-		return &workers.PaneNeverTypable{Detail: "nocx never observed this pane at all inside the spawn's own budget; " +
+		return &workers.PaneNeverTypable{Detail: "nocx never observed this pane at all inside its own budget; " +
 			"there is no reading to say why it did not become typable"}
 	}
 	held := last.held(time.Now())
-	lg.Warn("worker spawn: the pane's budget expired before it became typable",
+	lg.Warn(label+": the pane's budget expired before it became typable",
 		"pane_id", paneID, "last_state", string(last.state), "held_ms", held.Milliseconds())
 	if last.state == agentdriver.StateUnknown {
 		return &workers.PaneNeverTypable{State: string(last.state), Detail: fmt.Sprintf(
-			"the pane's screen held state %q for %s of the spawn's budget: nocx's driver did not recognise what was on screen, and a pane it cannot read will never become typable on its own",
+			"the pane's screen held state %q for %s: nocx's driver did not recognise what was on screen, and a pane it cannot read will never become typable on its own",
 			last.state, held.Round(time.Millisecond))}
 	}
 	return &workers.PaneNeverTypable{State: string(last.state), Detail: fmt.Sprintf(
-		"the pane held state %q for %s of the spawn's budget without becoming typable",
+		"the pane held state %q for %s without becoming typable",
 		last.state, held.Round(time.Millisecond))}
+}
+
+// owedTasks is the in-memory set of participants whose spawn left a task
+// untyped because the pane asked a question first (nocx-f545a.3, nocx-f545a.7).
+//
+// THE INTERVAL. A session id is owed from the moment deliverTask's own wait
+// ends on a question — WaitingOn != "" — until one of: (a) the task is
+// actually submitted (workerAnswerer's own take, below, is the check-and-clear
+// that makes this happen at most once even under two concurrent answers); (b)
+// the participant's session ends, dropped from workerSupervisor.report AND
+// from spawnedParticipant.Kill — Kill's own doc already establishes why a
+// registration that fails after Spawn compensates through it before any
+// supervisor is ever attached, and this debt must not outlive either path; or
+// (c) this backend restarts, which needs no code at all: the set lives only in
+// this process's memory, and the restart sweep that finds such a participant
+// abandoned is exactly the interruption ADR-0064 already treats a human
+// takeover as orthogonal to — see the omission note below.
+//
+// A HUMAN TAKEOVER DOES NOT CLOSE IT. Suspending EffectSendInput stops a
+// coordinator's own answer from reaching the pane (Registrar.Answer refuses
+// before workerAnswerer.Answer is ever called), but it does not un-owe the
+// task: the person is not nocx, and nothing here reads a screen to decide
+// whether they typed it themselves. The debt closes only through (a), (b) or
+// (c) above.
+//
+// It is deliberately NOT part of the workers.Store record: ADR-0064 §4 says a
+// screen reading assigns no status to a participant and a menu answer moves no
+// record, and "this participant's task is still owed" is exactly such a
+// status — derived from what nocx did at spawn, not from anything the
+// participant declared. So it lives here, at the composition root, beside the
+// other two maps (workerEnrolments) this layer already owns for the same
+// reason.
+type owedTasks struct {
+	mu   sync.Mutex
+	sids map[session.ID]struct{}
+}
+
+func newOwedTasks() *owedTasks {
+	return &owedTasks{sids: make(map[session.ID]struct{})}
+}
+
+// mark records sid as owed. A nil *owedTasks is a spawner nobody wired one
+// into, treated exactly like every other optional seam in this file: the
+// spawn proceeds and nothing is tracked, rather than panicking on a debt
+// nobody asked it to keep.
+func (o *owedTasks) mark(sid session.ID) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sids[sid] = struct{}{}
+}
+
+// take is the check-and-clear: it reports whether sid was owed, and if so
+// clears the debt in the same locked section. This is what makes two
+// concurrent Answer calls on one owed participant type the task at most
+// once — the second call's take finds nothing and does nothing, rather than
+// both racing to submit.
+func (o *owedTasks) take(sid session.ID) bool {
+	if o == nil {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.sids[sid]; !ok {
+		return false
+	}
+	delete(o.sids, sid)
+	return true
+}
+
+// restore re-marks sid as owed, for an answer that took the debt but could
+// not pay it — the pane asked a different question, or the gate refused the
+// submission. A later answer takes it again.
+func (o *owedTasks) restore(sid session.ID) {
+	o.mark(sid)
+}
+
+// drop ends the debt without paying it, for a participant whose session is
+// gone — see the interval doc above for both callers.
+func (o *owedTasks) drop(sid session.ID) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.sids, sid)
 }
 
 // spawnedParticipant is a launcher that has been started. It is not yet a
@@ -386,6 +524,11 @@ type spawnedParticipant struct {
 	// delivery is what became of the task (nocx-f545a.3), set by Spawn and
 	// read once by the registration through workers.TaskDeliverer.
 	delivery workers.TaskDelivery
+	// owed is dropped for this participant's session in Kill, below, so a
+	// spawn that never becomes a supervised participant — compensated before
+	// workerSupervisor.Attach ever runs — does not leave a debt nothing will
+	// ever clear (nocx-f545a.7, owedTasks' own doc).
+	owed *owedTasks
 }
 
 // TaskDelivery is how the registration that started this participant learns
@@ -446,6 +589,13 @@ func (s spawnedParticipant) Liveness() workers.Liveness {
 func (s spawnedParticipant) Kill(ctx context.Context) error {
 	ctx, cancel := killContext(ctx)
 	defer cancel()
+	if s.sess != nil {
+		// Dropped unconditionally and first: a session that is about to be
+		// killed owes nothing more, whether or not this call's own session
+		// close succeeds below — a debt left standing over a session already
+		// gone would never be cleared by anything else.
+		s.owed.drop(s.sess.ID())
+	}
 	var errs []error
 	if s.sess != nil {
 		if _, getErr := s.sessions.Get(s.sess.ID()); getErr == nil {
@@ -620,7 +770,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's session is open",
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
-		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout, owed: s.owed,
 	}
 
 	// Told BEFORE the command is written, or an enrolment that arrives
@@ -785,7 +935,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 			"pane_id", paneID)
 		return workers.TaskDelivery{}, nil
 	}
-	state, waitErr := awaitFreeText(ctx, s.readiness, paneID, s.log)
+	state, waitErr := awaitFreeText(ctx, s.readiness, paneID, s.log, "worker spawn")
 	if waitErr != nil {
 		var never *workers.PaneNeverTypable
 		if errors.As(waitErr, &never) {
@@ -796,9 +946,12 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 	if state != agentdriver.StateFreeText {
 		// The pane is asking something. Nothing is typed into a question —
 		// the gate would refuse it anyway, and answering it is the caller's
-		// choice under ADR-0064, never nocx's.
+		// choice under ADR-0064, never nocx's. The debt is owed from here
+		// until workerAnswerer pays it, the session ends, or the backend
+		// restarts (owedTasks' own doc).
 		s.log.Info("worker spawn: the participant's pane is asking a question, so its task was not typed",
 			"pane_id", paneID, "state", string(state))
+		s.owed.mark(session.ID(paneID))
 		return workers.TaskDelivery{WaitingOn: string(state)}, nil
 	}
 	res := s.typist.Submit(paneID, task)
@@ -835,7 +988,7 @@ func (s *workerSpawner) deliverTask(ctx context.Context, paneID, task string) (w
 // two errors instead: that caller has no Spawn error of its own to prefer,
 // this one does.
 func (s *workerSpawner) compensateSpawn(ctx context.Context, tabID string, sess session.Session) {
-	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout}
+	sp := spawnedParticipant{tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout, owed: s.owed}
 	if err := sp.Kill(ctx); err != nil {
 		s.log.Warn("worker spawn: could not fully compensate a failed spawn",
 			"tab_id", tabID, "error", err)
@@ -982,7 +1135,12 @@ type workerSupervisor struct {
 	// registrar to report to. Two-phase wiring at the composition root, which
 	// is the ordinary shape for a cycle between two things the root owns.
 	exited func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, e workers.Exit)
-	log    log.Logger
+	// owed is dropped in report, below, for the participant whose exit is
+	// being reported (nocx-f545a.7): a process that is gone owes nobody a
+	// task, and this is the closing event for a debt that survives even a
+	// human takeover — see owedTasks' own doc for the whole interval.
+	owed *owedTasks
+	log  log.Logger
 }
 
 // Attach begins watching a participant that is already recorded live.
@@ -1018,6 +1176,10 @@ func (s *workerSupervisor) Attach(ctx context.Context, p workers.Participant) er
 }
 
 func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e workers.Exit) {
+	// Dropped first and unconditionally: the process this participant was is
+	// gone whether or not anything downstream is wired to hear about it, and
+	// a debt over a gone process is a debt nothing will ever pay.
+	s.owed.drop(session.ID(p.Liveness.SessionID))
 	if s.exited == nil {
 		// Unwired supervision is a worker nothing watches, which is the one
 		// state this whole record exists to make impossible. Say so loudly
@@ -1181,6 +1343,19 @@ type paneChooser interface {
 type workerAnswerer struct {
 	grid   panegrid.Observer
 	typist paneChooser
+	// owed, readiness and typing are what pays a task this participant's
+	// spawn left owed, once THIS answer is the one that confirms the
+	// question it was waiting on (nocx-f545a.7). All three nil is the
+	// ordinary absence case every optional seam in this file already uses —
+	// nothing is paid, and Answer behaves exactly as it did before this bead.
+	owed      *owedTasks
+	readiness paneReadiness
+	// typing is the same *agenttyping.Typist as typist above, reached
+	// through Submit rather than Choose: the one gate, never a second door
+	// onto this pane's input queue, exactly as workerWaker and deliverTask
+	// already share it.
+	typing paneTypist
+	log    log.Logger
 }
 
 func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, option string) (workers.PaneAnswer, error) {
@@ -1190,13 +1365,92 @@ func (a *workerAnswerer) Answer(ctx context.Context, p workers.Participant, opti
 	}
 	res := a.typist.Choose(sid, option)
 	if res.Outcome != agenttyping.OutcomeTyped {
-		return paneAnswerOf(res), nil
+		return a.withOwedTask(ctx, p, res), nil
 	}
 	if err := awaitSelectionOn(ctx, a.grid, sid, option); err != nil {
 		res.Reason = "the selection was moved and the menu never showed it on that option, so nothing was confirmed (" + err.Error() + ")"
 		return paneAnswerOf(res), nil
 	}
-	return paneAnswerOf(a.typist.Choose(sid, option)), nil
+	return a.withOwedTask(ctx, p, a.typist.Choose(sid, option)), nil
+}
+
+// withOwedTask turns the gate's own result into the answer, and — only when
+// that result just CONFIRMED a selection — pays a task this participant's
+// pane was left owing, if one still is (nocx-f545a.7).
+//
+// ADR-0064 §4 is why this decides it here rather than reading it off the
+// record: a screen reading assigns no status to a participant and a menu
+// answer moves no record, so "this task is still owed" was never something
+// workers.Store could be asked — it lives in owed, this call's own in-memory
+// debt, and take is what makes paying it happen at most once even under two
+// concurrent Answer calls racing the same participant.
+func (a *workerAnswerer) withOwedTask(ctx context.Context, p workers.Participant, res agenttyping.Result) workers.PaneAnswer {
+	ans := paneAnswerOf(res)
+	if res.Outcome != agenttyping.OutcomeSubmitted || a.readiness == nil || a.typing == nil {
+		// No seam to pay a debt with is the same absence case as everywhere
+		// else in this file — never a reason to dereference one.
+		return ans
+	}
+	sid := session.ID(p.Liveness.SessionID)
+	if !a.owed.take(sid) {
+		return ans
+	}
+	ans.Task = a.typeOwedTask(ctx, sid, p.Task)
+	return ans
+}
+
+// answerTaskBudget bounds how long typeOwedTask waits for the pane to reach
+// free_text after THIS answer confirmed, once the confirmation itself is
+// already committed (nocx-f545a.7).
+//
+// It must stay under workers.answer's own declared Deadline
+// (internal/agenttools/registry.go, 30s) so a pane that never becomes
+// typable inside it is answered as itself — "waiting", with the state and
+// reason the wait ended on — rather than the whole tool call timing out and
+// reporting a failure for an answer nocx actually confirmed. A package var
+// and not a const, exactly like killTimeout above, so a test can shorten it
+// and prove the bound applies without waiting out the production value —
+// the test still asserts on the STATE the answer reports, never on how long
+// it took.
+var answerTaskBudget = 20 * time.Second
+
+// typeOwedTask pays sid's debt: it waits for the pane to become typable,
+// under answerTaskBudget, and submits task through the SAME gate a spawn's
+// own delivery and a wake both reach. Every branch below either pays the
+// debt (Delivery: "typed") or restores it for a later answer to try again —
+// except the one case where restoring would be wrong: the participant's
+// agent has exited, and there will be no later answer to pay it with.
+func (a *workerAnswerer) typeOwedTask(ctx context.Context, sid session.ID, task string) *workers.TaskOutcome {
+	subCtx, cancel := context.WithTimeout(ctx, answerTaskBudget)
+	defer cancel()
+	state, waitErr := awaitFreeText(subCtx, a.readiness, string(sid), a.log, "worker answer")
+	if waitErr != nil {
+		var never *workers.PaneNeverTypable
+		if errors.As(waitErr, &never) {
+			a.owed.restore(sid)
+			return &workers.TaskOutcome{Delivery: "waiting", State: never.State, Reason: never.Detail}
+		}
+		// The agent exited: the session is ending, so the debt is not
+		// restored (owedTasks' own doc, closing event (b)) — nothing will
+		// ever answer for this participant again.
+		return &workers.TaskOutcome{Delivery: "refused", Reason: waitErr.Error()}
+	}
+	if state != agentdriver.StateFreeText {
+		// The pane is asking something ELSE now. Answering THAT question is
+		// what pays this debt next — see workers.answer's own description.
+		a.owed.restore(sid)
+		return &workers.TaskOutcome{Delivery: "waiting", State: string(state)}
+	}
+	res := a.typing.Submit(string(sid), task)
+	if res.Outcome == agenttyping.OutcomeSubmitted {
+		return &workers.TaskOutcome{Delivery: "typed"}
+	}
+	a.owed.restore(sid)
+	reason := res.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("nocx refused to submit the task (%s)", res.Outcome)
+	}
+	return &workers.TaskOutcome{Delivery: "refused", State: string(res.State), Reason: reason}
 }
 
 // awaitSelectionOn blocks until paneID's screen shows a menu whose selection is

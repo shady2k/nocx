@@ -166,6 +166,27 @@ type workerAnswerResult struct {
 	Outcome string `json:"outcome"`
 	State   string `json:"state,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// Task is what became of a task this worker's spawn left owed, present
+	// only when THIS answer's own confirmation was the moment nocx paid it
+	// (nocx-f545a.7). Nil for every other answer — a refused one, one that
+	// only moved a selection, or one that confirmed a participant that
+	// owed nothing — so a coordinator never has to tell "nothing was owed"
+	// from "the field was simply omitted".
+	Task *workerAnswerTaskResult `json:"task,omitempty"`
+}
+
+// workerAnswerTaskResult restates workers.TaskOutcome in the wire's own
+// vocabulary, exactly as workerAnswerResult restates workers.PaneAnswer: one
+// owner of the words, this package never inventing a second set.
+type workerAnswerTaskResult struct {
+	// Delivery is the closed set: "typed" — the task reached the pane and
+	// started the worker's turn. "waiting" — the pane is asking something
+	// else now; look at it with workers.screen and answer it, and the task
+	// follows. "refused" — nocx's typing gate turned the submission away, or
+	// the worker's agent exited before it could be paid; look at reason.
+	Delivery string `json:"delivery"`
+	State    string `json:"state,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 type workerCloseResult struct {
@@ -535,9 +556,15 @@ func executeWorkerAnswer(ctx context.Context, cap agenttools.Capability, args js
 	if err != nil {
 		return "", fmt.Errorf("workers.answer: %w", err)
 	}
-	raw, err := json.Marshal(workerAnswerResult{
+	result := workerAnswerResult{
 		Worker: p.Worker, Outcome: answer.Outcome, State: answer.State, Reason: answer.Reason,
-	})
+	}
+	if answer.Task != nil {
+		result.Task = &workerAnswerTaskResult{
+			Delivery: answer.Task.Delivery, State: answer.Task.State, Reason: answer.Task.Reason,
+		}
+	}
+	raw, err := json.Marshal(result)
 	if err != nil {
 		return "", fmt.Errorf("workers.answer: result: %w", err)
 	}

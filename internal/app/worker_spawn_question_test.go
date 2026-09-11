@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -182,5 +183,48 @@ func TestAPaneNeverObservedIsAnUnreadableRefusal(t *testing.T) {
 	var never *workers.PaneNeverTypable
 	if !errors.As(err, &never) || never.State != "" || !never.Unreadable() {
 		t.Fatalf("err = %v, want an unreadable refusal with no state", err)
+	}
+}
+
+// ── the debt itself: marked at spawn, dropped at either closing event
+// other than an answer paying it (nocx-f545a.7) ────────────────────────────
+
+// Criterion: a spawn whose pane asks a question marks the participant's
+// task owed, and Kill — the compensation for every failure after the fork,
+// reached both by compensateSpawn here and by
+// internal/workers.Registrar.compensate for a later failure — drops that
+// debt, so a registration that never becomes a supervised participant does
+// not leave one nothing will ever clear.
+func TestKillDropsAnOwedTask(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	sid, _, sp := spawnStuckOnQuestion(t, stand, "p-owed-kill-2", "do the thing")
+
+	if !stand.owed.take(sid) {
+		t.Fatal("the spawn did not mark its task owed")
+	}
+	stand.owed.mark(sid) // restore for Kill to find and drop
+
+	if err := sp.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if stand.owed.take(sid) {
+		t.Fatal("Kill did not drop the participant's owed task")
+	}
+}
+
+// Criterion: the other closing event — the participant's session ending —
+// drops the same debt, from workerSupervisor.report, whether or not
+// anything downstream is wired to hear about the exit.
+func TestSupervisorReportDropsAnOwedTask(t *testing.T) {
+	stand := newTaskDeliveryStand(t)
+	sid := session.ID("sid-owed-report")
+	stand.owed.mark(sid)
+
+	stand.sup.report(context.Background(), workers.Participant{
+		ID: "p-owed-report", Liveness: workers.Liveness{SessionID: string(sid)},
+	}, workers.Exit{Cause: "exited"})
+
+	if stand.owed.take(sid) {
+		t.Fatal("workerSupervisor.report did not drop the participant's owed task")
 	}
 }

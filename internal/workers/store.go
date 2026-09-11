@@ -255,6 +255,34 @@ type PaneAnswer struct {
 	// Reason is why, in the words a caller reads; empty when the answer was
 	// confirmed.
 	Reason string
+	// Task is what became of a task this participant's spawn left owed —
+	// present only when this answer's own confirmation was ALSO the moment
+	// the debt was paid (nocx-f545a.7). Nil means no task was owed: either
+	// this spawn typed its task already, or the answer was not confirmed
+	// (Outcome != "submitted"), which pays no debt.
+	Task *TaskOutcome
+}
+
+// TaskOutcome is what nocx did with a task it owed a participant, once a
+// confirmed menu answer gave it the chance to act (ADR-0064 §4: a menu
+// answer writes nothing into the record, so this travels with the answer
+// that produced it and is kept nowhere, the same discipline TaskDelivery
+// above already uses for the identical fact at spawn time).
+type TaskOutcome struct {
+	// Delivery is the closed set: "typed" — the task reached the pane and
+	// started a turn; "waiting" — the pane is asking something else, and the
+	// task is still owed; "refused" — nocx's typing gate turned the
+	// submission away, or the debt could not be paid for another reason (the
+	// participant's agent exited). Never empty when Task is non-nil.
+	Delivery string
+	// State is the pane state Delivery was decided against, when there is
+	// one to name (empty for a gate refusal that carries no state of its
+	// own, or when the agent exited before the pane was ever read).
+	State string
+	// Reason is why, in the words a caller reads; empty when Delivery is
+	// "typed" and when Delivery is "waiting" on a plain question with
+	// nothing more to say about it.
+	Reason string
 }
 
 // Answerer answers a participant's menu by naming an option. It is a seam for

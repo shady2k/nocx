@@ -75,7 +75,13 @@ func (contractWorkerRecord) Screen(context.Context, string, workers.ParticipantI
 }
 
 func (contractWorkerRecord) Answer(context.Context, string, workers.ParticipantID, string) (workers.PaneAnswer, error) {
-	return workers.PaneAnswer{Outcome: "submitted", State: "permission_choice"}, nil
+	// A task object (nocx-f545a.7), carried by the over-the-wire case below
+	// so the schema's $defs.result.properties.task is exercised off a real
+	// result and not only off the DTO built directly from the Go struct.
+	return workers.PaneAnswer{
+		Outcome: "submitted", State: "permission_choice",
+		Task: &workers.TaskOutcome{Delivery: "typed"},
+	}, nil
 }
 
 func contractWorkerParticipants() []workers.Participant {
@@ -204,6 +210,22 @@ func TestGroupEndpoint_OverTheWireConformsToContract(t *testing.T) {
 				t.Fatalf("response error = %+v", response.Error)
 			}
 			validateGroupResult(t, workerResultSchema(t, tc.result), response.Result, tc.method)
+			if tc.method == "workers.answer" {
+				// The double above hands back a task outcome (nocx-f545a.7);
+				// this confirms the REAL result off the real wire carries it,
+				// which is what the schema validation just above cannot tell
+				// on its own — task is optional in the schema, so a result
+				// that omitted it would validate too.
+				var decoded struct {
+					Task map[string]any `json:"task"`
+				}
+				if err := json.Unmarshal(response.Result, &decoded); err != nil {
+					t.Fatalf("decode workers.answer result: %v", err)
+				}
+				if decoded.Task == nil || decoded.Task["delivery"] != "typed" {
+					t.Fatalf("workers.answer result = %s, want a task object with delivery typed", response.Result)
+				}
+			}
 		})
 	}
 }

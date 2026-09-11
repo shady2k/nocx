@@ -2009,7 +2009,16 @@ func New(opts ...Option) (*App, error) {
 	// registrar exists. Two-phase wiring at the composition root, which is
 	// the ordinary shape for a cycle between two things the root owns — the
 	// same shape as the emitter and the liveness observer above.
-	workerSup := &workerSupervisor{sessions: sess, log: logger}
+	// workerOwed is the one in-memory set of tasks left owed by a spawn whose
+	// pane asked a question first (nocx-f545a.7): marked in workerSpawner,
+	// paid in workerAnswerer once the coordinator's own answer to that
+	// question confirms, and dropped in workerSupervisor (below) and in
+	// spawnedParticipant.Kill (workers.go) when the participant's session
+	// ends. One instance shared by all three, for the reason workerEnrol
+	// above is shared: they are three views of one debt, and two instances
+	// would be two answers to "is this participant still owed its task".
+	workerOwed := newOwedTasks()
+	workerSup := &workerSupervisor{sessions: sess, owed: workerOwed, log: logger}
 	// The undispatched fact set and its two routes out (nocx-dkawo.3): the
 	// coordinator by a wake through the SAME typist agent.type reaches, the
 	// human by a deadline through the notification pipeline built above. The
@@ -2038,6 +2047,7 @@ func New(opts ...Option) (*App, error) {
 			// input queue.
 			readiness: paneWatch,
 			typist:    paneTyping,
+			owed:      workerOwed,
 			// Participants are minted in the default workspace until a
 			// coordinator names its own. It is the workspace the ledger
 			// already records every session nobody named one for, so this
@@ -2066,7 +2076,15 @@ func New(opts ...Option) (*App, error) {
 		// And the seam workers.answer reaches (nocx-f545a.4): paneTyping is the
 		// SAME Typist agent.type, a wake and a spawn's task delivery go through,
 		// so an answer is one more act through the one gate onto a pane's input.
-		workers.WithAnswerer(&workerAnswerer{grid: paneGrid, typist: paneTyping}),
+		// owed, paneWatch and paneTyping (again, as typing) are what lets a
+		// confirmed answer also pay a task it left owed (nocx-f545a.7): the
+		// SAME watcher and gate deliverTask itself uses, so an answer's own
+		// delivery is decided by the one reading and the one door this design
+		// has ever had for a pane's input.
+		workers.WithAnswerer(&workerAnswerer{
+			grid: paneGrid, typist: paneTyping,
+			owed: workerOwed, readiness: paneWatch, typing: paneTyping, log: logger,
+		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
 	)

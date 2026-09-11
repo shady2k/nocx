@@ -962,7 +962,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "workers.answer",
-		Description: "Answer a question one of your workers' panes is asking — a menu such as whether to trust the folder it was started in, or whether to approve a tool — by naming the option exactly as its screen shows it. Look at the screen with workers.screen first: nocx refuses an option that is not on it, and never picks one for you. The option you choose is the worker's answer, so choose it as the person would. You can only answer workers your own session started, and not while a person is at that worker's keyboard.",
+		Description: "Answer a question one of your workers' panes is asking — a menu such as whether to trust the folder it was started in, or whether to approve a tool — by naming the option exactly as its screen shows it. Look at the screen with workers.screen first: nocx refuses an option that is not on it, and never picks one for you. The option you choose is the worker's answer, so choose it as the person would. If workers.spawn told you a task was waiting on this same question, answering it here is enough: nocx types the task itself once the pane is ready, and the result's task field says what became of it — call workers.holdings or workers.wait to learn what happens next, never resend the task yourself. You can only answer workers your own session started, and not while a person is at that worker's keyboard.",
 		// MUTATE-DESTRUCTIVE, for workers.close's reason and one more: the
 		// option named can approve a tool call inside the worker, or trust a
 		// directory on the person's behalf, and neither comes back. ADR-0064

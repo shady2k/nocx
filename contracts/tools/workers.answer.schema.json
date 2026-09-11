@@ -22,7 +22,7 @@
   "$defs": {
     "result": {
       "title": "WorkersAnswerResult",
-      "description": "What became of the answer. A refusal is an answer too: nothing was written, and the reason says why.",
+      "description": "What became of the answer, and — when this answer was also the moment a task from workers.spawn was still owed — what became of that task. A refusal is an answer too: nothing was written, and the reason says why.",
       "type": "object",
       "additionalProperties": false,
       "required": ["worker", "outcome"],
@@ -52,6 +52,36 @@
         "reason": {
           "type": "string",
           "description": "Why, when the answer was not confirmed."
+        },
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["delivery"],
+          "properties": {
+            "delivery": {
+              "type": "string",
+              "enum": ["typed", "waiting", "refused"],
+              "description": "typed: the task from workers.spawn reached this pane and started the worker's turn — you do not need to send it again. waiting: this answer confirmed, but the pane is now asking something else; look at it with workers.screen and answer that with workers.answer too, and the task follows automatically once a confirmed answer finds the pane ready. refused: nocx's typing gate turned the task away, or the worker's agent exited before it could be paid — see reason."
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "free_text",
+                "permission_choice",
+                "modal_choice",
+                "working",
+                "error",
+                "unknown",
+                "exited"
+              ],
+              "description": "The pane state the task's own delivery was decided against, when there is one to name."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why, when delivery is refused."
+            }
+          },
+          "description": "Present only when this answer's own confirmation was the moment a task workers.spawn left owed got its chance to be typed. Absent for every other answer — including one that only moved a selection, one the gate refused outright, or one confirmed by a worker that owed nothing."
         }
       }
     }

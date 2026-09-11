@@ -46,6 +46,13 @@ type taskDeliveryStand struct {
 	watch   *paneobserve.Watcher
 	enrol   *workerEnrolments
 	spawner *workerSpawner
+	// owed is the SAME set spawner marks a question against, so a test that
+	// answers through a workerAnswerer built over this stand (answerStand,
+	// worker_answer_test.go) pays the identical debt Spawn left, rather than
+	// a second instance that happens to agree by construction.
+	owed *owedTasks
+	sup  *workerSupervisor
+	log  log.Logger
 }
 
 func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
@@ -73,6 +80,8 @@ func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
 	watch.SetEmitter(func(paneobserve.Observation) {})
 	typist := newPaneTypist(logger, grid, rules, verifiedClaude(t), watch, reg)
 	enrol := newWorkerEnrolments(logger, reg)
+	owed := newOwedTasks()
+	sup := &workerSupervisor{sessions: reg, owed: owed, log: logger}
 	spawner := &workerSpawner{
 		layout:     tabs,
 		opener:     opener,
@@ -81,12 +90,75 @@ func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
 		readiness:  watch,
 		typist:     typist,
 		workspace:  "ws-test",
+		owed:       owed,
 		log:        logger,
 	}
 	return &taskDeliveryStand{
 		reg: reg, ptys: ptys, tabs: tabs, opener: opener,
 		grid: grid, rules: rules, watch: watch, enrol: enrol, spawner: spawner,
+		owed: owed, sup: sup, log: logger,
 	}
+}
+
+// realTypist is the stand's typing gate, asserted back to its concrete type
+// so a caller can hand it to a workerAnswerer as both paneChooser (Choose)
+// and paneTypist (Submit) — the one gate, never two.
+func (s *taskDeliveryStand) realTypist(t *testing.T) *agenttyping.Typist {
+	t.Helper()
+	typist, ok := s.spawner.typist.(*agenttyping.Typist)
+	if !ok {
+		t.Fatalf("the stand's typist is %T, want the real gate", s.spawner.typist)
+	}
+	return typist
+}
+
+// answerer is a workerAnswerer wired exactly as app.go wires the shipped
+// one: the real gate for both Choose and Submit, the real grid, and this
+// stand's OWN owed set and watcher — the same ones spawner marks a question
+// against, so an owed task answered through this answerer pays the identical
+// debt Spawn left (nocx-f545a.7).
+func (s *taskDeliveryStand) answerer(t *testing.T) *workerAnswerer {
+	t.Helper()
+	typist := s.realTypist(t)
+	return &workerAnswerer{
+		grid: s.grid, typist: typist,
+		owed: s.owed, readiness: s.watch, typing: typist, log: s.log,
+	}
+}
+
+// spawnStuckOnQuestion spawns a participant whose pane immediately shows the
+// real folder-trust question, off the real capture, so its task is left
+// owed (nocx-f545a.3) — the starting condition every owed-task test needs.
+// It returns the Spawned too, so a test asserting on Kill has the exact
+// value internal/workers.Registrar.compensate would call it on.
+func spawnStuckOnQuestion(t *testing.T, stand *taskDeliveryStand, participant workers.ParticipantID, task string) (session.ID, workers.Participant, workers.Spawned) {
+	t.Helper()
+	type outcome struct {
+		sp  workers.Spawned
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		sp, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
+			Participant: participant, Group: "worker-1", Task: task, Command: "claude",
+		})
+		done <- outcome{sp, err}
+	}()
+
+	sid := waitForNewSession(t, stand.reg)
+	stand.enrolWorkerPane(t, sid)
+	stand.feedCapture(t, sid, "claude-trust", 11000)
+	waittest.WaitFor(t, "the worker's pane to be classified as asking a question", func() bool {
+		stand.watch.Sweep()
+		o, ok := stand.watch.Snapshot(string(sid))
+		return ok && o.State == agentdriver.StatePermissionChoice
+	})
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Spawn refused a pane that was asking a question: %v", got.err)
+	}
+	return sid, workers.Participant{ID: participant, Liveness: workers.Liveness{SessionID: string(sid)}, Task: task}, got.sp
 }
 
 // enrolWorkerPane opens the pane's grid and observation exactly as
@@ -120,6 +192,42 @@ func (s *taskDeliveryStand) feedCapture(t *testing.T, sid session.ID, name strin
 	for _, c := range chunks[:through] {
 		s.grid.Feed(string(sid), []byte(c.Data))
 	}
+}
+
+// repaintAsIdle resets sid's pane to a brand-new terminal (Withdraw then
+// Enrol, exactly as a real teardown-and-reopen would) and replays the same
+// idle capture TestASpawnWhosePaneBecomesFreeTextDeliversTheTask drives a
+// fresh pane to free_text with.
+//
+// A plain Feed of a SECOND, unrelated capture onto a pane that already holds
+// another one's escape state does not reliably reach free_text — measured
+// while writing the owed-task tests: the driver read the result as unknown,
+// because a capture's opening bytes assume a fresh terminal (alternate-screen
+// mode, saved cursor, application keypad) rather than whatever mode the trust
+// question's own capture left behind. Resetting the emulator before the
+// replay is what makes the frame this typist reads a screen the shipped rule
+// was actually written against, the same guarantee feedCapture's own doc
+// states for the untouched case.
+func (s *taskDeliveryStand) repaintAsIdle(t *testing.T, sid session.ID) {
+	t.Helper()
+	s.grid.Withdraw(string(sid))
+	if err := s.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+		t.Fatalf("re-enrol the worker's pane: %v", err)
+	}
+	s.feedCapture(t, sid, "claude-idle", 11000)
+	// The watcher's own dirty flag is what makes Sweep reclassify a pane at
+	// all (paneobserve.Watcher.Touch's own doc), and nothing here re-marks
+	// it on a SECOND feed the way a real pane's byte-write path does — the
+	// transport touches the watcher beside every grid.Feed, and this stand
+	// feeds the grid directly. So it is done by hand, and the wait that
+	// follows drives BOTH this call's own Snapshot and any awaitFreeText
+	// poll a concurrently-running Answer is spinning on.
+	s.watch.Touch(string(sid))
+	waittest.WaitFor(t, "the worker's pane to be classified free_text", func() bool {
+		s.watch.Sweep()
+		o, ok := s.watch.Snapshot(string(sid))
+		return ok && o.State == agentdriver.StateFreeText
+	})
 }
 
 // waitForNewSession blocks until a session other than any already known

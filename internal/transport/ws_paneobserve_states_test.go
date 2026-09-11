@@ -2,40 +2,73 @@ package transport
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/log"
 )
 
-// claudeTurnStartingChrome is the idle chrome with the status row Claude
-// Code 2.1.266 draws in the first seconds of a turn: the spinner and its verb,
-// no elapsed timer yet, and the interrupt hint in the mode line (nocx-ys9jd).
-func claudeTurnStartingChrome(cols int) string {
-	return claudeIdleChrome(cols) +
-		"\x1b[6;1H✻ Burrowing…" +
-		"\x1b[12;1H  ⏸ manual mode on · esc to interrupt" +
-		"\x1b[9;3H"
-}
-
-// claudeAPIWaitingChrome is the status row Claude Code 2.1.266 draws while a
-// request to its API has gone unanswered (nocx-emors).
-func claudeAPIWaitingChrome(cols int) string {
-	return claudeIdleChrome(cols) +
-		"\x1b[6;1H✻ Waiting for API response · will retry in 4m 36s · check your network" +
-		"\x1b[12;1H  ⏸ manual mode on · esc to interrupt" +
-		"\x1b[9;3H"
+// recordedChrome replays a committed internal/agentdriver capture up to atMs
+// and paints the resulting frame back into the bytes that reproduce it
+// (internal/agentcapture.Paint), so the seam test below drives its pane from
+// real Claude Code byte streams rather than hand-built chrome. A fixture
+// written by the person writing the driver encodes that person's model of the
+// TUI, including the parts that are wrong (AGENTS.md's testing rule 1); a
+// capture is real bytes off a real PTY, produced and marked the way
+// internal/agentdriver's own manifest is (nocx-nru89.8).
+func recordedChrome(t *testing.T, capture string, atMs int64) string {
+	t.Helper()
+	path := filepath.Join("..", "agentdriver", "testdata", "captures", capture+".jsonl")
+	header, chunks, err := agentcapture.Read(path)
+	if err != nil {
+		t.Fatalf("read capture %s: %v", capture, err)
+	}
+	r, err := agentcapture.NewReplayer(log.NewSlogAdapter(nil), header)
+	if err != nil {
+		t.Fatalf("replayer for %s: %v", capture, err)
+	}
+	defer r.Close()
+	if err = r.Feed(chunks[:agentcapture.ChunksThrough(chunks, atMs, 0)]); err != nil {
+		t.Fatalf("feed %s to %dms: %v", capture, atMs, err)
+	}
+	f, err := r.Frame()
+	if err != nil {
+		t.Fatalf("frame %s@%dms: %v", capture, atMs, err)
+	}
+	return string(agentcapture.Paint(f))
 }
 
 // THE SEAM A PERSON REACHES (nocx-nru89). Nobody calls Explain: a person sees a
 // pane's state because the watcher classifies the grid and the transport sends
 // session.observationChanged. So the readings the rule fixes are proved here,
 // through the real socket, the real watcher and the shipped rule, in the order
-// a turn produces them.
+// a turn produces them — and, since nocx-nru89.8, on the same recorded bytes
+// the manifest itself is checked against, not on chrome hand-built to match
+// what the rule currently reads.
+//
+// The pane is enrolled at 120x40 because that is the geometry every capture
+// used here was recorded at (record.sh's -rows 40, cols 120): the frame a
+// driver classifies in production comes out of a panegrid Store fed from byte
+// zero at a real geometry, and replaying at a different one would answer
+// about a screen the product never produces (the same reason
+// internal/agentcapture's package doc gives for going through panegrid at
+// all).
+//
+// The API-wait frame is sourced from claude-lmstudio-turn, the nocx-nru89.7
+// recording, rather than one of the nocx-nru89.8 captures: this corpus's only
+// evidence of Claude's "Waiting for API response · will retry in" chrome is
+// that capture (see manifest.json's api-waiting entry, unverified for
+// nocx-nru89.8 because the moment could not be reproduced against a
+// never-answering listener within record.sh's capture window). The capture
+// itself remains a valid, committed nocx-nru89.7 recording of Claude Code
+// 2.1.266; only the manifest inventory mark moved off it.
 func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 	ws, store, watch, term := newObservedWS(t)
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
-	if err := store.Enrol(sid, 80, 14); err != nil {
+	if err := store.Enrol(sid, 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	watch.Watch(sid, "claude")
@@ -45,9 +78,9 @@ func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 		chrome string
 		want   agentdriver.State
 	}{
-		{"a turn before its elapsed timer", claudeTurnStartingChrome(80), agentdriver.StateWorking},
-		{"the API waiting for a response", claudeAPIWaitingChrome(80), agentdriver.StateError},
-		{"the turn finished", claudeIdleChrome(80), agentdriver.StateFreeText},
+		{"a turn before its elapsed timer", recordedChrome(t, "claude-2.1.266-turn", 49000), agentdriver.StateWorking},
+		{"the API waiting for a response", recordedChrome(t, "claude-lmstudio-turn", 72000), agentdriver.StateError},
+		{"the turn finished", recordedChrome(t, "claude-2.1.266-subagent-finished", 126000), agentdriver.StateFreeText},
 	}
 	for _, step := range steps {
 		term.emit(t, step.chrome)

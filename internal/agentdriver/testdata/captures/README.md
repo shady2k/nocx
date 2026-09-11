@@ -60,6 +60,14 @@ reads this corpus.
 | `claude-lmstudio-subagent`          | `lmstudio-subagent.script`          | the main turn and a backgrounded Explore agent, still generating above the task panel (`65000`)                                                                                                                                                                                |
 | `claude-lmstudio-subagent-finished` | `lmstudio-subagent-finished.script` | the same shape, run long enough to watch the task panel clear (`75000`) and, roughly 20-30s of real time later, the `/tasks to see subagents` mode-line hint clear too (`112000`)                                                                                              |
 | `claude-lmstudio-api-refused`       | `lmstudio-api.script`               | the TUI's own error against a dead port, `http://127.0.0.1:9` (`40000`)                                                                                                                                                                                                        |
+| `claude-2.1.266-turn`               | `lmstudio-turn.script`              | onboarding, trust accepted, idle, ctrl+o transcript viewer (40000), a turn before its timer (47500, 49000), /btw overlay (53500, 54000), a streaming reply with no spinner (80000)                                                                                             |
+| `claude-2.1.266-idle-80`            | `lmstudio-onboarding.script`        | the idle input box at 80×40 (`38000`)                                                                                                                                                                                                                                          |
+| `claude-2.1.266-idle-60`            | `lmstudio-onboarding.script`        | the idle input box at 60×40 (`38000`)                                                                                                                                                                                                                                          |
+| `claude-2.1.266-model`              | `lmstudio-onboarding-model.script`  | onboarding, then `/model` typed and submitted: the model picker (`49000`)                                                                                                                                                                                                      |
+| `claude-2.1.266-permission`         | `lmstudio-permission.script`        | onboarding, a Bash permission dialog for `touch marker.txt` (timed spinner at `46000`, the dialog at `48000`-`49000`, cancelled with Esc), then a Write permission dialog for `note.txt` (`118000`), also cancelled                                                            |
+| `claude-2.1.266-subagent-finished`  | `lmstudio-subagent-finished.script` | the same shape as `claude-lmstudio-subagent-finished`: task panel while a background agent runs (`70000`), panel and mode-line hint both cleared (`110000`), a second turn's natural completion (`126000`)                                                                     |
+| `claude-2.1.266-api-refused`        | `lmstudio-api.script`               | the TUI's own error against a dead port, `http://127.0.0.1:9` (`40000`)                                                                                                                                                                                                        |
+| `claude-2.1.266-api-waiting`        | `lmstudio-api.script`               | attempted reproduction of the "Waiting for API response" chrome against a never-answering listener; does not reach that chrome (see the nocx-nru89.8 section below) — not pointed at by any manifest inventory moment                                                          |
 
 `claude-error` was captured against v2.1.245 by pointing `ANTHROPIC_BASE_URL` at a dead port,
 which is how the error chrome is reproduced without waiting for a real outage. What it settled:
@@ -101,8 +109,10 @@ none of those needed a dedicated recording.
 `claude-lmstudio-idle-80`, `claude-lmstudio-idle-60`, `claude-lmstudio-model`,
 `claude-lmstudio-permission`, `claude-lmstudio-subagent`, `claude-lmstudio-subagent-finished`
 and `claude-lmstudio-api-refused` were all captured 2026-09-11 against Claude Code 2.1.266
-with `qwen/qwen3.6-35b-a3b` on LM Studio (`http://192.168.0.202:1234`, except
-`claude-lmstudio-api-refused` against `http://127.0.0.1:9`), each in its own
+with `qwen/qwen3.6-35b-a3b` on LM Studio (the owner's LAN endpoint, passed to `record.sh` as
+`http://<lm-studio-host>:1234`; not committed here — see AGENTS.md's code-search section on
+why a LAN address does not belong in a tracked file), except `claude-lmstudio-api-refused`
+against `http://127.0.0.1:9`), each in its own
 `/var/tmp/nocx-detect-*` run with a fresh `HOME` and `CLAUDE_CONFIG_DIR`, via `record.sh`.
 Every prior recorded entry for these moments, from Claude Code 2.1.238/2.1.245, is kept as
 an anonymous (no `moment`) regression entry in `manifest.json` rather than deleted.
@@ -161,6 +171,84 @@ without leaving the alternate screen — but that moment is an Esc-INTERRUPTED t
 nocx-nru89.6 moved it to `claude-lmstudio-subagent-finished` at `125600`
 (`✻ Churned for 6s · done`), a turn that finished without an Esc anywhere in its history, and
 kept the old mark as an anonymous regression entry.
+
+## Re-recorded for nocx-nru89.8, still on Claude Code 2.1.266
+
+Every moment-bearing capture was re-recorded through the hardened `record.sh` (nocx-nru89.7:
+metadata beside the capture, bash-3.2-safe, refuses an uninspectable real home directory) —
+`claude --version` on this machine still reports `2.1.266 (Claude Code)`, so the re-recording
+is about the isolation and metadata hardening, not a new Claude build.
+
+**Naming.** Each new capture is named `claude-<claude-version>-<what>.jsonl` — the version
+that produced it, then the same descriptive suffix the `claude-lmstudio-*` name already used
+(`turn`, `idle-80`, `idle-60`, `model`, `permission`, `subagent-finished`, `api-refused`,
+`api-waiting`). Every prior recorded entry, from the `claude-lmstudio-*` (nocx-nru89.7) and
+older captures, is kept as an anonymous (no `moment`) regression entry in `manifest.json`
+rather than deleted, exactly as the nocx-nru89.2 round kept the captures before it.
+
+**Marks moved because this run's model answered faster.** The LM Studio endpoint used for
+this round returned tokens sooner than the nocx-nru89.7 recording, so several marks sit
+earlier or later than their nocx-nru89.7 counterparts, each re-derived by reading the replay
+rather than copied from the old timestamp:
+
+- `turn-with-timer` moved from `48000` to `46000`: by `48000` the Bash dialog had already
+  replaced the spinner.
+- `turn-streaming` moved from `85000` to `80000`: the turn was fully finished (`✻ Cooked for
+36s · done`) by `84000`, so `85000` no longer shows a turn in flight.
+- `btw-overlay` moved from `55000`/`58000` to `53500`/`54000`: the overlay-working branch
+  requires the row above the overlay to END in `…` (`suffix: "…"`, not merely contain it), and
+  by `54500` that row already reads `✻ Sublimating… (7s · thinking)` — the elapsed timer's
+  `(7s · thinking)` suffix breaks the match. At `53500` the row still reads a bare
+  `✻ Hyperspacing…`, which matches.
+- `write-permission` moved from `110000` to `118000`: the second (Write) turn took longer to
+  reach its own permission dialog than in the nocx-nru89.7 recording.
+- `subagent-finished`'s `/tasks to see subagents` mode-line hint cleared much sooner this time
+  (between `100000` and `105000`ms of real time, against nocx-nru89.7's 20-30s-after-panel
+  window), so its mark moved from `112000` to `110000`, still placed after the hint clears, for
+  the same reason nocx-nru89.6's report gives: the frame right after the panel collapses but
+  before the hint clears is chrome-identical, under this rule's closed predicate set, to a real
+  still-running background agent (`internal/paneobserve`'s
+  `TestAChildAppearingOrVanishingDoesNotChangeTheParentsState`).
+- `turn-finished` moved from the nocx-nru89.7 mark's capture and offset entirely: this round's
+  second turn (`ok`) completed naturally by `126000` (`✻ Worked for 5s · done`), so that mark
+  sources the moment instead of re-deriving a timestamp on the same capture nocx-nru89.7 used.
+
+**`api-waiting` could not be reproduced and is `unverified`.** The new `claude-2.1.266-turn`
+capture's real generation never stalled, so the chrome that appeared incidentally in the
+nocx-nru89.7 recording (`claude-lmstudio-turn@72000`) did not recur here. Following SKILL.md's
+documented fallback — a listener that accepts a connection and never answers
+(`127.0.0.1:18999`) — was tried twice: once with the `lmstudio-api.script` procedure's
+documented 40s final wait, and once with the wait extended to 190s (about 228s of total real
+elapsed time, just under `record.sh`'s 240s hard capture ceiling). In both runs the screen
+never advances past a plain, ever-growing spinner; it never draws "Waiting for API response ·
+will retry in" or "check your network". Per SKILL.md step 5, this is left to the owner rather
+than resolved by guessing: either a longer wait than one `record.sh` invocation allows
+reproduces it, or the chrome needs an actual mid-request network failure (a reset connection,
+tried as a debugging probe, instead produces a third, already-covered grammar — `API error ·
+Retrying in Xs`, matching the existing `· Retrying in` branch, not this one). The old
+`claude-lmstudio-turn@72000` entry is kept as the corpus's only evidence of this chrome, and
+`claude-2.1.266-api-waiting.jsonl` is committed as the record of what was tried, referenced by
+no manifest moment.
+
+**The Bash permission capture uses a settings file.** `claude-2.1.266-permission` was recorded
+with `.claude/skills/nocx-detection-verify/permission-ask-settings.json` as `record.sh`'s
+`[settings]` argument (`{"permissions": {"ask": ["Bash(touch marker.txt)"]}}`), the same rule
+the nocx-nru89.7 recording used, so the Bash tool call still surfaces a real approval dialog
+rather than running unattended.
+
+**No LAN address and no real email is committed.** `record.sh`'s endpoint argument is never
+written to a capture or its metadata — only variable NAMES are ever recorded (see
+`writeRunMeta` in `cmd/agent-capture/isolation.go`), so this round's LM Studio endpoint reaches
+no committed file. Auditing the whole corpus for nocx-nru89.8 (`192.168.`, `10.`, `172.16-31.`,
+`/home/…`, email addresses, tokens) also turned up a real email address baked into the TUI
+chrome of five OLDER captures predating this epic's isolation work — `claude-idle`,
+`claude-modal`, `claude-permission`, `claude-subagent` and `claude-working` — from before a
+fresh, isolated `HOME` was used for every recording. Each occurrence was replaced in place
+with a same-length placeholder (`redacted@test.com`, 17 bytes for 17 bytes) so the replacement
+does not shift any chunk's byte offset — `agentcapture.Read` validates offsets are contiguous,
+so a length-changing edit would have corrupted the capture. `go run ./cmd/agent-capture replay`
+and the full `internal/agentdriver` suite were re-run against all five afterwards to confirm
+the redaction changed nothing a rule reads.
 
 ## Four things the captures decided, which reasoning got wrong
 

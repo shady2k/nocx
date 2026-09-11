@@ -25,24 +25,16 @@
   "entries": [
     {
       "moment": "theme-picker",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 8000,
+      "state": "modal_choice",
+      "note": "the onboarding theme list, before the first Enter dismisses it; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 8000,
       "state": "modal_choice",
-      "note": "the onboarding theme list, before the first Enter dismisses it (nocx-nru89.2)"
-    },
-    {
-      "moment": "security-notes",
-      "capture": "claude-lmstudio-turn",
-      "atMs": 17000,
-      "state": "unknown",
-      "note": "Press Enter to continue; not a numbered menu and not the input box (nocx-nru89.2)"
-    },
-    {
-      "moment": "folder-trust",
-      "capture": "claude-lmstudio-turn",
-      "atMs": 20500,
-      "state": "permission_choice",
-      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-trust",
@@ -51,11 +43,43 @@
       "note": "the same moment on Claude Code 2.1.263, kept as a regression (nocx-nru89.2)"
     },
     {
+      "moment": "security-notes",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 17000,
+      "state": "unknown",
+      "note": "Press Enter to continue; not a numbered menu and not the input box; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
+      "capture": "claude-lmstudio-turn",
+      "atMs": 17000,
+      "state": "unknown",
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
+    },
+    {
+      "moment": "folder-trust",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 20500,
+      "state": "permission_choice",
+      "note": "numbers none of its options; identified by the cursor on the marker and the confirm legend below (nocx-f545a.2); re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
+      "capture": "claude-lmstudio-turn",
+      "atMs": 20500,
+      "state": "permission_choice",
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
+    },
+    {
       "moment": "idle-120",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 36000,
+      "state": "free_text",
+      "note": "the idle input box is where nocx may type; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 36000,
       "state": "free_text",
-      "note": "the idle input box is where nocx may type; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-idle",
@@ -65,10 +89,16 @@
     },
     {
       "moment": "idle-80",
+      "capture": "claude-2.1.266-idle-80",
+      "atMs": 38000,
+      "state": "free_text",
+      "note": "re-recorded on Claude Code 2.1.266 at 80x40 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-idle-80",
       "atMs": 38000,
       "state": "free_text",
-      "note": "re-recorded on Claude Code 2.1.266 at 80x40 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-idle-80",
@@ -78,10 +108,16 @@
     },
     {
       "moment": "idle-60",
+      "capture": "claude-2.1.266-idle-60",
+      "atMs": 38000,
+      "state": "free_text",
+      "note": "the narrow geometry of a side-by-side worker pane; re-recorded on Claude Code 2.1.266 at 60x40 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-idle-60",
       "atMs": 38000,
       "state": "free_text",
-      "note": "the narrow geometry of a side-by-side worker pane; re-recorded on Claude Code 2.1.266 at 60x40 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-idle-60",
@@ -91,18 +127,31 @@
     },
     {
       "moment": "turn-before-timer",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 49000,
+      "state": "working",
+      "note": "spinner row before the elapsed timer draws (nocx-ys9jd); re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    { "capture": "claude-2.1.266-turn", "atMs": 47500, "state": "working" },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 49000,
       "state": "working",
-      "note": "spinner row before the elapsed timer draws (nocx-ys9jd)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     { "capture": "claude-lmstudio-turn", "atMs": 47500, "state": "working" },
     {
       "moment": "turn-with-timer",
+      "capture": "claude-2.1.266-permission",
+      "atMs": 46000,
+      "state": "working",
+      "note": "the timed spinner (✢ Percolating… (7s · thinking)); re-recorded on Claude Code 2.1.266 through the hardened record.sh, at a mark earlier than the nocx-nru89.7 recording because this run's model answered the Bash permission prompt faster (dialog already on screen by 48000ms; nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-permission",
       "atMs": 48000,
       "state": "working",
-      "note": "the spinner with its elapsed timer (Blanching… (9s · ...)); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording (✳ Blanching… (9s · ...)), kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-working",
@@ -112,17 +161,29 @@
     },
     {
       "moment": "turn-streaming",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 80000,
+      "state": "working",
+      "note": "Claude has erased the spinner row and streams its reply with no ellipsis; the mode line still reads esc to interrupt (nocx-nru89.6, owner's decision 2026-09-11); re-recorded on Claude Code 2.1.266 through the hardened record.sh at a mark earlier than the nocx-nru89.7 recording because this run's model finished generating sooner (the turn is fully complete by 84000ms here; nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 85000,
       "state": "working",
-      "note": "Claude has erased the spinner row and streams its reply with no ellipsis; the mode line still reads esc to interrupt, which is what a dedicated branch now reads (nocx-nru89.6, owner's decision 2026-09-11)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "moment": "turn-finished",
+      "capture": "claude-2.1.266-subagent-finished",
+      "atMs": 126000,
+      "state": "free_text",
+      "note": "a turn that completed on its own (\"Worked for 5s · done\"), box idle with no spinner and no esc to interrupt; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-subagent-finished",
       "atMs": 125600,
       "state": "free_text",
-      "note": "a turn that completed on its own (\"Churned for 6s · done\"), box idle with no spinner and no esc to interrupt; moved off the Esc-interrupted moment so the mark tests a natural completion (nocx-nru89.6)"
+      "note": "the same moment from the nocx-nru89.7 recording (\"✳ Churned for 6s · done\"), kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-lmstudio-permission",
@@ -138,25 +199,44 @@
     },
     {
       "moment": "btw-overlay",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 53500,
+      "state": "working",
+      "note": "the overlay replaces the box; the main turn's spinner is drawn above its full-width ▔ row (nocx-nru89.4); re-recorded on Claude Code 2.1.266 through the hardened record.sh, at a mark earlier than the nocx-nru89.7 recording because this run's outer spinner picked up its elapsed timer only ~1s after the mark (by 54500ms the row already reads '(7s · thinking)', which no longer matches the branch's bare-suffix-… requirement; nocx-nru89.8)"
+    },
+    { "capture": "claude-2.1.266-turn", "atMs": 54000, "state": "working" },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 55000,
       "state": "working",
-      "note": "the overlay replaces the box; the main turn's spinner is drawn above its full-width ▔ row (nocx-nru89.4)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     { "capture": "claude-lmstudio-turn", "atMs": 58000, "state": "working" },
     {
       "moment": "transcript-viewer",
+      "capture": "claude-2.1.266-turn",
+      "atMs": 40000,
+      "state": "unknown",
+      "note": "Showing detailed transcript · ctrl+o to toggle, opened during the ctrl+o steps of the same onboarding run; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 40000,
       "state": "unknown",
-      "note": "Showing detailed transcript · ctrl+o to toggle, opened during the ctrl+o steps of the same onboarding run (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "moment": "model-menu",
+      "capture": "claude-2.1.266-model",
+      "atMs": 49000,
+      "state": "modal_choice",
+      "note": "a menu the user opened, not a tool approval; re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-model",
       "atMs": 49000,
       "state": "modal_choice",
-      "note": "a menu the user opened, not a tool approval; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-modal",
@@ -166,19 +246,33 @@
     },
     {
       "moment": "bash-permission",
+      "capture": "claude-2.1.266-permission",
+      "atMs": 49000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "Bash command / touch marker.txt, only 2 options because the settings ask-rule names this exact command; re-recorded on Claude Code 2.1.266 through the hardened record.sh, against .claude/skills/nocx-detection-verify/permission-ask-settings.json (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-permission",
       "atMs": 49000,
       "state": "permission_choice",
       "branch": 0,
-      "note": "Bash command / touch marker.txt, only 2 options because the settings ask-rule names this exact command (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "moment": "write-permission",
+      "capture": "claude-2.1.266-permission",
+      "atMs": 118000,
+      "state": "permission_choice",
+      "branch": 0,
+      "note": "replaces the input box; its selected row opens with the input marker; re-recorded on Claude Code 2.1.266 through the hardened record.sh, at a mark later than the nocx-nru89.7 recording because this run's model took longer to reach the second (Write) request (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-permission",
       "atMs": 110000,
       "state": "permission_choice",
       "branch": 0,
-      "note": "replaces the input box; its selected row opens with the input marker; re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-lmstudio-permission",
@@ -202,10 +296,16 @@
     },
     {
       "moment": "subagent-running",
+      "capture": "claude-2.1.266-subagent-finished",
+      "atMs": 70000,
+      "state": "working",
+      "note": "task panel below the mode line, the main turn only saying 'Waiting for 1 background agent to finish' (no elapsis, not a spinner line); re-recorded on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-subagent-finished",
       "atMs": 75000,
       "state": "working",
-      "note": "task panel below the mode line, the main turn only saying 'Waiting for 1 background agent to finish' (no elapsis, not a spinner line); re-recorded on Claude Code 2.1.266 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-lmstudio-subagent",
@@ -227,10 +327,16 @@
     },
     {
       "moment": "subagent-finished",
+      "capture": "claude-2.1.266-subagent-finished",
+      "atMs": 110000,
+      "state": "free_text",
+      "note": "the interval's second end; a finished turn's summary in the status slot is not an error; re-recorded on Claude Code 2.1.266 through the hardened record.sh. This run's /tasks-to-see-subagents mode-line hint clears between 100000ms and 105000ms of real time -- much sooner than the nocx-nru89.7 recording's 20-30s window, because this run's model reached the second turn's own completion sooner overall -- and this mark sits at 110000ms, after the hint has cleared. nocx-nru89.6's finding still holds: the hint-alone branch is required by internal/paneobserve's TestAChildAppearingOrVanishingDoesNotChangeTheParentsState (a real herdr regression guard for a subagent still running with the panel just collapsed), and that frame is chrome-identical to this one under the closed predicate set (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-subagent-finished",
       "atMs": 112000,
       "state": "free_text",
-      "note": "the interval's second end; a finished turn's summary in the status slot is not an error; on Claude Code 2.1.266 the /tasks-to-see-subagents mode-line hint outlives the task panel by roughly 20-30s of real time before it too clears (nocx-nru89.2). nocx-nru89.6 could not move this mark inside that window: the hint-alone branch is required by internal/paneobserve's TestAChildAppearingOrVanishingDoesNotChangeTheParentsState (a real herdr regression guard for a subagent still running with the panel just collapsed), and that frame is chrome-identical to this one under the closed predicate set — see the nocx-nru89.6 report for the evidence."
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-subagent",
@@ -240,10 +346,16 @@
     },
     {
       "moment": "api-refused",
+      "capture": "claude-2.1.266-api-refused",
+      "atMs": 40000,
+      "state": "error",
+      "note": "the TUI's own error, in the spinner's slot, told apart by grammar; re-recorded on Claude Code 2.1.266 through the hardened record.sh against http://127.0.0.1:9 (nocx-nru89.8)"
+    },
+    {
       "capture": "claude-lmstudio-api-refused",
       "atMs": 40000,
       "state": "error",
-      "note": "the TUI's own error, in the spinner's slot, told apart by grammar; re-recorded on Claude Code 2.1.266 against http://127.0.0.1:9 (nocx-nru89.2)"
+      "note": "the same moment from the nocx-nru89.7 recording, kept as a regression (nocx-nru89.8)"
     },
     {
       "capture": "claude-error",
@@ -255,10 +367,13 @@
     { "capture": "claude-error", "atMs": 44000, "state": "error" },
     {
       "moment": "api-waiting",
+      "unverified": "attempted on Claude Code 2.1.266 through the hardened record.sh (nocx-nru89.8): (1) the new claude-2.1.266-turn capture's real generation never stalled, so the chrome did not occur naturally within it (unlike the nocx-nru89.7 recording, where it appeared incidentally at 72000ms during a real slow LM Studio response); (2) recorded against the SKILL.md never-answering listener (127.0.0.1:18999, accept-and-never-respond) with the lmstudio-api.script procedure, first with its documented 40s final wait (claude-2.1.266-api-waiting.jsonl, 291 chunks) and again with the wait extended to 190s (same file, 1251 chunks, ~228s of real elapsed time total, just under record.sh's 240s hard capture ceiling): in both runs the screen never advances past a plain, ever-growing spinner ('· Manifesting… (3m 10s)', cycling through Claude's usual spinner glyphs, by the end of the second run) -- the TUI is still treating the request as in flight and never draws 'Waiting for API response · will retry in' or any 'check your network' text. The old claude-lmstudio-turn@72000 entry (kept above) is the only evidence this corpus has of the owner's api-waiting chrome; awaiting owner decision on whether a longer wait (beyond what one record.sh invocation's 240s ceiling allows) reproduces it, or whether the chrome needs an actual mid-request network failure rather than a connection that is accepted and then never answered."
+    },
+    {
       "capture": "claude-lmstudio-turn",
       "atMs": 72000,
       "state": "error",
-      "note": "Waiting for API response · will retry in; a second chrome of an unreachable API (nocx-emors); already on Claude Code 2.1.266, so not re-recorded for nocx-nru89.2"
+      "note": "Waiting for API response · will retry in; a second chrome of an unreachable API (nocx-emors); recorded on Claude Code 2.1.266 during the nocx-nru89.7 recording, kept as the corpus's only evidence of this chrome pending the owner's decision above (nocx-nru89.8)"
     },
     {
       "capture": "claude-idle",

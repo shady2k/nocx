@@ -1,6 +1,6 @@
 # What nocx lets a coordinator do, measured against herdr — design
 
-- **Status:** Draft, third revision, 2026-09-11. §4 holds the owner's decisions of that day. §6
+- **Status:** Draft, fourth revision, 2026-09-11. §4 holds the owner's decisions of that day. §6
   designs part 1a in full. §7 is the brief for part 1b, which gets a design of its own. §9 records
   both codex reviews and what became of each finding.
 - **Brainstorm bead:** `nocx-34r0i` (its notes carry the decisions verbatim).
@@ -120,210 +120,120 @@ observation and input can be made atomic: they cannot, because the application r
 
 ## 5. Order of work
 
-1. **1a — classification, verified** (§6), including `nocx-ys9jd` and `nocx-emors`.
-2. **1b — pane interaction tools** (§7 is its brief; `nocx-tlaft` is its prerequisite).
-3. **Event-driven worker state and the coordinator wake;** `workers.wait` and the drop removed;
-   `workers.close` closes the tab.
-4. **Spawn preamble and checkpoints.**
-5. **Workspace neighbours.**
-6. **Hooks as the authoritative tier.**
+1. **1a — classification, verified:** `nocx-nru89` (§6), with `nocx-ys9jd` and `nocx-emors`.
+2. **1b — pane interaction tools:** `nocx-6q1uh` (§7 is its brief); blocked by `nocx-nru89` (the rule
+   and menu extraction) and `nocx-tlaft` (concurrency).
+3. **Event-driven worker state and the coordinator wake:** `nocx-luqz9`, holding `nocx-9f1d4`;
+   blocked by `nocx-6q1uh` (`internal/app/workers.go`).
+4. **Spawn preamble and checkpoints:** `nocx-k2csf`, blocked by `nocx-luqz9`.
+5. **Workspace neighbours:** `nocx-i8umd`, blocked by `nocx-luqz9`.
+6. **Hooks as the authoritative tier:** `nocx-7faow`, blocked by `nocx-luqz9` and `nocx-nru89`; it
+   also holds the automatic label oracle the reviews shaped (§9).
 
-`nocx-tdiqs` is a standalone bug.
+Standalone bugs: `nocx-tdiqs` (tab position), `nocx-tlaft` (MCP bridge and endpoint serialise calls),
+`nocx-8a38l` and `nocx-fqpbw` (capture tool). Blocking edges follow shared files, as `AGENTS.md`
+requires; the order above is also the owner's.
 
-## 6. Part 1a — the classification, verified
+## 6. Part 1a — the classification, verified (epic `nocx-nru89`)
 
-### 6.1 What is verified, and what is not
+### 6.1 What changed after three reviews
 
-**Verified:** that the shipped rule (`internal/agentdriver/claude.rule.json`) gives the state the
-owner fixed in §6.4 at every classification mark of every scenario that ran, on the Claude Code
-version installed when 1a closes. **Not verified here:** any write into a pane (1b), worker state
-reduction (part 3), hook authority (part 6). A scenario the owner accepted as `unsupported` is listed
-as **unverified** in the closing report, never folded into the claim. 1a adds no permission to write
-into any pane and no product surface.
+The previous revisions built an automatic label oracle: hook events on the capture's clock, online
+expect steps before dependent input, a fault proxy with request-level faults, a capture completion
+record, mutually exclusive entry predicates per screen. Each review found real holes in it, and the
+third found that its capture-format change would have silently removed a typing refusal
+(`agentcalib` writes headers without `Started` and reads a failed load as no evidence against the
+rule, `internal/agentcalib/verify.go` `evaluate`). The owner fixed the labels by looking at the
+screens, which is also how herdr keeps its rules correct. So 1a verifies the rule against moments the
+owner labelled, and the oracle moves to the hooks epic (`nocx-7faow`), where hooks exist anyway.
 
-**Already found by the discovery run** (§6.8): `nocx-ys9jd` and `nocx-emors`. Both are inside 1a:
-it does not close while either disagrees.
+### 6.2 What is verified
 
-### 6.2 Isolation of every Claude a run starts
+The shipped rule (`internal/agentdriver/claude.rule.json`) gives the owner's state at every moment in
+`internal/agentdriver/testdata/captures/manifest.json`, through `agentcapture.Read`,
+`agentcapture.Frames` and `agentdriver.Registry.Explain` — the path the product uses — for moments
+recorded on the Claude Code version current when the epic closes. Not verified: writes into a pane
+(1b), worker state (part 2), hook authority (hooks epic).
 
-The discovery run showed what inheritance costs: `cmd/agent-capture` passes its caller's whole
-environment except five terminal variables (`pinnedEnvironment`), so a run started from inside a
-Claude Code session would hand the captured Claude that session's `CLAUDECODE`,
-`CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_MESSAGING_TOKEN`.
+### 6.3 Tasks
 
-- **The environment is an allowlist the capture tool enforces**, not a shell wrapper's habit: a new
-  `-env-file` replaces inheritance entirely. The file holds `HOME=<group>/home`,
-  `CLAUDE_CONFIG_DIR=<group>/claude-config`, `PATH` (the directory of `claude` and the system's
-  coreutils only), `TERM`, `LANG`, `ANTHROPIC_BASE_URL=<proxy>` (§6.3), a dummy
-  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` set to one model the
-  endpoint lists, `DISABLE_TELEMETRY=1`. Nothing else reaches the process.
-- **Settings sources.** `HOME` and `CLAUDE_CONFIG_DIR` are fresh per scenario group; `work/` is
-  empty; the only settings passed are `--settings <group>/settings.json` (hooks and the scenario's
-  permission rules). `--bare` is not used: it disables hooks.
-- **Refusals before anything starts:** a managed settings file exists
-  (`/etc/claude-code/managed-settings.json` on Linux, `/Library/Application
-Support/ClaudeCode/managed-settings.json` on macOS); any `.claude/` or `CLAUDE.md` exists in
-  `work/` or any of its ancestors; `HOME` or `CLAUDE_CONFIG_DIR` is not new and empty; the run root is
-  not under `/var/tmp`.
-- **Effective configuration is observed, not assumed:** every group's first classification mark is
-  the idle screen, whose header row must name the configured model and whose mode line must read
-  `manual mode on`; either missing fails the group before any prompt is sent.
+1. **Isolation — `nocx-nru89.1`.** `agent-capture` gains `-env-file`, which replaces inheritance: the
+   program gets exactly the file's variables. Before starting, it refuses when Claude would read
+   settings or instructions from outside the run: `managed-settings.json` or `managed-settings.d/`
+   (Linux `/etc/claude-code`, the macOS equivalents), or `CLAUDE.md`, `CLAUDE.local.md` or `.claude/`
+   in the working directory or any ancestor. The launcher's own environment additions (the Nix
+   `claude` wrapper sets several) are recorded, not hidden.
+2. **Corpus, manifest and skill — `nocx-nru89.2`.** Record the moments below on the current Claude
+   through the owner's Anthropic-compatible local endpoint with a fresh `HOME` and
+   `CLAUDE_CONFIG_DIR` under `/var/tmp`; write the manifest (capture, mark, expected state, optional
+   branch); commit captures and scripts; add `.claude/skills/nocx-detection-verify/` so the recording
+   is redone after a Claude update. Permission moments use an explicit `permissions.ask` rule in a
+   `--settings` file, because read-only commands such as `ls` are allowed without asking.
+3. **One replay path — `nocx-nru89.3`.** The rule tests read the manifest through `agentcapture`;
+   the test-only reader in `capture_test.go` goes; state and branch are compared separately.
+   `agentcapture.Read`'s contract does not change.
+4. **Rule fixes — `nocx-ys9jd`, `nocx-emors`** and whatever the new moments show, each with a test that
+   fails on the old rule and passes on the new.
 
-### 6.3 The harness
+Two defects of the capture tool the reviews verified are filed on their own, because 1a does not need
+them to be fixed first: `nocx-8a38l` (a descendant holding the PTY hangs the capture, which then
+writes nothing) and `nocx-fqpbw` (a new capture with its tail cut replays as whole).
 
-**`cmd/agent-capture capture`, extended where the review found it cannot carry evidence:**
+### 6.4 The moments and their labels
 
-1. **One time domain.** The capture records, besides output chunks, three record kinds on its own
-   monotonic clock: `input` (each script step, with the bytes' label and whether the write
-   succeeded), `process` (start, exit with status, kill), and `hook` (each hook event the capture
-   received). Hooks do not write files with wall-clock times: the settings' hook command writes the
-   event JSON to a Unix socket the capture owns, and the capture stamps it on receipt. `Header.Started`
-   stays informational.
-2. **Bounded end.** The program runs in its own process group. On script end, timeout or error the
-   capture signals the group, closes the PTY master after a bounded drain, and always writes what it
-   has, ending with an `end` record: `{reason: exited | exited_early | script_ended | timeout | error,
-exitStatus, capturedThroughMs, bytes}`. A program that exits before its script finishes is
-   `exited_early`, not success.
-3. **Completeness.** `agentcapture.Read` requires the `end` record and a parseable `Started`, and
-   rejects a capture without them; `Frames` refuses a mark beyond `capturedThroughMs` instead of
-   answering the last screen.
+Owner's labels, 2026-09-11. The literal text is what identifies the moment when marks are placed by
+reading the replay; it is not a second classifier.
 
-**`agent-capture verify`** reuses `agentcapture.Read` and `agentcapture.Frames` for replay and
-`agentdriver.Registry.Explain` for the verdict — the entry points the product uses — and replaces the
-separate test-only reader in `internal/agentdriver/capture_test.go` with the same parser, so there is
-one replay path.
+| Moment                                 | Identified by                                  | Expected                                 |
+| -------------------------------------- | ---------------------------------------------- | ---------------------------------------- |
+| theme picker (first run)               | `Choose the text style`                        | `modal_choice`                           |
+| security notes (first run)             | `Press Enter to continue`                      | `unknown`                                |
+| folder trust                           | `Yes, I trust this folder`                     | `permission_choice`                      |
+| idle at 120, 80, 60 columns            | `manual mode on`, prompt box, no spinner       | `free_text`                              |
+| turn before its elapsed timer          | spinner row without `(Ns)`, `esc to interrupt` | `working` (`nocx-ys9jd`)                 |
+| turn with its timer                    | spinner row with `(Ns)`                        | `working`                                |
+| turn finished                          | prompt box, no spinner, no `esc to interrupt`  | `free_text`                              |
+| `/btw` overlay over a running turn     | `Esc to close` under the main turn's spinner   | `working`                                |
+| transcript viewer                      | `Showing detailed transcript`                  | `unknown`                                |
+| `/model` menu                          | the menu as recorded                           | `modal_choice`                           |
+| Bash permission                        | `Do you want to proceed?`                      | `permission_choice`                      |
+| Write permission                       | the file-specific question                     | `permission_choice`                      |
+| background subagent running, and after | the task panel row; `/tasks to see subagents`  | `working`; then `free_text` when it ends |
+| API refused, retrying                  | `Retrying in`                                  | `error`                                  |
+| API waiting for a response             | `Waiting for API response`                     | `error` (`nocx-emors`)                   |
 
-**A fault proxy.** `ANTHROPIC_BASE_URL` points at a loopback proxy the harness starts in front of the
-real endpoint. It forwards until a scenario step tells it to fail, then either refuses connections
-or stalls, which is how scenario 13 reproduces both retry chromes while pre-flight and startup still
-reach a healthy endpoint.
+A moment that cannot be reached on the current Claude or model is named in the manifest with the
+reason and stays unverified; the epic does not claim it.
 
-**The procedure** is a skill, `.claude/skills/nocx-detection-verify/`, holding the settings template,
-the scenario scripts and the pre-flight; the owner's endpoint is its input, recorded in `nocx-34r0i`.
+### 6.5 Acceptance, as assertions
 
-**The run root** `/var/tmp/nocx-detect-<timestamp>/` holds one directory per scenario group (`home/`,
-`claude-config/`, `work/`, `settings.json`, the capture) and the run's `report.jsonl` and
-`versions.json` (`claude --version`, model id, nocx commit, proxy mode per scenario).
+1. **Isolation (mocks).** A fake program printing its environment under `-env-file` shows only the
+   file's variables and none of the caller's `CLAUDE*`; each refusal source starts no process, one
+   test per source; with none present the capture starts.
+2. **Manifest (CI).** Every manifest moment classifies to its expected state, and to its expected branch
+   where one is named; changing one expected state makes the test fail; every assertion the corpus
+   tests carried before survives as a manifest entry; calibration tests are unchanged and green.
+3. **Rule fixes.** `nocx-ys9jd` and `nocx-emors` each close with a moment that was red on the rule
+   before the fix and is green after it, and the idle and finished moments stay `free_text`.
+4. **Currency.** The manifest's moments for every row of §6.4 were recorded on the Claude Code version
+   current when the epic closes, and the skill reproduces one of them from an empty run directory.
+5. **CI on mocks only.** No CI test starts `claude` or reaches a model endpoint.
 
-**Pre-flight, before any process starts; any failure stops the run and records why:** the refusals
-of §6.2; `GET /v1/models` through the proxy lists the model; `POST /v1/messages` with one tool
-definition answers `stop_reason: tool_use`; the hook socket accepts and returns a probe event; the
-report and versions files can be written.
+### 6.6 What the discovery run established (2026-09-11)
 
-### 6.4 Labels
+Claude Code 2.1.266, `qwen/qwen3.6-35b-a3b` on LM Studio, `agent-capture` under `env -i` with a fresh
+`HOME` and `CLAUDE_CONFIG_DIR` in `/var/tmp`, 120×40:
 
-**A label comes from the scenario, never from a timestamp.** Each classification mark in a scenario
-declares the state the owner fixed for it and its **entry evidence**, and verify places the mark only
-when all of it holds:
-
-1. the input that causes the state was recorded as written (`input` record, `ok`);
-2. the scenario's entry text is present in the replayed frame — a literal string the scenario states
-   (for example `Enter to confirm · Esc to cancel` and `Yes, I trust this folder`), checked by plain
-   substring and not by the rule under test;
-3. where the scenario names a corroborating hook, that hook was received after (1) and before the
-   mark, for the same `session_id` and, for tool events, the same tool;
-4. no input or hook the scenario names as **closing** the state lies between (1) and the mark;
-5. no record of any kind lies within the ambiguity window (100 ms) either side of the mark.
-
-Anything short of that is `unsupported` with the unmet condition named — never an inferred
-agreement. A `measurement` row records hook coverage and carries no label; a `process` row records an
-exit and its status.
-
-**A disagreement is resolved in one of three places,** and the owner picks which: the rule (the
-common case), the scenario's entry evidence, or the harness. Only the first changes
-`claude.rule.json`.
-
-### 6.5 The scenarios
-
-Groups share one fresh `HOME`/`CLAUDE_CONFIG_DIR`/`work/`. Every group starts with the measured
-startup sequence (§6.8): theme picker → Enter → security notes → Enter → trust question → the group's
-answer. Expected states are the owner's (2026-09-11).
-
-| Group | Scenario                    | Reached by                                                                                     | Entry evidence (literal) / corroborating hook                                  | Closing                 | Expected                                                                                |
-| ----- | --------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------- | --------------------------------------------------------------------------------------- |
-| A     | theme picker                | start                                                                                          | `Choose the text style`                                                        | Enter                   | `modal_choice`                                                                          |
-| A     | security notes              | Enter                                                                                          | `Press Enter to continue`                                                      | Enter                   | `unknown`                                                                               |
-| A     | folder trust                | Enter                                                                                          | `Yes, I trust this folder`                                                     | Enter                   | `permission_choice`                                                                     |
-| A     | trust declined              | Enter on `No, exit`                                                                            | —                                                                              | —                       | process row: exit status 1                                                              |
-| B     | idle at 120, 80, 60 columns | trust accepted (Down, Enter); one capture per width                                            | `manual mode on`, the model name in the header                                 | any input               | `free_text`                                                                             |
-| B     | turn starting               | a fixed prompt answered at length, marked before the elapsed timer appears                     | `esc to interrupt` / `UserPromptSubmit`                                        | `Stop`                  | `working` (`nocx-ys9jd`)                                                                |
-| B     | turn running                | the same turn once `(Ns)` shows                                                                | `esc to interrupt` / `UserPromptSubmit`                                        | `Stop`                  | `working`                                                                               |
-| B     | turn finished               | the same turn completing                                                                       | `manual mode on` without `esc to interrupt` / `Stop`                           | any input               | `free_text`                                                                             |
-| B     | `/btw` overlay              | `/btw What is 2+2?` during a running turn                                                      | `Esc to close` / `UserPromptSubmit` of the main turn, no `Stop` yet            | Esc                     | `working`                                                                               |
-| B     | transcript viewer           | `ctrl+o` at idle                                                                               | `Showing detailed transcript`                                                  | `ctrl+o`                | `unknown`                                                                               |
-| B     | `/model` menu               | `/model` at idle                                                                               | the menu's own confirm line, recorded by discovery before the plan             | Esc                     | `modal_choice`                                                                          |
-| C     | Bash permission, declined   | settings rule `permissions.ask: ["Bash(touch marker.txt)"]`; prompt asking to run exactly that | `Do you want to proceed?` / `PreToolUse` for Bash, `Notification`              | Esc, after the evidence | `permission_choice`; after Esc, `marker.txt` does not exist                             |
-| C     | Bash permission, approved   | the same prompt in a fresh group; confirm the allow option                                     | as above                                                                       | the confirm             | `permission_choice`; after, `marker.txt` exists                                         |
-| C     | write permission, declined  | prompt asking to create `note.txt` with fixed content                                          | `Do you want to` / `PreToolUse` for Write, `Notification`                      | Esc, after the evidence | `permission_choice`; after Esc, no `note.txt`                                           |
-| D     | background subagent         | prompt asking for the Explore agent with `run_in_background`                                   | the task panel row / `PreToolUse` for the agent tool; `SubagentStop` closes it | `SubagentStop`          | `working` while open; model refusal or foreground run is `unsupported` with that reason |
-| E     | API refused, retrying       | a turn submitted, then the proxy refuses                                                       | `Retrying in`                                                                  | proxy restored          | `error`                                                                                 |
-| E     | API stalled, waiting        | a turn submitted, then the proxy stalls                                                        | `Waiting for API response`                                                     | proxy restored          | `error` (`nocx-emors`)                                                                  |
-| 0     | hook coverage               | every group                                                                                    | —                                                                              | —                       | measurement rows: which events fired, with which fields                                 |
-
-The literal entry texts above come from the discovery captures (§6.8) and the committed corpus; where
-a row says "recorded by discovery before the plan", the plan starts with that capture.
-
-### 6.6 From a disagreement to the tree
-
-A `disagree` goes to the owner, who picks where it is resolved (§6.4). A rule change comes with a unit
-test on that moment — a committed capture moment or a painted frame — that fails on the previous
-rule and passes on the new one; no large fixture suite is added. The corpus's expectations move into
-one manifest, `internal/agentdriver/testdata/captures/manifest.json`, naming each mark, its expected
-state and, where a test pins it, its expected branch; the rule tests read it and verify compares state
-to state and branch to branch separately. The rule is embedded, so re-verification replays the run's
-own captures against the rebuilt binary; hot reload stays `nocx-y6w66`.
-
-### 6.7 Acceptance, as assertions
-
-All of these run in CI on mocks — fake programs on a real PTY, a fake endpoint, a fake hook sender —
-except (8), which is the live run.
-
-1. **Isolation.** A capture started with `-env-file` gives the program exactly the file's variables:
-   a fake program that prints its environment shows none of the caller's `CLAUDE*` variables. Each
-   refusal of §6.2 stops the run with no process started, asserted per case; with none of them present
-   the run starts.
-2. **Pre-flight.** Endpoint unreachable, non-200, invalid JSON, model missing, no `tool_use`, hook
-   socket probe lost, report not writable: each stops the run, names the cause, starts nothing. A
-   fake endpoint that behaves passes and the capture starts.
-3. **Capture lifecycle.** Against fake programs: a normal exit after the script ends `exited`; an exit
-   before the script ends `exited_early`; a program that ignores signals and a descendant holding the
-   PTY both end `timeout` within the bound, with the capture written; a failed input write records
-   `input ok=false` and ends `error`. Each writes an `end` record and keeps the chunks it has.
-4. **Capture integrity.** `Read` rejects a capture whose trailing records were removed, one with no
-   `end` record, and one with an unparseable `Started`; `Frames` refuses a mark beyond
-   `capturedThroughMs`; a complete capture replays. `agentcapture.Write` failing at create, encode,
-   close and rename each surface as the run's error with no half-written file in place.
-5. **Labels.** On a fake capture with fake hooks: every condition of §6.4 missing in turn yields
-   `unsupported` naming it; all present yields the scenario's label; a hook for another `session_id`
-   or tool does not corroborate; a record inside the ambiguity window rejects the mark.
-6. **One replay path.** `internal/agentdriver` rule tests and `agent-capture verify` read the same
-   manifest through `agentcapture.Read`; for every manifest mark both give the manifest's state, and
-   the branch where the manifest names one.
-7. **End to end on mocks.** A fake agent program that draws a scripted idle screen, a permission
-   dialog and a working spinner, with a fake hook sender, goes through capture → verify → report and
-   produces `agree` for each mark and a `measurement` row for the hooks.
-8. **The live run.** On the Claude Code version installed when 1a closes, through the owner's endpoint:
-   `report.jsonl` has every classification row of §6.5 `agree`, or `unsupported` with the owner's
-   acceptance recorded and the row listed as unverified; `nocx-ys9jd` and `nocx-emors` are closed with
-   their red-then-green tests; replaying the run's captures against the final binary gives the same
-   verdicts.
-9. **CI on mocks only.** No CI test starts `claude` or reaches a model endpoint.
-
-### 6.8 What the discovery run established (2026-09-11)
-
-Claude Code 2.1.266, `qwen/qwen3.6-35b-a3b` on LM Studio, `agent-capture` under `env -i` with a
-fresh `HOME` and `CLAUDE_CONFIG_DIR` in `/var/tmp`, 120×40:
-
-- **Startup sequence:** an unrecognized-model notice on the primary screen; the theme picker; security
-  notes with `Press Enter to continue…`; the folder trust question with the cursor on `No, exit`
-  (Enter there exits with status 1); the idle alternate screen with the model name in the header and
-  `manual mode on`. No login screen, and no API-key prompt with `ANTHROPIC_AUTH_TOKEN`.
+- **Startup:** an unrecognized-model notice on the primary screen; the theme picker; security notes;
+  the trust question with the cursor on `No, exit` (Enter there exits with status 1); the idle
+  alternate screen with the model in the header and `manual mode on`. No login screen, no API-key
+  prompt with `ANTHROPIC_AUTH_TOKEN`.
 - **The rule's readings:** theme picker `modal_choice`; security notes `unknown`; trust
   `permission_choice`; idle `free_text`; transcript viewer `unknown`; `/btw` overlay `unknown`
-  (owner's expectation: `working`); a turn before its elapsed timer `free_text` (`nocx-ys9jd`); a turn
-  with its timer `working`; `Waiting for API response · will retry in …` `free_text` (`nocx-emors`).
+  (owner: `working`); a turn before its timer `free_text` (`nocx-ys9jd`); a turn with its timer
+  `working`; `Waiting for API response · will retry in …` `free_text` (`nocx-emors`).
 
-## 7. Part 1b — brief for its own design
+## 7. Part 1b — brief for its own design (epic `nocx-6q1uh`)
 
 Section A of the first revision (approved in intent by the owner) moves pane interaction into
 `session.read`, `session.message` and `session.keys` for both callers, removing `workers.screen` and
@@ -428,3 +338,22 @@ Every claim below was checked against the tree before it was accepted.
 | 10  | Failing-call matrix and success pairs missing                                     | Accepted; §6.7 (2)–(5), (7)                                                   |
 | 11  | A capture with its tail cut still replays                                         | Accepted; verified; `end` record, coverage; §6.3, §6.7 (4)                    |
 | 12  | Branch compared to a state; tests assert "not free_text"; duplicate replay reader | Accepted; manifest, one replay path; §6.6, §6.7 (6)                           |
+
+### Third review (codex, 2026-09-11, on 40bbae26)
+
+Eleven findings, all checked against the tree; the ones about the harness were verified and led the
+owner to simplify part 1a (§6.1) rather than keep extending an automatic label oracle.
+
+| #   | Finding                                                                               | Disposition                                                                  |
+| --- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1   | Requiring an `end` record in `Read` breaks calibration and removes a refusal          | Verified; `Read`'s contract kept (§6.3.3); completion record in `nocx-fqpbw` |
+| 2   | Isolation misses `managed-settings.d`, managed and local `CLAUDE` files, launcher env | Verified; `nocx-nru89.1`                                                     |
+| 3   | Entry evidence lets the API-wait screen label as `working`                            | Oracle removed; labels are the owner's per moment (§6.4)                     |
+| 4   | Universal prerequisites make startup and `/btw` scenarios impossible                  | Oracle removed (§6.1)                                                        |
+| 5   | The 100 ms window rejects animated states                                             | Oracle removed (§6.1)                                                        |
+| 6   | Evidence before input needs an online expect driver                                   | Deferred to the hooks epic `nocx-7faow`                                      |
+| 7   | The hook socket needs a sender; Notification has no `tool_name`                       | Deferred to `nocx-7faow`                                                     |
+| 8   | The fault proxy lacks request-level fault semantics                                   | Deferred to `nocx-7faow`; both API chromes recorded as moments (§6.4)        |
+| 9   | Capture lifecycle contradicts the trust-decline exit                                  | `nocx-8a38l` (expect-exit step)                                              |
+| 10  | `/model` and background subagent rows had placeholders                                | Recorded as moments in `nocx-nru89.2`; unreachable ones named, not claimed   |
+| 11  | Failing-call matrix and success pairs still incomplete                                | §6.5 for what 1a now builds; the oracle's matrix goes with `nocx-7faow`      |

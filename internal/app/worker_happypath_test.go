@@ -443,6 +443,15 @@ type happyStandConfig struct {
 	// replay and a background sweep goroutine that every other happy-path
 	// test has no reason to pay for.
 	realTyping bool
+	// answering additionally wires workers.screen and workers.answer's own
+	// composition-root seams (workerScreener, workerAnswerer) onto the same
+	// real observation/typing stack realTyping builds, plus the shared
+	// owed-task debt workerSpawner and workerAnswerer both need to hand a
+	// spawn's untyped task to whichever answer finally frees it
+	// (nocx-f545a.7's shape, app.go's own wiring) — see
+	// withHappyStandAnswering. Implies realTyping: a screen or an answer
+	// with nothing real behind them would test nothing.
+	answering bool
 }
 
 // logger is the stand's own logger, and endpointSlog is the same sink the tool
@@ -479,6 +488,18 @@ func withHappyStandEnrolmentDeadline(d time.Duration) happyStandOption {
 // absence of an observer as licence to skip typing.
 func withHappyStandRealTyping() happyStandOption {
 	return func(c *happyStandConfig) { c.realTyping = true }
+}
+
+// withHappyStandAnswering wires workers.screen and workers.answer through the
+// same composition-root seams app.go builds — workerScreener and
+// workerAnswerer, over the real grid, watcher and typist realTyping already
+// wires in, plus one shared *owedTasks so a question workers.spawn left owed
+// is the SAME debt workerAnswerer pays once its answer is confirmed
+// (nocx-f545a.7). nocx-f545a.5's real-Claude check is the first caller: it
+// reads a stuck worker's screen and answers its folder-trust question through
+// exactly the tool surface a coordinator reaches.
+func withHappyStandAnswering() happyStandOption {
+	return func(c *happyStandConfig) { c.realTyping = true; c.answering = true }
 }
 
 // happyCalibStore is a calibration store holding one pre-verified set. It
@@ -694,15 +715,28 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		spawner.readiness = realWatch
 		spawner.typist = paneTyping
 	}
-	record := workers.NewRegistrar(
-		store,
-		spawner,
-		enrol,
-		sup,
+	recordOpts := []workers.Option{
 		workers.WithEnrolmentDeadline(cfg.deadline),
 		workers.WithLogger(logger),
 		workers.WithCloser(&workerCloser{sessions: reg, log: logger}),
-	)
+	}
+	if cfg.answering {
+		// The shared debt spawner marks and workerAnswerer pays, exactly as
+		// app.go's own workerOwed is shared between the two (nocx-f545a.7):
+		// two separate instances would let a question workers.spawn left
+		// owed go unpaid forever, because the answerer would be checking a
+		// debt nobody had marked on ITS OWN set.
+		owed := newOwedTasks()
+		spawner.owed = owed
+		recordOpts = append(recordOpts,
+			workers.WithScreener(&workerScreener{grid: grid, watch: realWatch}),
+			workers.WithAnswerer(&workerAnswerer{
+				grid: grid, typist: paneTyping,
+				owed: owed, classify: realWatch, typing: paneTyping, log: logger,
+			}),
+		)
+	}
+	record := workers.NewRegistrar(store, spawner, enrol, sup, recordOpts...)
 	report.declare = func(ctx context.Context, id workers.ParticipantID, l workers.Liveness, d workers.Declaration) error {
 		_, declareErr := record.Declared(ctx, id, l, d)
 		return declareErr

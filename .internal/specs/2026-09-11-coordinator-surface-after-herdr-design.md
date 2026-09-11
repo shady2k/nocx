@@ -1,6 +1,6 @@
 # What nocx lets a coordinator do, measured against herdr — design
 
-- **Status:** Draft, fourth revision, 2026-09-11. §4 holds the owner's decisions of that day. §6
+- **Status:** Draft, fifth revision, 2026-09-11. §4 holds the owner's decisions of that day. §6
   designs part 1a in full. §7 is the brief for part 1b, which gets a design of its own. §9 records
   both codex reviews and what became of each finding.
 - **Brainstorm bead:** `nocx-34r0i` (its notes carry the decisions verbatim).
@@ -78,7 +78,7 @@ observation and input can be made atomic: they cannot, because the application r
 | **ADR-0020**                                     | Authority granted per run.                                                                                                                      | 1b: which sessions a tool reaches is the capability's answer, never the tool's name.                                                                                                      |
 | 2026-08-15 design §6, **D11**, **D12**           | One dispatcher, two callers; state is evidence, reduced over, never one field with source priority; rules local.                                | §6 keeps D12 (no catalogue). Part 2 and part 6 restore D11 including its rejection of a priority field: hook authority needs activation, expiry and per-turn identity.                    |
 | 2026-08-24 design **D6**, **D9**, §7.2           | Hooks carry nothing required; only exit and declaration decide state; `wait` is a convenience.                                                  | Superseded in parts 2 and 6 by new records.                                                                                                                                               |
-| 2026-09-05 design **D5**                         | Hooks optional and non-load-bearing.                                                                                                            | §6 stages hooks only as measurement labels in a throwaway run; part 6 supersedes D5.                                                                                                      |
+| 2026-09-05 design **D5**                         | Hooks optional and non-load-bearing.                                                                                                            | 1a stages no hooks. Superseded by the hooks epic `nocx-7faow`.                                                                                                                            |
 | 2026-09-03 mesh design **M1**, **M2**, **P1–P7** | Talk is mesh, act is star; checkpoints wake nobody and are expressly **not** completion reports; structural reporting kept.                     | Part 3 conflicts with P1's "not a completion report" if the drop goes (§4.5): part 2/3 must decide what carries a final outcome and supersede the provision it replaces.                  |
 | `AGENTS.md` testing rules 1–5                    | User-path tests, a happy path per epic, failure paths as intervals, independent tests, the wire in the contract.                                | §6.4 for 1a; §7 carries them into 1b's brief.                                                                                                                                             |
 
@@ -145,43 +145,71 @@ third found that its capture-format change would have silently removed a typing 
 (`agentcalib` writes headers without `Started` and reads a failed load as no evidence against the
 rule, `internal/agentcalib/verify.go` `evaluate`). The owner fixed the labels by looking at the
 screens, which is also how herdr keeps its rules correct. So 1a verifies the rule against moments the
-owner labelled, and the oracle moves to the hooks epic (`nocx-7faow`), where hooks exist anyway.
+owner labelled, and the oracle moves to the hooks epic (`nocx-7faow`), where hooks exist anyway. 1a
+stages no hooks.
 
-### 6.2 What is verified
+### 6.2 What is verified, and the user's seam
 
-The shipped rule (`internal/agentdriver/claude.rule.json`) gives the owner's state at every moment in
-`internal/agentdriver/testdata/captures/manifest.json`, through `agentcapture.Read`,
-`agentcapture.Frames` and `agentdriver.Registry.Explain` — the path the product uses — for moments
-recorded on the Claude Code version current when the epic closes. Not verified: writes into a pane
-(1b), worker state (part 2), hook authority (hooks epic).
+**The rule.** The shipped rule (`internal/agentdriver/claude.rule.json`) gives the owner's state at
+every **recorded** moment of `internal/agentdriver/testdata/captures/manifest.json`, through
+`agentcapture.Read`, `agentcapture.Frames` and `agentdriver.Registry.Explain`, for moments recorded
+on the Claude Code version current when the epic closes.
+
+**The seam a user reaches.** A person does not call `Explain`: they see a pane's state because
+`internal/paneobserve` (`Watcher.Sweep` → driver observation → emit) reports it through the transport
+(`WSServer.EmitPaneObservation`), wired in `internal/app/app.go`. So the epic's happy-path check runs
+through that wiring with a mock agent: an enrolled pane whose program draws, in turn, the recorded
+early-turn frame, the API-wait frame and the finished frame, and a subscribed consumer that receives
+`working`, `error` and `free_text` in that order. It needs neither Claude nor the oracle.
+
+**Not verified:** writes into a pane (1b), worker state (part 2), hook authority (`nocx-7faow`), and any
+moment the manifest lists as **unverified**.
 
 ### 6.3 Tasks
 
 1. **Isolation — `nocx-nru89.1`.** `agent-capture` gains `-env-file`, which replaces inheritance: the
    program gets exactly the file's variables. Before starting, it refuses when Claude would read
-   settings or instructions from outside the run: `managed-settings.json` or `managed-settings.d/`
-   (Linux `/etc/claude-code`, the macOS equivalents), or `CLAUDE.md`, `CLAUDE.local.md` or `.claude/`
-   in the working directory or any ancestor. The launcher's own environment additions (the Nix
-   `claude` wrapper sets several) are recorded, not hidden.
-2. **Corpus, manifest and skill — `nocx-nru89.2`.** Record the moments below on the current Claude
-   through the owner's Anthropic-compatible local endpoint with a fresh `HOME` and
-   `CLAUDE_CONFIG_DIR` under `/var/tmp`; write the manifest (capture, mark, expected state, optional
-   branch); commit captures and scripts; add `.claude/skills/nocx-detection-verify/` so the recording
-   is redone after a Claude update. Permission moments use an explicit `permissions.ask` rule in a
-   `--settings` file, because read-only commands such as `ls` are allowed without asking.
-3. **One replay path — `nocx-nru89.3`.** The rule tests read the manifest through `agentcapture`;
-   the test-only reader in `capture_test.go` goes; state and branch are compared separately.
-   `agentcapture.Read`'s contract does not change.
-4. **Rule fixes — `nocx-ys9jd`, `nocx-emors`** and whatever the new moments show, each with a test that
-   fails on the old rule and passes on the new.
+   settings or instructions from outside the run:
+   - managed settings: `managed-settings.json` and `managed-settings.d/` (Linux `/etc/claude-code`,
+     macOS `/Library/Application Support/ClaudeCode`);
+   - managed instructions: `CLAUDE.md` and `.claude/rules/` in those same directories;
+   - `CLAUDE.md`, `CLAUDE.local.md` or `.claude/` in the working directory or any ancestor.
 
-Two defects of the capture tool the reviews verified are filed on their own, because 1a does not need
-them to be fixed first: `nocx-8a38l` (a descendant holding the PTY hangs the capture, which then
-writes nothing) and `nocx-fqpbw` (a new capture with its tail cut replays as whole).
+   A source that cannot be inspected (permission denied, I/O error) is a refusal, never an absence.
+   The launcher's own environment additions (the Nix `claude` wrapper sets several) are written to the
+   run's metadata file.
 
-### 6.4 The moments and their labels
+2. **Corpus, manifest and skill — `nocx-nru89.2`.** Record the screen moments of §6.4 on the current
+   Claude through the owner's Anthropic-compatible local endpoint with `-env-file`, a fresh `HOME` and
+   `CLAUDE_CONFIG_DIR` under `/var/tmp`; write the manifest; commit captures and scripts; add
+   `.claude/skills/nocx-detection-verify/` so the recording is redone after a Claude update.
+   Permission moments use an explicit `permissions.ask` rule in a `--settings` file, because read-only
+   commands such as `ls` are allowed without asking; the dialog is left with Esc once recorded. Only
+   screens are recorded as moments: a process exit is never a classifier state
+   (`agentdriver.StateExited` comes from process ownership), and approve/decline outcomes are not part
+   of 1a.
+3. **One replay path — `nocx-nru89.3`.** Fixed-moment state and branch expectations move from the
+   corpus tests into the manifest, compared state to state and branch to branch. Tests that mutate a
+   replayed screen (`TestTextTheAgentPrintedCannotForgeAnyVerdict`), check extraction
+   (`observation_test.go`) or explanation behaviour (`explain_test.go`) stay as tests, and only their
+   test-only reader (`capture_test.go` `replayStore`) is replaced by `agentcapture.NewReplayer`,
+   `Feed` and `Frame`. `agentcapture.Read`'s contract does not change.
+4. **Rule fixes — `nocx-ys9jd`, `nocx-emors`** and whatever the new moments show, each with a moment
+   that fails on the old rule and passes on the new.
 
-Owner's labels, 2026-09-11. The literal text is what identifies the moment when marks are placed by
+Two capture-tool defects the reviews verified are filed on their own, because 1a does not need them
+fixed first: `nocx-8a38l` (a descendant holding the PTY hangs the capture, which then writes nothing)
+and `nocx-fqpbw` (a new capture with its tail cut replays as whole).
+
+### 6.4 The manifest, the moments and their labels
+
+**Manifest entries** are of two kinds. A **recorded** entry names a capture, a mark, the expected state
+and optionally the expected branch. An **unverified** entry names a moment of the inventory below and
+the reason it could not be recorded on this Claude or model. The inventory itself is part of the
+manifest, so coverage — every inventory row has exactly one entry, recorded or unverified — is checked
+separately from the state comparisons.
+
+Owner's labels, 2026-09-11. The identifying text is what a person looks for when placing a mark by
 reading the replay; it is not a second classifier.
 
 | Moment                                 | Identified by                                  | Expected                                 |
@@ -195,29 +223,37 @@ reading the replay; it is not a second classifier.
 | turn finished                          | prompt box, no spinner, no `esc to interrupt`  | `free_text`                              |
 | `/btw` overlay over a running turn     | `Esc to close` under the main turn's spinner   | `working`                                |
 | transcript viewer                      | `Showing detailed transcript`                  | `unknown`                                |
-| `/model` menu                          | the menu as recorded                           | `modal_choice`                           |
+| `/model` menu                          | the menu, inspected on the replay              | `modal_choice`                           |
 | Bash permission                        | `Do you want to proceed?`                      | `permission_choice`                      |
-| Write permission                       | the file-specific question                     | `permission_choice`                      |
+| Write permission                       | the file-specific question, inspected          | `permission_choice`                      |
 | background subagent running, and after | the task panel row; `/tasks to see subagents`  | `working`; then `free_text` when it ends |
 | API refused, retrying                  | `Retrying in`                                  | `error`                                  |
 | API waiting for a response             | `Waiting for API response`                     | `error` (`nocx-emors`)                   |
 
-A moment that cannot be reached on the current Claude or model is named in the manifest with the
-reason and stays unverified; the epic does not claim it.
-
 ### 6.5 Acceptance, as assertions
 
-1. **Isolation (mocks).** A fake program printing its environment under `-env-file` shows only the
-   file's variables and none of the caller's `CLAUDE*`; each refusal source starts no process, one
-   test per source; with none present the capture starts.
-2. **Manifest (CI).** Every manifest moment classifies to its expected state, and to its expected branch
-   where one is named; changing one expected state makes the test fail; every assertion the corpus
-   tests carried before survives as a manifest entry; calibration tests are unchanged and green.
-3. **Rule fixes.** `nocx-ys9jd` and `nocx-emors` each close with a moment that was red on the rule
-   before the fix and is green after it, and the idle and finished moments stay `free_text`.
-4. **Currency.** The manifest's moments for every row of §6.4 were recorded on the Claude Code version
-   current when the epic closes, and the skill reproduces one of them from an empty run directory.
-5. **CI on mocks only.** No CI test starts `claude` or reaches a model endpoint.
+All in CI on mocks except (6).
+
+1. **Isolation, success and refusals.** A fake program printing its environment under `-env-file`
+   shows exactly the file's variables and none of the caller's `CLAUDE*`, and the launcher metadata is
+   written. Each refusal source of §6.3.1 starts no process, one test per source, managed instructions
+   included.
+2. **Isolation, failing calls.** An unreadable `-env-file`, a malformed line in it, an ancestor or
+   managed directory that cannot be inspected, and a metadata file that cannot be written each stop the
+   run with a named cause and no process started.
+3. **Manifest, success and failures.** A complete manifest over the committed captures passes. Each of
+   these fails with a named cause: a missing or unreadable capture, a malformed manifest, an unknown
+   state name, a wrong expected state, a wrong expected branch, a replay error, an inventory row with no
+   entry or with two.
+4. **Tests that are not manifest entries stay green** — forged transcript content, extraction,
+   explanation — on the shared replayer; calibration tests are unchanged and green.
+5. **The user's seam.** Through the production observation wiring (§6.2) a mock agent's enrolled pane
+   emits `working`, `error`, `free_text` for the early-turn, API-wait and finished frames, in order;
+   before the rule fixes the same test reports `free_text` for the first two, so it is red first.
+6. **Currency, live.** Every recorded entry was recorded on the Claude Code version current when the
+   epic closes; every unverified entry carries the owner's acceptance; the skill reproduces one recorded
+   moment from an empty run directory.
+7. **CI on mocks only.** No CI test starts `claude` or reaches a model endpoint.
 
 ### 6.6 What the discovery run established (2026-09-11)
 
@@ -298,6 +334,10 @@ Section A of the first revision (approved in intent by the owner) moves pane int
 
 ## 9. Review of the first revision (codex, 2026-09-11)
 
+Each table records the dispositions as of the revision it answered. The fourth revision replaced
+§6, so section references in the first two tables point at text that no longer exists; §6.1, §6.3 and
+the later tables say where each item lives now.
+
 Every claim below was checked against the tree before it was accepted.
 
 | #   | Finding                                                                     | Disposition                                                             |
@@ -344,16 +384,28 @@ Every claim below was checked against the tree before it was accepted.
 Eleven findings, all checked against the tree; the ones about the harness were verified and led the
 owner to simplify part 1a (§6.1) rather than keep extending an automatic label oracle.
 
-| #   | Finding                                                                               | Disposition                                                                  |
-| --- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1   | Requiring an `end` record in `Read` breaks calibration and removes a refusal          | Verified; `Read`'s contract kept (§6.3.3); completion record in `nocx-fqpbw` |
-| 2   | Isolation misses `managed-settings.d`, managed and local `CLAUDE` files, launcher env | Verified; `nocx-nru89.1`                                                     |
-| 3   | Entry evidence lets the API-wait screen label as `working`                            | Oracle removed; labels are the owner's per moment (§6.4)                     |
-| 4   | Universal prerequisites make startup and `/btw` scenarios impossible                  | Oracle removed (§6.1)                                                        |
-| 5   | The 100 ms window rejects animated states                                             | Oracle removed (§6.1)                                                        |
-| 6   | Evidence before input needs an online expect driver                                   | Deferred to the hooks epic `nocx-7faow`                                      |
-| 7   | The hook socket needs a sender; Notification has no `tool_name`                       | Deferred to `nocx-7faow`                                                     |
-| 8   | The fault proxy lacks request-level fault semantics                                   | Deferred to `nocx-7faow`; both API chromes recorded as moments (§6.4)        |
-| 9   | Capture lifecycle contradicts the trust-decline exit                                  | `nocx-8a38l` (expect-exit step)                                              |
-| 10  | `/model` and background subagent rows had placeholders                                | Recorded as moments in `nocx-nru89.2`; unreachable ones named, not claimed   |
-| 11  | Failing-call matrix and success pairs still incomplete                                | §6.5 for what 1a now builds; the oracle's matrix goes with `nocx-7faow`      |
+| #   | Finding                                                                               | Disposition                                                                       |
+| --- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 1   | Requiring an `end` record in `Read` breaks calibration and removes a refusal          | Verified; `Read`'s contract kept (§6.3.3); completion record in `nocx-fqpbw`      |
+| 2   | Isolation misses `managed-settings.d`, managed and local `CLAUDE` files, launcher env | Verified; `nocx-nru89.1`                                                          |
+| 3   | Entry evidence lets the API-wait screen label as `working`                            | Oracle removed; labels are the owner's per moment (§6.4)                          |
+| 4   | Universal prerequisites make startup and `/btw` scenarios impossible                  | Oracle removed (§6.1)                                                             |
+| 5   | The 100 ms window rejects animated states                                             | Oracle removed (§6.1)                                                             |
+| 6   | Evidence before input needs an online expect driver                                   | Deferred to the hooks epic `nocx-7faow`                                           |
+| 7   | The hook socket needs a sender; Notification has no `tool_name`                       | Deferred to `nocx-7faow`                                                          |
+| 8   | The fault proxy lacks request-level fault semantics                                   | Deferred to `nocx-7faow`; both API chromes required as moments by `nocx-nru89.2`  |
+| 9   | Capture lifecycle contradicts the trust-decline exit                                  | `nocx-8a38l` (expect-exit step)                                                   |
+| 10  | `/model` and background subagent rows had placeholders                                | Required as moments by `nocx-nru89.2`; unreachable ones become unverified entries |
+| 11  | Failing-call matrix and success pairs still incomplete                                | §6.5 for what 1a now builds; the oracle's matrix goes with `nocx-7faow`           |
+
+### Fourth review (codex, 2026-09-11, on 28ac4dfc)
+
+| #   | Finding                                                                              | Disposition                                                                     |
+| --- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| 1   | Isolation omits managed instructions (`/etc/claude-code/CLAUDE.md`, `.claude/rules`) | Verified; §6.3.1, `nocx-nru89.1`; uninspectable sources refuse                  |
+| 2   | The epic's check bypasses the seam a user reaches                                    | Accepted; mock agent through the production observation wiring, §6.2, §6.5 (5)  |
+| 3   | No failing-call matrix for what 1a builds                                            | Accepted; §6.5 (2), (3); `nocx-nru89.1`, `nocx-nru89.3`                         |
+| 4   | Not every corpus assertion fits a state/branch manifest entry                        | Verified; mutation, extraction and explanation tests stay, §6.3.3               |
+| 5   | Coverage and completion disagree; process and approve/decline outcomes out of place  | Accepted; recorded and unverified entries with an inventory, outcomes out of 1a |
+| 6   | `nocx-9f1d4`'s acceptance still relies on `workers.wait`                             | Verified; its acceptance superseded by the wake behaviour of `nocx-luqz9`       |
+| 7   | Historical tables and §3 describe removed work as current                            | Accepted; note above, wording corrected, §3 D5 row                              |

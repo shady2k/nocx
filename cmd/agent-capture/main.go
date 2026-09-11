@@ -354,7 +354,7 @@ func captureProgram(opts captureOptions, stderr io.Writer) error {
 		if opts.MetaPath != "" {
 			version := ""
 			if opts.VersionArg != "" {
-				version, err = probeVersion(resolved, opts.VersionArg, opts.Env)
+				version, err = probeVersion(resolved, opts.VersionArg, opts.Env, root)
 				if err != nil {
 					return fmt.Errorf("record program version: %w", err)
 				}

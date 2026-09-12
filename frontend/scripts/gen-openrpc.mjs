@@ -17,6 +17,12 @@ const resultAliases = new Map([
   ['uistate.get', 'uistate.schema.json'],
   ['uistate.set', 'uistate.schema.json'],
   ['agent.calibration.answer', 'agent.calibration.schema.json'],
+  // The three writes answer with the state they produced, like the calibration
+  // above: a surface that had to ask again would draw a rule one round trip
+  // behind the person's own edit (nocx-y6w66).
+  ['agent.rules.set', 'agent.rules.schema.json'],
+  ['agent.rules.setEnabled', 'agent.rules.schema.json'],
+  ['agent.rules.delete', 'agent.rules.schema.json'],
 ])
 
 function ref(file) {

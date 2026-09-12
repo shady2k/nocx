@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.rules.set.params.schema.json",
+  "title": "AgentRulesSetParams",
+  "description": "The agent whose rule is being written, and the whole document. The document is text rather than a parsed object: what a person edits is the rule, and sending it as JSON would let the wire normalise away the field spelling they are looking at.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent", "document"],
+  "properties": {
+    "agent": { "type": "string" },
+    "document": {
+      "description": "One rule document, in the grammar contracts/ does not restate: internal/agentdriver owns it, and it is the same grammar the shipped rules are written in. The backend compiles it before it is stored, so a document that could never answer is refused while the person is looking at it. 64 KiB is the engine's bound on this field.",
+      "type": "string",
+      "maxLength": 65536
+    }
+  }
+}

@@ -1,0 +1,45 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/agent.rules.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Result of agent.rules, agent.rules.set, agent.rules.setEnabled and agent.rules.delete: which rule reads each agent's pane, where the person's own documents live, and what the last write left behind (nocx-y6w66). All four methods answer the same shape because a write IS a read of the state it produced — a page that saved a document and then asked again would draw a rule one round trip behind the person's own edit, and this rule decides whether nocx types into a pane.
+ */
+export interface AgentRules {
+  /**
+   * The directory the person's own documents live in, under the app directory THIS build owns, one file per agent named after it. It is on the wire because editing the file by hand is half of what the feature is for, and a renderer that spelled the path itself would be a second owner of where these live.
+   */
+  directory: string
+  /**
+   * Every agent this build ships a rule for, in agent order. Never absent and never null: an empty array and a missing one are two ways to say nothing, and the renderer's `.map` is what finds out the difference.
+   */
+  rules: AgentRule[]
+}
+/**
+ * One agent's detection. The state is the whole of the decision — shipped and user read the pane, disabled and unreadable do not — so it is one closed set rather than a pair of booleans that a surface would have to combine itself. Which of the two silent states it is matters to a person: one is a control they pressed, the other is a file they broke.
+ */
+export interface AgentRule {
+  /**
+   * The agent, as the driver this build carries names it.
+   */
+  agent: string
+  /**
+   * Where the rule reading this agent's pane comes from. shipped: the build's rule, which is every install nobody has edited. user: the person's own rule, which REPLACES the shipped one entirely. disabled: they switched detection off, and the pane reports unknown. unreadable: a document of theirs exists and could not be used, which is also unknown — never a silent fallback to the shipped rule, which would tell its author their edit took effect when it did not.
+   */
+  state: 'shipped' | 'user' | 'disabled' | 'unreadable'
+  /**
+   * The rule text as it stands: the person's own document when they wrote one, and the shipped rule's text when they did not, so the page has something to edit from on an install nobody has touched. EMPTY in the unreadable state, deliberately: a surface filled with either the unreadable bytes or the shipped rule would invite a save that replaces a file its author cannot see.
+   */
+  document: string
+  /**
+   * Why the person's document could not be used, as a clause they can act on. ABSENT when there is none — "no problem" and "a problem with an empty description" are two different claims and only one of them is ever true. Present exactly when the state is unreadable.
+   */
+  problem?: string
+}

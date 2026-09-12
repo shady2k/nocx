@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.rules.setEnabled.params.schema.json",
+  "title": "AgentRulesSetEnabledParams",
+  "description": "Whether nocx reads this agent at all. Switching detection off is not deleting: the person's document stays where it is, and switching back on returns exactly the rule they wrote.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent", "enabled"],
+  "properties": {
+    "agent": { "type": "string" },
+    "enabled": { "type": "boolean" }
+  }
+}

@@ -38,7 +38,9 @@ import { AgentAccessSection } from './agent-access-section'
 import type { AgentAccessClient } from './agent-access-client'
 import { AgentEmittingSection } from './agent-emitting-section'
 import { AgentCalibrationSection } from './agent-calibration-section'
+import { AgentRulesSection } from './agent-rules-section'
 import type { EmittingClient } from './emitting-client'
+import type { AgentRulesClient } from './agent-rules-client'
 import type { CalibrationClient } from './calibration-client'
 import type { TypingClient } from './typing-client'
 import type { FootprintClient } from './footprint-client'
@@ -249,6 +251,9 @@ export interface SettingsComponentProps {
   /** The guided calibration (nocx-etejh). Optional like every other client
    *  here: without it the page is still registered and says so. */
   calibrationClient?: CalibrationClient
+  /** A person's own rule for an agent (nocx-y6w66). Optional like every other
+   *  client here: without it the page is still registered and says so. */
+  rulesClient?: AgentRulesClient
   typingClient?: TypingClient
   /** What the window calls a pane. The emitting view's picker lists panes the
    *  backend named by session id and agent; this is what turns one into the
@@ -732,6 +737,29 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // what a person looks at while repairing a rule, and calibration is where
     // the evidence that rule is checked against comes from. A person who has
     // found one has found the other.
+    // BEFORE the calibration, in the same group, because the rule is what
+    // calibration checks and what the emitting view shows being read. A person
+    // who has just learned their agent is read wrongly starts here.
+    const rulesPage: SettingsPage = {
+      kind: 'component',
+      id: 'rules',
+      title: 'Agent rules',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.rulesClient}
+          fallback={
+            <PageSection title="Agent rules">
+              Editing the rules nocx reads your agents with is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentRulesSection client={props.rulesClient!} />
+        </Show>
+      ),
+    }
+
     const calibrationPage: SettingsPage = {
       kind: 'component',
       id: 'calibration',
@@ -800,6 +828,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // person brought (nocx-6jbad).
       agentAccessPage,
       emittingPage,
+      rulesPage,
       calibrationPage,
       // Last in Assistant, after the two pages that decide what the assistant
       // may do at all: a skill is what it does once that is settled.

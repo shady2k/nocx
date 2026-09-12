@@ -201,7 +201,6 @@ package agentdriver
 
 import (
 	_ "embed"
-	"encoding/json"
 	"fmt"
 )
 
@@ -219,13 +218,9 @@ var claudeDriver = mustParseDocument(claudeRuleJSON)
 func Claude() Driver { return claudeDriver }
 
 func mustParseDocument(raw []byte) documentDriver {
-	var doc Document
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		panic(fmt.Sprintf("agentdriver: rule document does not parse: %v", err))
-	}
-	d, err := newDocumentDriver(doc)
+	d, err := parseDocument(raw)
 	if err != nil {
-		panic(fmt.Sprintf("agentdriver: rule document is not usable: %v", err))
+		panic(fmt.Sprintf("agentdriver: %v", err))
 	}
 	return d
 }

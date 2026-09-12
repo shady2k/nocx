@@ -226,6 +226,28 @@ describe('TextField', () => {
     expect(label?.textContent?.trim()).toBe('Private Key')
   })
 
+  // The height, and the reason it is a prop rather than a four-row default:
+  // four rows is right for a password, a commit message or a phrase, and wrong
+  // for a DOCUMENT (a rule a person edits, a captured request), where the
+  // person needs the shape of what they are editing rather than four lines of
+  // it. The alternative was a surface setting a height from OUTSIDE, which is
+  // repainting a kit component and would let the two heights drift.
+  it('shows four lines unless the caller asks for a document', () => {
+    subject({ multiline: true, value: 'x' })
+    expect(screen.getByRole('textbox').getAttribute('rows')).toBe('4')
+  })
+
+  it('shows as many lines as the caller asked for', () => {
+    subject({ multiline: true, rows: 16, value: 'x' })
+    expect(screen.getByRole('textbox').getAttribute('rows')).toBe('16')
+  })
+
+  it('ignores rows on a single-line field, where the browser owns the height', () => {
+    const { container } = subject({ rows: 16, value: 'x' })
+    expect(container.querySelector('textarea')).toBeNull()
+    expect(container.querySelector('input')?.hasAttribute('rows')).toBe(false)
+  })
+
   it('renders description on multiline variant', () => {
     const desc = 'Paste your private key'
     subject({ multiline: true, value: '', description: desc })

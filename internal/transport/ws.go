@@ -316,6 +316,10 @@ type WSServer struct {
 	// that it is not available rather than a screen with no reading beside
 	// it — the half of that view the design says may not be missing.
 	agentRules agentRules
+	// agentRuleStore is where a person's OWN rule for an agent lives
+	// (nocx-y6w66). Nil when unwired, and the four agent.rules* methods then
+	// answer "not found" rather than a list of agents nobody can edit.
+	agentRuleStore agentRuleStore
 	// agentCalibration runs the guided calibration walk (nocx-etejh). Nil
 	// when unwired, and both agent.calibration methods then answer "not
 	// found" rather than a step list nobody can answer.
@@ -1692,6 +1696,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentAccessSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
+	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)

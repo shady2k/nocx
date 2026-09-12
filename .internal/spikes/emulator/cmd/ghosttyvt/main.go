@@ -78,7 +78,41 @@ func main() {
 	p7()
 	p8()
 	p9()
+	p11()
 	api()
+}
+
+// p11 measures graphics support by executing the sequences, and decides
+// whether Kitty actually decoded an image rather than merely declining to
+// report the sequence as unknown.
+func p11() {
+	const p = "11_graphics"
+	sixel := "\x1bPq\"1;1;2;2#0;2;0;0;0#0~~\x1b\\"
+	kitty := "\x1b_Ga=T,f=24,s=1,v=1,i=42;AAAA\x1b\\"
+
+	t := ghostty.New(20, 3)
+	before := screen(t)
+	t.Write([]byte(sixel))
+	obs.Emit(p, "sixel", "unknown_sequence_tags", fmt.Sprint(t.UnknownSequences()))
+	obs.Emit(p, "sixel", "screen_unchanged", screen(t) == before)
+	cx, cy := t.Cursor()
+	obs.Emit(p, "sixel", "cursor", fmt.Sprintf("%d,%d", cx, cy))
+
+	t.Write([]byte(kitty))
+	obs.Emit(p, "kitty", "unknown_sequence_tags", fmt.Sprint(t.UnknownSequences()))
+	obs.Emit(p, "kitty", "screen_unchanged", screen(t) == before)
+	obs.Emit(p, "kitty", "kitty_graphics_compiled", ghostty.BuildInfoKittyGraphics())
+	obs.Emit(p, "kitty", "storage_present", t.KittyGraphicsPresent())
+	obs.Emit(p, "kitty", "image_42_decoded", t.KittyImagePresent(42))
+	obs.Emit(p, "kitty", "reply_esc", obs.Esc(t.Reply()))
+
+	// Control: the reporting mechanism itself works, so an empty list above
+	// means "handled" rather than "nothing is ever reported". Tag 0 is
+	// GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_APC.
+	t.Write([]byte("\x1b_private-command;payload\x1b\\"))
+	obs.Emit(p, "control_unknown_apc", "unknown_sequence_tags", fmt.Sprint(t.UnknownSequences()))
+	obs.Emit(p, "control_unknown_apc", "screen_unchanged", screen(t) == before)
+	t.Free()
 }
 
 func p1() {

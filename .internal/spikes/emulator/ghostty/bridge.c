@@ -29,6 +29,17 @@ static void cb_clipboard_write(GhosttyTerminal terminal, void *userdata,
 }
 
 /*
+ * Only the tag is read. The payload is a tagged union of borrowed strings and
+ * this spike deliberately does not bind it, so the probe answers "was this
+ * sequence reported as unsupported, and as which kind" and nothing more.
+ */
+static void cb_unknown_sequence(GhosttyTerminal terminal, void *userdata,
+                                const GhosttyTerminalUnknownSequence *seq) {
+  (void)terminal;
+  nocxGoUnknownSequence((uintptr_t)userdata, (int)seq->tag);
+}
+
+/*
  * The option value for an effect IS the function pointer, cast to
  * const void*; the value for GHOSTTY_TERMINAL_OPT_USERDATA IS the userdata
  * pointer. Passing the address of a stack local holding either one makes the
@@ -52,6 +63,17 @@ GhosttyResult nocxInstallEffects(GhosttyTerminal terminal, uintptr_t handle) {
   r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
                            (const void *)cb_clipboard_write);
   if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE,
+                           (const void *)cb_unknown_sequence);
+  if (r != GHOSTTY_SUCCESS) return r;
+  /* The callback alone retains nothing: capture must also be enabled with a
+     nonzero byte limit, per the header. */
+  {
+    size_t unknown_max_bytes = 256;
+    r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES,
+                             &unknown_max_bytes);
+    if (r != GHOSTTY_SUCCESS) return r;
+  }
   return ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_USERDATA,
                               (const void *)handle);
 }
@@ -175,4 +197,23 @@ GhosttyResult nocxBuildInfoBool(GhosttyBuildInfo which, int *out) {
   GhosttyResult r = ghostty_build_info(which, &v);
   *out = v ? 1 : 0;
   return r;
+}
+
+GhosttyResult nocxKittyGraphicsPresent(GhosttyTerminal terminal, int *out) {
+  GhosttyKittyGraphics g = NULL;
+  GhosttyResult r =
+      ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &g);
+  *out = (r == GHOSTTY_SUCCESS && g != NULL) ? 1 : 0;
+  return r;
+}
+
+GhosttyResult nocxKittyImagePresent(GhosttyTerminal terminal, uint32_t image_id,
+                                    int *out) {
+  *out = 0;
+  GhosttyKittyGraphics g = NULL;
+  GhosttyResult r =
+      ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &g);
+  if (r != GHOSTTY_SUCCESS || g == NULL) return r;
+  *out = ghostty_kitty_graphics_image(g, image_id) != NULL ? 1 : 0;
+  return GHOSTTY_SUCCESS;
 }

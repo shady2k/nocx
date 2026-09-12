@@ -26,16 +26,21 @@ real programs (see §6).
 
 ```bash
 cd .internal/spikes/emulator
-./run.sh                 # vendors ghostty, builds libghostty-vt, runs both drivers
+./run.sh                 # pinned ghostty fetch, libghostty-vt build, both drivers
 ```
 
-`run.sh` fetches the pinned ghostty commit into `.vendor/ghostty` and **fails if the
-checkout is not that commit**, then runs
-`nix shell nixpkgs#zig -c zig build -Demit-lib-vt=true -Doptimize=ReleaseFast` inside it,
-then `go run ./cmd/xvt > results/xvt.jsonl` and
-`go run ./cmd/ghosttyvt > results/ghostty.jsonl`. Verified end to end from a clean vendor
-directory: 1 m 59 s, the same two artifacts by size, and byte-identical output for every
-deterministic probe.
+`run.sh` has three unconditional steps and two conditional ones. It fetches the pinned
+ghostty commit into `.vendor/ghostty` and **fails if the checkout is not that commit**; runs
+`nix shell nixpkgs#zig -c zig build -Demit-lib-vt=true -Doptimize=ReleaseFast` inside it; then
+`go run ./cmd/xvt > results/xvt.jsonl` and
+`go run ./cmd/ghosttyvt > results/ghostty.jsonl`, each under a backstop `timeout` that warns
+rather than letting a hung driver pass for a complete one. If `npm` is present it also runs
+the xterm.js reference into `results/xtermjs-*.txt`. The live-xterm title check of §1.9 is
+**manual** — `run.sh` documents it but does not run it, because it is unreliable under Xvfb
+here (§6).
+
+Verified end to end from a clean vendor directory: 1 m 59 s, the same two artifacts by size,
+and byte-identical output for every deterministic probe.
 
 Commands that worked, verbatim:
 
@@ -182,9 +187,14 @@ Setup: `abcd`, `CUP 1;1`, `CSI 4 h`, then print `XY`.
 | | `x/vt` | `libghostty-vt` |
 |---|---|---|
 | row after printing | `XYcd` — **overwrote** | `XYabcd` — **inserted** |
-| mode state | callback `EnableMode` fired with mode 4; recorded set | queryable set (`GHOSTTY_TERMINAL_DATA_MODE` on `ANSIMode(4)` → `true`) |
-| `CSI 4 $p` (DECRQM) | `\x1b[4;1$y` — replies **"set"** | **no reply** |
+| mode state | no public query exists (`isModeSet` is unexported); observed two ways, both from the wire side: the `EnableMode` callback fired with mode 4, and DECRQM answered "set" | public data query: `GHOSTTY_TERMINAL_DATA_MODE` on `ANSIMode(4)` → `true` |
+| `CSI 4 $p` (DECRQM) | replied `\x1b[4;1$y` — **status 1 = set** | **no reply** |
 | `CSI ? 6 $p`, `CSI ? 25 $p` | — | `\x1b[?6;2$y`, `\x1b[?25;1$y` |
+
+Both "set" observations for `x/vt` come from what the emulator *says* (a callback and a wire
+reply), not from reading a private field — which is what makes the row a defect rather than a
+probe limitation: the claim under test is "the emulator tells the program the mode is set",
+and it does, twice.
 
 `x/vt` records the mode (`csi_mode.go:71`), answers a DECRQM request saying the mode is set,
 and then ignores it: `utf8.go:88` calls `SetCell`, which always overwrites. An emulator that
@@ -224,22 +234,29 @@ headless `xterm.js` does not answer DSR.
 
 | n | `x/vt` wall | `x/vt` cumulative alloc / mallocs | `libghostty-vt` wall | ghostty alloc / mallocs |
 |---|---|---|---|---|
-| 100 000 | 17.0 ms | 12.1 MB / 101 259 | 0.45 ms | 439 B / 11 |
-| 1 000 000 | 177.9 ms | 123.1 MB / 1 012 517 | 0.49 ms | 1 960 B / 11 |
-| 10 000 000 | 1 821.8 ms | 1.22 GB / 10 125 018 | 0.39 ms | 1 832 B / 7 |
-| 1 000 000 000 | **not completed in 30 s** (189 473 616 mallocs done) | 22.9 GB in 30 s | **0.44 ms** | 1 536 B / 16 |
+| 100 000 | 16.4 ms | 12.1 MB / 101 258 | 0.47 ms | 1 944 B / 11 |
+| 1 000 000 | 174.8 ms | 123.1 MB / 1 012 517 | 0.50 ms | 1 960 B / 12 |
+| 10 000 000 | 1 734.4 ms | 1.22 GB / 10 125 017 | 0.38 ms | 1 352 B / 9 |
+| 1 000 000 000 | **not completed in 30 s** (190 686 113 mallocs done) | 23.1 GB in 30 s | **0.48 ms** | 2 224 B / 17 |
 
-These are the numbers committed in `results/*.jsonl`, from one run. Wall time is the only
-value here that drifts, and the probes below were run five times while the drivers were being
-edited: `x/vt` gave 16.7–18.5 ms at 10⁵, 172.1–179.9 ms at 10⁶ and 1701.6–1821.8 ms at 10⁷;
-ghostty gave 0.36–0.49 ms. The allocation counts, the cell outcomes and every probe in
-§1.1–§1.6 and §1.9 are identical across those runs, including a full `run.sh` from a clean
-vendor checkout.
+These are the numbers committed in `results/*.jsonl`. **Wall time is the only quantity here
+that is not reproducible, and it is not close**: eight runs of the same `x/vt` cases gave
+16.4–43.6 ms at 10⁵, 172.1–219.0 ms at 10⁶ and 1701.6–**4090.9** ms at 10⁷; the high sample
+was taken on a loaded machine (load average 2.2) and the same cases returned 1701.6–1821.8 ms
+on every quiet run. Ghostty's four were 0.32–0.52 ms. **The allocation counts are exact and
+stable** — 1 012 517 ± 2 mallocs at 10⁶ across every run, and 1.013 mallocs and 122 bytes per
+repeated character — so the rate is better read from those than from the clock: at ~1.01
+allocations per character, 10⁹ repeats is ~1.01 × 10⁹ allocations whatever the machine is
+doing, and the observed 19.1 %-in-30 s is consistent with that.
 
-`x/vt` is linear with no cap: ~170–182 ns and ~1.013 allocations per repeated character, so
-10⁹ repeats is ~170–182 s and ~1.01 × 10⁹ allocations. In 30 seconds it completed **18.9 %**
-of the work, consistent with that rate. The allocation is ~121–123 bytes per character —
-`utf8.go:44` boxes each printed character with `string(r)` before storing it in a cell.
+Every other probe (§1.1–§1.6, §1.8, §1.9, §1.10 and the API section) reproduced identically
+across all of those runs, including a full `run.sh` from a clean vendor checkout.
+
+`x/vt` is linear with no cap: ~170 ns and ~1.013 allocations per repeated character on an
+unloaded machine (~409 ns/char at the loaded extreme), so 10⁹ repeats is roughly three
+minutes and ~1.01 × 10⁹ allocations. In 30 seconds it completed **19.1 %** of the work.
+The allocation is ~121–123 bytes per character — `utf8.go:44` boxes each printed character
+with `string(r)` before storing it in a cell.
 
 `libghostty-vt` is flat because it **clamps the count at 65535**. The committed drivers
 contain the pair that shows it: `rep_65535` and `rep_70000` leave identical state in ghostty
@@ -315,6 +332,20 @@ The bare-0x9C row differs in a way worth noting honestly: `x/vt` sets the title 
 ghostty fires no title event at all. Nothing reaches the grid in either. I did not determine
 which is correct for a raw 0x9C terminator.
 
+### 1.10 Graphics (probe added by this spike)
+
+Not one of the nine. Added because the graphics answer §2.5 asks for was otherwise derivable
+only from reading source, and a grep for the absence of a word is not a measurement. Both
+drivers execute a sixel DCS and a Kitty graphics APC and record what the emulator does:
+
+| | `x/vt` | `libghostty-vt` |
+|---|---|---|
+| sixel DCS | `unhandled sequence: DCS "q" "\"1;1;2;2#0;2;0;0;0#0~~"` | *no report* |
+| Kitty APC | `unhandled sequence: APC "Ga=T,f=24,s=1,v=1,i=42;AAAA"` | `image_42_decoded = true` |
+| reply | none | `\e_Gi=42;OK\e\\` |
+| screen, cursor | unchanged, `0,0` | unchanged, `0,0` |
+| handler seam | 1 DCS + 1 APC delivered with payload bytes verbatim | *no DCS/APC effect to register* |
+
 ## 2. The API answers
 
 ### 2.1 Incremental render state for a diff encoder
@@ -372,10 +403,17 @@ recovered afterwards, and the frontend's `isWrapped` path in
 `frontend/src/scrollback/serializer.ts:483` has no backend counterpart.
 
 **`libghostty-vt`: stored and readable.** `GHOSTTY_ROW_DATA_WRAP` and
-`GHOSTTY_ROW_DATA_WRAP_CONTINUATION` on a `GhosttyRow` obtained from a grid ref. Measured on
-the same input: `row0_wrap=true`, `row1_continuation=true`, `row2` both false; and after
-`Resize(20, 4)` the row is rejoined to `"0123456789ABCDEFGHIJ"` with wrap false. The
-continuation flag survives the resize because it was stored while parsing.
+`GHOSTTY_ROW_DATA_WRAP_CONTINUATION` on a `GhosttyRow` obtained from a grid ref
+(`ghostty_grid_ref_row`, `ghostty_row_get`). Measured on the same input: `row0_wrap=true`,
+`row1_continuation=true`, `row2` both false; and after `Resize(20, 4)` the row is rejoined to
+`"0123456789ABCDEFGHIJ"` with wrap false. The continuation flag survives the resize because
+it was stored while parsing.
+
+Two more pieces of the same family, named because a card serializer wants them and neither
+exists in `x/vt`: `GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP` (`= 5`) exposes the phantom
+pending-wrap state at the right margin as terminal state, and `ghostty_grid_ref_tracked.h`
+provides a reference that survives scrolling and reports when it loses its value — the
+substrate for "the marker I recorded is now at row N" without re-scanning.
 
 ### 2.3 PTY replies
 
@@ -393,13 +431,21 @@ the write blocks *inside* whatever goroutine called `Write`. ADR-0041 already re
 an integration requirement; the probe above is the number behind it.
 
 **`libghostty-vt`: a synchronous callback, no pipe, no reader.** Replies are delivered to
-`GHOSTTY_TERMINAL_OPT_WRITE_PTY` during the write; the callback runs on the caller's
-goroutine and the parser continues when it returns. There is no drain to forget, and no
-deadlock if there is none. The documented constraint is the reverse one: callbacks are
-synchronous and must not re-enter `ghostty_terminal_vt_write` on the same terminal, and must
-not block (the header says so explicitly: "callbacks must be very careful to not block for
-too long"). A runtime that must hand the reply to an SSH carrier has to either be fast or
-queue, where `x/vt` lets it be arbitrarily slow as long as something reads.
+`GHOSTTY_TERMINAL_OPT_WRITE_PTY` during the write. The obligation is the opposite of a drain
+and it is stricter about *time*: the callback runs **synchronously on the caller's
+goroutine**, the parser is blocked until it returns, and the header says so outright —
+callbacks "must be very careful to not block for too long or perform expensive operations,
+since they are blocking further IO processing", and must not re-enter
+`ghostty_terminal_vt_write` on the same terminal. There is nothing to drain and no deadlock
+if nothing is registered; what a runtime must not do is hand the reply to a slow carrier
+inside the callback. Measured: a DSR 6 produces its reply with no reader goroutine anywhere
+in the driver, which is why the ghostty driver has no `drainer` at all and the `x/vt` driver
+cannot do without one.
+
+So the two differ in where the back-pressure lands: `x/vt` blocks the *writer* until someone
+reads, ghostty blocks the *parser* until the callback returns. A runtime that must forward a
+reply over SSH has to be fast-or-queue in the second case and may be arbitrarily slow in the
+first.
 
 ### 2.4 Non-visual effects
 
@@ -431,19 +477,33 @@ itself.
 
 ### 2.5 Graphics
 
-**`x/vt`: neither.** `grep -rni "sixel\|kitty" x/vt/*.go` finds no sixel and no Kitty image
-code. `handleDcs`/`handleApc`/`handleSos`/`handlePm` (`dcs.go`) forward to user-registered
-handlers and log "unhandled sequence" otherwise, so both protocols are dropped unless the
-consumer writes a parser.
+Measured by executing the sequences, not by reading the source: a minimal sixel DCS
+(`ESC P q "1;1;2;2#0;2;0;0;0#0~~ ESC \`) and a Kitty graphics APC transmitting a 1×1 RGB
+image (`ESC _ G a=T,f=24,s=1,v=1,i=42;AAAA ESC \`). Recorded in `results/*.jsonl` under
+probe `11_graphics`, which is the one probe here **added by the spike** rather than taken
+from the nine (§1.10).
 
-**`libghostty-vt`: Kitty graphics yes, sixel no.** `include/ghostty/vt/kitty_graphics.h` is
-871 lines and the implementation is `src/terminal/kitty/graphics_image.zig` and neighbours;
-the linked build reports `GHOSTTY_BUILD_INFO_KITTY_GRAPHICS = true` (measured). Sixel is
-**not implemented**: the only occurrence of the word in the whole `src/` tree is
-`src/terminal/device_attributes.zig:53`, `sixel = 4`, a flag the embedder may advertise in
-DA1 — and the measured default DA1 reply is `\x1b[?62;22c`, which does not advertise it.
-So ghostty is not a superset here: it covers Kitty images, and neither candidate parses
-sixel. This confirms §1.2's "two real gaps" item 1 as still open for the runtime.
+| | `x/vt` | `libghostty-vt` |
+|---|---|---|
+| sixel DCS | logged `unhandled sequence: DCS "q" "\"1;1;2;2#0;2;0;0;0#0~~"`, screen and cursor unchanged, no reply | **no report at all**, screen and cursor unchanged |
+| Kitty APC | logged `unhandled sequence: APC "Ga=T,f=24,s=1,v=1,i=42;AAAA"`, screen unchanged | **decoded**: `image_42_decoded = true`, reply `\e_Gi=42;OK\e\\` |
+| consumer seam | `dcs_deliveries = 1`, `apc_deliveries = 1` with the payload bytes verbatim — a handler gets it | not measured; the effect list carries no DCS/APC hook |
+| compiled in | n/a (pure Go) | `GHOSTTY_BUILD_INFO_KITTY_GRAPHICS = true`, storage present |
+| control | n/a | a deliberately unsupported APC (`ESC _ private-command;payload ESC \`) **is** reported, tag 0 — so the empty list above means "handled", not "nothing is ever reported" |
+
+So: **Kitty graphics is ghostty-only and it genuinely decodes and answers**; sixel is
+**absent from both** — `x/vt` logs it as unhandled, ghostty is silent about DCS sequences by
+design (its header says only APC sequences are reported). Neither candidate changes a cell
+for either protocol, which is the right behaviour for an image overlay but is also what
+"silently ignored" looks like from the grid.
+
+A small wart worth recording from the same log: the `ESC \` string terminator is reported by
+`x/vt` as its own `unhandled sequence: ESC "\\"` line, separately from the sequence it
+terminates.
+
+The comparison with §1.2's "two real gaps" is therefore: gap 1 (graphics) is half closed by
+ghostty — Kitty images yes, sixel no — and unchanged for `x/vt`; gap 2 (soft wrap) is closed
+by ghostty and untouched in `x/vt`, as §2.2 measures.
 
 ### 2.6 Two capabilities neither candidate question asked about, but the design needs
 
@@ -531,19 +591,21 @@ nine probes — and the recommendation is conditional on one measurement this sp
 make.** The condition is stated in reason 3 and spelled out below, because it is the one
 place where the evidence points the other way. Reasons, in order of weight:
 
-1. **`x/vt` fails all nine probes, and four of the failures are silent wrongness rather
-   than missing features.** Modified keys emit **nothing** (§1.3); F13 emits U+FFFD (§1.4);
-   IRM is reported set and then ignored (§1.5); a CPR under origin mode reports a row it
-   cannot distinguish from the absolute one (§1.6). The other five — split clusters,
-   combining marks, unbounded REP, destructive resize, and the 0x9C title — are the same
-   class of thing arrived at differently. Ghostty answers all nine correctly except one.
-2. **Ghostty fails exactly one probe, and it is a deliberate bound, not a defect.**
-   `libghostty-vt` clamps REP at 65535 (§1.7); `x/vt` honours the count and takes ~170 s and
-   ~1 × 10⁹ allocations for 10⁹ repeats. A runtime that puts a remote program's bytes through
-   its authority needs the bound, so this is arguably ghostty's answer to a question `x/vt`
-   has not asked. Ghostty's other two misses are outside the nine: no sixel (§2.5), and emoji
-   column accounting that disagrees with `xterm.js` on the regional-indicator flag (§1.1).
-   Neither is silent wrongness of the same class.
+1. **`x/vt` fails all nine specified probes, and four of the failures are silent wrongness
+   rather than missing features.** Modified keys emit **nothing** (§1.3); F13 emits U+FFFD
+   (§1.4); IRM is reported set by both a callback and a DECRQM reply and then ignored (§1.5);
+   a CPR under origin mode reports a row it cannot distinguish from the absolute one (§1.6).
+   The other five — split clusters, combining marks, unbounded REP, destructive resize, and
+   the 0x9C title — are the same class of thing arrived at differently. Ghostty answers all
+   nine correctly except one.
+2. **Ghostty fails exactly one of the nine, and it is a deliberate bound, not a defect.**
+   `libghostty-vt` clamps REP at 65535 (§1.7); `x/vt` honours the count and takes ~180 s and
+   ~1.01 × 10⁹ allocations for 10⁹ repeats. A runtime that puts a remote program's bytes
+   through its authority needs the bound, so this is arguably ghostty's answer to a question
+   `x/vt` has not asked. Ghostty's other misses are outside the nine: no sixel (§2.5, where the
+   added probe §1.10 shows `x/vt` has neither protocol and ghostty decodes Kitty images for
+   real), and emoji column accounting that disagrees with `xterm.js` on the
+   regional-indicator flag (§1.1). Neither is silent wrongness of the same class.
 3. **The condition: the argument that chose `x/vt` — column geometry against `xterm.js` — is
    measured on two disjoint bodies of evidence that disagree.** `ADR-0041` scored `x/vt` at
    100/100 on five real captures (`claude`, `bash`, `htop`, `vim`, `less`) containing no
@@ -597,7 +659,7 @@ maintaining**, by name:
   A policy is needed; reflow is the lossless one, and reflow means re-running cluster
   assembly over the whole buffer — i.e. it depends on the Unicode work above.
 - **Resource bounds.** REP is O(n) with ~1 allocation per character (§1.7): 10⁹ repeats is
-  ~170 s and ~1.01 × 10⁹ allocations, which is a remote program's denial of service against the
+  ~180 s and ~1.01 × 10⁹ allocations, which is a remote program's denial of service against the
   runtime. Bounding it means choosing a clamp (ghostty chose 65535) and applying it
   consistently across REP, CUP/CHH counts, and DCS/OSC payload sizes. Ghostty has separate
   options for exactly this (`APC_MAX_BYTES`, `KITTY_IMAGE_STORAGE_LIMIT`,
@@ -665,11 +727,76 @@ differ on exactly the boundaries this brief names.
   deadlocks without a drain is reproduced here (§2.3), but nothing in this spike says how
   either library behaves on `htop`, `vim` or an agent's spinner under sustained load, and the
   REP number is a synthetic worst case rather than a workload.
-- **Ghostty's `UNKNOWN_SEQUENCE` effect.** Left unbound in the binding (its payload is a
-  tagged union, and the title/grid evidence already decided probe 9). It would answer
-  whether ghostty *reports* what it drops, which is a different question from whether it
-  drops it.
+- **Ghostty's `UNKNOWN_SEQUENCE` effect, beyond the tag.** The binding reports *that* a
+  sequence was unsupported and which kind (APC), which is what §1.10 and its control use.
+  The payload — the borrowed sequence bytes — is a tagged union of `GhosttyString`s and is
+  deliberately not bound, so this spike does not report *what* was dropped, only that it was
+  and that the reporting mechanism works.
 - **`libghostty-vt`'s own test suite.** Not run. `build.zig` has `test` and a
   `lib_vt` test step, and a type-schema ABI validation step; running them was not needed for
   any probe here and would have measured the library's opinion of itself rather than the
   nine questions asked.
+
+## Appendix A — the exact probe inputs
+
+Every sequence below is a Go string literal as fed to `Write`/`vt_write`, with its bytes in
+hex. `\x1b` is ESC (1b), `\a` is BEL (07). Where a probe drives an API rather than bytes, the
+call is named instead.
+
+| probe | input | bytes |
+|---|---|---|
+| 1 | `"\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466"` | `f09f91a8 e2808d f09f91a9 e2808d f09f91a7 e2808d f09f91a6` (25) |
+| 1 | `"\U0001F44D\U0001F3FD"` | `f09f918d f09f8fbd` (8) |
+| 1 | `"\U0001F1F7\U0001F1FA"` | `f09f87b7 f09f87ba` (8) |
+| 1 | `"\u2764\uFE0F"` | `e29da4 efb88f` (6) |
+| 2 | `"a\u0301"` | `61 cc81` (3) |
+| 3, 4 | no bytes in: `vt.KeyPressEvent{Code, Mod}` to `SendKey`, or `ghostty.EncodeKey(key, mods, kittyFlags, nil)` | output recorded in §1.3, §1.4 |
+| 5 | `"abcd"`, `"\x1b[1;1H"`, `"\x1b[4h"`, `"XY"`, `"\x1b[4$p"` | `61626364`, `1b5b313b3148`, `1b5b3468`, `5859`, `1b5b342470` |
+| 6 | `"\x1b[5;10r"`, `"\x1b[?6h"`, `"\x1b[1;1H"`, `"\x1b[6n"` | `1b5b353b313072`, `1b5b3f3668`, `1b5b313b3148`, `1b5b366e` |
+| 6 (control) | `"\x1b[5;10r"`, `"\x1b[5;1H"`, `"\x1b[6n"` | `1b5b353b313072`, `1b5b353b3148`, `1b5b366e` |
+| 7 | `"A"`, `"\x1b[<n>b"` | `41`, `1b5b<n as decimal>62` |
+| 8 | `"L01\r\n" … "L24"`, `"0123456789"×4 + "ABCDE"`, `"hello\r\nworld"` | see §1.8 |
+| 9 | `"\x1b]0;X\u2733Y\a"`, `"\x1b]0;X\u2733Y\x1b\\"`, `"\x1b]0;X\x9cY\a"`, `"\x1b]0;X-Y\a"`, then `"Z"` | prefixes `1b5d303b58 e29cb3 59`, terminators `07` / `1b5c` / `1b` (`\x9c` bare) / `07` |
+| 10 | `"\x1b[6n"` | `1b5b366e` |
+| 11 | sixel `"\x1bPq\"1;1;2;2#0;2;0;0;0#0~~\x1b\\"` | `1b507122...1b5c` |
+| 11 | kitty `"\x1b_Ga=T,f=24,s=1,v=1,i=42;AAAA\x1b\\"` | `1b5f47 613d542c663d32342c... 1b5c` |
+| 11 | control APC `"\x1b_private-command;payload\x1b\\"` | `1b5f 707269766174652d636f6d6d616e643b7061796c6f6164 1b5c` |
+
+Terminal geometry, unless a probe says otherwise: 80×24 for probes 3, 4, 6, 7; 20×3 for 1, 2,
+5, 11; 40×3 for 9; probe 8 sets its own. Scrollback is the library default except where the
+probe passes `SetScrollbackSize`/`SetScrollbackLines`. `TERM` is irrelevant: neither driver
+sets it, and neither emulator reads it.
+
+## Appendix B — how each number was taken
+
+- **Cells.** `x/vt`: `Emulator.CellAt(x, y)` on the focused screen, read as
+  `{Content, Width}`; a cell with empty content prints `.`. `libghostty-vt`:
+  `ghostty_terminal_grid_ref` → `ghostty_grid_ref_cell` → `GHOSTTY_CELL_DATA_HAS_TEXT` /
+  `_WIDE`, with the cluster text from `ghostty_grid_ref_graphemes`, mapped to the same width
+  vocabulary (narrow 1, wide 2, spacer 0). Rows are `%q`-quoted so a blank row and a row
+  holding a space cannot be confused.
+- **Replies.** `x/vt`: the driver runs one goroutine reading `Emulator.Read` into a buffer,
+  and each probe takes everything accumulated (250 ms budget for the first byte, then 20 ms
+  for stragglers). `libghostty-vt`: the `write_pty` effect appends during the write; `Reply()`
+  concatenates and clears.
+- **Wall time.** `time.Now()` / `time.Since` around the single `Write` call, no warm-up and no
+  repetition averaging. This is a one-shot figure and §1.7 reports its observed spread across
+  eight runs, including one taken under load, rather than pretending to a precision it does
+  not have.
+- **Allocation.** `runtime.ReadMemStats` before and after the region, with `runtime.GC()`
+  before the first read. `TotalAlloc` and `Mallocs` are reported as deltas; the live heap is
+  reported as the two absolute `HeapAlloc` values rather than as a signed difference, because
+  a `uint64`→`int64` conversion of a difference is the kind of unchecked cast the repo's
+  linter rejects and the delta carries no information the pair does not. Note what these
+  numbers do and do not cover: `TotalAlloc` counts **Go** allocations only, so the `x/vt`
+  column is the whole cost of its cell model while the ghostty column is only the Go side of
+  a call whose real work happens in Zig — which is why the ghostty allocation figures are
+  near-constant and small, and why the honest comparison in §1.7 is wall time plus the
+  clamp, not bytes.
+- **The reference (`xterm.js`).** Headless `@xterm/headless@5.5.0` with
+  `@xterm/addon-unicode11@0.8.0` loaded and `unicode.activeVersion = '11'`, matching
+  `frontend/package.json` and `frontend/src/renderers/xterm.ts`. Cells read via
+  `buffer.active.getLine(y).getCell(x)` → `getChars()` / `getWidth()`. Output committed at
+  `results/xtermjs-cases.txt` and `results/xtermjs-zwj.txt`.
+- **The real terminal.** `xterm 410` under `Xvfb :94`, title read back with
+  `xdotool getwindowname`. Recorded in §1.9 and §6.

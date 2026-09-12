@@ -141,7 +141,60 @@ func main() {
 	p8()
 	p9()
 	p10()
+	p11()
 	api()
+}
+
+// logSink collects the emulator's own log lines, which is how x/vt reports a
+// sequence it has no handler for.
+type logSink struct{ lines *[]string }
+
+func (s logSink) Printf(format string, v ...any) {
+	*s.lines = append(*s.lines, fmt.Sprintf(format, v...))
+}
+
+// p11 measures whether the graphics protocols are supported by executing them
+// against the emulator, rather than by reading the source for their absence.
+func p11() {
+	const p = "11_graphics"
+	// A minimal sixel DCS (ESC P q ... ESC \) and a Kitty graphics APC
+	// (ESC _ G ... ESC \) transmitting a 1x1 RGB image as three bytes.
+	sixel := "\x1bPq\"1;1;2;2#0;2;0;0;0#0~~\x1b\\"
+	kitty := "\x1b_Ga=T,f=24,s=1,v=1,i=42;AAAA\x1b\\"
+
+	// (a) No handler registered: what does the emulator do with them?
+	e, d := newEmu(20, 3)
+	var lines []string
+	e.SetLogger(logSink{&lines})
+	before := screen(e)
+	write(e, []byte(sixel))
+	write(e, []byte(kitty))
+	d.take()
+	obs.Emit(p, "no_handler", "log_lines", fmt.Sprintf("%q", lines))
+	obs.Emit(p, "no_handler", "screen_unchanged", screen(e) == before)
+	obs.Emit(p, "no_handler", "screen_row0", fmt.Sprintf("%q", rowText(e, 0)))
+	cx, cy := e.CursorPosition().X, e.CursorPosition().Y
+	obs.Emit(p, "no_handler", "cursor", fmt.Sprintf("%d,%d", cx, cy))
+	obs.Emit(p, "no_handler", "reply_bytes", obs.Esc(d.take()))
+
+	// (b) The consumer seam: a registered handler receives them instead.
+	e2, d2 := newEmu(20, 3)
+	var dcsData, apcData [][]byte
+	e2.RegisterDcsHandler('q', func(_ ansi.Params, data []byte) bool {
+		dcsData = append(dcsData, append([]byte(nil), data...))
+		return true
+	})
+	e2.RegisterApcHandler(func(data []byte) bool {
+		apcData = append(apcData, append([]byte(nil), data...))
+		return true
+	})
+	write(e2, []byte(sixel))
+	write(e2, []byte(kitty))
+	d2.take()
+	obs.Emit(p, "with_handler", "dcs_deliveries", len(dcsData))
+	obs.Emit(p, "with_handler", "apc_deliveries", len(apcData))
+	obs.Emit(p, "with_handler", "dcs_bytes", obs.Esc(bytes.Join(dcsData, nil)))
+	obs.Emit(p, "with_handler", "apc_bytes", obs.Esc(bytes.Join(apcData, nil)))
 }
 
 // p10 measures the integration obligation ADR-0041 records: x/vt answers the

@@ -19,6 +19,7 @@ extern void nocxGoBell(uintptr_t handle);
 extern void nocxGoTitleChanged(uintptr_t handle);
 extern void nocxGoPwdChanged(uintptr_t handle);
 extern void nocxGoClipboardWrite(uintptr_t handle, int location, size_t len);
+extern void nocxGoUnknownSequence(uintptr_t handle, int tag);
 
 GhosttyResult nocxInstallEffects(GhosttyTerminal terminal, uintptr_t handle);
 GhosttyResult nocxTerminalTitle(GhosttyTerminal terminal, GhosttyString *out);
@@ -47,7 +48,16 @@ GhosttyResult nocxRenderStateDirtyRows(GhosttyRenderState state,
 GhosttyResult nocxRenderStateClean(GhosttyRenderState state);
 void nocxRenderStateFree(GhosttyRenderState state);
 
-/* Compile-time capabilities of the library that was linked. */
+/* Compile-time capabilities of the library that was linked, plus whether the
+   linked build exposes Kitty image storage for this terminal. */
 GhosttyResult nocxBuildInfoBool(GhosttyBuildInfo which, int *out);
+GhosttyResult nocxKittyGraphicsPresent(GhosttyTerminal terminal, int *out);
+
+/* Whether an image with this id exists in the terminal's Kitty image
+   storage: 1 when found, 0 when not. This is what decides whether a Kitty
+   graphics APC was decoded, as opposed to merely not being reported as
+   unknown. */
+GhosttyResult nocxKittyImagePresent(GhosttyTerminal terminal, uint32_t image_id,
+                                    int *out);
 
 #endif /* NOCX_SPIKE_GHOSTTY_BRIDGE_H */

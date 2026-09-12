@@ -39,6 +39,10 @@ type Terminal struct {
 	titles  []string
 	pwds    []string
 	clips   []ClipboardWrite
+	// unknown holds the tags of sequences the library reported as
+	// unsupported. Only the tag is bound; the payload is a tagged union of
+	// borrowed strings and this spike does not reach into it.
+	unknown []int
 	freed   bool
 }
 
@@ -328,6 +332,37 @@ func (t *Terminal) Events() (bells int, titles, pwds []string, clips []Clipboard
 	clips = append([]ClipboardWrite(nil), t.clips...)
 	t.bells, t.titles, t.pwds, t.clips = 0, nil, nil, nil
 	return bells, titles, pwds, clips
+}
+
+// UnknownSequences returns the tags of sequences the library reported as
+// unsupported since the previous call.
+func (t *Terminal) UnknownSequences() []int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := append([]int(nil), t.unknown...)
+	t.unknown = nil
+	return out
+}
+
+// KittyGraphicsPresent reports whether the terminal exposes Kitty image
+// storage. The header returns GHOSTTY_NO_VALUE when Kitty graphics are
+// disabled at build time, which this reports as false.
+func (t *Terminal) KittyGraphicsPresent() bool {
+	var v C.int
+	if r := C.nocxKittyGraphicsPresent(t.t, &v); r != C.GHOSTTY_SUCCESS {
+		return false
+	}
+	return v != 0
+}
+
+// KittyImagePresent reports whether an image with this id was decoded into
+// the terminal's Kitty image storage.
+func (t *Terminal) KittyImagePresent(id uint32) bool {
+	var v C.int
+	if r := C.nocxKittyImagePresent(t.t, C.uint32_t(id), &v); r != C.GHOSTTY_SUCCESS {
+		return false
+	}
+	return v != 0
 }
 
 // Key is a key identity, mirroring GhosttyKey.

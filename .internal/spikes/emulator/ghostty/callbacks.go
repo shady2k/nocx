@@ -75,3 +75,14 @@ func nocxGoClipboardWrite(h C.uintptr_t, location C.int, n C.size_t) {
 	t.clips = append(t.clips, ClipboardWrite{Location: int(location), Length: int(n)})
 	t.mu.Unlock()
 }
+
+//export nocxGoUnknownSequence
+func nocxGoUnknownSequence(h C.uintptr_t, tag C.int) {
+	t := lookup(h)
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.unknown = append(t.unknown, int(tag))
+	t.mu.Unlock()
+}

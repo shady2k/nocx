@@ -1,0 +1,6 @@
+# An interactive bash runs one coloured command, then the capture's own
+# timeout ends the run. No `exit` is typed: a shell's teardown would be
+# recorded as the last thing on the screen and the corpus wants the command's
+# output there.
+1500 br ready\r
+4000

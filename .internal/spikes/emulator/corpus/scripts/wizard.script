@@ -1,0 +1,14 @@
+# Claude Code's first run, driven to the point where a turn is in flight.
+#
+# Nothing is typed that leaves the program: the capture ends while the request
+# is still unanswered, so the last frame holds the spinner rather than the
+# screen Claude restores on exit. The endpoint (see record.sh) accepts the
+# connection and never answers, which is what keeps the spinner up.
+4000 \r
+4000 \r
+3000 \x1b[B
+1000 \r
+2000
+2000 Write a haiku about terminals.
+500 \r
+15000

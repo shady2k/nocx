@@ -5,10 +5,35 @@
 // # What is here and what is deliberately not
 //
 // These files declare the VOCABULARY: the states, the events, the errors and
-// the [Runtime] interface an implementation must satisfy. They contain no
-// functions, because there is nothing yet to run — nocx-ygxjv.2 builds the
-// implementation, and the contract exists so that it cannot choose the model by
-// accident, the way internal/lifecycle's kernel exists ahead of its transports.
+// the [Runtime] interface an implementation must satisfy. The contract exists
+// so that an implementation cannot choose the model by accident, the way
+// internal/lifecycle's kernel exists ahead of its transports.
+//
+// # The implementation has arrived, and it is judged by the same schedules
+//
+// nocx-ygxjv.9 lands it in runtime.go: [Session], a runtime over a real PTY and
+// the real emulator (internal/emulator, the adapter in internal/emulator/ghostty),
+// built by [New] from a [Config]. The schedules in contract_test.go are run
+// against it in schedules_test.go, constructed over instruments of its own
+// (harness_test.go), because that is the only way the contract can be evidence
+// about the product rather than about itself — and the three assertions in
+// those schedules that a real terminal cannot reach are named there, with the
+// reason, rather than relaxed here.
+//
+// Two things about the contract changed with the implementation, both of them
+// the same concept having had two owners:
+//
+//   - [Geometry] is internal/emulator's own type, aliased rather than
+//     re-declared, so a size has one owner;
+//   - [Emulator] carries the port's own signature for resize, so that the
+//     port's terminal SATISFIES it (asserted where the implementation is)
+//     instead of being wrapped in a second declaration that would drop the
+//     replies a program's in-band size report consists of.
+//
+// What is deliberately NOT here: placing the runtime beside the helper's PTY,
+// and switching the renderer's own reply path off. Those are the next step and
+// depend on this constructor — so this package has no production caller yet and
+// says so rather than inventing one.
 //
 // The MODEL — a reference implementation of [Runtime] over the test's own
 // terminal, emulator and consumers, with no I/O behind any of them — and the

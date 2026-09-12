@@ -26,17 +26,20 @@
 // state them: create and destroy with owned handles; ingest; cells with
 // grapheme boundaries and authoritative widths; style with colour kept apart as
 // default, palette and RGB; per-line soft-wrap continuation; the program's own
-// replies handed to the caller; key encoding driven from the terminal's state;
-// resize; and the alternate screen.
+// replies handed to the caller; key, mouse, paste and focus encoding driven
+// from the terminal's state; the non-visual effects the program's output asked
+// for; resize; and the alternate screen.
 //
 // Deliberately absent, and not by oversight:
 //
 //   - The cursor. The frame format needs it, but the runtime that consumes the
 //     frame does not exist yet, and a field nobody reads is a field nobody has
 //     agreed to.
-//   - The non-visual effects — bell, title, cwd, OSC 52 clipboard writes.
-//     Design §6.2 gives them their own delivery with permissions and a replay
-//     rule, which is the runtime's, not a return value of an ingest call.
+//   - What the effects are FOR. Bell, title, cwd and clipboard writes cross the
+//     port as [Effect] values because no read of the screen can find them, but
+//     design §6.2's delivery — permissions, the replay rule, who may write the
+//     clipboard — is the runtime's, and an effect is the request rather than
+//     the delivery. The port carries no notion of a user having agreed to one.
 //   - Hyperlinks, selection, search, Kitty graphics, and the incremental
 //     render state. Each is a real capability of the library; none is in this
 //     bead's list, and the render-state path in particular is a different

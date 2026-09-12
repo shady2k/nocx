@@ -28,6 +28,38 @@ const maxGraphemeCodepoints = 16
 // when one is not, and the caller retries into an exactly-sized buffer.
 const maxEncodedKey = 128
 
+// maxEncodedPaste bounds the stack buffer one paste is encoded into. A paste is
+// arbitrarily long, so this is a first attempt rather than a limit: the library
+// reports the required size and the caller retries into an exactly-sized
+// buffer. It is the size that covers a line or two of pasted text — the common
+// case at a prompt — without a heap allocation.
+const maxEncodedPaste = 256
+
+// maxEncodedMouse bounds the stack buffer one mouse event is encoded into. A
+// mouse sequence is a fixed prefix, two numbers and a terminator — the numbers
+// cannot exceed the grid, which is at most five digits — so this is a bound
+// rather than an estimate, and the retry exists only so that a library that one
+// day encodes something longer is answered with bytes instead of a failure.
+const maxEncodedMouse = 32
+
+// maxEncodedFocus bounds the stack buffer one focus report is encoded into.
+// CSI I and CSI O are three bytes; the bound is written with room to spare for
+// the same reason as the mouse event's.
+const maxEncodedFocus = 16
+
+// The program's own DEC private modes this adapter asks about. They are named
+// here rather than written at the call sites because the number IS the
+// protocol, and a call site reading `t.mode(2004)` says nothing about what 2004
+// is.
+const (
+	// modeFocusEvent is DEC private mode 1004: the program asks to be told when
+	// the terminal's window gains and loses focus.
+	modeFocusEvent = 1004
+	// modeBracketedPaste is DEC private mode 2004: the program asks for pastes
+	// to be wrapped in the bracketed-paste sequences.
+	modeBracketedPaste = 2004
+)
+
 // terminal is one libghostty-vt terminal. It is the only implementation of
 // emulator.Terminal in the tree, and it owns the upstream handle for its whole
 // life: nothing outside this package can name, copy or free it.
@@ -40,8 +72,8 @@ const maxEncodedKey = 128
 // nothing for a mutex to exclude. (The registry entry is taken before the
 // callbacks are installed, because the callbacks need the handle; a callback
 // firing during construction would run on this same goroutine and append to
-// t.replies without a lock, which is why the ordering is written down here
-// rather than left to be re-derived.)
+// t.replies or t.effects without a lock, which is why the ordering is written
+// down here rather than left to be re-derived.)
 //
 // From then on, every field is under mu, and ADR-0065 point 3 requires exactly
 // that. There are three reasons it is a mutex rather than a convention:
@@ -63,6 +95,13 @@ type terminal struct {
 	// not.
 	t   C.GhosttyTerminal
 	enc C.GhosttyKeyEncoder
+	// menc is the mouse encoder. It is kept for the terminal's whole life
+	// rather than allocated per event because an encoder holds the state the
+	// port must NOT: the terminal's tracking mode and output format are
+	// re-derived from the terminal before every event, so nothing the PROGRAM
+	// did can go stale between two calls (EncodeKey's comment carries the same
+	// argument for the key encoder).
+	menc C.GhosttyMouseEncoder
 	// id is this terminal's key in the registry the callbacks look it up by. A
 	// C callback cannot carry a Go pointer, so it carries a number instead.
 	id   uintptr
@@ -71,6 +110,11 @@ type terminal struct {
 	// the struct doc: only the goroutine holding mu writes it, and the bytes in
 	// it are already copied out of the library's borrowed memory.
 	replies []byte
+	// effects holds the non-visual effects the program's output produced, in
+	// the order they arrived. It is written by the effect callbacks under the
+	// same rule as replies — the goroutine holding mu is the only writer — and
+	// is drained whole by Effects.
+	effects []emulator.Effect
 }
 
 var (
@@ -109,7 +153,7 @@ func lookup(id uintptr) *terminal {
 // New creates a terminal of the given geometry.
 //
 // The returned value owns everything the call allocated: [emulator.Terminal]
-// .Close releases the terminal, its key encoder and its registry entry, and
+// .Close releases the terminal, its two encoders and its registry entry, and
 // there is no other way to reach them.
 func New(g emulator.Geometry) (emulator.Terminal, error) {
 	if !g.Valid() {
@@ -123,8 +167,11 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 	t := &terminal{t: handle, geom: g}
 	t.id = register(t)
 	if err := t.install(g); err != nil {
-		unregister(t.id)
-		C.ghostty_terminal_free(handle)
+		// release and not a hand-rolled free: install owns three handles by the
+		// time it can fail (the terminal, the key encoder, the mouse encoder),
+		// and the path that has to remember all three is the path that
+		// eventually forgets one.
+		t.release()
 		return nil, err
 	}
 	return t, nil
@@ -132,7 +179,8 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 
 // install sizes the terminal and wires its callbacks. It is separate from New
 // so that every failure after the handle exists goes down one path that frees
-// it, rather than three that must each remember to.
+// it — release — rather than four that must each remember what was allocated
+// before them.
 func (t *terminal) install(g emulator.Geometry) error {
 	// The pixel size is part of the geometry a program can ask about (XTWINOPS,
 	// and mode 2048's in-band reports), and ghostty_terminal_new takes only the
@@ -151,6 +199,11 @@ func (t *terminal) install(g emulator.Geometry) error {
 		return resultError("key_encoder_new", r)
 	}
 	t.enc = enc
+	var menc C.GhosttyMouseEncoder
+	if r := C.ghostty_mouse_encoder_new(nil, &menc); r != C.GHOSTTY_SUCCESS {
+		return resultError("mouse_encoder_new", r)
+	}
+	t.menc = menc
 	return nil
 }
 
@@ -163,12 +216,10 @@ func (t *terminal) install(g emulator.Geometry) error {
 //export nocxGoWritePty
 func nocxGoWritePty(handle C.uintptr_t, data *C.uint8_t, n C.size_t) {
 	t := lookup(uintptr(handle))
-	if t == nil || n == 0 || data == nil {
+	if t == nil {
 		return
 	}
-	off := len(t.replies)
-	t.replies = append(t.replies, make([]byte, int(n))...)
-	copy(t.replies[off:], unsafe.Slice((*byte)(unsafe.Pointer(data)), int(n)))
+	t.replies = append(t.replies, copyBorrowed(data, n)...)
 }
 
 func (t *terminal) Geometry() (emulator.Geometry, error) {
@@ -452,12 +503,254 @@ func goBytes(in []C.char) []byte {
 	return out
 }
 
+// Paste hands the terminal a paste of text and returns the bytes the program is
+// to be sent, framed per the terminal's own state.
+//
+// # Why the library encodes the paste and not this adapter
+//
+// The framing IS mode 2004, and mode 2004 is the program's: a shell that turned
+// bracketed paste on must receive the text wrapped in the bracketed-paste
+// sequences, and one that did not must receive it bare, and nothing in the
+// caller's request says which. ghostty_paste_encode applies that rule from the
+// mode this adapter reads out of the terminal, strips the bytes that cannot
+// travel through a paste (NUL, ESC and DEL are replaced with spaces), and on
+// the unbracketed path turns newlines into carriage returns — every one of
+// which is the terminal's own rule rather than a caller's.
+//
+// The paste-event path (Kitty's OSC 5522, in which a paste becomes an event the
+// program then reads through the clipboard) is NOT taken, because upstream
+// enables it only when a clipboard_read callback is installed and this adapter
+// installs none: nocx's clipboard is the runtime's to mediate (design §6.2),
+// and an adapter that answered reads with an empty clipboard would be making
+// that decision here.
+//
+// # Why the bytes come back instead of being written
+//
+// The caller owns the single ordered write path to the PTY (see the port's
+// Paste). Upstream streams a paste through the write_pty callback in chunks,
+// which is the right shape for an embedder that writes as it goes and the wrong
+// one here: the chunks would land in the reply buffer and be indistinguishable
+// from a cursor report the program is waiting for.
+func (t *terminal) Paste(text []byte) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	if len(text) == 0 {
+		// Nothing to paste is nothing to say. An empty paste is not an error:
+		// an empty clipboard is a real thing, and the caller has nothing to
+		// write either way.
+		return nil, nil
+	}
+	bracketed, err := t.mode(modeBracketedPaste)
+	if err != nil {
+		return nil, err
+	}
+	// ghostty_paste_encode REWRITES ITS INPUT: the byte stripping happens in
+	// the buffer it is given. The buffer it is given is therefore a copy, so a
+	// caller's slice cannot change under it — and the copy is taken per attempt
+	// because a second pass would be encoding bytes the first pass already
+	// rewrote.
+	encode := func(out *C.char, outLen C.size_t) (C.GhosttyResult, C.size_t) {
+		scratch := make([]byte, len(text))
+		copy(scratch, text)
+		var n C.size_t
+		r := C.ghostty_paste_encode((*C.char)(unsafe.Pointer(&scratch[0])), C.size_t(len(scratch)),
+			C.bool(bracketed), out, outLen, &n)
+		return r, n
+	}
+	var buf [maxEncodedPaste]C.char
+	r, n := encode(&buf[0], C.size_t(len(buf)))
+	if r == C.GHOSTTY_OUT_OF_SPACE {
+		// As in readGrapheme: out of space with nothing required is a
+		// contradiction, and it is reported rather than answered with no bytes.
+		if n == 0 {
+			return nil, fmt.Errorf("ghostty: paste_encode: %w: out of space with nothing required", emulator.ErrFailure)
+		}
+		grown := make([]C.char, n)
+		r, n = encode(&grown[0], C.size_t(len(grown)))
+		if r != C.GHOSTTY_SUCCESS {
+			return nil, resultError("paste_encode", r)
+		}
+		return goBytes(grown[:int(n)]), nil
+	}
+	if r != C.GHOSTTY_SUCCESS {
+		return nil, resultError("paste_encode", r)
+	}
+	return goBytes(buf[:int(n)]), nil
+}
+
+// Mouse hands the terminal one mouse event and returns the bytes the program is
+// to be sent, in the tracking mode and output format the program set.
+//
+// # The mode is re-derived, and the coordinates are the port's
+//
+// ghostty_mouse_encoder_setopt_from_terminal reads the tracking mode (X10,
+// normal, button, any-event) and the output format (X10, UTF-8, SGR, URXVT,
+// SGR-pixels) out of the terminal, because the same click is a different
+// sequence under each and the program chose. It is done before EVERY event
+// rather than once at construction: a program that turns tracking on, changes
+// format or turns it off again between two clicks would otherwise be sent the
+// previous program's encoding.
+//
+// The size context is what makes the port's cell coordinates mean anything to
+// the library, which thinks in surface pixels: one pixel per column and one per
+// row makes a position of (x, y) mean cell (x, y), and the screen is exactly
+// the grid because a position outside the grid is outside the terminal.
+//
+// Two encoder options are set from the event rather than read from the
+// terminal, and both are about this port's shape rather than about the library.
+// Motion deduplication is turned OFF so that the same event twice is the same
+// bytes twice: a library that answered the second one with nothing would make
+// this method's answer depend on the call before it. And "any button pressed"
+// is set from the event's own button, because that is all the caller has told
+// this port about the mouse: a motion that names a button is a motion with that
+// button held — which is the whole of what DECSET 1002 exists to report — and
+// without the flag the encoder declines to encode it at all.
+func (t *terminal) Mouse(ev emulator.MouseEvent) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	action, ok := cMouseAction(ev.Action)
+	if !ok {
+		return nil, fmt.Errorf("ghostty: mouse action %d: %w", ev.Action, emulator.ErrUnsupported)
+	}
+	button, ok := cMouseButton(ev.Button)
+	if !ok {
+		return nil, fmt.Errorf("ghostty: mouse button %d: %w", ev.Button, emulator.ErrUnsupported)
+	}
+	hasButton := ev.Button != emulator.MouseNone
+	size := C.GhosttyMouseEncoderSize{
+		size:          C.size_t(unsafe.Sizeof(C.GhosttyMouseEncoderSize{})),
+		screen_width:  C.uint32_t(t.geom.Cols),
+		screen_height: C.uint32_t(t.geom.Rows),
+		cell_width:    1,
+		cell_height:   1,
+	}
+	C.ghostty_mouse_encoder_setopt(t.menc, C.GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
+		unsafe.Pointer(&size))
+	off := C.bool(false)
+	C.ghostty_mouse_encoder_setopt(t.menc, C.GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL,
+		unsafe.Pointer(&off))
+	held := C.bool(hasButton)
+	C.ghostty_mouse_encoder_setopt(t.menc, C.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED,
+		unsafe.Pointer(&held))
+	C.ghostty_mouse_encoder_setopt_from_terminal(t.menc, t.t)
+
+	encode := func(out *C.char, outLen C.size_t) (C.GhosttyResult, C.size_t) {
+		var n C.size_t
+		r := C.nocxMouseEncode(t.menc, action, button, C.bool(hasButton), cMods(ev.Mods),
+			C.float(ev.X), C.float(ev.Y), out, outLen, &n)
+		return r, n
+	}
+	var buf [maxEncodedMouse]C.char
+	r, n := encode(&buf[0], C.size_t(len(buf)))
+	if r == C.GHOSTTY_OUT_OF_SPACE {
+		// As in readGrapheme: out of space with nothing required is a
+		// contradiction, and it is reported rather than answered with no bytes.
+		if n == 0 {
+			return nil, fmt.Errorf("ghostty: mouse_encode: %w: out of space with nothing required", emulator.ErrFailure)
+		}
+		grown := make([]C.char, n)
+		r, n = encode(&grown[0], C.size_t(len(grown)))
+		if r != C.GHOSTTY_SUCCESS {
+			return nil, resultError("mouse_encode", r)
+		}
+		return goBytes(grown[:int(n)]), nil
+	}
+	if r != C.GHOSTTY_SUCCESS {
+		return nil, resultError("mouse_encode", r)
+	}
+	if n == 0 {
+		// No bytes is the program not being interested: either no tracking mode
+		// is enabled at all, or the event is one the mode it chose does not
+		// report (a motion under normal tracking, a button the encoder has no
+		// identity for). All of them are [ErrUnsupported] rather than an empty
+		// success, because the port's answer to "what does this event put in
+		// the program's input stream" is "nothing does", and a caller that
+		// could not tell that from "the bytes are empty" would write nothing
+		// and believe it had written something.
+		return nil, fmt.Errorf("ghostty: mouse action %d button %d: %w",
+			ev.Action, ev.Button, emulator.ErrUnsupported)
+	}
+	return goBytes(buf[:int(n)]), nil
+}
+
+// Focus hands the terminal one focus report and returns the bytes the program
+// is to be sent when it asked for focus reporting.
+//
+// The mode IS the method: DEC private mode 1004 is the program saying it wants
+// to be told, and a terminal that sent the report anyway would be writing into
+// a program's input stream because a window moved. The report itself is the
+// library's encoding (CSI I and CSI O), for the same reason every other
+// sequence here is: the bytes are the protocol's, not this adapter's.
+func (t *terminal) Focus(gained bool) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	on, err := t.mode(modeFocusEvent)
+	if err != nil {
+		return nil, err
+	}
+	if !on {
+		return nil, fmt.Errorf("ghostty: mode %d: %w", modeFocusEvent, emulator.ErrUnsupported)
+	}
+	var event C.GhosttyFocusEvent = C.GHOSTTY_FOCUS_LOST
+	if gained {
+		event = C.GHOSTTY_FOCUS_GAINED
+	}
+	var buf [maxEncodedFocus]C.char
+	var n C.size_t
+	r := C.ghostty_focus_encode(event, &buf[0], C.size_t(len(buf)), &n)
+	if r == C.GHOSTTY_OUT_OF_SPACE {
+		grown := make([]C.char, n)
+		r = C.ghostty_focus_encode(event, &grown[0], C.size_t(len(grown)), &n)
+		if r != C.GHOSTTY_SUCCESS {
+			return nil, resultError("focus_encode", r)
+		}
+		return goBytes(grown[:int(n)]), nil
+	}
+	if r != C.GHOSTTY_SUCCESS {
+		return nil, resultError("focus_encode", r)
+	}
+	return goBytes(buf[:int(n)]), nil
+}
+
+// mode reads one of the program's own DEC private modes. The read is a query of
+// the terminal rather than a field this adapter keeps: a mode the program set
+// is the library's state, and a copy of it here would be a second answer to the
+// same question.
+func (t *terminal) mode(value int) (bool, error) {
+	var on C.bool
+	if r := C.nocxModeValue(t.t, C.uint16_t(value), &on); r != C.GHOSTTY_SUCCESS {
+		return false, resultError("terminal_mode", r)
+	}
+	return bool(on), nil
+}
+
 func (t *terminal) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.t == nil {
 		return
 	}
+	t.release()
+}
+
+// release frees everything the terminal owns and leaves it closed: every field
+// that names an upstream handle is cleared, so t.t is nil afterwards exactly as
+// it is after Close and before New returned — the two paths out of this value
+// are one path.
+//
+// It is safe to call with nothing allocated, which is what makes it usable from
+// a construction that failed half way through. The caller holds mu, or is
+// construction holding the only reference.
+func (t *terminal) release() {
 	// The registry entry goes first: a callback in flight would look the
 	// terminal up and find nothing rather than a handle being freed. None can
 	// be, because every call that can produce one holds mu — but the order
@@ -467,7 +760,12 @@ func (t *terminal) Close() {
 		C.ghostty_key_encoder_free(t.enc)
 		t.enc = nil
 	}
+	if t.menc != nil {
+		C.ghostty_mouse_encoder_free(t.menc)
+		t.menc = nil
+	}
 	C.ghostty_terminal_free(t.t)
 	t.t = nil
 	t.replies = nil
+	t.effects = nil
 }

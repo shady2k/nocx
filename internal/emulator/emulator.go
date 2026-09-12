@@ -292,6 +292,76 @@ type Terminal interface {
 	// no error: a modifier key on its own is a real event with no bytes.
 	EncodeKey(ev KeyEvent) ([]byte, error)
 
+	// Effects returns the non-visual effects the program's output produced
+	// since the previous call, oldest first, and starts a fresh list.
+	//
+	// It is the other half of Ingest: a bell, a title, a clipboard write and a
+	// reported directory change no cell, so no read of the screen can find
+	// them, and a program that sets a title and rings has asked for two things
+	// a runtime must act on (design §6.2). They come out of the emulator
+	// rather than going to a callback the caller installs because they arrive
+	// on whatever goroutine is feeding the program's output, and a runtime
+	// that was called back from inside an ingest could not answer without
+	// re-entering a terminal whose lock the caller is holding.
+	//
+	// The list is the CALLER'S once it is returned: the bytes in it were copied
+	// out of the emulator's borrowed memory, and the next call starts empty, so
+	// an effect is read exactly once and by one reader.
+	Effects() []Effect
+
+	// Paste hands the terminal a paste of text and returns the bytes the
+	// program is to be sent, framed per the TERMINAL'S OWN state: bracketed
+	// when the program enabled mode 2004 and passed through when it did not.
+	// A paste of nothing produces no bytes and no error.
+	//
+	// "Passed through" is the framing and not a promise about every byte. A
+	// paste is not typing: the terminal removes the bytes that cannot travel
+	// through one — a control byte that would be read as input rather than as
+	// text is replaced — and a newline in an unbracketed paste becomes the
+	// carriage return that keeps the text on the program's current line. The
+	// returned bytes are the terminal's own answer for the text, and a caller
+	// must read them rather than assume they are the slice it handed over.
+	//
+	// The caller cannot do this itself. Bracketed paste is a mode the program
+	// set, mode 2004 is only one of the things a paste's framing depends on,
+	// and the sequences that have to be wrapped around the text are the
+	// terminal's own — a caller that wrapped them by itself would eventually
+	// wrap a paste the program did not ask to be bracketed, which turns a
+	// paste into typed input at a shell prompt.
+	//
+	// The bytes are RETURNED rather than written, exactly as Ingest returns the
+	// program's replies: the caller owns the one ordered write path to the PTY,
+	// and a port that wrote here would put a paste's bytes in front of a
+	// reply's or behind them depending on which goroutine won.
+	Paste(text []byte) ([]byte, error)
+
+	// Mouse hands the terminal one mouse event and returns the bytes the
+	// program is to be sent, in the tracking mode and output format the
+	// PROGRAM set. With no tracking mode enabled it reports [ErrUnsupported]
+	// and no bytes: the event is not input, and a caller must not have to
+	// invent that answer.
+	//
+	// Which is the whole reason this is a method and not a caller's string
+	// concatenation. A program chooses between X10, normal, button and
+	// any-event tracking, and between the legacy byte form, UTF-8, SGR and
+	// the pixel form; the same click is four different sequences depending on
+	// what it chose and nothing in the caller's event says which. The
+	// terminal knows, because it is where the modes were set.
+	//
+	// Returned rather than written, for the same reason Paste's bytes are.
+	Mouse(ev MouseEvent) ([]byte, error)
+
+	// Focus hands the terminal one focus report and returns the bytes the
+	// program is to be sent when it asked for focus reporting (DEC private
+	// mode 1004), and [ErrUnsupported] with no bytes when it did not: a program
+	// that did not ask is not told.
+	//
+	// The mode is the whole content of the method. A surface knows its window
+	// gained or lost focus and can say so; only the terminal knows whether the
+	// program running inside it asked to hear about it, and a caller that sent
+	// the report anyway would be typing into the program's input stream.
+	Focus(gained bool) ([]byte, error)
+
 	// Close releases the terminal and everything it owns. It is idempotent:
 	// a runtime closing deliberately and a deferred close are both normal, and
 	// the second must be harmless. After it returns, every method that reads or

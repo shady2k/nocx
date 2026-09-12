@@ -80,6 +80,96 @@ static bool cb_size(GhosttyTerminal terminal, void *userdata,
 }
 
 /*
+ * The non-visual effects. Each is a thin shim: it reads the borrowed value the
+ * callback carries — from the callback's own argument, or from the terminal,
+ * for the two whose callback carries nothing — and forwards the bytes to Go,
+ * which copies them before the borrowed memory dies with this call.
+ *
+ * Installing one of these is what makes the effect exist at all. Without the
+ * bell callback a BEL is consumed and nothing says so; without the title and
+ * pwd callbacks the terminal still stores the values but no one is told they
+ * changed; without the clipboard callback a clipboard write is refused (the
+ * header's "returning without replying denies the write" is moot when no
+ * callback is installed, since the library then has nobody to ask); without the
+ * notification callback OSC 9 and OSC 777 are swallowed.
+ *
+ * The progress report (OSC 9;4) is deliberately NOT installed. It is a progress
+ * hint about a long-running command — a bar a surface may draw — and not a
+ * thing the program asked the terminal to DO, so it is not an effect and a
+ * runtime that wants it must ask upstream for it separately.
+ */
+static void cb_bell(GhosttyTerminal terminal, void *userdata) {
+  (void)terminal;
+  nocxGoBell((uintptr_t)userdata);
+}
+
+/*
+ * The title is read from the terminal rather than passed to the callback, so
+ * it is read HERE, while the borrowed string is alive: GHOSTTY_TERMINAL_DATA_TITLE
+ * is valid until the next mutating call, and a Go-side read after this
+ * function returned would be reading through a pointer the library was free to
+ * invalidate.
+ */
+static void cb_title_changed(GhosttyTerminal terminal, void *userdata) {
+  GhosttyString title = {0};
+  if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_TITLE, &title) !=
+      GHOSTTY_SUCCESS)
+    return;
+  nocxGoTitle((uintptr_t)userdata, (uint8_t *)title.ptr, title.len);
+}
+
+static void cb_pwd_changed(GhosttyTerminal terminal, void *userdata) {
+  GhosttyString pwd = {0};
+  if (ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_PWD, &pwd) !=
+      GHOSTTY_SUCCESS)
+    return;
+  nocxGoPwd((uintptr_t)userdata, (uint8_t *)pwd.ptr, pwd.len);
+}
+
+/*
+ * A clipboard write carries its payload in the callback's argument: an array of
+ * MIME representations of ONE logical value (the header's words), the first of
+ * which is the payload the port carries. A write with no representations is a
+ * request to CLEAR the destination, which travels as an effect with an empty
+ * body rather than as no effect at all: the program asked for something.
+ *
+ * The reply is answered success, and it has to be answered here because the
+ * header requires it within the callback. Success is the honest answer rather
+ * than a convenience: nocx ACCEPTS the write — the effect is the payload being
+ * handed to the runtime that will perform it (design §6.2) — and answering
+ * denied would tell the program that a write nocx took was refused, which a
+ * program that retries or reports an error would then act on. `remember` is
+ * left false: a session grant is a permission decision, and this adapter has no
+ * notion of one having been given.
+ */
+static void cb_clipboard_write(GhosttyTerminal terminal, void *userdata,
+                               const GhosttyClipboardWrite *write) {
+  (void)terminal;
+  GhosttyString payload = {0};
+  if (write->contents_len > 0) payload = write->contents[0].data;
+  nocxGoClipboard((uintptr_t)userdata, (uint8_t *)payload.ptr, payload.len);
+  if (write->reply == NULL) return;
+  GhosttyClipboardWriteReply reply = {0};
+  reply.size = sizeof(reply);
+  reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+  write->reply(write, &reply);
+}
+
+/*
+ * The body is the message. OSC 9 carries only its text, which the library
+ * reports as the body with an empty title, and OSC 777 carries a title AND a
+ * body; the port carries the body for both, which is the thing a notification
+ * says.
+ */
+static void cb_desktop_notification(
+    GhosttyTerminal terminal, void *userdata,
+    const GhosttyTerminalDesktopNotification *notification) {
+  (void)terminal;
+  nocxGoNotification((uintptr_t)userdata, (uint8_t *)notification->body.ptr,
+                     notification->body.len);
+}
+
+/*
  * The option value for an effect IS the function pointer, cast to const void*;
  * the value for GHOSTTY_TERMINAL_OPT_USERDATA IS the userdata pointer itself.
  * Passing the address of a stack local holding either one makes the terminal
@@ -95,8 +185,36 @@ GhosttyResult nocxInstall(GhosttyTerminal terminal, uintptr_t handle) {
   r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
                            (const void *)cb_device_attributes);
   if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_BELL,
+                           (const void *)cb_bell);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+                           (const void *)cb_title_changed);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_PWD_CHANGED,
+                           (const void *)cb_pwd_changed);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+                           (const void *)cb_clipboard_write);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION,
+                           (const void *)cb_desktop_notification);
+  if (r != GHOSTTY_SUCCESS) return r;
   return ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SIZE,
                               (const void *)cb_size);
+}
+
+/* -------------------------------------------------------------------- modes */
+
+GhosttyResult nocxModeValue(GhosttyTerminal terminal, uint16_t mode,
+                            bool *out) {
+  GhosttyTerminalModeConfig cfg = {0};
+  cfg.mode = ghostty_mode_new(mode, false);
+  GhosttyResult r = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE,
+                                         &cfg);
+  if (r != GHOSTTY_SUCCESS) return r;
+  *out = cfg.value;
+  return GHOSTTY_SUCCESS;
 }
 
 /* -------------------------------------------------------------------- reads */
@@ -170,5 +288,28 @@ GhosttyResult nocxKeyEncode(GhosttyKeyEncoder encoder, GhosttyKey key,
     ghostty_key_event_set_utf8(event, utf8, utf8_len);
   r = ghostty_key_encoder_encode(encoder, event, out, out_len, out_written);
   ghostty_key_event_free(event);
+  return r;
+}
+
+GhosttyResult nocxMouseEncode(GhosttyMouseEncoder encoder,
+                              GhosttyMouseAction action,
+                              GhosttyMouseButton button, bool has_button,
+                              GhosttyMods mods, float x, float y, char *out,
+                              size_t out_len, size_t *out_written) {
+  GhosttyMouseEvent event = NULL;
+  GhosttyResult r = ghostty_mouse_event_new(NULL, &event);
+  if (r != GHOSTTY_SUCCESS) return r;
+  ghostty_mouse_event_set_action(event, action);
+  if (has_button)
+    ghostty_mouse_event_set_button(event, button);
+  else
+    ghostty_mouse_event_clear_button(event);
+  ghostty_mouse_event_set_mods(event, mods);
+  GhosttyMousePosition position = {0};
+  position.x = x;
+  position.y = y;
+  ghostty_mouse_event_set_position(event, position);
+  r = ghostty_mouse_encoder_encode(encoder, event, out, out_len, out_written);
+  ghostty_mouse_event_free(event);
   return r;
 }

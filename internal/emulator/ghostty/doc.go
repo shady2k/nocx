@@ -72,7 +72,19 @@
 //     debt ADR-0065 records and TestDECRQMOnInsertModeIsUnanswered carries. ENQ
 //     (0x05) and the colour-scheme query (`CSI ? 996 n`) answer nothing: the
 //     first has no response nocx has decided on, the second needs a theme the
-//     terminal does not own.
+//     terminal does not own. A clipboard READ (`OSC 52` with a `?` payload) is
+//     in the same list for a different reason: nocx's clipboard is the
+//     runtime's to mediate (design §6.2), so no read callback is installed and
+//     a program that asks hears nothing — measured, not assumed.
+//
+//   - REPORTED BUT NOT ANSWERED. BEL, `OSC 0/2` (title), `OSC 7` (cwd),
+//     `OSC 52` clipboard WRITES and `OSC 9`/`OSC 777` (notifications) are
+//     installed callbacks, and what they produce crosses the port as
+//     [emulator.Effect] values rather than as bytes written back: a program
+//     that sets a title is owed nothing and hears nothing. `OSC 9;4` — the
+//     progress report — is deliberately NOT installed with them, because it is
+//     a hint about a command rather than something the program asked the
+//     terminal to do, and a runtime that wants it must ask upstream itself.
 //
 //   - ANSWERED BY UPSTREAM, NOT BY NOCX. XTVERSION (`CSI > q`) is answered
 //     `\x1bP>|libghostty\x1b\\` — the library's own default, because no

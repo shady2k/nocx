@@ -351,6 +351,62 @@ func cAction(a emulator.KeyAction) (C.GhosttyKeyAction, bool) {
 	}
 }
 
+// cMouseAction converts what happened to the mouse.
+func cMouseAction(a emulator.MouseAction) (C.GhosttyMouseAction, bool) {
+	switch a {
+	case emulator.MousePress:
+		return C.GHOSTTY_MOUSE_ACTION_PRESS, true
+	case emulator.MouseRelease:
+		return C.GHOSTTY_MOUSE_ACTION_RELEASE, true
+	case emulator.MouseMotion:
+		return C.GHOSTTY_MOUSE_ACTION_MOTION, true
+	default:
+		return 0, false
+	}
+}
+
+// cMouseButton converts a button identity.
+//
+// The wheel's four directions are buttons upstream, exactly as they are in the
+// protocols: four is up, five is down, six and seven are the horizontal pair,
+// and the four buttons above them are the eight through eleven a twelve-button
+// mouse reports. The conversion names each one rather than adding an offset to
+// the port's numbering, because the two only agree by accident: the port orders
+// left, middle, right and upstream orders left, right, middle.
+func cMouseButton(b emulator.MouseButton) (C.GhosttyMouseButton, bool) {
+	switch b {
+	case emulator.MouseLeft:
+		return C.GHOSTTY_MOUSE_BUTTON_LEFT, true
+	case emulator.MouseMiddle:
+		return C.GHOSTTY_MOUSE_BUTTON_MIDDLE, true
+	case emulator.MouseRight:
+		return C.GHOSTTY_MOUSE_BUTTON_RIGHT, true
+	case emulator.MouseWheelUp:
+		return C.GHOSTTY_MOUSE_BUTTON_FOUR, true
+	case emulator.MouseWheelDown:
+		return C.GHOSTTY_MOUSE_BUTTON_FIVE, true
+	case emulator.MouseWheelLeft:
+		return C.GHOSTTY_MOUSE_BUTTON_SIX, true
+	case emulator.MouseWheelRight:
+		return C.GHOSTTY_MOUSE_BUTTON_SEVEN, true
+	case emulator.MouseButton8:
+		return C.GHOSTTY_MOUSE_BUTTON_EIGHT, true
+	case emulator.MouseButton9:
+		return C.GHOSTTY_MOUSE_BUTTON_NINE, true
+	case emulator.MouseButton10:
+		return C.GHOSTTY_MOUSE_BUTTON_TEN, true
+	case emulator.MouseButton11:
+		return C.GHOSTTY_MOUSE_BUTTON_ELEVEN, true
+	case emulator.MouseNone:
+		// "No button" is not a button identity: it is the absence of one, and
+		// the event carries it that way (see nocxMouseEncode, which clears the
+		// button rather than naming UNKNOWN).
+		return C.GHOSTTY_MOUSE_BUTTON_UNKNOWN, true
+	default:
+		return 0, false
+	}
+}
+
 // resultError converts an upstream result code into the port's errors.
 //
 // Every code the header names has an arm, and the arm names the SENTINEL the

@@ -1,0 +1,5 @@
+# Vendored upstream source for the spike, not evidence and not shipped.
+.vendor/
+# Zig build output for libghostty-vt.
+zig-out/
+.zig-cache/

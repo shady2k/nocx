@@ -1,0 +1,161 @@
+shared keys: 355   identical: 309   different: 46
+only in wasm: 15   only in native: 0
+
+=== DIFFERENCES ===
+11_graphics / kitty / image_42_decoded
+    wasm:   false
+    native: true
+11_graphics / kitty / kitty_graphics_compiled
+    wasm:   false
+    native: true
+11_graphics / kitty / reply_esc
+    wasm:   "\"\""
+    native: "\"\\e_Gi=42;OK\\e\\\\\""
+11_graphics / kitty / storage_present
+    wasm:   false
+    native: true
+7_bounded_rep / rep_100000 / heap_alloc_after_bytes
+    wasm:   22491960
+    native: 190080
+7_bounded_rep / rep_100000 / heap_alloc_before_bytes
+    wasm:   17148792
+    native: 188136
+7_bounded_rep / rep_100000 / mallocs
+    wasm:   17
+    native: 11
+7_bounded_rep / rep_100000 / total_alloc_bytes
+    wasm:   5343168
+    native: 1944
+7_bounded_rep / rep_100000 / wall_ms
+    wasm:   "1.9"
+    native: "0.4"
+7_bounded_rep / rep_100000 / wall_ns
+    wasm:   1890250
+    native: 366203
+7_bounded_rep / rep_1000000 / heap_alloc_after_bytes
+    wasm:   22496000
+    native: 189504
+7_bounded_rep / rep_1000000 / heap_alloc_before_bytes
+    wasm:   17153632
+    native: 187656
+7_bounded_rep / rep_1000000 / mallocs
+    wasm:   13
+    native: 11
+7_bounded_rep / rep_1000000 / total_alloc_bytes
+    wasm:   5342368
+    native: 1848
+7_bounded_rep / rep_1000000 / wall_ms
+    wasm:   "0.4"
+    native: "0.5"
+7_bounded_rep / rep_1000000 / wall_ns
+    wasm:   428188
+    native: 453712
+7_bounded_rep / rep_10000000 / heap_alloc_after_bytes
+    wasm:   22496800
+    native: 195672
+7_bounded_rep / rep_10000000 / heap_alloc_before_bytes
+    wasm:   17153648
+    native: 193728
+7_bounded_rep / rep_10000000 / mallocs
+    wasm:   16
+    native: 11
+7_bounded_rep / rep_10000000 / total_alloc_bytes
+    wasm:   5343152
+    native: 1944
+7_bounded_rep / rep_10000000 / wall_ms
+    wasm:   "0.3"
+    native: "0.4"
+7_bounded_rep / rep_10000000 / wall_ns
+    wasm:   345695
+    native: 409074
+7_bounded_rep / rep_1000000000_budget30s / heap_alloc_after_bytes
+    wasm:   22497096
+    native: 196272
+7_bounded_rep / rep_1000000000_budget30s / heap_alloc_before_bytes
+    wasm:   17154240
+    native: 194416
+7_bounded_rep / rep_1000000000_budget30s / mallocs
+    wasm:   21
+    native: 17
+7_bounded_rep / rep_1000000000_budget30s / total_alloc_bytes
+    wasm:   5342856
+    native: 1856
+7_bounded_rep / rep_1000000000_budget30s / wall_ms
+    wasm:   "0.4"
+    native: "0.5"
+7_bounded_rep / rep_1000000000_budget30s / wall_ns
+    wasm:   374605
+    native: 467944
+7_bounded_rep / rep_1000000_scrollback100 / heap_alloc_after_bytes
+    wasm:   22497880
+    native: 196144
+7_bounded_rep / rep_1000000_scrollback100 / heap_alloc_before_bytes
+    wasm:   17154728
+    native: 195016
+7_bounded_rep / rep_1000000_scrollback100 / mallocs
+    wasm:   16
+    native: 7
+7_bounded_rep / rep_1000000_scrollback100 / scrollback_rows
+    wasm:   123
+    native: 218
+7_bounded_rep / rep_1000000_scrollback100 / total_alloc_bytes
+    wasm:   5343152
+    native: 1128
+7_bounded_rep / rep_1000000_scrollback100 / wall_ns
+    wasm:   354936
+    native: 417053
+7_bounded_rep / rep_65535 / heap_alloc_after_bytes
+    wasm:   22498352
+    native: 196216
+7_bounded_rep / rep_65535 / heap_alloc_before_bytes
+    wasm:   17155056
+    native: 194880
+7_bounded_rep / rep_65535 / mallocs
+    wasm:   16
+    native: 9
+7_bounded_rep / rep_65535 / total_alloc_bytes
+    wasm:   5343296
+    native: 1336
+7_bounded_rep / rep_65535 / wall_ns
+    wasm:   358057
+    native: 352442
+7_bounded_rep / rep_70000 / heap_alloc_after_bytes
+    wasm:   22498016
+    native: 196024
+7_bounded_rep / rep_70000 / heap_alloc_before_bytes
+    wasm:   17155680
+    native: 194880
+7_bounded_rep / rep_70000 / mallocs
+    wasm:   12
+    native: 8
+7_bounded_rep / rep_70000 / total_alloc_bytes
+    wasm:   5342336
+    native: 1144
+7_bounded_rep / rep_70000 / wall_ns
+    wasm:   349805
+    native: 333472
+9_c1_0x9c_in_osc / title_bare_9c / title_events
+    wasm:   "[\"\"]"
+    native: "[]"
+api / graphics / kitty_graphics_compiled
+    wasm:   false
+    native: true
+
+=== ONLY IN WASM ===
+  7_bounded_rep / rep_100000 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_100000 / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_1000000 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_1000000 / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_10000000 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_10000000 / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_1000000000_budget30s / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_1000000000_budget30s / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_1000000_scrollback100 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_1000000_scrollback100 / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_65535 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_65535 / wasm_mem_before_bytes = 4259840
+  7_bounded_rep / rep_70000 / wasm_mem_after_bytes = 4718592
+  7_bounded_rep / rep_70000 / wasm_mem_before_bytes = 4259840
+  api / incremental / rs_new = 0
+
+exit status 1

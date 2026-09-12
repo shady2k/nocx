@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# Records the exact argv Go hands the external linker, then behaves as `zig cc`
+# with the target triple CC appends.
+#
+#   ZIGLOG=/tmp/argv.txt CC="$PWD/tools/ccwrap -target x86_64-linux-gnu" go build ...
+#
+# It exists because a SUCCESSFUL external link never prints its own command: the
+# `-x` trace shows the `go tool link` line, not the `zig cc` line, so the flags
+# that actually reached the linker -- which archive, how many times, in what
+# order relative to -lresolv -- cannot be read off a build log without this.
+set -e
+: "${ZIGLOG:?ZIGLOG must name the file to record argv into}"
+printf '%s\n' "$@" >"$ZIGLOG"
+# ZIG overrides, because the wrapper is what the toolchain chain calls and it
+# may be started with no PATH entry for zig at all (the Nix store path is not
+# on PATH in every shell here).
+set -- cc "$@"
+zig_path="${ZIG:-$(command -v zig || true)}"
+[ -n "$zig_path" ] || { echo "ccwrap: no zig (set ZIG)" >&2; exit 1; }
+exec "$zig_path" "$@"

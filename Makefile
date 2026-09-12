@@ -56,9 +56,17 @@ endif
 # into the artifact package's bin/ directory and embedded by
 # //go:embed all:bin. The 2x2 matrix was adopted in nocx-v1ltv,
 # which added the Intel macOS target.
-# CGO_ENABLED=0 is load-bearing: a static binary is what a helper on an
-# unknown remote host must be — no remote glibc, no dynamic-loader
-# surprises. The artifacts are gitignored; a fresh checkout compiles with
+# CGO_ENABLED=0 is load-bearing ON LINUX: a static binary is what a helper on
+# an unknown remote host must be — no remote glibc, no dynamic-loader
+# surprises. ON macOS IT NEVER BOUGHT THAT, and this line said otherwise until
+# somebody measured it (nocx-cm1ac, .internal/spikes/buildmatrix): the darwin
+# helper built by this very target already carries LC_LOAD_DYLIB for
+# /usr/lib/libSystem.B.dylib and /usr/lib/libresolv.9.dylib, because Go's own
+# darwin runtime links them. Read it back with `otool -L`, or from a Linux box
+# with the debug/macho reader in that spike. It matters because adopting a CGo
+# dependency is priced against what the zero actually holds: on Linux it holds
+# everything and the archive must be built -musl to keep it, on macOS it holds
+# nothing that is not already part of the OS. The artifacts are gitignored; a fresh checkout compiles with
 # only the committed .gitignore embedded, and Artifact answers
 # ErrArtifactsNotBuilt until this target has run.
 #

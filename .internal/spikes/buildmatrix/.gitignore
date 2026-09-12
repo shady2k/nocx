@@ -1,0 +1,8 @@
+# Vendored upstream source at one pinned commit, and the four archives built
+# out of it (~18 MB each). Neither is evidence and neither belongs in git.
+.vendor/
+dist/
+logs/
+
+# Go build output for the cross-built probes.
+/bin/

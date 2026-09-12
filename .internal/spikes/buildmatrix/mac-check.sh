@@ -40,6 +40,9 @@ run() { # run <logname> <cmd...>   output to logs/<logname>.log, tail on failure
   "$@" >"logs/$1.log" 2>&1
 }
 bytes() { stat -f%z "$1" 2>/dev/null || echo "?"; }
+# The first line that says what went wrong. `tail -1` of a compiler log is
+# usually the ^~~~ under the error, which names nothing.
+why() { grep -m1 -E 'error:|FATAL|fatal:' "$1" 2>/dev/null || tail -1 "$1" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
 say "0. environment"
@@ -95,13 +98,13 @@ say "2. archives: aarch64-macos and x86_64-macos"
 for spec in aarch64-macos:darwin-arm64 x86_64-macos:darwin-amd64; do
   triple=${spec%%:*}; name=${spec##*:}
   start=$(date +%s)
-  if (cd .vendor/ghostty && "$ZIG" build -Demit-lib-vt=true -Dtarget="$triple" -Doptimize=ReleaseFast) \
+  if (cd .vendor/ghostty && "$ZIG" build -Demit-lib-vt=true -Demit-xcframework=false -Dtarget="$triple" -Doptimize=ReleaseFast) \
        >"logs/archive-$name.log" 2>&1; then
     mkdir -p "dist/$name"
     cp .vendor/ghostty/zig-out/lib/libghostty-vt.a "dist/$name/"
     record "C2" PASS "$name archive built: $(bytes "dist/$name/libghostty-vt.a") bytes in $(( $(date +%s) - start ))s"
   else
-    record "C2" FAIL "$name archive did not build — tail: $(tail -1 "logs/archive-$name.log")"
+    record "C2" FAIL "$name archive did not build — tail: $(why "logs/archive-$name.log")"
   fi
 done
 
@@ -119,7 +122,7 @@ if [ "$(uname -m)" = "arm64" ] && [ -f dist/darwin-arm64/libghostty-vt.a ]; then
     if [ $rc -eq 0 ]; then record C3 PASS "native build links and runs: ok=true"
     else record C3 FAIL "native build runs but probe exit $rc: $out"; fi
   else
-    record C3 FAIL "native link failed — tail: $(tail -2 logs/n-darwin-arm64.log | tr '\n' ' ')"
+    record C3 FAIL "native link failed — tail: $(why logs/n-darwin-arm64.log)"
   fi
 
   say "4. STUB link (zig cc + .tbd stubs, as a Linux host builds it) — does dyld keep the stubs' promise?"
@@ -131,7 +134,7 @@ if [ "$(uname -m)" = "arm64" ] && [ -f dist/darwin-arm64/libghostty-vt.a ]; then
     if [ $rc -eq 0 ]; then record C4 PASS "STUB-LINKED binary runs under dyld: ok=true  <-- the key answer"
     else record C4 FAIL "STUB-LINKED binary exit $rc: $out  <-- the stub route does not hold"; fi
   else
-    record C4 FAIL "stub link failed on the Mac — tail: $(tail -2 logs/s-darwin-arm64.log | tr '\n' ' ')"
+    record C4 FAIL "stub link failed on the Mac — tail: $(why logs/s-darwin-arm64.log)"
   fi
 
   say "5. native vs stub: what each asks dyld for"
@@ -207,7 +210,7 @@ say "8. the nine qualification probes on this Mac, against the Linux baseline"
 if [ -d "$EMU/cmd/ghosttyvt" ]; then
   mkdir -p "$EMU/.vendor"
   [ -e "$EMU/.vendor/ghostty" ] || ln -s "$SPIKE/.vendor/ghostty" "$EMU/.vendor/ghostty"
-  if (cd .vendor/ghostty && "$ZIG" build -Demit-lib-vt=true -Doptimize=ReleaseFast) >logs/archive-host.log 2>&1 \
+  if (cd .vendor/ghostty && "$ZIG" build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast) >logs/archive-host.log 2>&1 \
      && (cd "$EMU" && CGO_ENABLED=1 go run ./cmd/ghosttyvt) >"$SPIKE/logs/ghostty-mac.jsonl" 2>"$SPIKE/logs/ghostty-mac.err"; then
     mac_n=$(grep -c . logs/ghostty-mac.jsonl)
     lin_n=$(grep -c . "$EMU/results/ghostty.jsonl" 2>/dev/null || echo 0)
@@ -215,17 +218,33 @@ if [ -d "$EMU/cmd/ghosttyvt" ]; then
     # records wall time and Go allocator counters of the process that ran it,
     # which differ between two machines by design and say nothing about the
     # emulator's behaviour. Every other key is behaviour and must match.
-    strip() { grep -vE '"key":"(wall_ns|wall_ms|total_alloc_bytes|heap_alloc_before_bytes|heap_alloc_after_bytes|mallocs)"' "$1"; }
+    #
+    # scrollback_rows under a scrollback CAP is host-dependent too, but it is not
+    # noise, so it is not merely dropped. ghostty's max_lines is "a page-granular
+    # heuristic: at least one standard page worth of rows is permitted and only
+    # complete historical pages are removed" (src/terminal/PageList.zig at the
+    # pin), and a page is sized from std.heap.page_size_min — 16 KiB on Apple
+    # silicon, 4 KiB on x86_64 Linux. So the retained count past a cap differs
+    # between the two by construction (first measured: 218 on Linux, 205 on a
+    # Mac, cap 100). The exact diff excludes it; the assertion below keeps the
+    # part that IS behaviour: no capped case retains fewer rows than its cap.
+    strip() { grep -vE '"key":"(wall_ns|wall_ms|total_alloc_bytes|heap_alloc_before_bytes|heap_alloc_after_bytes|mallocs)"' "$1" \
+      | grep -vE '"case":"[^"]*scrollback[0-9]+","key":"scrollback_rows"'; }
+    below_cap=$(grep -E '"case":"[^"]*scrollback[0-9]+","key":"scrollback_rows"' logs/ghostty-mac.jsonl \
+      | sed -E 's/.*scrollback([0-9]+)".*"value":([0-9]+).*/\1 \2/' \
+      | awk '$2 < $1 { n++ } END { print n + 0 }')
     strip logs/ghostty-mac.jsonl >logs/ghostty-mac.cmp
     strip "$EMU/results/ghostty.jsonl" >logs/ghostty-linux.cmp
-    if diff -q logs/ghostty-linux.cmp logs/ghostty-mac.cmp >/dev/null; then
-      record C8 PASS "probes run on macOS arm64 and match the Linux baseline ($mac_n observations)"
+    if [ "$below_cap" -ne 0 ]; then
+      record C8 FAIL "$below_cap capped scrollback case(s) retained FEWER rows than their cap — that is a behaviour defect, not page size"
+    elif diff -q logs/ghostty-linux.cmp logs/ghostty-mac.cmp >/dev/null; then
+      record C8 PASS "probes run on macOS arm64 and match the Linux baseline ($mac_n observations; capped scrollback checked as >= cap)"
     else
       nd=$(diff logs/ghostty-linux.cmp logs/ghostty-mac.cmp | grep -c '^[<>]')
       record C8 FAIL "probes run ($mac_n obs, Linux had $lin_n) but $nd lines differ — diff logs/ghostty-linux.cmp logs/ghostty-mac.cmp"
     fi
   else
-    record C8 FAIL "probes did not build or run — tail: $(tail -2 logs/ghostty-mac.err 2>/dev/null | tr '\n' ' ')"
+    record C8 FAIL "probes did not build or run — tail: $(why logs/ghostty-mac.err)"
   fi
 else
   record C8 SKIP "emulator spike not found at $EMU"

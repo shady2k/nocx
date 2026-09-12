@@ -193,6 +193,51 @@ alternate screen entered, resized and exited; resource use under sustained outpu
 lifetime under stress; and the application-driven input negotiation named in reason 3.
 Acceptance must not be read as claiming any of them passed.
 
+### The gate, measured (2026-09-13)
+
+Run by the owner on an Apple-silicon Mac — macOS 15.7.4, arm64, go1.26.5, Zig 0.16.0, ghostty
+at the pinned `e2e53f86` — with `.internal/spikes/buildmatrix/mac-check.sh`, and on Linux with
+that spike's `run.sh` (`nocx-cm1ac`).
+
+- **Build, link and run on macOS arm64: passed, twice over.** The native build with Apple
+  clang and the real SDK links and runs (`ok=true`). So does the build a LINUX host produces —
+  `zig cc` against two empty `.tbd` stubs for `libresolv` and CoreFoundation — which was the
+  question the whole cross-build route hung on, since a `.tbd` is a promise to the linker and
+  only dyld can keep it. The two load the same dylibs (`otool -L`), survive ad-hoc signing,
+  and `lipo` into a universal binary whose arm64 and x86_64 (Rosetta) slices both run.
+- **The exercise: passed, with one qualification stated rather than folded in.** The nine
+  qualification probes ran on macOS arm64 against the committed Linux baseline: create,
+  ingest, cells, the program's replies, resize, destroy. Of 313 behaviour observations 312 are
+  identical. The one that is not — `scrollback_rows` under a 100-row cap, 218 on Linux and 205
+  on the Mac — is ghostty's page-granular `max_lines` evicting only whole pages, sized from
+  `std.heap.page_size_min`, which is 16 KiB on Apple silicon and 4 KiB on x86_64 Linux; both
+  exceed the cap, which is the behaviour. **The qualification:** those probes pass `nil` for
+  the terminal when encoding keys (`cmd/ghosttyvt/main.go:207`), so _key encoding driven from
+  terminal state_ is not exercised by them on either machine. It WAS measured on the same
+  pinned library compiled to wasm — `TestKeyEncodingIsDrivenFromTerminalState` in
+  `.internal/spikes/vtwasm/`: application-cursor mode encodes `Left` as `\x1bOD`, legacy as
+  `\x1b[D`, Kitty flags as `\x1b[1;5:1D` — which is the library's logic but not this
+  binding's call path. The native call path is `nocx-ygxjv.2`'s first integration gate.
+- **A route for the other targets: established, and cheaper than this record assumed.** From
+  one Linux machine with nothing but Zig: six archives, four links. On Linux the static
+  property `Makefile:59` protects is kept, but only by the `-musl` triple — a glibc build is
+  dynamic. On macOS that property **was never held**: the `CGO_ENABLED=0` darwin helper this
+  repository already ships carries `LC_LOAD_DYLIB` for `libSystem` and `libresolv`, because
+  Go's own darwin runtime links them. The cost this record named — "a CGo binding and a Zig
+  build … cross-compilation for every platform nocx ships" — is real on Linux and nearly
+  nothing on macOS.
+
+**Not measured, and still not gates:** colour and attribute extraction; the alternate screen
+entered, resized and exited; resource use under sustained output; binding lifetime under
+stress; application-driven input negotiation end to end. Acceptance must still not be read as
+claiming any of them passed. Notarisation was not attempted.
+
+**One alternative was measured and rejected on the way**, so nobody re-proposes it
+unexamined: `libghostty-vt` as a single wasm artifact under wazero keeps `CGO_ENABLED=0` and
+carries nearly every capability, but costs ~4.3 MB RSS per session against ~45 KB native,
+runs 2.0×–2.5× slower, and loses Kitty graphics on the freestanding target
+(`nocx-d1dw4`, `.internal/spikes/vtwasm/REPORT.md`).
+
 ## Holding an unstable dependency
 
 `libghostty-vt` says _incomplete, work in progress, unstable_ and ships an ABI manifest

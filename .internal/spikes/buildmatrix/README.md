@@ -403,3 +403,45 @@ ZIG=$(nix shell nixpkgs#zig -c sh -c 'command -v zig')      # zig is not on PATH
 ZIGLOG=/tmp/argv.txt ZIG="$ZIG" CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
   CC="$PWD/tools/ccwrap -target x86_64-linux-gnu" go build -tags gnu -o /tmp/p ./cmd/probe
 ```
+
+## 6. The Mac half, run (2026-09-13)
+
+Run by the owner with `mac-check.sh` on macOS 15.7.4, arm64, go1.26.5, Zig 0.16.0.
+
+```
+C1   PASS  ghostty checked out at e2e53f861482e080bf45054ba49ef471f9849937
+C2   PASS  darwin-arm64 archive built: 10982520 bytes in 2s
+C2   PASS  darwin-amd64 archive built: 11910976 bytes in 27s
+C3   PASS  native build links and runs: ok=true
+C4   PASS  STUB-LINKED binary runs under dyld: ok=true  <-- the key answer
+C5   PASS  native and stub builds load the SAME dylibs
+C6   PASS  ad-hoc signed stub binary verifies and runs
+C7   PASS  universal binary: arm64 slice ok, x86_64 slice ok
+C8   FAIL  probes run (355 obs, Linux had 355) but 2 lines differ
+C9   SKIP  set LINUX_STUB=/path/to/s-darwin-arm64 to run the Linux-built binary
+```
+
+**Section 5's first question is answered: a stub-linked darwin binary runs under dyld.**
+The route "build the macOS helper on Linux with two `.tbd` stubs" holds, and the binary it
+produces asks dyld for the same libraries a native build does.
+
+**C8 was a script defect, not a binding defect.** The two diff lines are one observation:
+`7_bounded_rep / rep_1000000_scrollback100 / scrollback_rows`, 218 on Linux and 205 on the Mac.
+ghostty's `max_lines` is documented at the pin as "a page-granular heuristic: at least one
+standard page worth of rows is permitted and only complete historical pages are removed"
+(`src/terminal/PageList.zig`), and a page is sized from `std.heap.page_size_min` — 16 KiB on
+Apple silicon (`getconf PAGESIZE` = 16384), 4 KiB on x86_64 Linux. Both values exceed the cap,
+which is the behaviour. The script now excludes that key from the exact comparison and asserts
+instead that no capped case retains fewer rows than its cap; checked against both the real
+Mac value (passes) and a fabricated 42 (fails). The other 312 behaviour observations were
+identical.
+
+**Two script fixes the Mac run found, both applied.** An Xcode that is installed but never
+launched failed C2 with nothing but a `^~~~` line: in `emit-lib-vt` mode on a Darwin host
+ghostty defaults `emit-xcframework` to "is xcodebuild present" (`src/build/Config.zig`), so the
+builds now pass `-Demit-xcframework=false`, since no check needs the xcframework. And every
+failure line now quotes the first `error:` of its log rather than the last line, which for a
+compiler is usually the caret under the error.
+
+C9 — the byte-for-byte Linux-built binary — was not run. C4 rebuilt the equivalent on the Mac
+with the same Zig and stubs, so it is corroboration rather than an open question.

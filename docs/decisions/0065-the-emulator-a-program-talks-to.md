@@ -1,6 +1,6 @@
 # ADR-0065 — The emulator a program talks to is not the emulator that watches it
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-13, by the owner, on the gate recorded in "The gate, measured")
 - **Date:** 2026-09-12
 - **Supersedes:** [ADR-0041](0041-x-vt-as-the-backend-emulator.md) **in its choice only.**
   ADR-0041's method, its corpus description and its explicit statement of what it did and

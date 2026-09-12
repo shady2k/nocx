@@ -166,64 +166,6 @@ func TestServeNamesEndpointFailureAndDoesNotReturnEmptyTools(t *testing.T) {
 	}
 }
 
-func TestServeReconnectsAfterIdle(t *testing.T) {
-	var mu sync.Mutex
-	connections := 0
-	listener := listenEndpoint(t)
-	defer func() { _ = listener.Close() }()
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			connections++
-			mu.Unlock()
-			go func() {
-				defer func() { _ = conn.Close() }()
-				request, err := readJSONLine(conn)
-				if err == nil {
-					if request.Method == "tools.catalogue" {
-						writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"tools":[{"name":"alpha.one","summary":"one","params":{"type":"object"},"result":{"type":"object"}},{"name":"alpha.two","summary":"two","params":{"type":"object"},"result":{"type":"object"}}]}`)})
-					} else {
-						writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"value":true}`)})
-					}
-				}
-			}()
-		}
-	}()
-	input := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"alpha.one","arguments":{}}}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"alpha.two","arguments":{}}}`,
-	}, "\n") + "\n"
-	lines := splitJSONLines(t, runAdapter(t, listener.Addr().String(), input))
-	if len(lines) != 3 {
-		t.Fatalf("responses = %d, want 3: %s", len(lines), strings.Join(lines, "\n"))
-	}
-	for _, line := range lines[1:] {
-		var response struct {
-			Result struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-				StructuredContent json.RawMessage `json:"structuredContent"`
-				IsError           bool            `json:"isError"`
-			} `json:"result"`
-		}
-		mustDecode(t, line, &response)
-		if response.Result.IsError || len(response.Result.Content) != 1 || response.Result.Content[0].Text != `{"value":true}` || string(response.Result.StructuredContent) != `{"value":true}` {
-			t.Fatalf("wrapped success = %s", line)
-		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if connections != 3 {
-		t.Fatalf("endpoint connections = %d, want 3 (catalogue refresh plus two calls)", connections)
-	}
-}
-
 func TestSourceContainsNoDomainVocabulary(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -264,6 +206,10 @@ type rpcErrorEnvelope struct {
 	Data    map[string]string `json:"data,omitempty"`
 }
 
+// startEndpoint serves EVERY request a connection carries, which is the shape
+// the adapter holds it to now that one connection outlives one call. A fake
+// that answered a single line per connection would leave the second request on
+// it unanswered and measure a re-dial it was never meant to provoke.
 func startEndpoint(t *testing.T, handler func(net.Conn, rpcEnvelope)) string {
 	t.Helper()
 	listener := listenEndpoint(t)
@@ -276,8 +222,12 @@ func startEndpoint(t *testing.T, handler func(net.Conn, rpcEnvelope)) string {
 			}
 			go func() {
 				defer func() { _ = conn.Close() }()
-				request, err := readJSONLine(conn)
-				if err == nil {
+				reader := bufio.NewReader(conn)
+				for {
+					request, err := readJSONLine(reader)
+					if err != nil {
+						return
+					}
 					handler(conn, request)
 				}
 			}()
@@ -355,8 +305,8 @@ func (w *recordingWriter) String() string {
 	return w.data.String()
 }
 
-func readJSONLine(conn net.Conn) (rpcEnvelope, error) {
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
+func readJSONLine(reader *bufio.Reader) (rpcEnvelope, error) {
+	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		return rpcEnvelope{}, err
 	}
@@ -409,7 +359,7 @@ func TestTheEndpointRequestCarriesATraceparent(t *testing.T) {
 	seen := make(chan string, 4)
 	socket := startEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
 		seen <- request.Traceparent
-		_, _ = io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`+"\n")
+		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"tools":[]}`)})
 	})
 
 	runAdapter(t, socket, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n")
@@ -434,7 +384,7 @@ func TestEachMCPRequestGetsATraceOfItsOwn(t *testing.T) {
 	seen := make(chan string, 8)
 	socket := startEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
 		seen <- request.Traceparent
-		_, _ = io.WriteString(conn, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`+"\n")
+		writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"tools":[]}`)})
 	})
 
 	runAdapter(t, socket,

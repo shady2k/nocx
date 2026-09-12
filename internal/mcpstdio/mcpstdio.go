@@ -102,14 +102,43 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	go readMessages(input, lines)
 	writer := &lineWriter{output: output}
 	active := newCalls()
+	// ONE ENDPOINT CONNECTION FOR THE LIFE OF THIS SESSION. A connection IS
+	// the endpoint's admission interval (ADR-0058): toolendpoint's serve calls
+	// Auth.Admit exactly once per connection, and the composition root hands
+	// out one caller slot per session for that connection's whole lifetime
+	// (internal/app's caller-slot bookkeeping), released only when its
+	// serve loop ends. Dialling per call opened and closed an authority
+	// interval around every tool call, so the second of two overlapping calls
+	// was refused by the slot the first one still held — a refusal the wire
+	// words as a problem with the caller, though the peer was never in
+	// question. One shared connection is that interval expressed literally,
+	// and the endpoint already serves concurrent requests on it.
+	link := newEndpointLink(s.socket, s.dialer)
 	var requests sync.WaitGroup
 	defer func() {
+		// Cancel first, then close, then wait. Cancelling is what every
+		// in-flight call sees through its own context; closing is what
+		// reaches a call already inside a write, which no context can
+		// interrupt. The session is over either way — the input reached EOF
+		// or the context was cancelled — so no answer is owed to anybody, and
+		// waiting before closing could park the last caller far enough into a
+		// full socket buffer to hold the session open.
 		active.cancelAll()
+		link.close()
 		requests.Wait()
 	}()
 	state := &sessionState{}
-	lastDone := make(chan struct{})
-	close(lastDone)
+	// THE ONLY ORDER THAT IS REAL. initialize and tools/list write session
+	// state that a later tools/call reads — the negotiated version deciding
+	// structuredContent, and the catalogue deciding membership — so a request
+	// waits for a state-writing request that was in flight when it arrived,
+	// and for nothing else. Two calls in flight together are two exchanges on
+	// the endpoint's own concurrent path and MUST NOT queue behind each other:
+	// the call a coordinator most needs beside a long wait is the one asking
+	// what that wait is doing.
+	gate := make(chan struct{})
+	close(gate)
+	var gateMu sync.Mutex
 
 	for {
 		select {
@@ -144,26 +173,44 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 
 			callCtx, cancel := context.WithCancel(ctx)
 			active.add(request.ID, cancel)
-			previous := lastDone
-			lastDone = make(chan struct{})
-			done := lastDone
 			requests.Add(1)
-			go func(request requestMessage, callCtx context.Context, cancel context.CancelFunc, previous <-chan struct{}, done chan struct{}) {
+			gateMu.Lock()
+			wait := gate
+			var done chan struct{}
+			if writesSessionState(request.Method) {
+				// A state-writer is a barrier for the requests that arrive while
+				// it runs, including a later state-writer: their turns follow
+				// the state, not each other.
+				done = make(chan struct{})
+				gate = done
+			}
+			gateMu.Unlock()
+			go func(request requestMessage, callCtx context.Context, cancel context.CancelFunc, wait <-chan struct{}, done chan struct{}) {
 				defer cancel()
 				defer requests.Done()
 				defer active.remove(request.ID)
-				defer close(done)
+				if done != nil {
+					defer close(done)
+				}
 				select {
-				case <-previous:
+				case <-wait:
 				case <-callCtx.Done():
 					return
 				}
-				if err := s.handle(callCtx, writer, state, request); err != nil && callCtx.Err() == nil {
+				if err := s.handle(callCtx, writer, state, link, request); err != nil && callCtx.Err() == nil {
 					_ = writer.errorResponse(request.ID, -32603, "internal error", err.Error())
 				}
-			}(request, callCtx, cancel, previous, done)
+			}(request, callCtx, cancel, wait, done)
 		}
 	}
+}
+
+// writesSessionState reports whether a request writes session state a later
+// request reads: initialize fixes the negotiated protocol version that decides
+// whether a result carries structuredContent, and tools/list writes the
+// catalogue that tools/call checks membership against.
+func writesSessionState(method string) bool {
+	return method == "initialize" || method == "tools/list"
 }
 
 type sessionState struct {
@@ -300,7 +347,7 @@ func validateRequest(request requestMessage) error {
 	}
 }
 
-func (s *Server) handle(ctx context.Context, writer *lineWriter, state *sessionState, request requestMessage) error {
+func (s *Server) handle(ctx context.Context, writer *lineWriter, state *sessionState, link *endpointLink, request requestMessage) error {
 	// WHERE THE EXCHANGE IS BORN. This process is the first thing in nocx an
 	// agent's tool call reaches, so the trace starts here and travels to the
 	// backend as a traceparent on the endpoint request (nocx-4l2a5.3). Without
@@ -320,9 +367,9 @@ func (s *Server) handle(ctx context.Context, writer *lineWriter, state *sessionS
 			"serverInfo":      map[string]string{"name": s.serverName, "version": s.serverVersion},
 		})
 	case "tools/list":
-		return s.handleList(ctx, writer, state, request.ID)
+		return s.handleList(ctx, writer, state, link, request.ID)
 	case "tools/call":
-		return s.handleCall(ctx, writer, state, request.ID, request.Params)
+		return s.handleCall(ctx, writer, state, link, request.ID, request.Params)
 	default:
 		return writer.errorResponse(request.ID, -32601, "method not found", "MCP method is not supported")
 	}
@@ -363,8 +410,8 @@ type catalogueData struct {
 	names   map[string]struct{}
 }
 
-func (s *Server) loadCatalogue(ctx context.Context) (catalogueData, *upstreamError, error) {
-	result, upstream, err := s.endpointCall(ctx, "tools.catalogue", json.RawMessage(`{}`))
+func (s *Server) loadCatalogue(ctx context.Context, link *endpointLink) (catalogueData, *upstreamError, error) {
+	result, upstream, err := link.call(ctx, "tools.catalogue", json.RawMessage(`{}`))
 	if err != nil || upstream != nil {
 		return catalogueData{}, upstream, err
 	}
@@ -388,8 +435,8 @@ func (s *Server) loadCatalogue(ctx context.Context) (catalogueData, *upstreamErr
 	return data, nil, nil
 }
 
-func (s *Server) handleList(ctx context.Context, writer *lineWriter, state *sessionState, id json.RawMessage) error {
-	data, upstream, err := s.loadCatalogue(ctx)
+func (s *Server) handleList(ctx context.Context, writer *lineWriter, state *sessionState, link *endpointLink, id json.RawMessage) error {
+	data, upstream, err := s.loadCatalogue(ctx, link)
 	if err != nil {
 		return writer.errorResponse(id, -32000, "tool endpoint unavailable", err.Error())
 	}
@@ -409,7 +456,7 @@ func (s *Server) handleList(ctx context.Context, writer *lineWriter, state *sess
 	return writer.result(id, map[string]any{"tools": tools})
 }
 
-func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sessionState, id json.RawMessage, params json.RawMessage) error {
+func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sessionState, link *endpointLink, id json.RawMessage, params json.RawMessage) error {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -425,7 +472,7 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 		return writer.errorResponse(id, -32602, "invalid params", "tools/call arguments must be an object")
 	}
 	if !state.hasTool(call.Name) {
-		data, upstream, err := s.loadCatalogue(ctx)
+		data, upstream, err := s.loadCatalogue(ctx, link)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -440,7 +487,7 @@ func (s *Server) handleCall(ctx context.Context, writer *lineWriter, state *sess
 			return writer.toolError(id, fmt.Sprintf("tool %q is not offered by the endpoint", call.Name))
 		}
 	}
-	result, upstream, err := s.endpointCall(ctx, call.Name, call.Arguments)
+	result, upstream, err := link.call(ctx, call.Name, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -482,18 +529,275 @@ func (e *upstreamError) refusal() bool {
 	return e.Code == -32000 || e.Code == -32001
 }
 
-func (s *Server) endpointCall(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *upstreamError, error) {
-	conn, err := s.dialer.DialContext(ctx, "unix", s.socket)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, err)
-	}
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	defer func() { _ = conn.Close() }()
+// endpointLink is the adapter's ONE connection to the local tool endpoint,
+// multiplexed for the life of a stdio session.
+//
+// A connection here is not merely a socket. toolendpoint.Endpoint.serve calls
+// Auth.Admit exactly ONCE per connection, and the composition root's
+// active-caller bookkeeping hands out one caller slot per session for that
+// connection's whole lifetime, released when its serve loop ends. The
+// connection IS the admission interval ADR-0058 makes the unit of authority,
+// and dialling per call opened and closed that interval around every tool
+// call — which is what turned a coordinator's second call into that refusal,
+// naming a peer identity that was never in question.
+//
+// THE FIX IS NOT A MUTEX. The endpoint serves concurrent requests on one
+// connection (its own inFlight counter, WaitGroup and dropped read deadline),
+// so serialising the requests here would reproduce the defect one layer up:
+// the long-poll would hold the lock, and the call a coordinator needs to run
+// beside a wait would be exactly the call that waits.
+type endpointLink struct {
+	socket string
+	dialer Dialer
 
+	mu      sync.Mutex
+	conn    *endpointConn
+	nextID  int64
+	stopped bool
+}
+
+func newEndpointLink(socket string, dialer Dialer) *endpointLink {
+	return &endpointLink{socket: socket, dialer: dialer}
+}
+
+// close releases the shared connection when the stdio session ends. The
+// endpoint sees the close and releases the session's caller slot with it.
+func (l *endpointLink) close() {
+	l.mu.Lock()
+	conn := l.conn
+	l.conn = nil
+	l.stopped = true
+	l.mu.Unlock()
+	if conn != nil {
+		conn.close()
+	}
+}
+
+// attach returns the live connection and the id this request will carry,
+// dialling when there is none. An idle connection the endpoint has already
+// closed is replaced rather than reported: the endpoint holds a read deadline
+// of requestReadWindow while nothing is in flight, so an idle coordinator
+// connection is expected to be gone by the next call, and a coordinator whose
+// call died with it would rather have the call than the error.
+func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopped {
+		return nil, 0, errors.New("endpoint link is closed")
+	}
+	if l.conn == nil || l.conn.gone() {
+		if l.conn != nil {
+			l.conn.close()
+			l.conn = nil
+		}
+		raw, err := l.dialer.DialContext(ctx, "unix", l.socket)
+		if err != nil {
+			return nil, 0, err
+		}
+		l.conn = newEndpointConn(raw)
+	}
+	l.nextID++
+	return l.conn, l.nextID, nil
+}
+
+// call sends one request over the shared connection and waits for the answer
+// carrying ITS id. Waiting is per request: a cancelled caller stops waiting
+// for its own answer and leaves the connection, and every other call on it,
+// exactly as they were.
+func (l *endpointLink) call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *upstreamError, error) {
+	for round := 0; ; round++ {
+		conn, id, err := l.attach(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, err)
+		}
+		reply := conn.expect(id)
+		writeErr := conn.send(ctx, id, method, params)
+		if writeErr != nil {
+			conn.forget(id)
+			if ctx.Err() == nil && round == 0 {
+				// The write failed, so the endpoint never received a whole
+				// request and the retry cannot run anything twice. Whatever
+				// ended the connection — an endpoint that timed the session
+				// out, a socket that moved — the next attempt dials again.
+				conn.close()
+				continue
+			}
+			return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, writeErr)
+		}
+		select {
+		case answer := <-reply:
+			conn.forget(id)
+			return answer.result, answer.upstream, answer.err
+		case <-conn.closed:
+			// The answer can arrive in the same instant the connection ends —
+			// an endpoint that answers and closes, which is how a session
+			// times out. A delivery already made is still the answer, so it
+			// wins over the close that followed it.
+			select {
+			case answer := <-reply:
+				conn.forget(id)
+				return answer.result, answer.upstream, answer.err
+			default:
+			}
+			conn.forget(id)
+			return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, conn.failure())
+		case <-ctx.Done():
+			// The endpoint keeps working on the call; this caller stops
+			// waiting for its answer. Nothing here touches the connection,
+			// because closing it is what used to cancel the siblings: on a
+			// shared connection one caller's cancellation is not another
+			// caller's failure (nocx-tlaft). The answer, if it arrives, is
+			// dropped — MCP's cancellation carries no response for the
+			// cancelled request.
+			conn.forget(id)
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+// endpointConn is one connection to the endpoint with its responses
+// demultiplexed by request id. The endpoint answers what it finishes first,
+// not what was sent first, so the id is the only thing that says whose answer
+// is whose — which is why the constant 1 had to go.
+type endpointConn struct {
+	conn net.Conn
+
+	mu      sync.Mutex
+	pending map[int64]chan endpointAnswer
+	err     error
+	once    sync.Once
+	closed  chan struct{}
+}
+
+type endpointAnswer struct {
+	result   json.RawMessage
+	upstream *upstreamError
+	err      error
+}
+
+func newEndpointConn(conn net.Conn) *endpointConn {
+	connection := &endpointConn{
+		conn:    conn,
+		pending: make(map[int64]chan endpointAnswer),
+		closed:  make(chan struct{}),
+	}
+	go connection.read()
+	return connection
+}
+
+func (c *endpointConn) expect(id int64) chan endpointAnswer {
+	reply := make(chan endpointAnswer, 1)
+	c.mu.Lock()
+	c.pending[id] = reply
+	c.mu.Unlock()
+	return reply
+}
+
+func (c *endpointConn) forget(id int64) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
+func (c *endpointConn) gone() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *endpointConn) failure() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		return errors.New("endpoint closed the connection")
+	}
+	return c.err
+}
+
+// close ends the connection. Once, whatever else reports it end.
+func (c *endpointConn) close() {
+	c.fail(net.ErrClosed)
+	_ = c.conn.Close()
+}
+
+// fail records why the connection ended — the first reason wins — and releases
+// every caller waiting on it. A connection that ended with a request in flight
+// cannot answer that request, and the caller is told so rather than retried: a
+// call the endpoint may already have dispatched must not run a second time.
+func (c *endpointConn) fail(err error) {
+	c.once.Do(func() {
+		c.mu.Lock()
+		if c.err == nil {
+			c.err = err
+		}
+		c.pending = make(map[int64]chan endpointAnswer)
+		c.mu.Unlock()
+		close(c.closed)
+	})
+}
+
+// read demultiplexes every response the connection delivers to the caller
+// waiting for that id, and ends the connection when the endpoint stops
+// answering on it.
+func (c *endpointConn) read() {
+	reader := bufio.NewReaderSize(c.conn, maxMessageBytes)
+	for {
+		line, err := readLine(reader)
+		if err != nil {
+			c.fail(err)
+			return
+		}
+		var response struct {
+			ID     json.RawMessage `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  *upstreamError  `json:"error"`
+		}
+		if err := json.Unmarshal(line, &response); err != nil {
+			// The framing is line-delimited JSON, so a line that is not a
+			// response means this connection can no longer be trusted to carry
+			// answers. It ends here, and every waiter is told why.
+			c.fail(fmt.Errorf("endpoint returned invalid JSON: %w", err))
+			return
+		}
+		var id int64
+		if err := json.Unmarshal(response.ID, &id); err != nil {
+			continue
+		}
+		answer := endpointAnswer{result: response.Result}
+		switch {
+		case response.Error != nil:
+			answer = endpointAnswer{upstream: response.Error}
+		case len(response.Result) == 0 || !json.Valid(response.Result):
+			answer = endpointAnswer{err: errors.New("endpoint returned no result")}
+		}
+		// DELIVERED UNDER THE LOCK, which is what makes the answer atomic with
+		// the removal: a connection that ends between the unlock and the send
+		// would close `closed` first, and the waiting caller — seeing the
+		// close, finding an empty channel — would report a lost endpoint for a
+		// request the endpoint answered. The channel is buffered and written
+		// once, so the send never blocks.
+		c.mu.Lock()
+		if reply := c.pending[id]; reply != nil {
+			delete(c.pending, id)
+			reply <- answer
+		}
+		// An answer nobody is waiting for — a call this adapter cancelled, or
+		// an error the endpoint wrote against an id it could not read — is
+		// dropped here, so a late answer can never resurrect a cancelled call.
+		c.mu.Unlock()
+	}
+}
+
+// send writes one request. The endpoint reads newline-delimited JSON, so one
+// Write of a whole frame is what keeps two concurrent callers from
+// interleaving halves of two requests on the one connection.
+func (c *endpointConn) send(ctx context.Context, id int64, method string, params json.RawMessage) error {
 	envelope := map[string]any{
 		"jsonrpc": "2.0",
-		"id":      1,
+		"id":      id,
 		"method":  method,
 		"params":  params,
 	}
@@ -506,32 +810,10 @@ func (s *Server) endpointCall(ctx context.Context, method string, params json.Ra
 	}
 	request, err := json.Marshal(envelope)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	if _, writeErr := conn.Write(append(request, '\n')); writeErr != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, writeErr)
-	}
-	line, err := readLine(bufio.NewReaderSize(conn, maxMessageBytes))
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		return nil, nil, fmt.Errorf("%w: %v", ErrEndpointUnavailable, err)
-	}
-	var response struct {
-		Result json.RawMessage `json:"result"`
-		Error  *upstreamError  `json:"error"`
-	}
-	if err := json.Unmarshal(line, &response); err != nil {
-		return nil, nil, fmt.Errorf("endpoint returned invalid JSON: %w", err)
-	}
-	if response.Error != nil {
-		return nil, response.Error, nil
-	}
-	if len(response.Result) == 0 || !json.Valid(response.Result) {
-		return nil, nil, errors.New("endpoint returned no result")
-	}
-	return response.Result, nil, nil
+	_, err = c.conn.Write(append(request, '\n'))
+	return err
 }
 
 type lineWriter struct {

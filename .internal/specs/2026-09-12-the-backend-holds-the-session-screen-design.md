@@ -1,6 +1,6 @@
-# One emulator, on the backend
+# One emulator, in the session runtime
 
-- **Date:** 2026-09-12 (fourth revision; §3 records what each earlier one got wrong)
+- **Date:** 2026-09-12 (fifth revision; §3 records what each earlier one got wrong)
 - **Status:** draft for review
 - **Owner's decision, 2026-09-12:** the long-term model, taken deliberately over the
   smaller incremental option. **"Нам и нужна долгосрочная модель, никаких быстрых побед.
@@ -20,18 +20,89 @@
 
 ## 1. The decision
 
-**One VT emulator in the system, on the backend. It owns the screen, the block boundaries
-and the block content. The frontend paints what it is sent and sends structured input.**
+**One VT emulator in the system, in a long-lived session runtime that sits beside the PTY.
+It owns the screen, the terminal's modes, the answers to the program's own questions, the
+block boundaries and the block content. The client paints cells and sends intent.**
 
-| Owner    | Owns                                                                                                                                                                                                                      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| backend  | the emulator, one per session; the parse of everything the program emits; where each block begins and ends; the block's content; the ledger; the session's size; the answer to any question the program asks its terminal |
-| frontend | painting frames; placing cards from what it is sent; selection, pointer, IME; **structured input events**, not encoded key bytes                                                                                          |
+Three things changed in this revision, all from the fifth review round:
 
-This is the shape `herdr` has, and the reason it is coherent is not that it runs on a
-server: **herdr has one representation of the screen.** Every difficulty in the three
-earlier revisions of this document came from nocx having a second representation — the
-command block — built on the client, where the authenticated facts are not.
+- **The runtime sits beside the PTY, not in the coordinator.** For a remote session that is
+  beside the remote PTY, with SSH as an authenticated carrier to it. Today the helper can
+  keep a process alive while the coordinator loses the output needed to rebuild its
+  emulator (`internal/transport/ws_readopt.go:100`); this removes that failure mode
+  structurally rather than recovering from it. The desktop process and the orchestration
+  coordinator may die without taking terminal state with them.
+- **A block never owns part of the current terminal.** The terminal is not cleared, rebased
+  or reinterpreted because a command finished, and the live surface stops being defined as
+  "the rows below the current command". The whole terminal is the session's mutable
+  surface; cards are records of activity in it. `CUP 1;1` always addresses the terminal's
+  first row and a card never competes for it. This removes the cut AND the low-water-mark
+  problem at once.
+- **The client receives cells, not ANSI, and xterm.js goes.** Keeping xterm as a painter
+  would mean the browser executing cursor moves and erases only to rebuild the cells the
+  runtime already has, and would keep selection bound to xterm's private machinery
+  (`ADR-0009:122` records that dependency). Verified: xterm's only input is `write(bytes)`
+  and its buffer is read-only (`xterm.d.ts:809`, `:1216`), so cells cannot be pushed in and
+  its renderer cannot be addressed without its parser.
+
+| Owner                            | Owns                                                                                                                                                      |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| session runtime (beside the PTY) | the emulator; terminal modes; committed geometry; ordered input admission; the answers to the program's questions; the authenticated lifecycle rendezvous |
+| capture producer                 | terminal observations bound to an execution interval; immutable capture bodies; explicit completeness                                                     |
+| document service                 | entries, attempts, the ordered block tree, artifact references, retention, permissions                                                                    |
+| projection service               | consistent client snapshots and the changes after them, relating terminal state and document references by revision                                       |
+| client                           | layout, font measurement, painting, selection, accessibility, IME — and submission of **intent**                                                          |
+
+The first two live together to begin with; the last two may share a process. These are
+ownership boundaries, not a demand for separate services.
+
+### 1.1 Watching is not controlling
+
+The fourth revision proposed that automation may act on a pane no client displays. That is
+withdrawn: hidden panes still mount renderers (`frontend/src/panes.ts:1728`) and the
+terminal-reply path has no visibility guard (`frontend/src/terminal-content.ts:4011`), so a
+background renderer still takes part in the program's terminal conversation — and
+visibility is an asynchronous client report that can go false between the check and the
+write.
+
+Instead: **observation and control are separate capabilities.** A person may watch an
+agent-driven worker without taking control. Taking control is an explicit operation the
+runtime acknowledges, and it invalidates the agent's write authority from a named
+boundary — bytes already written to the PTY cannot be recalled. Reading permission stays
+independently scoped, so watching grants a coordinator nothing about somebody else's
+session (`ADR-0064` §2 survives intact). If opening a pane should pause automation, opening
+issues an automatic take-control request; it does not consult a boolean.
+
+### 1.2 The terminal half of the runtime is already bought
+
+`charmbracelet/x/vt` is in the tree, already drives the enrolled-pane grid, and was measured
+against headless xterm.js for column geometry in `ADR-0041`. Verified in the module:
+
+| Needed                                                                                                                      | Present                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| parse, grid, alternate buffer, charsets, OSC, DCS, mouse, focus                                                             | yes                                                                      |
+| 19 modes including DECCKM `?1`, bracketed paste `?2004`, alt-screen `?1047/?1049`, mouse `?9/?1000/?1001/?1002/?1003/?1006` | `mode.go`                                                                |
+| **key encoding against those modes** — `SendKey(uv.KeyEvent)`                                                               | `key.go:25`                                                              |
+| **paste wrapped per bracketed-paste** — `Paste(text)`                                                                       | `emulator.go:301`                                                        |
+| `SendText`, `SendKeys`, `InputPipe()` — where encoded bytes leave for the PTY                                               | `emulator.go:294-316`                                                    |
+| replies to the program (device attributes, in-band resize)                                                                  | generated; read and dropped today at `internal/panegrid/panegrid.go:195` |
+| damage tracking — `Damage`, `CellDamage`, `RectDamage`                                                                      | `damage.go`                                                              |
+
+So "input becomes intent", which the review called the largest missing item, is a wiring
+job rather than a build: the client sends a key event, the runtime calls `SendKey`, the
+bytes leave through `InputPipe`. Damage tracking is already the substrate a diff encoder
+needs later.
+
+**Two real gaps, named so they are not discovered:**
+
+1. **Graphics.** No sixel and no kitty protocol anywhere in `x/vt`. herdr carries graphics
+   as a separate payload outside its cell diff (`src/server/render_stream.rs:94`). Either
+   nocx declares them unsupported or this is our own work.
+2. **Soft wrap.** Buffer lines carry no continuation flag — `Wrap` in ultraviolet belongs to
+   `StyledString` at print time, not to a stored line. The card serialiser joins
+   continuations by xterm's `isWrapped` today (`frontend/src/scrollback/serializer.ts:483`).
+   The runtime must preserve continuation **while parsing**; it cannot be recovered
+   afterwards.
 
 ## 2. What this buys, stated exactly
 
@@ -221,6 +292,29 @@ different mechanisms when xterm paints synthesised ANSI, and a live frame can ch
 become a card — mid-drag (`frontend/src/renderers/xterm.ts:976`,
 `frontend/src/terminal-content.ts:3335`, `SelectionService.ts:489`).
 
+### 6.11 The client's cell renderer
+
+xterm.js goes, so the client needs a renderer that takes **cells** and paints them: grapheme
+boundaries with authoritative widths, default/palette/RGB kept apart, links, cursor,
+selection by coordinate, IME composition and accessibility. It is not a terminal emulator
+and must not contain a parser.
+
+Verified: no such thing is available by extracting it from what we have. xterm.js takes only
+`write(bytes)` and exposes a read-only buffer; its canvas and WebGL addons render their own
+`Terminal`'s buffer and cannot be addressed without it. hterm has the same shape. Every web
+terminal is a parser-and-renderer bundle and we want only the second half.
+
+So this is a decision with a search in front of it, and the search is a task of its own with
+stated criteria: takes cells rather than bytes; carries grapheme widths; supports selection
+by coordinate, IME and accessibility; is readable; and is licensed to fork. Candidates to
+evaluate include cell-grid renderers from outside the terminal world — TUI frameworks
+compiled to wasm, grid/canvas text layers — and a fork of xterm.js keeping only its renderer
+and selection. Writing one is the fallback, not the plan.
+
+Per the build order (§9), the reference client starts with **full snapshots** and the
+simplest renderer whose correctness can be inspected. Delta encoding and a fast canvas are
+optimisations of a foundation that is already correct, not the organising principle of it.
+
 ### 6.10 Delivery freshness
 
 One authority does not mean the person has seen its latest state. With frame-rate coalescing
@@ -293,9 +387,7 @@ prerequisites.
 
 ## 10. Deliberately out
 
-- **Replacing xterm.js.** It keeps painting and keeps receiving bytes — ANSI our encoder
-  produced. Its parser stops being the authority; its renderer, selection surface and
-  alt-screen handling stay.
+- **Keeping xterm.js.** It goes. §1 records why, and the client's renderer is §6.11.
 - **What a write may DO.** `ADR-0064`'s bounds are untouched.
 
 ## 11. Beads this design produces

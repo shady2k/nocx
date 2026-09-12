@@ -98,7 +98,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0038 | [A forward is a route blind to the name](0038-a-forward-is-a-route-blind-to-the-name.md)                                          | Proposed (2026-08-25)                                                     |
 | 0039 | [An assistant turn is one ledger entry](0039-an-assistant-turn-is-one-entry.md)                                                   | Accepted (2026-08-23)                                                     |
 | 0040 | [A block is a node in an ordered tree](0040-a-block-is-a-node-in-an-ordered-tree.md)                                              | Accepted (2026-08-23)                                                     |
-| 0041 | [charmbracelet/x/vt is the backend's emulator, chosen by column geometry](0041-x-vt-as-the-backend-emulator.md)                   | Accepted (2026-08-25) (choice superseded by ADR-0065, proposed)           |
+| 0041 | [charmbracelet/x/vt is the backend's emulator, chosen by column geometry](0041-x-vt-as-the-backend-emulator.md)                   | Accepted (2026-08-25) (choice superseded by ADR-0065)                     |
 | 0042 | [A collection file names a secret by handle](0042-a-collection-file-names-a-secret-by-handle.md)                                  | Accepted (2026-08-26)                                                     |
 | 0043 | [One connection to the encrypted store](0043-one-connection-to-the-encrypted-store.md)                                            | Accepted (2026-08-26)                                                     |
 | 0044 | [Request files carry the environment choice](0044-request-files-carry-environment-choice.md)                                      | Accepted (2026-08-27)                                                     |
@@ -122,7 +122,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0062 | [The backend flushes the accept on its own authority](0062-the-backend-flushes-the-accept-on-its-own-authority.md)                | Accepted (2026-09-10)                                                     |
 | 0063 | [Typing is refused on evidence against the rule, not on its absence](0063-typing-is-refused-on-evidence-against-the-rule.md)      | Accepted (2026-09-10)                                                     |
 | 0064 | [A pane that is read may be answered](0064-a-pane-that-is-read-may-be-answered.md)                                                | Accepted (2026-09-11; amends the AD-6 amendment)                          |
-| 0065 | [The emulator a program talks to is not the emulator that watches it](0065-the-emulator-a-program-talks-to.md)                    | Proposed (2026-09-12; supersedes ADR-0041's choice)                       |
+| 0065 | [The emulator a program talks to is not the emulator that watches it](0065-the-emulator-a-program-talks-to.md)                    | Accepted (2026-09-13; supersedes ADR-0041's choice)                       |
 | 0066 | [One emulator, and it is the backend's](0066-one-emulator-and-it-is-the-backends.md)                                              | Accepted (2026-09-12; supersedes parts of AD-1/6/9/10 and ADR-0001/2/8/9) |
 
 ## Adding one

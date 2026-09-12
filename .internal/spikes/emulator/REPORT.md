@@ -258,9 +258,9 @@ across all of those runs, including a full `run.sh` from a clean vendor checkout
 
 `x/vt` is linear with no cap: ~170 ns and ~1.013 allocations per repeated character on an
 unloaded machine (~409 ns/char at the loaded extreme), so 10⁹ repeats is roughly three
-minutes and ~1.01 × 10⁹ allocations. In 30 seconds it completed **19.1 %** of the work.
-The allocation is ~121–123 bytes per character — `utf8.go:44` boxes each printed character
-with `string(r)` before storing it in a cell.
+minutes and ~1.01 × 10⁹ allocations. In 30 seconds it completed **19.3 %** of the work
+(192 922 025 of 10⁹). The allocation is ~121–123 bytes per character — `utf8.go:44` boxes
+each printed character with `string(r)` before storing it in a cell.
 
 `libghostty-vt` is flat because it **clamps the count at 65535**. The committed drivers
 contain the pair that shows it: `rep_65535` and `rep_70000` leave identical state in ghostty

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // The reference model: a Runtime with no PTY, no emulator and no clock.
@@ -53,20 +54,56 @@ const (
 	// ruleEncodeAgainstModes: a key is encoded against the modes the PROGRAM
 	// set, at execution, by the runtime.
 	ruleEncodeAgainstModes
+	// ruleConsumerQueueIsBounded: one subscriber's queue holds at most
+	// MaxPendingFrames payloads, and the runtime coalesces rather than growing.
+	ruleConsumerQueueIsBounded
+	// ruleConsumerLossIsReported: a payload the runtime dropped for a consumer
+	// is COUNTED for that consumer and leaves it stale, rather than being
+	// discovered by the consumer as a hole in what it holds.
+	ruleConsumerLossIsReported
+	// ruleLosslessIngestSurvivesASlowConsumer: a consumer that cannot keep up
+	// never costs the stream itself. The lossless class is the emulator's, and
+	// the way to slow a source down is to throttle it (AD-10's credit, the
+	// carrier's job), never to discard output.
+	ruleLosslessIngestSurvivesASlowConsumer
+	// rulePerSessionAllowance: the allowance a queue draws on belongs to its
+	// SESSION. One session reading slowly may not spend another's, which is
+	// what per-session fairness means over frames.
+	rulePerSessionAllowance
+	// ruleDuplicateEffectIsSuppressed: an effect a consumer has already been
+	// given is not delivered to it again, whatever carried it the second time.
+	ruleDuplicateEffectIsSuppressed
+	// ruleResendCarriesNoEffects: a full frame — a snapshot, a resend, a
+	// re-attachment — carries cells and never an effect. A resend of state must
+	// not resend a clipboard write or a notification (design §6.2).
+	ruleResendCarriesNoEffects
+	// ruleIngestIsBounded: the runtime's own ingest path is bounded three ways
+	// — one call carries at most MaxIngestBytes and a larger one is refused,
+	// an unterminated sequence is held to at most MaxPendingSequence bytes with
+	// the excess dropped and reported, and the work it spends is linear in the
+	// bytes it examined rather than in any count inside them.
+	ruleIngestIsBounded
 )
 
 var ruleNames = map[rule]string{
-	ruleCancelOnRevoke:                   "cancel-on-revoke",
-	ruleExecutedIsIrreversible:           "executed-is-irreversible",
-	ruleRevalidateAtExecution:            "revalidate-at-execution",
-	ruleSightingAuthorisesNothing:        "sighting-authorises-nothing",
-	rulePinSource:                        "pin-source",
-	ruleAtomicGeometry:                   "atomic-geometry",
-	ruleSnapshotIsPassive:                "snapshot-is-passive",
-	ruleObserverLossIsNotControlLoss:     "observer-loss-is-not-control-loss",
-	ruleFailRevokes:                      "fail-revokes",
-	ruleUnknownCompletenessRefusesWrites: "unknown-completeness-refuses-writes",
-	ruleEncodeAgainstModes:               "encode-against-modes",
+	ruleCancelOnRevoke:                      "cancel-on-revoke",
+	ruleExecutedIsIrreversible:              "executed-is-irreversible",
+	ruleRevalidateAtExecution:               "revalidate-at-execution",
+	ruleSightingAuthorisesNothing:           "sighting-authorises-nothing",
+	rulePinSource:                           "pin-source",
+	ruleAtomicGeometry:                      "atomic-geometry",
+	ruleSnapshotIsPassive:                   "snapshot-is-passive",
+	ruleObserverLossIsNotControlLoss:        "observer-loss-is-not-control-loss",
+	ruleFailRevokes:                         "fail-revokes",
+	ruleUnknownCompletenessRefusesWrites:    "unknown-completeness-refuses-writes",
+	ruleEncodeAgainstModes:                  "encode-against-modes",
+	ruleConsumerQueueIsBounded:              "consumer-queue-is-bounded",
+	ruleConsumerLossIsReported:              "consumer-loss-is-reported",
+	ruleLosslessIngestSurvivesASlowConsumer: "lossless-ingest-survives-a-slow-consumer",
+	rulePerSessionAllowance:                 "per-session-allowance",
+	ruleDuplicateEffectIsSuppressed:         "duplicate-effect-is-suppressed",
+	ruleResendCarriesNoEffects:              "resend-carries-no-effects",
+	ruleIngestIsBounded:                     "ingest-is-bounded",
 }
 
 type ruleSet map[rule]bool
@@ -130,11 +167,49 @@ type model struct {
 
 	rendezvous   Rendezvous
 	completeness Completeness
+
+	// --- delivery: the classes, and the bounds that keep them bounded ------
+
+	// budget is the allowance every consumer queue draws on. It is per model
+	// unless a schedule hands two models ONE budget, which is how "a session
+	// cannot spend another session's" is a difference a schedule can see
+	// rather than a sentence in a comment.
+	budget *deliveryBudget
+	// consumers are the subscribers attached to this session, in attach order.
+	// The schedules that matter hold one WEDGED: attached, and never read.
+	consumers []*consumer
+	// nextEffect mints the identity an effect's duplicate policy is stated
+	// over. The runtime mints it, never the consumer.
+	nextEffect EffectID
+	// lastEffect is what the stream produced last, which is what a resend must
+	// NOT repeat.
+	lastEffect *Effect
+
+	// pending is the part of an escape sequence the runtime is still holding
+	// because it has not terminated. It is the runtime's own memory for a
+	// hostile capture, and MaxPendingSequence is its bound.
+	pending []byte
+	// ingestWork counts the work units the runtime's OWN ingest path spent:
+	// one per byte examined. It exists so "a hostile capture costs bounded
+	// time" is a number a schedule can read, and so that a runtime which did
+	// the EMULATOR's expansion of a repeat count would be caught doing it.
+	ingestWork uint64
+	// ingestLost counts output the ingest path discarded: the oldest bytes of
+	// an unterminated sequence past its bound. It belongs to the LOSSLESS class
+	// and it is the number the schedule for a slow consumer asserts is zero.
+	ingestLost uint64
 }
 
 var _ Runtime = (*model)(nil)
 
 func newModel(rules ruleSet) *model {
+	return newModelWithBudget(rules, newDeliveryBudget())
+}
+
+// newModelWithBudget is newModel with the delivery allowance SUPPLIED, which is
+// how a schedule attaches two sessions to one budget: whether the allowance is
+// per session is otherwise a difference nothing can observe.
+func newModelWithBudget(rules ruleSet, budget *deliveryBudget) *model {
 	return &model{
 		rules:        rules,
 		inc:          Incarnation{Session: "S", Generation: 1},
@@ -143,7 +218,18 @@ func newModel(rules ruleSet) *model {
 		intents:      map[IntentID]*modelIntent{},
 		geom:         GeometryCommit{Geometry: Geometry{Cols: 80, Rows: 24}, Revision: 1},
 		completeness: CompletenessComplete,
+		budget:       budget,
 	}
+}
+
+// newSessionModel is newModelWithBudget for a session other than the model's
+// default one, which is how a schedule attaches two SESSIONS to a single
+// budget: the allowance is per session, and two sessions is the least that can
+// show it.
+func newSessionModel(rules ruleSet, budget *deliveryBudget, id SessionID) *model {
+	m := newModelWithBudget(rules, budget)
+	m.inc = Incarnation{Session: id, Generation: 1}
+	return m
 }
 
 func (m *model) tick() Revision { m.rev++; return m.rev }
@@ -358,24 +444,247 @@ func (m *model) Ingest(b []byte) error {
 	if err := m.live(); err != nil {
 		return err
 	}
-	// Enough of an emulator to make the mode real: the program turns
-	// application cursor keys on and off, and the runtime's encoder follows.
-	if bytes.Contains(b, []byte("\x1b[?1h")) {
-		m.applicationCursorKeys = true
+	if m.rules.on(ruleIngestIsBounded) && len(b) > MaxIngestBytes {
+		// One call carries at most the ingest bound, and a larger one is
+		// REFUSED rather than truncated: nothing is ingested, no work is
+		// charged, and the caller knows (the carrier's own reads are bounded by
+		// the credit AD-10 gives it).
+		return ErrIngestTooLarge
 	}
-	if bytes.Contains(b, []byte("\x1b[?1l")) {
+	// A consumer that cannot keep up must not cost the STREAM. This is the
+	// lossless class's own rule, and the defect it refuses to be is the obvious
+	// wrong one: discard output to keep a slow subscriber happy, instead of
+	// throttling the source that produced it.
+	if !m.rules.on(ruleLosslessIngestSurvivesASlowConsumer) && m.anyConsumerExhausted() {
+		// The defect, stated as code: the output is dropped, silently, because
+		// nobody is reading.
+		m.ingestLost += uint64(len(b))
+		return nil
+	}
+
+	// The runtime's OWN cost for this call, in work units: the bytes it examines
+	// and hands on. It is linear in the BYTES of the call and never in a count
+	// inside them. `CSI 1000000000 b` is the reason that sentence exists: its
+	// cost is the emulator's (ADR-0065 measured x/vt at ~180 s and ~10⁹
+	// allocations and libghostty-vt clamping REP at 65535; which emulator nocx
+	// ships, and therefore that clamp, is nocx-ygxjv.2's), and the runtime's
+	// share of the answer is to hand it over rather than to expand it.
+	m.ingestWork += uint64(len(b))
+	if !m.rules.on(ruleIngestIsBounded) {
+		// The defect, stated as code: the runtime does the emulator's expansion,
+		// so a sixteen-byte sequence costs it a billion units of work.
+		m.ingestWork += repeatCount(b)
+	}
+
+	// The sequence this call leaves open, joined to whatever was already open.
+	// Only the trailing OPEN sequence is held; everything before it has either
+	// been drawn or is an escape sequence that completed.
+	joined := append(append([]byte(nil), m.pending...), b...)
+	printable, effects, open := m.scanOutput(joined)
+	m.pending = open
+	if m.rules.on(ruleIngestIsBounded) {
+		held, kept := uint64(len(m.pending)), uint64(MaxPendingSequence)
+		if held > kept {
+			// The oldest bytes of the sequence go. The loss is STATED — the
+			// completeness claim and the counter — because an emulator fed a
+			// partial sequence is not authoritative (design §6.7) and a silent
+			// trim is how a screen that looks whole is served from one that is
+			// not.
+			m.ingestLost += held - kept
+			m.pending = append([]byte(nil), m.pending[held-kept:]...)
+			m.completeness = CompletenessLostIngest
+		}
+	}
+
+	if err := m.deliver(losslessPayload(printable)); err != nil {
+		return err
+	}
+	rev := m.tick()
+	for i := range effects {
+		m.nextEffect++
+		e := Effect{
+			ID:   m.nextEffect,
+			At:   m.inc,
+			Kind: effects[i].kind,
+			Body: append([]byte(nil), effects[i].body...),
+		}
+		m.lastEffect = &e
+		if err := m.deliver(effectPayload(e)); err != nil {
+			return err
+		}
+	}
+	// One frame per ingest is the model's stand-in for the frame protocol: it
+	// is what makes a consumer's queue fill, and its body is a snapshot of the
+	// screen. The real frame format is epic nocx-zg3k3's and is not declared
+	// here.
+	return m.deliver(framePayload(rev, m.screen))
+}
+
+// streamEffect is what the program's output asked for, before the runtime mints
+// the identity it will be delivered under.
+type streamEffect struct {
+	kind EffectKind
+	body []byte
+}
+
+// The two control bytes the model's stand-in parser knows by name.
+const (
+	esc = 0x1b
+	bel = 0x07
+)
+
+// scanOutput is the model's stand-in for the emulator's parser, and it is
+// deliberately NOT a terminal: it finds the units a chunk of output is made of
+// — the text that reaches the screen, the non-visual effects the program asked
+// for, and the trailing sequence that has not terminated — and nothing else.
+// The DECCKM set and clear it applies is the one mode this model carries, which
+// is what makes "input is intent" concrete.
+//
+// A real parser's cost, its mode table and its own bounds are the emulator's
+// (ADR-0065, nocx-ygxjv.2). What this returns is only ever used to assert the
+// RUNTIME's obligations.
+func (m *model) scanOutput(b []byte) (printable []byte, effects []streamEffect, open []byte) {
+	for i := 0; i < len(b); {
+		if b[i] == bel {
+			effects = append(effects, streamEffect{kind: EffectBell})
+			i++
+			continue
+		}
+		if b[i] != esc {
+			printable = append(printable, b[i])
+			i++
+			continue
+		}
+		if i+1 >= len(b) {
+			return printable, effects, b[i:]
+		}
+		switch b[i+1] {
+		case ']': // OSC, terminated by BEL or ST
+			body, next, ok := oscBody(b, i+2)
+			if !ok {
+				return printable, effects, b[i:]
+			}
+			if kind, isEffect := effectOfOSC(body); isEffect {
+				effects = append(effects, streamEffect{kind: kind, body: body})
+			}
+			i = next
+		case 'P': // DCS, terminated by ST. Nothing in it is drawn.
+			next, ok := stTerminated(b, i+2)
+			if !ok {
+				return printable, effects, b[i:]
+			}
+			i = next
+		case '[': // CSI, terminated by a final byte
+			end, ok := csiEnd(b, i+2)
+			if !ok {
+				return printable, effects, b[i:]
+			}
+			applyCSI(b[i+2:end], m)
+			i = end
+		default: // ESC <byte>: two bytes and it is done, nothing drawn
+			i += 2
+		}
+	}
+	return printable, effects, nil
+}
+
+// oscBody reads an OSC body from b starting at start, which is just past
+// `ESC ]`. The returned body excludes the terminator and next is the offset
+// just past it; ok is false when the sequence does not terminate within b —
+// which is the hostile-capture case rather than an edge of it.
+func oscBody(b []byte, start int) (body []byte, next int, ok bool) {
+	for i := start; i < len(b); i++ {
+		if b[i] == bel {
+			return b[start:i], i + 1, true
+		}
+		if b[i] == esc && i+1 < len(b) && b[i+1] == '\\' {
+			return b[start:i], i + 2, true
+		}
+	}
+	return nil, len(b), false
+}
+
+// stTerminated reads a string terminated by ST from b starting at start, which
+// is just past `ESC P`.
+func stTerminated(b []byte, start int) (next int, ok bool) {
+	for i := start; i < len(b); i++ {
+		if b[i] == esc && i+1 < len(b) && b[i+1] == '\\' {
+			return i + 2, true
+		}
+	}
+	return len(b), false
+}
+
+// csiEnd reads a CSI from b starting at start, which is just past `ESC [`, and
+// returns the offset just past its final byte (0x40–0x7e). A sequence whose
+// final byte has not arrived is open.
+func csiEnd(b []byte, start int) (next int, ok bool) {
+	for i := start; i < len(b); i++ {
+		if b[i] >= 0x40 && b[i] <= 0x7e {
+			return i + 1, true
+		}
+	}
+	return len(b), false
+}
+
+// effectOfOSC maps the OSC numbers design §6.2 names onto their effects. The
+// numbers that carry none carry none here: a fence (133, 1337) has its own
+// vocabulary above, and `9;4;<state>;<percent>` is ConEmu's progress hint,
+// which the renderer's own parser returns null for so that it stays available
+// to whatever renders progress (frontend/src/renderers/xterm.ts, onNotification)
+// — an OSC arriving is not an effect arriving. The payload is not parsed
+// further: decoding it is the surface's, and delivering it once is this
+// contract's.
+func effectOfOSC(body []byte) (EffectKind, bool) {
+	num, rest, _ := bytes.Cut(body, []byte(";"))
+	switch string(num) {
+	case "0", "2":
+		return EffectTitle, true
+	case "7":
+		return EffectCwdReport, true
+	case "9":
+		if bytes.HasPrefix(rest, []byte("4;")) {
+			return EffectNone, false
+		}
+		return EffectNotification, true
+	case "777":
+		return EffectNotification, true
+	case "52":
+		return EffectClipboard, true
+	default:
+		return EffectNone, false
+	}
+}
+
+// applyCSI applies the one mode this model carries. DECCKM is enough to make
+// "input is intent" concrete; the mode table is the emulator's (nocx-ygxjv.2).
+func applyCSI(params []byte, m *model) {
+	switch string(params) {
+	case "?1h":
+		m.applicationCursorKeys = true
+	case "?1l":
 		m.applicationCursorKeys = false
 	}
-	printable := bytes.ReplaceAll(b, []byte("\x1b[?1h"), nil)
-	printable = bytes.ReplaceAll(printable, []byte("\x1b[?1l"), nil)
-	// A trim: later output can destroy the rows a fence was seen on, which is
-	// exactly why a rendezvous pins content rather than a row number.
-	m.screen = append(m.screen, printable...)
-	if len(m.screen) > 64 {
-		m.screen = m.screen[len(m.screen)-64:]
+}
+
+// repeatCount reads the count out of a REP sequence (`CSI <n> b`). It exists
+// ONLY so the defect branch can charge the runtime the emulator's work: nothing
+// in the runtime's own path expands a repeat, and when the rule is on nothing
+// calls this.
+func repeatCount(b []byte) uint64 {
+	_, rest, ok := bytes.Cut(b, []byte("\x1b["))
+	if !ok {
+		return 0
 	}
-	m.tick()
-	return nil
+	digits, _, ok := bytes.Cut(rest, []byte("b"))
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseUint(string(digits), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (m *model) ReportHole(lost uint64) error {
@@ -470,6 +779,300 @@ func (m *model) ExpireRendezvous() error {
 	default:
 		return ErrNoRendezvous
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Delivery: what a consumer is, what its queue may hold, and what the runtime
+// owes when it cannot hold any more.
+//
+// The classes and the bounds are the CONTRACT's (contract.go, DeliveryClass).
+// What is here is the model's delivery path, so that a schedule can wedge a
+// consumer and read what the runtime did about it. A consumer arriving or
+// leaving is not a transition of the terminal, which is why attach is not on
+// Runtime — the same reason observerLost is not.
+// ---------------------------------------------------------------------------
+
+// modelScreenBytes is how much of the screen the model keeps: a window on the
+// emulator's state, not the stream.
+const modelScreenBytes = 64
+
+// payload is one thing the runtime hands a consumer, as the model's union types
+// it. Its CLASS decides where it goes, and the producer decides the class —
+// never the consumer, which is what makes "every payload belongs to exactly
+// one" checkable rather than a habit.
+type payload struct {
+	class  DeliveryClass
+	rev    Revision // coalescable: the revision of the visual state
+	bytes  []byte   // lossless: the output ingested, or a frame's cells
+	effect Effect   // at-most-once
+}
+
+func losslessPayload(b []byte) payload {
+	return payload{class: DeliveryLossless, bytes: append([]byte(nil), b...)}
+}
+
+func framePayload(rev Revision, screen []byte) payload {
+	return payload{class: DeliveryCoalescable, rev: rev, bytes: append([]byte(nil), screen...)}
+}
+
+func effectPayload(e Effect) payload {
+	return payload{class: classOfEffect(e.Kind), effect: e}
+}
+
+// classOfEffect is the ONE place an effect's class is decided, and it is
+// exhaustive by construction: every kind the vocabulary declares is named here,
+// and a kind added to contract.go without being named falls to
+// DeliveryUnclassified and is REFUSED rather than delivered under a guess.
+func classOfEffect(k EffectKind) DeliveryClass {
+	switch k {
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport:
+		return DeliveryAtMostOnce
+	default:
+		return DeliveryUnclassified
+	}
+}
+
+// consumer is one subscriber: a queue nobody reads in the schedules that hold
+// it wedged, and the counts that tell it what it lost.
+type consumer struct {
+	session SessionID
+	queue   []payload
+	// coalesced and effectsLost are what the runtime DROPPED for this consumer,
+	// by class. They are the report: a consumer is TOLD what it lost, and that
+	// what it still holds is stale, rather than discovering a hole in it.
+	coalesced   uint64
+	effectsLost uint64
+	stale       bool
+}
+
+func (c *consumer) pending() int { return len(c.queue) }
+
+// heldBytes is the memory the runtime spends on this consumer: the payloads it
+// is holding for it.
+func (c *consumer) heldBytes() int {
+	held := 0
+	for _, p := range c.queue {
+		held += len(p.bytes) + len(p.effect.Body)
+	}
+	return held
+}
+
+// effects is how many at-most-once payloads the consumer is holding, which is
+// what the duplicate policy is read off.
+func (c *consumer) effects() int {
+	held := 0
+	for _, p := range c.queue {
+		if p.class == DeliveryAtMostOnce {
+			held++
+		}
+	}
+	return held
+}
+
+// hasEffect reports whether the consumer already holds THIS effect. Identity is
+// the pair, not the number alone: an EffectID identifies an effect for as long
+// as its INCARNATION lives (contract.go), so a later incarnation minting the
+// same number again is a different effect and comparing numbers alone would
+// swallow a bell.
+func (c *consumer) hasEffect(e Effect) bool {
+	for _, p := range c.queue {
+		if p.class == DeliveryAtMostOnce && p.effect.At == e.At && p.effect.ID == e.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// newestEffect is the effect of the newest at-most-once payload the consumer
+// holds, which is the identity a duplicate would have to carry to be one.
+func (c *consumer) newestEffect() (Effect, bool) {
+	for i := len(c.queue) - 1; i >= 0; i-- {
+		if c.queue[i].class == DeliveryAtMostOnce {
+			return c.queue[i].effect, true
+		}
+	}
+	return Effect{}, false
+}
+
+func (c *consumer) holds(k EffectKind) bool {
+	for _, p := range c.queue {
+		if p.class == DeliveryAtMostOnce && p.effect.Kind == k {
+			return true
+		}
+	}
+	return false
+}
+
+// deliveryBudget is the allowance one consumer's queue draws on. The schedules
+// that attach TWO sessions to one budget are asserting the policy stated in
+// MaxPendingFrames: the allowance is per session, so one session reading slowly
+// may not spend another's.
+type deliveryBudget struct {
+	remaining map[SessionID]int
+}
+
+func newDeliveryBudget() *deliveryBudget {
+	return &deliveryBudget{remaining: map[SessionID]int{}}
+}
+
+// take spends one payload's worth of the account's allowance, opening the
+// account at MaxPendingFrames the first time it is drawn on.
+func (b *deliveryBudget) take(account SessionID) bool {
+	if _, ok := b.remaining[account]; !ok {
+		b.remaining[account] = MaxPendingFrames
+	}
+	if b.remaining[account] <= 0 {
+		return false
+	}
+	b.remaining[account]--
+	return true
+}
+
+// account is the budget account this session's queues spend from, and WHICH
+// account that is, is rulePerSessionAllowance.
+func (m *model) account() SessionID {
+	if !m.rules.on(rulePerSessionAllowance) {
+		// The defect, stated as code: one account every session spends from, so
+		// the first wedged consumer starves the others.
+		return ""
+	}
+	return m.inc.Session
+}
+
+// attach adds a consumer to this session.
+func (m *model) attach() *consumer {
+	c := &consumer{session: m.inc.Session}
+	m.consumers = append(m.consumers, c)
+	return c
+}
+
+// anyConsumerExhausted reports whether some consumer has spent the allowance,
+// which is the state the lossless-ingest defect reacts to.
+func (m *model) anyConsumerExhausted() bool {
+	for _, c := range m.consumers {
+		if len(c.queue) >= MaxPendingFrames {
+			return true
+		}
+	}
+	return false
+}
+
+// deliver routes one payload to whatever its class says may hold it. It is the
+// ONE place a class decides behaviour, so no payload is treated as coalescable
+// by accident.
+func (m *model) deliver(p payload) error {
+	switch p.class {
+	case DeliveryLossless:
+		return m.feedEmulator(p.bytes)
+	case DeliveryCoalescable, DeliveryAtMostOnce:
+		for _, c := range m.consumers {
+			m.enqueue(c, p)
+		}
+		return nil
+	default:
+		return ErrUnclassifiedDelivery
+	}
+}
+
+// feedEmulator is where a lossless payload lands. Nothing here may drop any of
+// it: the SCREEN is a window, and the stream the class covers is not.
+//
+// The trim is what makes a rendezvous pin CONTENT rather than a row number:
+// later output can destroy the rows a fence was seen on.
+func (m *model) feedEmulator(b []byte) error {
+	m.screen = append(m.screen, b...)
+	if len(m.screen) > modelScreenBytes {
+		m.screen = m.screen[len(m.screen)-modelScreenBytes:]
+	}
+	return nil
+}
+
+// enqueue is the bounded path one payload takes to one consumer.
+func (m *model) enqueue(c *consumer, p payload) {
+	if p.class == DeliveryAtMostOnce && m.rules.on(ruleDuplicateEffectIsSuppressed) && c.hasEffect(p.effect) {
+		// The duplicate policy: the bell is the same bell, and applying it
+		// twice rings twice. Nothing was lost by not delivering it, so nothing
+		// is reported either.
+		return
+	}
+	if !m.rules.on(ruleConsumerQueueIsBounded) {
+		// The defect, stated as code: the queue grows without bound, which is
+		// what one unwatched session does to the process holding it.
+		c.queue = append(c.queue, p)
+		return
+	}
+	if !m.budget.take(m.account()) {
+		m.shed(c, p)
+		return
+	}
+	c.queue = append(c.queue, p)
+}
+
+// shed makes room in a queue whose session has spent its allowance. The OLDEST
+// coalescable payload goes first, because a later frame supersedes it; if the
+// queue holds only effects, the oldest EFFECT goes, which at-most-once permits
+// — zero deliveries is inside that class — as long as the loss is reported.
+func (m *model) shed(c *consumer, p payload) {
+	for i, queued := range c.queue {
+		if queued.class != DeliveryCoalescable {
+			continue
+		}
+		c.queue = append(c.queue[:i], c.queue[i+1:]...)
+		m.reportLoss(c, queued)
+		c.queue = append(c.queue, p)
+		return
+	}
+	if len(c.queue) == 0 {
+		// Nothing to shed: the payload that just arrived is what this consumer
+		// does not get.
+		m.reportLoss(c, p)
+		return
+	}
+	oldest := c.queue[0]
+	c.queue = c.queue[1:]
+	m.reportLoss(c, oldest)
+	c.queue = append(c.queue, p)
+}
+
+// reportLoss is ruleConsumerLossIsReported: the consumer is told. Without it
+// the payload is gone and nothing the consumer holds says so — which is how a
+// client paints a screen it believes is current.
+func (m *model) reportLoss(c *consumer, p payload) {
+	if !m.rules.on(ruleConsumerLossIsReported) {
+		return
+	}
+	if p.class == DeliveryAtMostOnce {
+		c.effectsLost++
+	} else {
+		c.coalesced++
+	}
+	c.stale = true
+}
+
+// deliverEffect is the producer's side of the duplicate policy: handing a
+// consumer an effect it has already been given delivers nothing.
+func (m *model) deliverEffect(e Effect) error {
+	return m.deliver(effectPayload(e))
+}
+
+// resendState is a full frame: a snapshot, a re-attachment, a resync. It
+// carries cells, and ruleResendCarriesNoEffects is what keeps it from carrying
+// an effect — a resend of state must not re-ring a bell or re-write a clipboard
+// (design §6.2).
+func (m *model) resendState() error {
+	if err := m.deliver(framePayload(m.rev, m.screen)); err != nil {
+		return err
+	}
+	if m.rules.on(ruleResendCarriesNoEffects) || m.lastEffect == nil {
+		return nil
+	}
+	// The defect, stated as code: the resend replays the effects it has already
+	// delivered. It appends directly on purpose — the hazard is a resend that
+	// carries effects at all, however the resend is built.
+	for _, c := range m.consumers {
+		c.queue = append(c.queue, effectPayload(*m.lastEffect))
+	}
+	return nil
 }
 
 // --- failure and observation -----------------------------------------------

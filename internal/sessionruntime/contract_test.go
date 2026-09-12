@@ -164,6 +164,40 @@ func principalName(k PrincipalKind) string {
 	}
 }
 
+func deliveryClassName(c DeliveryClass) string {
+	switch c {
+	case DeliveryUnclassified:
+		return "unclassified"
+	case DeliveryLossless:
+		return "lossless"
+	case DeliveryCoalescable:
+		return "coalescable"
+	case DeliveryAtMostOnce:
+		return "at-most-once"
+	default:
+		return fmt.Sprintf("DeliveryClass(%d)", int(c))
+	}
+}
+
+func effectKindName(k EffectKind) string {
+	switch k {
+	case EffectNone:
+		return "no effect"
+	case EffectBell:
+		return "a bell"
+	case EffectNotification:
+		return "a notification request"
+	case EffectClipboard:
+		return "a clipboard write"
+	case EffectTitle:
+		return "a title"
+	case EffectCwdReport:
+		return "a cwd report"
+	default:
+		return fmt.Sprintf("EffectKind(%d)", int(k))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Reachability bookkeeping.
 //
@@ -183,6 +217,8 @@ const (
 	kindCompleteness = "completeness"
 	kindAvailability = "availability"
 	kindPrincipal    = "principal-kind"
+	kindDelivery     = "delivery-class"
+	kindEffect       = "effect-kind"
 )
 
 func observe(kind string, value int) { observedStates[fmt.Sprintf("%s/%d", kind, value)] = true }
@@ -207,6 +243,26 @@ type fingerprint struct {
 	IntentStates map[IntentID]IntentState
 	Executed     [][]byte
 	Reported     Geometry
+
+	// The delivery state is part of what a caller can observe, so an event the
+	// vocabulary refuses has to leave it alone too: an ingest that is refused
+	// for its size must do no work, hold no sequence and hand no consumer
+	// anything.
+	Pending    []byte
+	IngestWork uint64
+	IngestLost uint64
+	Consumers  []consumerFingerprint
+	NextEffect EffectID
+}
+
+// consumerFingerprint is everything observable about one consumer's queue.
+type consumerFingerprint struct {
+	Session     SessionID
+	Pending     int
+	Held        int
+	Coalesced   uint64
+	EffectsLost uint64
+	Stale       bool
 }
 
 // fingerprintOf reads the model. It takes a snapshot, so it is passive only
@@ -219,10 +275,24 @@ func fingerprintOf(m *model) fingerprint {
 		Admitted:     append([]IntentID(nil), m.queue...),
 		Executed:     append([][]byte(nil), m.executed...),
 		Reported:     m.reportedGeom,
+		Pending:      append([]byte(nil), m.pending...),
+		IngestWork:   m.ingestWork,
+		IngestLost:   m.ingestLost,
+		NextEffect:   m.nextEffect,
 		IntentStates: make(map[IntentID]IntentState, len(m.intents)),
 	}
 	for id, mi := range m.intents {
 		f.IntentStates[id] = mi.state
+	}
+	for _, c := range m.consumers {
+		f.Consumers = append(f.Consumers, consumerFingerprint{
+			Session:     c.session,
+			Pending:     c.pending(),
+			Held:        c.heldBytes(),
+			Coalesced:   c.coalesced,
+			EffectsLost: c.effectsLost,
+			Stale:       c.stale,
+		})
 	}
 	return f
 }
@@ -249,6 +319,11 @@ func (f fingerprint) diff(g fingerprint) string {
 	add("admitted order", !slices.Equal(f.Admitted, g.Admitted))
 	add("executed bytes", !reflect.DeepEqual(f.Executed, g.Executed))
 	add("intent states", !reflect.DeepEqual(f.IntentStates, g.IntentStates))
+	add("pending sequence", !bytes.Equal(f.Pending, g.Pending))
+	add("ingest work", f.IngestWork != g.IngestWork)
+	add("ingest loss", f.IngestLost != g.IngestLost)
+	add("consumers", !reflect.DeepEqual(f.Consumers, g.Consumers))
+	add("next effect id", f.NextEffect != g.NextEffect)
 	if len(changed) == 0 {
 		return ""
 	}
@@ -904,6 +979,358 @@ func scheduleRuntimeFailure(m *model) error {
 }
 
 // ---------------------------------------------------------------------------
+// 13. The consumer that never reads (bead nocx-ygxjv.4).
+//
+// A subscriber that stops reading is the ordinary case, not the hostile one: a
+// laptop suspends, a tab is backgrounded, a client is mid-handshake. Three
+// things must hold while it is wedged, and each is one rule below.
+//
+// Paired with ruleConsumerQueueIsBounded, ruleLosslessIngestSurvivesASlowConsumer
+// and ruleConsumerLossIsReported — in that order, because each rule's removal
+// must fail this schedule at ITS assertion rather than at an earlier one.
+// ---------------------------------------------------------------------------
+
+func scheduleConsumerThatNeverReads(m *model) error {
+	wedged := m.attach()
+	const ingests = 4 * MaxPendingFrames
+
+	// Far more output than its queue can hold, and nothing here reads.
+	for range ingests {
+		if err := m.Ingest([]byte("a line of output arrived\r\n")); err != nil {
+			return failed("delivery/ingest", "ingesting output for a consumer that never reads: %v", err)
+		}
+	}
+	observe(kindDelivery, int(DeliveryCoalescable))
+	observe(kindDelivery, int(DeliveryLossless))
+
+	// The bound the vocabulary states, and the memory it implies: the payloads
+	// held for this consumer, and the bytes those payloads are.
+	if got := wedged.pending(); got > MaxPendingFrames {
+		return failed("delivery/the-queue-is-at-its-bound",
+			"the runtime holds %d payloads for a consumer read none of the %d it was sent, want at most MaxPendingFrames (%d)",
+			got, ingests, MaxPendingFrames)
+	}
+	if got := wedged.heldBytes(); got > MaxPendingFrames*modelScreenBytes {
+		return failed("delivery/the-queue-is-at-its-bound",
+			"the runtime holds %d bytes for a consumer that never reads, want at most MaxPendingFrames*modelScreenBytes (%d)",
+			got, MaxPendingFrames*modelScreenBytes)
+	}
+
+	// The LOSSLESS class lost nothing. The flood was coalesced FOR THE
+	// CONSUMER; the runtime's own ingest saw every byte of it, and the output
+	// arriving after the flood still reaches the emulator. A slow consumer is
+	// never a reason to discard what the program said.
+	if m.ingestLost != 0 {
+		return failed("delivery/a-wedged-consumer-costs-no-ingest",
+			"%d bytes of output were discarded while a consumer was wedged, want none: a consumer's queue is coalescable, the stream is not", m.ingestLost)
+	}
+	if err := m.Ingest([]byte("the last line\r\n")); err != nil {
+		return failed("delivery/ingest-after-the-flood", "ingesting output after the flood: %v", err)
+	}
+	if !bytes.HasSuffix(m.screen, []byte("the last line\r\n")) {
+		return failed("delivery/a-wedged-consumer-costs-no-ingest",
+			"the output ingested after the flood did not reach the emulator: the screen ends %q", m.screen)
+	}
+
+	// And what the consumer lost is REPORTED to it. A client handed a stale
+	// screen and told nothing paints it as current, which is the whole reason
+	// the coalescable class is allowed to lose anything at all.
+	if wedged.coalesced == 0 || !wedged.stale {
+		return failed("delivery/what-the-consumer-lost-is-reported",
+			"the consumer was sent %d payloads it never read, %d of them are counted as dropped and its staleness reads %v, want a count above zero and a consumer that knows what it holds",
+			ingests, wedged.coalesced, wedged.stale)
+	}
+
+	// A program can also emit EFFECTS at a rate no client keeps up with — a
+	// bell in a loop — and an at-most-once payload is not a free one: the queue
+	// holding it is bounded like any other. The class permits ZERO deliveries;
+	// it never permits an unreported one.
+	for range 4 * MaxPendingFrames {
+		if err := m.Ingest([]byte("\x07")); err != nil {
+			return failed("delivery/ingest-a-bell", "ingesting a bell for a wedged consumer: %v", err)
+		}
+	}
+	if got := wedged.pending(); got > MaxPendingFrames {
+		return failed("delivery/the-queue-is-at-its-bound",
+			"the runtime holds %d payloads after a flood of effects, want at most MaxPendingFrames (%d)", got, MaxPendingFrames)
+	}
+	if wedged.effectsLost == 0 {
+		return failed("delivery/what-the-consumer-lost-is-reported",
+			"the runtime shed effects for a consumer that never reads and counted %d of them", wedged.effectsLost)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 14. One session may not spend another session's allowance.
+//
+// AD-10's per-session fairness, over frames. The two models share ONE budget on
+// purpose: whether the allowance is per session is otherwise a sentence in a
+// comment rather than a difference a schedule can see. Paired with
+// rulePerSessionAllowance.
+// ---------------------------------------------------------------------------
+
+func scheduleOneSessionCannotSpendAnothersAllowance() error {
+	return scheduleOneSessionCannotSpendAnothersAllowanceWith(allRules(), newDeliveryBudget())
+}
+
+// scheduleOneSessionCannotSpendAnothersAllowanceWith is the schedule with the
+// RULES and the BUDGET supplied. The body is the schedule: the paired run needs
+// one budget the two sessions share while the rules differ, and a schedule
+// hard-wired to allRules() could not express that.
+func scheduleOneSessionCannotSpendAnothersAllowanceWith(rules ruleSet, budget *deliveryBudget) error {
+	// The first session runs ahead of its consumer, which reads nothing.
+	busy := newSessionModel(rules, budget, "the-busy-session")
+	busyConsumer := busy.attach()
+	for range 4 * MaxPendingFrames {
+		if err := busy.Ingest([]byte("the first session is busy\r\n")); err != nil {
+			return failed("setup/busy-session-ingest", "ingesting output on the busy session: %v", err)
+		}
+	}
+	if busyConsumer.pending() != MaxPendingFrames || busyConsumer.coalesced == 0 || !busyConsumer.stale {
+		return failed("setup/the-first-session-is-wedged",
+			"the busy session holds %d payloads, dropped %d and reads stale=%v; this schedule is about the OTHER session, so its setup failing is not its finding",
+			busyConsumer.pending(), busyConsumer.coalesced, busyConsumer.stale)
+	}
+
+	// The second session is a different terminal with a consumer of its own,
+	// reading nothing either — it is simply not the one that ran ahead.
+	other := newSessionModel(rules, budget, "the-other-session")
+	otherConsumer := other.attach()
+	for range MaxPendingFrames {
+		if err := other.Ingest([]byte("the other session is idle\r\n")); err != nil {
+			return failed("setup/other-session-ingest", "ingesting output on the other session: %v", err)
+		}
+	}
+	if otherConsumer.coalesced != 0 || otherConsumer.effectsLost != 0 || otherConsumer.stale {
+		return failed("delivery/one-session-cannot-spend-anothers-allowance",
+			"the other session lost %d coalescable and %d at-most-once payloads (stale=%v) because the busy session spent the allowance, want none: the allowance is per session",
+			otherConsumer.coalesced, otherConsumer.effectsLost, otherConsumer.stale)
+	}
+	if got := otherConsumer.pending(); got != MaxPendingFrames {
+		return failed("delivery/one-session-cannot-spend-anothers-allowance",
+			"the other session holds %d payloads, want all %d of its own", got, MaxPendingFrames)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 15. At-most-once, with a duplicate policy (design §6.2).
+//
+// Two ways one effect is delivered twice, and the class refuses both: the
+// producer offering it again, and a FULL FRAME — a snapshot, a resend, a
+// re-attachment — carrying it. Paired with ruleDuplicateEffectIsSuppressed and
+// ruleResendCarriesNoEffects.
+// ---------------------------------------------------------------------------
+
+func scheduleEffectDeliveryPolicy(m *model) error {
+	c := m.attach()
+
+	// The program writes to the clipboard, through OSC 52.
+	if err := m.Ingest([]byte("\x1b]52;c;aGVsbG8=\x07")); err != nil {
+		return failed("effect/ingest", "ingesting a clipboard write: %v", err)
+	}
+	if got := c.effects(); got != 1 {
+		return failed("effect/the-stream-produced-one-effect",
+			"the consumer holds %d at-most-once payloads after one OSC 52, want one", got)
+	}
+	observe(kindEffect, int(EffectClipboard))
+	observe(kindDelivery, int(DeliveryAtMostOnce))
+	clipboard, ok := c.newestEffect()
+	if !ok {
+		return failed("effect/the-effect-carries-its-identity",
+			"the consumer holds no effect after an OSC 52 the runtime accepted")
+	}
+	if clipboard.Kind != EffectClipboard || clipboard.ID == 0 {
+		return failed("effect/the-effect-carries-its-identity",
+			"the effect the stream produced is %+v, want a clipboard write with an identity the runtime minted", clipboard)
+	}
+
+	// The same effect offered a second time — a carrier re-delivering a chunk,
+	// a hub fanning one program's display out to two consumers that merged — is
+	// the SAME clipboard write, and must not be applied twice.
+	if err := m.deliverEffect(clipboard); err != nil {
+		return failed("effect/second-delivery",
+			"delivering an effect the consumer already holds: %v", err)
+	}
+	if got := c.effects(); got != 1 {
+		return failed("effect/a-duplicate-is-not-delivered-twice",
+			"the consumer holds %d clipboard writes after the same effect was delivered twice, want one: the identity is what makes them one effect", got)
+	}
+
+	// And a full frame is a resend of STATE: cells, never an effect. This is
+	// the half ADR-0066 states in terms — a full frame must never repeat a
+	// clipboard write or a notification.
+	before := c.pending()
+	if err := m.resendState(); err != nil {
+		return failed("effect/resend", "resending the state: %v", err)
+	}
+	if got := c.effects(); got != 1 {
+		return failed("effect/a-resend-carries-no-effect",
+			"the consumer holds %d at-most-once payloads after a resend of state, want the one it already had: a resend of state must not resend an effect", got)
+	}
+	if got := c.pending() - before; got != 1 {
+		return failed("effect/a-resend-is-one-frame",
+			"the resend handed the consumer %d payloads, want the one frame it is", got)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 16. Every effect kind the vocabulary declares is produced by the stream and
+// delivered once.
+//
+// OSC 9 and OSC 777 are two spellings of ONE kind, so this chunk produces six
+// effects of five kinds — and nothing downstream may depend on which spelling a
+// program chose.
+// ---------------------------------------------------------------------------
+
+func driveEffectKinds(m *model) error {
+	c := m.attach()
+	stream := []byte("\x07\x1b]9;build finished\x07\x1b]777;notify;nocx;done\x07" +
+		"\x1b]52;c;aGVsbG8=\x07\x1b]0;a title\x07\x1b]7;file://host/tmp\x07")
+	if err := m.Ingest(stream); err != nil {
+		return failed("effect/kind-stream", "ingesting one chunk carrying every effect kind: %v", err)
+	}
+	if got := c.effects(); got != 6 {
+		return failed("effect/every-kind-is-delivered",
+			"the consumer holds %d at-most-once payloads after a chunk carrying every kind, want 6 (six effects, five kinds)", got)
+	}
+	for _, k := range []EffectKind{EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport} {
+		observe(kindEffect, int(k))
+		if !c.holds(k) {
+			return failed("effect/every-kind-is-delivered",
+				"the consumer was handed no %s from a chunk that carried one", effectKindName(k))
+		}
+	}
+
+	// And the sequences that carry NO effect carry none: a ConEmu progress hint
+	// is the same OSC number as a notification with a payload the renderer's
+	// parser returns null for, and turning it into a message would be a
+	// delivery the program never asked for.
+	before := c.effects()
+	if err := m.Ingest([]byte("\x1b]9;4;1;50\x07\x1b]133;D;0\x07")); err != nil {
+		return failed("effect/non-effect-stream", "ingesting a progress hint and a fence: %v", err)
+	}
+	if got := c.effects(); got != before {
+		return failed("effect/a-sequence-with-no-effect-delivers-none",
+			"a progress hint and a fence produced %d at-most-once payloads, want none: an OSC arriving is not an effect arriving", got-before)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 17. Hostile captures (bead nocx-ygxjv.4, criterion 3).
+//
+// A remote program can print anything, and ADR-0065 measured what one small
+// sequence costs an emulator that does not clamp it: `CSI 1000000000 b` is
+// ~180 s and ~10⁹ allocations on x/vt — a projection from completed smaller
+// cases, which that record says out loud — while libghostty-vt clamps REP at
+// 65535.
+//
+// WHICH of those bounds applies is the EMULATOR's, and it is nocx-ygxjv.2's to
+// land: nothing here measures an emulator this model does not have. What the
+// runtime owes on its OWN account is what these three schedules assert, and
+// each owes a number rather than an adjective: one ingest call carries at most
+// MaxIngestBytes and a larger one is refused rather than truncated, an
+// unterminated sequence is held to at most MaxPendingSequence bytes with the
+// excess dropped and the loss STATED, and the work the runtime spends is linear
+// in the bytes it examined and never in a count inside them.
+//
+// Paired with ruleIngestIsBounded.
+// ---------------------------------------------------------------------------
+
+func scheduleHostileRepeatCount(m *model) error {
+	// A complete, sixteen-byte sequence asking for a billion repetitions.
+	capture := []byte("\x1b[1000000000b")
+	before := m.ingestWork
+	if err := m.Ingest(capture); err != nil {
+		return failed("hostile/repeat-is-accepted",
+			"ingesting a %d-byte sequence inside the ingest bound: %v", len(capture), err)
+	}
+	if spent := m.ingestWork - before; spent > MaxIngestBytes {
+		return failed("hostile/repeat-costs-the-bytes-it-carries",
+			"the runtime spent %d work units on a %d-byte repeat sequence, want no more than MaxIngestBytes (%d): the count inside it is the emulator's work, and clamping it is nocx-ygxjv.2's",
+			spent, len(capture), MaxIngestBytes)
+	}
+	if got := len(m.pending); got != 0 {
+		return failed("hostile/repeat-leaves-nothing-open",
+			"the runtime is holding %d bytes after a sequence that terminates: %q", got, m.pending)
+	}
+	if got := m.Completeness(); got != CompletenessComplete {
+		return failed("hostile/repeat-loses-nothing",
+			"completeness is %s after a sequence the runtime accepted whole, want complete", completenessName(got))
+	}
+	return nil
+}
+
+func scheduleHostileUnterminatedOSC(m *model) error {
+	// An OSC that opens and never terminates. A program can do this by accident
+	// — a title with a stray byte — or deliberately, as a denial of service
+	// aimed at the runtime's memory.
+	body := bytes.Repeat([]byte("A"), 4*MaxPendingSequence)
+	capture := append([]byte("\x1b]0;"), body...)
+	before := m.ingestWork
+	if err := m.Ingest(capture); err != nil {
+		return failed("hostile/unterminated-osc-is-accepted",
+			"ingesting %d bytes of an unterminated OSC, inside the ingest bound: %v", len(capture), err)
+	}
+	if got := len(m.pending); got > MaxPendingSequence {
+		return failed("hostile/unterminated-osc-is-bounded",
+			"the runtime holds %d bytes of a sequence that never terminates, want at most MaxPendingSequence (%d)", got, MaxPendingSequence)
+	}
+	if spent := m.ingestWork - before; spent > MaxIngestBytes {
+		return failed("hostile/unterminated-osc-costs-the-bytes-it-carries",
+			"the runtime spent %d work units on %d bytes of output, want no more than MaxIngestBytes (%d)", spent, len(capture), MaxIngestBytes)
+	}
+	if m.ingestLost == 0 {
+		return failed("hostile/the-dropped-sequence-is-reported",
+			"the runtime holds %d bytes of an unterminated sequence and counted no loss, want the %d bytes it discarded reported",
+			len(m.pending), len(capture)-len(m.pending))
+	}
+	if got := m.Completeness(); got != CompletenessLostIngest {
+		return failed("hostile/the-dropped-sequence-is-reported",
+			"completeness is %s after the ingest discarded bytes, want lost-ingest: an attaching client must be told, not handed a screen that looks whole (design §6.7)", completenessName(got))
+	}
+	observe(kindCompleteness, int(CompletenessLostIngest))
+	return nil
+}
+
+func scheduleHostileOversizedDCS(m *model) error {
+	// A DCS larger than any bound the runtime states, in ONE call. It is
+	// refused, and a refusal changes nothing — not the clock, not the sequence
+	// held, not the work charged.
+	oversized := append([]byte("\x1bP"), bytes.Repeat([]byte("D"), MaxIngestBytes)...)
+	before := fingerprintOf(m)
+	if err := m.Ingest(oversized); !errors.Is(err, ErrIngestTooLarge) {
+		return failed("hostile/an-oversized-ingest-is-refused",
+			"Ingest of %d bytes returned %v, want %v", len(oversized), err, ErrIngestTooLarge)
+	}
+	if d := before.diff(fingerprintOf(m)); d != "" {
+		return failed("hostile/an-oversized-ingest-changes-nothing",
+			"a refused ingest changed the runtime (%s); an event the vocabulary refuses must change no state", d)
+	}
+
+	// Delivered in calls the runtime does take, the same sequence is still
+	// bounded: the excess of the unterminated one is dropped, and reported.
+	for range 4 {
+		chunk := append([]byte("\x1bP"), bytes.Repeat([]byte("D"), MaxPendingSequence)...)
+		if err := m.Ingest(chunk); err != nil {
+			return failed("hostile/chunked-dcs-is-accepted", "ingesting one DCS chunk: %v", err)
+		}
+	}
+	if got := len(m.pending); got > MaxPendingSequence {
+		return failed("hostile/oversized-dcs-is-bounded",
+			"the runtime holds %d bytes of an unterminated DCS, want at most MaxPendingSequence (%d)", got, MaxPendingSequence)
+	}
+	if m.ingestLost == 0 {
+		return failed("hostile/oversized-dcs-is-bounded",
+			"the runtime discarded the excess of an oversized DCS and counted none of it")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // The pairs. Every schedule above runs once with every rule on, where it must
 // pass, and once with exactly one rule removed, where a NAMED assertion must
 // fail. The second run is the acceptance criterion: a rule that cannot be
@@ -1075,6 +1502,134 @@ func TestRuntimeFailureRevokesAndDoesNotAdopt_FailsWhenItsRuleIsRemoved(t *testi
 	assertionFailed(t, err, "failure/cancels-admitted-input")
 }
 
+// --- the delivery rules (bead nocx-ygxjv.4) --------------------------------
+
+func TestSchedule_ConsumerThatNeverReads(t *testing.T) {
+	if err := scheduleConsumerThatNeverReads(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_ConsumerThatNeverReads_FailsWhenItsQueueRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatNeverReads(newModel(without(ruleConsumerQueueIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleConsumerQueueIsBounded])
+	}
+	assertionFailed(t, err, "delivery/the-queue-is-at-its-bound")
+}
+
+func TestSchedule_ConsumerThatNeverReads_FailsWhenItsReportingRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatNeverReads(newModel(without(ruleConsumerLossIsReported)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleConsumerLossIsReported])
+	}
+	assertionFailed(t, err, "delivery/what-the-consumer-lost-is-reported")
+}
+
+func TestSchedule_ConsumerThatNeverReads_FailsWhenItsLosslessRuleIsRemoved(t *testing.T) {
+	err := scheduleConsumerThatNeverReads(newModel(without(ruleLosslessIngestSurvivesASlowConsumer)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleLosslessIngestSurvivesASlowConsumer])
+	}
+	assertionFailed(t, err, "delivery/a-wedged-consumer-costs-no-ingest")
+}
+
+func TestSchedule_OneSessionCannotSpendAnothersAllowance(t *testing.T) {
+	if err := scheduleOneSessionCannotSpendAnothersAllowance(); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_OneSessionCannotSpendAnothersAllowance_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleOneSessionCannotSpendAnothersAllowanceWith(without(rulePerSessionAllowance), newDeliveryBudget())
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[rulePerSessionAllowance])
+	}
+	assertionFailed(t, err, "delivery/one-session-cannot-spend-anothers-allowance")
+}
+
+func TestSchedule_EffectDeliveryPolicy(t *testing.T) {
+	if err := scheduleEffectDeliveryPolicy(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_EffectDeliveryPolicy_FailsWhenItsDuplicateRuleIsRemoved(t *testing.T) {
+	err := scheduleEffectDeliveryPolicy(newModel(without(ruleDuplicateEffectIsSuppressed)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleDuplicateEffectIsSuppressed])
+	}
+	assertionFailed(t, err, "effect/a-duplicate-is-not-delivered-twice")
+}
+
+func TestSchedule_EffectDeliveryPolicy_FailsWhenItsResendRuleIsRemoved(t *testing.T) {
+	err := scheduleEffectDeliveryPolicy(newModel(without(ruleResendCarriesNoEffects)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleResendCarriesNoEffects])
+	}
+	assertionFailed(t, err, "effect/a-resend-carries-no-effect")
+}
+
+func TestSchedule_HostileRepeatCount(t *testing.T) {
+	if err := scheduleHostileRepeatCount(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_HostileRepeatCount_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleHostileRepeatCount(newModel(without(ruleIngestIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleIngestIsBounded])
+	}
+	assertionFailed(t, err, "hostile/repeat-costs-the-bytes-it-carries")
+}
+
+func TestSchedule_HostileUnterminatedOSC(t *testing.T) {
+	if err := scheduleHostileUnterminatedOSC(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_HostileUnterminatedOSC_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleHostileUnterminatedOSC(newModel(without(ruleIngestIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleIngestIsBounded])
+	}
+	assertionFailed(t, err, "hostile/unterminated-osc-is-bounded")
+}
+
+func TestSchedule_HostileOversizedDCS(t *testing.T) {
+	if err := scheduleHostileOversizedDCS(newModel(allRules())); err != nil {
+		t.Fatalf("with every rule on the schedule must pass: %v", err)
+	}
+}
+
+func TestSchedule_HostileOversizedDCS_FailsWhenItsRuleIsRemoved(t *testing.T) {
+	err := scheduleHostileOversizedDCS(newModel(without(ruleIngestIsBounded)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleIngestIsBounded])
+	}
+	assertionFailed(t, err, "hostile/an-oversized-ingest-is-refused")
+}
+
+// Every payload belongs to exactly one class, and WHICH class an effect kind
+// belongs to is decided in one place, exhaustively. A kind added to contract.go
+// without being named there falls to DeliveryUnclassified, is refused by the
+// delivery path, and fails here — which is what makes the sentence in
+// contract.go a check rather than a claim.
+func TestEveryEffectKindBelongsToTheAtMostOnceClass(t *testing.T) {
+	for k := EffectBell; k <= EffectCwdReport; k++ {
+		if got := classOfEffect(k); got != DeliveryAtMostOnce {
+			t.Errorf("%s classifies as %s, want at-most-once: every effect kind the vocabulary declares changes no cell and must not be applied twice",
+				effectKindName(k), deliveryClassName(got))
+		}
+	}
+	if got := classOfEffect(EffectNone); got != DeliveryUnclassified {
+		t.Errorf("the zero effect kind classifies as %s, want unclassified: it names no effect, so it is not a payload any class covers",
+			deliveryClassName(got))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The errors the vocabulary declares, each produced and each shown to change
 // nothing. An event the runtime refuses is a transition that does not happen,
@@ -1207,6 +1762,30 @@ func invalidEvents() []invalidEvent {
 				return mustBeUnchanged(m, before, "invalid/expiry-without-a-rendezvous-changes-nothing")
 			},
 		},
+		{
+			name: "Delivering a payload whose class nobody decided",
+			drive: func(m *model) error {
+				// The zero value of DeliveryClass is not a class: a payload
+				// carrying it is refused rather than delivered as though the
+				// zero value were a policy. This is the direction that makes
+				// "every payload belongs to exactly one class" a promise.
+				c := m.attach()
+				before := fingerprintOf(m)
+				err := m.deliverEffect(Effect{ID: 1, At: m.Incarnation(), Kind: EffectNone})
+				if !errors.Is(err, ErrUnclassifiedDelivery) {
+					return failed("invalid/unclassified-delivery-refused",
+						"delivering an effect of kind %s returned %v, want %v", effectKindName(EffectNone), err, ErrUnclassifiedDelivery)
+				}
+				if err := mustBeUnchanged(m, before, "invalid/unclassified-delivery-changes-nothing"); err != nil {
+					return err
+				}
+				if got := c.effects(); got != 0 {
+					return failed("invalid/unclassified-delivery-changes-nothing",
+						"a refused payload left the consumer holding %d of them", got)
+				}
+				return nil
+			},
+		},
 	}
 }
 
@@ -1320,6 +1899,14 @@ func principalWalk(k PrincipalKind, unreachable string) stateWalk {
 	return stateWalk{name: "principal " + principalName(k), kind: kindPrincipal, value: int(k), unreachable: unreachable}
 }
 
+func deliveryWalk(c DeliveryClass, unreachable string) stateWalk {
+	return stateWalk{name: "delivery class " + deliveryClassName(c), kind: kindDelivery, value: int(c), unreachable: unreachable}
+}
+
+func effectWalk(k EffectKind, unreachable string) stateWalk {
+	return stateWalk{name: "effect " + effectKindName(k), kind: kindEffect, value: int(k), unreachable: unreachable}
+}
+
 func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 	// The schedules are the evidence, so this test drives them itself rather
 	// than trusting whatever ran before it.
@@ -1327,21 +1914,31 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 
 	for _, s := range []struct {
 		name  string
-		sched func(*model) error
+		sched func() error
 	}{
-		{"FenceAuthenticatedFirst", scheduleFenceAuthenticatedFirst},
-		{"FenceSightedFirst", scheduleFenceSightedFirst},
-		{"FenceSightedFirstSurvivesScreenTrim", scheduleFenceSightedFirstSurvivesScreenTrim},
-		{"TakeoverWithInputQueued", scheduleTakeoverWithInputQueued},
-		{"DisconnectAfterAdmission", scheduleDisconnectAfterAdmission},
-		{"ResizeDuringOutput", scheduleResizeDuringOutput},
-		{"ObserverResync", scheduleObserverResync},
-		{"KeyEncodedAgainstModes", scheduleKeyEncodedAgainstModes},
-		{"RendezvousExpiresUnjoined", scheduleRendezvousExpiresUnjoined},
-		{"PreconditionStaleAtExecution", schedulePreconditionStaleAtExecution},
-		{"RuntimeFailure", scheduleRuntimeFailure},
+		{"FenceAuthenticatedFirst", func() error { return scheduleFenceAuthenticatedFirst(newModel(allRules())) }},
+		{"FenceSightedFirst", func() error { return scheduleFenceSightedFirst(newModel(allRules())) }},
+		{"FenceSightedFirstSurvivesScreenTrim", func() error { return scheduleFenceSightedFirstSurvivesScreenTrim(newModel(allRules())) }},
+		{"TakeoverWithInputQueued", func() error { return scheduleTakeoverWithInputQueued(newModel(allRules())) }},
+		{"DisconnectAfterAdmission", func() error { return scheduleDisconnectAfterAdmission(newModel(allRules())) }},
+		{"ResizeDuringOutput", func() error { return scheduleResizeDuringOutput(newModel(allRules())) }},
+		{"ObserverResync", func() error { return scheduleObserverResync(newModel(allRules())) }},
+		{"KeyEncodedAgainstModes", func() error { return scheduleKeyEncodedAgainstModes(newModel(allRules())) }},
+		{"RendezvousExpiresUnjoined", func() error { return scheduleRendezvousExpiresUnjoined(newModel(allRules())) }},
+		{"PreconditionStaleAtExecution", func() error { return schedulePreconditionStaleAtExecution(newModel(allRules())) }},
+		{"RuntimeFailure", func() error { return scheduleRuntimeFailure(newModel(allRules())) }},
+
+		// The delivery schedules (bead nocx-ygxjv.4). The fairness one builds
+		// its own two sessions and one shared budget, which is why this list
+		// takes closures rather than models.
+		{"ConsumerThatNeverReads", func() error { return scheduleConsumerThatNeverReads(newModel(allRules())) }},
+		{"OneSessionCannotSpendAnothersAllowance", scheduleOneSessionCannotSpendAnothersAllowance},
+		{"EffectDeliveryPolicy", func() error { return scheduleEffectDeliveryPolicy(newModel(allRules())) }},
+		{"HostileRepeatCount", func() error { return scheduleHostileRepeatCount(newModel(allRules())) }},
+		{"HostileUnterminatedOSC", func() error { return scheduleHostileUnterminatedOSC(newModel(allRules())) }},
+		{"HostileOversizedDCS", func() error { return scheduleHostileOversizedDCS(newModel(allRules())) }},
 	} {
-		if err := s.sched(newModel(allRules())); err != nil {
+		if err := s.sched(); err != nil {
 			t.Fatalf("schedule %s must pass with every rule on, or the states it reaches are not evidence: %v", s.name, err)
 		}
 	}
@@ -1352,6 +1949,9 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 	}
 	if err := driveReportHole(newModel(allRules())); err != nil {
 		t.Fatalf("reporting a hole, or the states it passes through are not evidence: %v", err)
+	}
+	if err := driveEffectKinds(newModel(allRules())); err != nil {
+		t.Fatalf("delivering every effect kind, or the states it passes through are not evidence: %v", err)
 	}
 
 	walk := []stateWalk{
@@ -1381,6 +1981,18 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		principalWalk(PrincipalNone, ""),
 		principalWalk(PrincipalPerson, ""),
 		principalWalk(PrincipalAgent, ""),
+
+		deliveryWalk(DeliveryUnclassified, "the zero value, and NOT a class: a payload nobody classified is REFUSED rather than delivered as though the zero value were a policy, and the refusal is asserted in the invalid-event table — which is why no schedule observes it as a delivery"),
+		deliveryWalk(DeliveryLossless, ""),
+		deliveryWalk(DeliveryCoalescable, ""),
+		deliveryWalk(DeliveryAtMostOnce, ""),
+
+		effectWalk(EffectNone, "the zero value: an OSC number that carries no effect — a fence, a progress hint — yields NO effect rather than one of this kind, so nothing produces it"),
+		effectWalk(EffectBell, ""),
+		effectWalk(EffectNotification, ""),
+		effectWalk(EffectClipboard, ""),
+		effectWalk(EffectTitle, ""),
+		effectWalk(EffectCwdReport, ""),
 	}
 
 	next := map[string]int{}

@@ -302,6 +302,151 @@ const (
 )
 
 // ---------------------------------------------------------------------------
+// 8. Delivery: three classes, and the bounds that make them keepable
+// ---------------------------------------------------------------------------
+
+// DeliveryClass is what a consumer may do with one payload, and the PRODUCER
+// decides it — the runtime classifies what it emits, so that a consumer reading
+// a gap never has to guess whether it missed a frame that was coalesced or a
+// byte that was dropped.
+//
+// Three classes, exhaustive, and every payload belongs to exactly one. That is
+// the only form of AD-10's promise that can be kept: "lossless and ordered"
+// described raw PTY bytes, the emulator moved to the backend (ADR-0066), and
+// the data plane now carries FRAMES outbound and effects beside them. So the
+// statement splits, per class:
+//
+//   - [DeliveryLossless] — the payloads that must never be lost, in order: the
+//     output the runtime INGESTS into the emulator, and the ledger. Losing a
+//     byte here is losing what the program said, so no bound licenses
+//     discarding one: the way to keep the promise is to throttle the SOURCE
+//     (AD-10's credit, which is the carrier's and the helper's), never to drop.
+//   - [DeliveryCoalescable] — what FRAMES are. An intermediate visual state
+//     nobody was shown is explicitly LOSSY, because that is what frame-rate
+//     coalescing IS: the consumer is shown a later revision of the same cells
+//     instead of every revision that existed. Calling this class lossless
+//     would be a promise the design cannot keep, so it is not called that, and
+//     the loss is REPORTED to the consumer rather than discovered by it.
+//   - [DeliveryAtMostOnce] — the payloads that change no cell: a bell, a
+//     notification request, an OSC 52 clipboard write, a title, a cwd report
+//     (design §6.2). Each carries an [EffectID], and the duplicate policy is
+//     stated over that identity: a consumer that has already been given an
+//     effect with that identity is not given it again, and a FULL FRAME — a
+//     snapshot, a resend, a re-attachment — carries cells and never an effect.
+//     A resend of state must not resend an effect.
+//
+// [DeliveryUnclassified] is the zero value and is NOT a class: a payload whose
+// class nobody decided is one the runtime refuses ([ErrUnclassifiedDelivery])
+// rather than one it delivers as though the zero value were a policy.
+type DeliveryClass int
+
+const (
+	// DeliveryUnclassified is the absence of a classification, and nothing may
+	// be delivered carrying it.
+	DeliveryUnclassified DeliveryClass = iota
+	// DeliveryLossless is a payload that must never be lost, in order: the
+	// output ingested into the emulator, and the ledger.
+	DeliveryLossless
+	// DeliveryCoalescable is a payload a later one supersedes: a frame whose
+	// cells have been redrawn does not have to reach the consumer, and what
+	// the consumer lost is reported to it.
+	DeliveryCoalescable
+	// DeliveryAtMostOnce is a payload that changes no cell and must not be
+	// applied twice: a bell, a notification request, a clipboard write, a
+	// title, a cwd report.
+	DeliveryAtMostOnce
+)
+
+// EffectKind is which non-visual effect a program asked for, in the spellings
+// the renderer handles today (frontend/src/renderers/xterm.ts): BEL for a bell,
+// OSC 9 and OSC 777 for one notification request (two spellings of one thing,
+// so nothing downstream may depend on which was sent), OSC 52 for a clipboard
+// write, OSC 0 and OSC 2 for a title, OSC 7 for a cwd report.
+//
+// A fence is deliberately NOT here. OSC 133/1337 ride the rendezvous above,
+// which is a meeting of two authenticated halves and not a delivery; a program
+// printing a forged one must not be able to close a block or choose a capture
+// endpoint (ADR-0024 decision 1).
+type EffectKind int
+
+const (
+	// EffectNone is the zero value and names no effect: an OSC number that
+	// carries none — a fence, a progress hint — yields no effect at all rather
+	// than one of this kind.
+	EffectNone EffectKind = iota
+	// EffectBell is BEL.
+	EffectBell
+	// EffectNotification is OSC 9 or OSC 777: the program asked nocx to
+	// present a message (ADR-0047). It is a REQUEST, never a grant — what the
+	// router does with it is internal/notify's and nothing here widens it.
+	EffectNotification
+	// EffectClipboard is OSC 52: the program asked for its payload to be put
+	// on the clipboard. Decoding it is the surface's; delivering it once is
+	// this contract's.
+	EffectClipboard
+	// EffectTitle is OSC 0 or OSC 2.
+	EffectTitle
+	// EffectCwdReport is OSC 7.
+	EffectCwdReport
+)
+
+// EffectID identifies one effect for as long as its incarnation lives. The
+// runtime mints it when the program's output produced the effect — not the
+// consumer, and not the client, because an identity a consumer could choose is
+// an identity it could choose twice.
+type EffectID uint64
+
+// Effect is one non-visual effect with the identity its duplicate policy is
+// stated over: two deliveries carrying the same [EffectID] are the same bell,
+// the same clipboard write, the same notification request, and the second one
+// is not applied again. Identity is the whole of what makes that implementable
+// — without it, "sent twice" and "two identical bells" are the same bytes.
+type Effect struct {
+	ID   EffectID
+	At   Incarnation
+	Kind EffectKind
+	// Body is the effect's argument: the notification text, the clipboard
+	// payload, the title, the reported directory. It is untrusted bytes from
+	// whatever the user ran, and nothing here interprets them.
+	Body []byte
+}
+
+// The bounds. Each is a NUMBER rather than a policy statement, so that
+// "bounded" is a claim somebody can check, and each belongs to the runtime
+// rather than to the emulator it feeds — the emulator's own bounds are the
+// emulator's and are named where the choice of emulator is (ADR-0065,
+// nocx-ygxjv.2).
+const (
+	// MaxIngestBytes is the most output one ingest call carries. A larger call
+	// is REFUSED ([ErrIngestTooLarge]) and changes nothing, rather than
+	// silently truncated: the class stays lossless because nothing was taken
+	// and then discarded — the bytes are still the CALLER's, and the caller is
+	// the carrier, whose obligation is then to hand them over again in windows
+	// of at most this (its own reads are bounded by the credit AD-10 gives it —
+	// internal/transport/ring.go's CreditLimit, 64 KiB per subscriber, which is
+	// what this number's order matches and not what it decides: that one bounds
+	// transport buffering for a reader, this one bounds the work the runtime
+	// does on its own account in one call). A call this large therefore means a
+	// caller that has stopped honoring its own window, and the runtime says so
+	// instead of doing unbounded work on its account.
+	MaxIngestBytes = 64 << 10
+	// MaxPendingSequence is the most of an UNTERMINATED escape sequence the
+	// runtime holds. A remote program can open an OSC or a DCS and never close
+	// it; the bytes past this bound are the oldest of that sequence and are
+	// discarded, with the loss reported (Design §6.7: an emulator fed a
+	// partial stream is not authoritative, and the attach must say so).
+	MaxPendingSequence = 4 << 10
+	// MaxPendingFrames is the most payloads one session's consumer queue may
+	// hold. Past it the runtime coalesces — the oldest coalescable payload
+	// goes, its loss is reported to the consumer — and it never grows, because
+	// the consumer is whoever is reading or not reading the session's screen.
+	// The allowance is PER SESSION and is never transferable: one session
+	// reading slowly must not spend another session's, which is what per-session
+	// fairness in AD-10 means over frames.
+	MaxPendingFrames = 8
+)
+
+// ---------------------------------------------------------------------------
 // The interface an implementation must satisfy
 // ---------------------------------------------------------------------------
 
@@ -427,4 +572,12 @@ var (
 	ErrNoRendezvous = errors.New("sessionruntime: no rendezvous is in flight")
 	// ErrGeometryInvalid names a size no terminal can run at.
 	ErrGeometryInvalid = errors.New("sessionruntime: geometry is not valid")
+	// ErrIngestTooLarge is one ingest call over [MaxIngestBytes]. It is a
+	// REFUSAL and not a truncation: nothing was ingested, and the caller knows.
+	ErrIngestTooLarge = errors.New("sessionruntime: the ingest call is larger than the runtime will take")
+	// ErrUnclassifiedDelivery names a payload whose [DeliveryClass] nobody
+	// decided — the class no payload belongs to. The runtime refuses it rather
+	// than inventing a policy for it, which is what makes "every payload
+	// belongs to exactly one class" a promise instead of a habit.
+	ErrUnclassifiedDelivery = errors.New("sessionruntime: the payload has no delivery class")
 )

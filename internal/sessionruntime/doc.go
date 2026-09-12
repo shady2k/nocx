@@ -10,11 +10,37 @@
 // implementation, and the contract exists so that it cannot choose the model by
 // accident, the way internal/lifecycle's kernel exists ahead of its transports.
 //
-// The MODEL — a reference implementation of [Runtime] with no I/O — and the
-// SCHEDULES that judge it live in this package's _test.go files. When the real
-// runtime arrives it implements the same interface and the same schedules run
-// against it, which is the only way the contract can be evidence about the
-// product rather than about itself.
+// The MODEL — a reference implementation of [Runtime] over the test's own
+// terminal, emulator and consumers, with no I/O behind any of them — and the
+// SCHEDULES that judge it live in this package's _test.go files. Every schedule
+// takes a [Runtime] and nothing else, and what it observes it observes through
+// the interface: the transitions it drives, the snapshot and the records the
+// interface answers with ([Runtime.Intents], [Runtime.ReportedGeometry],
+// [Runtime.IngestState]), and the instruments the runtime was constructed over
+// ([Runtime.Terminal], [Runtime.Emulator], [Runtime.Consumers]) — which a
+// schedule reads through the CONTRACT's instrument types
+// ([TerminalInstrument], [EmulatorInstrument]) rather than through any one
+// implementation's fixtures. So the same schedules run against the real runtime
+// when it arrives — provided it is CONSTRUCTED over instruments, which is what
+// those two types are for — and that is the only way the contract can be
+// evidence about the product rather than about itself.
+//
+// The construction is the HARNESS's and not an obligation on the ports. The
+// instrument capabilities are optional by design — a shipped runtime implements
+// [Terminal] and [Emulator] and nothing more — and a real runtime satisfies the
+// schedules that read the boundary by being built over instruments in its own
+// tests: a terminal and an emulator that record what they were handed and can
+// be told to refuse, wrapped around the real ones. The record is the wrapper's;
+// no shipped adapter keeps a log of the keystrokes it forwards, and no shipped
+// emulator refuses a size because a test said so. Every schedule that does not
+// read the boundary is satisfied by the ports alone.
+//
+// One thing in those files is the model's and NOT the contract's: the removable
+// rule set ([without] in model_test.go). Removing a rule is how the MODEL is
+// shown to be falsifiable — a shortcut it could have taken — and a real runtime
+// has no rules to switch off. The assertion a removal makes fail is a statement
+// about the contract and holds for any implementation; which rule's removal
+// fires which assertion is a statement about the model alone.
 //
 // # Why the vocabulary is production and the model is not
 //

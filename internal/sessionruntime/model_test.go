@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -37,8 +38,10 @@ const (
 	// rulePinSource: the content a fence was sighted over is pinned until the
 	// rendezvous leaves its pending states, so later output cannot destroy it.
 	rulePinSource
-	// ruleAtomicGeometry: a commit that fails on either the PTY or the emulator
-	// commits on neither, and the previous commit stands.
+	// ruleAtomicGeometry: the COMMIT opens on both sides or on neither, and no
+	// side is left at a size nobody committed. A resize has an effect outside
+	// the two calls — the program receives SIGWINCH — so the rule cannot be,
+	// and is not, "neither side was touched"; see GeometryCommit in contract.go.
 	ruleAtomicGeometry
 	// ruleSnapshotIsPassive: taking a snapshot mutates nothing.
 	ruleSnapshotIsPassive
@@ -143,20 +146,23 @@ type model struct {
 
 	control Control
 
-	queue    []IntentID
-	intents  map[IntentID]*modelIntent
-	nextID   IntentID
-	executed [][]byte // what reached the "PTY", in order
+	queue   []IntentID
+	intents map[IntentID]*modelIntent
+	nextID  IntentID
+
+	// pty and emulator are the INSTRUMENTS this model was constructed over.
+	// They are held as the contract's ports and not as their concrete types,
+	// because that is what a real runtime does with the real ones: input is
+	// written to a terminal and a commit is asked of both sides, and the model
+	// has no private copy of either. What reached the PTY is therefore the
+	// terminal's record and not a field here (contract.go, Terminal).
+	pty      Terminal
+	emulator Emulator
 
 	geom GeometryCommit
 	// reportedGeom is the last thing a client said it could show. The runtime
 	// decides; this is only evidence for that decision.
 	reportedGeom Geometry
-	// ptyRefusesResize / emulatorRefusesResize are the injectable halves of a
-	// geometry commit. A real runtime has a channel and an emulator; the model
-	// has two booleans, which is enough to state the atomicity rule.
-	ptyRefusesResize      bool
-	emulatorRefusesResize bool
 
 	screen []byte
 	// applicationCursorKeys is the one mode the model carries. It is enough to
@@ -200,10 +206,32 @@ type model struct {
 	ingestLost uint64
 }
 
-var _ Runtime = (*model)(nil)
+var (
+	_ Runtime             = (*model)(nil)
+	_ Consumers           = (*model)(nil)
+	_ AuthenticatedEvents = (*model)(nil)
+	_ Consumer            = (*consumer)(nil)
+	_ Terminal            = (*ptySink)(nil)
+	_ TerminalInstrument  = (*ptySink)(nil)
+	_ Emulator            = (*emulatorSink)(nil)
+	_ EmulatorInstrument  = (*emulatorSink)(nil)
+)
 
 func newModel(rules ruleSet) *model {
 	return newModelWithBudget(rules, newDeliveryBudget())
+}
+
+// newUnestablishedModel is the model as a real runtime BEGINS: completeness
+// UNKNOWN, where the write gate refuses every write until something establishes
+// that the runtime holds the whole stream. The ordinary constructor has no
+// attach step to establish anything from, and the producer of that state is a
+// real runtime's (nocx-ygxjv.2) — so the state a runtime STARTS in is built
+// here rather than switched on by a schedule through the contract, which would
+// have been an instrumentation of the model wearing the contract's name.
+func newUnestablishedModel(rules ruleSet) *model {
+	m := newModel(rules)
+	m.completeness = CompletenessUnknown
+	return m
 }
 
 // newModelWithBudget is newModel with the delivery allowance SUPPLIED, which is
@@ -219,6 +247,12 @@ func newModelWithBudget(rules ruleSet, budget *deliveryBudget) *model {
 		geom:         GeometryCommit{Geometry: Geometry{Cols: 80, Rows: 24}, Revision: 1},
 		completeness: CompletenessComplete,
 		budget:       budget,
+		// The instruments the test owns. A real runtime is constructed over a
+		// real terminal and a real emulator at the composition root; this is
+		// the same arrangement with nothing behind either port, which is what
+		// makes "no I/O" true of the model rather than merely claimed.
+		pty:      newPtySink(),
+		emulator: newEmulatorSink(),
 	}
 }
 
@@ -241,6 +275,42 @@ func (m *model) Control() Control           { return m.control }
 func (m *model) Geometry() GeometryCommit   { return m.geom }
 func (m *model) Rendezvous() Rendezvous     { return m.rendezvous }
 func (m *model) Completeness() Completeness { return m.completeness }
+func (m *model) Terminal() Terminal         { return m.pty }
+func (m *model) Emulator() Emulator         { return m.emulator }
+
+// AuthenticatedEvents is the model itself: it collects the completion and does
+// nothing else with it, which is all the runtime is allowed to do (ADR-0024
+// decision 1 — a sighted marker LOCATES an authenticated event and never
+// authorises one).
+func (m *model) AuthenticatedEvents() AuthenticatedEvents { return m }
+
+// Consumers is the model ITSELF, which is the least that can be said: the
+// delivery side has four methods and the model is already the thing that holds
+// the queues, the budget and the last effect. The interface is what keeps a
+// schedule from reaching any of that except through these four (contract.go).
+func (m *model) Consumers() Consumers { return m }
+
+// Intents is the admission record in the order ids were minted. Ids are minted
+// sequentially, so this is deterministic without walking a map.
+func (m *model) Intents() []IntentRecord {
+	out := make([]IntentRecord, 0, len(m.intents))
+	for id := IntentID(1); id <= m.nextID; id++ {
+		if mi, ok := m.intents[id]; ok {
+			out = append(out, IntentRecord{ID: id, State: mi.state})
+		}
+	}
+	return out
+}
+
+func (m *model) ReportedGeometry() Geometry { return m.reportedGeom }
+
+func (m *model) IngestState() IngestState {
+	return IngestState{
+		Pending: append([]byte(nil), m.pending...),
+		Work:    m.ingestWork,
+		Lost:    m.ingestLost,
+	}
+}
 
 func (m *model) live() error {
 	if m.avail != AvailabilityAvailable {
@@ -367,7 +437,17 @@ func (m *model) Execute() (IntentID, IntentState, error) {
 		}
 	}
 
-	m.executed = append(m.executed, m.encode(mi.intent))
+	// The bytes reach the program through the terminal this runtime was
+	// constructed over, and nowhere else: what a schedule reads as "what
+	// reached the PTY" is that terminal's record, so nothing here keeps a
+	// second copy of it. A write that fails is reported as FAILED and never as
+	// executed — nobody may say the bytes landed — and never as cancelled
+	// either, because a write can fail part-way and the bytes it did take are
+	// beyond recall. That is the whole reason IntentStateFailed exists.
+	if _, err := m.pty.Write(m.encode(mi.intent)); err != nil {
+		mi.state = IntentStateFailed
+		return id, mi.state, err
+	}
 	mi.state = IntentStateExecuted
 	m.tick()
 	return id, mi.state, nil
@@ -426,22 +506,36 @@ func (m *model) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		return m.geom, ErrGeometryInvalid
 	}
 	if m.rules.on(ruleAtomicGeometry) {
-		// Both sides are asked BEFORE either is recorded. The interval this
-		// field describes opens when both accepted and closes when the next
-		// commit replaces it, so a refusal leaves the session describing what
-		// it is still running at.
-		if m.ptyRefusesResize || m.emulatorRefusesResize {
-			return m.geom, errors.New("sessionruntime: resize refused")
+		// Both sides are asked BEFORE the commit opens, and the rule is about
+		// the COMMIT and not about the two calls: a resize has an effect
+		// outside them — the terminal is resized and the program receives
+		// SIGWINCH — and a signal already delivered cannot be recalled. What a
+		// terminal can honour, and all it can, is that no side is left at a
+		// size nobody committed: the commit in force stands, and the side that
+		// took the refused size is put back to it.
+		if err := m.pty.Resize(g); err != nil {
+			return m.geom, err
+		}
+		if err := m.emulator.Resize(g); err != nil {
+			// The terminal already took a size that is not going to be
+			// committed. Put it back, so what is running and what the session
+			// describes are one size and not two.
+			if restoreErr := m.pty.Resize(m.geom.Geometry); restoreErr != nil {
+				return m.geom, errors.Join(err, restoreErr)
+			}
+			return m.geom, err
 		}
 	} else {
-		// The defect: the PTY is changed, then the emulator, and a failure in
-		// between leaves two sizes in the system.
-		if m.ptyRefusesResize {
-			return m.geom, errors.New("sessionruntime: resize refused")
+		// The defect, stated as code: the terminal is resized and the commit
+		// recorded, and only then is the emulator asked. A refusal in between
+		// leaves the two running at different sizes with nothing that puts
+		// them back, while the session describes the size one of them took.
+		if err := m.pty.Resize(g); err != nil {
+			return m.geom, err
 		}
 		m.geom = GeometryCommit{Geometry: g, Revision: m.tick()}
-		if m.emulatorRefusesResize {
-			return m.geom, errors.New("sessionruntime: resize refused")
+		if err := m.emulator.Resize(g); err != nil {
+			return m.geom, err
 		}
 		return m.geom, nil
 	}
@@ -712,16 +806,104 @@ func (m *model) ReportHole(lost uint64) error {
 	return nil
 }
 
-// establishNothing puts the runtime in the state a real one starts in, before
-// it has established anything: completeness UNKNOWN, where the write gate
-// (ruleUnknownCompletenessRefusesWrites) refuses everything. The model is
-// CONSTRUCTED complete because it has no attach step to establish anything
-// from — a real runtime's producer is nocx-ygxjv.2's — so this is that missing
-// producer, named here rather than written as a bare field by whichever
-// schedule happened to need it.
-func (m *model) establishNothing() {
-	m.completeness = CompletenessUnknown
+// ---------------------------------------------------------------------------
+// The instruments the model is built over.
+//
+// These are the TEST's, and the model reaches them only through the contract's
+// ports (contract.go, Terminal and Emulator). They exist because three things a
+// schedule must see are invisible from the runtime's own account — the bytes
+// that reached the program, whether a resize failed, and (for a consumer) what
+// it was told — and reading them here is reading them where they are true
+// rather than reading the model's private copy of them.
+//
+// They implement the contract's TerminalInstrument and EmulatorInstrument
+// (contract.go) — the reading half a schedule judges the boundary through, and
+// the refusal a real tty only performs when it actually refuses a size. In a
+// real runtime's tests the same two capabilities arrive as a wrapper in front
+// of the real tty and the real emulator, which is why the interfaces and not
+// these structs are what a schedule names.
+// ---------------------------------------------------------------------------
+
+// ptySink is the terminal the model is constructed over: it records what it was
+// handed and it can be told to refuse a resize, which is the only way to make
+// one side of a geometry commit fail without a real terminal.
+type ptySink struct {
+	writes [][]byte
+	size   Geometry
+	refuse bool
 }
+
+func newPtySink() *ptySink {
+	return &ptySink{size: Geometry{Cols: 80, Rows: 24}}
+}
+
+func (p *ptySink) Write(b []byte) (int, error) {
+	p.writes = append(p.writes, append([]byte(nil), b...))
+	return len(b), nil
+}
+
+func (p *ptySink) Resize(g Geometry) error {
+	if p.refuse {
+		return errResizeRefused
+	}
+	p.size = g
+	return nil
+}
+
+// Written is what reached the terminal, in order, as a copy. It is the
+// instrument's and deliberately not the contract's: a runtime that kept its own
+// log of what it sent would be spending memory on an observation this test gets
+// for free, and no port could ask a real tty for it.
+func (p *ptySink) Written() [][]byte { return slices.Clone(p.writes) }
+
+// Size is the size the terminal is running at, which is a different fact from
+// the commit in force and the one a refusal has to be judged against.
+func (p *ptySink) Size() Geometry { return p.size }
+
+// RefuseResize makes every Resize up to AcceptResize fail, leaving the size
+// where it is: a terminal that refuses has not been resized.
+func (p *ptySink) RefuseResize() { p.refuse = true }
+
+// AcceptResize ends the refusal RefuseResize began.
+func (p *ptySink) AcceptResize() { p.refuse = false }
+
+// emulatorSink is the screen the model is constructed over: nothing is fed to
+// it (the model's parser is a stand-in, and the real emulator is nocx-ygxjv.2's),
+// and it is here for the other half of a geometry commit.
+type emulatorSink struct {
+	size   Geometry
+	refuse bool
+}
+
+func newEmulatorSink() *emulatorSink {
+	return &emulatorSink{size: Geometry{Cols: 80, Rows: 24}}
+}
+
+func (e *emulatorSink) Resize(g Geometry) error {
+	if e.refuse {
+		return errResizeRefused
+	}
+	e.size = g
+	return nil
+}
+
+// Size is the size the emulator is running at. A commit that opened on both
+// sides leaves this and the terminal's at the same size; a refusal leaves both
+// where the commit in force says they are.
+func (e *emulatorSink) Size() Geometry { return e.size }
+
+// RefuseResize makes every Resize up to AcceptResize fail, leaving the size
+// where it is: an emulator that refuses has not been resized.
+func (e *emulatorSink) RefuseResize() { e.refuse = true }
+
+// AcceptResize ends the refusal RefuseResize began.
+func (e *emulatorSink) AcceptResize() { e.refuse = false }
+
+// errResizeRefused is what either instrument answers once a schedule has told it
+// to. A real side's refusal is its own error — internal/pty's, the emulator's —
+// and the runtime propagates whichever it is: the refusal is the side's to name
+// and not this package's to invent.
+var errResizeRefused = errors.New("sessionruntime: the size was refused")
 
 func (m *model) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if m.avail != AvailabilityAvailable || at != m.inc {
@@ -798,9 +980,13 @@ func (m *model) ExpireRendezvous() error {
 //
 // The classes and the bounds are the CONTRACT's (contract.go, DeliveryClass).
 // What is here is the model's delivery path, so that a schedule can wedge a
-// consumer and read what the runtime did about it. A consumer arriving or
-// leaving is not a transition of the terminal, which is why attach is not on
-// Runtime — the same reason observerLost is not.
+// consumer and read what the runtime did about it.
+//
+// A consumer arriving or leaving is not a transition of the TERMINAL, which is
+// why it is not on Runtime as a transition: attaching, resending, offering an
+// effect and losing a consumer are the delivery side's, and they reach a
+// schedule through Consumers() — a port, so that a schedule can hold a wedged
+// consumer and a real runtime can hand out real ones (contract.go, Consumers).
 // ---------------------------------------------------------------------------
 
 // modelScreenBytes is how much of the screen the model keeps: a window on the
@@ -844,10 +1030,11 @@ func classOfEffect(k EffectKind) DeliveryClass {
 }
 
 // consumer is one subscriber: a queue nobody reads in the schedules that hold
-// it wedged, and the counts that tell it what it lost.
+// it wedged, and the counts that tell it what it lost. It implements the
+// contract's Consumer — the reads below are what a schedule sees of it, and the
+// queue itself is nobody's but the runtime's.
 type consumer struct {
-	session SessionID
-	queue   []payload
+	queue []payload
 	// coalesced and effectsLost are what the runtime DROPPED for this consumer,
 	// by class. They are the report: a consumer is TOLD what it lost, and that
 	// what it still holds is stale, rather than discovering a hole in it.
@@ -856,11 +1043,11 @@ type consumer struct {
 	stale       bool
 }
 
-func (c *consumer) pending() int { return len(c.queue) }
+func (c *consumer) Pending() int { return len(c.queue) }
 
-// heldBytes is the memory the runtime spends on this consumer: the payloads it
+// HeldBytes is the memory the runtime spends on this consumer: the payloads it
 // is holding for it.
-func (c *consumer) heldBytes() int {
+func (c *consumer) HeldBytes() int {
 	held := 0
 	for _, p := range c.queue {
 		held += len(p.bytes) + len(p.effect.Body)
@@ -868,13 +1055,18 @@ func (c *consumer) heldBytes() int {
 	return held
 }
 
-// effects is how many at-most-once payloads the consumer is holding, which is
-// what the duplicate policy is read off.
-func (c *consumer) effects() int {
-	held := 0
+func (c *consumer) Coalesced() uint64   { return c.coalesced }
+func (c *consumer) EffectsLost() uint64 { return c.effectsLost }
+func (c *consumer) Stale() bool         { return c.stale }
+
+// Effects is the at-most-once payloads the consumer holds, oldest first. It is
+// the queue's effects and nothing else: a payload that changed no cell is the
+// only thing the duplicate policy is stated over.
+func (c *consumer) Effects() []Effect {
+	held := make([]Effect, 0, len(c.queue))
 	for _, p := range c.queue {
 		if p.class == DeliveryAtMostOnce {
-			held++
+			held = append(held, p.effect)
 		}
 	}
 	return held
@@ -888,26 +1080,6 @@ func (c *consumer) effects() int {
 func (c *consumer) hasEffect(e Effect) bool {
 	for _, p := range c.queue {
 		if p.class == DeliveryAtMostOnce && p.effect.At == e.At && p.effect.ID == e.ID {
-			return true
-		}
-	}
-	return false
-}
-
-// newestEffect is the effect of the newest at-most-once payload the consumer
-// holds, which is the identity a duplicate would have to carry to be one.
-func (c *consumer) newestEffect() (Effect, bool) {
-	for i := len(c.queue) - 1; i >= 0; i-- {
-		if c.queue[i].class == DeliveryAtMostOnce {
-			return c.queue[i].effect, true
-		}
-	}
-	return Effect{}, false
-}
-
-func (c *consumer) holds(k EffectKind) bool {
-	for _, p := range c.queue {
-		if p.class == DeliveryAtMostOnce && p.effect.Kind == k {
 			return true
 		}
 	}
@@ -950,9 +1122,43 @@ func (m *model) account() SessionID {
 	return m.inc.Session
 }
 
+// --- the Consumers port, which the model satisfies itself ------------------
+//
+// Four methods, and each is deliberately NOT a transition of the terminal: a
+// consumer joining, going away, being handed a full frame again, or being
+// offered an effect the producer already minted, all leave the session's state
+// exactly as it was (contract.go, Consumers).
+
+// Attach joins a consumer and hands it back for a schedule to hold wedged.
+func (m *model) Attach() Consumer { return m.attach() }
+
+// Attached is every joined consumer, in attach order.
+func (m *model) Attached() []Consumer {
+	attached := make([]Consumer, 0, len(m.consumers))
+	for _, c := range m.consumers {
+		attached = append(attached, c)
+	}
+	return attached
+}
+
+// Offer is the producer's side of the duplicate policy: handing a consumer an
+// effect it has already been given delivers nothing.
+func (m *model) Offer(e Effect) error { return m.deliverEffect(e) }
+
+// Resend is a full frame — a snapshot, a re-attachment, a resync. It carries
+// cells, and ruleResendCarriesNoEffects is what keeps it from carrying an
+// effect with them.
+func (m *model) Resend() error { return m.resendState() }
+
+// Lost is a consumer going away. It is here rather than on Runtime for the
+// reason the header above gives, and it is not nothing: a disconnect treated as
+// a loss of authority throws away input a person already committed to, which is
+// what ruleObserverLossIsNotControlLoss refuses.
+func (m *model) Lost() { m.observerLost() }
+
 // attach adds a consumer to this session.
 func (m *model) attach() *consumer {
-	c := &consumer{session: m.inc.Session}
+	c := &consumer{}
 	m.consumers = append(m.consumers, c)
 	return c
 }

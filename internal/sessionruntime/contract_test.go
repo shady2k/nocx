@@ -23,6 +23,26 @@ import (
 // cannot be removed to make a named assertion fail is not being tested by the
 // schedule paired with it.
 //
+// # What is the contract here, and what is the MODEL's own falsifiability
+//
+// Every schedule takes a Runtime and nothing else, and every named assertion is
+// about the CONTRACT: it holds for any implementation, and a real runtime
+// (nocx-ygxjv.2) is judged by the same sentences. What a schedule needs to see
+// beyond the transitions it drives, it reads at the boundary the runtime was
+// constructed over — the terminal it writes to, the emulator it resizes, the
+// consumers it emits to — or from the records the interface answers with
+// (Snapshot, Intents, ReportedGeometry, IngestState). Nothing here reads an
+// implementation's private state, which is what makes the promise in doc.go
+// true rather than aspirational.
+//
+// The RULES are the model's, and so is the PAIRING: removing one rule is how
+// the model is shown to be falsifiable — a shortcut it could have taken — and a
+// real runtime has no rules to switch off. So "with every rule on the schedule
+// must pass" and "with exactly this rule removed THIS assertion must fail" are
+// statements about the model in model_test.go; the assertion named in each one
+// is a statement about the contract. A schedule paired with a rule is evidence
+// that the rule has teeth, not that the contract has only one implementation.
+//
 // The model these run against is in model_test.go, which is not this file's to
 // rewrite: it is the reference implementation the real runtime (nocx-ygxjv.2)
 // will have to satisfy the same way. Nothing here sleeps, nothing here is
@@ -54,7 +74,7 @@ func nonceOf(b byte) FenceNonce {
 // grant and admitKey are setup rather than subject matter: no schedule in this
 // file is about the grant itself or about the shape of an intent, and a failure
 // here names itself as setup so it cannot be mistaken for the schedule's finding.
-func grant(m *model, p Principal) (Control, error) {
+func grant(m Runtime, p Principal) (Control, error) {
 	c, err := m.GrantControl(p)
 	if err != nil {
 		return c, failed("setup/grant-control", "granting control to %+v: %v", p, err)
@@ -62,7 +82,7 @@ func grant(m *model, p Principal) (Control, error) {
 	return c, nil
 }
 
-func admitKey(m *model, ctrl Control, payload []byte) (IntentID, error) {
+func admitKey(m Runtime, ctrl Control, payload []byte) (IntentID, error) {
 	id, err := m.Admit(Intent{
 		At:      m.Incarnation(),
 		Under:   ctrl.Epoch,
@@ -77,12 +97,69 @@ func admitKey(m *model, ctrl Control, payload []byte) (IntentID, error) {
 }
 
 // lastExecuted is what reached the PTY last, which is the only place a schedule
-// can see the bytes the runtime decided on.
-func lastExecuted(m *model) []byte {
-	if len(m.executed) == 0 {
-		return nil
+// can see the bytes the runtime decided on. It is read from the terminal the
+// runtime was CONSTRUCTED over and not from the runtime: a runtime that kept
+// its own log of what it sent would be spending memory on an observation the
+// injected terminal already holds, and the interesting assertion — "the same
+// intent is different bytes depending on the mode the PROGRAM set" — is
+// checkable exactly where the bytes land.
+func lastExecuted(m Runtime) ([]byte, error) {
+	terminal, err := terminalOf(m)
+	if err != nil {
+		return nil, err
 	}
-	return m.executed[len(m.executed)-1]
+	written := terminal.Written()
+	if len(written) == 0 {
+		return nil, nil
+	}
+	return written[len(written)-1], nil
+}
+
+// terminalOf and emulatorOf are the two instruments a schedule reads the
+// boundary through: the record of what reached the program and the refusal that
+// makes one side of a commit fail. Both return the CONTRACT's instrument types
+// and not a fixture's — a real runtime is judged by the same schedules by being
+// CONSTRUCTED over instruments of its own (each implements one of these), which
+// is why the requirement is a published interface and not this package's test
+// struct. A runtime whose terminal is neither is a harness that cannot be
+// judged, and it says so here, once, rather than surfacing as "the key reached
+// the PTY as \"\"".
+func terminalOf(m Runtime) (TerminalInstrument, error) {
+	t, ok := m.Terminal().(TerminalInstrument)
+	if !ok {
+		return nil, failed("harness/the-terminal-is-an-instrument",
+			"the runtime's terminal is a %T, which does not implement TerminalInstrument (contract.go): these schedules judge a runtime constructed over an instrument, and a shipped runtime implements Terminal alone", m.Terminal())
+	}
+	return t, nil
+}
+
+func emulatorOf(m Runtime) (EmulatorInstrument, error) {
+	e, ok := m.Emulator().(EmulatorInstrument)
+	if !ok {
+		return nil, failed("harness/the-emulator-is-an-instrument",
+			"the runtime's emulator is a %T, which does not implement EmulatorInstrument (contract.go): these schedules judge a runtime constructed over an instrument", m.Emulator())
+	}
+	return e, nil
+}
+
+// newestEffect and holdsKind read what a consumer is HOLDING, which is the only
+// way a duplicate policy and a delivery can be told apart: two deliveries of one
+// EffectID are one effect, and two effects of one kind are two.
+func newestEffect(c Consumer) (Effect, bool) {
+	held := c.Effects()
+	if len(held) == 0 {
+		return Effect{}, false
+	}
+	return held[len(held)-1], true
+}
+
+func holdsKind(c Consumer, k EffectKind) bool {
+	for _, e := range c.Effects() {
+		if e.Kind == k {
+			return true
+		}
+	}
+	return false
 }
 
 func intentStateName(s IntentState) string {
@@ -204,7 +281,7 @@ func effectKindName(k EffectKind) string {
 // The schedules below record every enumerated state they pass through, so the
 // walk at the end of this file can say of each constant either that a schedule
 // reaches it or, in words, why nothing does. It is package state because a
-// schedule's signature is a model and an error and nothing else; the walk
+// schedule's signature is a runtime and an error and nothing else; the walk
 // RESETS it and drives every schedule itself, so its answer does not depend on
 // which test ran first.
 // ---------------------------------------------------------------------------
@@ -230,29 +307,29 @@ func wasObserved(kind string, value int) bool {
 // ---------------------------------------------------------------------------
 // "An invalid event changes nothing" — the property that makes invalid events
 // testable at all, and the reason a runtime's refusals can be asserted rather
-// than hoped for. fingerprint is everything a caller can observe of the model:
+// than hoped for. fingerprint is everything a caller can observe of a RUNTIME:
 // a comparison is then a statement about the runtime rather than about the one
 // field somebody remembered to check.
+//
+// It is built from the interface and nothing else, which is what makes it a
+// statement about any implementation — the records Intents, ReportedGeometry
+// and IngestState answer with, the delivery side each consumer reports, and the
+// bytes the injected terminal was handed. Two things a model happens to hold
+// are deliberately NOT here, because the vocabulary does not promise them to a
+// caller: the id the next Admit will mint (nothing says which id it is, and a
+// refusal that burned one is not a fact any caller can read) and the identity
+// the next effect will carry (an effect is observable as the thing delivered,
+// and an identity minted and never delivered is not).
 // ---------------------------------------------------------------------------
 
 type fingerprint struct {
 	Snapshot
 
-	NextID       IntentID
-	Admitted     []IntentID
-	IntentStates map[IntentID]IntentState
-	Executed     [][]byte
-	Reported     Geometry
-
-	// The delivery state is part of what a caller can observe, so an event the
-	// vocabulary refuses has to leave it alone too: an ingest that is refused
-	// for its size must do no work, hold no sequence and hand no consumer
-	// anything.
-	Pending    []byte
-	IngestWork uint64
-	IngestLost uint64
-	Consumers  []consumerFingerprint
-	NextEffect EffectID
+	Intents   []IntentRecord
+	Executed  [][]byte
+	Reported  Geometry
+	Ingest    IngestState
+	Consumers []consumerFingerprint
 }
 
 // consumerFingerprint is everything observable about one consumer's queue.
@@ -263,35 +340,36 @@ type consumerFingerprint struct {
 	Coalesced   uint64
 	EffectsLost uint64
 	Stale       bool
+	Effects     int
 }
 
-// fingerprintOf reads the model. It takes a snapshot, so it is passive only
-// while ruleSnapshotIsPassive is on — every use in this file is on a model
-// built by allRules(), where it is.
-func fingerprintOf(m *model) fingerprint {
+// fingerprintOf reads a runtime. It takes a snapshot, so it is passive only
+// while ruleSnapshotIsPassive is on — and that rule is the MODEL's, so every
+// use in this file is on a model built by allRules(), where it is.
+func fingerprintOf(m Runtime) fingerprint {
 	f := fingerprint{
-		Snapshot:     m.Snapshot(),
-		NextID:       m.nextID,
-		Admitted:     append([]IntentID(nil), m.queue...),
-		Executed:     append([][]byte(nil), m.executed...),
-		Reported:     m.reportedGeom,
-		Pending:      append([]byte(nil), m.pending...),
-		IngestWork:   m.ingestWork,
-		IngestLost:   m.ingestLost,
-		NextEffect:   m.nextEffect,
-		IntentStates: make(map[IntentID]IntentState, len(m.intents)),
+		Snapshot: m.Snapshot(),
+		Intents:  m.Intents(),
+		Reported: m.ReportedGeometry(),
+		Ingest:   m.IngestState(),
 	}
-	for id, mi := range m.intents {
-		f.IntentStates[id] = mi.state
+	// The bytes that reached the program are the instrument's record — the same
+	// place the schedules read them from — and a runtime built over a terminal
+	// that is not an instrument simply contributes none of them here. The
+	// schedules that ASSERT on those bytes go through terminalOf, which names
+	// that as a harness failure rather than reporting it as a finding.
+	if terminal, ok := m.Terminal().(TerminalInstrument); ok {
+		f.Executed = terminal.Written()
 	}
-	for _, c := range m.consumers {
+	for _, c := range m.Consumers().Attached() {
 		f.Consumers = append(f.Consumers, consumerFingerprint{
-			Session:     c.session,
-			Pending:     c.pending(),
-			Held:        c.heldBytes(),
-			Coalesced:   c.coalesced,
-			EffectsLost: c.effectsLost,
-			Stale:       c.stale,
+			Session:     m.Incarnation().Session,
+			Pending:     c.Pending(),
+			Held:        c.HeldBytes(),
+			Coalesced:   c.Coalesced(),
+			EffectsLost: c.EffectsLost(),
+			Stale:       c.Stale(),
+			Effects:     len(c.Effects()),
 		})
 	}
 	return f
@@ -315,22 +393,19 @@ func (f fingerprint) diff(g fingerprint) string {
 	add("screen", !bytes.Equal(f.Screen, g.Screen))
 	add("rendezvous", f.Rendezvous != g.Rendezvous)
 	add("completeness", f.Completeness != g.Completeness)
-	add("next intent id", f.NextID != g.NextID)
-	add("admitted order", !slices.Equal(f.Admitted, g.Admitted))
+	add("intents", !slices.Equal(f.Intents, g.Intents))
 	add("executed bytes", !reflect.DeepEqual(f.Executed, g.Executed))
-	add("intent states", !reflect.DeepEqual(f.IntentStates, g.IntentStates))
-	add("pending sequence", !bytes.Equal(f.Pending, g.Pending))
-	add("ingest work", f.IngestWork != g.IngestWork)
-	add("ingest loss", f.IngestLost != g.IngestLost)
+	add("pending sequence", !bytes.Equal(f.Ingest.Pending, g.Ingest.Pending))
+	add("ingest work", f.Ingest.Work != g.Ingest.Work)
+	add("ingest loss", f.Ingest.Lost != g.Ingest.Lost)
 	add("consumers", !reflect.DeepEqual(f.Consumers, g.Consumers))
-	add("next effect id", f.NextEffect != g.NextEffect)
 	if len(changed) == 0 {
 		return ""
 	}
 	return "changed fields: " + strings.Join(changed, ", ")
 }
 
-func mustBeUnchanged(m *model, before fingerprint, assertion string) error {
+func mustBeUnchanged(m Runtime, before fingerprint, assertion string) error {
 	if d := before.diff(fingerprintOf(m)); d != "" {
 		return failed(assertion,
 			"an event the vocabulary refuses changed the runtime (%s); an invalid event must change no state", d)
@@ -346,14 +421,14 @@ func mustBeUnchanged(m *model, before fingerprint, assertion string) error {
 // ruleSightingAuthorisesNothing.
 // ---------------------------------------------------------------------------
 
-func scheduleFenceAuthenticatedFirst(m *model) error {
+func scheduleFenceAuthenticatedFirst(m Runtime) error {
 	observe(kindRendezvous, int(m.Rendezvous().State)) // idle: nothing is in flight yet
 
 	inc := m.Incarnation()
 	nonce := nonceOf(0x11)
 	source := []byte("$ \x1b]133;D;0\x07")
 
-	m.Completed(inc, nonce, 0)
+	m.AuthenticatedEvents().Completed(inc, nonce, 0)
 	if got := m.Rendezvous().State; got != RendezvousAwaitingSighting {
 		return failed("fence/authenticated-first-parks",
 			"the authenticated half left the rendezvous %s, want awaiting-sighting and therefore not complete", rendezvousName(got))
@@ -405,7 +480,7 @@ func scheduleFenceAuthenticatedFirst(m *model) error {
 // ruleSightingAuthorisesNothing.
 // ---------------------------------------------------------------------------
 
-func scheduleFenceSightedFirst(m *model) error {
+func scheduleFenceSightedFirst(m Runtime) error {
 	nonce := nonceOf(0x44)
 	source := []byte("$ \x1b]133;D;0\x07")
 
@@ -420,13 +495,13 @@ func scheduleFenceSightedFirst(m *model) error {
 
 	// It authorises nothing: a completion carrying another nonce is another
 	// event, and must not close what the sighting parked.
-	m.Completed(m.Incarnation(), nonceOf(0x55), 0)
+	m.AuthenticatedEvents().Completed(m.Incarnation(), nonceOf(0x55), 0)
 	if got := m.Rendezvous().State; got != RendezvousAwaitingAuthenticated {
 		return failed("fence/parked-sighting-closes-nothing",
 			"a completion with a foreign nonce closed the parked rendezvous: %s", rendezvousName(got))
 	}
 
-	m.Completed(m.Incarnation(), nonce, 0)
+	m.AuthenticatedEvents().Completed(m.Incarnation(), nonce, 0)
 	if got := m.Rendezvous().State; got != RendezvousComplete {
 		return failed("fence/sighted-first-completes",
 			"the matching completion left the rendezvous %s, want complete", rendezvousName(got))
@@ -441,7 +516,7 @@ func scheduleFenceSightedFirst(m *model) error {
 // in flight. Paired with rulePinSource.
 // ---------------------------------------------------------------------------
 
-func scheduleFenceSightedFirstSurvivesScreenTrim(m *model) error {
+func scheduleFenceSightedFirstSurvivesScreenTrim(m Runtime) error {
 	nonce := nonceOf(0x66)
 	source := []byte("the row the fence was drawn over")
 
@@ -462,7 +537,7 @@ func scheduleFenceSightedFirstSurvivesScreenTrim(m *model) error {
 	if err := m.Ingest(bytes.Repeat([]byte("x"), 96)); err != nil {
 		return failed("fence/trim-ingest", "output after the sighting: %v", err)
 	}
-	if bytes.Contains(m.screen, source) {
+	if bytes.Contains(m.Snapshot().Screen, source) {
 		return failed("fence/trim-must-actually-happen",
 			"the screen still holds the sighted content, so this schedule would prove nothing")
 	}
@@ -471,7 +546,7 @@ func scheduleFenceSightedFirstSurvivesScreenTrim(m *model) error {
 			"the pin is %q after the screen trimmed past it, want %q", got, source)
 	}
 
-	m.Completed(m.Incarnation(), nonce, 0)
+	m.AuthenticatedEvents().Completed(m.Incarnation(), nonce, 0)
 	if got := m.Rendezvous().State; got != RendezvousComplete {
 		return failed("fence/pinned-sighting-completes",
 			"the matching completion left the rendezvous %s, want complete", rendezvousName(got))
@@ -485,7 +560,7 @@ func scheduleFenceSightedFirstSurvivesScreenTrim(m *model) error {
 // Paired with ruleCancelOnRevoke.
 // ---------------------------------------------------------------------------
 
-func scheduleTakeoverWithInputQueued(m *model) error {
+func scheduleTakeoverWithInputQueued(m Runtime) error {
 	ctrl, err := grant(m, agent())
 	if err != nil {
 		return err
@@ -542,9 +617,13 @@ func scheduleTakeoverWithInputQueued(m *model) error {
 			"Execute after the handover returned id=%d state=%s err=%v, want %v",
 			id, intentStateName(state), err, ErrNothingAdmitted)
 	}
-	if len(m.executed) != 1 {
+	terminal, terr := terminalOf(m)
+	if terr != nil {
+		return terr
+	}
+	if len(terminal.Written()) != 1 {
 		return failed("takeover/nothing-cancelled-reached-the-pty",
-			"%d intents reached the PTY, want only the one executed before the handover", len(m.executed))
+			"%d intents reached the PTY, want only the one executed before the handover", len(terminal.Written()))
 	}
 	return nil
 }
@@ -578,7 +657,7 @@ func scheduleTakeoverWithInputQueued(m *model) error {
 // ruleObserverLossIsNotControlLoss.
 // ---------------------------------------------------------------------------
 
-func scheduleDisconnectAfterAdmission(m *model) error {
+func scheduleDisconnectAfterAdmission(m Runtime) error {
 	ctrl, err := grant(m, person())
 	if err != nil {
 		return err
@@ -594,7 +673,7 @@ func scheduleDisconnectAfterAdmission(m *model) error {
 	// A watcher coming and going is not a transition of the terminal: the
 	// person already committed to this keystroke, and throwing it away would
 	// discard a decision nobody withdrew.
-	m.observerLost()
+	m.Consumers().Lost()
 	if got := m.IntentState(id); got != IntentStateAdmitted {
 		return failed("observer-loss/keeps-admitted-input",
 			"an observer disconnect left an admitted intent %s; losing a watcher is not losing control", intentStateName(got))
@@ -629,7 +708,7 @@ func scheduleDisconnectAfterAdmission(m *model) error {
 // side. Paired with ruleAtomicGeometry.
 // ---------------------------------------------------------------------------
 
-func scheduleResizeDuringOutput(m *model) error {
+func scheduleResizeDuringOutput(m Runtime) error {
 	if err := m.Ingest([]byte("$ make test\r\n")); err != nil {
 		return failed("geometry/output-flowing", "ingesting output before the first commit: %v", err)
 	}
@@ -666,12 +745,27 @@ func scheduleResizeDuringOutput(m *model) error {
 		return failed("geometry/still-exactly-one-commit", "the commit in force is %+v, want %+v", got, second)
 	}
 
-	// The failure half. A resize that fails on either side commits on NEITHER,
-	// and the session goes on describing what it is still running at rather than
-	// what was asked for — a size one side took and the other did not is a
-	// screen and a PTY disagreeing about every cell after this column.
+	// The failure half, and the half that has to be stated in terms a real
+	// terminal can HONOUR. A resize is not atomic: the terminal is resized and
+	// the program receives SIGWINCH, and a signal already delivered cannot be
+	// recalled by anything the runtime does next. So the rule is about the
+	// COMMIT rather than about the two calls — it opens on both or it does not
+	// open at all, and the commit in force keeps standing — and the other half
+	// of it is that no side is left at a size nobody committed, the side that
+	// took the refused size being put back to the commit in force. A screen and
+	// a PTY disagreeing about every cell after this column is what that half
+	// exists against.
 	wanted := Geometry{Cols: 90, Rows: 20}
-	m.emulatorRefusesResize = true
+	terminal, ptyErr := terminalOf(m)
+	if ptyErr != nil {
+		return ptyErr
+	}
+	screen, emuErr := emulatorOf(m)
+	if emuErr != nil {
+		return emuErr
+	}
+
+	screen.RefuseResize()
 	if _, err := m.CommitGeometry(wanted); err == nil {
 		return failed("geometry/emulator-refusal-is-an-error",
 			"the emulator refused the size and CommitGeometry reported success")
@@ -680,9 +774,13 @@ func scheduleResizeDuringOutput(m *model) error {
 		return failed("geometry/emulator-refusal-commits-neither",
 			"the commit in force is %+v after the emulator refused, want the previous commit %+v", got, second)
 	}
-	m.emulatorRefusesResize = false
+	if got, running := terminal.Size(), screen.Size(); got != second.Geometry || running != second.Geometry {
+		return failed("geometry/emulator-refusal-leaves-no-side-at-an-uncommitted-size",
+			"after the emulator refused %+v the terminal is at %+v and the emulator at %+v, want both at the commit in force %+v: the terminal had already taken the refused size, and a size nobody committed is not one either side may keep", wanted, got, running, second.Geometry)
+	}
+	screen.AcceptResize()
 
-	m.ptyRefusesResize = true
+	terminal.RefuseResize()
 	if _, err := m.CommitGeometry(wanted); err == nil {
 		return failed("geometry/pty-refusal-is-an-error", "the PTY refused the size and CommitGeometry reported success")
 	}
@@ -690,7 +788,11 @@ func scheduleResizeDuringOutput(m *model) error {
 		return failed("geometry/pty-refusal-commits-neither",
 			"the commit in force is %+v after the PTY refused, want the previous commit %+v", got, second)
 	}
-	m.ptyRefusesResize = false
+	if got, running := terminal.Size(), screen.Size(); got != second.Geometry || running != second.Geometry {
+		return failed("geometry/pty-refusal-leaves-no-side-at-an-uncommitted-size",
+			"after the terminal refused %+v it is at %+v and the emulator at %+v, want both at the commit in force %+v", wanted, got, running, second.Geometry)
+	}
+	terminal.AcceptResize()
 	return nil
 }
 
@@ -699,7 +801,7 @@ func scheduleResizeDuringOutput(m *model) error {
 // it. Paired with ruleSnapshotIsPassive.
 // ---------------------------------------------------------------------------
 
-func scheduleObserverResync(m *model) error {
+func scheduleObserverResync(m Runtime) error {
 	ctrl, err := grant(m, person())
 	if err != nil {
 		return err
@@ -730,7 +832,7 @@ func scheduleObserverResync(m *model) error {
 	// expressible at all.
 	if snap.At != m.Incarnation() || snap.Availability != m.Availability() || snap.Control != m.Control() ||
 		snap.Geometry != m.Geometry() || snap.Rendezvous != m.Rendezvous().State ||
-		snap.Completeness != m.Completeness() || !bytes.Equal(snap.Screen, m.screen) {
+		snap.Completeness != m.Completeness() || !bytes.Equal(snap.Screen, m.Snapshot().Screen) {
 		return failed("snapshot/every-field-at-that-revision",
 			"the snapshot's fields do not all describe revision %d", snap.Revision)
 	}
@@ -758,14 +860,14 @@ func scheduleObserverResync(m *model) error {
 // depending on the mode the PROGRAM set. Paired with ruleEncodeAgainstModes.
 // ---------------------------------------------------------------------------
 
-func scheduleKeyEncodedAgainstModes(m *model) error {
-	// The program turns application cursor keys on.
+func scheduleKeyEncodedAgainstModes(m Runtime) error {
+	// The program turns application cursor keys on, and the mode is observable
+	// through what it DOES and not as a flag: nothing in this contract reports
+	// which modes are set, and a schedule that read one would be reading an
+	// implementation's private state rather than the runtime's behaviour. What
+	// the mode means here is the bytes the same intent becomes.
 	if err := m.Ingest([]byte("\x1b[?1h")); err != nil {
 		return failed("key/ingest-set-mode", "ingesting the DECCKM set: %v", err)
-	}
-	if !m.applicationCursorKeys {
-		return failed("key/program-set-the-mode",
-			"the program set application cursor keys and the runtime did not record it")
 	}
 	ctrl, err := grant(m, person())
 	if err != nil {
@@ -778,29 +880,34 @@ func scheduleKeyEncodedAgainstModes(m *model) error {
 	if id, state, execErr := m.Execute(); execErr != nil || id != up || state != IntentStateExecuted {
 		return failed("key/execute", "executing a key intent: id=%d state=%s err=%v", id, intentStateName(state), execErr)
 	}
-	if got := lastExecuted(m); !bytes.Equal(got, []byte("\x1bOA")) {
+	got, err := lastExecuted(m)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(got, []byte("\x1bOA")) {
 		return failed("key/encoded-against-the-program-mode",
 			"with application cursor keys set the key reached the PTY as %q, want %q — the client sent %q, and passing its own encoding through is the defect", got, "\x1bOA", "Up")
 	}
 
-	// The program turns them off again. The SAME intent now means a different
-	// byte sequence, which a client could not have known when it sent it: a
-	// frame of cells conveys nothing about DECCKM (ADR-0066, AD-1 as amended).
+	// The program turns them off again, and the SAME intent now means a
+	// different byte sequence, which a client could not have known when it sent
+	// it: a frame of cells conveys nothing about DECCKM (ADR-0066, AD-1 as
+	// amended).
 	if ingestErr := m.Ingest([]byte("\x1b[?1l")); ingestErr != nil {
 		return failed("key/ingest-clear-mode", "ingesting the DECCKM clear: %v", ingestErr)
-	}
-	if m.applicationCursorKeys {
-		return failed("key/program-cleared-the-mode",
-			"the program cleared application cursor keys and the runtime did not record it")
 	}
 	up, err = admitKey(m, ctrl, []byte("Up"))
 	if err != nil {
 		return err
 	}
-	if id, state, err := m.Execute(); err != nil || id != up || state != IntentStateExecuted {
-		return failed("key/execute-again", "executing the second key intent: id=%d state=%s err=%v", id, intentStateName(state), err)
+	if id, state, execErr := m.Execute(); execErr != nil || id != up || state != IntentStateExecuted {
+		return failed("key/execute-again", "executing the second key intent: id=%d state=%s err=%v", id, intentStateName(state), execErr)
 	}
-	if got := lastExecuted(m); !bytes.Equal(got, []byte("\x1b[A")) {
+	got, err = lastExecuted(m)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(got, []byte("\x1b[A")) {
 		return failed("key/encoded-against-the-program-mode",
 			"with application cursor keys cleared the key reached the PTY as %q, want %q", got, "\x1b[A")
 	}
@@ -814,7 +921,7 @@ func scheduleKeyEncodedAgainstModes(m *model) error {
 // call, which is why ExpireRendezvous is a call rather than a timer.
 // ---------------------------------------------------------------------------
 
-func scheduleRendezvousExpiresUnjoined(m *model) error {
+func scheduleRendezvousExpiresUnjoined(m Runtime) error {
 	if err := m.SightFence(nonceOf(0x77), []byte("$ \x1b]133;D;0\x07")); err != nil {
 		return failed("rendezvous/expiry-sighting", "sighting the fence: %v", err)
 	}
@@ -848,7 +955,7 @@ func scheduleRendezvousExpiresUnjoined(m *model) error {
 // ruleRevalidateAtExecution.
 // ---------------------------------------------------------------------------
 
-func schedulePreconditionStaleAtExecution(m *model) error {
+func schedulePreconditionStaleAtExecution(m Runtime) error {
 	if err := m.Ingest([]byte("Overwrite the file? [y/N] ")); err != nil {
 		return failed("precondition/read-the-screen", "ingesting the prompt: %v", err)
 	}
@@ -867,7 +974,7 @@ func schedulePreconditionStaleAtExecution(m *model) error {
 		Payload: []byte("y"),
 		Precondition: &Precondition{
 			ScreenRevision: m.Revision(),
-			Digest:         sha256.Sum256(m.screen),
+			Digest:         sha256.Sum256(m.Snapshot().Screen),
 		},
 	})
 	if err != nil {
@@ -899,15 +1006,19 @@ func schedulePreconditionStaleAtExecution(m *model) error {
 	// admitted would execute it later against the very evidence that made it
 	// stale. What must not move is the PTY and the runtime's own clock: nothing
 	// was written, and no revision was minted for a write that did not happen.
-	if len(m.executed) != len(before.Executed) {
+	terminal, terr := terminalOf(m)
+	if terr != nil {
+		return terr
+	}
+	if len(terminal.Written()) != len(before.Executed) {
 		return failed("precondition/nothing-reached-the-pty",
-			"%d intents had reached the PTY before the refusal and %d after", len(before.Executed), len(m.executed))
+			"%d intents had reached the PTY before the refusal and %d after", len(before.Executed), len(terminal.Written()))
 	}
 	if m.Revision() != before.Revision {
 		return failed("precondition/the-clock-does-not-move", "a refused write moved Revision from %d to %d", before.Revision, m.Revision())
 	}
 	if m.Control() != before.Control || m.Geometry() != before.Geometry || m.Availability() != before.Availability ||
-		m.Completeness() != before.Completeness || !bytes.Equal(m.screen, before.Screen) {
+		m.Completeness() != before.Completeness || !bytes.Equal(m.Snapshot().Screen, before.Screen) {
 		return failed("precondition/only-the-intent-moved",
 			"a refused write moved something other than the intent it refused")
 	}
@@ -918,7 +1029,7 @@ func schedulePreconditionStaleAtExecution(m *model) error {
 // 12. The runtime fails. Paired with ruleFailRevokes.
 // ---------------------------------------------------------------------------
 
-func scheduleRuntimeFailure(m *model) error {
+func scheduleRuntimeFailure(m Runtime) error {
 	ctrl, err := grant(m, agent())
 	if err != nil {
 		return err
@@ -993,8 +1104,8 @@ func scheduleRuntimeFailure(m *model) error {
 // must fail this schedule at ITS assertion rather than at an earlier one.
 // ---------------------------------------------------------------------------
 
-func scheduleConsumerThatNeverReads(m *model) error {
-	wedged := m.attach()
+func scheduleConsumerThatNeverReads(m Runtime) error {
+	wedged := m.Consumers().Attach()
 	const ingests = 4 * MaxPendingFrames
 
 	// Far more output than its queue can hold, and nothing here reads.
@@ -1008,12 +1119,12 @@ func scheduleConsumerThatNeverReads(m *model) error {
 
 	// The bound the vocabulary states, and the memory it implies: the payloads
 	// held for this consumer, and the bytes those payloads are.
-	if got := wedged.pending(); got > MaxPendingFrames {
+	if got := wedged.Pending(); got > MaxPendingFrames {
 		return failed("delivery/the-queue-is-at-its-bound",
 			"the runtime holds %d payloads for a consumer read none of the %d it was sent, want at most MaxPendingFrames (%d)",
 			got, ingests, MaxPendingFrames)
 	}
-	if got := wedged.heldBytes(); got > MaxPendingFrames*modelScreenBytes {
+	if got := wedged.HeldBytes(); got > MaxPendingFrames*modelScreenBytes {
 		return failed("delivery/the-queue-is-at-its-bound",
 			"the runtime holds %d bytes for a consumer that never reads, want at most MaxPendingFrames*modelScreenBytes (%d)",
 			got, MaxPendingFrames*modelScreenBytes)
@@ -1023,25 +1134,25 @@ func scheduleConsumerThatNeverReads(m *model) error {
 	// CONSUMER; the runtime's own ingest saw every byte of it, and the output
 	// arriving after the flood still reaches the emulator. A slow consumer is
 	// never a reason to discard what the program said.
-	if m.ingestLost != 0 {
+	if m.IngestState().Lost != 0 {
 		return failed("delivery/a-wedged-consumer-costs-no-ingest",
-			"%d bytes of output were discarded while a consumer was wedged, want none: a consumer's queue is coalescable, the stream is not", m.ingestLost)
+			"%d bytes of output were discarded while a consumer was wedged, want none: a consumer's queue is coalescable, the stream is not", m.IngestState().Lost)
 	}
 	if err := m.Ingest([]byte("the last line\r\n")); err != nil {
 		return failed("delivery/ingest-after-the-flood", "ingesting output after the flood: %v", err)
 	}
-	if !bytes.HasSuffix(m.screen, []byte("the last line\r\n")) {
+	if !bytes.HasSuffix(m.Snapshot().Screen, []byte("the last line\r\n")) {
 		return failed("delivery/a-wedged-consumer-costs-no-ingest",
-			"the output ingested after the flood did not reach the emulator: the screen ends %q", m.screen)
+			"the output ingested after the flood did not reach the emulator: the screen ends %q", m.Snapshot().Screen)
 	}
 
 	// And what the consumer lost is REPORTED to it. A client handed a stale
 	// screen and told nothing paints it as current, which is the whole reason
 	// the coalescable class is allowed to lose anything at all.
-	if wedged.coalesced == 0 || !wedged.stale {
+	if wedged.Coalesced() == 0 || !wedged.Stale() {
 		return failed("delivery/what-the-consumer-lost-is-reported",
 			"the consumer was sent %d payloads it never read, %d of them are counted as dropped and its staleness reads %v, want a count above zero and a consumer that knows what it holds",
-			ingests, wedged.coalesced, wedged.stale)
+			ingests, wedged.Coalesced(), wedged.Stale())
 	}
 
 	// A program can also emit EFFECTS at a rate no client keeps up with — a
@@ -1053,13 +1164,13 @@ func scheduleConsumerThatNeverReads(m *model) error {
 			return failed("delivery/ingest-a-bell", "ingesting a bell for a wedged consumer: %v", err)
 		}
 	}
-	if got := wedged.pending(); got > MaxPendingFrames {
+	if got := wedged.Pending(); got > MaxPendingFrames {
 		return failed("delivery/the-queue-is-at-its-bound",
 			"the runtime holds %d payloads after a flood of effects, want at most MaxPendingFrames (%d)", got, MaxPendingFrames)
 	}
-	if wedged.effectsLost == 0 {
+	if wedged.EffectsLost() == 0 {
 		return failed("delivery/what-the-consumer-lost-is-reported",
-			"the runtime shed effects for a consumer that never reads and counted %d of them", wedged.effectsLost)
+			"the runtime shed effects for a consumer that never reads and counted %d of them", wedged.EffectsLost())
 	}
 	return nil
 }
@@ -1073,44 +1184,40 @@ func scheduleConsumerThatNeverReads(m *model) error {
 // rulePerSessionAllowance.
 // ---------------------------------------------------------------------------
 
-func scheduleOneSessionCannotSpendAnothersAllowance() error {
-	return scheduleOneSessionCannotSpendAnothersAllowanceWith(allRules(), newDeliveryBudget())
-}
-
-// scheduleOneSessionCannotSpendAnothersAllowanceWith is the schedule with the
-// RULES and the BUDGET supplied. The body is the schedule: the paired run needs
-// one budget the two sessions share while the rules differ, and a schedule
-// hard-wired to allRules() could not express that.
-func scheduleOneSessionCannotSpendAnothersAllowanceWith(rules ruleSet, budget *deliveryBudget) error {
+// The fairness schedule takes its TWO runtimes, one session each, and it is the
+// harness that builds them over a single budget — the arrangement the schedule
+// is about, and construction rather than judgement. Whether the allowance is
+// per session is otherwise a sentence in a comment; it is a difference only
+// when two runtimes share one account, and a schedule may count on how it was
+// wired without wiring it.
+func scheduleOneSessionCannotSpendAnothersAllowance(busy, other Runtime) error {
 	// The first session runs ahead of its consumer, which reads nothing.
-	busy := newSessionModel(rules, budget, "the-busy-session")
-	busyConsumer := busy.attach()
+	busyConsumer := busy.Consumers().Attach()
 	for range 4 * MaxPendingFrames {
 		if err := busy.Ingest([]byte("the first session is busy\r\n")); err != nil {
 			return failed("setup/busy-session-ingest", "ingesting output on the busy session: %v", err)
 		}
 	}
-	if busyConsumer.pending() != MaxPendingFrames || busyConsumer.coalesced == 0 || !busyConsumer.stale {
+	if busyConsumer.Pending() != MaxPendingFrames || busyConsumer.Coalesced() == 0 || !busyConsumer.Stale() {
 		return failed("setup/the-first-session-is-wedged",
 			"the busy session holds %d payloads, dropped %d and reads stale=%v; this schedule is about the OTHER session, so its setup failing is not its finding",
-			busyConsumer.pending(), busyConsumer.coalesced, busyConsumer.stale)
+			busyConsumer.Pending(), busyConsumer.Coalesced(), busyConsumer.Stale())
 	}
 
 	// The second session is a different terminal with a consumer of its own,
 	// reading nothing either — it is simply not the one that ran ahead.
-	other := newSessionModel(rules, budget, "the-other-session")
-	otherConsumer := other.attach()
+	otherConsumer := other.Consumers().Attach()
 	for range MaxPendingFrames {
 		if err := other.Ingest([]byte("the other session is idle\r\n")); err != nil {
 			return failed("setup/other-session-ingest", "ingesting output on the other session: %v", err)
 		}
 	}
-	if otherConsumer.coalesced != 0 || otherConsumer.effectsLost != 0 || otherConsumer.stale {
+	if otherConsumer.Coalesced() != 0 || otherConsumer.EffectsLost() != 0 || otherConsumer.Stale() {
 		return failed("delivery/one-session-cannot-spend-anothers-allowance",
 			"the other session lost %d coalescable and %d at-most-once payloads (stale=%v) because the busy session spent the allowance, want none: the allowance is per session",
-			otherConsumer.coalesced, otherConsumer.effectsLost, otherConsumer.stale)
+			otherConsumer.Coalesced(), otherConsumer.EffectsLost(), otherConsumer.Stale())
 	}
-	if got := otherConsumer.pending(); got != MaxPendingFrames {
+	if got := otherConsumer.Pending(); got != MaxPendingFrames {
 		return failed("delivery/one-session-cannot-spend-anothers-allowance",
 			"the other session holds %d payloads, want all %d of its own", got, MaxPendingFrames)
 	}
@@ -1126,20 +1233,20 @@ func scheduleOneSessionCannotSpendAnothersAllowanceWith(rules ruleSet, budget *d
 // ruleResendCarriesNoEffects.
 // ---------------------------------------------------------------------------
 
-func scheduleEffectDeliveryPolicy(m *model) error {
-	c := m.attach()
+func scheduleEffectDeliveryPolicy(m Runtime) error {
+	c := m.Consumers().Attach()
 
 	// The program writes to the clipboard, through OSC 52.
 	if err := m.Ingest([]byte("\x1b]52;c;aGVsbG8=\x07")); err != nil {
 		return failed("effect/ingest", "ingesting a clipboard write: %v", err)
 	}
-	if got := c.effects(); got != 1 {
+	if got := len(c.Effects()); got != 1 {
 		return failed("effect/the-stream-produced-one-effect",
 			"the consumer holds %d at-most-once payloads after one OSC 52, want one", got)
 	}
 	observe(kindEffect, int(EffectClipboard))
 	observe(kindDelivery, int(DeliveryAtMostOnce))
-	clipboard, ok := c.newestEffect()
+	clipboard, ok := newestEffect(c)
 	if !ok {
 		return failed("effect/the-effect-carries-its-identity",
 			"the consumer holds no effect after an OSC 52 the runtime accepted")
@@ -1152,11 +1259,11 @@ func scheduleEffectDeliveryPolicy(m *model) error {
 	// The same effect offered a second time — a carrier re-delivering a chunk,
 	// a hub fanning one program's display out to two consumers that merged — is
 	// the SAME clipboard write, and must not be applied twice.
-	if err := m.deliverEffect(clipboard); err != nil {
+	if err := m.Consumers().Offer(clipboard); err != nil {
 		return failed("effect/second-delivery",
 			"delivering an effect the consumer already holds: %v", err)
 	}
-	if got := c.effects(); got != 1 {
+	if got := len(c.Effects()); got != 1 {
 		return failed("effect/a-duplicate-is-not-delivered-twice",
 			"the consumer holds %d clipboard writes after the same effect was delivered twice, want one: the identity is what makes them one effect", got)
 	}
@@ -1164,15 +1271,15 @@ func scheduleEffectDeliveryPolicy(m *model) error {
 	// And a full frame is a resend of STATE: cells, never an effect. This is
 	// the half ADR-0066 states in terms — a full frame must never repeat a
 	// clipboard write or a notification.
-	before := c.pending()
-	if err := m.resendState(); err != nil {
+	before := c.Pending()
+	if err := m.Consumers().Resend(); err != nil {
 		return failed("effect/resend", "resending the state: %v", err)
 	}
-	if got := c.effects(); got != 1 {
+	if got := len(c.Effects()); got != 1 {
 		return failed("effect/a-resend-carries-no-effect",
 			"the consumer holds %d at-most-once payloads after a resend of state, want the one it already had: a resend of state must not resend an effect", got)
 	}
-	if got := c.pending() - before; got != 1 {
+	if got := c.Pending() - before; got != 1 {
 		return failed("effect/a-resend-is-one-frame",
 			"the resend handed the consumer %d payloads, want the one frame it is", got)
 	}
@@ -1188,20 +1295,20 @@ func scheduleEffectDeliveryPolicy(m *model) error {
 // program chose.
 // ---------------------------------------------------------------------------
 
-func driveEffectKinds(m *model) error {
-	c := m.attach()
+func driveEffectKinds(m Runtime) error {
+	c := m.Consumers().Attach()
 	stream := []byte("\x07\x1b]9;build finished\x07\x1b]777;notify;nocx;done\x07" +
 		"\x1b]52;c;aGVsbG8=\x07\x1b]0;a title\x07\x1b]7;file://host/tmp\x07")
 	if err := m.Ingest(stream); err != nil {
 		return failed("effect/kind-stream", "ingesting one chunk carrying every effect kind: %v", err)
 	}
-	if got := c.effects(); got != 6 {
+	if got := len(c.Effects()); got != 6 {
 		return failed("effect/every-kind-is-delivered",
 			"the consumer holds %d at-most-once payloads after a chunk carrying every kind, want 6 (six effects, five kinds)", got)
 	}
 	for _, k := range []EffectKind{EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport} {
 		observe(kindEffect, int(k))
-		if !c.holds(k) {
+		if !holdsKind(c, k) {
 			return failed("effect/every-kind-is-delivered",
 				"the consumer was handed no %s from a chunk that carried one", effectKindName(k))
 		}
@@ -1211,11 +1318,11 @@ func driveEffectKinds(m *model) error {
 	// is the same OSC number as a notification with a payload the renderer's
 	// parser returns null for, and turning it into a message would be a
 	// delivery the program never asked for.
-	before := c.effects()
+	before := len(c.Effects())
 	if err := m.Ingest([]byte("\x1b]9;4;1;50\x07\x1b]133;D;0\x07")); err != nil {
 		return failed("effect/non-effect-stream", "ingesting a progress hint and a fence: %v", err)
 	}
-	if got := c.effects(); got != before {
+	if got := len(c.Effects()); got != before {
 		return failed("effect/a-sequence-with-no-effect-delivers-none",
 			"a progress hint and a fence produced %d at-most-once payloads, want none: an OSC arriving is not an effect arriving", got-before)
 	}
@@ -1243,22 +1350,22 @@ func driveEffectKinds(m *model) error {
 // Paired with ruleIngestIsBounded.
 // ---------------------------------------------------------------------------
 
-func scheduleHostileRepeatCount(m *model) error {
+func scheduleHostileRepeatCount(m Runtime) error {
 	// A complete, sixteen-byte sequence asking for a billion repetitions.
 	capture := []byte("\x1b[1000000000b")
-	before := m.ingestWork
+	before := m.IngestState().Work
 	if err := m.Ingest(capture); err != nil {
 		return failed("hostile/repeat-is-accepted",
 			"ingesting a %d-byte sequence inside the ingest bound: %v", len(capture), err)
 	}
-	if spent := m.ingestWork - before; spent > MaxIngestBytes {
+	if spent := m.IngestState().Work - before; spent > MaxIngestBytes {
 		return failed("hostile/repeat-costs-the-bytes-it-carries",
 			"the runtime spent %d work units on a %d-byte repeat sequence, want no more than MaxIngestBytes (%d): the count inside it is the emulator's work, and clamping it is nocx-ygxjv.2's",
 			spent, len(capture), MaxIngestBytes)
 	}
-	if got := len(m.pending); got != 0 {
+	if got := len(m.IngestState().Pending); got != 0 {
 		return failed("hostile/repeat-leaves-nothing-open",
-			"the runtime is holding %d bytes after a sequence that terminates: %q", got, m.pending)
+			"the runtime is holding %d bytes after a sequence that terminates: %q", got, m.IngestState().Pending)
 	}
 	if got := m.Completeness(); got != CompletenessComplete {
 		return failed("hostile/repeat-loses-nothing",
@@ -1267,29 +1374,29 @@ func scheduleHostileRepeatCount(m *model) error {
 	return nil
 }
 
-func scheduleHostileUnterminatedOSC(m *model) error {
+func scheduleHostileUnterminatedOSC(m Runtime) error {
 	// An OSC that opens and never terminates. A program can do this by accident
 	// — a title with a stray byte — or deliberately, as a denial of service
 	// aimed at the runtime's memory.
 	body := bytes.Repeat([]byte("A"), 4*MaxPendingSequence)
 	capture := append([]byte("\x1b]0;"), body...)
-	before := m.ingestWork
+	before := m.IngestState().Work
 	if err := m.Ingest(capture); err != nil {
 		return failed("hostile/unterminated-osc-is-accepted",
 			"ingesting %d bytes of an unterminated OSC, inside the ingest bound: %v", len(capture), err)
 	}
-	if got := len(m.pending); got > MaxPendingSequence {
+	if got := len(m.IngestState().Pending); got > MaxPendingSequence {
 		return failed("hostile/unterminated-osc-is-bounded",
 			"the runtime holds %d bytes of a sequence that never terminates, want at most MaxPendingSequence (%d)", got, MaxPendingSequence)
 	}
-	if spent := m.ingestWork - before; spent > MaxIngestBytes {
+	if spent := m.IngestState().Work - before; spent > MaxIngestBytes {
 		return failed("hostile/unterminated-osc-costs-the-bytes-it-carries",
 			"the runtime spent %d work units on %d bytes of output, want no more than MaxIngestBytes (%d)", spent, len(capture), MaxIngestBytes)
 	}
-	if m.ingestLost == 0 {
+	if m.IngestState().Lost == 0 {
 		return failed("hostile/the-dropped-sequence-is-reported",
 			"the runtime holds %d bytes of an unterminated sequence and counted no loss, want the %d bytes it discarded reported",
-			len(m.pending), len(capture)-len(m.pending))
+			len(m.IngestState().Pending), len(capture)-len(m.IngestState().Pending))
 	}
 	if got := m.Completeness(); got != CompletenessLostIngest {
 		return failed("hostile/the-dropped-sequence-is-reported",
@@ -1299,7 +1406,7 @@ func scheduleHostileUnterminatedOSC(m *model) error {
 	return nil
 }
 
-func scheduleHostileOversizedDCS(m *model) error {
+func scheduleHostileOversizedDCS(m Runtime) error {
 	// A DCS larger than any bound the runtime states, in ONE call. It is
 	// refused, and a refusal changes nothing — not the clock, not the sequence
 	// held, not the work charged.
@@ -1322,11 +1429,11 @@ func scheduleHostileOversizedDCS(m *model) error {
 			return failed("hostile/chunked-dcs-is-accepted", "ingesting one DCS chunk: %v", err)
 		}
 	}
-	if got := len(m.pending); got > MaxPendingSequence {
+	if got := len(m.IngestState().Pending); got > MaxPendingSequence {
 		return failed("hostile/oversized-dcs-is-bounded",
 			"the runtime holds %d bytes of an unterminated DCS, want at most MaxPendingSequence (%d)", got, MaxPendingSequence)
 	}
-	if m.ingestLost == 0 {
+	if m.IngestState().Lost == 0 {
 		return failed("hostile/oversized-dcs-is-bounded",
 			"the runtime discarded the excess of an oversized DCS and counted none of it")
 	}
@@ -1339,7 +1446,34 @@ func scheduleHostileOversizedDCS(m *model) error {
 // fail. The second run is the acceptance criterion: a rule that cannot be
 // removed to make a named assertion fail is not being tested by the schedule
 // paired with it.
+//
+// Read the two halves differently, because they are evidence about two
+// different things. "With every rule on the schedule must pass" is evidence
+// about the CONTRACT, and so is the assertion the second half NAMES: the
+// schedule is written against the interface, so the sentence it fails with is
+// one a real runtime is judged by too. The REMOVAL is evidence about the MODEL
+// and nothing else — which rule makes which schedule fail is a fact about
+// model_test.go's rule set, and a runtime with no rules to remove cannot be
+// asked a question of that shape. Pairing the assertion with a rule is how the
+// model is kept falsifiable; it is not how the contract is kept true.
 // ---------------------------------------------------------------------------
+
+// The two session ids the fairness schedule is run over, named here because
+// BUILDING the arrangement is the harness's business and not the schedule's.
+const (
+	busySessionID  SessionID = "the-busy-session"
+	otherSessionID SessionID = "the-other-session"
+)
+
+// sessionsOverOneBudget builds the fairness schedule's two runtimes — two
+// sessions, one delivery allowance between them — which is a piece of
+// CONSTRUCTION: the schedule judges what the arrangement does, and a schedule
+// that wired it would be asserting against its own setup. Whether the allowance
+// is per session is unobservable unless these two share one account.
+func sessionsOverOneBudget(rules ruleSet) (Runtime, Runtime) {
+	budget := newDeliveryBudget()
+	return newSessionModel(rules, budget, busySessionID), newSessionModel(rules, budget, otherSessionID)
+}
 
 // assertionFailed is the second half of every pair: the schedule must have
 // failed through a named assertion, and it must be the one the rule's removal
@@ -1550,13 +1684,17 @@ func TestSchedule_ConsumerThatNeverReads_FailsWhenItsLosslessRuleIsRemoved(t *te
 }
 
 func TestSchedule_OneSessionCannotSpendAnothersAllowance(t *testing.T) {
-	if err := scheduleOneSessionCannotSpendAnothersAllowance(); err != nil {
+	busy, other := sessionsOverOneBudget(allRules())
+	if err := scheduleOneSessionCannotSpendAnothersAllowance(busy, other); err != nil {
 		t.Fatalf("with every rule on the schedule must pass: %v", err)
 	}
 }
 
 func TestSchedule_OneSessionCannotSpendAnothersAllowance_FailsWhenItsRuleIsRemoved(t *testing.T) {
-	err := scheduleOneSessionCannotSpendAnothersAllowanceWith(without(rulePerSessionAllowance), newDeliveryBudget())
+	// The paired run differs in the RULES alone, over the same arrangement: two
+	// sessions, one shared budget.
+	busy, other := sessionsOverOneBudget(without(rulePerSessionAllowance))
+	err := scheduleOneSessionCannotSpendAnothersAllowance(busy, other)
 	if err == nil {
 		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[rulePerSessionAllowance])
 	}
@@ -1660,16 +1798,32 @@ func TestEveryEffectKindBelongsToTheAtMostOnceClass(t *testing.T) {
 
 type invalidEvent struct {
 	name string
+	// build is the runtime the event is invalid IN, when the ordinary one —
+	// every rule on, completeness established — is not the state it needs. The
+	// only event that needs another is the write gate, which refuses while
+	// completeness is unknown and that is a state a runtime BEGINS in: it is
+	// built rather than switched on through the contract, because "establish
+	// nothing" is a producer a real runtime has and a schedule is not one.
+	// A nil builder means newModel.
+	build func(ruleSet) Runtime
 	// drive brings the runtime to the state the event is invalid in, performs
 	// the event, and asserts both the refusal and that nothing changed.
-	drive func(m *model) error
+	drive func(m Runtime) error
+}
+
+// runtime applies the builder, or the ordinary construction when there is none.
+func (ev invalidEvent) runtime(rules ruleSet) Runtime {
+	if ev.build != nil {
+		return ev.build(rules)
+	}
+	return newModel(rules)
 }
 
 func invalidEvents() []invalidEvent {
 	return []invalidEvent{
 		{
 			name: "Admit carrying evidence about another incarnation",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				ctrl, err := grant(m, person())
 				if err != nil {
 					return err
@@ -1686,7 +1840,7 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "Admit carrying a superseded control epoch",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				// The agent holds control, then the person takes over: the epoch
 				// the agent's client computed is now superseded, and an intent
 				// still carrying it is refused rather than applied late.
@@ -1709,7 +1863,7 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "Admit with nobody holding control",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				before := fingerprintOf(m)
 				_, err := m.Admit(Intent{At: m.Incarnation(), Under: 1, By: person(), Kind: IntentKindKey, Payload: []byte("l")})
 				if !errors.Is(err, ErrNoController) {
@@ -1721,7 +1875,13 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "Execute while completeness is unknown",
-			drive: func(m *model) error {
+			// The runtime BEGINS here, which is why this is a builder and not a
+			// step in the drive: while it cannot say whether it holds the whole
+			// stream it executes nothing, and establishing anything is a
+			// producer a real runtime has (nocx-ygxjv.2) rather than something
+			// a schedule reaches for through the contract.
+			build: func(r ruleSet) Runtime { return newUnestablishedModel(r) },
+			drive: func(m Runtime) error {
 				ctrl, err := grant(m, person())
 				if err != nil {
 					return err
@@ -1729,11 +1889,6 @@ func invalidEvents() []invalidEvent {
 				if _, admitErr := admitKey(m, ctrl, []byte("l")); admitErr != nil {
 					return admitErr
 				}
-				// While the runtime cannot say whether it holds the whole stream
-				// it executes nothing, and this is the state a real runtime
-				// STARTS in: establishNothing is the producer the model would
-				// have had (the real one is nocx-ygxjv.2's).
-				m.establishNothing()
 				observe(kindCompleteness, int(CompletenessUnknown))
 				before := fingerprintOf(m)
 				id, state, err := m.Execute()
@@ -1746,7 +1901,7 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "ReportGeometry with a size no terminal can run at",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				before := fingerprintOf(m)
 				if err := m.ReportGeometry(Geometry{}); !errors.Is(err, ErrGeometryInvalid) {
 					return failed("invalid/reported-geometry-refused",
@@ -1757,7 +1912,7 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "CommitGeometry with a size no terminal can run at",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				before := fingerprintOf(m)
 				if _, err := m.CommitGeometry(Geometry{}); !errors.Is(err, ErrGeometryInvalid) {
 					return failed("invalid/committed-geometry-refused",
@@ -1768,7 +1923,7 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "ExpireRendezvous with nothing in flight",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				before := fingerprintOf(m)
 				if err := m.ExpireRendezvous(); !errors.Is(err, ErrNoRendezvous) {
 					return failed("invalid/expiry-without-a-rendezvous-refused",
@@ -1779,14 +1934,14 @@ func invalidEvents() []invalidEvent {
 		},
 		{
 			name: "Delivering a payload whose class nobody decided",
-			drive: func(m *model) error {
+			drive: func(m Runtime) error {
 				// The zero value of DeliveryClass is not a class: a payload
 				// carrying it is refused rather than delivered as though the
 				// zero value were a policy. This is the direction that makes
 				// "every payload belongs to exactly one class" a promise.
-				c := m.attach()
+				c := m.Consumers().Attach()
 				before := fingerprintOf(m)
-				err := m.deliverEffect(Effect{ID: 1, At: m.Incarnation(), Kind: EffectNone})
+				err := m.Consumers().Offer(Effect{ID: 1, At: m.Incarnation(), Kind: EffectNone})
 				if !errors.Is(err, ErrUnclassifiedDelivery) {
 					return failed("invalid/unclassified-delivery-refused",
 						"delivering an effect of kind %s returned %v, want %v", effectKindName(EffectNone), err, ErrUnclassifiedDelivery)
@@ -1794,7 +1949,7 @@ func invalidEvents() []invalidEvent {
 				if err := mustBeUnchanged(m, before, "invalid/unclassified-delivery-changes-nothing"); err != nil {
 					return err
 				}
-				if got := c.effects(); got != 0 {
+				if got := len(c.Effects()); got != 0 {
 					return failed("invalid/unclassified-delivery-changes-nothing",
 						"a refused payload left the consumer holding %d of them", got)
 				}
@@ -1807,7 +1962,7 @@ func invalidEvents() []invalidEvent {
 func TestInvalidEventsChangeNothing(t *testing.T) {
 	for _, ev := range invalidEvents() {
 		t.Run(ev.name, func(t *testing.T) {
-			if err := ev.drive(newModel(allRules())); err != nil {
+			if err := ev.drive(ev.runtime(allRules())); err != nil {
 				t.Fatalf("%v", err)
 			}
 		})
@@ -1819,7 +1974,7 @@ func TestInvalidEventsChangeNothing(t *testing.T) {
 // did not, the refusal would be coming from somewhere else and the rule would
 // be decoration.
 func TestUnknownCompletenessRefusalFailsWhenItsRuleIsRemoved(t *testing.T) {
-	m := newModel(without(ruleUnknownCompletenessRefusesWrites))
+	m := newUnestablishedModel(without(ruleUnknownCompletenessRefusesWrites))
 	ctrl, err := grant(m, person())
 	if err != nil {
 		t.Fatal(err)
@@ -1827,7 +1982,6 @@ func TestUnknownCompletenessRefusalFailsWhenItsRuleIsRemoved(t *testing.T) {
 	if _, err := admitKey(m, ctrl, []byte("l")); err != nil {
 		t.Fatal(err)
 	}
-	m.establishNothing()
 	if _, state, err := m.Execute(); err != nil || state != IntentStateExecuted {
 		t.Fatalf("with rule %q removed the write must go through: state=%s err=%v",
 			ruleNames[ruleUnknownCompletenessRefusesWrites], intentStateName(state), err)
@@ -1840,7 +1994,7 @@ func TestUnknownCompletenessRefusalFailsWhenItsRuleIsRemoved(t *testing.T) {
 // fence, and an emulator fed only the surviving suffix is not authoritative.
 // ---------------------------------------------------------------------------
 
-func driveReportHole(m *model) error {
+func driveReportHole(m Runtime) error {
 	before := fingerprintOf(m)
 	if err := m.ReportHole(0); err != nil {
 		return failed("hole/zero-is-not-a-hole", "ReportHole(0) returned %v", err)
@@ -1943,11 +2097,14 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		{"PreconditionStaleAtExecution", func() error { return schedulePreconditionStaleAtExecution(newModel(allRules())) }},
 		{"RuntimeFailure", func() error { return scheduleRuntimeFailure(newModel(allRules())) }},
 
-		// The delivery schedules (bead nocx-ygxjv.4). The fairness one builds
-		// its own two sessions and one shared budget, which is why this list
-		// takes closures rather than models.
+		// The delivery schedules (bead nocx-ygxjv.4). The fairness one is run
+		// over the two runtimes sessionsOverOneBudget wires, which is why this
+		// list takes closures: the arrangement is the harness's.
 		{"ConsumerThatNeverReads", func() error { return scheduleConsumerThatNeverReads(newModel(allRules())) }},
-		{"OneSessionCannotSpendAnothersAllowance", scheduleOneSessionCannotSpendAnothersAllowance},
+		{"OneSessionCannotSpendAnothersAllowance", func() error {
+			busy, other := sessionsOverOneBudget(allRules())
+			return scheduleOneSessionCannotSpendAnothersAllowance(busy, other)
+		}},
 		{"EffectDeliveryPolicy", func() error { return scheduleEffectDeliveryPolicy(newModel(allRules())) }},
 		{"HostileRepeatCount", func() error { return scheduleHostileRepeatCount(newModel(allRules())) }},
 		{"HostileUnterminatedOSC", func() error { return scheduleHostileUnterminatedOSC(newModel(allRules())) }},
@@ -1958,7 +2115,7 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		}
 	}
 	for _, ev := range invalidEvents() {
-		if err := ev.drive(newModel(allRules())); err != nil {
+		if err := ev.drive(ev.runtime(allRules())); err != nil {
 			t.Fatalf("invalid event %q must be refused without changing anything, or the states it passes through are not evidence: %v", ev.name, err)
 		}
 	}
@@ -1975,7 +2132,7 @@ func TestEveryStateIsReachableOrNamedUnreachable(t *testing.T) {
 		intentWalk(IntentStateExecuted, ""),
 		intentWalk(IntentStateCancelled, ""),
 		intentWalk(IntentStateRefused, ""),
-		intentWalk(IntentStateFailed, "no producer yet: Execute either writes (executed) or refuses before writing (refused, cancelled), and a real runtime reaches this only when proc.Write itself fails part-way — nocx-ygxjv.2"),
+		intentWalk(IntentStateFailed, "the producer exists and no schedule injects one: Execute reports it when the TERMINAL refuses the write (a real one does when proc.Write fails part-way — nocx-ygxjv.2), and the terminal every schedule here is constructed over takes everything it is handed, because a schedule's subject is the runtime's decisions and not a tty's"),
 
 		rendezvousWalk(RendezvousIdle, ""),
 		rendezvousWalk(RendezvousAwaitingSighting, ""),

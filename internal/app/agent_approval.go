@@ -62,6 +62,12 @@ type agentApprovalService struct {
 	// decision, and a stack of identical dialogs is how a person clicks one
 	// without reading it — so a second start joins the first one's wait.
 	asking map[string][]chan string
+
+	// authorityEnded is called whenever an answer stops holding — a revoke, a
+	// withdrawn enrolment — so the tool endpoint can close the connections
+	// admitted under it. Bound by the composition root; nil means no endpoint
+	// was built, and nothing is admitted to close.
+	authorityEnded func()
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -95,6 +101,12 @@ func (s *agentApprovalService) Approved(sid session.ID, scope string) bool {
 
 // Forget drops what an enrolment approved when that enrolment ends, so the map
 // follows the live intervals rather than growing for the life of the backend.
+//
+// THE INTERVAL ENDS WITH THE ANSWER. An enrolment that stops approving is also
+// an admission that must stop being usable: the endpoint admits a connection
+// once (ADR-0058), so a live one carries the approval it was let in under and
+// nothing re-reads it per call. Ending the answer is therefore half the work,
+// and the endpoint is told before this returns.
 func (s *agentApprovalService) Forget(sid session.ID) {
 	if s == nil {
 		return
@@ -102,6 +114,28 @@ func (s *agentApprovalService) Forget(sid session.ID) {
 	s.mu.Lock()
 	delete(s.enrolled, sid)
 	s.mu.Unlock()
+	s.endAuthority()
+}
+
+// BindAuthorityEnded takes what closes the tool-endpoint connections admitted
+// under an answer that has stopped holding. newToolAuthorizer calls it while
+// both are in hand; an approval seam that never gets one is one whose sessions
+// nothing can admit, so there is nothing to close.
+func (s *agentApprovalService) BindAuthorityEnded(ended func()) {
+	if s == nil {
+		return
+	}
+	s.authorityEnded = ended
+}
+
+// endAuthority tells the tool endpoint that an answer has stopped holding, so
+// the connections admitted under it are closed. Nil before the authorizer binds
+// it, and nil is safe: an endpoint that was never built admits nobody.
+func (s *agentApprovalService) endAuthority() {
+	if s == nil || s.authorityEnded == nil {
+		return
+	}
+	s.authorityEnded()
 }
 
 func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agent string) error {
@@ -235,10 +269,16 @@ func (s *agentApprovalService) ListAgentAccess() []transport.AgentAccessRecord {
 	return records
 }
 
-// ForgetAgentAccess unmakes one answer. It touches only the document: a pane
-// already running is not reached and does not need to be, because Approved
-// reads the store on every admit, so that agent's next tool call is refused
-// and it goes on running without nocx's tools — the state a denial produces.
+// ForgetAgentAccess unmakes one answer, and ends every admission that answer
+// was holding.
+//
+// The DOCUMENT is only half of it now. A tool connection is admitted once
+// (ADR-0058), so nothing re-reads this store per call, and revoking the answer
+// alone left a live connection — and the grant inside it — working until the
+// socket happened to end. Closing the connections admitted under an answer that
+// has gone is what makes the revocation take effect on the next call rather
+// than on the next session; the PANE still goes on running, which is the state
+// a denial produces, because nocx does not reach into an agent's process.
 //
 // A workspace this backend does not answer for is refused rather than
 // composed into a key that would match nothing: silently forgetting nothing
@@ -250,7 +290,22 @@ func (s *agentApprovalService) ForgetAgentAccess(executable, digest, workspace s
 	if workspace != s.workspace {
 		return false, fmt.Errorf("nocx does not hold answers for workspace %q", workspace)
 	}
-	return s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
+	forgotten, err := s.store.Forget(agentapproval.Executable{Path: executable, SHA256: digest}, s.scope)
+	if err != nil {
+		return forgotten, err
+	}
+	if forgotten {
+		// An answer was actually unmade, so the admissions it held have to
+		// end: asking Approved again for each live admitted session is what
+		// closes the ones that no longer hold. AFTER the Forget and never
+		// before — before it, the answer still reads as granted.
+		//
+		// Nothing forgotten means no answer ended, so there is nothing to
+		// close; closing anyway would re-ask an unchanged set, and the answer
+		// to "did this call change anything" should not be "it depends".
+		s.endAuthority()
+	}
+	return forgotten, nil
 }
 
 // settle closes the question for every enrolment waiting on it — nothing when

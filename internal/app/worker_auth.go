@@ -45,6 +45,15 @@ type workerAuthApproval interface {
 	Approved(sid session.ID, scope string) bool
 }
 
+// workerAuthAuthorityEnding is implemented by an approval seam whose answers
+// can stop holding while a connection admitted under one is still open. The
+// authorizer binds its closer here, where both are in hand, rather than leaving
+// a composition root — or a test that builds these two by hand — a second
+// wiring step to remember.
+type workerAuthAuthorityEnding interface {
+	BindAuthorityEnded(ended func())
+}
+
 // The slot is the coordinator seat, not a conversation gate. M1 makes talk
 // mesh from day one; A1 says membership makes a participant addressable while
 // delegation makes it controllable. Each participant has its own session, so
@@ -99,6 +108,52 @@ type toolAuthorizer struct {
 	approval     workerAuthApproval
 	workspace    string
 	slots        workerCallerSlots
+	// admissions is the endpoint's view of the connections it admitted, bound
+	// by toolendpoint.New before the socket accepts anything. Nil when no
+	// endpoint was built, and nil is the honest answer then: there are no
+	// intervals to close.
+	admissions toolendpoint.SessionAdmissions
+}
+
+// BindSessionAdmissions implements toolendpoint.SessionAdmissionBinder.
+//
+// THE ADMISSION INTERVAL IS NOT RECHECKED PER CALL. A shared connection is
+// admitted once (ADR-0058), so the approval that let it in is the approval it
+// keeps — which is the point of the interval, and also why the interval has to
+// be CLOSED when the answer behind it ends. Without this, a person revoking an
+// agent's access in Settings revoked a document while the coordinator's
+// connection went on working, and the next tool call ran under a grant nobody
+// still held.
+func (a *toolAuthorizer) BindSessionAdmissions(admissions toolendpoint.SessionAdmissions) {
+	if a == nil {
+		return
+	}
+	a.admissions = admissions
+}
+
+// CloseUnapproved closes the admitted connections whose session no longer
+// holds an approval, and reports how many it closed.
+//
+// It re-asks the approval rather than taking an instruction to close a
+// particular session, because the two ways an answer ends reach this from
+// different places and neither carries the connection's identity: a revoke
+// names an executable and a digest, a withdraw names a lane. What they have in
+// common is the fact that matters — the answer these connections were admitted
+// under has stopped holding — and the approval seam is the only thing that can
+// answer it. Approvals that still hold are left alone, so one person revoking
+// one agent does not drop another's work in flight.
+func (a *toolAuthorizer) CloseUnapproved() int {
+	if a == nil || a.admissions == nil {
+		return 0
+	}
+	closed := 0
+	for _, sid := range a.admissions.AdmittedSessions() {
+		if a.approval != nil && a.approval.Approved(session.ID(sid), agentToolEndpointScopePrefix+a.workspace) {
+			continue
+		}
+		closed += a.admissions.CloseAdmitted(sid)
+	}
+	return closed
 }
 
 // newToolAuthorizer builds the one external caller authorizer. It binds a
@@ -106,6 +161,11 @@ type toolAuthorizer struct {
 // came from a process nocx opened itself. The peer's uid and pid never supply
 // the root identity. The durable executable/scope decision is required in
 // addition to the live process-tree pin.
+//
+// It returns the CONCRETE type because the composition root asks it for one
+// thing the Authorizer interface does not carry — closing the admitted
+// connections whose approval has ended — and reaching that through an
+// assertion at the call site would move a wiring fact into a runtime branch.
 func newToolAuthorizer(
 	pinner peerpin.Pinner,
 	sessions workerAuthSessions,
@@ -113,14 +173,19 @@ func newToolAuthorizer(
 	participants workerAuthParticipants,
 	workspace string,
 	approval workerAuthApproval,
-) (toolendpoint.Authorizer, error) {
+) (*toolAuthorizer, error) {
 	if approval == nil {
 		return nil, errors.New("tool authorizer: no agent approval")
 	}
-	return &toolAuthorizer{
+	authorizer := &toolAuthorizer{
 		pinner: pinner, sessions: sessions, enrolments: enrolments,
 		participants: participants, approval: approval, workspace: workspace,
-	}, nil
+	}
+	if binder, ok := approval.(workerAuthAuthorityEnding); ok {
+		// The count is for whoever wants to log it; this seam is a notice.
+		binder.BindAuthorityEnded(func() { _ = authorizer.CloseUnapproved() })
+	}
+	return authorizer, nil
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, bool) {

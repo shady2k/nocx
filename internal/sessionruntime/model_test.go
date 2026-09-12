@@ -278,21 +278,32 @@ func (m *model) cancelSuperseded() {
 	if !m.rules.on(ruleCancelOnRevoke) {
 		return
 	}
-	kept := m.queue[:0]
-	for _, id := range m.queue {
-		mi := m.intents[id]
-		if mi.intent.Under != m.control.Epoch {
-			// ruleExecutedIsIrreversible: only an ADMITTED intent can be
-			// cancelled. An executed one is not in the queue at all, and the
-			// guard below is what keeps a broken implementation from putting
-			// it back.
-			if m.rules.on(ruleExecutedIsIrreversible) && mi.state == IntentStateExecuted {
-				continue
-			}
-			mi.state = IntentStateCancelled
+	// Walked over every RECORD rather than over the pending queue, because the
+	// records are what a real implementation has to keep: IntentState(id) must
+	// answer long after an intent left the queue, so a revocation written
+	// against the records is the ordinary shape — and the ordinary mistake.
+	// Walking the queue instead would make the guard below unreachable and its
+	// removal inert, which is what nocx-ygxjv.5 was filed about. Ids are minted
+	// sequentially, so this is deterministic without a map walk.
+	for id := IntentID(1); id <= m.nextID; id++ {
+		mi, ok := m.intents[id]
+		if !ok || mi.intent.Under == m.control.Epoch {
 			continue
 		}
-		kept = append(kept, id)
+		// ruleExecutedIsIrreversible. Bytes on a PTY cannot be recalled, so a
+		// revocation may not report an executed intent as cancelled. Removing
+		// this guard is exactly what a revocation that walks its records
+		// without the check does.
+		if m.rules.on(ruleExecutedIsIrreversible) && mi.state != IntentStateAdmitted {
+			continue
+		}
+		mi.state = IntentStateCancelled
+	}
+	kept := m.queue[:0]
+	for _, id := range m.queue {
+		if m.intents[id].intent.Under == m.control.Epoch {
+			kept = append(kept, id)
+		}
 	}
 	m.queue = kept
 }

@@ -550,24 +550,27 @@ func scheduleTakeoverWithInputQueued(m *model) error {
 }
 
 // ---------------------------------------------------------------------------
-// 5. ruleExecutedIsIrreversible, and why it has no schedule of its own.
+// 5. ruleExecutedIsIrreversible shares section 4's schedule, and why that is
+// enough (nocx-ygxjv.5).
 //
 // The rule guards an intent that has EXECUTED from being re-reported as
-// cancelled by cancelSuperseded. Through the model's own transitions that guard
-// is unreachable and its removal is inert: Execute takes an intent off the
-// admitted order, and cancelSuperseded only ever walks what is still on it, so
-// no admitted intent is ever also executed. Driving it would mean injecting an
-// id back onto that order after its bytes had left — a state no implementation
-// satisfying Runtime can be in — and a schedule that needed it would be
-// evidence about the model's internals rather than about the contract, and
-// could not run against the real runtime at all.
+// cancelled when its epoch is superseded. It was briefly INERT, and the reason
+// is worth keeping because it is the trap: cancelSuperseded walked the pending
+// QUEUE, an executed intent is not on it, so removing the guard changed nothing
+// and the rule could not be falsified.
 //
-// So the rule is exercised where it is observable: section 4 asserts the
-// CONSEQUENCE — an executed intent survives the handover and is never reported
-// as cancelled, which is what a revocation acting on a stale queue would break.
-// The inertness of the guard itself is reported to the coordinator, because the
-// fix, if the guard is to be tested, is a model transition that the Runtime
-// interface also supports — not a state a schedule can inject.
+// The fix was not to inject a state — that would have been evidence about model
+// internals rather than about the contract, and could not judge a real runtime.
+// It was to make the model take the shape a real implementation must: the
+// RECORDS outlive the queue, because IntentState(id) has to answer long after
+// an intent left it, so a revocation is written against the records. That is
+// the ordinary shape and therefore the ordinary mistake, and with it the guard
+// is live — removing the rule cancels an executed intent and section 4's
+// takeover/executed-survives-the-handover fires.
+//
+// So the rule is paired like the other ten; it simply shares a schedule with
+// ruleCancelOnRevoke rather than having one of its own, because one arrival
+// order exercises both halves of what a handover owes.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -1406,6 +1409,18 @@ func TestSchedule_TakeoverWithInputQueued_FailsWhenItsRuleIsRemoved(t *testing.T
 		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleCancelOnRevoke])
 	}
 	assertionFailed(t, err, "takeover/cancels-admitted-input")
+}
+
+// The second half of the same schedule. A handover owes two things that pull in
+// opposite directions — cancel what has not run, and never disown what has —
+// and a model that walks its records rather than its queue can get the first
+// right while breaking the second. See section 5.
+func TestSchedule_TakeoverWithInputQueued_FailsWhenExecutedIsReversible(t *testing.T) {
+	err := scheduleTakeoverWithInputQueued(newModel(without(ruleExecutedIsIrreversible)))
+	if err == nil {
+		t.Fatalf("removing rule %q must make this schedule fail; it did not", ruleNames[ruleExecutedIsIrreversible])
+	}
+	assertionFailed(t, err, "takeover/executed-survives-the-handover")
 }
 
 func TestSchedule_DisconnectAfterAdmission(t *testing.T) {

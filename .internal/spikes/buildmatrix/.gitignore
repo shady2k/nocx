@@ -6,3 +6,6 @@ logs/
 
 # Go build output for the cross-built probes.
 /bin/
+
+# What mac-check.sh writes on the Mac.
+mac-check.log

@@ -1,11 +1,11 @@
-# The backend owns the session's screen and its blocks
+# One emulator, on the backend
 
-- **Date:** 2026-09-12 (third revision. The first two are superseded and §3 says what
-  each got wrong; they were reviewed by codex and the corrections are folded in.)
+- **Date:** 2026-09-12 (fourth revision; §3 records what each earlier one got wrong)
 - **Status:** draft for review
-- **Owner's decision:** taken in conversation on 2026-09-12, in three steps — the backend
-  holds the screen; the renderer's destructive cut is the problem, not the remedy; and
-  **the backend owns the blocks.** The third step is what this revision is about.
+- **Owner's decision, 2026-09-12:** the long-term model, taken deliberately over the
+  smaller incremental option. **"Нам и нужна долгосрочная модель, никаких быстрых побед.
+  Нужно сделать архитектурно правильно."** The scope in §6 is therefore accepted scope, not
+  a list of risks to be traded away later.
 - **Binding documents this crosses:** `AD-1`, `AD-6`, `AD-9`, `AD-10`,
   [ADR-0001](../../docs/decisions/0001-xterm-js-as-vt-frontend.md),
   [ADR-0002](../../docs/decisions/0002-native-tabs-no-embedded-multiplexer.md),
@@ -14,250 +14,294 @@
   [ADR-0024](../../docs/decisions/0024-authenticated-shell-integration-channel.md),
   [ADR-0041](../../docs/decisions/0041-x-vt-as-the-backend-emulator.md),
   [ADR-0064](../../docs/decisions/0064-a-pane-that-is-read-may-be-answered.md).
-- **Beads:** `nocx-kkn89` (this design), epic `nocx-eidfb`, epic `nocx-6q1uh`, `nocx-dkawo`.
-- **Reference read for this revision:** `~/repos/herdr`, `src/server/render_stream.rs` and
-  `src/protocol/render_ansi.rs`.
+- **Beads:** `nocx-kkn89` (this design), epics `nocx-eidfb`, `nocx-6q1uh`, `nocx-dkawo`.
+- **Reference read:** `~/repos/herdr` — `src/server/render_stream.rs`,
+  `src/protocol/render_ansi.rs`, `src/protocol/wire.rs`.
 
-## 1. How this document arrived where it is
+## 1. The decision
 
-It began as the evidence question under `nocx-6q1uh`: a write into a pane must be judged
-against that pane's screen, and a coordinator's worker pane has a backend grid while a
-person's own pane does not.
+**One VT emulator in the system, on the backend. It owns the screen, the block boundaries
+and the block content. The frontend paints what it is sent and sends structured input.**
 
-Three moves followed, each the owner's:
+| Owner    | Owns                                                                                                                                                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| backend  | the emulator, one per session; the parse of everything the program emits; where each block begins and ends; the block's content; the ledger; the session's size; the answer to any question the program asks its terminal |
+| frontend | painting frames; placing cards from what it is sent; selection, pointer, IME; **structured input events**, not encoded key bytes                                                                                          |
 
-1. **The backend holds the screen.** One source of evidence for both callers, and the same
-   thing a second machine needs to attach.
-2. **The renderer's cut is the problem.** Every attempt to reconcile two screens failed on
-   one operation — the renderer destroys rows the backend keeps — and reconciling it is not
-   possible, because the moment of that operation is not a function of the byte stream.
-3. **The backend owns the blocks.** The reason two representations exist at all is that the
-   frontend decides, captures and freezes command blocks from its own buffer. Move that
-   ownership and the second representation stops existing.
+This is the shape `herdr` has, and the reason it is coherent is not that it runs on a
+server: **herdr has one representation of the screen.** Every difficulty in the three
+earlier revisions of this document came from nocx having a second representation — the
+command block — built on the client, where the authenticated facts are not.
 
-The third move is what makes the whole thing smaller instead of larger, and it is what
-this revision records.
+## 2. What this buys, stated exactly
 
-## 2. What herdr does, and why it is simpler
+These stop existing rather than being solved:
 
-`herdr` keeps the terminal state on the server and sends clients **frames**, in two
-encodings (`src/server/render_stream.rs`): `SemanticFrame`, a whole frame with identical
-frames skipped; and `TerminalAnsi`, the **diff re-encoded as ANSI**
-(`src/protocol/render_ansi.rs`) — first frame a full redraw, then only changed cells,
-wrapped in synchronised output with the cursor hidden for the paint.
+- **Seeding a second emulator with application state.** The browser never needs the
+  program's saved cursor, parser continuation, margins or inactive buffer in order to
+  execute the next bytes, because it no longer executes them.
+- **Safe-boundary checkpointing for a browser attach.** The backend can snapshot applied
+  cells while keeping its own incomplete parser state to itself. (Recovery of the BACKEND
+  emulator is a separate problem — §6.7.)
+- **The clear as a wire event.** A client receives consequences, not an instruction to
+  mutate its own terminal.
+- **Equivalence between two application emulators**, and the fidelity oracle between them.
 
-It is simpler than anything we have proposed, and the reason is not that it runs on a
-server. **herdr has no command blocks.** One grid, one representation, nothing to keep in
-step. Every difficulty in the first two revisions of this document came from nocx having a
-second representation of the same content and having built it on the client.
+What does **not** disappear, contrary to the third revision:
 
-## 3. What the first two revisions got wrong
+- **Ordering obligations.** Capture-before-discard, card/frame coherence, reconnect and
+  baseline recovery all remain — they move, they do not vanish.
+- **The fence.** §6.4.
+- **Fidelity testing.** Its subject changes from "two emulators agree" to "backend →
+  encoder → xterm displays what the backend has", plus input correctness and delivery
+  freshness.
 
-Recorded because each was believed and acted on, and the corrections are what shaped this
-one.
+## 3. What the earlier revisions got wrong
 
-- **The first revision** claimed a late client is limited to the 256 KB replay ring, and
-  that a session with no renderer records no history. Both wrong. `reclaimSession`
-  (`frontend/src/ipc.ts:1179`) reads recorded output before joining the ring;
-  `syncLifecycleLedger` (`internal/transport/ws_lifecycle.go:342`) completes the ledger row
-  from authenticated facts. What is renderer-dependent is the **frozen output artifact**,
-  not history.
-- **The first revision** argued the two screens need not agree because they answer different
-  questions. They do need to agree, because the same pane can be watched by a person while
-  an automated caller writes into it — a delegated worker gets an ordinary tab
-  (`frontend/src/panes.ts:959`).
-- **The second revision** said the live region has no offset. It has one
-  (`frontend/src/scrollback/controller.ts:470`), conditionally released when the echo row is
-  overwritten (`:479`). The historical `nocx-m87n` diagnosis no longer describes the code.
-- **The second revision** said xterm's scrollback depth does not touch the coordinate
-  question. It does: on a height increase xterm recovers rows from scrollback and moves the
-  cursor row, so the same session grown from 3 rows to 5 lands differently with a 0-line and
-  a 10-line scrollback.
-- **A shared, ordered clear** (the third option considered) survives review but costs a
-  protocol: the backend feeds its grid before the delivery ring
-  (`internal/transport/ws.go:3289`), so a renderer that clears and then reports is always
-  late, and the clear would have to be committed by the backend and applied by clients — a
-  session-state and protocol change spanning submission, lifecycle, output application,
-  capture and recovery, with nine failure modes each needing a test.
+Kept because each was believed and acted on.
 
-**The decision below removes the need for that protocol rather than specifying it.**
+- **R1:** a late client is limited to the 256 KB ring — wrong, `reclaimSession`
+  (`frontend/src/ipc.ts:1179`) reads recorded output first. A session with no renderer
+  records no history — wrong, `syncLifecycleLedger`
+  (`internal/transport/ws_lifecycle.go:342`) closes the row from authenticated facts; what
+  is renderer-dependent is the frozen output ARTIFACT.
+- **R1:** the two screens need not agree — wrong; a delegated worker gets an ordinary tab
+  (`frontend/src/panes.ts:959`), so a person can watch the pane an automated caller writes
+  into.
+- **R2:** the live region has no offset — wrong, it has one
+  (`frontend/src/scrollback/controller.ts:470`), conditionally released at `:479`.
+- **R2:** xterm's scrollback depth does not touch the coordinate question — wrong; on a
+  height increase xterm recovers rows from scrollback and moves the cursor row.
+- **R3:** "the fence machinery goes" — wrong, see §6.4. "Attach is a first frame" — true
+  only of the live rectangle, see §5. "Frame diffs emit fewer bytes than raw output" —
+  not unconditionally, see §7. "Nothing else about xterm changes" — wrong, input encoding
+  and non-visual effects live in xterm today, see §6.1 and §6.2. "The tests do not need a
+  browser" — wrong; cell geometry, hit-testing, IME and selection still do.
 
-## 4. The decision
+## 4. The invariant, as a new ADR
 
-**One emulator in the system, on the backend. It owns the screen, the block boundaries and
-the block content. The frontend renders what it is sent.**
-
-| Owner    | Owns                                                                                                                                 |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| backend  | the VT emulator, one per session; OSC 133; where each block begins and ends; **the block's content**; the ledger; the session's size |
-| frontend | painting the cards it is sent; the live region; selection, input, and everything else DOM                                            |
-
-Consequences that follow without being designed:
-
-- **No divergence to manage.** There is one emulator, so there is nothing to reconcile, no
-  equivalence requirement, no fidelity oracle between two implementations.
-- **Attach is a first frame.** A client that attaches gets a full redraw as its first frame —
-  that is what the encoder already does for its first frame — and the repaint protocol,
-  the safe-boundary checkpointing and the snapshot/offset ordering all disappear.
-- **The clear is not an event.** Whatever nocx does at a command boundary, the backend does
-  it once and the clients receive its consequences. No ordered clear, no nine failure modes.
-- **The fence machinery goes.** The 500 ms deferred fence, `beginBlockNow` opening a block
-  before the authenticated fact arrives, `_settleFrozen`, `_freezeVisual` and `clearViewport`
-  exist because the decision is taken where the facts are not. They are not ported; they are
-  deleted.
-- **`history.record` goes.** The backend already opens and closes the durable row; with the
-  content in hand it stops needing the renderer to send the facts back.
-
-### 4.1 The live region
-
-It arrives as **frame diffs**, herdr's `TerminalAnsi` shape: a full redraw first, then
-changed cells only.
-
-`AD-1` chose raw binary PTY frames for hero rendering performance, and this crosses that
-choice — but not in the direction it assumes. A fast-scrolling log emits **fewer** bytes as
-frame diffs at a fixed frame rate than as raw PTY output, because intermediate frames are
-never painted; that is how tmux and herdr stay fast under `yes`. This must be measured
-(§7), not assumed in either direction.
-
-### 4.2 What stays on the frontend, and what moves
-
-Of ~6,900 non-test lines under `frontend/src/scrollback/`, the block LIFECYCLE —
-`blocks.ts` (3,028), `controller.ts` (1,134), `serializer.ts` (708) — plus
-`history-client.ts` and `history-outbox.ts` (340) is what moves: roughly 5,200 lines become
-"render what the backend sent".
-
-Card PRESENTATION stays: `cell-drift`, `cell-fit`, `cell-metric`, `sgr`, `sgr-read`,
-`restored-block`, `shell-paint`. The card is still HTML on the client.
-
-This is a relocation, not a saving, and it should not be sold as one. What it buys is that
-the copy is single, the tests do not need a browser, and a whole class of races stops
-existing because the decision is finally taken where the facts are.
-
-## 5. What this supersedes, and what it must not absorb
-
-A **new ADR**, not an edit to any existing record.
+Not an edit to any existing record.
 
 > **One emulator, on the backend. It owns what the session is; the renderer owns what the
-> person sees of it.**
+> person sees of it, and what the person does to it arrives as intent, not as bytes.**
 
-**Superseded:**
+### 4.1 Superseded
 
-- `AD-6`'s rule that the backend does not sniff the byte stream, its refusal list
+- `AD-6`'s rule that the backend does not sniff the byte stream, and its refusal list
   (`docs/architecture.md:160`) forbidding grid-derived content from being displayed or
-  persisted, and both carve-outs, which exist only because of that rule.
+  persisted — **but only those two**. The 2026-08-25 amendment's limits on what a grid may
+  DECIDE (no wave state, no lifecycle attempt, no execution attempt, no network
+  destination) are POWERS, not consequences of where the parser runs, and they stand
+  verbatim.
 - `ADR-0001`'s consequences promising frontend-only OSC parsing. xterm.js remains the
   renderer; it stops being the VT authority.
 - `ADR-0008`'s consequences promising a byte-blind backend.
-- `ADR-0002` where it closed server-side terminal state; its revisit trigger is recorded as
-  fired.
-- `ADR-0009` in the part where the block's content is serialised from the client's buffer.
-  Its substance — the DOM owns the frozen block's presentation and geometry — stands.
-- `AD-9` and the `session.output` contract, including its no-grid reasoning.
+- `ADR-0002` where it closed server-side terminal state.
+- `ADR-0009` where the block's content is serialised from the client's buffer. Its
+  substance — the DOM owns the frozen block's presentation and geometry — stands.
+- **`AD-1`**, in the part where the data plane carries raw PTY bytes in both directions. It
+  carries frames outbound and structured input inbound; the two-plane split survives.
+- **`AD-9`** and the `session.output` contract, including its no-grid reasoning.
+- **`AD-10`**, which promises bounded per-session credit and lossless ordered byte delivery.
+  Coalesced visual updates need a different delivery contract: what is still lossless (the
+  ingest into the emulator, the ledger), what is explicitly lossy (intermediate frames), and
+  how fairness and credit are expressed over frames.
 - The `ledger.capture` contract's description of a renderer serialiser.
 - `nocx-eidfb`'s body reasoning, amended by note.
 
-**Not superseded, and must not be absorbed:**
+### 4.2 Not superseded, and not to be absorbed
 
-- The `AD-6` bootstrap-window carve-out. Permission to parse VT is not permission to
-  interpret bootstrap readiness tokens or to write bootstrap frames outside their interval.
-- **`ADR-0024` decision 1.** Its rule is narrower than "no outcomes from the stream": a
-  sighted OSC 133 may only **locate an already-authenticated event** through the rendezvous
-  at `:164`, and `C`/`D` have no meaning of their own. A program printing a forged `D` must
-  not be able to close a block or choose a capture endpoint. Backend ownership of boundaries
-  is compatible with this only if an authenticated fact authorises the transition and the
-  sighted marker merely locates it. If ordinary `C`/`D` are to acquire independent meaning,
-  the new ADR must say so explicitly rather than arrive at it by implication.
+- The `AD-6` bootstrap-window carve-out. Parsing VT is not permission to interpret bootstrap
+  readiness tokens or to write bootstrap frames outside their interval.
+- **`ADR-0024` decision 1 and decision 7.** A sighted marker may only LOCATE an
+  already-authenticated event; it never authorises one. The rendezvous is **OSC 1337 with a
+  matching nonce** (`internal/shellintegration/scripts/nocx.bash:1505`,
+  `frontend/src/renderers/xterm.ts:580`) — not ordinary OSC 133, whose `C`/`D` have no
+  meaning of their own. A program printing a forged `D` must not be able to close a block or
+  choose a capture endpoint.
 - `internal/notify`'s trust classes.
-- `ADR-0064`'s permission boundary. One source of evidence authorises nobody to read a pane
-  they could not read before.
+- `ADR-0064`'s permission boundary.
 
-## 6. What still has to be designed
+## 5. Attach is a frame AND a card projection, related by a revision
 
-Removing the protocol does not remove these.
+"Attach is just a first frame" is true of the live rectangle only. The failing case:
 
-1. **The encoder.** herdr's is ~2,000 lines and the hard parts are synchronised output,
-   hiding the cursor across a paint, batching adjacent changes and minimising cursor
-   movement. Ours is new work, and it is the riskiest single piece.
-2. **Per-client baseline and resync.** herdr carries `seq`, `repaint_pending` and
-   `reset_baseline` (`src/server/render_stream.rs`). A client whose baseline is unknown gets
-   a full redraw; the state machine for deciding that is owed.
-3. **What a card carries on the wire.** Rows with styles, or something structured. It must
-   be enough for the existing presentation — cell geometry, SGR, links, restoration — and it
-   is a contract in `contracts/`, generated for the renderer, validated in Go.
-4. **The unfinished command.** A long command's rows that have scrolled above the live
-   screen are not yet a block and not on the screen. The backend now has them; what it keeps
-   and for how long is a retention decision, and `x/vt`'s own scrollback defaults to 10,000
-   lines with `SetMaxLines(0)` ignored (`scrollback.go:86`).
-5. **Terminal replies.** A program asking where it is must be answered from the authoritative
-   state. Today xterm answers from its own
-   (`frontend/src/terminal-content.ts:4011`) while the backend's replies are read and dropped
-   (`internal/panegrid/panegrid.go:195`). Which component transmits is free; what it says
-   must derive from the one emulator.
-6. **Resize.** The client resizes immediately (`frontend/src/renderers/xterm.ts:633`) and
-   tells the backend after an 80 ms debounce (`frontend/src/terminal-content.ts:3395`). With
-   the backend authoritative the order inverts: the client reports, the backend decides, the
-   frame follows. The transitional behaviour must be stated.
-7. **Recovery.** A helper session can outlive the coordinator and report an output-window
-   hole (`internal/transport/ws_readopt.go:100`). An emulator fed only the surviving suffix
-   is not authoritative; the honest answer for the write gate is refusal while completeness
-   is unknown.
-8. **The alternate screen.** A full-screen program's grid is the same emulator's other
-   buffer; what the client is sent while it is active, and what it is sent on exit, is owed.
-9. **Selection across the boundary.** Live selection reads xterm's buffer today
-   (`frontend/src/renderers/xterm.ts:976` → `frontend/src/terminal-content.ts:3335`) and a
-   drag started in live output continues through document-level listeners
-   (`SelectionService.ts:489`). With the live region a painted frame, what a selection
-   crossing into a card returns must be defined.
+1. the client loads the cards it can see;
+2. the backend captures block B and removes its rows from the live screen;
+3. the client receives the post-freeze frame.
 
-## 7. Measurements, before anything is built
+B is in neither. Reverse the order and B is in both. So attach delivers **a snapshot
+revision** — cards through revision R, the live frame at revision R — and then changes after
+R. Geometry, the active presentation, the running block and the availability of an artifact
+belong to the same revision.
 
-1. **Throughput and latency of frame diffs against raw bytes** on the hero case — a fast
-   build log — at the frame rate we would ship. This decides §4.1 and it is the one that can
-   overturn the approach.
-2. **Backend memory and CPU per session** with an emulator, at the tab counts actually in
-   use, against today's copy-only path.
-3. **First-frame size and latency** for an attaching client.
-4. **Client cost** of applying diffs against parsing raw output.
+herdr does not treat frames as stateless either: it prepares against a baseline and commits
+that baseline separately after sending (`src/server/render_stream.rs:121`). nocx adds a
+second client-side presentation — the cards — to that protocol.
 
-## 8. Order of work, and what `nocx-6q1uh` does meanwhile
+## 6. The contracts this commits us to
 
-The owner's choice, taken in the same conversation: `nocx-6q1uh` is built on **the part of
-this that comes first anyway**, and not on the old model, and does not wait for the rest.
+Accepted scope, per the owner's decision.
+
+### 6.1 Input becomes intent, not bytes
+
+The largest item, and it was missing from the third revision. xterm today encodes keys
+against application modes — arrow keys read `applicationCursorKeys`
+(`@xterm/xterm` `Terminal.ts:1023`) — and nocx delegates paste wrapping to xterm's
+bracketed-paste handling (`frontend/src/renderers/xterm.ts:995`). A frame carrying cells and
+a cursor conveys none of that, so a program that enabled DECCKM or bracketed paste would
+receive **differently encoded input while the screen looked correct**.
+
+herdr carries the other half of the architecture: structured key, text, mouse, paste and
+focus events (`src/protocol/wire.rs:115`). nocx moves application input encoding to the
+backend, where the modes live. What the frontend sends is intent.
+
+### 6.2 Non-visual effects need their own delivery
+
+BEL, notification requests, OSC 52 clipboard writes, cwd, title and shell snapshots can
+leave every cell unchanged and each has a handler today
+(`frontend/src/renderers/xterm.ts:936`, `:972`, `:489`). They need event delivery with
+permissions and an explicit replay rule: **a full frame must never repeat a clipboard write
+or a notification.**
+
+### 6.3 The card's wire format
+
+Styled rows are not enough. It must distinguish:
+
+| Information                                                            | Why                                                                                                                                             |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| grapheme and cell boundaries, authoritative column widths              | `cell-fit` takes chars, width, bold and italic and measures locally because fonts differ per machine (`frontend/src/scrollback/cell-fit.ts:23`) |
+| logical lines vs physical continuation rows                            | the serialiser joins `isWrapped` continuations and preserves hard newlines (`frontend/src/scrollback/serializer.ts:483`)                        |
+| default / palette / RGB colour, kept apart                             | restored SGR is deliberately repainted in the current theme (`frontend/src/scrollback/restored-block.ts:113`)                                   |
+| blank cells, trailing spaces, line column counts                       | HTML, SGR and text share one walk today so they agree (`serializer.ts:343`)                                                                     |
+| block identity, kind, placement, author, status, artifact availability | a missing artifact is not empty output, and a restored block can carry prose (`restored-block.ts:51`)                                           |
+| links, with identity and validation                                    | they are decorated today and must survive                                                                                                       |
+
+**Soft wrap is an emulator requirement, not a format choice.** `x/vt`'s scrollback stores
+cloned cell arrays with no per-line continuation field (`scrollback.go:13`), so the backend
+must preserve continuation while parsing — it cannot be recovered afterwards.
+
+### 6.4 The fence stays
+
+`ADR-0024` decision 7 records that SSH orders each channel independently and that an
+authenticated completion can arrive before the last output bytes (`:566`). Moving both
+consumers into one process does not order their arrivals. So a pending rendezvous state and
+a bounded missing-fence policy remain; only the 500 ms number is free to change. Both
+arrival orders need handling, and if the fence lands first and later output overwrites or
+trims its rows before the authenticated event arrives, **the capture source must survive
+that interval** — a row number is not enough.
+
+### 6.5 Terminal replies
+
+Answered from the one emulator. Which component transmits is free; what it says is not.
+Today xterm answers from its own coordinates
+(`frontend/src/terminal-content.ts:4011`) while the backend's replies are read and dropped
+(`internal/panegrid/panegrid.go:195`).
+
+### 6.6 Resize inverts
+
+The client resizes immediately (`frontend/src/renderers/xterm.ts:633`) and tells the backend
+after an 80 ms debounce (`frontend/src/terminal-content.ts:3395`). Under this model the
+client reports, the backend decides, the frame follows. The transitional behaviour — what a
+client shows between its own resize and the first frame at the new geometry — must be
+stated.
+
+### 6.7 Recovery of the backend emulator
+
+A helper session can outlive the coordinator and report an output-window hole
+(`internal/transport/ws_readopt.go:100`). An emulator fed only the surviving suffix is not
+authoritative, and one that missed a midstream interval is not either. Completeness must be
+establishable, and while it is unknown the write gate refuses and the attach says so.
+
+### 6.8 The alternate screen, and 6.9 selection
+
+What a client is sent while a full-screen program owns the pane, and on its exit. And a
+selection model over stable content identities: xterm selection and DOM selection remain
+different mechanisms when xterm paints synthesised ANSI, and a live frame can change — or
+become a card — mid-drag (`frontend/src/renderers/xterm.ts:976`,
+`frontend/src/terminal-content.ts:3335`, `SelectionService.ts:489`).
+
+### 6.10 Delivery freshness
+
+One authority does not mean the person has seen its latest state. With frame-rate coalescing
+the backend can classify menu B while the browser still displays menu A, so automation
+against a **displayed** pane needs an explicit relationship to the displayed revision. This
+is freshness, not disagreement — but it is the property `ADR-0064` actually depends on.
+
+## 7. The throughput question, corrected
+
+The third revision claimed frame diffs always emit fewer bytes than raw output. That is
+false as stated. herdr's encoder compares cells at fixed coordinates and does **not**
+recognise scrolling (`src/protocol/render_ansi.rs:773`). A 100×40 terminal producing 600
+distinct full-width lines per second, displayed at 60 fps: raw printable output ≈ 60 KB/s;
+a positional diff rewriting ~4,000 cells per frame ≈ 240 KB/s before ANSI overhead.
+
+So: coalescing wins hugely when the producer far outruns the display, and loses on
+scrolling unless the encoder is **scroll-aware** — which is more than herdr's encoder does
+and is therefore ours to build. Compact VT operations (scroll, erase, insert, repeat) change
+many cells from few source bytes and amplify the same effect; very wide terminals multiply
+it; graphics and sixel are outside "changed cells" entirely and herdr carries them as a
+separate payload (`src/server/render_stream.rs:94`).
+
+**And measure TOTAL delivery, not live delivery.** If a card promises the complete retained
+output, the lines omitted from live frames still reach the browser when that card is
+fetched.
+
+## 8. Measurements, before anything is built
+
+1. Frame diffs against raw bytes on the hero case, with a **scroll-aware** encoder and
+   without, at the frame rate we would ship — and total bytes including card fetches.
+2. Backend memory and CPU per session with an emulator, at real tab counts.
+3. First-frame size and latency for an attaching client.
+4. Client cost of applying diffs against parsing raw output.
+5. Backend cost of capture, storage and per-client diffing.
+
+## 9. Order of work — and what `nocx-6q1uh` may and may not do meanwhile
+
+The third revision tried to give `nocx-6q1uh` an early unblock by declaring the backend
+authoritative while the frontend still cleared its own buffer and still answered the
+program's questions. **That is withdrawn.** It does not repair the divergence; it exposes it
+to a new consumer.
 
 1. This document reviewed; the new ADR written and accepted.
-2. The measurements of §7.
-3. **The backend owns the screen** — one emulator per session, replacing the
-   enrolment-scoped grid. Grid lifetime separates from observation authority in the same
-   change: `paneEnroller.Enrol` (`internal/app/paneenrol.go:102`) creates the grid and
-   rejects an existing one, so pre-creating without that separation breaks enrolment and the
-   waves that depend on it.
-4. **The backend owns block boundaries**, with `ADR-0024` decision 1's rendezvous rule
-   intact.
-5. **`nocx-6q1uh` is designed and built on (3) and (4).** It needs one authoritative answer
-   to "what is on this pane's screen" and an authorisation rule; it needs neither the
-   encoder nor the card wire format. This is the step that unblocks the herdr replacement.
-6. The encoder and the live region as diffs (§6.1, §6.2).
-7. Block content on the wire; the frontend lifecycle machinery deleted (§4.2).
+2. The measurements of §8.
+3. One emulator per session on the backend, replacing the enrolment-scoped grid. Grid
+   lifetime separates from observation authority in the same change: `paneEnroller.Enrol`
+   (`internal/app/paneenrol.go:102`) creates the grid and rejects an existing one.
+4. Backend-owned block boundaries, with §6.4's rendezvous intact.
+5. Structured input (§6.1) and non-visual effect delivery (§6.2).
+6. The encoder (§7), per-client baseline, and the live region as frames.
+7. The card wire format (§6.3); the frontend block lifecycle deleted; `history.record`
+   retired, including the masked command and capture offers its ack carries today
+   (`frontend/src/history-client.ts:67`).
 8. Terminal replies, resize inversion, recovery, alt-screen, selection (§6.5–§6.9).
 
-`nocx-eidfb` is closed by (6), not before: attach today displaces the previous subscriber
-(`internal/transport/ws_session_handlers.go:822`), and `.4`, `.3` and `.5` remain its
+**The cutover of live display, cards and interaction is one coordinated step, not three.**
+Step 6 cannot precede step 7: a server diff against frame F plus a surviving
+`clearViewport` (`frontend/src/scrollback/controller.ts:722`) means the next diff assumes
+cells the client has erased.
+
+**`nocx-6q1uh` meanwhile.** Its API and its backend may be designed and built on (3) and
+(4). What it may **not** do before the cutover is act on a pane a client is **displaying** —
+that is exactly the unpaid authority. The backend knows which panes each client renders, so
+the rule is expressible: automation proceeds on a pane no client displays, and is refused,
+by a named reason, on one that is. That is the coordinator's ordinary case — workers in
+background tabs — and it collects no authority it has not paid for.
+
+`nocx-eidfb` closes after the cutover, not at step 6, and `.4`, `.3` and `.5` remain its
 prerequisites.
 
-## 9. Deliberately out
+## 10. Deliberately out
 
-- **Replacing xterm.js.** It keeps painting, and it keeps receiving bytes — ANSI produced by
-  our encoder instead of raw PTY output. Its parser stops being the VT authority; nothing
-  else about it changes.
-- **Retiring the replay ring** while raw bytes are still the live path.
+- **Replacing xterm.js.** It keeps painting and keeps receiving bytes — ANSI our encoder
+  produced. Its parser stops being the authority; its renderer, selection surface and
+  alt-screen handling stay.
 - **What a write may DO.** `ADR-0064`'s bounds are untouched.
 
-## 10. Beads this design produces
+## 11. Beads this design produces
 
-- **The `savedY` hazard.** xterm's `clear()` moves the live row and resets `ybase`/`y`
-  without adjusting `savedY`, so a later `restoreCursor()` lands on a blank row while both
-  freeze guards passed. Live today, bounded to normal-buffer state retained across a freeze.
-  This design removes the cause; the bead exists because the defect does not wait for it.
+- **The `savedY` hazard** — live today, bounded to normal-buffer state retained across a
+  freeze; the cutover removes the cause, the bead exists because the defect does not wait.
 - **Terminal-reply ownership** (§6.5).
-- **The frozen output artifact off the renderer** (§4.2) — the concrete first slice of the
-  block-content move.
+- **The frozen output artifact off the renderer** — the first concrete slice of §6.3.
+- **Structured input** (§6.1) — large enough to be its own epic.

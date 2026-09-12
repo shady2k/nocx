@@ -43,6 +43,7 @@ package agentdriver
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/panegrid"
 )
@@ -196,8 +197,17 @@ type Observer interface {
 }
 
 // Registry maps an agent name to its driver, and fails closed.
+//
+// The map holds what this BUILD ships. A person's own rules arrive through
+// SetRuleSource (rules.go) and are consulted on every lookup, because a rule
+// they are editing is meant to take effect on the pane they are looking at
+// rather than at the next start.
 type Registry struct {
 	byAgent map[string]Driver
+	// rules is the person's half, absent unless the composition root attached
+	// one. Atomic because it is read on the classify path of every frame while
+	// it is written outside it.
+	rules atomic.Pointer[ruleSourceBox]
 }
 
 // NewRegistry validates the wiring once, at the composition root.
@@ -222,12 +232,43 @@ func NewRegistry(drivers ...Driver) (*Registry, error) {
 // For returns the driver for an agent, and false when there is none. False is
 // a normal answer: most agents have no driver, and that is what keeps nocx out
 // of their panes.
+//
+// # What a false here means, and the three ways to reach one
+//
+// With a RuleSource attached, this is the ONE place that decides which rule
+// reads a pane, and the decision is the design's (D12, nocx-y6w66): a person's
+// document REPLACES the shipped rule for that agent entirely — never a
+// field-by-field merge, which would be two owners of one decision — and
+// switching detection off is not deleting, so the shipped rule is what comes
+// back when the document goes away.
+//
+// False is then the failing-closed direction of both of those: an agent with
+// no driver in this build, an agent whose detection was switched off, and an
+// agent whose own document could not be compiled all answer no driver at all,
+// which Observe lifts to StateUnknown. Unknown is treated as busy everywhere,
+// so a person's half-written file stops nocx typing into that pane rather than
+// falling back to a rule they were in the middle of replacing.
 func (r *Registry) For(agent string) (Driver, bool) {
 	if r == nil {
 		return nil, false
 	}
-	d, ok := r.byAgent[agent]
-	return d, ok
+	shipped, known := r.byAgent[agent]
+	if !known {
+		return nil, false
+	}
+	src := r.ruleSource()
+	if src == nil {
+		return shipped, true
+	}
+	state := src.RuleState(agent)
+	switch {
+	case state.Off, state.Broken:
+		return nil, false
+	case state.Driver != nil:
+		return state.Driver, true
+	default:
+		return shipped, true
+	}
 }
 
 // Observe is the failing-closed form of For: an agent with no driver answers

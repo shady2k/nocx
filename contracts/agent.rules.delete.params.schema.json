@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.rules.delete.params.schema.json",
+  "title": "AgentRulesDeleteParams",
+  "description": "The agent whose own rule is being removed. This is the ONE operation that puts the build's shipped rule back, with detection on — switching detection off is not it, and neither is editing a rule.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent"],
+  "properties": {
+    "agent": { "type": "string" }
+  }
+}

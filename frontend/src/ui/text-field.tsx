@@ -123,6 +123,20 @@ export interface TextFieldProps {
   required?: boolean
   autoFocus?: boolean
   /**
+   * How many lines a `multiline` field shows before it scrolls. Default 4.
+   *
+   * It exists because the kit had one height and the callers do not: four
+   * rows is right for a setting, a commit message or a pasted phrase, and
+   * wrong for a DOCUMENT — a rule file, a captured request — where the person
+   * needs to see the shape of what they are editing rather than four lines of
+   * it. The alternative was a surface setting a height on
+   * `.ui-text-field__input` from outside, which is repainting a kit component
+   * (§3.6) and would have left the two heights to drift apart.
+   *
+   * Ignored by a single-line field, where the browser owns the height.
+   */
+  rows?: number
+  /**
    * Select the field's current text when it takes focus, so the first
    * keystroke replaces it.
    *
@@ -350,7 +364,7 @@ export function TextField(props: TextFieldProps) {
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
-      rows={4}
+      rows={props.rows ?? 4}
       ref={(element) => {
         fieldControl = element
         // Read before the microtask — see the input above for why.

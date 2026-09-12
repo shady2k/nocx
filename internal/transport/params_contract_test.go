@@ -793,6 +793,24 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up"}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","text":"wake up","submit":true}`),
 		},
+		// A person's own rule for an agent (nocx-y6w66). The read takes
+		// nothing: the whole set is a handful of agents, and a page that asked
+		// for one row would have to keep the others in step with an edit made
+		// from somewhere else. The document is TEXT and not an object, because
+		// what a person edits is the rule itself.
+		"agent.rules": {
+			[]byte(`{}`),
+		},
+		"agent.rules.set": {
+			[]byte(`{"agent":"claude","document":"{\"agent\":\"claude\",\"anchors\":[],\"branches\":[],\"default\":\"unknown\"}"}`),
+		},
+		"agent.rules.setEnabled": {
+			[]byte(`{"agent":"claude","enabled":false}`),
+			[]byte(`{"agent":"claude","enabled":true}`),
+		},
+		"agent.rules.delete": {
+			[]byte(`{"agent":"claude"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
@@ -1438,6 +1439,19 @@ func New(opts ...Option) (*App, error) {
 	if driversErr != nil {
 		return nil, fmt.Errorf("pane drivers: %w", driversErr)
 	}
+	// Where a person's OWN rule for an agent lives (nocx-y6w66): one document
+	// per agent this build ships a rule for, under the profile directory THIS
+	// build owns — so a dev stand keeps its own and the installed app keeps
+	// its own. Attached to the SAME registry the watcher, the calibration and
+	// the typist already share, which is what makes an edit take effect on the
+	// next frame of the pane a person is looking at rather than at the next
+	// start. The shipped rules go in as the seed and are never written out:
+	// that is what lets a later release improve an install nobody edited.
+	ruleStore, rulesErr := agentrule.New(paths.ConfigDir(), paneDrivers.ShippedRules())
+	if rulesErr != nil {
+		return nil, fmt.Errorf("agent rules: %w", rulesErr)
+	}
+	paneDrivers.SetRuleSource(ruleStore)
 	// What turns a grid into something a person or a worker can act on
 	// (nocx-szb40.3): it classifies a watched pane and reports only the
 	// CHANGES. Built here because both ends need it — the enroller opens an
@@ -1821,6 +1835,7 @@ func New(opts ...Option) (*App, error) {
 	paneTyping := newPaneTypist(logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)
 	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
+		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
 		transport.WithAgentTypist(paneTyping))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)

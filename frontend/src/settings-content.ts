@@ -69,6 +69,11 @@ export class SettingsContent extends SolidPaneContent {
      *  emitting one, because the two answer different questions about the
      *  same pane — one looks, the other writes a labelled set. */
     private readonly calibrationClient?: import('./calibration-client').CalibrationClient,
+    /** A person's own rule for an agent (nocx-y6w66): the document that rule
+     *  is, and the switch that turns detection off. Beside the calibration
+     *  because whether a rule is any good is the question that page answers
+     *  about the rule this one writes. */
+    private readonly rulesClient?: import('./agent-rules-client').AgentRulesClient,
     /** The typing primitive (nocx-dkawo.1). It rides beside the calibration
      *  because the verdict that page draws is a claim about what nocx will do
      *  with somebody's keyboard, and a claim like that should be checkable
@@ -94,6 +99,7 @@ export class SettingsContent extends SolidPaneContent {
           emittingClient: this.emittingClient,
           agentAccessClient: this.agentAccessClient,
           calibrationClient: this.calibrationClient,
+          rulesClient: this.rulesClient,
           typingClient: this.typingClient,
           paneName: this.paneName,
           endpointsClient: this.endpointsClient,

@@ -40,6 +40,7 @@ import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { EmittingClient } from './emitting-client'
 import { AgentAccessClient } from './agent-access-client'
+import { AgentRulesClient } from './agent-rules-client'
 import { CalibrationClient } from './calibration-client'
 import { TypingClient } from './typing-client'
 import { AgentClient } from './agent'
@@ -258,6 +259,10 @@ function main(): void {
   // it drives lives in the backend, keyed by the pane, so a window that goes
   // away leaves nothing half-open.
   const calibrationClient = new CalibrationClient(dispatcher)
+  // A person's own rule for an agent (nocx-y6w66). Stateless like its two
+  // neighbours: the documents live in files under the profile this build owns,
+  // and the page that edits them owns the one read it makes.
+  const rulesClient = new AgentRulesClient(dispatcher)
   // The typing primitive (nocx-dkawo.1). Stateless like its two neighbours:
   // every decision about whether a keystroke may be sent is taken in the
   // backend, on a frame it reads itself, in the instant before each write.
@@ -617,6 +622,7 @@ function main(): void {
         emittingClient,
         agentAccessClient,
         calibrationClient,
+        rulesClient,
         typingClient,
         // The window already names every pane in its tab strip, and the
         // backend answers the emitting view with a session id and an agent

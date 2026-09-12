@@ -169,13 +169,15 @@ func p11() {
 	before := screen(e)
 	write(e, []byte(sixel))
 	write(e, []byte(kitty))
-	d.take()
+	// One capture, emitted once. Draining here and again below would make the
+	// second read empty by construction, which is not a measurement.
+	replies := d.take()
 	obs.Emit(p, "no_handler", "log_lines", fmt.Sprintf("%q", lines))
 	obs.Emit(p, "no_handler", "screen_unchanged", screen(e) == before)
 	obs.Emit(p, "no_handler", "screen_row0", fmt.Sprintf("%q", rowText(e, 0)))
 	cx, cy := e.CursorPosition().X, e.CursorPosition().Y
 	obs.Emit(p, "no_handler", "cursor", fmt.Sprintf("%d,%d", cx, cy))
-	obs.Emit(p, "no_handler", "reply_bytes", obs.Esc(d.take()))
+	obs.Emit(p, "no_handler", "reply_bytes", obs.Esc(replies))
 
 	// (b) The consumer seam: a registered handler receives them instead.
 	e2, d2 := newEmu(20, 3)
@@ -190,11 +192,12 @@ func p11() {
 	})
 	write(e2, []byte(sixel))
 	write(e2, []byte(kitty))
-	d2.take()
+	replies2 := d2.take()
 	obs.Emit(p, "with_handler", "dcs_deliveries", len(dcsData))
 	obs.Emit(p, "with_handler", "apc_deliveries", len(apcData))
 	obs.Emit(p, "with_handler", "dcs_bytes", obs.Esc(bytes.Join(dcsData, nil)))
 	obs.Emit(p, "with_handler", "apc_bytes", obs.Esc(bytes.Join(apcData, nil)))
+	obs.Emit(p, "with_handler", "reply_bytes", obs.Esc(replies2))
 }
 
 // p10 measures the integration obligation ADR-0041 records: x/vt answers the

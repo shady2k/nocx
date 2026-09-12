@@ -29,18 +29,21 @@ cd .internal/spikes/emulator
 ./run.sh                 # pinned ghostty fetch, libghostty-vt build, both drivers
 ```
 
-`run.sh` has three unconditional steps and two conditional ones. It fetches the pinned
-ghostty commit into `.vendor/ghostty` and **fails if the checkout is not that commit**; runs
+`run.sh` is **three automated steps, one npm-conditional automated step, and one documented
+manual check**. Automated: it fetches the pinned ghostty commit into `.vendor/ghostty` and
+**fails if the checkout is not that commit**; runs
 `nix shell nixpkgs#zig -c zig build -Demit-lib-vt=true -Doptimize=ReleaseFast` inside it; then
 `go run ./cmd/xvt > results/xvt.jsonl` and
 `go run ./cmd/ghosttyvt > results/ghostty.jsonl`, each under a backstop `timeout` that warns
-rather than letting a hung driver pass for a complete one. If `npm` is present it also runs
-the xterm.js reference into `results/xtermjs-*.txt`. The live-xterm title check of §1.9 is
+rather than letting a hung driver pass for a complete one. If `npm` is present it additionally
+runs the xterm.js reference into `results/xtermjs-*.txt`, installing into a temporary
+directory rather than the repository. Not a step: the live-xterm title check of §1.9 is
 **manual** — `run.sh` documents it but does not run it, because it is unreliable under Xvfb
 here (§6).
 
-Verified end to end from a clean vendor directory: 1 m 59 s, the same two artifacts by size,
-and byte-identical output for every deterministic probe.
+Verified end to end from a clean vendor directory with the exit status recorded: `EXIT=0`,
+1 m 59 s on the cold run, the same two artifacts by size, and byte-identical output for every
+deterministic probe.
 
 Commands that worked, verbatim:
 
@@ -234,20 +237,21 @@ headless `xterm.js` does not answer DSR.
 
 | n | `x/vt` wall | `x/vt` cumulative alloc / mallocs | `libghostty-vt` wall | ghostty alloc / mallocs |
 |---|---|---|---|---|
-| 100 000 | 16.4 ms | 12.1 MB / 101 258 | 0.47 ms | 1 944 B / 11 |
-| 1 000 000 | 174.8 ms | 123.1 MB / 1 012 517 | 0.50 ms | 1 960 B / 12 |
-| 10 000 000 | 1 734.4 ms | 1.22 GB / 10 125 017 | 0.38 ms | 1 352 B / 9 |
-| 1 000 000 000 | **not completed in 30 s** (190 686 113 mallocs done) | 23.1 GB in 30 s | **0.48 ms** | 2 224 B / 17 |
+| 100 000 | 17.2 ms | 12.1 MB / 101 258 | 0.37 ms | 1 944 B / 11 |
+| 1 000 000 | 171.7 ms | 123.1 MB / 1 012 515 | 0.45 ms | 1 848 B / 11 |
+| 10 000 000 | 1 727.2 ms | 1.22 GB / 10 125 017 | 0.41 ms | 1 944 B / 11 |
+| 1 000 000 000 | **not completed in 30 s** (192 922 025 mallocs done) | 23.3 GB in 30 s | **0.47 ms** | 1 856 B / 17 |
 
-These are the numbers committed in `results/*.jsonl`. **Wall time is the only quantity here
-that is not reproducible, and it is not close**: eight runs of the same `x/vt` cases gave
-16.4–43.6 ms at 10⁵, 172.1–219.0 ms at 10⁶ and 1701.6–**4090.9** ms at 10⁷; the high sample
-was taken on a loaded machine (load average 2.2) and the same cases returned 1701.6–1821.8 ms
-on every quiet run. Ghostty's four were 0.32–0.52 ms. **The allocation counts are exact and
-stable** — 1 012 517 ± 2 mallocs at 10⁶ across every run, and 1.013 mallocs and 122 bytes per
-repeated character — so the rate is better read from those than from the clock: at ~1.01
-allocations per character, 10⁹ repeats is ~1.01 × 10⁹ allocations whatever the machine is
-doing, and the observed 19.1 %-in-30 s is consistent with that.
+These are the numbers committed in `results/*.jsonl`, produced by the `run.sh` whose exit
+status was recorded as 0. **Wall time is the only quantity here that is not reproducible, and
+it is not close**: nine runs of the same `x/vt` cases gave 16.4–43.6 ms at 10⁵,
+171.7–219.0 ms at 10⁶ and 1701.6–**4090.9** ms at 10⁷; the high sample was taken on a loaded
+machine (load average 2.2) and the same cases returned 1701.6–1821.8 ms on every quiet run.
+Ghostty's four were 0.32–0.52 ms. **The allocation counts are exact and stable** —
+1 012 515 ± 2 mallocs at 10⁶ across every run, and 1.013 mallocs and 122 bytes per repeated
+character — so the rate is better read from those than from the clock: at ~1.01 allocations
+per character, 10⁹ repeats is ~1.01 × 10⁹ allocations whatever the machine is doing, and the
+observed 19.3 %-in-30 s is consistent with that.
 
 Every other probe (§1.1–§1.6, §1.8, §1.9, §1.10 and the API section) reproduced identically
 across all of those runs, including a full `run.sh` from a clean vendor checkout.
@@ -336,15 +340,36 @@ which is correct for a raw 0x9C terminator.
 
 Not one of the nine. Added because the graphics answer §2.5 asks for was otherwise derivable
 only from reading source, and a grep for the absence of a word is not a measurement. Both
-drivers execute a sixel DCS and a Kitty graphics APC and record what the emulator does:
+drivers execute a sixel DCS and a Kitty graphics APC and record what the emulator does.
+
+`x/vt` has no grid-side behaviour for either: it logs both as unhandled and, if a consumer
+has registered a DCS or APC handler, hands the payload over verbatim. The four log lines it
+produced, verbatim from `results/xvt.jsonl` (`log_lines`):
+
+```
+unhandled sequence: DCS "q" "\"1;1;2;2#0;2;0;0;0#0~~"
+unhandled sequence: ESC "\\"
+unhandled sequence: APC "Ga=T,f=24,s=1,v=1,i=42;AAAA"
+unhandled sequence: ESC "\\"
+```
+
+Note the second and fourth: the `ESC \` string **terminator** is reported as its own
+unhandled ESC, once per protocol. That is the parser's shape showing through, and it is
+recorded rather than smoothed over.
 
 | | `x/vt` | `libghostty-vt` |
 |---|---|---|
-| sixel DCS | `unhandled sequence: DCS "q" "\"1;1;2;2#0;2;0;0;0#0~~"` | *no report* |
-| Kitty APC | `unhandled sequence: APC "Ga=T,f=24,s=1,v=1,i=42;AAAA"` | `image_42_decoded = true` |
-| reply | none | `\e_Gi=42;OK\e\\` |
+| sixel DCS | logged unhandled, no grid change | *no report* |
+| Kitty APC | logged unhandled, no grid change | `image_42_decoded = true` |
+| reply | `""` — captured once, empty (no reply is sent) | `\e_Gi=42;OK\e\\` |
 | screen, cursor | unchanged, `0,0` | unchanged, `0,0` |
-| handler seam | 1 DCS + 1 APC delivered with payload bytes verbatim | *no DCS/APC effect to register* |
+| consumer seam | 1 DCS + 1 APC delivered, payload bytes verbatim: `"1;1;2;2#0;2;0;0;0#0~~"` and `Ga=T,f=24,s=1,v=1,i=42;AAAA` | *no DCS/APC effect to register* |
+
+So the accurate statement for `x/vt` is **not** "no DCS or APC support": it parses both,
+keeps neither, mutates no cell, and delegates both payloads to a handler the embedder
+supplies. What it lacks is any *built-in* interpretation of either payload — which is what a
+sixel or Kitty graphics implementation would be. Ghostty has one for Kitty and not for
+sixel, where it is silent rather than delegating.
 
 ## 2. The API answers
 
@@ -491,19 +516,29 @@ from the nine (§1.10).
 | compiled in | n/a (pure Go) | `GHOSTTY_BUILD_INFO_KITTY_GRAPHICS = true`, storage present |
 | control | n/a | a deliberately unsupported APC (`ESC _ private-command;payload ESC \`) **is** reported, tag 0 — so the empty list above means "handled", not "nothing is ever reported" |
 
-So: **Kitty graphics is ghostty-only and it genuinely decodes and answers**; sixel is
-**absent from both** — `x/vt` logs it as unhandled, ghostty is silent about DCS sequences by
-design (its header says only APC sequences are reported). Neither candidate changes a cell
-for either protocol, which is the right behaviour for an image overlay but is also what
-"silently ignored" looks like from the grid.
+Neither library mutates a cell for either protocol, which is the right behaviour for an image
+overlay and is also what "silently ignored" looks like from the grid. The difference is what
+each one *does* with the payload:
 
-A small wart worth recording from the same log: the `ESC \` string terminator is reported by
-`x/vt` as its own `unhandled sequence: ESC "\\"` line, separately from the sequence it
-terminates.
+- **`x/vt` parses both and delegates both.** It recognises the DCS and APC framing, produces
+  no grid change, and — through `RegisterDcsHandler` / `RegisterApcHandler` — hands the
+  payload to the embedder verbatim. So the honest description is not "no graphics support":
+  it has the transport and none of the interpretation, and a consumer that wants sixel or
+  Kitty must write the decoder itself.
+- **`libghostty-vt` interprets Kitty and ignores sixel.** It decodes a Kitty APC into image
+  storage and answers `OK` on the wire, with an 871-line `kitty_graphics.h` covering images
+  and their placements, and a build-time feature flag. Sixel produces no callback at all —
+  its header states that only APC sequences are reported — so a sixel payload is neither
+  drawn nor handed back.
+
+A wart from the same log, kept because it is the parser's shape showing through: `x/vt`
+reports the `ESC \` string **terminator** as its own `unhandled sequence: ESC "\\"` line, once
+per protocol. Verbatim in §1.10.
 
 The comparison with §1.2's "two real gaps" is therefore: gap 1 (graphics) is half closed by
-ghostty — Kitty images yes, sixel no — and unchanged for `x/vt`; gap 2 (soft wrap) is closed
-by ghostty and untouched in `x/vt`, as §2.2 measures.
+ghostty — Kitty images yes, sixel no — and for `x/vt` it remains a consumer-side decoder plus
+a handler registration. Gap 2 (soft wrap) is closed by ghostty and untouched in `x/vt`, as
+§2.2 measures.
 
 ### 2.6 Two capabilities neither candidate question asked about, but the design needs
 

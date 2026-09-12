@@ -109,6 +109,21 @@ func (s State) Valid() bool {
 	return false
 }
 
+// Working reports whether s is a state in which WORK is in progress.
+//
+// It is a PREDICATE over the closed set, not a member of it, and the difference
+// is the whole of what the third facet had to get right: "has this pane
+// stopped moving" is a question only askable of a pane that is supposed to be
+// moving, so the progress facet needs to name the states it applies to — and a
+// pane that is working AND stalled is still, in every listing and every
+// comparison here, a pane whose state is StateWorking.
+//
+// StateError is deliberately NOT one of them. The TUI's own error is already a
+// state that says "come here", and its retry chrome animates on a timer of its
+// own; folding it into this predicate would give one condition two owners and
+// would report an agent that is visibly failing as merely slow.
+func (s State) Working() bool { return s == StateWorking }
+
 // Observation is a driver's whole answer about ONE frame: the scalar state,
 // and whatever else the rule was able to read off the same screen.
 //
@@ -299,6 +314,45 @@ func (o Observation) Subagents() []Subagent {
 				continue
 			}
 			out = append(out, Subagent{Name: name, Task: row["task"]})
+		}
+	}
+	return out
+}
+
+// TranscriptExtra is the name a rule document gives the extractor that reads
+// the pane's TRANSCRIPT — the rows the agent printed, as opposed to the chrome
+// the TUI draws around them. It is a constant here for the same reason
+// SubagentsExtra is: the document's vocabulary is this package's contract, and
+// a caller that misspells it silently measures a pane with no transcript, which
+// is indistinguishable from a pane whose transcript has not moved.
+const TranscriptExtra = "transcript"
+
+// transcriptText is the capture group a transcript extractor reads a row's own
+// text into. Named once here rather than at each reader, because the projection
+// below is where that vocabulary stops being a map and becomes meaning.
+const transcriptText = "text"
+
+// Transcript projects the observation's extras onto the transcript rows the
+// rule read, one string per row, in the order it read them.
+//
+// The ORDER is the region's, and the region is anchored at the input box and
+// walks UP the screen — so the yield runs from the row nearest the chrome
+// backwards into the scrollback. Nothing downstream needs the order to be
+// anything else, and a caller that reordered it would be inventing a reading
+// the screen never had.
+//
+// Nil when the rule extracted nothing — which is every agent with no such
+// extractor, every pane whose transcript is empty, and every frame the region
+// could not reach. Nil is "no measurement", never "no change": only the second
+// of those can support a claim that something has stopped moving.
+func (o Observation) Transcript() []string {
+	var out []string
+	for _, e := range o.Extras {
+		if e.Name != TranscriptExtra {
+			continue
+		}
+		for _, row := range e.Rows {
+			out = append(out, row[transcriptText])
 		}
 	}
 	return out

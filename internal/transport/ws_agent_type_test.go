@@ -136,7 +136,7 @@ func newTypingEnv(t *testing.T) *typingEnv {
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watcher := paneobserve.New(logger, grid, rules)
+	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	sent := &sentInput{}
 
 	// The pane id is not known until the session is open, so the enrolment

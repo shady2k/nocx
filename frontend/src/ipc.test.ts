@@ -1404,6 +1404,7 @@ describe('session.observationChanged notification', () => {
       ...OPEN_IDENTITY,
       agent: 'claude',
       state: 'free_text',
+      progress: 'moving',
       ...over,
     },
   })

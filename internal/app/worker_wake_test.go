@@ -74,7 +74,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 	if err != nil {
 		t.Fatalf("driver registry: %v", err)
 	}
-	watch := paneobserve.New(logger, grid, rules)
+	watch := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	raiser := &recordingRaiser{}
 
 	// The stand is built with the backstop already in it, because the record

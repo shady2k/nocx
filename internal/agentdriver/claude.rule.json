@@ -259,6 +259,14 @@
       "anchor": "taskPanelHead",
       "maxRows": 8,
       "pattern": "^\\s*(?P<glyph>[●◯])\\s(?P<name>\\S+)(?:\\s{2,}(?P<task>\\S.*?))?(?:\\s{2,}(?P<elapsed>\\d+[smh])(?:\\s·\\s(?P<flow>[↑↓])\\s(?P<tokens>[0-9.]+k?)\\stokens)?)?$"
+    },
+    {
+      "name": "transcript",
+      "anchor": "meter",
+      "up": true,
+      "toEdge": true,
+      "skipStatusGlyphs": ["✻", "✢", "✽", "✶", "·", "*"],
+      "pattern": "^(?P<text>.*)$"
     }
   ],
   "default": "unknown"

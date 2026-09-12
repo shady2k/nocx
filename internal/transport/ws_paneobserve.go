@@ -66,6 +66,13 @@ type observationChangedParams struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 	Agent        string `json:"agent"`
 	State        string `json:"state"`
+	// Progress is the THIRD facet, beside the state rather than inside it:
+	// whether a pane that is working has moved lately (nocx-tnx44). It is
+	// always sent — a pane that is not working, and a pane whose rule reads
+	// no transcript, answer "moving" — because the receiver would otherwise
+	// have to tell an absent field from a moving pane, and the two are not
+	// the same claim.
+	Progress string `json:"progress"`
 	// Children is omitted when the pane's chrome named none, which is the
 	// ordinary case. `omitempty` is load-bearing rather than tidy: the
 	// schema's minItems refuses an empty array, because "the panel is not on
@@ -149,6 +156,7 @@ func (s *WSServer) emitPaneObservation(sid session.ID, o paneobserve.Observation
 		SessionEpoch: ident.Epoch,
 		Agent:        o.Agent,
 		State:        string(o.State),
+		Progress:     string(o.Progress),
 		Children:     observationChildren(o.Children),
 	}
 	if err := wconn.TryNotify("session.observationChanged", mustMarshal(params)); err != nil {

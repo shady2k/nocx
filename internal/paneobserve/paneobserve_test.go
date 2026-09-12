@@ -85,7 +85,7 @@ func newFixture(t *testing.T) (*paneobserve.Watcher, *panegrid.Store, *recorder)
 		t.Fatalf("registry: %v", err)
 	}
 	rec := &recorder{}
-	w := paneobserve.New(lg, grid, reg)
+	w := paneobserve.New(lg, grid, reg, paneobserve.Config{})
 	w.SetEmitter(rec.emit)
 	return w, grid, rec
 }
@@ -361,7 +361,7 @@ func TestASweepWithNoEmitterYetLosesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	w := paneobserve.New(lg, grid, reg)
+	w := paneobserve.New(lg, grid, reg, paneobserve.Config{})
 	if err := grid.Enrol("p1", 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}

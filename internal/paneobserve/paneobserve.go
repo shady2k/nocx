@@ -40,17 +40,41 @@
 // that attaches after the last change must be able to ask what the pane is,
 // because for a settled idle pane no further change is coming.
 //
+// # The third facet is a comparison, and a comparison needs a past
+//
+// Progress — has a WORKING pane moved lately — is the third thing an
+// observation carries, and it is here rather than in the driver for the reason
+// above plus one of its own. It is not a property of a frame: a frame is one
+// instant, and "the transcript has stood still for a minute" is a statement
+// about two instants. The rule CAN name the region (agentdriver's transcript
+// extractor reads the rows the agent printed, stepping over the status stack
+// whose spinner would otherwise move every second) and a frame can yield its
+// text — but the comparison against the previous yield, and against a clock,
+// belongs to the one component that already keeps what a pane was.
+//
+// So progress rides BESIDE the state and can never become one: nothing here
+// may fold "stalled" into the closed set, and a pane that is working and
+// stalled is still, in every listing and every comparison, a pane whose state
+// is working. The threshold is a dependency of this watcher rather than a
+// constant at the comparison, because the bead that asks for this facet says
+// N is per-agent and belongs in settings; until that bead lands, New's
+// WithStallAfter is the single seam it arrives through.
+//
 // # No timer is visible from a test
 //
 // Touch marks a pane dirty and is on the hot path of every session in the
 // product, so it does nothing else. Sweep does the work. Production drives
 // Sweep from a coalescing ticker at the composition root; a test drives it
 // directly, and therefore asserts on a state change rather than on a duration.
+// The clock is a dependency for the same reason: an interval with two ends has
+// a low end as well as a high one, and a test that slept to reach either would
+// be measuring the machine rather than the rule.
 package paneobserve
 
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
@@ -74,6 +98,71 @@ type Observation struct {
 	// no extractor is visible to — and the interval below is what keeps them
 	// from deciding it here either.
 	Children []agentdriver.Subagent
+	// Progress is the THIRD facet: whether a pane that is working has moved
+	// lately. It rides beside the state for the same reason the children do
+	// and it decides nothing — a pane that is working and stalled is still,
+	// in every listing and every comparison here, a pane whose state is
+	// working.
+	//
+	// It is not a sixth member of agentdriver.State and must never become
+	// one. "Stalled" is not what a screen is inviting; it is a comparison
+	// between two readings of one taken over time, and the driver — which
+	// holds no state between frames, deliberately — is structurally unable
+	// to make it. See Watcher for where the comparison lives.
+	//
+	// ProgressMoving is the answer whenever the question cannot be asked:
+	// a pane that is not working, and a pane whose rule reads no transcript.
+	// A claim of stagnation is the expensive direction, and it is only made
+	// on evidence.
+	Progress Progress
+}
+
+// Progress is whether a working pane's transcript has moved recently.
+//
+// # Two values, and there is no third
+//
+// The coordinator's real question about a wave is not "who is working" but
+// "has anything stalled", and a hung agent reports working forever because its
+// spinner keeps spinning. So this is the comparison between what a pane WAS
+// and what it is: two readings, taken over time, of the one region a rule
+// named as the agent's own output.
+//
+// It answers for the WORKING states only, and that is a decision rather than
+// an omission. A pane waiting on a human is not stalled — it is waiting, and
+// the state already says so; a pane in the TUI's own error state is failing
+// visibly, with retry chrome of its own, and folding it in here would give one
+// condition two owners.
+type Progress string
+
+// ProgressMoving and ProgressStalled are the closed set. There is no Valid
+// method beside them, unlike State's: a state crosses the wire as a string and
+// is checked at the boundary it enters, while this facet is derived HERE and is
+// what the schema's enum is checked against.
+const (
+	// ProgressMoving means the pane's transcript has changed within the
+	// threshold, or that nothing can be said about it — a pane that is not
+	// working, or one whose rule reads no transcript at all.
+	ProgressMoving Progress = "moving"
+	// ProgressStalled means the pane is working and its transcript has not
+	// changed for longer than the threshold. The chrome around that
+	// transcript may be animating the whole time; that is the case this
+	// exists to see through.
+	ProgressStalled Progress = "stalled"
+)
+
+// sameTranscript reports whether two transcript readings are the same yield,
+// in the same order. Ordered because the region reads the screen in one
+// direction and a reordering is a different screen.
+func sameTranscript(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // sameChildren reports whether two child lists are the same reading. Ordered,
@@ -91,6 +180,43 @@ func sameChildren(a, b []agentdriver.Subagent) bool {
 	return true
 }
 
+// DefaultStallAfter is how long a working pane's transcript may stand still
+// before its progress reads stalled.
+//
+// It is a named default rather than a number at the comparison, because the
+// bead that asks for this facet also says N is per-agent and belongs in
+// settings (nocx-y6w66) — and that bead has not started, so this is the one
+// place a value lives until it has an owner. The seam the setting writes into
+// is Config.StallAfter, and nothing else here reads the threshold.
+//
+// A minute is chosen for what a coordinator does with the answer: a live
+// transcript in the committed corpus moves within seconds, and a pane that has
+// said nothing at all for a minute is worth a look while there is still time
+// to do something about it. A false stalled is the expensive direction, so the
+// number is generous rather than tight, and every state that cannot support
+// the claim answers moving instead.
+const DefaultStallAfter = 60 * time.Second
+
+// Config is what a watcher cannot decide for itself: the clock it reads and the
+// threshold it compares a transcript against.
+//
+// The ZERO VALUE IS PRODUCTION — time.Now, and DefaultStallAfter — so the
+// composition root may say nothing at all, and a test says exactly the two
+// things it means to vary. It is a struct rather than a list of options
+// because both halves are dependencies and neither is a decoration: the clock
+// is varied by a test that must state an interval instead of waiting for one,
+// and the threshold is where the per-agent setting the bead calls for
+// (nocx-y6w66) will arrive.
+type Config struct {
+	// Now is the clock this watcher reads. Nil means time.Now.
+	Now func() time.Time
+	// StallAfter is how long a working pane's transcript may stand still
+	// before its progress reads stalled. Zero or less means
+	// DefaultStallAfter — a threshold of zero would report every working
+	// pane stalled on its first reading.
+	StallAfter time.Duration
+}
+
 // Emit hands an observation on. It is called from the sweep, never from Touch.
 type Emit func(Observation)
 
@@ -102,6 +228,11 @@ type Watcher struct {
 	grid    panegrid.Observer
 	drivers *agentdriver.Registry
 	emit    Emit
+	// now is the clock this watcher reads, and stallAfter is the threshold it
+	// compares against. Both are fields rather than package-level state so
+	// that a test can state an interval instead of waiting for one.
+	now        func() time.Time
+	stallAfter time.Duration
 
 	mu    sync.Mutex
 	panes map[string]*watched
@@ -124,14 +255,48 @@ type watched struct {
 	// of the answer, and a third representation is where the two come to
 	// disagree.
 	seenChildren []agentdriver.Subagent
+	// seenProgress is the last PROGRESS emitted, compared alongside the other
+	// two. A pane whose verdict held while its progress changed is news, and
+	// it is the only way the transition this facet exists for — working and
+	// moving becoming working and stalled — ever reaches a renderer.
+	seenProgress Progress
+	// transcript is the last transcript yield OBSERVED, which is not the
+	// same thing as the last one emitted: the yield moves on almost every
+	// frame of a live turn while the progress it implies stays moving, and
+	// the bookkeeping below has to follow the yield rather than the
+	// emission. Nil means the rule read no transcript, which is not a
+	// measurement at all.
+	transcript []string
+	// transcriptAt is when that yield last CHANGED. A zero time means the
+	// pane has never been measured, and a pane that has never been measured
+	// can never be called stalled.
+	transcriptAt time.Time
 }
 
 // New returns a Watcher. It watches nothing until told, and reports nowhere
 // until SetEmitter — the transport is built after the things that enrol into
 // this, so the destination is bound afterwards, as it is for the lifecycle
 // publisher's emitter.
-func New(lg log.Logger, grid panegrid.Observer, drivers *agentdriver.Registry) *Watcher {
-	return &Watcher{log: lg, grid: grid, drivers: drivers, panes: make(map[string]*watched)}
+//
+// A zero Config is production: the wall clock, and DefaultStallAfter. A test
+// passes the clock it advances and the interval it is asserting about, because
+// the threshold has two ends and a test that waited for either would be
+// measuring the machine rather than the rule.
+func New(lg log.Logger, grid panegrid.Observer, drivers *agentdriver.Registry, cfg Config) *Watcher {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.StallAfter <= 0 {
+		cfg.StallAfter = DefaultStallAfter
+	}
+	return &Watcher{
+		log:        lg,
+		grid:       grid,
+		drivers:    drivers,
+		now:        cfg.Now,
+		stallAfter: cfg.StallAfter,
+		panes:      make(map[string]*watched),
+	}
 }
 
 // SetEmitter binds where observations go. Until it is called a sweep does
@@ -209,6 +374,12 @@ func (w *Watcher) Exited(paneID string) {
 	// them is what keeps the retained observation from leaving the last rows
 	// standing under a pane whose process is gone.
 	p.seenChildren = nil
+	// For the same reason it has no transcript either, and nothing about a
+	// process that has ended is "working but not moving": the facet falls
+	// back to the answer it gives whenever the question cannot be asked.
+	p.seenProgress = ProgressMoving
+	p.transcript = nil
+	p.transcriptAt = time.Time{}
 	agent := p.agent
 	w.mu.Unlock()
 
@@ -216,26 +387,42 @@ func (w *Watcher) Exited(paneID string) {
 	if emit == nil {
 		return
 	}
-	emit(Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited})
+	emit(Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited, Progress: ProgressMoving})
 }
 
-// Sweep classifies every pane that has moved since the last one, and emits the
-// ones whose answer changed.
+// Sweep classifies every pane that has moved since the last one — and every
+// working pane whose stall deadline has passed — and emits the ones whose
+// answer changed.
+//
+// # Why the deadline is in the work set
+//
+// The dirty flag is set by the session's READ path, so it says a pane emitted
+// bytes. Progress is not a question about bytes: a suspended or wedged agent
+// paints nothing at all, and a sweep that only looked at panes that had moved
+// would never look at it again — the one pane whose stall is the whole point
+// of the facet would be the one pane nobody could report. So a pane already
+// working, already measured, and already past the threshold is swept whether it
+// moved or not. It stops qualifying the moment its progress is emitted as
+// stalled, which is why this costs one classification per stalled pane rather
+// than a poll per pane per tick.
 func (w *Watcher) Sweep() {
 	w.mu.Lock()
 	emit := w.emit
-	w.mu.Unlock()
 	if emit == nil {
+		w.mu.Unlock()
 		return
 	}
+	now := w.now()
 	type job struct {
 		paneID string
 		agent  string
 	}
 	var jobs []job
-	w.mu.Lock()
 	for id, p := range w.panes {
-		if p.dirty && !p.gone {
+		if p.gone {
+			continue
+		}
+		if p.dirty || overdue(p, w.stallAfter, now) {
 			jobs = append(jobs, job{paneID: id, agent: p.agent})
 		}
 	}
@@ -252,36 +439,97 @@ func (w *Watcher) Sweep() {
 			continue
 		}
 		o := w.drivers.Observe(j.agent, f)
-		children := o.Subagents()
-		if !w.commit(j.paneID, o.State, children) {
+		progress, news := w.commit(j.paneID, o.State, o.Subagents(), o.Transcript(), now)
+		if !news {
 			continue
 		}
-		emit(Observation{PaneID: j.paneID, Agent: j.agent, State: o.State, Children: children})
+		emit(Observation{
+			PaneID:   j.paneID,
+			Agent:    j.agent,
+			State:    o.State,
+			Children: o.Subagents(),
+			Progress: progress,
+		})
 	}
 }
 
-// commit clears the dirty flag and reports whether the observation is news.
-// Both under one lock, so a Touch that lands mid-sweep is not lost.
+// overdue reports whether a working pane's transcript has stood still past the
+// threshold, so that a pane sending nothing at all is still looked at. A pane
+// with no transcript measurement never qualifies: a stall is a claim, and this
+// is the condition under which one could be made — see Sweep.
+func overdue(p *watched, after time.Duration, now time.Time) bool {
+	return p.seen.Working() &&
+		p.seenProgress != ProgressStalled &&
+		!p.transcriptAt.IsZero() &&
+		now.Sub(p.transcriptAt) > after
+}
+
+// commit records the transcript yield this sweep read, clears the dirty flag,
+// and reports the pane's progress together with whether the observation is
+// news.
 //
-// The state and the children are compared TOGETHER and stored together,
-// because they are one answer about one screen: a pane whose verdict held
-// while its children changed is news, and a pane whose children held while its
-// verdict changed carries the same rows forward rather than dropping them.
-func (w *Watcher) commit(paneID string, state agentdriver.State, children []agentdriver.Subagent) bool {
+// All of it under one lock, so a Touch that lands mid-sweep is not lost.
+//
+// The state, the children and the progress are compared TOGETHER and stored
+// together, because they are one answer about one screen: a pane whose verdict
+// held while its children changed is news, a pane whose children held while its
+// verdict changed carries the same rows forward rather than dropping them, and
+// a pane whose VERDICT held while its PROGRESS changed is news too — that one
+// transition is the whole reason the facet exists.
+//
+// The transcript yield is bookkeeping rather than an emitted value, and the
+// two are deliberately different fields: a live turn's transcript changes on
+// almost every frame while its progress stays moving, so what is compared is
+// what was sent and what is TIMED is what was read.
+func (w *Watcher) commit(paneID string, state agentdriver.State, children []agentdriver.Subagent, transcript []string, now time.Time) (Progress, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	p, ok := w.panes[paneID]
 	if !ok || p.gone {
 		// Unwatched, or the agent exited, while the frame was being read.
-		return false
+		return ProgressMoving, false
 	}
 	p.dirty = false
-	if p.seen == state && sameChildren(p.seenChildren, children) {
-		return false
+	moved := !sameTranscript(p.transcript, transcript)
+	if moved {
+		p.transcript = transcript
+		p.transcriptAt = now
+	}
+	progress := progressOf(p, state, moved, w.stallAfter, now)
+	if p.seen == state && sameChildren(p.seenChildren, children) && p.seenProgress == progress {
+		return progress, false
 	}
 	p.seen = state
 	p.seenChildren = children
-	return true
+	p.seenProgress = progress
+	return progress, true
+}
+
+// progressOf answers the progress a pane is in, given what this reading found.
+//
+// It is a function of the reading and the pane's own record rather than a
+// method that decides anything, so that the LIVE read (Classify) and the
+// cached one (Sweep, and the Snapshot that reports it) cannot answer the same
+// question differently.
+func progressOf(p *watched, state agentdriver.State, moved bool, after time.Duration, now time.Time) Progress {
+	switch {
+	case !state.Working():
+		// Only a working pane can be stalled: a pane waiting on a human is
+		// waiting, and the state already says so.
+		return ProgressMoving
+	case moved:
+		// The transcript moved under this very reading, so the interval
+		// starts here whatever it was before.
+		return ProgressMoving
+	case p.transcriptAt.IsZero():
+		// Nothing has ever been measured on this pane — no rule with a
+		// transcript extractor, or a screen the region could not reach. An
+		// unmeasurable pane is not a stalled one.
+		return ProgressMoving
+	case now.Sub(p.transcriptAt) > after:
+		return ProgressStalled
+	}
+	return ProgressMoving
 }
 
 func (w *Watcher) clean(paneID string) {
@@ -302,15 +550,29 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 	if !ok || p.seen == "" {
 		return Observation{}, false
 	}
-	return Observation{PaneID: paneID, Agent: p.agent, State: p.seen, Children: p.seenChildren}, true
+	return Observation{
+		PaneID:   paneID,
+		Agent:    p.agent,
+		State:    p.seen,
+		Children: p.seenChildren,
+		Progress: p.seenProgress,
+	}, true
 }
 
 // Classify reads paneID's CURRENT frame and answers what it is classified as
 // RIGHT NOW — the live reading Sweep would produce if it ran this instant,
 // rather than the cache Snapshot answers from. It touches none of dirty,
-// seen or seenChildren, and it emits nothing: it is a READ, not a second
-// sweep, and must never make a later real Sweep believe this pane was
-// already reported.
+// seen, seenChildren, seenProgress or the transcript record, and it emits
+// nothing: it is a READ, not a second sweep, and must never make a later real
+// Sweep believe this pane was already reported.
+//
+// THE PROGRESS IT ANSWERS IS DERIVED AND NOT RECORDED, exactly as the observer
+// rules require of a read. It is computed from the record the last sweep left
+// — the yield it last saw and when that yield last changed — compared against
+// the yield of the frame read here. A yield that differs moved under this very
+// reading, and the answer is moving because a pane whose transcript just
+// changed has not stalled; the timestamp the next real sweep writes is what
+// gives that comparison an interval.
 //
 // It exists for exactly one caller (nocx-f545a.7, the race a review of
 // 1ffd3a56 found): a wait that has just written a confirm key into a pane
@@ -336,7 +598,9 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 // which is stricter than Sweep's own handling of the same race — Sweep
 // clears the pane's dirty flag when this happens because it owns that
 // bookkeeping; Classify owns none of it and leaves the pane exactly as it
-// found it.
+// found it. A pane unwatched while its frame was being read is the same
+// absence, answered the same way: there is no record left to read a progress
+// against, and inventing one would be the guess this path refuses.
 func (w *Watcher) Classify(paneID string) (Observation, bool) {
 	w.mu.Lock()
 	p, ok := w.panes[paneID]
@@ -347,9 +611,10 @@ func (w *Watcher) Classify(paneID string) (Observation, bool) {
 	if p.gone {
 		agent := p.agent
 		w.mu.Unlock()
-		return Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited}, true
+		return Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited, Progress: ProgressMoving}, true
 	}
 	agent := p.agent
+	lastTranscript := p.transcript
 	w.mu.Unlock()
 
 	f, err := w.grid.Frame(paneID)
@@ -357,7 +622,17 @@ func (w *Watcher) Classify(paneID string) (Observation, bool) {
 		return Observation{}, false
 	}
 	o := w.drivers.Observe(agent, f)
-	return Observation{PaneID: paneID, Agent: agent, State: o.State, Children: o.Subagents()}, true
+	transcript := o.Transcript()
+
+	w.mu.Lock()
+	cur, still := w.panes[paneID]
+	if !still || cur.gone {
+		w.mu.Unlock()
+		return Observation{}, false
+	}
+	progress := progressOf(cur, o.State, !sameTranscript(lastTranscript, transcript), w.stallAfter, w.now())
+	w.mu.Unlock()
+	return Observation{PaneID: paneID, Agent: agent, State: o.State, Children: o.Subagents(), Progress: progress}, true
 }
 
 // Enrolled is one pane under observation: which pane, and which agent's rule

@@ -44,7 +44,7 @@ func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *panegrid.Store, *sess
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watch := paneobserve.New(lg, grid, drivers)
+	watch := paneobserve.New(lg, grid, drivers, paneobserve.Config{})
 	sessions := newSessionRegistry()
 	e, err := newPaneEnroller(lg, sessions, grid, watch, allowPaneApproval{})
 	if err != nil {

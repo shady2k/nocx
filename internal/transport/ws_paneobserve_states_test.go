@@ -8,6 +8,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/paneobserve"
 )
 
 // recordedChrome replays a committed internal/agentdriver capture up to atMs
@@ -65,7 +66,7 @@ func recordedChrome(t *testing.T, capture string, atMs int64) string {
 // remains a valid, committed nocx-nru89.2 recording of Claude Code 2.1.266;
 // nocx-nru89.9 is what gave the manifest entry the "api-waiting" moment name.
 func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
-	ws, store, watch, term := newObservedWS(t)
+	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 	if err := store.Enrol(sid, 120, 40); err != nil {

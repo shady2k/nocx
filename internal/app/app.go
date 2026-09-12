@@ -1443,7 +1443,14 @@ func New(opts ...Option) (*App, error) {
 	// CHANGES. Built here because both ends need it — the enroller opens an
 	// observation beside the grid's interval, and the transport touches it
 	// from the session read path and is where its reports go.
-	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers)
+	//
+	// The stall threshold is stated rather than left to the zero value,
+	// because it is the seam the per-agent setting arrives through
+	// (nocx-y6w66): production's clock is the watcher's own default and the
+	// number is the package's until that setting has one.
+	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers, paneobserve.Config{
+		StallAfter: paneobserve.DefaultStallAfter,
+	})
 	// The guided calibration (nocx-etejh): nocx asks a person to drive their
 	// agent into a named state and labels the frame with the state it asked
 	// for. It reads the grid through the same Observer the watcher does, so

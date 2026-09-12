@@ -72,7 +72,7 @@ func newTaskDeliveryStand(t *testing.T) *taskDeliveryStand {
 	if err != nil {
 		t.Fatalf("driver registry: %v", err)
 	}
-	watch := paneobserve.New(logger, grid, rules)
+	watch := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	// A sweep does nothing at all until an emitter exists (paneobserve's own
 	// doc on SetEmitter) — production binds the transport here; this stand's
 	// tests read Snapshot directly, so a recording emitter is enough to make

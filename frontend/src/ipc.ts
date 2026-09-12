@@ -15,7 +15,7 @@ import type {
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
-import { isDriverState, readPaneChildren } from './pane-observation'
+import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
@@ -697,6 +697,14 @@ export class WSClient {
       if (typeof agent !== 'string' || agent === '') return
       const paneState = raw.state
       if (!isDriverState(paneState)) return
+      // The progress facet is guarded the same way and with the same
+      // consequence, because it is the same kind of claim about the same
+      // pane: a scalar from a set nobody can add to. It is NOT carried
+      // beside the children's tolerance — a child row is a separate claim
+      // and a malformed one costs the row, while this is one of the two
+      // things the observation is ABOUT.
+      const progress = raw.progress
+      if (!isPaneProgress(progress)) return
       // The child rows travel BESIDE the state and are guarded separately,
       // because they are a separate claim: a malformed row must cost the row
       // and not the classification, and an observation whose children could
@@ -708,6 +716,7 @@ export class WSClient {
         sessionEpoch: state.sessionEpoch,
         agent,
         state: paneState,
+        progress,
         ...(children === null ? {} : { children }),
       })
     })

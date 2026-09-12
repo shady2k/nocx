@@ -122,10 +122,32 @@ type RegionSpec struct {
 	MaxRows     int    `json:"maxRows,omitempty"`
 	Col0Only    bool   `json:"col0Only,omitempty"`
 	StopAtBlank bool   `json:"stopAtBlank,omitempty"`
+	// SkipStatusGlyphs names the glyphs a pane's STATUS ROWS open with, so
+	// that a region reading up from the input box's own chrome steps over
+	// the status stack instead of ending on it. The row that carries one of
+	// them in its first cell and sits highest in the leading run of non-blank
+	// rows is the stack's last row; nothing at or below it is read. A
+	// leading run with none of them is not a stack at all, and the region
+	// reads it — which is what keeps a transcript that fills the pane, with
+	// no chrome between it and the box, from being discarded.
+	SkipStatusGlyphs []string `json:"skipStatusGlyphs,omitempty"`
+	// ToEdge says the region's bound is the FRAME's own edge in its
+	// direction, instead of a row count. The engine refuses it for a region
+	// that reads DOWN (see validate), which is the direction the row cap
+	// exists to bound.
+	ToEdge bool `json:"toEdge,omitempty"`
 }
 
 func (r RegionSpec) at(row int) region {
-	return region{anchor: row, up: r.Up, maxRows: r.MaxRows, col0Only: r.Col0Only, stopAtBlank: r.StopAtBlank}
+	return region{
+		anchor:           row,
+		up:               r.Up,
+		maxRows:          r.MaxRows,
+		col0Only:         r.Col0Only,
+		stopAtBlank:      r.StopAtBlank,
+		skipStatusGlyphs: r.SkipStatusGlyphs,
+		toEdge:           r.ToEdge,
+	}
 }
 
 // Pred is one predicate invocation. Kind selects which; the rest are its
@@ -497,6 +519,12 @@ func (d Document) validate() error {
 			if p.Anchor != "" && !seen[p.Anchor] {
 				return fmt.Errorf("agentdriver: branch %d names anchor %q, which no anchor binds", i, p.Anchor)
 			}
+			if p.ToEdge && !p.Up {
+				return fmt.Errorf("agentdriver: branch %d reads to the frame edge without reading up; an unbounded region may only walk AWAY from the chrome it is anchored in", i)
+			}
+			if len(p.SkipStatusGlyphs) > 0 && !p.Up {
+				return fmt.Errorf("agentdriver: branch %d steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", i)
+			}
 			if p.Kind == "belowCursorContains" && (p.MaxRows <= 0 || p.MaxRows > maxExtractorRows) {
 				return fmt.Errorf("agentdriver: branch %d reads below the cursor with a cap of %d rows; the engine requires 1 to %d, because an uncapped region is how a forged row gets read",
 					i, p.MaxRows, maxExtractorRows)
@@ -509,6 +537,27 @@ func (d Document) validate() error {
 		}
 		if !seen[e.Anchor] {
 			return fmt.Errorf("agentdriver: extractor %q reads from %q, which no anchor binds", e.Name, e.Anchor)
+		}
+		if len(e.SkipStatusGlyphs) > 0 && !e.Up {
+			return fmt.Errorf("agentdriver: extractor %q steps over a status stack without reading up; a status stack is only ever between an anchor and the agent's output ABOVE it", e.Name)
+		}
+		if e.ToEdge {
+			// The row cap below is the engine's bound on how far a region
+			// anchored in CHROME may reach, and it exists because the
+			// agent's printed output is what lies past it. A region that
+			// reads UP from the input box's own chrome is asking for that
+			// output, so its bound is the frame's top edge — the same bound
+			// belowAnchorOpensOnlyWith has, and the engine's for the same
+			// reason: there is nothing above the first row to reach. Reading
+			// DOWN to the edge is refused outright, because the chrome below
+			// an anchor is exactly what the cap is for.
+			if !e.Up {
+				return fmt.Errorf("agentdriver: extractor %q reads to the frame edge without reading up; an unbounded region may only walk AWAY from the chrome it is anchored in", e.Name)
+			}
+			if e.MaxRows != 0 {
+				return fmt.Errorf("agentdriver: extractor %q names both a cap of %d rows and the frame edge; a region has one bound, and two is how they come to disagree", e.Name, e.MaxRows)
+			}
+			continue
 		}
 		if e.MaxRows <= 0 {
 			return fmt.Errorf("agentdriver: extractor %q declares no row cap, and an uncapped region is how a forged row gets read", e.Name)

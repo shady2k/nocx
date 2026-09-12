@@ -642,7 +642,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		if driversErr != nil {
 			t.Fatalf("pane drivers: %v", driversErr)
 		}
-		realWatch = paneobserve.New(logger, grid, paneDrivers)
+		realWatch = paneobserve.New(logger, grid, paneDrivers, paneobserve.Config{})
 		paneWatcherSeam = realWatch
 		calibStore := newHappyVerifiedClaudeCalibration(t)
 		// Screens is nil deliberately, exactly as agentdriver's own

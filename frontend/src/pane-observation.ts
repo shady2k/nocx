@@ -51,6 +51,25 @@ export function isDriverState(v: unknown): v is DriverState {
   return typeof v === 'string' && (PANE_STATES as readonly string[]).includes(v)
 }
 
+/** The THIRD facet, re-exported from the generated contract type for the same
+ *  reason DriverState is: a member added to the schema cannot be missing here,
+ *  and one the schema drops cannot survive here (nocx-tnx44).
+ *
+ *  It rides BESIDE the state and is never a value of it. "Stalled" is not what
+ *  a screen is inviting; it is a comparison between two readings of one screen
+ *  taken over time, which is why it is measured in the backend's watcher rather
+ *  than in the rule. Nothing draws it yet — the surface that will is the
+ *  coordinator's view of a wave — and a surface that does draw it must read it
+ *  ALONGSIDE the state, never instead of it. */
+export type PaneProgress = SessionObservationChanged['progress']
+
+/** The boundary guard for it, beside isDriverState and for the same reason:
+ *  this is an unsolicited notification, nothing correlates it, and the schema
+ *  is the only statement of what it may carry. */
+export function isPaneProgress(v: unknown): v is PaneProgress {
+  return v === 'moving' || v === 'stalled'
+}
+
 /** What every surface shows for a pane: the tab's dot, the overview card, the
  *  workspace chip's attention mark.
  *

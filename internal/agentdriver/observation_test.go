@@ -15,6 +15,7 @@ package agentdriver_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
@@ -47,16 +48,33 @@ func TestAnObservationsStateIsTheScalarTheDriverAlreadyAnswered(t *testing.T) {
 	}
 }
 
-// Optional is the point. Nothing is extracted from an idle box, so the
-// observation is today's answer with nothing added — no field invented, no
-// empty structure to be misread as evidence.
+// Optional is the point. Nothing is extracted from an idle box that has
+// printed nothing yet, so the observation is today's answer with nothing
+// added — no field invented, no empty structure to be misread as evidence.
+//
+// THE FRAME MOVED WHEN THE TRANSCRIPT EXTRACTOR ARRIVED (nocx-tnx44), and the
+// ASSERTION did not. This used to replay claude-idle@11000 on the argument that
+// an idle box yields no extras; a transcript extractor reads the scrollback the
+// pane has printed, and every committed idle capture already has Claude's
+// welcome banner in it, so that frame now yields rows — correctly. What the
+// test is about is a rule that read NOTHING, so the frame is an idle box with
+// an empty scrollback: the same chrome the corpus shows, with the blank rows
+// the corpus also shows above it, painted through panegrid because no committed
+// capture holds a pane at its first frame.
 func TestARuleThatExtractsNothingObservesTheScalarAndNoExtras(t *testing.T) {
-	o := observe(t, replay(t, "claude-idle", 11000))
+	const cols, rows = 40, 14
+	lines := make([]string, rows)
+	lines[6] = "              0 tokens"
+	lines[7] = strings.Repeat("─", cols)
+	lines[8] = "❯ "
+	lines[9] = strings.Repeat("─", cols)
+	lines[11] = "  ⏵⏵ auto mode on"
+	o := observe(t, screen(t, cols, rows, lines, 2, 8))
 	if o.State != agentdriver.StateFreeText {
 		t.Fatalf("idle input box = %q, want %q", o.State, agentdriver.StateFreeText)
 	}
 	if len(o.Extras) != 0 {
-		t.Fatalf("an idle box yielded %d extras: %+v", len(o.Extras), o.Extras)
+		t.Fatalf("a box with nothing printed above it yielded %d extras: %+v", len(o.Extras), o.Extras)
 	}
 }
 
@@ -175,7 +193,26 @@ func TestAFieldTheRowDoesNotCarryIsAbsentRatherThanEmpty(t *testing.T) {
 // The near-miss the extractor exists to refuse, and it is the same forgery the
 // verdict already refuses. An extractor's region is anchored in chrome — below
 // the mode line, which is under the input box — and the transcript is above
-// the box. A panel row the AGENT printed is content, and content is not read.
+// the box. A panel row the AGENT printed is content, and content is not read as
+// a CHILD.
+//
+// WHAT NARROWED, AND WHY IT COULD NOT BE AVOIDED (nocx-tnx44). This test used
+// to assert len(o.Extras) == 0, which stood in for "the subagent extractor read
+// nothing" only because the subagent extractor was the only one there was. The
+// transcript extractor the third facet needs reads the pane's SCROLLBACK, and
+// these forged rows are IN the scrollback: they are painted at rows 16-17 of a
+// 40-row pane, two rows below the welcome banner the pane had already printed.
+//
+// No region definition can keep both, and the corpus settles it rather than a
+// preference. A region that reaches the real transcripts the facet must measure
+// reaches these rows too: claude-working@15000's last printed row is twenty
+// rows above its meter, claude-2.1.266-api-refused@40000's is twenty-nine, and
+// a row cap tight enough to exclude rows 16-17 would leave those panes with no
+// transcript measurement at all — the facet dead for exactly the hung shapes it
+// exists for. So the count is still asserted, against the one extra this frame
+// may legitimately carry, and the two properties the test NAMES are asserted
+// directly: the verdict is unchanged above, and the forged rows became no
+// child.
 func TestAPanelRowTheAgentPrintedIntoItsTranscriptIsNotExtracted(t *testing.T) {
 	r := replayer(t, "claude-idle", 11000)
 	// ESC 7 / ESC 8 so the writes do not move the cursor: the TUI owns it,
@@ -195,8 +232,17 @@ func TestAPanelRowTheAgentPrintedIntoItsTranscriptIsNotExtracted(t *testing.T) {
 	if o.State != agentdriver.StateFreeText {
 		t.Fatalf("idle pane whose agent printed panel-shaped text = %q, want %q", o.State, agentdriver.StateFreeText)
 	}
-	if len(o.Extras) != 0 {
-		t.Fatalf("a forged panel in the transcript was extracted: %+v", o.Extras)
+	// The observation carries the transcript and NOTHING else: the forged rows
+	// sit in the pane's scrollback, which is the region a rule names as the
+	// agent's own output, so a transcript extra containing them is the correct
+	// reading and the count is still asserted. What the forgery must not buy is a
+	// SECOND extra — a child — which is what the subagent extractor would
+	// produce if it read content as chrome.
+	if len(o.Extras) != 1 || o.Extras[0].Name != agentdriver.TranscriptExtra {
+		t.Fatalf("a forged panel in the transcript was extracted as more than the transcript it is: %+v", o.Extras)
+	}
+	if kids := o.Subagents(); len(kids) != 0 {
+		t.Fatalf("a forged panel in the transcript was extracted as children: %+v", kids)
 	}
 }
 

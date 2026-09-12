@@ -36,7 +36,7 @@ func newCalibrationEnv(t *testing.T) *calibrationEnv {
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watcher := paneobserve.New(logger, grid, rules)
+	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	store, err := agentcalib.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("store: %v", err)

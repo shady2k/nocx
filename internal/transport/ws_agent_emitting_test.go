@@ -46,7 +46,7 @@ func newEmittingEnv(t *testing.T) *emittingEnv {
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watcher := paneobserve.New(logger, grid, rules)
+	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	env := newLifecycleTestEnv(t,
 		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentRules(rules))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)

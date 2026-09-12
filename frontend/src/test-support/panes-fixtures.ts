@@ -513,6 +513,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
         sessionEpoch: 1,
         agent,
         state,
+        progress: 'moving',
       })
     },
     fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {

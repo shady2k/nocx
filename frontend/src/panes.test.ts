@@ -2848,6 +2848,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
           ...observationIdentity,
           agent: 'claude',
           state,
+          progress: 'moving',
         },
       })
     }
@@ -2974,6 +2975,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
           ...identity,
           agent: 'claude',
           state: 'working',
+          progress: 'moving',
           children: [{ name: 'Explore', task: 'List files in directory' }],
         },
       })
@@ -3028,7 +3030,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
       realSocket.deliverText({
         jsonrpc: '2.0',
         method: 'session.observationChanged',
-        params: { sessionId, ...identity, agent: 'claude', state: 'working' },
+        params: { sessionId, ...identity, agent: 'claude', state: 'working', progress: 'moving' },
       })
       await vi.waitFor(() => {
         expect(bar.querySelectorAll('.nocx-subagent')).toHaveLength(0)

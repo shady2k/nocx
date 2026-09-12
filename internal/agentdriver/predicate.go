@@ -129,27 +129,107 @@ func opensWithGlyph(text string, glyphs []string) bool {
 // and col0Only look similar and are not: a blank row ENDS the region, while an
 // indented row is merely SKIPPED. The status stack is a contiguous run of
 // unindented rows, so both are needed and neither substitutes for the other.
+//
+// skipStatusGlyphs is the third kind of bound, and it exists for the region
+// that reads the TRANSCRIPT rather than the chrome. Everything between the
+// input box and the agent's own output is the pane's STATUS STACK — a spinner
+// row, sometimes a tip row or a wrapped error line under it — and its height is
+// not fixed, so a region anchored at the box's own chrome and reading up must
+// STEP OVER it. Without that step the region would either end on the spinner or
+// measure the spinner's own timer as growth, and a spinner that keeps ticking
+// would report a hung agent as moving forever (nocx-tnx44).
+//
+// Where the stack ends is read off the glyphs: the TOPMOST row of the leading
+// run of non-blank rows that carries one of these in its first cell is the
+// stack's last row, and everything at or below it is read by nothing. The
+// cell is the row's own FIRST CELL and not its first non-blank one, because the
+// stack is drawn at column 0 while the agent's output is indented — a check
+// that trimmed indentation would mistake a markdown bullet the agent printed
+// for chrome and hide every row under it.
+//
+// A leading run with none of these glyphs is not a stack at all: a transcript
+// that FILLS the pane abuts the box with nothing drawn between, and the region
+// must read it whole rather than discard whatever happens to sit next to the
+// chrome.
+//
+// What that rule costs is one shape, stated here rather than discovered later:
+// a status row with NO glyph in its first cell and drawn ABOVE the stack's
+// glyph row would be read as transcript. The corpus never draws one — the stack
+// grows upward from the box as a tip line, then the spinner row that carries
+// the glyph — and the failure direction is a pane reported as moving, which is
+// the cheap one.
+//
+// toEdge says the region's bound is the FRAME's own edge in its direction
+// rather than a row count, and the engine permits it only for a region that
+// reads UP — see Document.validate, which is where that argument is stated.
 type region struct {
-	anchor      int
-	up          bool
-	maxRows     int
-	col0Only    bool
-	stopAtBlank bool
+	anchor           int
+	up               bool
+	maxRows          int
+	col0Only         bool
+	stopAtBlank      bool
+	skipStatusGlyphs []string
+	toEdge           bool
+}
+
+// stackTop answers where the status stack the region begins in ends: the row
+// its walk may start above, or the anchor itself when there is no stack.
+func (r region) stackTop(f panegrid.Frame) int {
+	top := -1
+	for y := r.anchor - 1; y >= 0; y-- {
+		if _, ok := firstNonBlankCol(f, y); !ok {
+			// A blank row ends the leading run. Everything above it is the
+			// agent's own output, which is why the stack can be found at all
+			// without knowing how tall it is.
+			break
+		}
+		if opensAtColumnZero(f, y, r.skipStatusGlyphs) {
+			top = y
+		}
+	}
+	if top < 0 {
+		return r.anchor
+	}
+	return top
+}
+
+// opensAtColumnZero answers whether a row's own FIRST CELL is one of the
+// glyphs — the POSITIONAL counterpart of opensWithGlyph, and the one this
+// question needs. The status stack is drawn at column 0 and the agent's own
+// transcript is indented, so identity alone is not enough: "* item" two columns
+// into a markdown list the agent printed is not a spinner, and a bound that
+// could not tell them apart would step over the transcript it was written to
+// measure.
+func opensAtColumnZero(f panegrid.Frame, row int, glyphs []string) bool {
+	cell, ok := cellAt(f, 0, row)
+	if !ok {
+		return false
+	}
+	for _, g := range glyphs {
+		if cell.Text == g {
+			return true
+		}
+	}
+	return false
 }
 
 // eachRow walks the region once, in order, handing every candidate row's
 // right-trimmed text to visit, and stops when visit says so or the region ends.
 //
 // It is the ONE walk. anyRow is this with a boolean out-parameter and capture
-// is this collecting, so the cap, the blank terminator, the indent skip and the
-// frame's own edge are enforced in a single place — a second walk written
-// beside it is a second set of bounds, and the whole argument for the region is
-// that its bounds are the engine's.
+// is this collecting, so the cap, the blank terminator, the indent skip, the
+// status-stack step and the frame's own edge are enforced in a single place — a
+// second walk written beside it is a second set of bounds, and the whole
+// argument for the region is that its bounds are the engine's.
 func (r region) eachRow(f panegrid.Frame, visit func(text string) bool) {
-	for i := 0; i < r.maxRows; i++ {
-		y := r.anchor + 1 + i
+	start := r.anchor
+	if r.up && len(r.skipStatusGlyphs) > 0 {
+		start = r.stackTop(f)
+	}
+	for i := 0; r.toEdge || i < r.maxRows; i++ {
+		y := start + 1 + i
 		if r.up {
-			y = r.anchor - 1 - i
+			y = start - 1 - i
 		}
 		if y < 0 || y >= f.Rows {
 			return

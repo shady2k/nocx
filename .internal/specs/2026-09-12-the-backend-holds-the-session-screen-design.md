@@ -1,6 +1,6 @@
 # One emulator, in the session runtime
 
-- **Date:** 2026-09-12 (sixth revision; §3 records what each earlier one got wrong)
+- **Date:** 2026-09-12 (seventh revision; §3 records what each earlier one got wrong)
 - **Status:** draft for review
 - **Owner's decision, 2026-09-12:** the long-term model, taken deliberately over the
   smaller incremental option. **"Нам и нужна долгосрочная модель, никаких быстрых побед.
@@ -190,6 +190,13 @@ the one that would have cost most, because §4 is what the ownership record is w
   it. See §6.10.
 - **Terminal replies at the last step** (§9) — they are a precondition of a runtime proved
   with no client attached, which is the epic's own success criterion.
+
+**R6, by measurement rather than by reading.** §7 corrected "frame diffs emit fewer bytes
+than raw output" into an argument about scrolling, and the argument was right — but it left
+standing the impression that a scroll-aware encoder recovers a bandwidth win. It does not.
+Measured, it is break-even plus a few percent, and total delivery on an incremental TUI is
+1.37×–1.58× raw. §7.1 carries the numbers. Nothing about the decision changes, which is what
+ADR-0066 said in advance would be true.
 
 ## 4. The invariant, as a new ADR
 
@@ -429,10 +436,45 @@ separate payload (`src/server/render_stream.rs:94`).
 output, the lines omitted from live frames still reach the browser when that card is
 fetched.
 
+### 7.1 MEASURED, and the conclusion is not the one this section invited
+
+`nocx-rpzdo`, `.internal/spikes/framebytes/REPORT.md`. Seven recorded captures plus the
+hero case, three frame rates and one frame per write, both encoders, every emitted frame
+applied to a FRESH `x/vt` emulator whose screen must equal the producing terminal's after
+every delivered frame — so an encoder that emitted too few bytes because it was wrong fails
+there rather than hiding in the numbers.
+
+**The projection above was right.** The hero at 60 fps: 306,000 bytes raw against 1,427,636
+positional, 4.67× — close to the 4× argued here.
+
+**The conclusion people were drawing from it was not.** A scroll-aware encoder brings the
+same case to **1.04× raw**, and across the sweep to 1.03×–1.17×. It is load-bearing for
+NOT BEING PATHOLOGICAL, not for saving bandwidth: the rows it must send are exactly the rows
+the program wrote, and each one costs a cursor move the raw stream did not need.
+
+**Counting total delivery settles it.** `bash` is 0.20× raw live and **1.11×** once the
+70,007 bytes no frame carried are fetched — 69,956 of them retained scrollback, so that is
+real card traffic. At 60 fps the totals run **0.84×** (`less`, a single screen) to **1.58×**
+(`htop`), the hero at 1.04×, a burst producer at 1.11×.
+
+**The producer's shape decides more than the frame rate.** An incremental TUI is already a
+diff, so a cell-level protocol re-derives it more expensively than the program stated it —
+`htop` costs 1.37× on the live stream alone.
+
+**So this document may not promise a bandwidth win, and does not.** The honest sentence is
+that it depends on the producer's shape and on whether the card's retained output is
+counted, and that on this corpus the frame protocol is not systematically cheaper than raw
+output. ADR-0066 anticipated exactly this and named what it costs: the encoder and possibly
+the delivery shape, not who owns the emulator. The reasons for the decision are §1's and
+§2's — the backend holding the screen, the caret, the state a program's own query is
+answered from, a client whose cost per update is a few cells rather than a stream — and not
+one of them is a bandwidth claim.
+
 ## 8. Measurements, before anything is built
 
-1. Frame diffs against raw bytes on the hero case, with a **scroll-aware** encoder and
-   without, at the frame rate we would ship — and total bytes including card fetches.
+1. ~~Frame diffs against raw bytes on the hero case, with a **scroll-aware** encoder and
+   without, at the frame rate we would ship — and total bytes including card fetches.~~
+   **DONE** (`nocx-rpzdo`): §7.1, `.internal/spikes/framebytes/REPORT.md`.
 2. Backend memory and CPU per session with an emulator, at real tab counts.
 3. First-frame size and latency for an attaching client.
 4. Client cost of applying diffs against parsing raw output.

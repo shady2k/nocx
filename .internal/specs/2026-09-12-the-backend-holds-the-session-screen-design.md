@@ -1,259 +1,385 @@
 # The backend holds the session's screen
 
-- **Date:** 2026-09-12
+- **Date:** 2026-09-12 (second revision — the first was reviewed by codex and is superseded
+  by this text; what changed and why is §3)
 - **Status:** draft for review
-- **Owner's decision:** taken in conversation on 2026-09-12; this document records it and
-  works out what it costs.
+- **Owner's decision:** taken in conversation on 2026-09-12. The second revision's central
+  move — the renderer stops destroying the grid — is the owner's, not this document's.
 - **Binding documents this crosses:** `AD-1`, `AD-6`, `AD-9`, `AD-10`,
   [ADR-0001](../../docs/decisions/0001-xterm-js-as-vt-frontend.md),
   [ADR-0002](../../docs/decisions/0002-native-tabs-no-embedded-multiplexer.md),
+  [ADR-0008](../../docs/decisions/0008-command-blocks-as-a-keyboard-first-ledger.md),
   [ADR-0009](../../docs/decisions/0009-dom-scrollback-with-explicit-cell-geometry.md),
+  [ADR-0024](../../docs/decisions/0024-authenticated-shell-integration-channel.md),
   [ADR-0041](../../docs/decisions/0041-x-vt-as-the-backend-emulator.md),
   [ADR-0064](../../docs/decisions/0064-a-pane-that-is-read-may-be-answered.md).
-- **Beads:** epic `nocx-eidfb` (two machines, one session), epic `nocx-6q1uh` (the session
-  surface that waits on this), `nocx-dkawo` (the wave that needs a session outliving its
-  window).
+- **Beads:** `nocx-kkn89` (this design), epic `nocx-eidfb`, epic `nocx-6q1uh`, `nocx-dkawo`.
 
 ## 1. Why this document exists
 
-`nocx-6q1uh` asks for one method — `session.keys` — usable by an external coordinator and
-by nocx's own assistant. Designing it ran into a fork that looked like a detail and is not:
-**a write into a pane must be judged against what is on that pane's screen, and the two
-callers had two different answers to "who holds the screen".** A coordinator's worker pane
-has a backend grid, because it is enrolled (AD-6's amendment of 2026-08-25). A person's own
-pane has no backend grid at all, so the assistant's evidence would have to come from the
-renderer — which is not always attached.
+`nocx-6q1uh` asks for one method usable by an external coordinator and by nocx's own
+assistant: send keys to a pane. A write into a pane must be judged against what is on that
+pane's screen, and the two callers had different answers to "who holds the screen" — a
+worker pane is enrolled and has a backend grid, a person's own pane has none.
 
-Following that fork back produced a second finding: it is the same missing piece that stops
-a second machine attaching to a running session. Both are "who holds the current screen",
-and the answer this document records is **the backend does**.
+Following that fork produced a second finding: it is the same missing piece that stops a
+second machine attaching to a running session. Both are "who holds the current screen".
+
+Following it once more — and this is the second revision's subject — produced a third: the
+two candidate holders disagree only because of one operation nocx performs on one of them,
+and that operation was a workaround for something else.
 
 ## 2. What is decided today, and where it stops
 
-**`ADR-0001` / `AD-6`:** xterm.js owns the VT state. The backend does not sniff the byte
-stream.
+**`ADR-0001` / `AD-6`:** xterm.js owns the VT state; the backend does not sniff the stream.
 
 **`ADR-0041` / the AD-6 amendment of 2026-08-25:** the backend keeps a real VT grid
-(`charmbracelet/x/vt`) for a pane that has been **explicitly enrolled**, for the life of
-that enrolment, with exactly two powers — whether nocx may write into the pane, and what
-the activity indicator shows. It says in as many words that nothing derived from that grid
-is shown to the user as their terminal.
+(`charmbracelet/x/vt`) for an **explicitly enrolled** pane, with exactly two powers.
 
-**`nocx-eidfb`, the two-machines epic (owner's, 2026-08-24):** only the session's SIZE moves
-to the backend. Its body states the reasoning that this document reverses:
+**`nocx-eidfb` (owner's, 2026-08-24):** only the session's SIZE moves to the backend, on the
+reasoning that "two clients then see the same bytes at the same size, they see the same
+screen WITHOUT a server-side grid".
 
-> "And because two clients then see the same bytes at the same size, they see the same
-> screen WITHOUT a server-side grid — which is what keeps ADR-0002 intact."
+### 2.1 Where the byte-stream argument stops — corrected
 
-### 2.1 Where that reasoning stops, measured
+The first revision claimed a late client is limited to the 256 KB replay ring
+(`internal/transport/ring.go:12`) and gets a cleared screen past it. That was wrong:
+`reclaimSession` (`frontend/src/ipc.ts:1179`) reads recorded output before joining the ring,
+so a late client is not categorically limited to ten screens.
 
-The sentence holds for a client that has been attached from the beginning. It does not hold
-for one that attaches later, and the bound is in the tree:
+What survives the correction, and is the actual motivation: byte replay is not a
+**guaranteed** screen reconstruction. Retention policy can legitimately have kept nothing,
+historical geometry is not recorded alongside the bytes, and replaying an arbitrary prefix
+costs time proportional to the session's whole life. A screen the backend already holds
+costs one snapshot.
 
-- `internal/transport/ring.go:12` — `RingCapacity = 256 * 1024`, documented as "~10 screens
-  of 132×43 terminal output".
-- `AD-9` — on reconnect the backend replays from the client's last offset, "or emits an
-  explicit `reset` (clear + resync) if the offset is past the buffer".
+### 2.2 What the renderer actually owns that it should not — corrected
 
-So attaching a second machine to a session that has been running for more than about ten
-screens of output yields a cleared screen, not the session's screen. "Two machines, one
-session, the same screen" is not reachable from the byte stream alone.
+The first revision claimed a session with no renderer records no history. That was wrong.
+`lifecycle.submitAttempt` opens the durable row, `PublishLifecycle` synchronises the ledger
+before delivery, and `syncLifecycleLedger` (`internal/transport/ws_lifecycle.go:342`)
+completes it from authenticated facts with `TermTransportGone` when the transport is gone;
+raw output is recorded backend-side in `ws_session_record.go`.
 
-### 2.2 A second thing the renderer owns that it should not
+The true, narrower statement: without a renderer a completed command's row is closed but
+carries **no frozen output artifact**, and its status can be `EntryUnknown`. Moving that
+capture is substantial separate work and is **not** a free consequence of this design.
 
-`history.record` — the record of a finished command block — originates in the renderer
-(`frontend/src/scrollback/blocks.ts`). The renderer parses OSC 133, derives the block, and
-sends the fact back to the backend, because the backend refuses to parse. **A session
-running with no window attached therefore records no history at all.** That hole is closed
-by the same change, without separate work.
+## 3. What changed in this revision, and the finding that changed it
 
-## 3. The decision
+The first revision argued the backend grid and xterm need not agree because they answer
+different questions. Codex refuted the argument's load-bearing half and the refutation
+holds: **the renderer performs a VT mutation the backend never sees, and it is not
+reproducible from the stream.**
 
-**The backend maintains an authoritative VT grid for every session. The renderer keeps
-rendering, and keeps owning what the user sees and interacts with.**
+At every freeze the renderer calls xterm's `clear()`, which does more than drop archived
+rows (`@xterm/xterm` `Terminal.ts:1224`):
 
-Concretely:
+```js
+this.buffer.lines.set(0, this.buffer.lines.get(this.buffer.ybase + this.buffer.y)!)
+this.buffer.lines.length = 1
+this.buffer.ydisp = 0; this.buffer.ybase = 0; this.buffer.y = 0
+```
 
-1. The backend parses each session's output into a grid, as it already does for an enrolled
-   pane, and does so for every session rather than only for enrolled ones.
-2. A client that attaches receives a **repaint** synthesised from that grid, then the
-   ordinary byte stream from that point. This is what tmux does for a reattaching client.
-3. The data plane does not change. `AD-1`'s raw binary frames stay raw binary frames; the
-   repaint is bytes like any other bytes.
-4. xterm.js is not replaced and not bypassed. It receives the repaint and the stream through
-   the same path it uses today.
-5. The DOM keeps everything it owns today: frozen blocks (`ADR-0009`), selection, search,
-   links, the command editor.
+The **live** row — the one nothing has frozen — moves to row 0 and the screen's origin moves
+with it. Absolute cursor addressing after that point lands on different cells in the two
+models, and `savedY` is not adjusted, so a later `restoreCursor()` lands on a now-blank row.
+Both of the freeze guards can have passed.
 
-### 3.1 The two grids answer different questions, and that is why they need not agree
+Worse for the first revision's remedy: the clear is **not** a function of the byte stream.
+`_settleFrozen` is driven by authenticated lifecycle facts arriving out of band, by a
+renderer-local running block that `beginBlockNow` sets at submit before the running fact
+arrives, and by a 500 ms deferred-fence timer. A completion waiting on its fence and a
+person submitting before that timer fires produce a different presentation from identical
+PTY bytes. No backend model can reproduce it from what it sees.
 
-The obvious objection is that two VT implementations will drift, and that drift is what
-`AD-6` exists to prevent. It does not apply here, because the two are not two owners of one
-question:
+### 3.1 The cut was a workaround, not a design
 
-- **xterm.js owns "what this client is displaying."** Its consumer is the person looking at
-  it, and everything built on it — selection, blocks, the editor.
-- **The backend grid owns "what this session's screen is"** for anybody who was not
-  watching: a client attaching now, and a caller about to write into the pane.
+`nocx-m87n`, the bug `clearViewport` was restored for, records its own root cause:
 
-They meet at exactly one point, the attach repaint, and there the backend's answer does not
-have to agree with anything — it _becomes_ the new client's starting state. From then on both
-clients consume the same stream.
+> "the live region shows the WHOLE terminal viewport, not the rows of the running command.
+> `liveContentHeight()` measures from viewport row 0 to the last non-empty row, and
+> `setLiveHeight` sizes the live box to that. **Nothing offsets the region to the running
+> block's `startLine`.**"
 
-For the write gate the renderer's opinion is not merely unnecessary, it is irrelevant: the
-truth is the state of the real application, and the backend grid is what models it. If that
-model is wrong the gate is wrong, and xterm.js agreeing with the wrong answer would not have
-saved it.
+So the live region has no start. Destroying the rows above it was how row 0 was made to be
+the right place. **Give the live region its offset and the destruction is unnecessary**, and
+with it goes the only structural reason the two models differ.
 
-**What this changes is therefore not a synchronisation requirement but a fidelity
-requirement**, stated in §7.
+This is the owner's move, and it inverts the design: the expensive half of the first
+revision — teaching the backend to reproduce a presentation — disappears, because there is
+nothing to reproduce.
 
-## 4. The new invariant
+## 4. The decision, in two halves
 
-To be written as a new ADR rather than as an edit to any existing record — the old records
-stay as they are, because they are evidence of what was decided when, and the new one says
-what changed and why (AGENTS.md, "An accepted ADR is never edited").
+**(a) The renderer stops destroying the grid.** A finished command's rows are serialised into
+their DOM block as they are today, and then **left in xterm's buffer**. The live region is
+given an offset — the running block's start — instead of relying on row 0. Nothing about the
+product's appearance changes: the scrollback is still DOM, xterm is still only the VT engine
+plus the alt-screen surface, and the frozen block still owns its own presentation
+(`ADR-0009` stands).
 
-> **The renderer owns what the person sees. The backend owns what the session is.**
+**(b) The backend maintains an authoritative VT grid for every session,** as it already does
+for an enrolled pane, and owns the block boundaries it parses from OSC 133 beside the
+lifecycle facts it already holds. A client that attaches receives a repaint synthesised from
+that grid plus those boundaries, and then the ordinary byte stream.
 
-Under it:
+(a) is what makes (b) cheap: with no destructive mutation on either side, the two models
+share one coordinate system by construction, and the repaint needs no translation.
 
-| Question                                              | Owner                                                   | Consumer                                           |
-| ----------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------- |
-| what this client displays, and what is selected in it | xterm.js + DOM                                          | the person                                         |
-| what the session's screen is right now                | backend grid                                            | an attaching client; a write gate; an agent driver |
-| what the session's finished blocks were               | the ledger (`internal/content`), written by the backend | history, search, a new client above the fold       |
-| the session's size                                    | the backend (`nocx-eidfb.1`)                            | every attached client                              |
+### 4.1 Why this is not the layout nocx moved away from
 
-`AD-6`'s single-owner rule survives intact under this reading: each question still has
-exactly one owner. What changes is that "the backend does not sniff the byte stream" stops
-being the mechanism that enforces it.
+The direction change of 2026-07-24 replaced _DOM overlays on a full-screen xterm_ with _DOM
+scrollback plus xterm as the VT engine_. This design keeps that: the blocks are DOM, not
+overlays, and xterm is not asked to present them. The only change is that xterm's buffer is
+not truncated behind them.
 
-### 4.1 What the new record supersedes, named
+## 5. The new invariant
 
-- `AD-6`'s rule sentence, "The backend does **not** sniff the byte stream", and with it both
-  carve-outs that exist only because of it: the bootstrap-window read of 2026-08-20 and the
-  enrolled-pane grid of 2026-08-25. Neither needs to be a carve-out once the backend parses
-  every session; both become ordinary consequences, and the _powers_ half of the 2026-08-25
-  amendment stays exactly as written, because it bounds what the grid may DECIDE and that
-  bound is not loosened here.
-- `ADR-0002`'s conclusion in the part where it closed server-side terminal state. Its own
-  revisit trigger — "a session that survives the client process entirely" — is already
-  recorded as fired in the AD-6 amendment; this is the second half of that firing.
-- The reasoning quoted in §2 from `nocx-eidfb`, which the epic body carries rather than an
-  ADR. The epic is amended by note, not rewritten.
+A **new ADR**, not an edit to any existing record — the old records stay as evidence of what
+was decided when (AGENTS.md, "An accepted ADR is never edited").
 
-Left standing, explicitly: `ADR-0001` (xterm.js is the VT frontend — it still is, for
-display), `ADR-0009` (the DOM owns frozen blocks), `AD-1` (two planes, raw binary data
-plane), `AD-9` (the replay ring stays; it is now a fast path in front of the repaint rather
-than the only path), `ADR-0064`'s bounds on what a write may be.
+> **The renderer owns what the person sees. The backend owns what the session is. Neither
+> destroys what the other reads.**
 
-## 5. The attach repaint
+| Question                                              | Owner                                   | Consumer                                           |
+| ----------------------------------------------------- | --------------------------------------- | -------------------------------------------------- |
+| what this client displays, and what is selected in it | xterm.js + DOM                          | the person                                         |
+| what the session's screen is right now                | backend grid                            | an attaching client; a write gate; an agent driver |
+| where each block starts and ends                      | the backend (OSC 133 + lifecycle facts) | every client's live-region offset; the repaint     |
+| a finished block's durable body                       | the ledger (`internal/content`)         | history, search, a new client above the fold       |
+| the session's size                                    | the backend (`nocx-eidfb.1`)            | every attached client                              |
 
-`x/vt` can already serialise: `Emulator.Render()` returns "a snapshot of the terminal screen
-as a string with styles and links encoded as ANSI escape codes"
-(`emulator.go:140`, delegating to `ultraviolet.Buffer.Render`). So the grid does not have to
-learn to serialise itself; it does that today.
+## 6. Equivalence: what must match, and what need not
 
-**`Render()` is cells and styles, and nothing else.** Reading
-`ultraviolet/buffer.go:271` it is `Lines(b.Lines).Render()` — no cursor, no modes. A repaint
-that carries only that gives an attaching client a correct-looking screen and a broken
-keyboard. The repaint must therefore carry, and the design of it must enumerate:
+The first revision's blanket claim ("different questions, so no agreement needed") is
+withdrawn. The requirements are separate and each is scoped:
 
-- **cursor** — position, visibility, shape.
-- **modes that change what a keystroke means** — bracketed paste (2004), application cursor
-  keys (DECCKM), application keypad, mouse reporting (1000/1002/1003/1006), focus reporting
-  (1004).
-- **which buffer is active** — a client attaching while `vim` runs must land on the alternate
-  screen, and must not inherit alternate-screen content as scrollback when the program exits.
-- **the session's size**, which the backend already owns (`nocx-eidfb.1`).
+1. **The write gate.** Equivalence is required for **every displayed target of automation** —
+   not only for the assistant in a person's own pane. A delegated worker gets an ordinary tab
+   (`frontend/src/panes.ts:959`) and viewing it does not suspend the write authority, so a
+   person can be watching the exact pane a coordinator is answering. Revalidation must cover
+   the action's facts and the key derivation, not merely that both readings classify as a
+   menu.
+2. **Attach and continuation.** The repaint plus the subsequent stream must land a new client
+   in the state the session is in. §7.
+3. **Freeze boundaries.** Every client must place the same block boundaries, which is why (b)
+   puts them in the backend rather than deriving them per client.
+4. **Selection and search.** These are DOM operations over the blocks
+   (`frontend/src/scrollback/blocks.ts:1532`); no `SearchAddon` is installed. The buffer's
+   copy of already-carded rows is therefore never read, and its post-resize divergence from
+   the card is invisible — but the rule must be written down, and hit-testing must not reach
+   into the clipped region.
+5. **Resize.** x/vt truncates and pads; xterm reflows the normal buffer. The rule for what a
+   client sees after a resize, and what a repaint after a resize carries, is owed.
 
-Each of these is a bounded, testable item, and each has an obvious failing case to write a
-test from. Any mode the repaint does not carry must be named in the design as deliberately
-dropped, with what breaks.
+## 7. The attach repaint
 
-## 6. Above the fold: what a new client sees behind the live screen
+`x/vt` can serialise: `Emulator.Render()` returns the screen with styles and links as ANSI
+sequences (`emulator.go:140`). It is **not sufficient on its own**: it renders only the
+active buffer, resets style and hyperlink at line ends, omits trailing spaces, separates rows
+with LF, and emits neither an erase nor a carriage return
+(`ultraviolet/buffer.go:141,228,271`).
 
-The live screen comes from the grid. Everything above it comes from the **ledger**, which is
-already backend-owned and which §2.2 makes complete for the first time.
+### 7.1 The state a repaint must carry
 
-The boundary has to be stated or it will be decided differently in each path:
+Cells alone give a correct-looking screen and a broken keyboard. Enumerated, each with an
+obvious failing test:
 
-- A client attaching mid-command gets the live region from the repaint, and the finished
-  blocks above it from the ledger.
-- `x/vt` has a scrollback of its own (`Emulator.Scrollback()`, `emulator.go:451`). It must be
-  **bounded**, and the design must say whether it is used at all: the product's scrollback is
-  the ledger's blocks, and a second scrollback in the backend is a second answer to the same
-  question — the thing §3.1 is careful to avoid elsewhere.
+- cursor position, visibility and shape; the **saved** cursor.
+- current rendition and any open hyperlink — distinct from the styles already on cells.
+- scrolling margins, origin mode, insert mode, autowrap, and **pending wrap** (a cursor in
+  the last column is not enough to know whether the next character wraps).
+- tab stops; character-set designation and selection.
+- modes that change what a keystroke means: bracketed paste, DECCKM, application keypad,
+  mouse reporting (1000/1002/1003/1006), focus reporting.
+- which buffer is active, and the inactive buffer's contents — a client attaching inside
+  `vim` must not inherit alternate-screen content as scrollback when the program exits.
+- the dynamic palette and default colours.
+- the session's size, which the backend already owns.
 
-Recommendation, to be argued in the design rather than assumed here: bound `x/vt`'s
-scrollback to the smallest value the emulator needs to be correct, and let the ledger be the
-only scrollback the product has.
+Any of these the repaint deliberately drops must be named, with what breaks.
 
-## 7. Fidelity, which replaces the agreement requirement
+### 7.2 Parser state: checkpoint at a safe boundary, and a bounded failure
 
-The backend grid is now the authority for the repaint and for the write gate. What matters
-is whether it models a real terminal correctly, and the cheapest oracle available is still
-the one `ADR-0041` used: the same bytes through `x/vt` and through headless xterm.js,
-compared per column. The spike that did it is in history at `d3872462`
-(`render-xterm.mjs` against `render-go`, per-column diff plus chrome-anchor checks).
+A repaint taken mid-sequence cannot be continued. Serialising partial parser state is not
+required; **checkpointing at a ground-state boundary is**, with these properties:
 
-This is a **correctness test of `x/vt`**, not a synchronisation mechanism, and the difference
-matters: a disagreement is a bug to be fixed or a documented divergence, never something the
-runtime reconciles.
+- the boundary is detected **during parsing**, not at read-chunk ends — a chunk can cross
+  ground and finish inside another sequence.
+- the wait is bounded in time and memory. A program can hold the parser inside an
+  unterminated OSC or DCS indefinitely (`x/ansi` `parser/transition_table.go:211,259`), so
+  "wait for ground" has no guaranteed end.
+- on exhaustion the attach returns a named **"snapshot unavailable: incomplete sequence"**
+  rather than a wrong continuation. An older complete checkpoint plus its fully retained
+  suffix is an acceptable alternative where one exists.
+- x/vt keeps its parser private (`emulator.go:47`), so a supported checkpoint accessor is
+  needed, taken after the emulator has applied the completed input.
 
-Concretely required before the epic closes: the corpus in
-`internal/agentdriver/testdata/captures/` replayed through both, with a per-cell comparison
-and a named, justified list of divergences.
+### 7.3 Delivery: its own message type, and one publication point
 
-## 8. Measurements to take FIRST
+The repaint is **not** PTY output. It travels as its **own message type** on `AD-1`'s
+existing binary data plane (`version || msg-type || session-id || payload`): it is not
+written to the replay ring, it does not advance the client's PTY offset
+(`frontend/src/ipc.ts:547` counts every binary payload), and it names the offset, geometry
+and session incarnation the continuation resumes from.
 
-The owner's position is that there is no new per-session cost, because the same information
-is already recorded, only from a different source. That is true of the ledger and of the
-replay ring. It is not automatically true of the grid, which is new allocation per session.
-So this is a number to produce, not an argument to win:
+The remaining race is not accounting but **ordering**: `pumpToRing`
+(`internal/transport/ws.go:3284`) updates the grid before appending to the ring, so a
+snapshot can be taken at offset `N+k` and labelled with frontier `N`, and the continuation
+replays `k` bytes into a picture that already has them. Grid and frontier must be published
+under one mechanism, geometry changes included. One trap: `ring.write()` can wait for
+capacity (`ring.go:182`), and that wait must not sit inside a lock an attach needs to
+establish the consumer that would drain it.
 
-1. **Resident memory per session with a live grid**, at 132×43 and at a large window, with
-   `x/vt` scrollback bounded as §6 recommends and unbounded, measured against the same
-   session with no grid.
-2. **The same at scale** — the tab counts actually in use, not a synthetic one.
-3. **CPU on a fast producer** — a build log at full speed through the grid, against the same
-   bytes with no grid, since today the backend only copies those bytes.
-4. **Repaint size and latency** for a full screen, which is what an attaching client waits
-   for.
+This is solved **with** the repaint, not before the grid-for-every-session step.
 
-If (1) and (3) are small, §8 is a paragraph in the ADR saying so, with the numbers. If either
-is not small, the design changes before it is built, not after.
+## 8. Terminal replies
 
-## 9. What this gives `nocx-6q1uh`
+A program can ask the terminal about itself, and the reply is written back into the PTY.
+Today xterm answers — `renderer.onData(...) → session.send(...)`
+(`frontend/src/terminal-content.ts:4011`) — from **its own** coordinates, while the backend
+grid's replies are read and dropped on purpose (`internal/panegrid/panegrid.go:195`).
 
-The fork that produced this document disappears. `session.read`, `session.keys` and
-`session.message` have **one** source of evidence — the backend grid — for both callers, and
-the "no renderer attached" case stops being a refusal path in the write tools. `session.read`
-keeps its `Dynamic` execution row for items, because an exited item still comes from the
-ledger; the SCREEN source becomes `InGo`.
+So the program is already living in the renderer's numbering. Declaring the backend
+authoritative while xterm goes on answering independently gives the program two
+interlocutors with different ideas of where it is.
 
-`nocx-6q1uh` is therefore blocked by this work and should be re-sequenced behind it.
+**Requirement: a reply must derive from the authoritative state.** Which component transmits
+it is free — xterm may relay a backend-computed answer. What is forbidden is two components
+answering the same state-dependent question from different coordinates.
 
-## 10. Order of work
+Note that decision (a) removes the _cause_ of the divergence rather than papering over it:
+with no `clear()`, the renderer's coordinates and the backend's are the same, and this
+requirement becomes cheap to satisfy. It is written down anyway, because it is what makes
+the coordinate question decidable at all.
 
-1. This document reviewed, and the new ADR written and accepted.
-2. Measurements of §8. They gate the rest.
-3. The grid for every session, replacing the enrolment-scoped one, with the enrolment
-   interval kept for what it still bounds — the powers, not the existence of the grid.
-4. The repaint (§5), and `nocx-eidfb`'s acceptance criterion met for a client attaching to a
-   long-running session.
-5. OSC 133 and the block ledger moved to the backend (§2.2), and `history.record` retired
-   from the renderer.
-6. `nocx-6q1uh` designed on top.
+## 9. Above the fold
 
-## 11. Deliberately out
+The live region comes from the grid, offset to the running block's start. Everything above
+comes from the ledger's blocks.
+
+- **The hole:** a long **unfinished** command whose first rows have scrolled above the live
+  screen. They are neither a finished ledger block nor a live cell. The design owes a
+  representation for them.
+- **The overlap:** with (a) in place, the renderer no longer removes carded rows from the
+  buffer, so a repaint that carries them and a ledger that also carries them would draw the
+  same output twice. The boundary is the running block's start, from the backend, and it is
+  the same boundary the live region's offset uses.
+- **x/vt's own scrollback** defaults to 10,000 lines and `SetMaxLines(0)` is ignored
+  (`scrollback.go:86`), so "bound it to nothing" is not available. Bound it deliberately and
+  say what it is for; the ledger remains the only **durable** block store.
+
+## 10. Fidelity, which replaces the agreement requirement
+
+The backend grid is the authority for the repaint and the write gate, so what matters is
+whether it models a real terminal correctly. The oracle is `ADR-0041`'s: the same bytes
+through `x/vt` and through headless xterm.js, compared per cell. The spike is in history at
+`d3872462`.
+
+**The comparison must be prefix → attach → suffix, not whole-capture.** Matching the picture
+at the attach instant does not prove correct continuation. Attach inside sequences, across a
+buffer switch, and across a resize.
+
+## 11. Measurements to take FIRST
+
+1. **Client memory without the cut.** Today `clear()` truncates xterm's buffer at every
+   freeze; without it the buffer grows to `scrollback: 10000`
+   (`frontend/src/renderers/xterm.ts:364`) at 3 words per cell
+   (`@xterm/xterm` `BufferLine.ts:22`). Measure at the tab counts actually in use — and note
+   that the cards now own the scrollback, so the xterm limit can be **reduced** rather than
+   kept. The coordinate fix does not depend on the limit: VT absolute addressing is within
+   the screen, not the scrollback.
+2. **Backend memory per session with a live grid**, bounded and unbounded scrollback, against
+   the same session with no grid.
+3. **CPU on a fast producer** through the grid, against the same bytes with no grid.
+4. **Repaint size and latency** for a full screen.
+
+If these are small, they become a paragraph of numbers in the ADR. If they are not, the
+design changes before it is built.
+
+## 12. What the new ADR supersedes, named
+
+- `AD-6`'s rule sentence, "the backend does **not** sniff the byte stream", and its refusal
+  list (`docs/architecture.md:160`), which forbids displaying grid-derived content or
+  persisting it as history — repaint and backend capture change exactly those permissions.
+  The _powers_ half of the 2026-08-25 amendment stays as written: it bounds what the grid may
+  DECIDE, and nothing here loosens that.
+- `ADR-0001`'s consequences, which promise frontend-only OSC parsing.
+- `ADR-0008`'s consequences, which promise a byte-blind backend.
+- `ADR-0002`'s conclusion where it closed server-side terminal state; its own revisit trigger
+  is already recorded as fired.
+- `AD-9` and the `session.output` contract, including its explicit no-grid/same-size
+  reasoning.
+- The `ledger.capture` contract's description of a renderer serializer, if and when capture
+  moves.
+- The reasoning quoted in §2 from `nocx-eidfb`'s body — amended by note, not rewritten.
+
+**Not superseded, and must not be absorbed:**
+
+- The AD-6 bootstrap-window carve-out. Permission to parse VT is not permission to interpret
+  bootstrap readiness tokens or to write bootstrap frames outside their interval; those are
+  separate powers held by `ADR-0024` and the input quarantine.
+- `ADR-0024` decision 1: no stream-derived lifecycle or history **authority**. §14's move of
+  OSC 133 parsing to the backend must not reinstate it — the backend may derive block
+  BOUNDARIES; it may not derive an attempt's outcome from the stream.
+- `internal/notify`'s trust classes. Backend execution does not turn an inference into an
+  authenticated fact.
+- `ADR-0064`'s permission boundary. This design gives both callers one source of EVIDENCE; it
+  authorises nobody to read a pane they could not read before, and a person's own pane stays
+  unreadable to a coordinator.
+
+## 13. Recovery: a grid that missed output
+
+A helper session can outlive the coordinator; on re-adoption the backend resumes from
+recorded progress and the helper can report an output-window hole
+(`internal/transport/ws_readopt.go:100`), while the grid lived in coordinator memory.
+
+A grid fed only the surviving suffix is not authoritative, and one that missed a midstream
+interval is not either. The design owes: where recoverable terminal state lives, how
+completeness is established, and what attach and write do while completeness is unknown —
+the honest answer for the write gate being refusal.
+
+## 14. Order of work
+
+1. This document reviewed; the new ADR written and accepted.
+2. Measurements of §11. They gate the rest.
+3. **Decision (a):** the live region gets its offset; `clearViewport` goes. `nocx-m87n`'s
+   regression test must stay green by the offset rather than by the cut.
+4. The grid for every session, replacing the enrolment-scoped one. Grid lifetime must be
+   separated from observation authority in the same change: `paneEnroller.Enrol`
+   (`internal/app/paneenrol.go:102`) creates the grid and rejects an existing one, so
+   pre-creating grids without that separation breaks enrolment and the waves that depend on
+   it.
+5. Block boundaries owned by the backend, and the live-region offset fed from them.
+6. The repaint (§7), with the publication and ordering of §7.3.
+7. Terminal replies derived from authoritative state (§8).
+8. The frozen output artifact moved off the renderer (§2.2) — separate, substantial, not a
+   prerequisite for the above.
+9. `nocx-6q1uh` designed on top. Its dependency is the **evidence contract and the
+   authorisation**, not the whole migration; it can be designed once (a), (4) and (5) are
+   settled.
+
+Note for `nocx-eidfb`: the repaint does not close it alone. Attach currently displaces the
+previous subscriber (`internal/transport/ws_session_handlers.go:822`), and `nocx-eidfb.4`
+(controller/observer), `.3` (session-size delivery to an observer) and `.5` remain
+prerequisites for its literal acceptance criterion.
+
+## 15. Deliberately out
 
 - **Rendering cells to the client** (the herdr/Ghostty model). The client keeps receiving
-  bytes and keeps parsing them with xterm.js. Moving the paint half would cost the whole
-  presentation layer — blocks, selection, search, links, the editor — for a property this
-  design already delivers.
-- **Retiring the replay ring.** It is the fast path for a brief disconnect and it is cheaper
-  than a repaint.
-- **Anything about what a write may DO.** `ADR-0064`'s bounds are untouched here; this
-  document changes where the evidence comes from, never what the evidence permits.
+  bytes and parsing them with xterm.js.
+- **Retiring the replay ring.** It is the fast path for a brief disconnect.
+- **Anything about what a write may DO.** `ADR-0064`'s bounds are untouched.
+
+## 16. Beads this design produces
+
+- **The `savedY` hazard.** xterm's `clear()` moves the live row and resets `ybase`/`y` without
+  adjusting `savedY`, so a later `restoreCursor()` lands on a blank row while both freeze
+  guards passed. Bounded to **normal-buffer state retained across a freeze** — background
+  writers, asynchronous prompt updates, nested-environment transitions. NOT "every
+  non-alt-screen progress renderer"; incidence is for the bead to measure. Decision (a)
+  removes the cause, so this bead may close as a consequence — it is filed separately because
+  it is live today.
+- **Terminal-reply ownership** (§8).
+- **The frozen output artifact off the renderer** (§2.2).

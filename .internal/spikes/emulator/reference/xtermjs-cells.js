@@ -1,3 +1,5 @@
+/* global require, console, Buffer */
+/* eslint-disable @typescript-eslint/no-require-imports -- standalone Node harnesses, run by hand */
 const { Terminal } = require('@xterm/headless')
 const { Unicode11Addon } = require('@xterm/addon-unicode11')
 

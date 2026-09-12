@@ -17,10 +17,12 @@
   disagree with each other on emoji column accounting, and column accounting is exactly
   what `ADR-0041` decided on. Its output is a reference, not a probe subject.
 
-**Scope warning.** This is a measurement of nine probes and five API questions. It is not a
-decision. It does not re-run `ADR-0041`'s geometry corpus, and it does not measure
-attributes, colour, alternate-screen behaviour, scrollback compression, or performance on
-real programs (see §6).
+**Scope warning.** This is a measurement of nine probes and five API questions — and, in §7,
+added afterwards, of seven recorded programs replayed through all three emulators for column
+geometry. It is not a decision. §7 answers §4's geometry question on a corpus recorded fresh
+for it (its opening paragraph explains why it cannot be `ADR-0041`'s own bytes). Still
+unmeasured anywhere in this report: attributes and colour **values**, alternate-screen
+behaviour as a state, scrollback compression, and performance on real programs (see §6).
 
 ## 0. How to reproduce
 
@@ -44,6 +46,20 @@ here (§6).
 Verified end to end from a clean vendor directory with the exit status recorded: `EXIT=0`,
 1 m 59 s on the cold run, the same two artifacts by size, and byte-identical output for every
 deterministic probe.
+
+**§7 has its own two scripts**, and needs the `libghostty-vt` build above:
+
+```bash
+cd .internal/spikes/emulator
+./corpus/record.sh       # records the seven captures into corpus/*.jsonl
+./geometry.sh            # replays them through all three, scores, writes results/geometry/
+```
+
+Both need the `libghostty-vt` build from step 2, and **the fetched checkout cannot be in the
+tree while a commit is made**: the pre-commit hook's root eslint walks the filesystem, the root
+config ignores `spike/**` but not `.internal/spikes/**`, and ghostty's own sources carry Node
+scripts eslint rejects. `run.sh` rebuilds it at the pinned, SHA-verified commit, which is why it
+is not committed either.
 
 Commands that worked, verbatim:
 
@@ -120,9 +136,11 @@ agree on _where the columns are_ for the ZWJ family and the skin tone, and agree
 column on `❤️`; they disagree on the regional-indicator flag, where `xterm.js` gives each
 indicator width 1 (2 columns total) and ghostty gives each width 2 (4 columns total). On
 that row `x/vt`'s 2-column total matches `xterm.js` and its single-cell shape does not.
-`ADR-0041` chose `x/vt` **because** its columns matched `xterm.js`; this spike did not
-re-run that corpus, so it neither confirms nor overturns the geometry case for ghostty. It
-establishes only that the two candidates now disagree with each other on emoji.
+`ADR-0041` chose `x/vt` **because** its columns matched `xterm.js`; the probe part of this
+spike did not re-run that corpus, so on its own evidence it neither confirms nor overturns
+the geometry case for ghostty — it establishes only that the two candidates now disagree with
+each other on emoji. (**§7, added afterwards, does re-run the geometry comparison**, on a
+corpus recorded for it, and finds on a real `emoji` capture exactly this split.)
 
 ### 1.2 Combining mark on an ASCII base
 
@@ -729,6 +747,13 @@ differ on exactly the boundaries this brief names.
 
 ## 6. What I could not test, and why
 
+**This section records what §1–§6 could not test at the time they were written.** §7 was added
+afterwards on a corpus recorded for it, and it does cover three of the items below: real
+programs and the alternate screen, the truecolor path (the bytes, still not their attribute or
+colour values), and `ADR-0041`'s geometry question — each bullet that §7 touches says so. The
+bullets are otherwise left as written: each was true of the probe table and the recommendation
+above it.
+
 - **A live real terminal for the key encodings (§1.3) and the CPR semantics (§1.6).** I
   installed `xterm 410`, `xdotool` and `Xvfb` from nixpkgs and drove a real xterm. It fails
   on this machine in three ways I could not work around inside a reasonable budget: there is
@@ -746,22 +771,32 @@ differ on exactly the boundaries this brief names.
   cross-compile and ghostty's build has Apple targets, but whether nocx's macOS and Windows
   cgo builds can consume it from a Linux CI, and what they would link, is unmeasured — and it
   is the single largest unknown in the cost model of §3.
-- **`ADR-0041`'s geometry corpus, re-run against `libghostty-vt`.** Not done, and §4 says so
-  plainly: this spike's five emoji sequences are not that corpus, and they found a
-  disagreement that the corpus might settle either way. `internal/agentdriver/testdata/captures/`
-  is still there and `xterm.js` still answers this question headlessly, so the re-run is
-  cheap; it was out of scope for a probe-based spike.
+- **`ADR-0041`'s geometry corpus, re-run against `libghostty-vt`.** Not done by the probes
+  above, and §4 says so plainly: this spike's five emoji sequences are not that corpus, and
+  they found a disagreement that the corpus might settle either way.
+  `internal/agentdriver/testdata/captures/` is still there and `xterm.js` still answers this
+  question headlessly, so the re-run is cheap; it was out of scope for a probe-based spike.
+  **§7 was added afterwards and answers this one**, on a corpus recorded fresh for it:
+  `ADR-0041`'s own `frames/` were never committed and are not recoverable, so §7 could not
+  replay that ADR's bytes — see §7's opening paragraph for what that does and does not allow
+  it to say.
 - **Attributes, colour and the truecolor path.** `ADR-0041`'s own "what this does NOT cover"
   list — attributes collected but not scored — applies to this spike unchanged. I read cell
   text, widths and cursor positions; I did not compare styles, and ghostty's style API
   (`style.h`, `GHOSTTY_CELL_DATA_STYLE_ID`) is a different shape from `uv.Cell.Style`.
+  **§7 records the truecolor path as bytes** — its `wizard` capture carries 24-bit SGR and no
+  256-colour sequence — and still compares no attribute or colour value.
 - **The alternate screen, mouse tracking, focus events, scrollback compression, and
   selection.** All present in both libraries' APIs; none probed. Ghostty's alternate screen
-  was exercised only incidentally (nothing in these probes enters it).
-- **Real programs.** No capture corpus was replayed. `ADR-0041`'s finding that `x/vt`
-  deadlocks without a drain is reproduced here (§2.3), but nothing in this spike says how
+  was exercised only incidentally (nothing in these probes enters it). **§7 replays five
+  captures that enter the alternate screen and whose final screen is the alternate one**, and
+  still does not compare a buffer against `xterm.js`'s.
+- **Real programs.** No capture corpus was replayed by the probes above. `ADR-0041`'s finding
+  that `x/vt` deadlocks without a drain is reproduced here (§2.3), but nothing in §1–§6 says how
   either library behaves on `htop`, `vim` or an agent's spinner under sustained load, and the
-  REP number is a synthetic worst case rather than a workload.
+  REP number is a synthetic worst case rather than a workload. **§7 replays seven real-program
+  captures through all three emulators**, for column geometry rather than for sustained load
+  or performance.
 - **Ghostty's `UNKNOWN_SEQUENCE` effect, beyond the tag.** The binding reports _that_ a
   sequence was unsupported and which kind (APC), which is what §1.10 and its control use.
   The payload — the borrowed sequence bytes — is a tagged union of `GhosttyString`s and is
@@ -771,6 +806,410 @@ differ on exactly the boundaries this brief names.
   `lib_vt` test step, and a type-schema ABI validation step; running them was not needed for
   any probe here and would have measured the library's opinion of itself rather than the
   nine questions asked.
+
+## 7. The geometry corpus — the measurement §4 made its recommendation conditional on
+
+**This section is the measurement §4 asked for, and §6 listed as not done.** §1–§6 are left as
+they were; nothing here restates their probes.
+
+**It is not `ADR-0041`'s corpus, and its scores cannot be compared with that ADR's.** The ADR's
+captures were `frames/`, and `spike/vt-agreement/.gitignore` at commit `d3872462` lists
+`frames/`: they were never committed and are not recoverable. The tools survive at that commit
+(`cmd/capture`, `cmd/diff`, `cmd/render-go`, `js/render-xterm.mjs`) and were read for method.
+What the corpus below can do is put the three emulators on **identical bytes** and report which
+column each of them puts those bytes in.
+
+### 7.1 The corpus as recorded
+
+| capture  | program (version)            | command                                     | alt screen | bytes | chunks | geometry |
+| -------- | ---------------------------- | ------------------------------------------- | ---------- | ----- | ------ | -------- |
+| `wizard` | claude 2.1.266 (Claude Code) | `claude`                                    | yes        | 15008 | 131    | 120×40   |
+| `bash`   | bash GNU bash 5.3.15(1)      | `bash -i`                                   | no         | 76923 | 283    | 120×40   |
+| `htop`   | htop 3.5.3                   | `htop`                                      | yes        | 8398  | 48     | 120×40   |
+| `vim`    | vim VIM 9.2                  | `vim -n internal/transport/ws.go`           | yes        | 1617  | 9      | 120×40   |
+| `less`   | less 704                     | `env -u LESS less internal/transport/ws.go` | yes        | 1554  | 2      | 120×40   |
+| `wide`   | less 704                     | `env -u LESS less -R +26 e2e/ime.spec.ts`   | yes        | 1678  | 3      | 120×40   |
+| `emoji`  | bash GNU bash 5.3.15(1)      | `bash corpus/scripts/emoji.sh`              | no         | 162   | 3      | 120×40   |
+
+What those recordings actually contain, counted from the bytes themselves — because a row can
+advertise a construct its bytes do not have, and one of these did:
+
+| capture  | alt | CUP | DECSTBM | CHA | SGR (any) | SGR 24-bit | SGR 256 | erase (ED/EL) | bracketed paste |
+| -------- | --- | --- | ------- | --- | --------- | ---------- | ------- | ------------- | --------------- |
+| `wizard` | 1   | 286 | 1       | 246 | 390       | 214        | 0       | 117           | 3               |
+| `bash`   | 0   | 0   | 0       | 0   | 4         | 0          | 0       | 0             | 2               |
+| `htop`   | 1   | 178 | 3       | 12  | 367       | 0          | 0       | 1             | 0               |
+| `vim`    | 1   | 47  | 1       | 0   | 10        | 0          | 2       | 3             | 1               |
+| `less`   | 1   | 1   | 0       | 0   | 41        | 0          | 0       | 1             | 0               |
+| `wide`   | 1   | 1   | 0       | 0   | 41        | 0          | 0       | 5             | 0               |
+| `emoji`  | 0   | 0   | 0       | 0   | 0         | 0          | 0       | 0             | 0               |
+
+Every capture is `corpus/<name>.jsonl`, recorded by `./corpus/record.sh` through the product's
+own `cmd/agent-capture` — bytes only, one JSON object per PTY read. `TERM` is pinned to
+`xterm-256color` and `LANG`/`LC_ALL` to `en_US.UTF-8` by the recorder; every capture is 120×40.
+Re-record with that script; the versions of everything involved are in
+`results/geometry/versions.txt`, written by `./geometry.sh` from the commands themselves.
+
+Three choices in the recording are load-bearing, and each was bought by a capture that was
+wrong before it:
+
+- **Nothing is typed that makes a program exit.** htop, vim and less restore the normal screen
+  (`?1049l`) on quit, which would record a blank screen in place of the alternate one the row
+  exists to measure. Each script ends instead and the recorder kills the program with the
+  alternate screen still up. `?1049h` is present in the five captures the table marks `yes`.
+- **`LESS` is unset for the two `less` runs.** This shell carries `LESS=FRX`, whose `-X` makes
+  less skip `smcup`/`rmcup`: the first recording of the `less` row has **no `?1049h` at all**
+  and shows the file on the normal screen. `env -u LESS` is what makes the row the shape it is
+  supposed to be.
+- **`vim` runs with `-n`.** Without it, vim writes a swap file beside the file it opens; this
+  capture ends by killing vim, so the swap can survive, and the next recording of the row would
+  then draw vim's "swap file already exists" dialog in place of the file — as well as leaving a
+  file outside this spike's directory. `-n` removes the swap and none of the screen.
+- **`COLORTERM=truecolor` is set explicitly in the Claude run's env file.** The recorder pins
+  `TERM` to `xterm-256color`, whose terminfo advertises no direct-colour capability, and the
+  other six captures inherit the caller's environment (which here has `COLORTERM` set too) —
+  none of them emits a 24-bit sequence, measured in the table above. The Claude run's env file
+  replaces the environment wholesale, so the variable has to be written into it: the first
+  recording of the `wizard` row carried 256-colour SGR and not one 24-bit sequence, which is
+  not the shape that row advertises. With `COLORTERM` set, the row in `corpus/` carries 24-bit sequences and no
+  256-colour ones — the two `SGR` columns of the table above. The other captures carry the
+  colours their programs chose under the terminal the recorder pins.
+- **The Claude capture is isolated.** A fresh `HOME` and `CLAUDE_CONFIG_DIR` under `/var/tmp`,
+  an `-env-file` that makes the recorder refuse to start at all if Claude Code would read
+  configuration outside the run, and an endpoint on `127.0.0.1:18999` that accepts the
+  connection and never answers — which is what keeps a turn in flight, so the last frame holds
+  the spinner rather than the screen Claude restores on exit. `corpus/wizard.meta.json` records
+  the resolved binary (2.1.266), its SHA-256 and the environment variable names; nothing of the
+  owner's Claude account or configuration is read, and the variable names carry no values.
+
+The shapes are the ones the brief asked for. `wizard`: first run — the theme picker with its
+`❯` menu, box drawing, truecolor SGR, the unknown-model warning, then the main UI with a turn
+submitted and the spinner up for the rest of the capture — the word stays `Newspapering…` and the
+glyph animates: `·` at 18 s, `✢` at 22, 26 and 30 s, `✽` at 31 s. `bash`: a
+prompt and `br ready`'s coloured list. `htop`: the alternate screen, 3 `DECSTBM` and 178 `CUP`
+sequences, the system bars, and heavy SGR traffic — every count in that sentence is a column of
+the table above. `vim` and `less`: alternate screen and a source file. `wide`: `less -R +26
+e2e/ime.spec.ts`, whose line 26 is `const MARKER = 'こんにちは'`. `emoji`: a ZWJ family, a
+skin-tone sequence, a regional-indicator flag and `❤️`, each between `<` and `>` markers so a
+width error moves the markers rather than silently shifting text, with a line of ordinary text
+after each.
+
+### 7.2 The measurement
+
+Each capture is replayed from byte zero through all three emulators at the capture's own
+geometry, and the final screen is written down column by column — one JSON dump per capture,
+emulator and feed shape in `results/geometry/`, which is machine output, about 12 MB, and is
+**not committed**: it is regenerated byte-identically by the script below from the corpus's
+bytes, which are. `./geometry.sh` runs all of it. `cmd/geom` (Go: x/vt and the existing
+`libghostty-vt` binding) and `reference/geometry.mjs` (node: headless xterm.js) emit the same
+schema, and `cmd/geom score` compares them into `<capture>.score.json`, from which every table
+below is generated rather than typed. Both sides refuse to measure a stream whose decoded bytes
+contain a U+FFFD, because the capture format carries bytes as a JSON string and a byte that is
+not valid UTF-8 cannot survive that; both were checked to refuse, on a synthetic stream holding
+one. **All seven recordings are clean on this check** — 0 replacement characters in every dump —
+so the bytes each emulator received are the bytes the program wrote.
+
+Ground truth is the product's own VT frontend (ADR-0001): headless `@xterm/headless` 5.5.0 with
+`@xterm/addon-unicode11` 0.8.0 and `unicode.activeVersion = '11'` — the versions that line up
+with `frontend/package.json`'s `@xterm/xterm` ^5.5.0 and `@xterm/addon-unicode11` ^0.8.0, and
+the setting `frontend/src/renderers/xterm.ts:412` installs. It reads the viewport
+(`viewportY + y`), which is the screenful a person sees and the one both candidates report.
+
+Two metrics, both from the same raw dumps:
+
+- **text** — the concatenated characters of the final screen, which is the definition the brief
+  gives. A row contributes its cells' characters in column order; a blank column contributes a
+  space and the second half of a wide cluster contributes nothing; the row is right-trimmed. The
+  count is rows whose text is identical to xterm.js's.
+- **geometry** — what each column holds, also the brief's definition: a column's cell is
+  classified (blank, narrow, wide, continuation, or a zero-width cell holding a cluster of its
+  own) and compared together with the characters it holds. The count is columns where both
+  agree, over all 4 800 columns and then restricted to the columns xterm.js does not leave
+  blank.
+
+**The one normalisation, and why it is not a fudge.** A zero-width cell holding nothing, and a
+cell holding a space where xterm.js holds a wide cluster's tail, both count as a continuation;
+a cell holding a printed space counts as blank. Without that, `x/vt`'s wide tails — which hold a
+space where `xterm.js` holds nothing — would read as geometry misses that are representation,
+not position. `ADR-0041` scored `x/vt` 100/100 on geometry and had to make the same allowance.
+The raw cells stay in the dumps, so which representation each emulator used is visible in every
+disagreement below.
+
+Not scored: colour and attributes, selection, graphics, performance, and the alternate-screen
+state itself (the recorded bytes establish which captures enter it). Cursors are recorded in
+every dump and are not part of either score; as an observation, all three emulators' cursors
+agreed on all seven captures (wizard 2,37 · bash 56,39 · htop 81,39 · vim 0,0 · less 24,39 ·
+wide 15,39 · emoji 0,10).
+
+### 7.3 Scores
+
+| capture  | emulator | text (rows identical) | geometry (columns)  | geometry, content columns | disagreeing columns |
+| -------- | -------- | --------------------- | ------------------- | ------------------------- | ------------------- |
+| `wizard` | xvt      | 39/40                 | 4790/4800 (99.79%)  | 410/410                   | 10                  |
+| `wizard` | ghostty  | 40/40                 | 4800/4800 (100.00%) | 410/410                   | 0                   |
+| `bash`   | xvt      | 40/40                 | 4800/4800 (100.00%) | 3459/3459                 | 0                   |
+| `bash`   | ghostty  | 40/40                 | 4800/4800 (100.00%) | 3459/3459                 | 0                   |
+| `htop`   | xvt      | 40/40                 | 4800/4800 (100.00%) | 2626/2626                 | 0                   |
+| `htop`   | ghostty  | 40/40                 | 4800/4800 (100.00%) | 2626/2626                 | 0                   |
+| `vim`    | xvt      | 40/40                 | 4800/4800 (100.00%) | 1062/1062                 | 0                   |
+| `vim`    | ghostty  | 40/40                 | 4800/4800 (100.00%) | 1062/1062                 | 0                   |
+| `less`   | xvt      | 40/40                 | 4800/4800 (100.00%) | 1041/1041                 | 0                   |
+| `less`   | ghostty  | 40/40                 | 4800/4800 (100.00%) | 1041/1041                 | 0                   |
+| `wide`   | xvt      | 40/40                 | 4800/4800 (100.00%) | 1156/1156                 | 0                   |
+| `wide`   | ghostty  | 40/40                 | 4800/4800 (100.00%) | 1156/1156                 | 0                   |
+| `emoji`  | xvt      | 40/40                 | 4783/4800 (99.65%)  | 84/100                    | 17                  |
+| `emoji`  | ghostty  | 40/40                 | 4795/4800 (99.90%)  | 97/100                    | 5                   |
+
+**Reading it.** On **five of the seven** captures both candidates reproduce xterm.js's screen
+exactly: 40/40 rows of text and 4 800/4 800 columns of geometry each for `bash`, `htop`, `vim`,
+`less` and `wide`. The CJK row — the one the brief calls the case that matters most — is in that
+set, and so is every shape `ADR-0041` measured.
+
+**Two captures are not perfect for at least one candidate.** `wizard` costs `x/vt` ten columns
+of row 0, all in one line, and §7.4 shows that is §1.9's defect rather than a geometry policy.
+The two candidates differ from each other on exactly two captures, for different reasons. On
+`wizard` they differ because of the defect above — 10 columns, `x/vt` alone. Excluding that
+defect, `emoji` is the only capture where their screens differ from each other at all: there
+`x/vt` matches 84 of the 100 content columns and `libghostty-vt` 97. The text score is 40/40 for both on `emoji` — every
+character the program printed is on both screens; what differs is which cell holds it.
+
+**The CJK row, which the brief calls the case that matters most, is a tie for the same reason**: all
+three agree cell for cell — each kana a two-column cluster with a continuation beside it, and the
+line's closing `'` on the same column in all three:
+
+| line on row 0 of `wide`       | emulator      | columns, from that line's first character                                                                                                                                                                                                |
+| ----------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `const MARKER = 'こんにちは'` | xterm.js      | 0:`c`/1 1:`o`/1 2:`n`/1 3:`s`/1 4:`t`/1 5:blank 6:`M`/1 7:`A`/1 8:`R`/1 9:`K`/1 10:`E`/1 11:`R`/1 12:blank 13:`=`/1 14:blank 15:`'`/1 16:`こ`/2 17:cont 18:`ん`/2 19:cont 20:`に`/2 21:cont 22:`ち`/2 23:cont 24:`は`/2 25:cont 26:`'`/1 |
+| `const MARKER = 'こんにちは'` | libghostty-vt | 0:`c`/1 1:`o`/1 2:`n`/1 3:`s`/1 4:`t`/1 5:blank 6:`M`/1 7:`A`/1 8:`R`/1 9:`K`/1 10:`E`/1 11:`R`/1 12:blank 13:`=`/1 14:blank 15:`'`/1 16:`こ`/2 17:cont 18:`ん`/2 19:cont 20:`に`/2 21:cont 22:`ち`/2 23:cont 24:`は`/2 25:cont 26:`'`/1 |
+| `const MARKER = 'こんにちは'` | x/vt          | 0:`c`/1 1:`o`/1 2:`n`/1 3:`s`/1 4:`t`/1 5:blank 6:`M`/1 7:`A`/1 8:`R`/1 9:`K`/1 10:`E`/1 11:`R`/1 12:blank 13:`=`/1 14:blank 15:`'`/1 16:`こ`/2 17:cont 18:`ん`/2 19:cont 20:`に`/2 21:cont 22:`ち`/2 23:cont 24:`は`/2 25:cont 26:`'`/1 |
+
+That is the line the CJK case turns on, and the widest content in the capture: five kana, each
+two columns wide with a continuation beside it, placed identically by all three.
+
+### 7.4 Every disagreement
+
+Every column where either candidate differs from xterm.js, with what all three put there. Columns
+are 0-based viewport coordinates — row 0 the top of the screen, column 0 its left edge — and a
+cell is written as its characters and column footprint (`/2` wide, `/1` narrow, `/0` not the first
+of anything); `blank` is a cell holding nothing, `cont` a wide cluster's second half.
+
+| capture  | row | col | xterm.js holds | libghostty-vt holds | x/vt holds   | kinds                           |
+| -------- | --- | --- | -------------- | ------------------- | ------------ | ------------------------------- |
+| `wizard` | 0   | 1   | blank          | blank               | `C`/1        | x/vt text+geometry              |
+| `wizard` | 0   | 2   | blank          | blank               | `l`/1        | x/vt geometry                   |
+| `wizard` | 0   | 3   | blank          | blank               | `a`/1        | x/vt geometry                   |
+| `wizard` | 0   | 4   | blank          | blank               | `u`/1        | x/vt geometry                   |
+| `wizard` | 0   | 5   | blank          | blank               | `d`/1        | x/vt geometry                   |
+| `wizard` | 0   | 6   | blank          | blank               | `e`/1        | x/vt geometry                   |
+| `wizard` | 0   | 8   | blank          | blank               | `C`/1        | x/vt geometry                   |
+| `wizard` | 0   | 9   | blank          | blank               | `o`/1        | x/vt geometry                   |
+| `wizard` | 0   | 10  | blank          | blank               | `d`/1        | x/vt geometry                   |
+| `wizard` | 0   | 11  | blank          | blank               | `e`/1        | x/vt geometry                   |
+| `emoji`  | 0   | 8   | `👨‍`/2        | `👨‍`/2             | `👨‍👩‍👧‍👦`/2       | x/vt geometry                   |
+| `emoji`  | 0   | 10  | `👩‍`/2        | `👩‍`/2             | `>`/1        | x/vt geometry                   |
+| `emoji`  | 0   | 11  | continuation   | continuation        | blank        | x/vt geometry                   |
+| `emoji`  | 0   | 12  | `👧‍`/2        | `👧‍`/2             | blank        | x/vt geometry                   |
+| `emoji`  | 0   | 13  | continuation   | continuation        | blank        | x/vt geometry                   |
+| `emoji`  | 0   | 14  | `👦`/2         | `👦`/2              | blank        | x/vt geometry                   |
+| `emoji`  | 0   | 15  | continuation   | continuation        | blank        | x/vt geometry                   |
+| `emoji`  | 0   | 16  | `>`/1          | `>`/1               | blank        | x/vt geometry                   |
+| `emoji`  | 2   | 6   | `👍`/2         | `👍`/2              | `👍🏽`/2       | x/vt geometry                   |
+| `emoji`  | 2   | 8   | `🏽`/2         | `🏽`/2              | `>`/1        | x/vt geometry                   |
+| `emoji`  | 2   | 9   | continuation   | continuation        | blank        | x/vt geometry                   |
+| `emoji`  | 2   | 10  | `>`/1          | `>`/1               | blank        | x/vt geometry                   |
+| `emoji`  | 4   | 6   | `🇷`/1          | `🇷`/2               | `🇷🇺`/2       | x/vt geometry, ghostty geometry |
+| `emoji`  | 4   | 7   | `🇺`/1          | continuation        | continuation | x/vt geometry, ghostty geometry |
+| `emoji`  | 4   | 8   | `>`/1          | `🇺`/2               | `>`/1        | ghostty geometry                |
+| `emoji`  | 4   | 9   | blank          | continuation        | blank        | ghostty geometry                |
+| `emoji`  | 4   | 10  | blank          | `>`/1               | blank        | ghostty geometry                |
+| `emoji`  | 6   | 7   | `❤️`/1         | `❤️`/1              | `❤️`/2       | x/vt geometry                   |
+| `emoji`  | 6   | 8   | `>`/1          | `>`/1               | continuation | x/vt geometry                   |
+| `emoji`  | 6   | 9   | blank          | blank               | `>`/1        | x/vt geometry                   |
+
+**`wizard` row 0 is §1.9's defect, reproduced by a real program.** `x/vt` holds `Claude Code`
+at columns 1–11 where xterm.js and `libghostty-vt` hold nothing. The cause is the byte `0x9C`
+being taken as a string terminator inside a UTF-8 sequence: Claude Code's window title is
+`✳ Claude Code`, and `✳` is U+2733, `E2 9C B3`. Three sequences reproduce it — the first is the
+title a real Claude Code sets, the second the smallest one this spike found, the third the
+control — each fed to both emulators by the table generator, which prints the bytes it fed in
+hex and refuses to publish a case whose stream does not contain a `0x9C`:
+
+Note what the hex column shows about the case: a capture holds valid UTF-8, so the byte can only
+appear inside a multi-byte sequence (`e29cb3` for `✳`, `c29c` for U+009C). A genuinely bare
+`0x9C` is an ST and cannot be written into the format at all — which is the same reason the
+product's filter distinguishes the two cases rather than dropping the byte.
+
+| sequence fed                                                | length | bytes, hex                                               | x/vt row 0     | libghostty-vt row 0 |
+| ----------------------------------------------------------- | ------ | -------------------------------------------------------- | -------------- | ------------------- |
+| `ESC [ 2 J ESC [ H ESC ] 0 ; ✳ ␠ C l a u d e ␠ C o d e BEL` | 27     | `1b5b324a1b5b481b5d303be29cb320436c6175646520436f646507` | ` Claude Code` | _(empty)_           |
+| `ESC [ 2 J ESC [ H ESC ] 0 ; U + 0 0 9 C B BEL`             | 15     | `1b5b324a1b5b481b5d303bc29c4207`                         | `B`            | _(empty)_           |
+| `ESC [ 2 J ESC [ H ESC ] 0 ; p l a i n ␠ t i t l e BEL`     | 23     | `1b5b324a1b5b481b5d303b706c61696e207469746c6507`         | _(empty)_      | _(empty)_           |
+
+The control leaks nothing, so the byte is the whole of the cause. This is
+the defect `internal/panegrid/c1filter.go` exists to work around — it rewrites a `0x9C` that is
+a UTF-8 continuation byte inside OSC or DCS before `x/vt` sees it, and is wired in front of
+every byte at `internal/panegrid/panegrid.go:262`. So this row is evidence about the **raw**
+emulator: **it was not re-measured through the product's filter**, because this spike module
+deliberately has no dependency on the product module (`§3`), and a filter re-implemented here
+would be a measurement of that re-implementation. What the row does establish is that a real
+program in the product's own workload class reaches the byte, and that ghostty does not have
+the defect.
+
+**`emoji` is the same split §1.1 measured by hand, on a real capture.** The four lines, from
+each line's first character (the `<` and `>` markers are the program's, and the `>` is what
+shows where a line's end landed):
+
+| line in the capture | emulator      | columns, from that line first character                                                                                                           |
+| ------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `family <👨‍👩‍👧‍👦>`       | xterm.js      | 0:`f`/1 1:`a`/1 2:`m`/1 3:`i`/1 4:`l`/1 5:`y`/1 6:blank 7:`<`/1 8:`👨‍`/2 9:cont 10:`👩‍`/2 11:cont 12:`👧‍`/2 13:cont 14:`👦`/2 15:cont 16:`>`/1 |
+| `family <👨‍👩‍👧‍👦>`       | libghostty-vt | 0:`f`/1 1:`a`/1 2:`m`/1 3:`i`/1 4:`l`/1 5:`y`/1 6:blank 7:`<`/1 8:`👨‍`/2 9:cont 10:`👩‍`/2 11:cont 12:`👧‍`/2 13:cont 14:`👦`/2 15:cont 16:`>`/1 |
+| `family <👨‍👩‍👧‍👦>`       | x/vt          | 0:`f`/1 1:`a`/1 2:`m`/1 3:`i`/1 4:`l`/1 5:`y`/1 6:blank 7:`<`/1 8:`👨‍👩‍👧‍👦`/2 9:cont 10:`>`/1                                                          |
+| `skin <👍🏽>`         | xterm.js      | 0:`s`/1 1:`k`/1 2:`i`/1 3:`n`/1 4:blank 5:`<`/1 6:`👍`/2 7:cont 8:`🏽`/2 9:cont 10:`>`/1                                                          |
+| `skin <👍🏽>`         | libghostty-vt | 0:`s`/1 1:`k`/1 2:`i`/1 3:`n`/1 4:blank 5:`<`/1 6:`👍`/2 7:cont 8:`🏽`/2 9:cont 10:`>`/1                                                          |
+| `skin <👍🏽>`         | x/vt          | 0:`s`/1 1:`k`/1 2:`i`/1 3:`n`/1 4:blank 5:`<`/1 6:`👍🏽`/2 7:cont 8:`>`/1                                                                           |
+| `flag <🇷🇺>`         | xterm.js      | 0:`f`/1 1:`l`/1 2:`a`/1 3:`g`/1 4:blank 5:`<`/1 6:`🇷`/1 7:`🇺`/1 8:`>`/1                                                                           |
+| `flag <🇷🇺>`         | libghostty-vt | 0:`f`/1 1:`l`/1 2:`a`/1 3:`g`/1 4:blank 5:`<`/1 6:`🇷`/2 7:cont 8:`🇺`/2 9:cont 10:`>`/1                                                            |
+| `flag <🇷🇺>`         | x/vt          | 0:`f`/1 1:`l`/1 2:`a`/1 3:`g`/1 4:blank 5:`<`/1 6:`🇷🇺`/2 7:cont 8:`>`/1                                                                           |
+| `heart <❤️>`        | xterm.js      | 0:`h`/1 1:`e`/1 2:`a`/1 3:`r`/1 4:`t`/1 5:blank 6:`<`/1 7:`❤️`/1 8:`>`/1                                                                          |
+| `heart <❤️>`        | libghostty-vt | 0:`h`/1 1:`e`/1 2:`a`/1 3:`r`/1 4:`t`/1 5:blank 6:`<`/1 7:`❤️`/1 8:`>`/1                                                                          |
+| `heart <❤️>`        | x/vt          | 0:`h`/1 1:`e`/1 2:`a`/1 3:`r`/1 4:`t`/1 5:blank 6:`<`/1 7:`❤️`/2 8:cont 9:`>`/1                                                                   |
+
+Read as behaviour:
+
+- **ZWJ family** — xterm.js and `libghostty-vt` are identical: four 2-column clusters, the `>`
+  at column 16. `x/vt` holds the whole sequence in **one** 2-column cell and puts `>` at
+  column 10. Six columns of geometry, on one line.
+- **Skin tone** — xterm.js and `libghostty-vt`: `👍`/2 and `🏽`/2, `>` at 10. `x/vt`: one `👍🏽`/2
+  cell, `>` at 8.
+- **Regional-indicator flag** — the only line where `libghostty-vt` differs from xterm.js:
+  `🇷`/2 + continuation + `🇺`/2 + continuation, `>` at 10, against xterm.js's two 1-column
+  indicators and `>` at 8. `x/vt`'s single `🇷🇺`/2 cell happens to leave `>` at 8, xterm.js's
+  column, with a different cell shape underneath it.
+- **`❤️` (U+2764 U+FE0F)** — xterm.js and `libghostty-vt` give it one column, `>` at 8;
+  `x/vt` gives it two, `>` at 9.
+
+`wizard` and `emoji` are the only two captures on which anything differs at all; on the other
+five the three emulators' screens are identical.
+
+### 7.5 Chunked replay
+
+The same captures, split into N writes at even byte offsets, and — for the six captures under
+64 KiB — one byte per write. "same" means the final screen is identical to that emulator's own
+whole-file screen. `text` counts rows that differ, `geometry` counts columns.
+
+| capture  | mode     | x/vt text | x/vt geometry | ghostty text | ghostty geometry | xterm.js text | xterm.js geometry |
+| -------- | -------- | --------- | ------------- | ------------ | ---------------- | ------------- | ----------------- |
+| `wizard` | bytewise | same      | same          | same         | same             | diff(1)       | diff(1)           |
+| `wizard` | split:2  | same      | same          | same         | same             | same          | same              |
+| `wizard` | split:3  | same      | same          | same         | same             | same          | same              |
+| `wizard` | split:5  | same      | same          | same         | same             | same          | same              |
+| `wizard` | split:8  | same      | same          | same         | same             | same          | same              |
+| `wizard` | split:16 | same      | same          | same         | same             | same          | same              |
+| `wizard` | split:32 | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:2  | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:3  | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:5  | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:8  | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:16 | same      | same          | same         | same             | same          | same              |
+| `bash`   | split:32 | same      | same          | same         | same             | same          | same              |
+| `htop`   | bytewise | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:2  | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:3  | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:5  | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:8  | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:16 | same      | same          | same         | same             | same          | same              |
+| `htop`   | split:32 | same      | same          | same         | same             | same          | same              |
+| `vim`    | bytewise | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:2  | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:3  | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:5  | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:8  | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:16 | same      | same          | same         | same             | same          | same              |
+| `vim`    | split:32 | same      | same          | same         | same             | same          | same              |
+| `less`   | bytewise | same      | same          | same         | same             | same          | same              |
+| `less`   | split:2  | same      | same          | same         | same             | same          | same              |
+| `less`   | split:3  | same      | same          | same         | same             | same          | same              |
+| `less`   | split:5  | same      | same          | same         | same             | same          | same              |
+| `less`   | split:8  | same      | same          | same         | same             | same          | same              |
+| `less`   | split:16 | same      | same          | same         | same             | same          | same              |
+| `less`   | split:32 | same      | same          | same         | same             | same          | same              |
+| `wide`   | bytewise | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:2  | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:3  | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:5  | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:8  | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:16 | same      | same          | same         | same             | same          | same              |
+| `wide`   | split:32 | same      | same          | same         | same             | same          | same              |
+| `emoji`  | bytewise | diff(2)   | diff(19)      | same         | same             | diff(1)       | diff(3)           |
+| `emoji`  | split:2  | same      | same          | same         | same             | same          | same              |
+| `emoji`  | split:3  | same      | same          | same         | same             | same          | same              |
+| `emoji`  | split:5  | same      | diff(4)       | same         | same             | same          | same              |
+| `emoji`  | split:8  | diff(1)   | diff(8)       | same         | same             | same          | same              |
+| `emoji`  | split:16 | diff(1)   | diff(14)      | same         | same             | same          | same              |
+| `emoji`  | split:32 | diff(1)   | diff(16)      | same         | same             | same          | same              |
+
+- **`libghostty-vt` holds everywhere**: identical screen at every split of every capture, one
+  byte per write included.
+- **`x/vt` holds on six of seven**, and fails on `emoji` exactly where §1.1 says it must: at
+  every split that falls between two complete runes of a cluster (5, 8, 16, 32 parts, and
+  bytewise), a partial cluster is flushed and the line shifts — 4 to 19 columns. Splits at 2
+  and 3 land inside a rune and survive.
+- **`xterm.js` is not fully chunk-invariant either**: fed one byte at a time it loses a
+  character in two captures (`wizard` row 34, an `…`; `emoji` row 0, the family's trailing
+  `U+200D`), geometry included in the first case. So byte-boundary sensitivity is not a
+  property the product could have inherited by choosing xterm.js: it is the _reference's_ own
+  limit, and `libghostty-vt` is the only one of the three that does not have it.
+
+### 7.6 What the numbers support, and what they do not
+
+**Supported.**
+
+1. On the shapes `ADR-0041` measured — bash, htop, vim, less — and on CJK, `x/vt` and
+   `libghostty-vt` are both **exactly** xterm.js: 4 800 of 4 800 columns. The geometry argument
+   for `x/vt` is reproduced as a property of `x/vt`; it is not reproduced as a **discriminator**
+   between the two candidates, because ghostty has the same property on the same bytes.
+2. The only capture where the two candidates differ from each other on something other than a
+   defect `x/vt`'s own filter already removes is `emoji`, and there `libghostty-vt` is closer to
+   the product's terminal (97 of 100 content columns against 84). The emoji case is precisely
+   the case `ADR-0041` records as untested.
+3. `libghostty-vt`'s final screen is invariant to where the writes fall, up to one byte per
+   write, on all seven captures; `x/vt`'s is not, on one, and `xterm.js`'s — the product's own
+   frontend — is not either.
+4. The `wizard` disagreement is `x/vt`'s known `0x9C` defect, not a geometry policy: ten
+   columns, one line, a 15-byte reproduction, and a filter the product already ships.
+
+**Not supported.**
+
+1. **Nothing here compares with `ADR-0041`'s scores.** The bytes are different; a fresh 100/100
+   on the same shapes is evidence about this corpus, not a re-run of that ADR's six captures.
+   That ADR's exact question is still open on its own bytes, and those bytes are gone.
+2. The separation between the candidates rests on **one** capture of ten lines, in which the
+   family line alone is 8 of `x/vt`'s 17 disagreeing columns and all four emoji lines together
+   are 17. One capture is a sample, not a distribution.
+3. The `wizard` row is a first run against an endpoint that never answers: it measures the
+   theme picker, the trust dialog, the main UI and the spinner, and no model output.
+4. Colour, attributes, selection, graphics and performance are not in this corpus at all
+   (§1.10 and §2.5 are the only graphics evidence here), and neither is the alternate screen
+   as a state — only the bytes that enter it.
+5. The `wide` row exercises CJK through `less` at 120 columns. Both candidates are exact; it
+   says nothing about CJK in a narrower or reflowing terminal.
+
+**Verdict: §4's condition is met — and it is met in the direction that weakens `x/vt`.** §4
+asked for `ADR-0041`'s non-emoji shapes to be re-measured against `xterm.js` and said that if
+ghostty's geometry matches there, the choice made on geometry should be revisited on geometry.
+On this corpus's replacements for those shapes, ghostty matches `xterm.js` on every column
+`x/vt` matches it on, and on the only shape where the two candidates diverge — emoji, untested
+by that ADR — it is the closer one. There is no capture here on which `x/vt`'s columns are the
+better ones, so the criterion that chose `x/vt` cannot be quoted against ghostty.
+
+What that leaves is a smaller decision than either document asked for, and it is the owner's:
+the geometry criterion is neutral between the two candidates on the workload `ADR-0041`
+measured, and on this evidence the behavioural half of §4's case — ghostty failing one of the
+nine probes where `x/vt` fails all nine, four of those four silently wrong — is no longer
+balanced by a geometry advantage. The
+one caveat worth carrying into that decision is that the sample that breaks the tie is a single
+emoji capture, and the same corpus says both emulators put the same _characters_ on the screen
+there (40/40 rows of text for both).
 
 ## Appendix A — the exact probe inputs
 

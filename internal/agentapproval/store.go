@@ -208,11 +208,12 @@ func (s *Store) List() []Record {
 // side: a denial is never silently retried, deliberately, which is only
 // defensible while there is somewhere to reconsider it (nocx-6jbad).
 //
-// The answer is what goes; nothing else does. Forgetting does not reach into
-// a live pane, and it does not have to: the admit check reads this store on
-// every call, so the next tool call from an agent whose answer is gone is
-// refused, and the agent itself goes on running without nocx's tools —
-// exactly the state a denial produces.
+// The answer is what goes; nothing else does. The store reaches no further
+// than the record: an agent already running goes on running, and nothing here
+// touches a process. What a caller must add is how a live admission ends — a
+// connection admitted under an answer that has gone keeps it until something
+// closes the connection (ADR-0058), and that closing lives with whoever holds
+// the connections, not here.
 //
 // A false second result is "there was nothing to forget", which is a SUCCESS
 // and not an error: a second click, or a page whose read predates somebody

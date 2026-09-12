@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -109,19 +110,19 @@ func (d *heldDispatcher) Catalogue(content.Grant) []agenttools.Tool {
 	}
 }
 
-// The reported failure, on the real path: with one call outstanding at the
-// endpoint, the next call is answered — over the SAME connection, because that
-// connection is the session's admission interval and a second one could not be
-// admitted while the first is open.
-func TestASecondCallCrossesTheRealEndpointWhileTheFirstIsHeld(t *testing.T) {
-	dispatcher := &heldDispatcher{held: make(chan struct{}), release: make(chan struct{})}
+// startRealEndpoint starts the shipped endpoint over a real socket with the
+// test's own authorizer and tool surface. Nothing here is a double except those
+// two seams: the socket, the kernel-stamped peer, the admission and the
+// dispatch pipeline are the ones the product runs.
+func startRealEndpoint(t *testing.T, auth toolendpoint.Authorizer, dispatch assistant.ToolDispatcher) *toolendpoint.Endpoint {
+	t.Helper()
 	endpoint, err := toolendpoint.New(toolendpoint.Config{
 		Dir:      t.TempDir(),
 		Peers:    testUIDPeers{},
 		Owner:    testUIDOwner{},
 		SelfUID:  testUID,
-		Auth:     &slotAuthorizer{},
-		Dispatch: dispatcher,
+		Auth:     auth,
+		Dispatch: dispatch,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -131,6 +132,43 @@ func TestASecondCallCrossesTheRealEndpointWhileTheFirstIsHeld(t *testing.T) {
 		t.Fatalf("start endpoint: %v", err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
+	return endpoint
+}
+
+// toolRefusal returns the text of a refused call.
+func toolRefusal(t *testing.T, envelope map[string]json.RawMessage) string {
+	t.Helper()
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(envelope["result"], &result); err != nil {
+		t.Fatalf("decode refusal of %v: %v", envelope, err)
+	}
+	if !result.IsError || len(result.Content) != 1 {
+		t.Fatalf("expected a refusal, got %v", envelope)
+	}
+	return result.Content[0].Text
+}
+
+// refusingAuthorizer refuses every peer, the way the shipped one does when the
+// answer behind an admission has gone or another caller holds the session's
+// slot.
+type refusingAuthorizer struct{ refusal error }
+
+func (a refusingAuthorizer) Admit(toolendpoint.Peer) (assistant.ToolInvocation, func(), error) {
+	return assistant.ToolInvocation{}, nil, a.refusal
+}
+
+// The reported failure, on the real path: with one call outstanding at the
+// endpoint, the next call is answered — over the SAME connection, because that
+// connection is the session's admission interval and a second one could not be
+// admitted while the first is open.
+func TestASecondCallCrossesTheRealEndpointWhileTheFirstIsHeld(t *testing.T) {
+	dispatcher := &heldDispatcher{held: make(chan struct{}), release: make(chan struct{})}
+	endpoint := startRealEndpoint(t, &slotAuthorizer{}, dispatcher)
 
 	driver := startStdio(t, endpoint.SocketPath())
 	initialization(driver)
@@ -145,5 +183,39 @@ func TestASecondCallCrossesTheRealEndpointWhileTheFirstIsHeld(t *testing.T) {
 	close(dispatcher.release)
 	if text := toolText(t, driver.nextID(2)); text != `{"held":true}` {
 		t.Fatalf("the held call answered %s", text)
+	}
+}
+
+// A REFUSAL THAT ARRIVES FOR THE CONNECTION IS STILL AN ANSWER TO THE CALLER.
+// An admission failure is written with a null id — the endpoint has read no
+// request to attach it to — so there is no waiter to hand it to. Dropped, all
+// of them arrive as "the endpoint is unavailable": the one answer that names no
+// action, for exactly the refusals this surface exists to deliver. The parent
+// decoded the error without needing a matching id; the multiplexed reader has
+// to keep that property deliberately.
+func TestAConnectionRefusalReachesTheCallerAsItsReason(t *testing.T) {
+	refusals := map[string]struct {
+		err      error
+		sentence string
+	}{
+		"not enrolled":            {toolendpoint.ErrNotEnrolled, "not in a pane nocx has enrolled"},
+		"another caller holds it": {toolendpoint.ErrSessionCallerActive, "serves one at a time"},
+	}
+	for name, refusal := range refusals {
+		t.Run(name, func(t *testing.T) {
+			endpoint := startRealEndpoint(t, refusingAuthorizer{refusal: refusal.err}, &heldDispatcher{
+				held: make(chan struct{}), release: make(chan struct{}),
+			})
+			driver := startStdio(t, endpoint.SocketPath())
+
+			driver.send(2, "tools/call", `{"name":"alpha.screen"}`)
+			reason := toolRefusal(t, driver.nextID(2))
+			if strings.Contains(reason, "unavailable") {
+				t.Fatalf("the refusal was reported as an unavailable endpoint: %q", reason)
+			}
+			if !strings.Contains(reason, refusal.sentence) {
+				t.Fatalf("the refusal reached the caller as %q, want the endpoint's own sentence", reason)
+			}
+		})
 	}
 }

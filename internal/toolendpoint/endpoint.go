@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +112,12 @@ type Endpoint struct {
 	listener *net.UnixListener
 	closed   bool
 	conns    map[*net.UnixConn]struct{}
+	// admitted is the same set keyed by the session each connection was
+	// admitted for. ADR-0058 makes the admission interval the unit of
+	// authority and names its closing events; a connection outlives a single
+	// call, so the interval has to be closable by session or a withdrawn
+	// answer keeps working until the socket happens to end.
+	admitted map[string]map[*net.UnixConn]struct{}
 	wait     sync.WaitGroup
 }
 
@@ -143,11 +150,74 @@ func New(cfg Config) (*Endpoint, error) {
 	case cfg.Logger == nil:
 		return nil, errors.New("toolendpoint: no logger")
 	}
-	return &Endpoint{
-		cfg:    cfg,
-		socket: filepath.Join(cfg.Dir, toolSocketName),
-		conns:  make(map[*net.UnixConn]struct{}),
-	}, nil
+	endpoint := &Endpoint{
+		cfg:      cfg,
+		socket:   filepath.Join(cfg.Dir, toolSocketName),
+		conns:    make(map[*net.UnixConn]struct{}),
+		admitted: make(map[string]map[*net.UnixConn]struct{}),
+	}
+	// An authorizer whose own authority can end while a connection is open
+	// takes the endpoint's admissions here, at construction, rather than
+	// through a second wiring step some composition root has to remember: the
+	// endpoint and the authorizer are joined by this call in every build,
+	// tests included.
+	if binder, ok := cfg.Auth.(SessionAdmissionBinder); ok {
+		binder.BindSessionAdmissions(endpoint)
+	}
+	return endpoint, nil
+}
+
+// SessionAdmissions is the endpoint's view of what it has admitted, handed to
+// an authorizer that needs to end an interval early: which sessions hold a live
+// connection, and the way to close one session's connections.
+type SessionAdmissions interface {
+	// AdmittedSessions names the sessions with at least one live admitted
+	// connection.
+	AdmittedSessions() []string
+	// CloseAdmitted closes every live connection admitted for a session,
+	// returning how many it closed. The session's caller slot is released as
+	// each serve loop ends, and a client that dials again is admitted afresh —
+	// which is where a revoked answer is refused.
+	CloseAdmitted(session string) int
+}
+
+// SessionAdmissionBinder is implemented by an Authorizer that owns authority
+// which can be withdrawn mid-connection. toolendpoint binds at construction.
+type SessionAdmissionBinder interface {
+	BindSessionAdmissions(SessionAdmissions)
+}
+
+// AdmittedSessions names the sessions with a live admitted connection, in a
+// stable order so a caller comparing them sees a set rather than a map walk.
+func (e *Endpoint) AdmittedSessions() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	sessions := make([]string, 0, len(e.admitted))
+	for session := range e.admitted {
+		sessions = append(sessions, session)
+	}
+	sort.Strings(sessions)
+	return sessions
+}
+
+// CloseAdmitted closes every live connection admitted for a session. It is the
+// closing event ADR-0058 names for a shared connection: the interval's grant is
+// immutable, so ending the interval is the only way a withdrawal takes effect
+// before the session itself ends.
+func (e *Endpoint) CloseAdmitted(session string) int {
+	if session == "" {
+		return 0
+	}
+	e.mu.Lock()
+	connections := make([]*net.UnixConn, 0, len(e.admitted[session]))
+	for conn := range e.admitted[session] {
+		connections = append(connections, conn)
+	}
+	e.mu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	return len(connections)
 }
 
 func isNilDependency(value any) bool {
@@ -300,6 +370,37 @@ func (e *Endpoint) untrack(conn *net.UnixConn) {
 	e.mu.Unlock()
 }
 
+// admitSession remembers which session this connection was admitted for, so the
+// interval can be closed by session later (ADR-0058's withdraw, and a revoked
+// approval). It is populated after Admit succeeds and removed with the
+// connection.
+func (e *Endpoint) admitSession(session string, conn *net.UnixConn) {
+	if session == "" {
+		return
+	}
+	e.mu.Lock()
+	if e.admitted == nil {
+		e.admitted = make(map[string]map[*net.UnixConn]struct{})
+	}
+	if e.admitted[session] == nil {
+		e.admitted[session] = make(map[*net.UnixConn]struct{})
+	}
+	e.admitted[session][conn] = struct{}{}
+	e.mu.Unlock()
+}
+
+func (e *Endpoint) forgetSession(session string, conn *net.UnixConn) {
+	if session == "" {
+		return
+	}
+	e.mu.Lock()
+	delete(e.admitted[session], conn)
+	if len(e.admitted[session]) == 0 {
+		delete(e.admitted, session)
+	}
+	e.mu.Unlock()
+}
+
 func (e *Endpoint) observe(observation Observation) {
 	if e.cfg.Observer != nil {
 		e.cfg.Observer.Observe(observation)
@@ -331,6 +432,9 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer) {
 	if base == nil {
 		base = context.Background()
 	}
+	session := invocation.RunContext.Session
+	e.admitSession(session, conn)
+	defer e.forgetSession(session, conn)
 	e.observe(Observation{
 		SessionID: invocation.RunContext.Session,
 		Kind:      ObservationAdmitted,

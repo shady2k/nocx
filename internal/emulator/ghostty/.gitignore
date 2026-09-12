@@ -1,0 +1,6 @@
+# The pinned upstream source and the archive built from it are a build artifact,
+# not source: ADR-0065 point 1 pins the commit, the toolchain and the flags
+# together, and how nocx holds the archive in CI, e2e and release is a separate
+# bead's decision. See doc.go for the exact commands that produce this
+# directory and for what a build bead has to replace.
+/.vendor/

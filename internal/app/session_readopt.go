@@ -504,28 +504,29 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 	return inv, nil
 }
 
-// isLocalBinding answers whether a carried-over binding names THIS machine's
-// daemon rather than a host reached over ssh — the discriminator the local
-// route is chosen by (nocx-ie23r.2).
+// isLocalBinding reports whether this session's CARRIER is this machine's
+// daemon — a different question from where its DESTINATION is (nocx-50w7p.5).
 //
-// IT IS THE BINDING'S SHAPE, and the shape is the statement. A local
-// HostedSessionOpen carries a generation and NOTHING ELSE (helper_local.go,
-// at the fields it deliberately leaves empty): there is no host to resolve and
-// no helper command to exec, because the route is a socket whose name is
-// derived from the generation. A remote one carries a host, always — it is
-// what the ssh lane connects to — and the two readopt routes are therefore
-// told apart by the field that exists rather than by a field that is merely
-// empty.
+// The two were one question until a remote destination could be carried by the
+// local daemon. A pane whose shell lives on somebody else's host, opened as a
+// channel by the daemon on THIS machine, carries Host and ProfileID; the old
+// test — "Host and ProfileID are empty" — therefore answered "remote" for it
+// and sent it down the route that demands a far-host HelperCommand it does not
+// have, so every such pane stayed unadopted across a restart.
 //
-// The three empties are checked together because each of them is enough to
-// send the binding down a route that cannot work: a host with no profile
-// would be refused for a partial route, a profile with no host would resolve
-// a connection to nowhere, and a helper command with no host would exec a
-// binary on this machine over an ssh lane that does not exist. Requiring all
-// three keeps the predicate one question — "does this name any half of an ssh
-// route?" — instead of four.
+// The discriminator is HelperCommand, and it is not a proxy for the carrier: it
+// is where the helper BINARY lives on the far host, which the bridge on that
+// host execs. A daemon reached over a socket on this machine has no such path,
+// and the remote route refuses to proceed without one (its own required-field
+// check above). So an empty value means the carrier is local as a matter of
+// what the value IS, not of what it happens to be empty of — the difference
+// between reading a fact the tree already carries and inventing a second field
+// to say it again.
+//
+// An id space no generation qualifies is still nobody's: a row without one is
+// refused here and left to a route that cannot judge it either.
 func isLocalBinding(p content.PendingSession) bool {
-	return p.Generation != "" && p.Host == "" && p.ProfileID == "" && p.HelperCommand == ""
+	return p.Generation != "" && p.HelperCommand == ""
 }
 
 // readopt is the attach-and-adopt half, and it is deliberately the same half

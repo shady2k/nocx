@@ -33,9 +33,12 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/content"
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -148,4 +151,81 @@ func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
 			"still refuse, or the fix above would be indistinguishable from never refusing", err)
 	}
 	t.Logf("MEASURED the unheld pane's refusal: %v", err)
+}
+
+// TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved exercises the
+// READOPT PATH itself for the shape this bead created (nocx-50w7p.5): a binding
+// whose Destination is remote and whose carrier is this machine's daemon.
+//
+// It takes the one branch of that path reachable without a live daemon — the
+// binding is the daemon's, and the saved connection now resolves to a DIFFERENT
+// host than the binding names — because that branch is where the new code's
+// judgement is: adopting the pane here would bind the session to a machine
+// nobody recorded, which is the inference nocx-k6p18.15 exists to forbid. A
+// profile edited between two runs is the ordinary way it happens.
+func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T) {
+	logger := log.NewSlogAdapter(discardLogger())
+	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	route := &countingLocalRoute{entries: []helperclient.SessionEntry{{
+		HostSessionID: helperclient.HostSessionID{Generation: "gen-1", Session: "sess-1"},
+		Launch:        helperclient.LaunchRecord{Cwd: "/home/alice"},
+	}}}
+	rp := &readoptPass{
+		registry: &helperRegistry{registry: reg},
+		adopter:  &stubAdopter{},
+		local:    route,
+		routes:   &stubRoutes{host: "somewhere.else", cfg: &ssh.ConnectConfig{User: "alice"}},
+	}
+
+	_, err := rp.readoptLocal(context.Background(), content.PendingSession{
+		SessionID: "sess-1", Generation: "gen-1", PaneID: "pane-1",
+		Host: "host.example", Account: "alice", ProfileID: "ssh:1",
+	})
+	if err == nil {
+		t.Fatal("re-adopting a binding whose saved connection now resolves elsewhere succeeded, so the pane " +
+			"was bound to a machine nobody recorded")
+	}
+	if !strings.Contains(err.Error(), "nobody recorded") {
+		t.Fatalf("the refusal is %q, want one naming the destination the binding does not record", err)
+	}
+	t.Logf("MEASURED the moved-profile refusal: %v", err)
+}
+
+// TestTheReadoptPredicateAnswersForTheCarrierNotTheDestination is the focused
+// test for the question the readopt pass routes by (nocx-50w7p.5).
+//
+// The destination-aware work in readoptLocal is dead code unless this predicate
+// sends a remote-destination binding there, and that is the exact case the old
+// shape — "Host and ProfileID are empty" — answered WRONG. Each row is one
+// carrier, and the third is the one the epic created: a shell on somebody
+// else's host, carried by the daemon here, which is the only row whose answer
+// changed.
+func TestTheReadoptPredicateAnswersForTheCarrierNotTheDestination(t *testing.T) {
+	const farHelper = "/home/alice/.nocx/helper/gen-test/nocx-helper"
+	for _, c := range []struct {
+		name string
+		p    content.PendingSession
+		want bool
+	}{
+		{"a local pane", content.PendingSession{SessionID: "s1", Generation: "gen"}, true},
+		{
+			"an ssh pane this machine's daemon carries",
+			content.PendingSession{SessionID: "s2", Generation: "gen", Host: "host.example", ProfileID: "ssh:1"},
+			true,
+		},
+		{
+			"an ssh pane a far helper carries",
+			content.PendingSession{SessionID: "s3", Generation: "gen", Host: "host.example", ProfileID: "ssh:1", HelperCommand: farHelper},
+			false,
+		},
+		{
+			"a row no generation qualifies",
+			content.PendingSession{SessionID: "s4", Host: "host.example", ProfileID: "ssh:1"},
+			false,
+		},
+	} {
+		if got := isLocalBinding(c.p); got != c.want {
+			t.Errorf("%s: isLocalBinding = %v, want %v (HelperCommand=%q)", c.name, got, c.want, c.p.HelperCommand)
+		}
+	}
 }

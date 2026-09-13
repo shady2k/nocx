@@ -421,7 +421,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 	fx.launcher = rec
 
 	kernel := newCanaryKernel()
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(logger)}
+	installer := liveBundleCarrier(t, fx)
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -667,14 +667,32 @@ func assertEverySurface(t *testing.T, fx *liveSshd, probe canaryProbe, path, ter
 
 // TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt is §0's last
 // clause: with the fixture's MaxSessions at 1 both paths still reach a
-// working prompt, un-integrated, with a named reason and exactly one
-// authentication.
+// working prompt, with a named reason and no login bought by a refused call.
 //
 // One session slot means the interactive session takes it and every auxiliary
 // channel is refused. D3 is what makes that survivable: the adapter is
 // mux-only with no fallback, so a refusal refuses the DELIVERY and never
 // opens a connection — which is the difference between losing integration and
 // costing the user a second password or a second 2FA prompt.
+//
+// # ONE CASE'S ANSWER CHANGED, and the name is about the other one
+//
+// The TYPED case is what the name describes and it is unchanged: the publish
+// rides the user's own mux, that connection's one slot is the shell's, and the
+// far side reports generation-unavailable.
+//
+// The SAVED case's answer is now the carrier's (nocx-50w7p.15): the publish is
+// this machine's helper's, on a connection of its own, so the pane's one slot
+// was never in play. It is measured per build and asserted only on what holds
+// everywhere (a working prompt, a delegated publish naming the pane's own
+// destination, a terminal outcome reported at all); the route's own verdict is
+// asserted where the route exists —
+// TestLiveSshd_OneSessionPerConnectionStillIntegratesOverTheHelper.
+//
+// The name is NOT renamed for that: nocx-650le cites this test by name for a
+// TempDir cleanup race of its own, and a bead's evidence pointing at a test
+// that no longer exists is worse than a name that describes one of its two
+// cases and says so here.
 func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 	t.Run("a typed ssh", func(t *testing.T) {
 		logs, logger := captureProductLogs(t)
@@ -739,19 +757,20 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		fx := startLiveSshd(t, true, withSshdConfig("MaxSessions 1"))
 		fx.logger = logger
 
-		// The interactive session holds the one slot, and the PRODUCT is what
-		// makes that true: the session channel the user's shell runs on is
-		// claimed before any auxiliary channel exists, so under one slot the
-		// publish is the one that is refused, every time.
+		// ONE SESSION PER CONNECTION, and this is the case nocx-50w7p.15
+		// rewrote the answer to. The publish used to run an auxiliary session
+		// channel on the PANE's connection, so under MaxSessions 1 it was the
+		// publish that lost the slot — and the cost was a session that could
+		// never integrate, which is what this subtest used to assert. The
+		// publish is this machine's helper's now: its home probe and its sftp
+		// channel are channels on a connection of the helper's OWN, so the
+		// pane's one slot belongs to the user's shell and nocx's auxiliary
+		// work cannot spend it.
 		//
-		// This used to be arranged here, by a gated installer that held the
-		// publish's first far-side call until the shell was open. That pin was
-		// honest while the two raced — the ordering could not be asserted
-		// because the product did not fix it — and it is exactly the thing to
-		// remove now that it does. Nothing here arranges the order; the
-		// installer only RECORDS what happened to the auxiliary call, so the
-		// clause is asserted rather than staged.
-		installer := &recordingInstaller{inner: &remoteInstallerAdapter{inner: shellintegration.New(logger)}}
+		// What this asserts, therefore, is the delegation (the engine hands
+		// the carrier a destination and no client) and the surviving session —
+		// not the refusal that no longer happens.
+		installer := &recordingCarrier{inner: liveBundleCarrier(t, fx)}
 
 		// The named reason on THIS path is not on the terminal and must not
 		// be looked for there: the bootstrap conversation happens on the SSH
@@ -787,57 +806,46 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 			return strings.Contains(out.String(), "P8_MAXSESS_SAVED_OK")
 		})
 
-		// UN-INTEGRATED with a NAMED reason, and no domain established.
+		// The publish was DELEGATED, with the address the pane dialed: the
+		// engine's whole statement to a carrier, and the fact that puts the
+		// bundle on this machine's helper's connection rather than on the
+		// user's.
+		calls, host := installer.delegation()
+		if calls == 0 {
+			t.Fatal("the publish was never delegated, so nothing measured here is about the new route")
+		}
+		if host != fx.addr {
+			t.Errorf("the publish was handed destination %q, want the address the pane dialed (%q)", host, fx.addr)
+		}
+
+		// The outcome the far side reports is asserted where the ROUTE is
+		// known: what this build's carrier publishes over decides what a
+		// one-slot bound means for the session (integrated over this machine's
+		// helper, refused for the untagged fixture's own connection), and a
+		// test that accepted either here would pin nothing. What holds in BOTH
+		// builds is below and above: the user has a working prompt, the
+		// publish was delegated with the pane's own destination, and the far
+		// side reported a terminal outcome at all — the clause ADR-0004 and
+		// §0 make absolute.
 		reason, named := outcomes.await(t)
 		if !named {
 			t.Fatal("the bootstrap never reported an outcome to the session integration axis; " +
 				"§0 requires a NAMED reason, and a reason only the log carries is the " +
 				"log-only degrade AGENTS.md forbids")
 		}
-		if reason == ssh.ReasonNone {
-			t.Fatal("the bootstrap reported no refusal: the session integrated where §0 says it must not")
-		}
-		t.Logf("MEASURED the named reason: %s", reason)
-		kernel.mu.Lock()
-		domain := kernel.domain
-		kernel.mu.Unlock()
-		if domain != "" {
-			if d, ok := kernel.Domain(domain); ok && d.State == lifecycle.DomainEstablished {
-				t.Error("the domain established under MaxSessions 1: the session integrated " +
-					"where §0 says it must not")
-			}
-		}
-		// And the publish was genuinely refused rather than skipped — which
-		// is §0's clause stated as an ORDERING and not as a hope: the one
-		// session slot belonged to the user's shell before the publish
-		// existed, so the far-side call the publish makes is the one the
-		// server has nothing left for.
-		attempted, auxErr := installer.firstCall()
-		if !attempted {
-			t.Error("the publish never ran, so this fixture did not exercise the refusal it exists for")
-		}
-		if attempted && auxErr == nil {
-			t.Error("the publish's first far-side call SUCCEEDED under MaxSessions 1: it took the one " +
-				"session slot, which is the slot §0 promises to the user's own shell")
-		}
-		t.Logf("MEASURED the auxiliary channel under one slot: %v", auxErr)
+		t.Logf("MEASURED the terminal outcome under one slot per connection: %q", reason)
 
-		// TWO AUTHENTICATIONS, AND NEITHER IS THE REFUSED CALL. That is the
-		// whole of D3: a refused session must never buy a second credential
-		// use. One login is the pane's own session. The other is this
-		// HARNESS's lifecycle transport lease, which takes its own pool
-		// identity by construction (liveSshd.tunnelLease says why) and so its
-		// own connection — this assertion read "want exactly 1" until the
-		// tunnel moved onto that lease in nocx-50w7p.8, and it had been red
-		// since (reproduced at 2a70029a, the merge before nocx-50w7p.12's work).
-		// What must NOT appear is a third: the publish's auxiliary channel was
-		// refused on the session's own connection, so it can authenticate
-		// nothing — and the assertions above fix that it was refused rather
-		// than skipped.
-		if n := fx.authCount(); n != 2 {
-			t.Errorf("the server accepted %d authentications, want 2 — the pane's session and this "+
-				"harness's lifecycle transport. A third would be a refused auxiliary call buying a "+
-				"credential, which D3 forbids", n)
+		// The far sshd's own count. Three logins are expected and each is
+		// named: the pane's session, this HARNESS's lifecycle transport lease
+		// (its own pool identity by construction — liveSshd.tunnelLease says
+		// why), and now the publish, which dials its own connection like any
+		// other consumer until the PANE moves onto this machine's helper too
+		// (nocx-50w7p.5). What must not appear is a login per CHANNEL: the
+		// helper's connection carries the home probe and the sftp channel
+		// together (asserted one process over, in helper_bundle_acceptance_test.go).
+		if n := fx.authCount(); n != 3 {
+			t.Errorf("the server accepted %d authentications, want 3 — the pane's session, this "+
+				"harness's lifecycle transport, and this machine's helper dialing for the publish", n)
 		}
 		t.Logf("MEASURED a saved connection under MaxSessions 1: %d authentication(s)", fx.authCount())
 
@@ -906,47 +914,39 @@ func (r *reasonRecorder) await(t *testing.T) (ssh.RefusalReason, bool) {
 	return reason, true
 }
 
-// recordingInstaller is the production installer with its first far-side call
-// RECORDED. It arranges nothing — no gate, no ordering, no substitute
-// behaviour — so what a test reads off it is what the product did.
+// recordingCarrier is the production carrier with the DELEGATION recorded: it
+// is handed a destination and no client, which is the whole of what
+// internal/ssh says to a carrier since nocx-50w7p.15, and what a test can
+// observe about the publish from this process.
 //
-// Its predecessor held that first call until the test released it, which fixed
-// which of two concurrent openers reached the single session slot. That was
-// honest while the product left the order open; it is a pin on the very clause
-// §0 now guarantees, so it is gone rather than kept beside the guarantee.
-type recordingInstaller struct {
+// Its predecessor recorded the first FAR-SIDE call (the home question, then run
+// over the pane's own connection) and held it until the test released it. Both
+// halves of that are gone by construction: the publish's far side is this
+// machine's helper's, and no channel of nocx's is opened on the pane's
+// connection to race the user's.
+type recordingCarrier struct {
 	inner ssh.RemoteInstaller
 	mu    sync.Mutex
-	tried bool
-	// homeErr is what the far side answered the FIRST auxiliary call with.
-	// Under one session slot it is the refusal, and that refusal is the
-	// observable proof the interactive session already held the slot.
-	homeErr error
+	host  string
+	calls int
 }
 
-func (g *recordingInstaller) GetRemoteHome(client *gossh.Client) (string, error) {
-	home, err := g.inner.GetRemoteHome(client)
+func (g *recordingCarrier) EnsureInstalledRemote(ctx context.Context, host string, opts ...ssh.ConnectOption) error {
 	g.mu.Lock()
-	if !g.tried {
-		g.tried = true
-		g.homeErr = err
-	}
+	g.calls++
+	g.host = host
 	g.mu.Unlock()
-	return home, err
+	return g.inner.EnsureInstalledRemote(ctx, host, opts...)
 }
 
-func (g *recordingInstaller) EnsureInstalledRemote(ctx context.Context, client *gossh.Client, home string) error {
-	return g.inner.EnsureInstalledRemote(ctx, client, home)
+func (g *recordingCarrier) UninstallRemote(ctx context.Context, c *gossh.Client) (removed, conflicts []string, err error) {
+	return g.inner.UninstallRemote(ctx, c)
 }
 
-func (g *recordingInstaller) UninstallRemote(ctx context.Context, client *gossh.Client, home string) (removed, conflicts []string, err error) {
-	return g.inner.UninstallRemote(ctx, client, home)
-}
-
-// firstCall reports whether the publish reached the far side at all, and what
-// that first call answered.
-func (g *recordingInstaller) firstCall() (bool, error) {
+// delegation reports that the publish was delegated at all, and the destination
+// it was handed.
+func (g *recordingCarrier) delegation() (int, string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.tried, g.homeErr
+	return g.calls, g.host
 }

@@ -50,7 +50,7 @@ func TestConnect_BothOrderingFactsReachTheGate(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test"}
+	installer := &recordInstaller{}
 	lc := &fakeRemoteLifecycle{launch: RemoteLifecycleLaunch{
 		Lane: "lane-1", Domain: "dom-1", Epoch: 7, Port: 40000,
 		Capability: "aa", Recovery: "bb",
@@ -174,78 +174,61 @@ func TestConnect_AnAcceptedBootstrapKeepsTheChannel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The slot: whose session channel is opened first, and what a bounded server
-// therefore refuses.
+// The slot: what nocx's own auxiliary work may spend on the pane's connection.
 
-// slotProbeInstaller is a RemoteInstaller that makes the same far-side move
-// the real one does — it opens a session channel on the connection — and
-// records the server's view at the moment it did.
+// delegationInstaller is a RemoteInstaller that records what internal/ssh hands
+// it and makes no far-side move of its own.
 //
-// It is the observable the ordering assertion needs. "The publish ran after
-// the shell" cannot be read off a duration or a goroutine, but "how many
-// session channels had the server granted when nocx asked for its auxiliary
-// one" is a state, and it is the state the whole defect is about.
-type slotProbeInstaller struct {
-	srv *testSSHServer
-
-	mu sync.Mutex
-	// called records that the first far-side call happened at all, so a
-	// publish that never ran cannot be mistaken for one that behaved.
-	called bool
-	// grantedBefore is the server's session-channel count as this call
-	// started, and auxErr is what the server answered our own open with.
-	grantedBefore int
-	auxErr        error
+// It CANNOT make one: the interface passes a destination, not a client
+// (nocx-50w7p.15), and that is the fact these two tests now measure. The old
+// pair of tests here drove a double that opened a session channel of its own to
+// prove the user's slot was claimed first — and that competition is gone
+// rather than reordered, because the publish rides this machine's helper's
+// connection and the pane's connection carries the user's session and nothing
+// else.
+type delegationInstaller struct {
+	mu       sync.Mutex
+	called   bool
+	host     string
+	opts     int
+	publishE error
 }
 
-func (p *slotProbeInstaller) GetRemoteHome(client *gossh.Client) (string, error) {
-	before := p.srv.sessionChannelCount()
-	sess, err := client.NewSession()
-	if err == nil {
-		_ = sess.Close()
-	}
-	p.mu.Lock()
-	if !p.called {
-		p.called, p.grantedBefore, p.auxErr = true, before, err
-	}
-	p.mu.Unlock()
-	if err != nil {
-		return "", err
-	}
-	return "/home/test", nil
+func (d *delegationInstaller) EnsureInstalledRemote(_ context.Context, host string, opts ...ConnectOption) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.called, d.host, d.opts = true, host, len(opts)
+	return d.publishE
 }
 
-func (p *slotProbeInstaller) EnsureInstalledRemote(context.Context, *gossh.Client, string) error {
-	return nil
-}
-
-func (p *slotProbeInstaller) UninstallRemote(context.Context, *gossh.Client, string) ([]string, []string, error) {
+func (d *delegationInstaller) UninstallRemote(context.Context, *gossh.Client) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
-func (p *slotProbeInstaller) snapshot() (bool, int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.called, p.grantedBefore, p.auxErr
+func (d *delegationInstaller) snapshot() (bool, string, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.called, d.host, d.opts
 }
 
-// The user's interactive session channel exists BEFORE nocx opens an auxiliary
-// one. ADR-0004 makes an ordinary usable terminal absolute, and the one way to
-// lose it that is nocx's own fault is to spend the server's last session slot
-// on nocx's own work — so the claim on that slot is the product's, not the Go
-// scheduler's.
+// The pane's own connection carries ONE session channel — the user's — and the
+// publish is delegated with the address the pane dialed.
+//
+// ADR-0004 makes an ordinary usable terminal absolute, and the one way to lose
+// it that is nocx's own fault is to spend the server's last session slot on
+// nocx's own work. That risk lived in nocx opening an auxiliary channel here;
+// it is retired by the auxiliary channel no longer being here at all.
 //
 // Asserted as a state and not as a race: the server says how many session
-// channels it had granted at the instant the publish made its first far-side
-// call, and the answer must already include the user's. Running it repeatedly
-// and hoping would assert nothing, which is exactly what the pinned e2e
-// ordering used to admit.
-func TestConnect_TheInteractiveSessionIsClaimedBeforeAnyAuxiliaryChannel(t *testing.T) {
+// channels it granted on that connection, and the carrier says it was handed
+// the destination. Running it repeatedly and hoping would assert nothing,
+// which is exactly what the pinned e2e ordering used to admit.
+func TestConnect_ThePanesConnectionCarriesOnlyTheUsersSession(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &slotProbeInstaller{srv: srv}
+	installer := &delegationInstaller{}
 	lc := &fakeRemoteLifecycle{launch: RemoteLifecycleLaunch{
 		Lane: "lane-slot", Domain: "dom-slot", Epoch: 7, Port: 40000,
 		Capability: "aa", Recovery: "bb",
@@ -262,38 +245,37 @@ func TestConnect_TheInteractiveSessionIsClaimedBeforeAnyAuxiliaryChannel(t *test
 	t.Cleanup(func() { _ = ch.Close() })
 
 	// The gate's publish fact is the event that says the publish reached a
-	// terminal outcome, so the snapshot below is read after it and never
-	// after a sleep.
+	// terminal outcome, so the reads below are made after it and never after a
+	// sleep.
 	waitGate(t, launcher)
-	called, granted, auxErr := installer.snapshot()
+	called, host, _ := installer.snapshot()
 	if !called {
-		t.Fatal("the publish never reached the far side, so this test measured nothing")
+		t.Fatal("the publish was never delegated, so this test measured nothing")
 	}
-	if auxErr != nil {
-		t.Fatalf("the auxiliary channel was refused by an unbounded server: %v", auxErr)
+	if host != srv.addr {
+		t.Errorf("the publish was handed destination %q, want the address the pane dialed (%q) — the helper keys its pool by what that resolves to", host, srv.addr)
 	}
-	if granted < 1 {
-		t.Errorf("the server had granted %d session channels when nocx opened its auxiliary one; "+
-			"the user's interactive session had not claimed its slot yet, so a server at its "+
-			"MaxSessions bound would have refused the user's shell and Connect would return no "+
-			"terminal at all", granted)
+	if n := srv.sessionChannelCount(); n != 1 {
+		t.Errorf("the pane's connection was asked for %d session channels, want exactly 1 (the user's): nocx's own work belongs on this machine's helper's connection, and a server at its MaxSessions bound must never have to refuse the user's shell to make room for it", n)
 	}
+	assertUsable(t, srv, ch)
 }
 
 // And the consequence, at the bound the epic's acceptance criterion names: a
-// server with ONE session slot leaves the user a working prompt and refuses
-// nocx's auxiliary channel instead of the other way round.
+// server with ONE session slot leaves the user a working prompt, and the
+// delegated publish still reaches a terminal outcome of its own.
 //
-// One run decides it. The refusal is not a race the test hopes to win — the
-// slot is taken before the publish exists — so a single attempt is the whole
-// assertion, and a second would only be the same statement made twice.
-func TestConnect_OneSessionSlotGoesToTheUserAndRefusesThePublish(t *testing.T) {
+// One run decides it. Under the old shape the publish competed for that slot
+// on this connection; it now competes for nothing here, and the publish's own
+// transport is the helper's problem (its own acceptance test asserts that it
+// costs one authentication and no second login).
+func TestConnect_OneSessionSlotGoesToTheUserAndNotToNocx(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 	srv.setMaxSessions(1)
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &slotProbeInstaller{srv: srv}
+	installer := &delegationInstaller{}
 	lc := &fakeRemoteLifecycle{launch: RemoteLifecycleLaunch{
 		Lane: "lane-one-slot", Domain: "dom-one-slot", Epoch: 7, Port: 40000,
 		Capability: "aa", Recovery: "bb",
@@ -313,20 +295,15 @@ func TestConnect_OneSessionSlotGoesToTheUserAndRefusesThePublish(t *testing.T) {
 	t.Cleanup(func() { _ = ch.Close() })
 
 	g := waitGate(t, launcher)
-	if _, _, perr := g.snapshot(); perr == nil {
-		t.Error("the publish reported success under one session slot; it can only have got the " +
-			"slot the user's shell needs")
+	if _, _, perr := g.snapshot(); perr != nil {
+		t.Errorf("the delegated publish reported %v; it was handed a destination and no client, so this connection's slot is not something it can have taken", perr)
 	}
-	called, granted, auxErr := installer.snapshot()
+	called, _, _ := installer.snapshot()
 	if !called {
-		t.Fatal("the publish never reached the far side, so the refusal this test is about never happened")
+		t.Fatal("the publish was never delegated, so the refusal this test is about never happened")
 	}
-	if granted < 1 {
-		t.Errorf("the server had granted %d session channels when nocx asked for its own", granted)
-	}
-	if auxErr == nil {
-		t.Error("the auxiliary channel was GRANTED under one session slot: nocx took the slot, " +
-			"and a shell opened after it would have had none")
+	if n := srv.sessionChannelCount(); n != 1 {
+		t.Errorf("the one slot was spent on %d session channels, want exactly 1", n)
 	}
 	// The user's terminal is the point of all of it.
 	assertUsable(t, srv, ch)

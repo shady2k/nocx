@@ -48,6 +48,19 @@ type LaunchOptions struct {
 	// lifecycle capability and report rendezvous remain outside this config.
 	AgentHelperPath     string
 	AgentToolSocketPath string
+	// AgentToolToken is the pane's tool bearer (nocx-50w7p.16): what the far
+	// agent's MCP bridge presents to be admitted, and what the pane's epoch
+	// bounds. It is LOWER-CASE HEX and it is a SECRET, so it travels by one of
+	// the two bearer transports and no others (capability_source.go, design
+	// D4): on the remote path it is a line in frame 2's payload, read once
+	// into a NON-EXPORTED shell variable and staged into the launch
+	// directory's mcp.json — never in this struct's env block, never in argv,
+	// never exported, and never a name on a filesystem outside that directory.
+	//
+	// It is a different value from Capability and is not a second spelling of
+	// it: Capability addresses the lifecycle channel, this admits tool calls,
+	// and each is bounded by its own interval.
+	AgentToolToken string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
 	// reaches the shell through an inherited, already-unlinked descriptor

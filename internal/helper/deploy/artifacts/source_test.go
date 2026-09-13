@@ -27,10 +27,11 @@ var helperArtifactTargets = []string{
 
 // THE CEILING IS SET FROM A MEASUREMENT, and this one is libghostty-vt's cost,
 // measured on the INTEGRATED helper — the runtime, the emulator port and the
-// CGo adapter all linked, which is what changes the number. Measured
-// 2026-09-13 on this tree with `make vt-helper-size`, on the artifacts
-// `make helpers` produces (per-target Zig, CGO_ENABLED=1, external linking,
-// statically linked musl on Linux, -tags vtmusl):
+// CGo adapter all linked, which is what changes the number. The table below is
+// THAT measurement, taken before each helper also began carrying the third-party
+// notices (nocx-ygxjv.15), on the artifacts `make helpers` produced then
+// (per-target Zig, CGO_ENABLED=1, external linking, statically linked musl on
+// Linux, -tags vtmusl):
 //
 //	linux/amd64   17,044,136   (was 6,610,992 — +10,433,144)
 //	linux/arm64   16,303,928   (was 6,452,000 — +9,851,928)
@@ -49,6 +50,15 @@ var helperArtifactTargets = []string{
 // — and the reason it is not raised further is that what the ceiling rejects
 // is still meaningful: a helper that grew by another archive's worth, or that
 // re-acquired a client stack, lands on the wrong side of it.
+//
+// THE NOTICES ADD 61,248 BYTES, measured rather than assumed: the linux/amd64
+// target was rebuilt on 2026-09-13 with the embed directory holding no document
+// (internal/helper/notices), 17,064,248 bytes against 17,125,496 — the 61,163
+// byte document plus the embed table and alignment. The four artifacts measure
+// 17,125,496 / 16,384,376 / 5,692,501 / 5,391,490 bytes in that order on the
+// current tree, so the headroom is now 3,846,024 bytes (18%): the difference
+// from the table above is the notices AND whatever landed on this branch after
+// that measurement, which is why the two are not arithmetic.
 const maxHelperBytes int64 = 20 * 1024 * 1024
 
 func TestMakeHelpersIsIdempotent(t *testing.T) {

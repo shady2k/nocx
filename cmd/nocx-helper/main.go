@@ -6,6 +6,8 @@
 //	                             serve every connection that reaches it
 //	nocx-helper bridge <gen>     connect to that generation's endpoint and
 //	                             copy bytes between it and stdin/stdout
+//	nocx-helper --licenses       print the third-party notices this binary
+//	                             carries (it links libghostty-vt statically)
 //
 // Locally the coordinator connects to the endpoint directly. Remotely
 // `bridge` runs over the pty-less ssh exec lane and the coordinator speaks the
@@ -40,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
+	"github.com/shady2k/nocx/internal/helper/notices"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/mcpstdio"
@@ -56,6 +59,30 @@ func main() {
 	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
 		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2]); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("mcp", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) == 1 && args[0] == "--licenses" {
+		// A binary that links libghostty-vt statically owes the licences of
+		// what is inside it, and this helper is distributed twice over: it
+		// ships inside the app for the local install, and it is written to
+		// hosts nobody here controls. Carrying the notices INSIDE it is what
+		// makes one installed file complete — D7's install is
+		// content-addressed on this binary alone, so a sibling file would be
+		// bytes the install's own completeness claim does not cover — and
+		// printing them is what makes them readable there.
+		//
+		// Handled before the executable is hashed and before any socket is
+		// touched: it answers a question about the FILE, so it must work on a
+		// host where nothing else about this binary does.
+		doc, err := notices.Document()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stdout.Write(doc); err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: printing the third-party notices: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -97,7 +124,7 @@ func main() {
 	case len(args) == 2 && args[0] == endpoint.BridgeCommand:
 		os.Exit(bridge(ctx, log, dir, proto.GenerationID(args[1]), generation, exe))
 	default:
-		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path>\n",
+		fmt.Fprintf(os.Stderr, "usage: nocx-helper %s | nocx-helper %s <generation> | nocx-helper mcp --socket <path> | nocx-helper --licenses\n",
 			endpoint.ServeCommand, endpoint.BridgeCommand)
 		os.Exit(2)
 	}

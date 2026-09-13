@@ -178,12 +178,19 @@ jobs:
       # asserted on the built artifact, not assumed from a flag.
       - name: Build the remote helpers
         run: make helpers
-      - name: Verify helper build output is stable and bounded
-        # -v because the ceiling test LOGS each target's measured size and the
-        # headroom (source_test.go): the budget for a helper that links
-        # libghostty-vt has to be derived from a real one, and this step's
-        # output is where those numbers are.
-        run: go test -v -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestMakeHelpersIsIdempotent|TestHelperArtifactsStayBelowSizeCeiling' -count=1
+      # -v because the ceiling test LOGS each target's measured size and the
+      # headroom (source_test.go): the budget for a helper that links
+      # libghostty-vt has to be derived from a real one, and this step's
+      # output is where those numbers are.
+      #
+      # The notices check is in this list because this is the only job that
+      # holds all four artifacts: it decompresses each one and asserts the
+      # pinned THIRD_PARTY_LICENSES is inside, then runs the host's artifact
+      # with `--licenses` and compares what it prints byte for byte.
+      # Named rather than covered by a bare `-run 'Test'` so that a check
+      # added to this package is a decision about THIS job.
+      - name: Verify helper build output is stable, bounded and licensed
+        run: go test -v -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestMakeHelpersIsIdempotent|TestHelperArtifactsStayBelowSizeCeiling|TestHelperArtifactsCarryThePinnedThirdPartyNotices' -count=1
 
       # The COMPRESSED artefacts, exactly as `make helpers` leaves them:
       # //go:embed all:bin takes the .gz files, so these are what the
@@ -475,6 +482,22 @@ jobs:
             build/bin/darwin-amd64/nocx-server build/bin/darwin-arm64/nocx-server
           cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
           cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
+          # THE PINNED THIRD-PARTY NOTICES, AND BEFORE THE SIGNATURE BELOW.
+          # The bundle is how our distribution reaches a user: it carries the
+          # app, the coordinator, and the helper artifacts the app embeds —
+          # and the HELPER is the binary that links libghostty-vt statically
+          # (ADR-0065; `go list -deps ./cmd/nocx-helper` is the check, and the
+          # app itself does not import the adapter today). What a user receives
+          # owes the licences of what is inside it, and the signature SEALS
+          # this tree: a file written after `codesign … nocx.app` is an
+          # unsealed resource and fails verification. Contents/Resources is
+          # where macOS keeps what a bundle carries.
+          #
+          # The bytes are the pin's own document, staged by the one script
+          # that owns where the notices come from; the step after this one
+          # reads it back out of the bundle and hashes it against the pin.
+          third_party/libghostty-vt/scripts/stage-notices.sh \
+            build/bin/nocx.app/Contents/Resources/THIRD_PARTY_LICENSES.txt
           # Sign inside-out. --deep is NOT used to sign: Apple deprecated it
           # for signing because it applies the outer options to nested code,
           # and here it would sign the coordinator as a by-product of signing
@@ -495,6 +518,35 @@ jobs:
           codesign --force --sign "$SIGN_IDENTITY" -i com.nocx.server \
             build/bin/nocx.app/Contents/MacOS/nocx-server
           codesign --force --sign "$SIGN_IDENTITY" build/bin/nocx.app
+
+      # THE BUNDLE CARRIES THE PINNED NOTICES, asserted off the bundle that was
+      # just signed rather than off the staging step that was supposed to put
+      # them there. A staging call that was dropped, or that wrote somewhere
+      # the bundle does not carry, leaves a shippable app with no licences in
+      # it — and nothing else in this job would notice, because the app links
+      # libghostty-vt with no runtime trace of it.
+      #
+      # The expectation is the PIN's sha256 out of MANIFEST.json (through
+      # vtfetch, the one reader of that file), not a hash written here: a
+      # hand-copied value would be a second statement of the pin, and this
+      # check exists to catch exactly that kind of drift.
+      #
+      # The check runs after the signature above, so a file added to the
+      # bundle later is both outside the seal and outside this file's
+      # presence — the requirement to stage before signing is stated at the
+      # staging call, and the `codesign --verify --deep --strict` later in
+      # this job is what proves the seal covers everything in the tree.
+      - name: The bundle carries the pinned third-party notices
+        run: |
+          set -euo pipefail
+          shipped="build/bin/nocx.app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+          pinned="$(go run ./cmd/vtfetch meta | sed -n 's/^licenses_sha256=//p')"
+          [ -n "$pinned" ] || { echo "::error::no licenses sha256 in third_party/libghostty-vt/MANIFEST.json"; exit 1; }
+          [ -f "$shipped" ] || { echo "::error::$shipped is not in the bundle: the app links libghostty-vt and owes its licences"; exit 1; }
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has both.
+          got="$(shasum -a 256 "$shipped" | awk '{print $1}')"
+          [ "$got" = "$pinned" ] || { echo "::error::$shipped is not the pinned document: $got != $pinned"; exit 1; }
+          echo "bundle notices: $shipped ($got) is the pinned document"
 
       # WHAT THIS JOB ACTUALLY EMBEDDED, hashed and thrown away. The
       # `helpers` job is the one origin for the bytes; this file is the

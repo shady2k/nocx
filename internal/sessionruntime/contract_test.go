@@ -115,6 +115,70 @@ func lastExecuted(m Runtime) ([]byte, error) {
 	return written[len(written)-1], nil
 }
 
+// showsText reports whether the screen the runtime serves carries this text.
+//
+// It is the ONE way a schedule in this file reads a screen, because a screen
+// has two shapes and a schedule is judged by both. The model's is a window on
+// the TEXT it ingested; a real one is the GRID the program drew — the rows it
+// filled, joined by line breaks, each row's trailing blank cells dropped. What
+// the two shapes agree on is what a person sees, so that is what a schedule may
+// assert. "The screen ENDS with these bytes" is a third claim: true of the
+// model, false of a grid for a reason that has nothing to do with the runtime
+// (a row is a rectangle of cells and has no newline at its end), so a schedule
+// asserting it measures the model's representation instead of the runtime's
+// behaviour.
+//
+// It is not the weaker claim, and a caller owes it one thing: text nothing else
+// in that schedule's stream contains. Showing it then can only mean the ingest
+// under test put it on the screen — the drawer of a grid and the buffer of a
+// model both hold what they were told to draw.
+func showsText(m Runtime, text string) bool {
+	return bytes.Contains(m.Snapshot().Screen, []byte(text))
+}
+
+// whatTheRuntimeDidNotHandOnIsAccountedFor is the half of both
+// hostile-sequence schedules that is a statement about the runtime's OWN
+// account rather than about where a pending sequence lives. It is one function
+// because it is one property, owed by every runtime whichever side owns the
+// parser: bytes the runtime did not hand on are HELD, within the bound the
+// vocabulary states, or DROPPED with the loss counted and reported. The one
+// thing a runtime may not do is neither — hold a sequence it could not have
+// kept whole while counting nothing, which is a screen that looks whole served
+// from bytes that were discarded (design §6.7), and it is the defect these
+// schedules were written against.
+//
+// fed is how many bytes the caller fed as one unterminated sequence, and it owes
+// more than MaxPendingSequence of them. That premise is what makes the first
+// assertion say a drop rather than a sequence the runtime simply kept: with more
+// fed than the bound, a runtime holding some of it and counting nothing did not
+// keep the rest, and the contract's own meaning of [IngestState.Pending] — the
+// trailing open sequence THIS runtime is keeping, everything before it drawn or
+// completed — leaves it nowhere else for the rest to be but discarded. The
+// premise is asserted rather than trusted, because a schedule that shortened its
+// input would turn this into a claim about nothing.
+func whatTheRuntimeDidNotHandOnIsAccountedFor(m Runtime, fed int, assertion string) error {
+	if fed <= MaxPendingSequence {
+		return failed("setup/the-sequence-is-longer-than-the-bound",
+			"the schedule fed %d bytes of an open sequence, which is not more than MaxPendingSequence (%d): a runtime may hold that much and have dropped nothing, so there would be nothing to account for",
+			fed, MaxPendingSequence)
+	}
+
+	held := len(m.IngestState().Pending)
+	lost := m.IngestState().Lost
+
+	if held > 0 && lost == 0 {
+		return failed(assertion,
+			"the runtime holds %d of the %d bytes of an open sequence and counts none of them discarded: what it did not hand on is neither held whole nor reported",
+			held, fed)
+	}
+	if lost > 0 && m.Completeness() != CompletenessLostIngest {
+		return failed(assertion,
+			"the runtime discarded %d bytes of the stream and reports completeness %s, want lost-ingest: an attaching client must be told, not handed a screen that looks whole (design §6.7)",
+			lost, completenessName(m.Completeness()))
+	}
+	return nil
+}
+
 // terminalOf and emulatorOf are the two instruments a schedule reads the
 // boundary through: the record of what reached the program and the refusal that
 // makes one side of a commit fail. Both return the CONTRACT's instrument types
@@ -1138,12 +1202,17 @@ func scheduleConsumerThatNeverReads(m Runtime) error {
 		return failed("delivery/a-wedged-consumer-costs-no-ingest",
 			"%d bytes of output were discarded while a consumer was wedged, want none: a consumer's queue is coalescable, the stream is not", m.IngestState().Lost)
 	}
-	if err := m.Ingest([]byte("the last line\r\n")); err != nil {
+	// The text is named once and read once, so that "the screen shows it" can
+	// only mean this ingest drew it: nothing else in this schedule's stream
+	// contains it, and [showsText] is the one reading of a screen both shapes
+	// of screen can honour.
+	const lastLine = "the last line"
+	if err := m.Ingest([]byte(lastLine + "\r\n")); err != nil {
 		return failed("delivery/ingest-after-the-flood", "ingesting output after the flood: %v", err)
 	}
-	if !bytes.HasSuffix(m.Snapshot().Screen, []byte("the last line\r\n")) {
+	if !showsText(m, lastLine) {
 		return failed("delivery/a-wedged-consumer-costs-no-ingest",
-			"the output ingested after the flood did not reach the emulator: the screen ends %q", m.Snapshot().Screen)
+			"the output ingested after the flood did not reach the screen: it is %q, which does not show %q", m.Snapshot().Screen, lastLine)
 	}
 
 	// And what the consumer lost is REPORTED to it. A client handed a stale
@@ -1338,14 +1407,31 @@ func driveEffectKinds(m Runtime) error {
 // cases, which that record says out loud — while libghostty-vt clamps REP at
 // 65535.
 //
-// WHICH of those bounds applies is the EMULATOR's, and it is nocx-ygxjv.2's to
-// land: nothing here measures an emulator this model does not have. What the
-// runtime owes on its OWN account is what these three schedules assert, and
-// each owes a number rather than an adjective: one ingest call carries at most
-// MaxIngestBytes and a larger one is refused rather than truncated, an
-// unterminated sequence is held to at most MaxPendingSequence bytes with the
-// excess dropped and the loss STATED, and the work the runtime spends is linear
-// in the bytes it examined and never in a count inside them.
+// WHICH of those bounds applies is the EMULATOR's, and the split is the point.
+// With the parser inside the library (ADR-0065, contract.go's Emulator) an
+// unterminated sequence is the LIBRARY's to hold, and nothing in this
+// vocabulary asks a runtime to hold one. So each schedule states what a runtime
+// owes on its OWN account — a number rather than an adjective, and a claim any
+// runtime can honour whichever side owns the parser:
+//
+//   - one ingest call carries at most MaxIngestBytes, and a larger one is
+//     refused rather than truncated;
+//   - the bytes of an open sequence the runtime keeps ITSELF are bounded by
+//     MaxPendingSequence;
+//   - whatever it did not hand on is ACCOUNTED for — held within that bound, or
+//     dropped with the loss counted and completeness reporting lost-ingest;
+//   - the work it spends is linear in the bytes it examined and never in a
+//     count inside them.
+//
+// Whether the LIBRARY bounds what IT holds is the library's own bound, and it is
+// measured where the emulator is chosen rather than asserted here: the port
+// carries no reading of it (contract.go's Emulator is the geometry half) and a
+// schedule handed a Runtime cannot reach one. The measurement at the pin this
+// repository links — an unterminated OSC on both of its paths, and a DCS — is
+// TestTheLibraryBoundsWhatItHoldsForAnUnterminatedSequence in
+// internal/emulator/ghostty, and it is what makes "the emulator's bound is the
+// emulator's" a checked sentence rather than the half of one this section used
+// to state.
 //
 // Paired with ruleIngestIsBounded.
 // ---------------------------------------------------------------------------
@@ -1377,7 +1463,16 @@ func scheduleHostileRepeatCount(m Runtime) error {
 func scheduleHostileUnterminatedOSC(m Runtime) error {
 	// An OSC that opens and never terminates. A program can do this by accident
 	// — a title with a stray byte — or deliberately, as a denial of service
-	// aimed at the runtime's memory.
+	// aimed at the terminal's memory. What the runtime owes for it is bounded
+	// and its own: the part it keeps ITSELF is within MaxPendingSequence, the
+	// work it spends is linear in the bytes it examined, and whatever it did
+	// not hand on is accounted for. Which runtime ends up holding the sequence
+	// is decided by who owns the parser (ADR-0065) — this one holds none of it
+	// and hands the whole sequence to the emulator, the model holds the trailing
+	// open sequence and trims it — and the assertion is the same for both
+	// because it is about the account rather than about the architecture. That
+	// the library's own holding is bounded is measured where the emulator is
+	// chosen (ghostty's TestTheLibraryBoundsWhatItHoldsForAnUnterminatedSequence).
 	body := bytes.Repeat([]byte("A"), 4*MaxPendingSequence)
 	capture := append([]byte("\x1b]0;"), body...)
 	before := m.IngestState().Work
@@ -1393,14 +1488,8 @@ func scheduleHostileUnterminatedOSC(m Runtime) error {
 		return failed("hostile/unterminated-osc-costs-the-bytes-it-carries",
 			"the runtime spent %d work units on %d bytes of output, want no more than MaxIngestBytes (%d)", spent, len(capture), MaxIngestBytes)
 	}
-	if m.IngestState().Lost == 0 {
-		return failed("hostile/the-dropped-sequence-is-reported",
-			"the runtime holds %d bytes of an unterminated sequence and counted no loss, want the %d bytes it discarded reported",
-			len(m.IngestState().Pending), len(capture)-len(m.IngestState().Pending))
-	}
-	if got := m.Completeness(); got != CompletenessLostIngest {
-		return failed("hostile/the-dropped-sequence-is-reported",
-			"completeness is %s after the ingest discarded bytes, want lost-ingest: an attaching client must be told, not handed a screen that looks whole (design §6.7)", completenessName(got))
+	if err := whatTheRuntimeDidNotHandOnIsAccountedFor(m, len(capture), "hostile/the-dropped-sequence-is-reported"); err != nil {
+		return err
 	}
 	observe(kindCompleteness, int(CompletenessLostIngest))
 	return nil
@@ -1422,22 +1511,25 @@ func scheduleHostileOversizedDCS(m Runtime) error {
 	}
 
 	// Delivered in calls the runtime does take, the same sequence is still
-	// bounded: the excess of the unterminated one is dropped, and reported.
+	// bounded and still accounted for, by the same property the OSC schedule
+	// asserts and for the same reason: the bound below is on what the runtime
+	// keeps ITSELF, and the accounting is what makes "the excess was dropped"
+	// true rather than assumed. Which side holds the DCS bytes while it is open
+	// is decided by who owns the parser (ADR-0065), and the library's own
+	// holding is measured where the emulator is chosen.
+	fed := 0
 	for range 4 {
 		chunk := append([]byte("\x1bP"), bytes.Repeat([]byte("D"), MaxPendingSequence)...)
 		if err := m.Ingest(chunk); err != nil {
 			return failed("hostile/chunked-dcs-is-accepted", "ingesting one DCS chunk: %v", err)
 		}
+		fed += len(chunk)
 	}
 	if got := len(m.IngestState().Pending); got > MaxPendingSequence {
 		return failed("hostile/oversized-dcs-is-bounded",
 			"the runtime holds %d bytes of an unterminated DCS, want at most MaxPendingSequence (%d)", got, MaxPendingSequence)
 	}
-	if m.IngestState().Lost == 0 {
-		return failed("hostile/oversized-dcs-is-bounded",
-			"the runtime discarded the excess of an oversized DCS and counted none of it")
-	}
-	return nil
+	return whatTheRuntimeDidNotHandOnIsAccountedFor(m, fed, "hostile/oversized-dcs-is-bounded")
 }
 
 // ---------------------------------------------------------------------------

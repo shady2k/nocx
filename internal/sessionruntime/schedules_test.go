@@ -1,7 +1,6 @@
 package sessionruntime
 
 import (
-	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -16,11 +15,20 @@ import (
 // nocx-ygxjv.6 bought — so they are run here against the implementation this
 // bead lands, constructed over instruments of its own (harness_test.go), and
 // the sentences they fail with are the same sentences they fail the model
-// with. Nothing in this file rewrites a schedule or relaxes one: a schedule
-// that a real runtime cannot honour is listed with the assertion that fires
-// and the reason, and the list is asserted to be EXHAUSTIVE over the schedules
-// in the contract file, so a schedule added there cannot be silently absent
-// here.
+// with. Nothing in this file rewrites a schedule or relaxes one: EVERY schedule
+// in the contract file runs here and every one of them passes, and the list is
+// asserted to be EXHAUSTIVE over the schedules in the contract file, so a
+// schedule added there cannot be silently absent here — or quietly skipped.
+//
+// There is no longer a way to record an exception. There was, for three
+// schedules (nocx-ygxjv.11), and the reason their entries had one is the reason
+// it is gone: each asserted a property in the SHAPE of one implementation —
+// a screen that ends with the last line's bytes, a parser the runtime owns —
+// rather than in terms of the behaviour, so a real runtime failed sentences
+// that said nothing about it. A schedule stated in terms any runtime can honour
+// has no exception to record, and one that cannot must be rewritten rather than
+// listed: an entry here that said "a real terminal cannot reach this" would be
+// this file conceding the thing it exists to check.
 //
 // The REMOVAL PAIRS are deliberately not here. A pair is the model switching
 // one rule OFF (without(rule) in model_test.go) and asserting that a NAMED
@@ -33,15 +41,6 @@ import (
 type realSchedule struct {
 	name string
 	run  func(t *testing.T) error
-	// unhonoured names the assertion this schedule fails against a real
-	// runtime. Empty means the schedule must pass. A schedule whose failure is
-	// named here is not "skipped": the named assertion IS asserted, so the day
-	// the contract changes the entry has to be changed with it.
-	unhonoured string
-	// why is the reason, in the terms of what a real terminal is, that the
-	// named assertion cannot hold. It is required exactly when unhonoured is
-	// set, and the test below checks that both are present or neither is.
-	why string
 }
 
 // realSchedules is every schedule in contract_test.go, in the file's own
@@ -135,21 +134,11 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
-			// Why the schedule cannot be judged here: its evidence for "the
-			// ingest path discarded nothing" is the model's screen, a window on
-			// the TEXT it has ingested, and it requires the screen to END with
-			// the bytes of the last ingest ("the last line\r\n"). A real
-			// screen is the grid the program drew: it ends with the ROW that
-			// line was written on, and a grid has no trailing newline. The rule
-			// itself is asserted on this same runtime, with evidence a real
-			// screen can give, by TestAWedgedConsumerCostsNoIngest.
 			name: "scheduleConsumerThatNeverReads",
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)
 				return scheduleConsumerThatNeverReads(s)
 			},
-			unhonoured: "delivery/a-wedged-consumer-costs-no-ingest",
-			why:        "the contract assumes a screen is a window on ingested TEXT and ends with the last line's bytes; a real screen is the grid, which ends with the row",
 		},
 		{
 			name: "scheduleOneSessionCannotSpendAnothersAllowance",
@@ -184,27 +173,11 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
-			// Why the two hostile-sequence schedules cannot be judged here:
-			// both require the runtime to have DISCARDED bytes of an
-			// unterminated sequence — a loss count above zero and
-			// CompletenessLostIngest — because the model holds that sequence
-			// and trims it at MaxPendingSequence. This runtime holds no part of
-			// a sequence at all: the parser it feeds does (ADR-0065,
-			// contract.go's Emulator), so there is nothing here to trim and
-			// nothing to report, and IngestState.Pending is empty BY
-			// CONSTRUCTION rather than because a bound was reached. That is NOT
-			// a claim about the emulator: whether the library bounds what IT
-			// holds is unmeasured here, and this bead neither asserts nor
-			// denies it. The halves of both schedules that need no loss — the
-			// work bound, no pending sequence left, and the refusal of an
-			// oversized call changing nothing — pass.
 			name: "scheduleHostileUnterminatedOSC",
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)
 				return scheduleHostileUnterminatedOSC(s)
 			},
-			unhonoured: "hostile/the-dropped-sequence-is-reported",
-			why:        "the contract assumes the runtime buffers an unterminated sequence and trims it; the parser is the emulator's, so this runtime holds nothing to trim or report",
 		},
 		{
 			name: "scheduleHostileOversizedDCS",
@@ -212,8 +185,6 @@ func realSchedules() []realSchedule {
 				s, _, _ := realRuntime(t)
 				return scheduleHostileOversizedDCS(s)
 			},
-			unhonoured: "hostile/oversized-dcs-is-bounded",
-			why:        "the same assumption at the point it is stated as a count: the runtime discarded nothing, so it counts nothing",
 		},
 		{
 			name: "driveEffectKinds",
@@ -233,36 +204,15 @@ func realSchedules() []realSchedule {
 }
 
 // TestTheContractSchedulesJudgeTheRealRuntime runs every schedule against a
-// real runtime and holds each one to its answer: the sentence it must pass
-// with, or the named assertion a real terminal cannot let it reach.
+// real runtime and holds each one to the sentence it must pass with. There is
+// no second answer: a schedule a real runtime cannot pass is a schedule written
+// in the shape of another implementation, and it is rewritten rather than
+// recorded.
 func TestTheContractSchedulesJudgeTheRealRuntime(t *testing.T) {
 	for _, s := range realSchedules() {
 		t.Run(s.name, func(t *testing.T) {
-			err := s.run(t)
-			switch {
-			case s.unhonoured == "" && s.why != "":
-				t.Fatalf("the entry names a reason but no assertion, so nothing is being asserted")
-			case s.unhonoured != "" && s.why == "":
-				t.Fatalf("the entry names assertion %q and no reason", s.unhonoured)
-			case s.unhonoured == "":
-				if err != nil {
-					t.Fatalf("the schedule must pass against the real runtime: %v", err)
-				}
-			case err == nil:
-				// The gap CLOSED. A skip that is no longer true is a lie the
-				// next reader would act on, so this fails rather than passing
-				// quietly: the entry has to be removed with the reason.
-				t.Fatalf("the schedule now PASSES against the real runtime, so %q is stale: delete the entry and let it run", s.unhonoured)
-			default:
-				var ae *assertionError
-				if !errors.As(err, &ae) {
-					t.Fatalf("the schedule returned %v, want the named assertion %q it cannot reach", err, s.unhonoured)
-				}
-				if ae.Assertion != s.unhonoured {
-					t.Fatalf("the schedule failed at %q; the entry says a real runtime cannot reach %q, so one of the two is stale: %v",
-						ae.Assertion, s.unhonoured, err)
-				}
-				t.Skipf("the schedule stops at %q — %s", ae.Assertion, s.why)
+			if err := s.run(t); err != nil {
+				t.Fatalf("the schedule must pass against the real runtime: %v", err)
 			}
 		})
 	}

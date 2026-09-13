@@ -448,10 +448,19 @@ const (
 	// instead of doing unbounded work on its account.
 	MaxIngestBytes = 64 << 10
 	// MaxPendingSequence is the most of an UNTERMINATED escape sequence the
-	// runtime holds. A remote program can open an OSC or a DCS and never close
-	// it; the bytes past this bound are the oldest of that sequence and are
-	// discarded, with the loss reported (Design §6.7: an emulator fed a
-	// partial stream is not authoritative, and the attach must say so).
+	// RUNTIME ITSELF holds, and it is this runtime's bound rather than the
+	// terminal's. A remote program can open an OSC or a DCS and never close it,
+	// and WHO holds the bytes while it is open is decided by who owns the
+	// parser. The model in this package holds the trailing open sequence and
+	// trims it here: the bytes past this bound are the oldest of that sequence
+	// and are discarded, with the loss reported (Design §6.7: an emulator fed a
+	// partial stream is not authoritative, and the attach must say so). A
+	// runtime that drives the emulator's parser (ADR-0065) holds none of it and
+	// hands the whole sequence on, so for that runtime this is a CEILING it
+	// satisfies by holding nothing — which is a bound the schedule on it can
+	// assert, unlike the LIBRARY's own bound, which is the library's and is
+	// measured where the emulator is chosen (internal/emulator/ghostty) rather
+	// than described here.
 	MaxPendingSequence = 4 << 10
 	// MaxPendingFrames is the most payloads one session's consumer queue may
 	// hold. Past it the runtime coalesces — the oldest coalescable payload

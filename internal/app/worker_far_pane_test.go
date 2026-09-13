@@ -469,33 +469,50 @@ func TestAFarPaneIsAdmittedWithoutAProcessPinner(t *testing.T) {
 // nothing presented, a value that is not the pane's, and ANOTHER PANE's token,
 // which is the case a per-connection check could pass and a per-pane one cannot.
 func TestAFarConnectionIsRefusedWithoutThePanesCurrentBearer(t *testing.T) {
-	stand := newFarStand(t,
-		remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"),
-		remoteSession(farPaneQ, "build.example.com", "deploy", "SHA256:key-a"))
-	stand.enrol(t, farPaneP, "claude")
-	stand.enrol(t, farPaneQ, "claude")
-
-	// THE ADMITTED CASE FIRST, so each refusal below is a fact about the bearer
-	// and not about a pane that could not have been admitted at all.
-	if env := stand.callOver(t, string(farPaneP)); env.Error != nil {
-		t.Fatalf("the pane's own agent was refused with its current token: %+v", env.Error)
+	// A STAND PER CASE, and that is not tidiness: a session admits ONE caller
+	// at a time, and a connection left open by an earlier case makes the next
+	// call fail for that reason instead. Measured — with one stand, the
+	// wrong-token case passed while the bearer check was removed, so the test
+	// was asserting about the caller slot and calling it the bearer.
+	newStand := func() *farStand {
+		stand := newFarStand(t,
+			remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"),
+			remoteSession(farPaneQ, "build.example.com", "deploy", "SHA256:key-a"))
+		stand.enrol(t, farPaneP, "claude")
+		stand.enrol(t, farPaneQ, "claude")
+		return stand
 	}
 
-	if env := stand.callOverWithToken(t, string(farPaneP), ""); env.Error == nil {
-		t.Fatal("a connection presenting no token was admitted")
-	} else if !strings.Contains(env.Error.Data.Reason, "did not present the token") {
-		t.Fatalf("a connection with no token was refused for %q, want the bearer's own sentence", env.Error.Data.Reason)
-	}
+	t.Run("admitted with the pane's current bearer", func(t *testing.T) {
+		if env := newStand().callOver(t, string(farPaneP)); env.Error != nil {
+			t.Fatalf("the pane's own agent was refused with its current bearer: %+v", env.Error)
+		}
+	})
 
-	if env := stand.callOverWithToken(t, string(farPaneP), strings.Repeat("ab", 32)); env.Error == nil {
-		t.Fatal("a connection presenting a wrong token was admitted")
-	}
+	t.Run("nothing presented", func(t *testing.T) {
+		env := newStand().callOverWithToken(t, string(farPaneP), "")
+		if env.Error == nil {
+			t.Fatal("a connection presenting no bearer was admitted")
+		}
+		if !strings.Contains(env.Error.Data.Reason, "did not present the token") {
+			t.Fatalf("refused for %q, want the bearer's own sentence", env.Error.Data.Reason)
+		}
+	})
 
-	// ANOTHER PANE'S TOKEN, from the same coordinator, the same host and the
-	// same account: everything agrees except which pane it is for.
-	if env := stand.callOverWithToken(t, string(farPaneP), stand.paneToken(t, string(farPaneQ))); env.Error == nil {
-		t.Fatal("another pane's token admitted a connection")
-	}
+	t.Run("a bearer that is not the pane's", func(t *testing.T) {
+		if env := newStand().callOverWithToken(t, string(farPaneP), strings.Repeat("ab", 32)); env.Error == nil {
+			t.Fatal("a connection presenting a wrong bearer was admitted")
+		}
+	})
+
+	t.Run("another pane's bearer", func(t *testing.T) {
+		stand := newStand()
+		// The same coordinator, the same host, the same account: everything
+		// agrees except which pane the bearer is for.
+		if env := stand.callOverWithToken(t, string(farPaneP), stand.paneToken(t, string(farPaneQ))); env.Error == nil {
+			t.Fatal("another pane's bearer admitted a connection")
+		}
+	})
 }
 
 // TestAFarRecordCannotStandForALocalPane — the arm's guard. A local pane's

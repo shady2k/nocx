@@ -15,13 +15,22 @@ package artifacts
 // accident. `make helpers` builds the four deployable targets with no extra
 // tags, so a forgotten flag cannot put an ssh client into what reaches a
 // remote host; `make helper-local` is the only target that passes
-// nocx_local_ssh, it builds the HOST platform alone, and it writes here.
+// nocx_local_ssh, it builds the HOST platform by default and every platform
+// HELPER_LOCAL_TARGETS names otherwise (the release builds the darwin pair,
+// because the macOS bundle is universal and either slice may be the one
+// running), and it writes here.
 //
 // A checkout that has never run it embeds nothing but bin/local/.gitignore —
 // which is committed, because a //go:embed pattern matching no file does not
-// compile — so LocalArtifact answers ErrLocalArtifactsNotBuilt and the local
-// install falls back to the deployable artifact, exactly as it did before this
-// variant existed.
+// compile — so LocalArtifact answers ErrLocalArtifactsNotBuilt.
+//
+// NOTHING FALLS BACK FROM THAT ANSWER (nocx-50w7p.7). A build whose bin/local
+// holds nothing for a platform it can run on installs no helper, and since
+// ADR-0057 there is no other route to a pane: every terminal in that app
+// refuses. That is why the targets which ship or run the app depend on the
+// Makefile's require-local-helper rather than on helper-local — building this
+// directory and proving the binary embeds it are two acts, and only the second
+// one fails when the artifact lands where //go:embed does not read it.
 
 import (
 	"embed"

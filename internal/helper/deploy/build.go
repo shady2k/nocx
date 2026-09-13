@@ -36,8 +36,10 @@ type ArtifactSource interface {
 // Hence a companion rather than a second ArtifactSource method, and hence an
 // interface a source MAY implement: the question "which helper does this
 // machine run" is asked in exactly one place (internal/helper/local, which
-// prefers this variant and falls back to Artifact when the build has none),
-// while the remote install reads Artifact and cannot reach this one at all.
+// installs THIS variant and, when the build carries none of them, reports the
+// source's own "not built" error instead of the deployable bytes — ADR-0057
+// leaves no Tier A behind the local helper to fall back to), while the remote
+// install reads Artifact and cannot reach this one at all.
 //
 // As with Artifact, the bytes are still compressed and contentHash is the
 // hash of their decompressed form.

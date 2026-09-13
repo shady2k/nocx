@@ -14,7 +14,7 @@ package ghostty
 // caret painted where a program had hidden it (DECTCEM).
 
 import (
-	"strings"
+	"errors"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -146,8 +146,8 @@ func TestCursorIsRefusedAfterClose(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a closed terminal answered a cursor read with (%d,%d)", got.X, got.Y)
 	}
-	if !strings.Contains(err.Error(), emulator.ErrClosed.Error()) {
-		t.Errorf("cursor after Close = %v, want it to name %v", err, emulator.ErrClosed)
+	if !errors.Is(err, emulator.ErrClosed) {
+		t.Errorf("cursor after Close = %v, want %v", err, emulator.ErrClosed)
 	}
 	if got.X != 0 || got.Y != 0 || got.Visible {
 		t.Errorf("a refused read answered with %+v, want the zero cursor: a value beside an error is one a caller could act on", got)

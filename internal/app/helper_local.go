@@ -311,6 +311,20 @@ type localHelperOpener struct {
 	// carried into every connection this opener builds — a helper that dials
 	// has nobody else to ask.
 	reverse *helperclient.ReverseRegistry
+	// sshTargets resolves a resolved ssh destination into the value the helper
+	// dials (nocx-50w7p.5).
+	//
+	// IT IS THE COORDINATOR'S HALF AND IT STAYS HERE. Resolution is an alias
+	// through ~/.ssh/config, the merging of its defaults, and the credential's
+	// own authorization against the endpoint its profile names — and the
+	// authorization check in particular belongs to the party that reads the
+	// config and holds the binding, which is this process. The helper is handed
+	// an address, an account and a REFERENCE to material, and it decides
+	// nothing (ssh.WireDestination's own comment).
+	//
+	// Nil is a legitimate wiring for a server that never opens an ssh pane, and
+	// an ssh open on it is a refusal that names this line rather than a dial.
+	sshTargets sshTargetResolver
 
 	// reattached is one connection per RE-ATTACHED session (nocx-ie23r.5),
 	// keyed by the session it was attached for and carrying the generation its
@@ -321,6 +335,46 @@ type localHelperOpener struct {
 	// until the coordinator closes (see close), because the connection is what
 	// the session's own detach travels over.
 	reattached map[session.ID]localSessionConn
+}
+
+// sshTargetResolver turns a host and its connect options into the destination
+// this machine's helper dials, or refuses.
+//
+// It is NARROWER THAN the client that satisfies it, on purpose: the client also
+// holds a dialer, and this opener needs the half of it that decides — not the
+// half that connects. A seam that named the concrete client would let a later
+// edit reach the dialer from here without either side noticing, which is the
+// state nocx-50w7p.5 exists to end.
+type sshTargetResolver interface {
+	ResolveTarget(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DialTarget, error)
+}
+
+// setSSHTargets records the destination resolver an ssh open on this machine's
+// helper is built from.
+//
+// It is a SETTER beside installedLocalGeneration for the same reason that one
+// is: the composition root wires the opener at New, and the ssh client it
+// resolves through is built later in the same function — at a point where the
+// vault, the credential resolver and the profile store all exist. A constructor
+// argument would force the earlier value to wait on the later one, which is the
+// brain method this file keeps trying not to grow.
+func (o *localHelperOpener) setSSHTargets(resolver sshTargetResolver) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sshTargets = resolver
+}
+
+// resolveTarget is the read side of the setter above, under the same lock, so a
+// caller never holds a nil interface it just checked.
+func (o *localHelperOpener) resolveTarget(ctx context.Context, host string, opts []ssh.ConnectOption) (ssh.DialTarget, error) {
+	o.mu.Lock()
+	resolver := o.sshTargets
+	o.mu.Unlock()
+	if resolver == nil {
+		return ssh.DialTarget{}, errors.New(
+			"open an ssh pane on this machine's helper: no destination resolver is wired")
+	}
+	return resolver.ResolveTarget(ctx, host, opts...)
 }
 
 // routeDir records the endpoint directory this machine's daemon is reached
@@ -400,14 +454,28 @@ func (o *localHelperOpener) toolEndpoint() string {
 	return o.toolSocketPath
 }
 
-// OpenHosted opens a local pane on this machine's helper.
+// OpenHosted opens a pane on this machine's helper.
 //
-// It answers selected=false only for a destination that is not this machine's.
-// A LOCAL destination is always this opener's, including when it cannot be
-// served — see the file header: answering "not mine" for a broken helper is
-// exactly the fallback ADR-0057 refuses.
+// TWO KINDS OF DESTINATION ARE THIS OPENER'S, and since nocx-50w7p.5 they are
+// the two a session can have. A LOCAL destination is a shell the daemon forks on
+// this machine. A REMOTE one is a shell channel on a connection the daemon
+// DIALS — `spawn-ssh`, a second op beside `spawn` because every shape on this
+// wire is closed, so a destination folded into `spawn` would be a payload an
+// older generation REJECTS while a new op is one it answers `unknown_op` to.
+//
+// That second arm is the owner's invariant made true: there is no ssh connection
+// without a helper, so an ssh pane is a pane THIS machine's helper hosts, and the
+// coordinator's own dial — the `svc.Open` fallback that used to answer a
+// destination no helper claimed — is gone with it. ADR-0057 is why there is no
+// third arm: locally there is no Tier A fallback, so a helper that cannot be
+// reached is a refusal naming what failed rather than a second way to connect.
+//
+// It answers selected=false only for a destination that is not this machine's,
+// which is now the empty Kind alone. A destination this opener owns is ALWAYS
+// its own, including when it cannot be served — see the file header: answering
+// "not mine" for a broken helper is exactly the fallback ADR-0057 refuses.
 func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
-	if o == nil || cfg.Kind != session.KindLocal {
+	if o == nil || (cfg.Kind != session.KindLocal && cfg.Kind != session.KindRemote) {
 		return transport.HostedSessionOpen{}, false, nil
 	}
 	c, generation, err := o.connect(ctx)
@@ -424,24 +492,33 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		helloTimeout: lifecycle.HelloTimeout,
 		log:          o.log,
 	}
-	// The shell, the argv and the environment are all the daemon's: D3
-	// refuses any op whose params carry a free-form []string, and the helper
-	// resolves the login shell through the same internal/loginshell this
-	// coordinator used to ask. The shell-integration activation environment
-	// travels with it: LocalSpawner renders NOCX_SHELL_INTEGRATION,
-	// NOCX_PROMPT_MODE and NOCX_SESSION_ID into the script it hands the shell
-	// on an inherited descriptor, which is where an integrated shell has
-	// always exported them from.
-	res, err := spawn.run(ctx, cfg, proto.SpawnParams{
-		Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows,
-		IdempotencyKey: claim,
-		// THIS backend's own tool endpoint, carried per pane (nocx-50w7p.18):
-		// the pane's tools belong to the coordinator that opened it, and the
-		// daemon cannot know which of its callers that is. Empty when this
-		// backend runs none, and the pane then renders no NOCX_TOOL_SOCKET at
-		// all — the soft degrade, stated above.
-		AgentToolEndpoint: o.toolEndpoint(),
-	})
+	var res hostedSpawnResult
+	if cfg.Kind == session.KindRemote {
+		res, err = o.openSSH(ctx, spawn, cfg, claim)
+	} else {
+		// The shell, the argv and the environment are all the daemon's: D3
+		// refuses any op whose params carry a free-form []string, and the helper
+		// resolves the login shell through the same internal/loginshell this
+		// coordinator used to ask. The shell-integration activation environment
+		// travels with it: LocalSpawner renders NOCX_SHELL_INTEGRATION,
+		// NOCX_PROMPT_MODE and NOCX_SESSION_ID into the script it hands the
+		// shell on an inherited descriptor, which is where an integrated shell
+		// has always exported them from.
+		res, err = spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+			return c.Spawn(ctx, proto.SpawnParams{
+				Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows,
+				Lifecycle:      life,
+				IdempotencyKey: claim,
+				// THIS backend's own tool endpoint, carried per pane
+				// (nocx-50w7p.18): the pane's tools belong to the coordinator
+				// that opened it, and the daemon cannot know which of its
+				// callers that is. Empty when this backend runs none, and the
+				// pane then renders no NOCX_TOOL_SOCKET at all — the soft
+				// degrade, stated above.
+				AgentToolEndpoint: o.toolEndpoint(),
+			})
+		})
+	}
 	if err != nil {
 		o.dropIfLost(c)
 		return transport.HostedSessionOpen{}, true, fmt.Errorf("open a pane on this machine's helper: %w", err)
@@ -451,27 +528,55 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		_ = res.Session.Close()
 		return transport.HostedSessionOpen{}, true, errors.New("local helper opener has no session registry")
 	}
-	if err := o.registry.RecordOwnedProcessPID(sid, res.Entry.Launch.Pid); err != nil {
-		_ = res.Session.Close()
-		return transport.HostedSessionOpen{}, true, fmt.Errorf("recording local helper launch pid: %w", err)
+	// THE THREE THINGS THAT ARE ABOUT A PROCESS ON THIS MACHINE ARE LOCAL ONLY,
+	// and the launch record is what says so: a remote session's branch has no
+	// pid and no pgid key AT ALL, because pid 0 — the only value left if a record
+	// insisted on carrying one — is the kernel scheduler, and a reader that
+	// trusted it would ask the OS about a process this machine never started
+	// (helper/proto's launch union; D10's "the launch record is the authority").
+	//
+	// So the pid is recorded, the shell replacement is watched, and the
+	// integration axis is filled in only for a launch that has one. The
+	// integration axis is not merely skipped for a remote pane, it is left EMPTY,
+	// which on that axis is "do not register" and is exactly right: a remote
+	// session's launch-time refusal is the ssh channel's own answer, and
+	// registerRemoteIntegration reads it there rather than from here
+	// (transport.HostedSessionOpen's own comment).
+	remote := res.Entry.RemoteLaunch
+	shell := ""
+	var (
+		status string
+		reason ssh.RefusalReason
+	)
+	if remote == nil {
+		shell = res.Entry.Launch.Shell
+		if err := o.registry.RecordOwnedProcessPID(sid, res.Entry.Launch.Pid); err != nil {
+			_ = res.Session.Close()
+			return transport.HostedSessionOpen{}, true, fmt.Errorf("recording local helper launch pid: %w", err)
+		}
+		status, reason = localIntegrationStatus(shell, res.LifecycleLane)
+		o.watchForReplacement(res.Session, res.Entry.Launch.Pid, shell)
 	}
-	shell := res.Entry.Launch.Shell
-	status, reason := localIntegrationStatus(shell, res.LifecycleLane)
-	o.watchForReplacement(res.Session, res.Entry.Launch.Pid, shell)
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
 		o.noteChildDomainParent(res.LifecycleTransport, res.LifecycleLane, string(sid))
 	}
-	return transport.HostedSessionOpen{
+	out := transport.HostedSessionOpen{
 		Session: res.Session,
-		// Host and Account are EMPTY, and Generation is not. Generation says
-		// which id space this session belongs to, which is true and is what a
-		// verdict needs; the rest of the route back — which pane, which
-		// connection, where the binary lives — is what a REMOTE session needs
-		// to be re-adopted over ssh, and a local one is re-adopted by dialling
-		// a socket instead. Filling them in with this machine's name would be
-		// inventing a route the readopt pass would then try to resolve as a
-		// saved connection. The local inventory that reads this is
-		// nocx-ie23r.2's.
+		// Host and Account are the DESTINATION, and their emptiness is the
+		// distinction the readopt pass reads (nocx-ie23r.2, nocx-50w7p.5).
+		//
+		// A LOCAL launch leaves them empty: Generation says which id space the
+		// session belongs to, which is true and is what a verdict needs, and the
+		// rest of the route back is a socket this machine dials rather than a
+		// saved connection. Filling them in with this machine's name would be
+		// inventing a route readopt would then try to resolve as a profile.
+		//
+		// A REMOTE launch names them, because for that session they are the
+		// destination and not this machine — the far host the helper's own launch
+		// record echoed, and the account it authenticated as. They are taken from
+		// THE HELPER'S RECORD rather than from cfg, which is the difference
+		// between what this coordinator asked for and what the daemon actually
+		// dialed.
 		Generation:         generation,
 		LifecycleLane:      res.LifecycleLane,
 		StartLifecycle:     res.StartLifecycle,
@@ -480,7 +585,82 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		IntegrationShell:   shell,
 		IntegrationStatus:  status,
 		IntegrationReason:  reason,
-	}, true, nil
+	}
+	if remote != nil {
+		out.Host = remote.Host
+		out.Account = remote.User
+	}
+	return out, true, nil
+}
+
+// openSSH hosts an ssh pane on this machine's helper: the daemon dials the far
+// host and the session's process is the shell channel it opens (nocx-50w7p.5).
+//
+// # The division this function is
+//
+// The DESTINATION IS RESOLVED HERE AND DIALED THERE. This half contributes the
+// two things a helper may not decide for itself: the ADDRESS — an alias through
+// ~/.ssh/config, merged with that config's own defaults — and the
+// AUTHORIZATION, because a linked credential may only be spent on the endpoint
+// its profile names and this process is the party holding that binding. What
+// crosses is an address, an account and a REFERENCE to material, so the helper
+// holds no secret at rest and cannot dial what this coordinator has not
+// authorised (ssh.WireDestination's own comment, which is one conversion rather
+// than a copy per consumer).
+//
+// # Why the claim rides this spawn
+//
+// L7's rule is that a pane's claim is durable BEFORE the first irreversible
+// effect, and the effect here is a shell on somebody else's machine. A
+// coordinator that dies between this spawn and the binding it writes leaves a
+// claim naming a session nothing recorded, and the repeat passes the SAME key
+// so the helper answers with the session the first attempt made instead of
+// forking a second far shell (proto.SSHSpawnParams' comment on the field). That
+// is why the key is a parameter rather than minted below, and why the empty
+// string is not passed: an open with no claim is an open owed no promise.
+func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg session.Config, claim string) (hostedSpawnResult, error) {
+	if cfg.Remote == nil {
+		// Unreachable from the wire — resolveRemote builds this before Kind is
+		// set to Remote — and named rather than panicked on, because the two
+		// facts are written by different statements in different files.
+		return hostedSpawnResult{}, errors.New("open an ssh pane on this machine's helper: the config carries no destination")
+	}
+	target, err := o.resolveTarget(ctx, cfg.Host, session.SSHOptionsFromConfig(cfg.Remote))
+	if err != nil {
+		return hostedSpawnResult{}, fmt.Errorf("resolve the ssh pane's destination: %w", err)
+	}
+	params := proto.SSHSpawnParams{
+		Destination: ssh.WireDestination(target),
+		// The two facts the far launcher is built for, read off the config the
+		// registry accepted rather than off the caller's spec: the shell pin a
+		// profile may carry (nocx-pu4.1) and the integration mode the resolver
+		// concluded. Their vocabularies are the same closed sets, and an EMPTY
+		// mode is not a gap to fill in here — it means "this destination was
+		// never asked", which profile.DesiredMode's own gate answers as the
+		// default does (AD-8, one owner for that question).
+		Shell:       proto.SSHShellKind(cfg.Remote.Shell),
+		DesiredMode: proto.SSHMode(cfg.Remote.DesiredMode),
+		Cols:        cfg.Cols,
+		Rows:        cfg.Rows,
+		// NO Cwd, and the absence is the wire's rule rather than an omission:
+		// this generation cannot move a far login shell, so `spawn-ssh` refuses a
+		// non-empty cwd by name instead of accepting a value nothing acts on. The
+		// launch record keeps the `cwd` key and reports it empty for the same
+		// reason.
+		IdempotencyKey: claim,
+		// THIS backend's endpoint, per spawn, for the reason the local arm gives:
+		// the pane's tools belong to the coordinator that opened it, and one
+		// account's daemon serves several coordinators (D12). The two FAR-HOST
+		// paths are deliberately left empty — a far socket path with no endpoint
+		// here is refused rather than degraded, and this opener arranges no
+		// far-side forward yet, so the honest request is the one that asks for no
+		// tool surface at all.
+		AgentToolEndpoint: o.toolEndpoint(),
+	}
+	return spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
+		params.Lifecycle = life
+		return spawn.client.SpawnSSH(ctx, params)
+	})
 }
 
 // localIntegrationStatus is what this open already knows about the pane's
@@ -878,11 +1058,29 @@ type hostedOpeners struct {
 	remote *helperRegistry
 }
 
+// OpenHosted asks the far host's own helper first when the destination is
+// remote, and THIS machine's helper when it is not — or when the far host's
+// helper declined.
+//
+// The order is the epic's shape rather than a preference. A destination whose
+// own machine runs a helper needs no channel from here at all: that pane is the
+// far host's local shell, and the install that made it so already rides this
+// machine's helper rather than a dial of the coordinator's. Everything else —
+// no helper there, or none the consent decision allows — is a pane THIS
+// machine's helper dials and hosts, which is what replaced the coordinator's own
+// fallback dial (nocx-50w7p.5).
+//
+// The claim travels BOTH ways, because both spawns are irreversible: a repeat
+// that reaches either helper must answer with the session the first attempt made
+// rather than fork a second shell.
 func (h *hostedOpeners) OpenHosted(ctx context.Context, cfg session.Config, claim string) (transport.HostedSessionOpen, bool, error) {
 	if cfg.Kind == session.KindLocal {
 		return h.local.OpenHosted(ctx, cfg, claim)
 	}
-	return h.remote.OpenHosted(ctx, cfg)
+	if opened, selected, err := h.remote.OpenHosted(ctx, cfg, claim); selected {
+		return opened, true, err
+	}
+	return h.local.OpenHosted(ctx, cfg, claim)
 }
 
 var _ transport.HelperSessionOpener = (*hostedOpeners)(nil)

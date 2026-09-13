@@ -86,6 +86,26 @@ type hostedSpawnResult struct {
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
+// spawnFunc is the ONE act that differs between the panes this opener hosts:
+// which op carries the spawn request.
+//
+// It is a parameter rather than a second copy of run, on the file header's own
+// argument. The lifecycle leg, the attach, the adoption and the rollback order
+// between them are decisions with reasons behind them, and a second
+// implementation would carry the code without the reasons. The op is a fourth
+// member of the list of things that genuinely differ — beside which helper to
+// reach, what the durable binding says, and who owns the connection afterwards
+// — rather than a reason to fork the other three.
+//
+// Why the op differs at all is the wire's own rule (contracts/helper): every
+// shape is `additionalProperties: false`, so a destination folded into `spawn`
+// would be a payload an older generation REJECTS, while `spawn-ssh` is a new op
+// it answers `unknown_op` to — which a coordinator already reads as "this
+// machine's helper is older than this app". So the two params structs are two
+// shapes on purpose, and life is handed to the caller because only the caller
+// knows which of them carries the launch.
+type spawnFunc func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error)
+
 // run spawns, attaches and adopts.
 //
 // THE ORDER IS THE ROLLBACK and each step names what is true if the next one
@@ -94,7 +114,7 @@ type hostedSpawnResult struct {
 // session that is attached and then not adopted is closed on both sides. The
 // one thing no arm does is close the connection, for the reason the file
 // header gives.
-func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.SpawnParams) (hostedSpawnResult, error) {
+func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFunc) (hostedSpawnResult, error) {
 	var subscriberRaw [16]byte
 	if _, err := rand.Read(subscriberRaw[:]); err != nil {
 		return hostedSpawnResult{}, err
@@ -103,6 +123,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 
 	var lifecycleAdapter *lifecyclechannel.Adapter
 	var lifecyclePeer net.Conn
+	// life is the launch the adapter mints, held here rather than written onto
+	// a params struct this function no longer owns: which struct carries it is
+	// the caller's business (see spawnFunc).
+	var life *proto.LifecycleLaunch
 	if h.lifecycle != nil {
 		coordinatorConn, peerConn := net.Pipe()
 		opts := []lifecyclechannel.Option{lifecyclechannel.WithLossReporter(h.loss)}
@@ -123,7 +147,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 		}
 		lifecycleAdapter, lifecyclePeer = adapter, peerConn
 		launch := adapter.Launch()
-		params.Lifecycle = &proto.LifecycleLaunch{
+		life = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
 		}
@@ -135,7 +159,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, params proto.S
 		}
 	}
 
-	entry, err := h.client.Spawn(ctx, params)
+	entry, err := spawn(ctx, life)
 	if err != nil {
 		abortLifecycleNow()
 		return hostedSpawnResult{}, err

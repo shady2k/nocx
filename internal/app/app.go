@@ -1000,6 +1000,14 @@ func New(opts ...Option) (*App, error) {
 	// so the holder is what lets one registry be complete either way.
 	helperPrompts := &helperPrompt{log: slogger}
 	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, helperPrompts, slogger))
+	// The destination half of the same client (nocx-50w7p.5): an ssh pane is
+	// hosted by THIS machine's helper, so the opener must resolve the address and
+	// the credential's authorization before the daemon is asked to dial — the
+	// two decisions that stay in the party reading ~/.ssh/config. It is the same
+	// *ssh.RealClient the reverse handlers above sign through, bound at the same
+	// point for the same reason: both halves need the vault and the profile
+	// store, which exist by now and did not at New.
+	localOpener.setSSHTargets(sshClient)
 
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is

@@ -334,7 +334,7 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 		Kind: session.KindRemote, Host: "host.example", Cwd: t.TempDir(),
 		PaneID: paneID, ProfileID: "profile-1",
 		Remote: helperConnection("u"),
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("open a helper-hosted session: %v", err)
 	}

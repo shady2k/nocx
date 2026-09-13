@@ -73,7 +73,6 @@ import (
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/waittest"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 // ---------------------------------------------------------------------------
@@ -939,9 +938,11 @@ func (g *recordingCarrier) EnsureInstalledRemote(ctx context.Context, host strin
 	return g.inner.EnsureInstalledRemote(ctx, host, opts...)
 }
 
-func (g *recordingCarrier) UninstallRemote(ctx context.Context, c *gossh.Client) (removed, conflicts []string, err error) {
-	return g.inner.UninstallRemote(ctx, c)
-}
+// There is no UninstallRemote here any more (nocx-50w7p.5): the removal left
+// ssh.RemoteInstaller when it moved onto this machine's helper, so this
+// delegation double records the publish and nothing else. The removal's
+// behaviour is asserted where it now lives, in
+// helper_bundle_acceptance_test.go's uninstall acceptance.
 
 // delegation reports that the publish was delegated at all, and the destination
 // it was handed.

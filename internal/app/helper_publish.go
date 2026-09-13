@@ -72,9 +72,16 @@ type helperBundlePublisher struct {
 }
 
 // bundlePublisher is the publish protocol as this file needs it: the bundle,
-// into a named home, over a filesystem carrier.
+// into a named home, over a filesystem carrier — and its removal, over the
+// same carrier and from the same home.
+//
+// The two are one interface because they are one route: both ride a probe lease
+// and an sftp channel (nocx-50w7p.5 moved the removal here to join the
+// publish), and a caller that could publish but not remove would be a second
+// transport for one protocol.
 type bundlePublisher interface {
 	EnsureInstalledRemote(ctx context.Context, fs shellintegration.FS, remoteHome string) error
+	UninstallRemote(ctx context.Context, fs shellintegration.FS, remoteHome string) (removed, conflicts []string, err error)
 }
 
 // PublishBundle writes the integration bundle into the remote account's home,
@@ -128,4 +135,59 @@ func (p *helperBundlePublisher) PublishBundle(ctx context.Context, host string, 
 			"host", host, "home", home)
 	}
 	return nil
+}
+
+// UninstallBundle removes the integration bundle from the remote account's
+// home, through this machine's helper — the mirror of PublishBundle, over the
+// same lease and the same channel (nocx-50w7p.5).
+//
+// It exists because the removal had its own transport until now: it rode the
+// connection internal/ssh acquired for the coordinator (`UninstallIntegration`),
+// which is the last dial this process made and the one the epic exists to
+// delete. Nothing about the protocol moves with it — internal/shellintegration
+// still owns what a removal IS, and internal/remoteprobe still owns the
+// commands — and what changes is only which process holds the connection.
+//
+// THE ORDER IS THE CONNECTION'S, for the reason PublishBundle gives: the lease
+// first so the pooled connection exists before the channel opens on it, and
+// released last so the channel never outlives the reference keeping it alive.
+// The home is asked over the lease and not over the sftp subsystem, because the
+// subsystem's starting directory is the passwd home, and a removal that used it
+// would look in a different place from the publish that wrote.
+func (p *helperBundlePublisher) UninstallBundle(ctx context.Context, host string, opts ...ssh.ConnectOption) (removed, conflicts []string, err error) {
+	lease, err := p.probes.acquire(ctx, host, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: %w", host, err)
+	}
+	defer func() { _ = lease.Close() }()
+
+	home, err := lease.Home(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: the far side's home directory could not be read: %w", host, err)
+	}
+	if home == "" {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: the far side named no home directory", host)
+	}
+
+	stream, err := p.channels.openChannel(ctx, proto.ChannelSFTP, host, opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: %w", host, err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	client, err := pkgsftp.NewClientPipe(stream, stream)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: sftp client: %w", host, err)
+	}
+	defer func() { _ = client.Close() }()
+
+	removed, conflicts, err = p.publish.UninstallRemote(ctx, shellIntegrationSFTPFS{SFTPFS: ssh.NewSFTPFS(client)}, home)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remove the shell integration bundle on %s: %w", host, err)
+	}
+	if p.log != nil {
+		p.log.Info("ssh: shell integration bundle removed through this machine's helper",
+			"host", host, "home", home, "removed", len(removed), "conflicts", len(conflicts))
+	}
+	return removed, conflicts, nil
 }

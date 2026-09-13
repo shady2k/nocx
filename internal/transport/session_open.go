@@ -289,43 +289,51 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 		sess   session.Session
 		hosted *HostedSessionOpen
 	)
-	if err := o.op.Dial(ctx, func(ctx context.Context, _ capability.OpenService) error {
-		// THE HELPER IS THE ONLY ROUTE A PANE HAS, and for an ssh pane that is
-		// the whole of nocx-50w7p.5. There is no second arm here any more: this
-		// used to fall back to the session registry, which dialed the far host
-		// FROM THIS PROCESS when no helper claimed the destination. That is the
-		// "Tier A fallback" ADR-0057 refuses by name — locally a helper that
-		// cannot be reached is a refusal that says WHAT failed, WHY, and what to
-		// do about it, and never a second way to connect.
+	if err := o.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
+		// THE HELPER IS ASKED FIRST, for both kinds of destination.
+		if o.helper != nil {
+			openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
+			if selected {
+				if oerr != nil {
+					return oerr
+				}
+				if openedHosted.Session == nil {
+					return errors.New("helper session opener returned no session")
+				}
+				sess = openedHosted.Session
+				hosted = &openedHosted
+				return nil
+			}
+			if oerr != nil {
+				return oerr
+			}
+		}
+		// AN SSH DESTINATION IS A HELPER'S, OR IT IS A REFUSAL. There is no
+		// fallback below this line for one: this used to dial the far host FROM
+		// THIS PROCESS whenever no helper claimed the destination, and that is
+		// the Tier A route ADR-0057 refuses by name (nocx-50w7p.5). The sentence
+		// is the point rather than a nicety — reaching the old fallback was
+		// indistinguishable to a user from a local copy of nocx behaving
+		// differently.
 		//
-		// What is left is one route with two possible owners, and which one
-		// answers is the dispatch's decision rather than this function's: the far
-		// host's own helper when it has one, and THIS machine's helper otherwise.
-		// A destination neither will take is now a sentence, and the sentence is
-		// the point — the old fallback reached a dial the product is not supposed
-		// to have, and reaching it is indistinguishable to a user from a local
-		// copy of nocx behaving differently.
-		if o.helper == nil {
-			return refuse(-32603, "SSH sessions are opened by this machine's helper (no helper opener is wired)")
-		}
-		openedHosted, selected, oerr := o.helper.OpenHosted(ctx, cfg, claim)
-		if oerr != nil {
-			return oerr
-		}
-		if !selected {
-			// Unreachable for both of the kinds a session can have, since this
-			// machine's opener claims every destination that is not a foreign
-			// one. Named rather than swallowed because what it would mean is a
-			// helper that declined this machine's own pane — and a swallow here
-			// would surface as a session with no channel.
+		// The kind check is what enforces it, and it is HERE rather than inside
+		// the registry because the registry is a general one: its local arm
+		// forks a process and is a seam tests legitimately use, while its remote
+		// arm connects to a host and is the thing this bead deleted. One check
+		// separates them, so a future caller cannot reach `r.ssh.Connect` by
+		// arriving with the wrong config.
+		if cfg.Kind == session.KindRemote {
+			if o.helper == nil {
+				return refuse(-32603, "SSH sessions are opened by this machine's helper (no helper opener is wired)")
+			}
 			return refuse(-32603, "SSH sessions are opened by this machine's helper, and no helper claimed this destination")
 		}
-		if openedHosted.Session == nil {
-			return errors.New("helper session opener returned no session")
-		}
-		sess = openedHosted.Session
-		hosted = &openedHosted
-		return nil
+		// A LOCAL destination in a build that wired no helper opener — the local
+		// PTY seam (see OpenService.Open's own doc). It forks a process; it does
+		// not connect to a host.
+		var oerr error
+		sess, oerr = svc.Open(ctx, cfg)
+		return oerr
 	}); err != nil {
 		// The spawn did not happen, or did not survive its own failure arm.
 		// The claim goes with it: a key left standing would name a session

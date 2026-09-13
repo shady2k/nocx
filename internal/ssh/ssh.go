@@ -36,34 +36,29 @@ type Channel interface {
 // while the publish succeeded. The remote command now comes from the
 // launcher, unconditionally and whatever the publish did.
 //
-// # Why the publish names a DESTINATION and the removal names a CLIENT
+// # Why the publish and the removal now name the same thing
 //
-// The two halves ride different transports, and the asymmetry is the epic's
-// state rather than a preference (nocx-50w7p.15). The PUBLISH is this
-// machine's helper's: the helper dials the far host, answers where the
-// account's home is, and opens the sftp channel the bundle travels on — all
-// on the one pooled connection AD-4 keys by destination. So the publish takes
-// what a helper is handed and nothing more: the address the caller named and
-// the options it resolved with, exactly as the pane's own open does, because
-// a different naming of one destination is a different pool key and therefore
-// a second authentication.
+// The two halves rode different transports, and that asymmetry was the epic's
+// state rather than a preference (nocx-50w7p.15, closed by nocx-50w7p.5). The
+// PUBLISH is this machine's helper's: the helper dials the far host, answers
+// where the account's home is, and opens the sftp channel the bundle travels on
+// — all on the one pooled connection AD-4 keys by destination. So the publish
+// takes what a helper is handed and nothing more: the address the caller named
+// and the options it resolved with, exactly as the pane's own open does, because
+// a different naming of one destination is a different pool key and therefore a
+// second authentication.
 //
-// The REMOVAL is still the coordinator's own dial (UninstallIntegration holds
-// the pooled connection and calls this with it), and it will move the same way
-// when its own task lands. Until then it keeps the raw client, and the home
-// question travels with it: internal/ssh must not compose shell text (the
-// commands are internal/remoteprobe's), so the carrier asks, over the client
-// it is handed.
+// The REMOVAL was the coordinator's own dial — a pooled connection held here and
+// the raw client handed to the carrier — which made it the last connection this
+// process made and the last reason it held a client at all. It rides the same
+// lease and the same channel now, so this interface names a DESTINATION on both
+// halves and no *gossh.Client appears in it. That is what let the whole dial
+// path leave this package's untagged build: an interface that takes a
+// *gossh.Client is an interface that cannot be satisfied by a build without one.
 type RemoteInstaller interface {
 	// EnsureInstalledRemote publishes the bundle into the remote account's
 	// home, as the far side reports it.
 	EnsureInstalledRemote(ctx context.Context, host string, opts ...ConnectOption) error
-	// UninstallRemote removes the committed integration bundle on the host,
-	// over the SFTP carrier, and reports the two lists: root-relative paths
-	// removed and root-relative paths the user modified (left in place).
-	// Defined here with the other carrier method so internal/ssh can own
-	// the dial-and-call (P10) without depending on shellintegration.
-	UninstallRemote(ctx context.Context, sshClient *gossh.Client) (removed, conflicts []string, err error)
 }
 
 // modeAllowsIntegration reports whether the resolved destination mode

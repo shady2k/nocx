@@ -1355,14 +1355,16 @@ func New(opts ...Option) (*App, error) {
 		// listing and the consent path share the composition root.
 		transport.WithHelperConsentStore(helperConsent),
 		transport.WithHelperInstallStore(helperInstalls),
-		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
-		// satisfies transport.RemoteUninstaller without an adapter — the
-		// signatures are identical. The capability owns the dial-and-call
-		// (acquire the pooled connection, ask the carrier for the remote
-		// home, run Publisher.Uninstall over SFTP); the raw SSH client
-		// never leaves internal/ssh. Wired beside the installer P8 added:
-		// a saved connection that publishes can also remove.
-		transport.WithRemoteUninstaller(sshClient),
+		// The uninstall capability (nocx-mlm7 P10, design §9, moved by
+		// nocx-50w7p.5): the carrier rides THIS MACHINE'S HELPER — a probe lease
+		// for the far account's home, then an sftp channel off the same pooled
+		// connection the publish already uses — so the removal no longer dials
+		// from this process and no raw client leaves it. The method signature is
+		// the same as the one *ssh.RealClient used to satisfy, which is why the
+		// transport and its handler needed no edit at all; what changed is the
+		// party behind it. A build with no helper wired refuses by name at the
+		// act rather than quietly removing nothing.
+		transport.WithRemoteUninstaller(remoteInstaller),
 		// The tunnel connector (nocx-8gix, moved by nocx-50w7p.8): a forward
 		// acquires a lease on this machine's helper, which opens a
 		// direct-tcpip channel per connection and a remote listener for -R.

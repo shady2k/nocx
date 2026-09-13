@@ -29,34 +29,44 @@ import (
 // replacing coordinator does.
 func aLiveSessionsWork(t *testing.T, sessionID, entryID string) (string, []byte) {
 	t.Helper()
-	ctx := context.Background()
 	db, led, path := newLedgerAt(t)
 	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
 	envReady(t, led, "local")
+	body := seedLiveSessionWork(t, db, sessionID, entryID)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return path, body
+}
 
+// seedLiveSessionWork is that fixture's PER-SESSION half, so a test whose
+// subject is "exactly this session's rows" can seed two into ONE file — which
+// it must, because a store holding one block cannot tell "closed the judged
+// session's entries" from "closed every open entry".
+func seedLiveSessionWork(t *testing.T, db content.ContentDB, sessionID, entryID string) []byte {
+	t.Helper()
+	ctx := context.Background()
+	led := db.Ledger()
 	if err := led.CreateSession(ctx, content.Session{ID: sessionID, WorkspaceID: "ws-1"}); err != nil {
-		t.Fatalf("CreateSession: %v", err)
+		t.Fatalf("CreateSession(%s): %v", sessionID, err)
 	}
 	if _, err := led.Submit(ctx, content.SubmitEntry{
 		ID: entryID, Client: "test-client", EnvironmentID: "local",
 		PaneID: strPtr("pane-1"), SessionID: strPtr(sessionID),
 		Cwd: "/repo", Kind: content.EntryShell, Intent: "make build",
 	}); err != nil {
-		t.Fatalf("Submit: %v", err)
+		t.Fatalf("Submit(%s): %v", entryID, err)
 	}
 	if _, err := led.StartExecution(ctx, content.StartExecution{EntryID: entryID}); err != nil {
-		t.Fatalf("StartExecution: %v", err)
+		t.Fatalf("StartExecution(%s): %v", entryID, err)
 	}
 	body := []byte("[  1%] building the thing\r\n")
 	if _, err := db.SessionOutput().Append(ctx, content.SessionOutputAppend{
 		SessionID: sessionID, Offset: 0, Body: body,
 	}); err != nil {
-		t.Fatalf("Append: %v", err)
+		t.Fatalf("Append(%s): %v", sessionID, err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	return path, body
+	return body
 }
 
 type retentionClock struct {
@@ -176,11 +186,29 @@ func TestTheLiveVerdictKeepsEverything(t *testing.T) {
 
 // Assertion 3: `absent` is exactly what `Open` used to do, for that session
 // alone.
+//
+// THE SECOND SESSION IS THE ASSERTION, not a second fixture. A store holding
+// one block cannot tell "closed the entries of the judged session" from
+// "closed every open entry it has" — the two observations are the same one —
+// and per-session reconciliation exists precisely because a store holds both
+// at once: a host that answered about one pipe and was never asked about the
+// other. So both are here, the verdict is applied to one, and the other is
+// read back whole.
 func TestTheAbsentVerdictSweepsThatSessionAlone(t *testing.T) {
 	const goneID = "session-the-host-does-not-report"
-	const entryID = "00000000-0000-7000-8000-00000000e003"
-	path, _ := aLiveSessionsWork(t, goneID, entryID)
+	const goneEntry = "00000000-0000-7000-8000-00000000e003"
+	const keptID = "session-nobody-has-asked-about-yet"
+	const keptEntry = "00000000-0000-7000-8000-00000000e013"
 	ctx := context.Background()
+
+	db, led, path := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+	seedLiveSessionWork(t, db, goneID, goneEntry)
+	keptBody := seedLiveSessionWork(t, db, keptID, keptEntry)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	again, err := reopenStore(t, path)
 	if err != nil {
@@ -188,13 +216,23 @@ func TestTheAbsentVerdictSweepsThatSessionAlone(t *testing.T) {
 	}
 	defer func() { _ = again.Close() }()
 
+	// Both were carried over, so the verdict below is about ONE OF TWO.
+	pending, err := again.Reconcile().Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("carried over = %+v, want both sessions — a sweep over one session cannot be "+
+			"observed against a store holding one", pending)
+	}
+
 	if applyErr := again.Reconcile().Apply(ctx, content.SessionJudgement{
 		SessionID: goneID, Verdict: content.VerdictAbsent,
 	}); applyErr != nil {
 		t.Fatalf("Apply(absent): %v", applyErr)
 	}
 
-	e, err := again.Ledger().Entry(ctx, entryID)
+	e, err := again.Ledger().Entry(ctx, goneEntry)
 	if err != nil || e == nil {
 		t.Fatalf("Entry: %v (nil=%v)", err, e == nil)
 	}
@@ -213,6 +251,41 @@ func TestTheAbsentVerdictSweepsThatSessionAlone(t *testing.T) {
 	}
 	if len(rec.Runs) != 0 || rec.Bytes != 0 {
 		t.Fatalf("recording after absent = %+v, want nothing — the absent path restores the old bound", rec)
+	}
+
+	// THE SESSION NOBODY JUDGED, and every one of the four things the verdict
+	// does is asserted ABSENT of it: its block is still open, it still names
+	// its pipe, and its bytes are still recorded. Any one of them alone would
+	// be satisfied by a sweep that only half-reached the other session.
+	kept, err := again.Ledger().Entry(ctx, keptEntry)
+	if err != nil || kept == nil {
+		t.Fatalf("Entry(%s): %v (nil=%v)", keptEntry, err, kept == nil)
+	}
+	if kept.Phase == content.PhaseClosed || kept.Status != content.EntryPending {
+		t.Fatalf("the other session's block = %s/%s, want it open and pending — a verdict about %q "+
+			"closed a command that is still running", kept.Phase, kept.Status, goneID)
+	}
+	if kept.SessionID == nil || *kept.SessionID != keptID {
+		t.Fatalf("the other session's session_id = %v, want %q — its pipe is untouched by a "+
+			"verdict about another one", entrySession(kept), keptID)
+	}
+	keptRec, err := again.SessionOutput().Read(ctx, keptID)
+	if err != nil {
+		t.Fatalf("Read(%s): %v", keptID, err)
+	}
+	if len(keptRec.Runs) != 1 || string(keptRec.Runs[0].Body) != string(keptBody) {
+		t.Fatalf("the other session's recording = %+v, want the %d bytes it held — an absent verdict "+
+			"deleted a recording it does not own", keptRec.Runs, len(keptBody))
+	}
+	// And it is still awaiting its own verdict: the sweep judged a session,
+	// not the pass.
+	after, err := again.Reconcile().Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending after absent: %v", err)
+	}
+	if len(after) != 1 || after[0].SessionID != keptID {
+		t.Fatalf("carried over after the verdict = %+v, want only %q — a verdict about one session "+
+			"cleared another's", after, keptID)
 	}
 }
 

@@ -25,17 +25,21 @@ package app
 //     TestTheShippedRootAsksThisMachinesDaemonAndNeverStartsOne. A route that
 //     is never wired would pass none of what follows.
 //
-// There is no wire assertion of the cause, and that is a property of the tree
-// rather than a gap: the cause reaches the renderer through a ledger row that
-// NAMES the session (content/reconcile_sqlite.go's unreconciledCause), and
-// today's shell-entry writer deliberately leaves entries.session_id NULL
-// (ws_ledger.go's `command` says why). So the page, the schema and the notice
-// are asserted where each of them lives — this file's page assertion below,
-// the contract's enum, and frontend/src/unreconciled-notice.test.tsx — and no
-// second surface is invented to make a test convenient.
+// The cause reaches the renderer through a ledger row that NAMES the session
+// (content/reconcile_sqlite.go's unreconciledCause), and until nocx-ie23r.6
+// there was no wire assertion of it here because the shell-entry writers
+// deliberately left entries.session_id NULL. They no longer do — a command's
+// row is created naming the pipe it ran in — so the cause has a surface a
+// person reaches, and TestARestoredShellBlockSaysWhichMachineCouldNotBeAsked
+// below reads it the way the product does: off the socket, through
+// ledger.query, on the SHIPPED root after a restart. The page assertion in
+// section 1, the contract's enum and frontend/src/unreconciled-notice.test.tsx
+// stay where they are; what is added is the wire, because there is now
+// something on it.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
@@ -581,4 +585,145 @@ func TestTheShippedRootAsksThisMachinesDaemonAndNeverStartsOne(t *testing.T) {
 	if sid == "" {
 		t.Fatal("the first boot opened no session, so there was nothing carried over to ask about")
 	}
+}
+
+// ── the restored block, read the way the product reads it ────────────────
+
+// A SHELL BLOCK THAT COMES BACK AFTER A RESTART SAYS WHICH MACHINE COULD NOT
+// BE ASKED ABOUT ITS PIPE (nocx-ie23r.6).
+//
+// EVERY STEP IS A PRODUCT STEP. The SHIPPED root opens a pane through this
+// machine's helper; the connection sends the ledger events a command that
+// started and ended sends, in the renderer's own shape (design §6.2); the
+// coordinator is replaced while this machine's daemon is gone; and the
+// restored block is read back over the socket with ledger.query — the request
+// the renderer's own restore makes (frontend/src/restore-client.ts). Nothing
+// here calls the reconciler or reads the store directly, because the claim
+// under test is what a person sees, not what a function returns.
+//
+// WHAT IT WOULD MISS WITHOUT A NAMED SESSION. The third state is derived from
+// entries.session_id and nothing else (content/reconcile_sqlite.go's
+// unreconciledCause), so a row that names no pipe is restored as RUNNING: the
+// product asserting that a command it could not check is still going. That is
+// the same lie the forced close told from the other end, and it is why the
+// assertion is on the READ rather than on the verdict.
+func TestARestoredShellBlockSaysWhichMachineCouldNotBeAsked(t *testing.T) {
+	home := storagetest.IsolateWithHome(t)
+	// The artifact the root installs, and therefore the generation its own
+	// socket is named for — the argument is
+	// TestTheShippedRootAsksThisMachinesDaemonAndNeverStartsOne's, made once.
+	src := fakeArtifacts{payload: syntheticPayload}
+	generation := src.hash()
+	ep := startFakeLocalEndpoint(t, endpoint.Dir(home), generation)
+	ctx := context.Background()
+
+	// ── the command, in a helper-hosted pane of the shipped root ─────────
+	first := bootLocalAppOn(t, src)
+	conn := dialAppWS(t, first)
+	opened := callAppWS(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	if opened.Error != nil {
+		t.Fatalf("opening a pane through the shipped root: %+v", opened.Error)
+	}
+	var pane struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(opened.Result, &pane); err != nil {
+		t.Fatalf("decode open: %v (raw %s)", err, opened.Result)
+	}
+	if pane.SessionID == "" {
+		t.Fatal("the open answered no session, so there was no pane for a command to run in")
+	}
+	// The pane IS helper-hosted, which is the case under test: a session this
+	// machine's daemon spawned has a binding row (session_open.go's
+	// recordHostedBinding writes it before the session is handed back), so a
+	// command's row can name it. The rowless case — a direct PTY open, where
+	// that write returns early — is asserted where it lives, in
+	// internal/content, because a pane opened here without the helper would
+	// not be this case at all.
+	if got := ep.spawned(); got != 1 {
+		t.Fatalf("%d sessions were spawned through this machine's daemon, want 1", got)
+	}
+
+	// The command's two ledger events. The envelope is repeated on every one
+	// on purpose (design §6.2): the row needs environment, cwd, kind and
+	// intent, so a close whose open was lost still lands.
+	const entryID = "0198f2b0-0000-7000-8000-00000000d0a1"
+	envelope := map[string]any{
+		"id": entryID, "sessionId": pane.SessionID, "cwd": "/repo", "kind": "shell",
+		"intent": "make watch", "sensitivity": "normal", "clientSeq": 0,
+		"attemptId": entryID,
+	}
+	if bind := callAppWS(t, conn, "ledger.bind", map[string]any{
+		"envelope": envelope, "facts": map[string]any{},
+	}, 2); bind.Error != nil {
+		t.Fatalf("ledger.bind: %+v", bind.Error)
+	}
+	if ended := callAppWS(t, conn, "ledger.close", map[string]any{
+		"envelope": envelope, "status": "success",
+		"facts": map[string]any{"terminationReason": "completed", "exitCode": 0},
+	}, 3); ended.Error != nil {
+		t.Fatalf("ledger.close: %+v", ended.Error)
+	}
+	_ = conn.Close()
+	first.Shutdown(ctx)
+
+	// ── the restart, with this machine's daemon gone ─────────────────────
+	// The state a machine is in when its daemon was killed or never came
+	// back, and the half the sentence under test is about.
+	ep.stop()
+	second := bootLocalAppOn(t, src)
+
+	// ── the read, which is the product's own ─────────────────────────────
+	restored := dialAppWS(t, second)
+	defer func() { _ = restored.Close() }()
+	page := callAppWS(t, restored, "ledger.query", map[string]any{"scope": "everywhere"}, 4)
+	if page.Error != nil {
+		t.Fatalf("ledger.query on the replacing coordinator: %+v", page.Error)
+	}
+	type restoredRow struct {
+		ID           string  `json:"id"`
+		Kind         string  `json:"kind"`
+		Phase        string  `json:"phase"`
+		Unreconciled *string `json:"unreconciled"`
+	}
+	var body struct {
+		Entries []restoredRow `json:"entries"`
+	}
+	if err := json.Unmarshal(page.Result, &body); err != nil {
+		t.Fatalf("decode ledger.query: %v (raw %s)", err, page.Result)
+	}
+	var found *restoredRow
+	for i := range body.Entries {
+		if body.Entries[i].ID == entryID {
+			found = &body.Entries[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("the restored page does not carry the command at all: %+v — the row the renderer "+
+			"submitted did not survive the replacement", body.Entries)
+	}
+	if found.Unreconciled == nil {
+		t.Fatal("the restored block says nothing about whether anybody could be asked, so the " +
+			"renderer draws it as RUNNING — the row was recorded without naming the pipe it ran in")
+	}
+	if *found.Unreconciled != string(content.CauseLocalEndpointUnreachable) {
+		t.Fatalf("the restored block's unreconciled = %q, want %q — THIS machine's own daemon is "+
+			"what could not be asked, and every other sentence would send a person looking at a "+
+			"host instead of at their own machine", *found.Unreconciled, content.CauseLocalEndpointUnreachable)
+	}
+	// And it is the command that ran, in the shape a restored block has:
+	// nothing about the read invented a row.
+	if found.Kind != "shell" || found.Phase != "closed" {
+		t.Fatalf("the restored block = kind %q phase %q, want the shell command that ended",
+			found.Kind, found.Phase)
+	}
+
+	// The daemon's own counter, so the cause above is the LOCAL route's and
+	// not a coincidental default: it was reached and did not answer.
+	if ep.asked() == 0 {
+		t.Fatal("this machine's daemon was never asked, so the cause above came from somewhere else")
+	}
+	second.Shutdown(ctx)
 }

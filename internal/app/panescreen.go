@@ -37,14 +37,19 @@ const paneScreenTimeout = 5 * time.Second
 // this refuses is one a shell asked for, and the answer reaches that shell's own
 // pane (D4 — "no enrolment, no orchestration, and the pane says so").
 //
-// THE END OF THIS REFUSAL IS nocx-ygxjv.13. Today the PTY of a pane with no
-// helper is held by the coordinator itself (a direct-channel SSH pane), and
-// there is no runtime beside it to read. .13 puts that PTY under THIS MACHINE'S
-// helper — the owner's decision of 2026-09-13: every session's PTY or channel is
-// owned by a helper, never by the coordinator — at which point the pane resolves
-// through the local route like every other and this error stops being reachable.
-// The predicate that raises it is owner() below, and .13 deletes it in one
-// place.
+// WHAT RAISES IT NOW (nocx-50w7p.5). The predicate is owner() below, and it
+// raises this for a session that is neither this machine's opener's nor a
+// remote registry's — a pane no helper holds, which is exactly what the
+// sentence says. Before this bead the same predicate also caught a pane whose
+// terminal WAS held: an ssh pane opened by this machine's helper has a remote
+// destination, and an owner that routed by kind sent it looking for a far
+// helper's registry entry it could never have. The doc's old claim — that
+// nocx-ygxjv.13 would make this unreachable by moving every PTY under a helper
+// — was right about the direction and wrong about the trigger: the panes became
+// the helper's in 08e90002, and the refusal stayed reachable because the
+// predicate was still asking the wrong question. It asks the opener now, so
+// what is left here is the honest case, and this error is genuinely "no helper
+// holds it" and nothing else.
 var errNoPaneRuntime = errors.New(
 	"nocx cannot watch this pane: no helper is holding its terminal, so there is no screen to read")
 

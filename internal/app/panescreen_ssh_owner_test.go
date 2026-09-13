@@ -118,3 +118,34 @@ func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
 	}
 	t.Logf("MEASURED the screen read for an ssh pane carried by this machine's helper succeeded")
 }
+
+// TestAPaneNoHelperHoldsIsStillTheNamedLoss is the PAIR of the test above, and
+// it is what stops the fix from being "the refusal never fires".
+//
+// The session here is in the registry and is nobody's: it was opened straight
+// into the registry, never through this machine's opener, and no remote helper
+// knows it. That is the case errNoPaneRuntime is FOR (nocx-50w7p.5), and the
+// assertion is the sentence rather than merely "an error", because a refusal
+// that stopped naming what failed is the failure mode this whole epic's
+// ADR-0057 work exists to prevent.
+func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
+	logger := log.NewSlogAdapter(discardLogger())
+	lg := discardLogger()
+	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+
+	// A LOCAL session, opened into the registry directly — so this machine's
+	// opener never saw it and does not hold it. Nothing else could hold a local
+	// id space, which is why it is the honest example of an unheld pane.
+	sess, err := reg.Open(context.Background(), session.Config{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("opening a session into the registry: %v", err)
+	}
+
+	ps := newPaneScreen(lg, reg, &localHelperOpener{log: lg}, &helperRegistry{})
+	err = ps.Available(string(sess.ID()))
+	if !errors.Is(err, errNoPaneRuntime) {
+		t.Fatalf("a pane no helper holds answered %v, want the refusal that names it — the owner must "+
+			"still refuse, or the fix above would be indistinguishable from never refusing", err)
+	}
+	t.Logf("MEASURED the unheld pane's refusal: %v", err)
+}

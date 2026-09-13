@@ -64,22 +64,23 @@
 // about what nocx's terminal IS. Measured on this binding, and none of it is
 // inferred:
 //
-//   - ANSWERED. DSR (`CSI 5n`, `CSI 6n`), the DEC-private DECRQM form
-//     (`CSI ? 6 $p` → `\x1b[?6;2$y`), the Kitty keyboard query (`CSI ? u`),
+//   - ANSWERED. DSR (`CSI 5n`, `CSI 6n`), DECRQM in both its forms — the
+//     DEC-private one (`CSI ? 6 $p` → `\x1b[?6;2$y`) and the ANSI one
+//     (`CSI 4 $p`), which the pinned fork patches upstream to answer
+//     (nocx-ygxjv.8) — the Kitty keyboard query (`CSI ? u`),
 //     device attributes (`CSI c` → `\x1b[?62;22c`, `CSI > c` → `\x1b[>1;0;0c`),
 //     and every size query — XTWINOPS `CSI 14/16/18 t` and mode 2048's in-band
 //     reports — from the geometry the terminal actually holds. DA's identity is
 //     the one ghostty answers itself (see bridge.c); DA is silent without its
 //     callback, which is why it is installed.
 //
-//   - NOT ANSWERED, deliberately. The ANSI DECRQM form (`CSI 4 $p`) is the
-//     debt ADR-0065 records and TestDECRQMOnInsertModeIsUnanswered carries. ENQ
-//     (0x05) and the colour-scheme query (`CSI ? 996 n`) answer nothing: the
-//     first has no response nocx has decided on, the second needs a theme the
-//     terminal does not own. A clipboard READ (`OSC 52` with a `?` payload) is
-//     in the same list for a different reason: nocx's clipboard is the
-//     runtime's to mediate (design §6.2), so no read callback is installed and
-//     a program that asks hears nothing — measured, not assumed.
+//   - NOT ANSWERED, deliberately. ENQ (0x05) and the colour-scheme query
+//     (`CSI ? 996 n`) answer nothing: the first has no response nocx has
+//     decided on, the second needs a theme the terminal does not own. A
+//     clipboard READ (`OSC 52` with a `?` payload) is in the same list for a
+//     different reason: nocx's clipboard is the runtime's to mediate
+//     (design §6.2), so no read callback is installed and a program that asks
+//     hears nothing — measured, not assumed.
 //
 //   - REPORTED BUT NOT ANSWERED. BEL, `OSC 0/2` (title), `OSC 7` (cwd),
 //     `OSC 52` clipboard WRITES and `OSC 9`/`OSC 777` (notifications) are

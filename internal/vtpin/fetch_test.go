@@ -22,8 +22,8 @@ type fixture struct {
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{manifest: validManifest(), dir: t.TempDir(), contents: map[string][]byte{}}
-	f.add(t, f.manifest.Source.Name, "the source tarball")
-	f.manifest.Source = f.asset(t, f.manifest.Source.Name)
+	f.add(t, f.manifest.Licenses.Name, "the licenses document")
+	f.manifest.Licenses = f.asset(t, f.manifest.Licenses.Name)
 	for i := range f.manifest.Targets {
 		target := &f.manifest.Targets[i]
 		f.add(t, target.Archive.Name, "archive bytes for "+target.Name)
@@ -158,9 +158,13 @@ func TestFetchVerifiesWithoutDownloadingTwice(t *testing.T) {
 	if err := f.manifest.Fetch(root, NewFetcher(server.URL), FetchOptions{}); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	wantRequests := 2 * len(f.manifest.Targets)
+	// One licences document and two files per target, and no more: the
+	// document is fetched like the archives, because the licences have to be
+	// the licences for the bytes they sit beside.
+	wantRequests := 1 + 2*len(f.manifest.Targets)
 	if requests != wantRequests {
-		t.Fatalf("%d downloads for %d targets, want %d", requests, len(f.manifest.Targets), wantRequests)
+		t.Fatalf("%d downloads for %d targets and the licenses document, want %d",
+			requests, len(f.manifest.Targets), wantRequests)
 	}
 	for _, target := range f.manifest.Targets {
 		sum, _, err := HashFile(VendorArchivePath(root, target.Name))
@@ -202,34 +206,38 @@ func TestFetchRefusesAMissingAssetByName(t *testing.T) {
 	}
 }
 
-func TestFetchWithSourceKeepsTheControlledCopy(t *testing.T) {
+// TestFetchInstallsTheLicensesDocument is the other half of what a fetch
+// materialises: the archives, and the licences of what is inside them. The
+// document is verified like every other asset, because a licence file that is
+// not the pinned bytes is not the licence for THESE tags — and it is fetched
+// unconditionally, since a build that links the archives owes the licences with
+// them.
+func TestFetchInstallsTheLicensesDocument(t *testing.T) {
 	f := newFixture(t)
 	root := t.TempDir()
-	// No targets: this test is about the source tarball. Fetch does not
-	// require a target list — Validate does, and the fixture is validated by
-	// its other tests.
+	// No targets: this test is about the licenses document, which is one file
+	// for all of them. Fetch does not require a target list — Validate does,
+	// and the fixture is validated by its other tests.
 	f.manifest.Targets = nil
-	if err := f.manifest.Fetch(root, NewFetcher(f.dir), FetchOptions{WithSource: true}); err != nil {
-		t.Fatalf("fetch --with-source: %v", err)
+	if err := f.manifest.Fetch(root, NewFetcher(f.dir), FetchOptions{}); err != nil {
+		t.Fatalf("fetch: %v", err)
 	}
-	path := filepath.Join(SourceDir(root), f.manifest.Source.Name)
+	path := f.manifest.LicensesPath(root)
 	got, _, err := HashFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != f.manifest.Source.SHA256 {
-		t.Fatalf("the source copy on disk is %s, pinned %s", got, f.manifest.Source.SHA256)
+	if got != f.manifest.Licenses.SHA256 {
+		t.Fatalf("the licenses document on disk is %s, pinned %s", got, f.manifest.Licenses.SHA256)
 	}
-
-	// Without the flag, the source is not fetched at all: a build does not
-	// need it, and a job that downloads 10 MB it never reads is a job that
-	// waits longer for nothing.
-	other := t.TempDir()
-	if err := f.manifest.Fetch(other, NewFetcher(f.dir), FetchOptions{}); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(filepath.Join(f.dir, f.manifest.Licenses.Name), []byte("someone else's terms"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if _, err := os.Stat(SourceDir(other)); !os.IsNotExist(err) {
-		t.Fatalf("the source was fetched without --with-source (stat: %v)", err)
+	err = f.manifest.Fetch(t.TempDir(), NewFetcher(f.dir), FetchOptions{})
+	var mismatch *MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("a substituted licenses document fetched as %v, want a MismatchError: the licences a binary "+
+			"ships have to be the licences for the archives it links", err)
 	}
 }
 
@@ -248,10 +256,10 @@ func TestFetcherReadsFileURLs(t *testing.T) {
 	f.manifest.Targets = nil
 	root := t.TempDir()
 	base := "file://" + filepath.ToSlash(f.dir)
-	if err := f.manifest.Fetch(root, NewFetcher(base), FetchOptions{WithSource: true}); err != nil {
+	if err := f.manifest.Fetch(root, NewFetcher(base), FetchOptions{}); err != nil {
 		t.Fatalf("fetch from %s: %v", base, err)
 	}
-	if _, err := os.Stat(filepath.Join(SourceDir(root), f.manifest.Source.Name)); err != nil {
+	if _, err := os.Stat(f.manifest.LicensesPath(root)); err != nil {
 		t.Fatalf("nothing was fetched from a file:// base: %v", err)
 	}
 }
@@ -260,7 +268,7 @@ func TestFetchReportsWhatItDid(t *testing.T) {
 	f := newFixture(t)
 	f.manifest.Targets = nil
 	var lines []string
-	opts := FetchOptions{WithSource: true, Log: func(format string, args ...any) {
+	opts := FetchOptions{Log: func(format string, args ...any) {
 		lines = append(lines, fmt.Sprintf(format, args...))
 	}}
 	if err := f.manifest.Fetch(t.TempDir(), NewFetcher(f.dir), opts); err != nil {

@@ -3,7 +3,6 @@ package ghostty
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -90,40 +89,31 @@ func TestDecrqmAnswersDecPrivateModes(t *testing.T) {
 	}
 }
 
-// decrqmANSIModeOps is the environment variable that turns the skipped test
-// below into a runnable one. Fixing the debt — by patching the pinned source,
-// carrying a patch queue, or taking an upstream release that fixed it — must
-// turn it green without editing this file, and running it with the variable set
-// is how the debt is confirmed to be real rather than remembered.
-const decrqmANSIModeOps = "NOCX_EMULATOR_DECRQM_ANSI"
-
-// TestDECRQMOnInsertModeIsUnanswered is the known debt ADR-0065 names, carried
-// as a failing assertion rather than as a comment: "it does not answer
-// `CSI 4 $p`, the program's own DECRQM query ... The public query probably
-// makes the missing reply cheap to add, but the work exists and is ours."
+// TestDecrqmAnswersTheAnsiForm is the other half of DECRQM, and it was the
+// debt nocx-ygxjv.8 was filed on: the ANSI form of the query (`CSI Ps $ p`, ONE
+// intermediate) was answered with nothing while the DEC private form
+// (`CSI ? Ps $ p`, two) was answered.
 //
-// It is real at the pinned commit and the cause is one line of upstream's:
-// src/terminal/stream.zig:2169 takes its DECRQM branch only when a CSI has TWO
-// intermediates, so `CSI ? 7 $p` (['?','$']) is answered and `CSI 4 $p`
-// (['$']) falls through to "ignoring unimplemented CSI p". A terminal that
-// reports the mode through the C query while the program's own query goes
-// unanswered is the failure ADR-0065 refused in x/vt, which is why the debt is
-// recorded here instead of being inherited quietly.
+// The cause was one line of upstream's, not a missing feature:
+// src/terminal/stream.zig took its DECRQM branch only when a CSI carried TWO
+// intermediates, so the block's own `1 =>` arm — which classifies the ANSI form
+// — could never run. nocx carries the fix as a patch on the pinned fork
+// (`upstream.patch` in third_party/libghostty-vt/MANIFEST.json), which is why
+// this test is no longer gated behind an environment variable.
 //
-// It is carried under nocx-ygxjv.8, filed by the coordinator from this adapter's
-// finding. That bead records the second half of the cause, which makes it an
-// upstream bug rather than a missing feature: the INNER switch in that same
-// block already has a `1 =>` arm for the ANSI form, and the outer switch that
-// admits only two intermediates makes it unreachable. The fix is one line and
-// belongs upstream (ADR-0065 "Holding", point 4).
-func TestDECRQMOnInsertModeIsUnanswered(t *testing.T) {
-	const want = "\x1b[4;1$y" // IRM is set: the reply x/vt gives and ghostty does not
-	if os.Getenv(decrqmANSIModeOps) == "" {
-		t.Skipf("nocx-ygxjv.8 debt: upstream at e2e53f86 does not answer the ANSI DECRQM form "+
-			"(src/terminal/stream.zig:2169); set %s=1 to watch this fail, and read the ADR-0065 "+
-			"obligation in this test's comment", decrqmANSIModeOps)
-	}
+// IRM is set before the assertion because the reply is a report about the
+// mode's STATE, and IRM starts reset like every ANSI mode outside ghostty's
+// `default` column — so the same query on a fresh terminal answers `\x1b[4;2$y`.
+// Both answers are asserted, in that order, because both are the contract.
+func TestDecrqmAnswersTheAnsiForm(t *testing.T) {
 	term := newTerminal(t, 20, 4)
+	if got, want := string(ingest(t, term, "\x1b[4$p")), "\x1b[4;2$y"; got != want {
+		t.Errorf("DECRQM for insert mode (reset) = %q, want %q", got, want)
+	}
+	if replies := ingest(t, term, "\x1b[4h"); len(replies) != 0 {
+		t.Fatalf("setting insert mode produced replies %q", replies)
+	}
+	const want = "\x1b[4;1$y" // IRM is set: the reply x/vt gives and ghostty did not
 	if got := string(ingest(t, term, "\x1b[4$p")); got != want {
 		t.Errorf("DECRQM for insert mode = %q, want %q", got, want)
 	}

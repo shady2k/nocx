@@ -133,6 +133,12 @@ VT_DIST := $(VT_ROOT)/dist
 VT_VENDOR := $(VT_ROOT)/vendor
 VT_STUBS := third_party/libghostty-vt/stubs
 
+# VT_SOURCE is for a pin whose commit is not published yet — the coordinator
+# builds a fork branch's archives before pushing that branch. The recipe checks
+# the checkout is AT the manifest's commit, so this can be a different tree on
+# disk but never a different revision of one.
+VT_SOURCE ?=
+
 .PHONY: vt-archives vt-recipe-audit vt-recipe-pin vt-verify-link vt-helper-size
 
 # Fetch-and-verify. Every job that compiles a CGo package needs this FIRST: an
@@ -150,14 +156,22 @@ vt-archives:
 #
 # So neither is in a gate: `-audit` reads and reports, `-pin` writes. Publishing
 # is the coordinator's and is one command away; the README says which.
+#
+# Both also generate THIRD_PARTY_LICENSES from the archives they just built
+# (nocx-ygxjv.14), because "which components are inside this archive" is a
+# question only the bytes answer. A partial run (--only) skips it: the document
+# covers every target, so writing one from some of them would describe a pin
+# that does not exist.
 vt-recipe-audit:
-	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)"
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" \
+	  $(if $(VT_SOURCE),--source "$(VT_SOURCE)",)
 
 # Records what this build produced as the pin. That is the act of publishing a
 # new set of archives, so it is explicit and its diff is read before anything
 # is uploaded.
 vt-recipe-pin:
-	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" --update-manifest
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" --update-manifest \
+	  $(if $(VT_SOURCE),--source "$(VT_SOURCE)",)
 
 # Prove every pinned archive links, and that the Linux ones link statically —
 # the property the helper needs, asserted on the artifact rather than assumed.

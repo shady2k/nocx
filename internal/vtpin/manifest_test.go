@@ -13,7 +13,9 @@ func validManifest() *Manifest {
 		Dependency: "libghostty-vt",
 		Upstream: Upstream{
 			Repository: "https://example.invalid/ghostty",
-			Commit:     "e2e53f861482e080bf45054ba49ef471f9849937",
+			Commit:     "6ea3d0e55a00d241a90c72f8903f21d5f8d3f1a2",
+			BaseCommit: "e2e53f861482e080bf45054ba49ef471f9849937",
+			Patch:      "src/terminal/stream.zig: the ANSI DECRQM form is answered",
 			Version:    "1.3.2-dev",
 			License:    "MIT",
 		},
@@ -26,11 +28,10 @@ func validManifest() *Manifest {
 			CanonicalHost: "linux/amd64, Zig 0.16.0",
 		},
 		Release: Release{
-			Tag:              "libghostty-vt-e2e53f86",
-			AssetURLTemplate: "https://example.invalid/releases/download/libghostty-vt-e2e53f86/{asset}",
-			Prerelease:       true,
+			Tag:              "libghostty-vt-6ea3d0e55a00",
+			AssetURLTemplate: "https://example.invalid/releases/download/libghostty-vt-6ea3d0e55a00/{asset}",
 		},
-		Source: Asset{Name: "ghostty-e2e53f861482.tar.gz", SHA256: hex64("a"), Bytes: 1},
+		Licenses: Asset{Name: "libghostty-vt-6ea3d0e55a00-THIRD_PARTY_LICENSES.txt", SHA256: hex64("a"), Bytes: 1},
 		Targets: []Target{
 			{
 				Name: "linux-amd64", GOOS: "linux", GOARCH: "amd64", Libc: LibcMusl, ZigTarget: "x86_64-linux-musl",
@@ -75,6 +76,10 @@ func TestValidateRejectsIncompleteManifests(t *testing.T) {
 		{"unknown libc", func(m *Manifest) { m.Targets[0].Libc = "uclibc" }},
 		{"no canonical host", func(m *Manifest) { m.Build.CanonicalHost = "" }},
 		{"duplicate target", func(m *Manifest) { m.Targets[1].Name = m.Targets[0].Name }},
+		{"short base commit", func(m *Manifest) { m.Upstream.BaseCommit = "e2e53f8" }},
+		{"patched without a patch", func(m *Manifest) { m.Upstream.Patch = "" }},
+		{"unpatched with a patch", func(m *Manifest) { m.Upstream.Commit = m.Upstream.BaseCommit }},
+		{"unsourced licenses", func(m *Manifest) { m.Licenses = Asset{} }},
 		{"no targets", func(m *Manifest) { m.Targets = nil }},
 	}
 	for _, tc := range cases {
@@ -134,11 +139,18 @@ func TestAssetNamesAreDistinctAndStable(t *testing.T) {
 			seen[name] = target.Name
 		}
 	}
-	if got, want := m.SourceAssetName(), "ghostty-e2e53f861482.tar.gz"; got != want {
-		t.Fatalf("source asset name %q, want %q", got, want)
+	if got, want := m.LicensesAssetName(), "libghostty-vt-6ea3d0e55a00-THIRD_PARTY_LICENSES.txt"; got != want {
+		t.Fatalf("licenses asset name %q, want %q", got, want)
 	}
 	if got, want := len(m.DistFiles()), 2*len(m.Targets)+1; got != want {
 		t.Fatalf("DistFiles lists %d files for %d targets; a published release would be missing one", got, len(m.Targets))
+	}
+	for _, t2 := range m.Targets {
+		for _, name := range []string{m.ArchiveAssetName(t2), m.HeadersAssetName(t2)} {
+			if name == m.LicensesAssetName() {
+				t.Fatalf("the licenses document collides with the %s asset", t2.Name)
+			}
+		}
 	}
 }
 
@@ -148,7 +160,7 @@ func TestRefreshFromDistRecordsWhatTheRecipeBuilt(t *testing.T) {
 	// The names are the manifest's to derive: the recipe writes what the
 	// manifest will name, so a file under any other name is a mismatch by
 	// definition, not a silent absence.
-	if err := os.WriteFile(filepath.Join(dist, m.SourceAssetName()), []byte("source"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dist, m.LicensesAssetName()), []byte("licenses"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, target := range m.Targets {
@@ -187,6 +199,9 @@ func TestRefreshFromDistRecordsWhatTheRecipeBuilt(t *testing.T) {
 func TestAssetByNamesEveryMismatch(t *testing.T) {
 	m := validManifest()
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, m.Licenses.Name), []byte("licenses"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, target := range m.Targets {
 		if err := os.WriteFile(filepath.Join(dir, target.Archive.Name), []byte("archive"), 0o600); err != nil {
 			t.Fatal(err)
@@ -206,6 +221,11 @@ func TestAssetByNamesEveryMismatch(t *testing.T) {
 			a.SHA256, a.Bytes = sum, size
 		}
 	}
+	if sum, size, err := HashFile(filepath.Join(dir, m.Licenses.Name)); err != nil {
+		t.Fatal(err)
+	} else {
+		m.Licenses.SHA256, m.Licenses.Bytes = sum, size
+	}
 	mismatches, err := m.AssetBy(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +244,24 @@ func TestAssetByNamesEveryMismatch(t *testing.T) {
 	}
 	if len(mismatches) != 1 || mismatches[0].Name != tampered {
 		t.Fatalf("tampering with %s reported %v; want exactly that one", tampered, mismatches)
+	}
+
+	// The licenses document is not decoration: a dist whose licences are not
+	// the pinned bytes is a dist that cannot be published as this pin. The
+	// archive above is put back first, so what the next assertion sees is one
+	// mismatch and not two.
+	if writeErr := os.WriteFile(filepath.Join(dir, tampered), []byte("archive"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(dir, m.Licenses.Name), []byte("terms for something else"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	mismatches, err = m.AssetBy(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mismatches) != 1 || mismatches[0].Name != m.Licenses.Name || mismatches[0].Asset != "licenses" {
+		t.Fatalf("tampering with the licenses document reported %v; want exactly that", mismatches)
 	}
 }
 
@@ -254,8 +292,20 @@ func TestCommittedManifestIsComplete(t *testing.T) {
 			t.Fatalf("darwin/%s is missing: %v", goarch, err)
 		}
 	}
-	if !m.Release.Prerelease {
-		t.Fatal("the archive release is not marked prerelease: GitHub's releases/latest would then offer it as a product update (internal/update)")
+	// The release lives in the FORK, and the tag is DERIVED from the commit the
+	// archives were built from — so a pin bump that forgot to retag is a URL
+	// that names nothing, which is what these two checks catch together. There
+	// is no prerelease flag any more: the fork is not a repository the updater
+	// resolves releases/latest from (nocx-ygxjv.14).
+	if !strings.Contains(m.Release.AssetURLTemplate, "https://github.com/shady2k/ghostty/releases/download/") {
+		t.Fatalf("asset URL template %q does not name the fork's release", m.Release.AssetURLTemplate)
+	}
+	if got, want := m.Release.Tag, "libghostty-vt-"+m.ShortCommit(); got != want {
+		t.Fatalf("release tag %q, want %q: the tag is derived from the commit the archives came from", got, want)
+	}
+	if m.Upstream.Commit == m.Upstream.BaseCommit || m.Upstream.Patch == "" {
+		t.Fatalf("the pin is unpatched (commit %s, base %s) and this repository's pin is expected to carry the "+
+			"DECRQM patch; if upstream fixed it, the pin needs a new base and no patch", m.Upstream.Commit, m.Upstream.BaseCommit)
 	}
 	if !strings.Contains(m.Release.AssetURLTemplate, m.Release.Tag) {
 		t.Fatalf("asset URL template %q does not name the release tag %q", m.Release.AssetURLTemplate, m.Release.Tag)

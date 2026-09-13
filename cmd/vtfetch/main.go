@@ -10,10 +10,11 @@
 //
 // Usage:
 //
-//	vtfetch fetch    --root build/libghostty-vt [--base URL|DIR] [--with-source]
+//	vtfetch fetch    --root build/libghostty-vt [--base URL|DIR]
 //	vtfetch plan     [--manifest P]
 //	vtfetch pin      [--manifest P] --dist DIR
 //	vtfetch pack-headers --dir DIR --out FILE
+//	vtfetch licenses --source DIR --dist DIR --out FILE
 //	vtfetch cc       --target GOOS/GOARCH [--zig BIN] [--stubs DIR]
 //	vtfetch zig      [--bin BIN]
 //	vtfetch inspect  [--require-static] [--symbol NAME] FILE...
@@ -63,6 +64,8 @@ func main() {
 		err = cmdVerify(args)
 	case "pack-headers":
 		err = cmdPackHeaders(args)
+	case "licenses":
+		err = cmdLicenses(args)
 	case "cc":
 		err = cmdCC(args)
 	case "zig":
@@ -91,6 +94,7 @@ func usage() {
   pin           record the hashes of --dist into the manifest
   verify        check --dist against the manifest, without writing
   pack-headers  pack a headers directory into a deterministic bundle
+  licenses      generate THIRD_PARTY_LICENSES from the pin and the built archives
   cc            print the C compiler for one helper target
   zig           resolve the pinned Zig and refuse a different version
   inspect       report linkage (and symbols) of built files
@@ -125,7 +129,6 @@ func cmdFetch(args []string) error {
 	manifest := fs.String("manifest", DefaultManifest, "the pin document")
 	root := fs.String("root", vtpin.DefaultRoot, "where verified artifacts land")
 	base := fs.String("base", "", "release URL or local directory (default: the manifest's asset URL template)")
-	withSource := fs.Bool("with-source", false, "also fetch the controlled copy of the upstream source")
 	_ = fs.Parse(args)
 
 	m, err := loadManifest(fs, manifest)
@@ -137,8 +140,7 @@ func cmdFetch(args []string) error {
 	}
 	fetcher := vtpin.NewFetcher(*base)
 	opts := vtpin.FetchOptions{
-		WithSource: *withSource,
-		Log:        func(format string, args ...any) { fmt.Printf(format+"\n", args...) },
+		Log: func(format string, args ...any) { fmt.Printf(format+"\n", args...) },
 	}
 	if err := m.Fetch(*root, fetcher, opts); err != nil {
 		return err
@@ -155,11 +157,12 @@ func cmdPlan(args []string) error {
 	if err != nil {
 		return err
 	}
-	// TSV, and the recipe is the only reader: the source first, then one line
-	// per target in the manifest's order, so a shell loop can build them all
-	// without knowing anything the manifest does not say.
+	// TSV, and the recipe is the only reader: one line per target in the
+	// manifest's order, so a shell loop can build them all without knowing
+	// anything the manifest does not say. The licenses document is not here:
+	// it is one file for every target, and the recipe reads its name from
+	// `meta` because nothing about it is per-target.
 	fmt.Println(strings.Join([]string{"kind", "name", "goos", "goarch", "libc", "zig_target", "archive_asset", "headers_asset"}, "\t"))
-	fmt.Println(strings.Join([]string{"source", m.SourceAssetName(), "", "", "", "", "", ""}, "\t"))
 	for _, t := range m.Targets {
 		fmt.Println(strings.Join([]string{"target", t.Name, t.GOOS, t.GOARCH, t.Libc, t.ZigTarget, m.ArchiveAssetName(t), m.HeadersAssetName(t)}, "\t"))
 	}
@@ -186,6 +189,8 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
+	checked := 1 + 2*len(m.Targets)
+	fmt.Println("ok", m.Licenses.Name)
 	for _, t := range m.Targets {
 		for _, a := range []vtpin.Asset{t.Archive, t.Headers} {
 			fmt.Println("ok", a.Name)
@@ -195,9 +200,9 @@ func cmdVerify(args []string) error {
 		for _, mismatch := range mismatches {
 			fmt.Fprintln(os.Stderr, "MISMATCH", mismatch)
 		}
-		return fmt.Errorf("%d of %d files are not the pinned bytes", len(mismatches), 2*len(m.Targets))
+		return fmt.Errorf("%d of %d files are not the pinned bytes", len(mismatches), checked)
 	}
-	fmt.Fprintf(os.Stderr, "%d files are the pinned bytes\n", 2*len(m.Targets))
+	fmt.Fprintf(os.Stderr, "%d files are the pinned bytes\n", checked)
 	return nil
 }
 
@@ -219,11 +224,13 @@ func cmdMeta(args []string) error {
 		{"short", m.ShortCommit()},
 		{"version", m.Upstream.Version},
 		{"repository", m.Upstream.Repository},
+		{"base_commit", m.Upstream.BaseCommit},
+		{"patch", m.Upstream.Patch},
 		{"zig", m.Toolchain.Zig},
 		{"release_tag", m.Release.Tag},
 		{"asset_url_template", m.Release.AssetURLTemplate},
-		{"source_asset", m.SourceAssetName()},
-		{"source_sha256", m.Source.SHA256},
+		{"licenses_asset", m.LicensesAssetName()},
+		{"licenses_sha256", m.Licenses.SHA256},
 		{"build_command", m.Build.Command},
 		{"build_flags", strings.Join(m.Build.Flags, " ")},
 		{"archive_output", m.Build.Archive},
@@ -236,6 +243,60 @@ func cmdMeta(args []string) error {
 	return nil
 }
 
+// cmdLicenses generates THIRD_PARTY_LICENSES: the components the built archives
+// statically link, and the text of every license that applies to them. It reads
+// the ARCHIVES (which is what makes the component list evidence rather than a
+// list somebody maintains) and the SOURCE at the pin (which is where the text
+// comes from), and it refuses to write a document it could not complete.
+//
+// It is a command rather than a shell script for the same reason the rest of
+// this binary is: it reads MANIFEST.json, and a shell implementation would
+// either duplicate the fields or grow a JSON parser.
+func cmdLicenses(args []string) error {
+	fs := flags("licenses")
+	manifest := fs.String("manifest", DefaultManifest, "the pin document")
+	source := fs.String("source", "", "the source checkout at the pin (the recipe's build root)")
+	dist := fs.String("dist", "", "the directory holding the archives that were just built")
+	out := fs.String("out", "", "the document to write")
+	repoRoot := fs.String("repo", ".", "the repository root, for the committed license copies")
+	_ = fs.Parse(args)
+	if *source == "" || *dist == "" || *out == "" {
+		return errors.New("licenses: --source, --dist and --out are required")
+	}
+	m, err := loadManifest(fs, manifest)
+	if err != nil {
+		return err
+	}
+	doc, err := vtpin.GenerateLicenses(m, *source, *repoRoot, *dist)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(*out) //nolint:gosec // the path is the caller's --out, and the recipe is the only caller
+	if err != nil {
+		return err
+	}
+	if writeErr := doc.Write(f); writeErr != nil {
+		_ = f.Close()
+		return writeErr
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return closeErr
+	}
+	sum, size, err := vtpin.HashFile(*out)
+	if err != nil {
+		return err
+	}
+	for _, e := range doc.Entries {
+		fmt.Printf("%-12s %s\n", e.Component, e.License)
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d components, sha256 %s, %d bytes\n", *out, len(doc.Entries), sum, size)
+	return nil
+}
+
+// cmdPin records the hashes of --dist into the manifest — a new pin. The
+// licenses document has to be IN that directory: it is published with the
+// archives and verified like them, so a pin that did not carry its own licenses
+// would be a pin whose binaries ship without them.
 func cmdPin(args []string) error {
 	fs := flags("pin")
 	manifest := fs.String("manifest", DefaultManifest, "the pin document")

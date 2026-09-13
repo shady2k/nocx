@@ -57,16 +57,34 @@ type Manifest struct {
 	Toolchain  Toolchain `json:"toolchain"`
 	Build      Build     `json:"build"`
 	Release    Release   `json:"release"`
-	Source     Asset     `json:"source"`
+	Licenses   Asset     `json:"licenses"`
 	Targets    []Target  `json:"targets"`
 }
 
-// Upstream identifies the source the archives are built from.
+// Upstream identifies the source the archives are built from: a FORK of
+// ghostty, at a commit that carries nocx's patches on top of an upstream one.
+//
+// THERE IS NO SOURCE TARBALL ASSET ANY MORE, and this is where that is decided.
+// ADR-0065 point 1 asks for a controlled copy of the source rather than a SHA
+// on somebody else's host; the fork's git history at the pinned tag IS that
+// copy, in a repository the archives are published from, so a second 39 MB
+// tarball in the same release would be a copy of a copy — and the one thing a
+// reader cannot diff against anything is the file nobody builds from.
 type Upstream struct {
+	// Repository is the fork the archives are built from.
 	Repository string `json:"repository"`
-	Commit     string `json:"commit"`
-	Version    string `json:"version"`
-	License    string `json:"license"`
+	// Commit is the FORK commit the archives are built from. It carries the
+	// patches below on top of BaseCommit.
+	Commit string `json:"commit"`
+	// BaseCommit is the upstream commit the fork's tag pointed at, recorded
+	// separately so a reader can see what nocx changed and diff it.
+	BaseCommit string `json:"baseCommit"`
+	// Patch describes what the fork adds, in one line. It exists so that a
+	// patched pin cannot be read as an unpatched one: a test refuses a commit
+	// that differs from BaseCommit without saying what the difference is.
+	Patch   string `json:"patch"`
+	Version string `json:"version"`
+	License string `json:"license"`
 }
 
 // Toolchain is the compiler that produced the archives. It is pinned because
@@ -105,16 +123,18 @@ type Build struct {
 
 // Release is where the published artifacts live. The tag is fixed per pin, so
 // a fetch is a URL a reader can construct by hand.
+//
+// THERE IS NO PRERELEASE FLAG ANY MORE (nocx-ygxjv.14). It existed for one
+// reason: the archives used to be published as a release of `nocx` itself, and
+// the updater resolves https://github.com/shady2k/nocx/releases/latest/download
+// (internal/update), where GitHub's `latest` skips prereleases. The archives
+// live in the FORK now, which the updater does not look at, so the flag guarded
+// nothing — and a field that guards nothing is a field the next reader has to
+// re-derive the truth of.
 type Release struct {
 	Tag string `json:"tag"`
 	// AssetURLTemplate uses {asset} in place of an asset name.
 	AssetURLTemplate string `json:"assetURLTemplate"`
-	// Prerelease is load-bearing beyond GitHub's UI: the updater resolves
-	// https://github.com/shady2k/nocx/releases/latest/download (internal/update),
-	// and GitHub's `latest` skips prereleases — which is what keeps a release
-	// that exists only to carry these archives from being offered as a product
-	// update.
-	Prerelease bool `json:"prerelease"`
 }
 
 // Asset is one published file: its sha256 and its size.
@@ -180,7 +200,7 @@ func Load(path string) (*Manifest, error) {
 // hydrate names every asset from the commit and the target list. It is the only
 // assignment of Asset.Name outside RefreshFromDist, which calls it too.
 func (m *Manifest) hydrate() {
-	m.Source.Name = m.SourceAssetName()
+	m.Licenses.Name = m.LicensesAssetName()
 	for i := range m.Targets {
 		t := &m.Targets[i]
 		t.Archive.Name = m.ArchiveAssetName(*t)
@@ -216,6 +236,21 @@ func (m *Manifest) Validate() error {
 	if !commitRE.MatchString(m.Upstream.Commit) {
 		return fmt.Errorf("upstream.commit %q is not a full 40-hex commit", m.Upstream.Commit)
 	}
+	if !commitRE.MatchString(m.Upstream.BaseCommit) {
+		return fmt.Errorf("upstream.baseCommit %q is not a full 40-hex commit: the pin has to say which "+
+			"upstream commit the fork's patches sit on", m.Upstream.BaseCommit)
+	}
+	// A patched pin must say what the patch is, and an unpatched one must not
+	// claim a patch: this is the pair that makes "what did nocx change" readable
+	// from the manifest alone.
+	switch {
+	case m.Upstream.Commit != m.Upstream.BaseCommit && strings.TrimSpace(m.Upstream.Patch) == "":
+		return fmt.Errorf("upstream.commit is %s and baseCommit is %s, so the pin is patched, and upstream.patch "+
+			"does not say what the patch is", m.Upstream.Commit, m.Upstream.BaseCommit)
+	case m.Upstream.Commit == m.Upstream.BaseCommit && strings.TrimSpace(m.Upstream.Patch) != "":
+		return fmt.Errorf("upstream.commit equals baseCommit, so nothing is patched, and upstream.patch describes one: %q",
+			m.Upstream.Patch)
+	}
 	if m.Toolchain.Zig == "" {
 		return fmt.Errorf("toolchain.zig is empty")
 	}
@@ -228,7 +263,7 @@ func (m *Manifest) Validate() error {
 	if m.Release.Tag == "" || !strings.Contains(m.Release.AssetURLTemplate, "{asset}") {
 		return fmt.Errorf("release needs a tag and an assetURLTemplate containing {asset}")
 	}
-	if err := checkAsset("source", m.Source); err != nil {
+	if err := checkAsset("licenses", m.Licenses); err != nil {
 		return err
 	}
 	if len(m.Targets) == 0 {
@@ -342,16 +377,18 @@ func (m *Manifest) HeadersAssetName(t Target) string {
 	return fmt.Sprintf("libghostty-vt-%s-%s-headers.tar.gz", m.ShortCommit(), t.Name)
 }
 
-// SourceAssetName is the controlled copy of the source at the pin. ADR-0065
-// point 1 asks for the source, not only a SHA on somebody else's host.
-func (m *Manifest) SourceAssetName() string {
-	return fmt.Sprintf("ghostty-%s.tar.gz", m.ShortCommit())
+// LicensesAssetName is the generated THIRD_PARTY_LICENSES document — the
+// licenses of everything the archives statically link, so a binary that ships
+// them can ship them with it. It is derived from the commit like the rest, so
+// the release, the fetch and the recipe cannot disagree about its name.
+func (m *Manifest) LicensesAssetName() string {
+	return fmt.Sprintf("libghostty-vt-%s-THIRD_PARTY_LICENSES.txt", m.ShortCommit())
 }
 
 // DistFiles are the files a published release carries, in a stable order: the
-// source tarball, then each target's archive and headers.
+// licenses, then each target's archive and headers.
 func (m *Manifest) DistFiles() []string {
-	names := []string{m.SourceAssetName()}
+	names := []string{m.LicensesAssetName()}
 	for _, t := range m.Targets {
 		names = append(names, m.ArchiveAssetName(t), m.HeadersAssetName(t))
 	}
@@ -374,7 +411,7 @@ func (m *Manifest) RefreshFromDist(dist string) ([]string, error) {
 		names = append(names, name)
 		return nil
 	}
-	if err := record("source", m.SourceAssetName(), &m.Source); err != nil {
+	if err := record("licenses", m.LicensesAssetName(), &m.Licenses); err != nil {
 		return nil, err
 	}
 	for i := range m.Targets {
@@ -403,6 +440,9 @@ func (m *Manifest) AssetBy(dir string) ([]Mismatch, error) {
 			out = append(out, Mismatch{Asset: what, Name: a.Name, Want: a.SHA256, Got: sum})
 		}
 		return nil
+	}
+	if err := check("licenses", m.Licenses); err != nil {
+		return nil, err
 	}
 	for _, t := range m.Targets {
 		if err := check(t.Name+" archive", t.Archive); err != nil {
@@ -460,9 +500,11 @@ func VendorIncludeDir(root, target string) string {
 	return filepath.Join(VendorDir(root, target), "include")
 }
 
-// SourceDir is where the fetched copy of the upstream source lands.
-func SourceDir(root string) string {
-	return filepath.Join(root, "source")
+// LicensesPath is where the verified THIRD_PARTY_LICENSES document lands. It
+// sits beside the vendor directories rather than inside one, because one
+// document covers every target's archive.
+func (m *Manifest) LicensesPath(root string) string {
+	return filepath.Join(root, m.Licenses.Name)
 }
 
 // HashFile returns the sha256 and size of a file.

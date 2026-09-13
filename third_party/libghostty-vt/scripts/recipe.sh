@@ -27,8 +27,9 @@
 # same build root, the same Zig and the same flags differ in 60 bytes, and the
 # differing bytes are Zig's own `.zig-cache/o/<key>` directory names, which are
 # embedded in the objects and are not a function of source + toolchain + flags.
-# The header bundles and the source tarball DO reproduce byte for byte. So this
-# is an audit: it tells you exactly which files are not the pinned bytes. The
+# The header bundles DO reproduce byte for byte, and so does the licenses
+# document, which is generated from the pin rather than built. So this is an
+# audit: it tells you exactly which files are not the pinned bytes. The
 # published FILE is the identity guarantee, which is the owner's reason for
 # shipping archives instead of building everywhere.
 #
@@ -36,8 +37,8 @@
 # Go. Zig 0.16.0 comes from nixpkgs here; ghostty's own build.zig.zon declares
 # minimum_zig_version, which is why the version is pinned rather than
 # recommended. Ghostty's Zig DEPENDENCIES are fetched by Zig itself and are
-# addressed by content hash in the pinned build.zig.zon, so the source tarball
-# plus this toolchain is the whole input set.
+# addressed by content hash in the pinned build.zig.zon, so the source at the
+# pin plus this toolchain is the whole input set.
 #
 # WHAT IT DOES NOT DO: publish. Uploading a release is an outward-facing act
 # and belongs to the coordinator; this script leaves the files and the command
@@ -59,6 +60,7 @@ out="$repo_root/build/libghostty-vt/dist"
 zig_bin="${ZIG:-zig}"
 update_manifest=0
 only=""
+local_source=""
 
 usage() {
   cat <<'FLAGS'
@@ -69,6 +71,9 @@ Flags:
   --cache DIR            source checkout and Zig cache (default ~/.cache/nocx/libghostty-vt)
   --zig BIN              the Zig binary (default $ZIG, then PATH); its version is checked
   --only a,b             build only these manifest targets
+  --source DIR           build from this checkout instead of fetching the pin
+                         (it must be at the manifest's commit; used for a pin whose
+                         commit is not published yet)
   --update-manifest      write the built hashes into the manifest (a new pin)
 FLAGS
 }
@@ -79,6 +84,7 @@ while [ $# -gt 0 ]; do
     --cache) cache="$2"; shift 2 ;;
     --zig) zig_bin="$2"; shift 2 ;;
     --only) only="$2"; shift 2 ;;
+    --source) local_source="$2"; shift 2 ;;
     --update-manifest) update_manifest=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "recipe.sh: unknown argument $1" >&2; usage >&2; exit 2 ;;
@@ -103,44 +109,58 @@ info "toolchain"
 zig_path="$(vtfetch zig --bin "$zig_bin" --manifest "$manifest")"
 echo "zig: $("$zig_path" version) ($zig_path)"
 
-# 2. The source at the pin. ZIG_GLOBAL_CACHE_DIR keeps the ~440 MB of fetched
-#    Zig dependencies inside the cache directory this script owns, so a
-#    measured run can be deleted whole.
+# 2. The source at the pin — the FORK, at the commit the manifest names, which
+#    is upstream's commit plus nocx's patches (upstream.baseCommit and
+#    upstream.patch say which and what). ZIG_GLOBAL_CACHE_DIR keeps the ~440 MB
+#    of fetched Zig dependencies inside the cache directory this script owns, so
+#    a measured run can be deleted whole.
 mkdir -p "$cache/src"
 src="$cache/src/ghostty"
 meta="$(vtfetch meta --manifest "$manifest")"
 commit="$(printf '%s\n' "$meta" | sed -n 's/^commit=//p')"
-source_asset="$(printf '%s\n' "$meta" | sed -n 's/^source_asset=//p')"
+repository="$(printf '%s\n' "$meta" | sed -n 's/^repository=//p')"
+base_commit="$(printf '%s\n' "$meta" | sed -n 's/^base_commit=//p')"
 [ -n "$commit" ] || { echo "FATAL: no commit in $manifest" >&2; exit 1; }
-[ -n "$source_asset" ] || { echo "FATAL: no source asset name in $manifest" >&2; exit 1; }
+[ -n "$repository" ] || { echo "FATAL: no repository in $manifest" >&2; exit 1; }
 
-info "source at $commit"
-if [ ! -d "$src/.git" ]; then
-  mkdir -p "$src"
-  git -C "$src" init -q
+if [ -n "$local_source" ]; then
+  # A pin whose commit is not published yet: the coordinator builds the
+  # archives before pushing the fork branch, and the bytes are the same bytes
+  # either way. The commit is checked rather than trusted, so a checkout of the
+  # wrong tree is an error and not a quietly different pin.
+  src="$(cd "$local_source" && pwd)"
+  info "source: local checkout $src"
+  got="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
+  [ "$got" = "$commit" ] || {
+    echo "FATAL: $src is at ${got:-no commit}, and the manifest pins $commit" >&2
+    exit 1
+  }
+  git -C "$src" log -1 --format='%H %ci %s'
+else
+  info "source at $commit"
+  if [ ! -d "$src/.git" ]; then
+    mkdir -p "$src"
+    git -C "$src" init -q
+  fi
+  # SET, not add-if-missing: the repository moved from upstream to the fork, and
+  # a checkout that kept the old origin would fetch the wrong history for a
+  # commit that only exists in the fork.
+  if git -C "$src" remote get-url origin >/dev/null 2>&1; then
+    git -C "$src" remote set-url origin "$repository"
+  else
+    git -C "$src" remote add origin "$repository"
+  fi
+  git -C "$src" fetch --depth 1 origin "$commit"
+  git -C "$src" checkout -q --detach FETCH_HEAD
+  got="$(git -C "$src" rev-parse HEAD)"
+  [ "$got" = "$commit" ] || { echo "FATAL: checked out $got, wanted $commit" >&2; exit 1; }
+  git -C "$src" log -1 --format='%H %ci %s'
 fi
-git -C "$src" remote get-url origin >/dev/null 2>&1 || \
-  git -C "$src" remote add origin "https://github.com/ghostty-org/ghostty.git"
-git -C "$src" fetch --depth 1 origin "$commit"
-git -C "$src" checkout -q --detach FETCH_HEAD
-got="$(git -C "$src" rev-parse HEAD)"
-[ "$got" = "$commit" ] || { echo "FATAL: checked out $got, wanted $commit" >&2; exit 1; }
-git -C "$src" log -1 --format='%H %ci %s'
+echo "upstream base: ${base_commit:-unknown}"
 
 mkdir -p "$out"
 
-# 3. The controlled copy of the source (ADR-0065 point 1): the release carries
-#    the source itself, not only a SHA on somebody else's host.
-#
-#    Deterministic on purpose: git archive zeroes the tree's timestamps and
-#    owners, and `gzip -n` drops the gzip header's own mtime, so two runs
-#    produce one file.
-info "source tarball"
-git -C "$src" archive --format=tar --prefix="ghostty-$(printf '%s' "$commit" | cut -c1-12)/" "$commit" \
-  | gzip -n -9 > "$out/$source_asset"
-printf '%s  %s\n' "$(sha256_of "$out/$source_asset")" "$source_asset"
-
-# 4. Every target in the manifest, one build each. -Dtarget is the only
+# 3. Every target in the manifest, one build each. -Dtarget is the only
 #    per-target input; the flags come from the manifest so the manifest, not
 #    this script, is what a reader checks a published archive against.
 info "archives"
@@ -167,6 +187,24 @@ while IFS=$'\t' read -r kind name _goos _goarch _libc zig_target archive_asset h
     "$(sha256_of "$out/$archive_asset" | cut -c1-16)"
 done <<< "$plan"
 
+# 4. The licenses of everything the archives just linked (nocx-ygxjv.14). It is
+#    generated AFTER the build and BEFORE the pin, because it is derived from
+#    the archives themselves: which components are inside them is a question
+#    only the bytes answer, and a document written from a list of names would
+#    be a document that agrees with itself.
+#
+#    A partial run (--only) does not regenerate it: the document covers every
+#    target, so writing one from some of them would be a document about a pin
+#    that does not exist. `verify` then reports the missing file, which is the
+#    correct answer for a dist directory that is not a whole pin.
+if [ -z "$only" ]; then
+  info "licenses"
+  vtfetch licenses --manifest "$manifest" --source "$src" --dist "$out" \
+    --out "$out/$(printf '%s\n' "$meta" | sed -n 's/^licenses_asset=//p')"
+else
+  echo "licenses: skipped (--only $only builds part of the pin)"
+fi
+
 # 5. The judgement. `verify` reads the manifest and reports every file that is
 #    not the pinned bytes; `--update-manifest` writes instead of judging, which
 #    is what a pin bump needs and what a check must never do.
@@ -182,7 +220,7 @@ if [ "$update_manifest" = 1 ]; then
 else
   info "verifying against the manifest"
   if vtfetch verify --manifest "$manifest" --dist "$out"; then
-    echo "recipe: every archive and header bundle is the pinned bytes"
+    echo "recipe: every archive, header bundle and the licenses document is the pinned bytes"
   else
     echo "recipe: the built bytes are NOT what the manifest pins (see above)." >&2
     echo "  this run: root $cache, zig-cache $ZIG_GLOBAL_CACHE_DIR, zig $zig_path" >&2
@@ -190,8 +228,9 @@ else
     echo "  Measured 2026-09-13: two builds of one archive from the SAME root and" >&2
     echo "  the SAME Zig differ in 60 bytes, all of them inside Zig's own" >&2
     echo "  .zig-cache/o/<key> directory names, which the objects embed and which" >&2
-    echo "  source + toolchain + flags do not determine. The header bundles and the" >&2
-    echo "  source tarball DO match byte for byte; the archives do not." >&2
+    echo "  source + toolchain + flags do not determine. The header bundles DO match" >&2
+    echo "  byte for byte, and so does the licenses document, which is generated from" >&2
+    echo "  the pin rather than built; the archives do not." >&2
     echo "  The published FILE is the identity guarantee (README.md," >&2
     echo "  \"Reproducibility, stated exactly\")." >&2
     echo "If this pin is new, re-run with --update-manifest and read the diff." >&2

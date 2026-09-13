@@ -169,10 +169,6 @@ func (f *Fetcher) EnsureFile(a Asset, dest string) (bool, error) {
 
 // FetchOptions tunes what a fetch materialises.
 type FetchOptions struct {
-	// WithSource also fetches the controlled copy of the upstream source
-	// (ADR-0065 point 1). A build does not need it; a machine keeping the
-	// pin does.
-	WithSource bool
 	// Log, when set, is told what happened — what was verified in place and
 	// what was downloaded. Silence would make "it fetched nothing" and "it
 	// verified everything" indistinguishable in a build log.
@@ -210,14 +206,16 @@ func (m *Manifest) Fetch(root string, f *Fetcher, opts FetchOptions) error {
 			return err
 		}
 	}
-	if opts.WithSource {
-		dest := filepath.Join(SourceDir(root), m.Source.Name)
-		fetched, err := f.EnsureFile(m.Source, dest)
-		if err != nil {
-			return err
-		}
-		logf("source: %s %s", describe(fetched, "fetched", "verified"), filepath.Base(dest))
+	// The licenses come with the archives and are verified the same way: a
+	// license document that is not the pinned bytes is not the license for
+	// these archives, and shipping it beside a binary would be shipping a
+	// statement nobody can check.
+	licenses := m.LicensesPath(root)
+	fetched, err := f.EnsureFile(m.Licenses, licenses)
+	if err != nil {
+		return err
 	}
+	logf("licenses: %s (%s)", describe(fetched, "fetched", "verified"), humanBytes(m.Licenses.Bytes))
 	return nil
 }
 

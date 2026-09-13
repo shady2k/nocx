@@ -220,6 +220,24 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	})
 	defer sessions.Close()
 
+	// THE SSH CLIENT THIS DAEMON HOLDS, where the build has one
+	// (nocx-50w7p.1). It is opened here, beside the sessions and out of the
+	// accept loop, for the same reason they are: it is a property of the
+	// DAEMON, not of one connection — one pool serves every host this machine
+	// hosts for its whole life — and it is released at shutdown with them.
+	//
+	// holdSSHClient is a build fact: a helper built with nocx_local_ssh opens
+	// a client and says so, and one built without it — every artifact
+	// `make helpers` produces, which is what reaches a host nobody here
+	// controls — returns a release that releases nothing. Nothing dials yet,
+	// so that is the whole difference today.
+	releaseSSH, err := holdSSHClient(log)
+	if err != nil {
+		log.Error("ssh client", "err", err)
+		return 1
+	}
+	defer releaseSSH()
+
 	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
 		h.Register(hostsvc.New(factory))

@@ -78,6 +78,24 @@ func hashOf(payload []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// variantSource is a source that carries BOTH artifacts for one platform: the
+// deployable one through Artifact, and this machine's own through LocalArtifact
+// (deploy.LocalArtifactSource). That is the shape the embedded source has in a
+// checkout where `make helper-local` has run, and it is the only shape in which
+// the two can differ — same platform, different bytes.
+type variantSource struct {
+	deployed bytesSource
+	local    bytesSource
+}
+
+func (s variantSource) Artifact(p deploy.Platform) ([]byte, string, error) {
+	return s.deployed.Artifact(p)
+}
+
+func (s variantSource) LocalArtifact(p deploy.Platform) ([]byte, string, error) {
+	return s.local.Artifact(p)
+}
+
 // helperSource builds cmd/nocx-helper once and serves it as the artifact — the
 // real binary, because a handshake against anything else would be a test
 // asserting about itself. The generation is the sha256 of the decompressed
@@ -277,6 +295,71 @@ func TestInstallWritesTheContentAddressedLayoutTheRemoteInstallerWrites(t *testi
 	}
 	if _, err := os.Lstat(filepath.Join(wantDir, ".install-complete")); err != nil {
 		t.Fatalf("the completed install carries no marker: %v", err)
+	}
+}
+
+// TestInstallPrefersThisMachineSOwnArtifact is nocx-50w7p.1's local half: the
+// install reads the host-local VARIANT when the source carries one, so the
+// helper installed on this machine is the one built with the ssh client — not
+// the deployable bytes, which are the same platform and a different binary.
+//
+// The assertion is on the installed BYTES and on the generation, because the
+// two variants differ in exactly those: a generation is the content hash, so a
+// test that only checked "something was installed" would pass with the wrong
+// artifact and say nothing about which helper this machine runs.
+func TestInstallPrefersThisMachineSOwnArtifact(t *testing.T) {
+	home := helperHome(t)
+	deployed := []byte("#!/bin/sh\n# the artifact that ships to another host\n")
+	ownVariant := []byte("#!/bin/sh\n# this machine's helper, with the ssh client linked in\n")
+	src := variantSource{deployed: newBytesSource(deployed), local: newBytesSource(ownVariant)}
+
+	got, err := local.Install(context.Background(), src, home)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if string(got.Generation) != hashOf(ownVariant) {
+		t.Fatalf("installed generation = %s, want the local variant's content hash %s", got.Generation, hashOf(ownVariant))
+	}
+	data, err := os.ReadFile(got.Binary) // #nosec G304 — this test installed it
+	if err != nil {
+		t.Fatalf("read the installed helper: %v", err)
+	}
+	if !bytes.Equal(data, ownVariant) {
+		t.Fatal("the install wrote the deployable artifact where this machine's own variant was available")
+	}
+}
+
+// TestInstallWithoutALocalVariantInstallsTheDeployableArtifact is the same
+// choice failing softly: a build whose source carries no local variant — a
+// checkout that never ran `make helper-local` — installs exactly what it
+// installed before the variant existed. Without this, "prefer the variant"
+// could be implemented as "require the variant", and every ordinary build would
+// stop installing a helper at all.
+//
+// The error a source answers here is not the embedded one; the install falls
+// back on any failure from the variant, deliberately, so a fabricated error is
+// the honest input for that branch.
+func TestInstallWithoutALocalVariantInstallsTheDeployableArtifact(t *testing.T) {
+	home := helperHome(t)
+	deployed := []byte("#!/bin/sh\n# the artifact that ships to another host\n")
+	src := variantSource{
+		deployed: newBytesSource(deployed),
+		local:    bytesSource{err: errors.New("no local variant built")},
+	}
+
+	got, err := local.Install(context.Background(), src, home)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if string(got.Generation) != hashOf(deployed) {
+		t.Fatalf("installed generation = %s, want the deployable artifact's content hash %s", got.Generation, hashOf(deployed))
+	}
+	data, err := os.ReadFile(got.Binary) // #nosec G304 — this test installed it
+	if err != nil {
+		t.Fatalf("read the installed helper: %v", err)
+	}
+	if !bytes.Equal(data, deployed) {
+		t.Fatal("the install did not write the deployable artifact when no local variant was available")
 	}
 }
 

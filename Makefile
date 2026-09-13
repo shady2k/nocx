@@ -1,5 +1,5 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
+        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers helper-local \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -116,6 +116,15 @@ endif
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 
+# The local variant of the same artifact (nocx-50w7p.1): this machine's own
+# helper, built for the host platform alone and ONLY under this tag. It is a
+# directory of its own under bin/ because the artifact name is frozen as
+# nocx-helper-<goos>-<goarch>.gz and the platform is the whole of it, so two
+# variants of one platform cannot live side by side under one directory.
+HELPER_LOCAL_DIR := $(HELPER_ARTIFACT_DIR)/local
+HELPER_LOCAL_TAGS := nocx_local_ssh
+HELPER_LOCAL_PLATFORM := $(HOST_GOOS)/$(shell $(GO) env GOARCH)
+
 # --- the pinned libghostty-vt archives (nocx-ygxjv.10) ------------------------
 #
 # third_party/libghostty-vt/MANIFEST.json is the pin: the ghostty commit, the
@@ -203,25 +212,63 @@ vt-helper-size:
 # helper runs on a host nobody knows and must be static, and the archive's libc
 # is baked into its objects. internal/emulator/ghostty's cgo constraints name
 # both sides and say which build gets which.
-.PHONY: helpers
+#
+# HOW EVERY HELPER ARTIFACT IS BUILT — one definition, two targets. `helpers`
+# builds the four deployable platforms with NO extra tags; `helper-local`
+# builds this host alone with nocx_local_ssh. `make helpers` never passes a tag
+# (see helper-local below), which is what makes "forgetting a flag cannot ship
+# an ssh client to a remote host" true by construction.
+#
+# Every property below is what makes an artifact installable on a host somebody
+# else controls, and a second copy of them is how the two targets drift:
+# -trimpath (no build directory inside the binary), -linkmode external against
+# the pinned Zig cc, stripped, gzip -9, and the static-linkage claim CHECKED on
+# each Linux artifact rather than assumed.
+#
+# $(1) targets, <goos>/<goarch>, whitespace-separated
+# $(2) output directory
+# $(3) extra build tags: empty, or a whitespace-free list
+define build_helper_artifacts
+zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
+for t in $(1); do \
+  os=$${t%/*}; arch=$${t#*/}; \
+  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
+  tags="$(strip $(3))"; if [ "$$os" = linux ]; then tags="$${tags:+$$tags,}vtmusl"; fi; \
+  tagflag=""; [ -n "$$tags" ] && tagflag="-tags $$tags"; \
+  CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
+    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tagflag \
+    -o $(2)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
+  case "$$os" in \
+    linux) $(GO) run ./cmd/vtfetch inspect --require-static \
+             $(2)/nocx-helper-$$os-$$arch >/dev/null || \
+           { echo "the linux/$$arch helper is dynamically linked; it must be static on an unknown host" >&2; exit 1; } ;; \
+  esac; \
+  gzip -9 -f $(2)/nocx-helper-$$os-$$arch || exit 1; \
+done
+endef
+
 helpers: vt-archives
 	@mkdir -p $(HELPER_ARTIFACT_DIR)
-	@zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
-	for t in $(HELPER_TARGETS); do \
-	  os=$${t%/*}; arch=$${t#*/}; \
-	  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
-	  tags=""; if [ "$$os" = linux ]; then tags="-tags vtmusl"; fi; \
-	  CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
-	    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tags \
-	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
-	  case "$$os" in \
-	    linux) $(GO) run ./cmd/vtfetch inspect --require-static \
-	             $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch >/dev/null || \
-	           { echo "helpers: the linux/$$arch helper is dynamically linked; it must be static on an unknown host" >&2; exit 1; } ;; \
-	  esac; \
-	  gzip -9 -f $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch || exit 1; \
-	done
+	@$(call build_helper_artifacts,$(HELPER_TARGETS),$(HELPER_ARTIFACT_DIR),)
 	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"
+
+# THE HELPER THIS MACHINE RUNS ITSELF (nocx-50w7p.1): the host platform's
+# artifact, built with the ssh client in it, into the embed's second directory
+# (bin/local/, which has its own //go:embed and its own source —
+# internal/helper/deploy/artifacts/source_local.go).
+#
+# It is the ONLY target that passes nocx_local_ssh, and it is deliberately not a
+# prerequisite of `helpers`, `build`, `dev` or `build-release`. Building it
+# means deciding that this checkout's local helper may dial ssh, which today
+# links the client and changes nothing else — nothing dials yet. When the route
+# that uses it lands, the development and release targets adopt it deliberately
+# and this comment says so; until then a build that has not run it installs the
+# artifact it always did (internal/helper/local falls back), and no deployed
+# artifact is affected either way.
+helper-local: vt-archives
+	@mkdir -p $(HELPER_LOCAL_DIR)
+	@$(call build_helper_artifacts,$(HELPER_LOCAL_PLATFORM),$(HELPER_LOCAL_DIR),$(HELPER_LOCAL_TAGS))
+	@echo "local helper artifact: $(HELPER_LOCAL_DIR)/nocx-helper-$(subst /,-,$(HELPER_LOCAL_PLATFORM)).gz"
 
 all: lint test build
 

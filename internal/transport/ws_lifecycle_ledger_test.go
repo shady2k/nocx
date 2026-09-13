@@ -128,6 +128,46 @@ func TestLifecycleSubmitAttempt_OpensLedgerEntryAtAttemptIDAndMasks(t *testing.T
 	_ = lane
 }
 
+// A command's row NAMES the pipe it ran in (nocx-ie23r.6), asserted at the
+// writer the RENDERER actually reaches.
+//
+// lifecycle.submitAttempt is what an editor submit sends, and it is the writer
+// that CREATES the row for an ordinary command: ledger.bind then advances the
+// row this one made, and history.record closes it. A row created here with no
+// session would keep none for the rest of its life, and the column is the
+// whole of what the unreconciled third state is derived from
+// (content/reconcile_sqlite.go's unreconciledCause) — so a restored block
+// could never be told that nobody was asked about its pipe.
+//
+// The other half of the column's behaviour is asserted where it lives:
+// internal/content for the foreign-key binding itself (an entry names a
+// session the ledger holds, and is still recorded when it holds none), and
+// internal/app for the restored block read back off the socket.
+func TestLifecycleSubmitAttemptNamesTheSessionTheCommandRanIn(t *testing.T) {
+	e, _, _, h, sid, db := newLifecycleLedgerEnv(t, true)
+
+	// THE BINDING ROW, which the OPEN path writes for a helper-hosted session
+	// (session_open.go's recordHostedBinding: "written before the session is
+	// handed back, so reconciliation can never observe a live helper session
+	// without the generation that qualifies its id space"). This harness opens
+	// its session with no helper behind it, so nothing wrote the row and the
+	// test writes what the open would have — the subject here is the WRITER,
+	// not the opener.
+	if err := db.Ledger().CreateSession(context.Background(), content.Session{
+		ID: sid, WorkspaceID: "ws-lifecycle",
+	}); err != nil {
+		t.Fatalf("CreateSession(%s): %v", sid, err)
+	}
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "make watch"), 41))
+	row := mustEntry(t, db, got.ID)
+	if row.SessionID == nil || *row.SessionID != sid {
+		t.Fatalf("the submitted command's session = %v, want %q — the pipe it ran in is where a "+
+			"restored block reads whether anybody could be asked about it", row.SessionID, sid)
+	}
+}
+
 func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" //nolint:gosec // synthetic detector fixture

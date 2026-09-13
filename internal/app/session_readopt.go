@@ -101,6 +101,13 @@ type localHelperRoute interface {
 	// another one holds, and a socket per refusal kept until the process ends
 	// is a cost nobody would choose.
 	Release(sid string)
+	// noteHeld records that this daemon holds a session, which is the fact
+	// paneScreen.owner routes by (nocx-50w7p.5). A RE-ADOPTION is one of the
+	// two moments a session enters that set — the other is OpenHosted — so it
+	// is here rather than left to a caller to remember: a pane taken back is a
+	// pane this daemon is holding, and the scan the screen read does must say
+	// so.
+	noteHeld(sid session.ID)
 }
 
 // hostedCarrier is the connection a re-attachment is made over: it takes the
@@ -431,18 +438,53 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// nothing here that could be left holding a socket.
 		return inv, nil
 	}
-	if err := rp.readopt(ctx, p, session.Config{
+	// THE CONFIG CARRIES THE DESTINATION, WHICH IS NOT ALWAYS LOCAL
+	// (nocx-50w7p.5). Being routed here says the CARRIER is this machine's
+	// daemon; it says nothing about where the session's shell runs, and a pane
+	// this bead moved onto the local daemon has a shell on somebody else's
+	// host. The destination therefore comes off the BINDING, and the carrier
+	// stays rp.local whatever it says: the attachment is this daemon's.
+	cfg := session.Config{
 		Kind: session.KindLocal,
 		// The cwd is the HELPER's, exactly as on the remote route: the launch
 		// record the daemon has kept since the shell started, not the pane's
 		// stored cwd, which is where the pane was opened.
 		Cwd:    mine.Launch.Cwd,
 		PaneID: p.PaneID,
-		// No Host, no ProfileID, no Remote: a local binding names none of
-		// them (helper_local.go's OpenHosted leaves them empty), and the
-		// registry's Kind is what routes the pane's screen read back to this
-		// machine's daemon.
-	}, nil, rp.local, *mine); err != nil {
+	}
+	if p.Host != "" {
+		// A remote destination, carried locally. Its remote half resolves the
+		// way the remote route resolves one, because the registry adopts a
+		// KindRemote session against a ConnectConfig.
+		if rp.routes == nil {
+			return nil, fmt.Errorf("re-adopt the session on %s: no route resolver is wired", p.Host)
+		}
+		host, resolved, rerr := rp.routes.Resolve(p.ProfileID)
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve the connection this session was opened on: %w", rerr)
+		}
+		// THE RESOLVED DESTINATION MUST BE THE ONE THE BINDING NAMES. A profile
+		// edited between two runs resolves to a different host, and adopting
+		// the pane against it would bind this session to a machine nobody
+		// recorded — the inference nocx-k6p18.15 exists to forbid. The remote
+		// route checks the same pair before it opens consent or a channel, and
+		// a local carrier is no reason to trust the resolver more.
+		if host != p.Host {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to %s — refusing to adopt it against a destination nobody recorded",
+				p.Host, host)
+		}
+		if resolved != nil && p.Account != "" && resolved.User != p.Account {
+			return nil, fmt.Errorf(
+				"re-adopt the session on %s: the saved connection now resolves to account %q and the binding names %q — refusing to adopt it against a destination nobody recorded",
+				p.Host, resolved.User, p.Account)
+		}
+		cfg.Kind = session.KindRemote
+		cfg.Host = host
+		cfg.Remote = resolved
+		cfg.ProfileID = p.ProfileID
+	}
+	if err := rp.readopt(ctx, p, cfg, nil, rp.local, *mine); err != nil {
 		// The session is LIVE and this coordinator could not take it. Said out
 		// loud, because the pane will otherwise open a second shell beside the
 		// one still running, and the only trace of it would be the absence of
@@ -450,6 +492,14 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		rp.registry.log.Warn("a local session that is still running could not be taken back; its pane will open a new shell instead",
 			"session_id", p.SessionID, "error", err)
 		rp.local.Release(p.SessionID)
+	} else {
+		// THE SESSION ENTERS THIS DAEMON'S SET ON RE-ADOPTION TOO
+		// (nocx-50w7p.5), and it is the same interval open uses: taken back is
+		// held. Without this a pane recovered after a restart would be in no
+		// helper's set, and the screen read — which asks the opener rather
+		// than the session's kind — would refuse a terminal this daemon is
+		// holding.
+		rp.local.noteHeld(session.ID(p.SessionID))
 	}
 	return inv, nil
 }

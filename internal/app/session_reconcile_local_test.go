@@ -55,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -268,6 +269,14 @@ func (r *countingLocalRoute) AdoptLifecycle(context.Context, client.HostSessionI
 
 func (r *countingLocalRoute) Release(string) {
 	panic("the local carrier was asked to release a connection for a binding that is not this machine's")
+}
+
+// noteHeld is the other half of the same seam (nocx-50w7p.5): a re-adoption
+// records that this daemon holds the session. Unreachable here for the reason
+// Release is — a binding that never reaches the local route is never adopted —
+// and a call to it would be the same bug.
+func (r *countingLocalRoute) noteHeld(session.ID) {
+	panic("the local carrier was asked to record ownership for a binding that is not this machine's")
 }
 
 // ── the verdict ─────────────────────────────────────────────────────────

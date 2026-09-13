@@ -335,6 +335,50 @@ type localHelperOpener struct {
 	// until the coordinator closes (see close), because the connection is what
 	// the session's own detach travels over.
 	reattached map[session.ID]localSessionConn
+	// held is this machine's daemon's own set of sessions — see its doc below
+	// for the interval and for why the carrier is not read off the kind.
+	held map[session.ID]struct{}
+}
+
+// held is the set of session ids THIS MACHINE'S DAEMON holds — the answer to
+// "which helper holds this session" for the one carrier that the remote
+// registry cannot answer for (nocx-50w7p.5).
+//
+// THE INTERVAL, BOTH ENDS NAMED. A session enters when this opener SPAWNS it
+// (OpenHosted, for either destination: a remote destination carried by this
+// daemon is still this daemon's) or when it RE-ATTACHES it after a restart
+// (readoptLocal), and it leaves when the session is RELEASED (Release) — the
+// same seam the re-attached connection leaves by, because that is where this
+// process stops being the party that holds it.
+//
+// IT IS DELIBERATELY NOT CLEARED WHEN A CONNECTION DROPS (dropIfLost). A lost
+// socket does not end the sessions behind it — the daemon owning them through
+// its holder's process is the whole point — so a pane whose coordinator lost
+// its socket is still this daemon's, and saying otherwise would turn a session
+// that is still running into "no helper holds this".
+//
+// noteHeld records that this machine's daemon holds a session.
+//
+// It takes the opener's OWN lock rather than a second one: `held` is the same
+// kind of state as `reattached` — which sessions this process has a claim on —
+// and two locks over one object is how a deadlock is written.
+func (o *localHelperOpener) noteHeld(sid session.ID) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.held == nil {
+		o.held = make(map[session.ID]struct{})
+	}
+	o.held[sid] = struct{}{}
+}
+
+// holds answers whether this machine's daemon holds a session. It is what
+// paneScreen.owner asks before it asks the remote registry, and it is the only
+// question that routes an ssh pane whose destination is remote.
+func (o *localHelperOpener) holds(sid session.ID) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, ok := o.held[sid]
+	return ok
 }
 
 // sshTargetResolver turns a host and its connect options into the destination
@@ -590,6 +634,12 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		out.Host = remote.Host
 		out.Account = remote.User
 	}
+	// THE SESSION ENTERS THIS DAEMON'S SET (nocx-50w7p.5). It is noted for
+	// BOTH destinations, because the set answers "who holds this terminal" and
+	// this daemon does — whether the process inside is a PTY it forked here or
+	// a shell channel it dialed. That is exactly the fact paneScreen.owner
+	// cannot read off the session's kind.
+	o.noteHeld(sid)
 	return out, true, nil
 }
 
@@ -772,6 +822,11 @@ func (o *localHelperOpener) Release(sid string) {
 	o.mu.Lock()
 	conn, ok := o.reattached[key]
 	delete(o.reattached, key)
+	// THE SESSION LEAVES THIS DAEMON'S SET HERE (nocx-50w7p.5). Release is the
+	// seam at which this process stops being the party that holds the pane, so
+	// it is the same seam the re-attached connection leaves by — one act, one
+	// place, rather than a second concept with its own lifetime.
+	delete(o.held, key)
 	o.mu.Unlock()
 	if ok {
 		_ = conn.client.Close()

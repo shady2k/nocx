@@ -23,23 +23,27 @@ import (
 // paneObserverSweep is how often the backend asks its watched panes what they
 // are now.
 //
-// It is a COALESCER, and the thing that used to make it one is gone: the dirty
-// mark came from the session's read path, and the coordinator no longer reads a
-// session's bytes for a screen (ADR-0066). What a sweep visits is therefore
-// every pane somebody is watching, and its cost is one frame read per watched
-// pane — bounded by this interval, by the watch set's own bound, and by the
-// fact that a pane whose classification did not change sends nothing.
+// It is BOUNDED POLLING of the panes somebody is watching, and what used to
+// make it something cheaper is gone: the dirty mark came from the session's
+// read path, and the coordinator no longer reads a session's bytes for a screen
+// (ADR-0066). So every sweep reads every watched pane — one frame read each per
+// tick — and what bounds the cost is this interval, MaxWatched, and the fact
+// that a pane whose classification did not change sends nothing. A pane that
+// has settled still costs its read; that is the price of an observer that
+// cannot be told a pane moved.
 //
-// What the interval still buys is the coalescing it was written for: an agent
-// that repaints its token counter on every chunk produces one classification
-// per tick rather than one per chunk. Nothing waits on the number — a test
-// drives Sweep directly and asserts on the state change it produces, which is
-// why no test in this repository depends on it.
+// What the interval buys is the coalescing it was written for: an agent that
+// repaints its token counter on every chunk produces one classification per
+// tick rather than one per chunk. Nothing waits on the number — a test drives
+// Sweep directly and asserts on the state change it produces, which is why no
+// test in this repository depends on it.
 const paneObserverSweep = 120 * time.Millisecond
 
 // paneObserver is the transport's half of the seam (AD-8). Narrow on purpose:
-// the transport may say a pane moved, may close an observation when the
-// session ends, and may ask what a pane currently is. It may not classify.
+// the transport may close an observation when the session ends, may drive a
+// sweep, and may ask what a pane currently is. It may not classify — and it may
+// no longer say a pane MOVED, because nothing tells the coordinator that any
+// more: the sweep reads what it watches.
 type paneObserver interface {
 	Unwatch(paneID string)
 	Sweep()

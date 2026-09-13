@@ -34,6 +34,12 @@ func TestEveryRefusalTellsTheCallerWhatToDoNext(t *testing.T) {
 		workers.ErrTaskSubmitRefused,
 		ErrSessionCallerActive,
 		ErrNotEnrolled,
+		// THE PANE ARM'S TWO (nocx-50w7p.16). They are here for the same reason
+		// the pair above is: a bearer that does not match and an interval that
+		// has ended are different facts, and a caller that cannot tell them
+		// apart goes looking for the wrong repair.
+		ErrNoLiveInterval,
+		ErrBearerRefused,
 		errUnpublishedAdmission,
 		context.Canceled,
 		context.DeadlineExceeded,

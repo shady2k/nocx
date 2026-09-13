@@ -144,7 +144,7 @@ const testBearer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 
 func TestTheBridgePresentsTheBearerBeforeAnyRequest(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, testBearer)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	if _, _, err := link.attach(context.Background()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestTheBridgePresentsTheBearerBeforeAnyRequest(t *testing.T) {
 
 func TestTheBridgeWritesNoBearerWhenItHasNone(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, "")
+	link := newEndpointLink("sock", dialer, "", discardLogger)
 	if _, _, err := link.attach(context.Background()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestTheBridgeWritesNoBearerWhenItHasNone(t *testing.T) {
 // the bearer would be refused for a value that arrived a moment later.
 func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, testBearer)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	conn, _, err := link.attach(context.Background())
 	if err != nil {
 		t.Fatalf("attach: %v", err)
@@ -216,7 +216,7 @@ func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
 // the bridge has to establish is a connection the endpoint has to admit.
 func TestAReconnectPresentsTheBearerAgain(t *testing.T) {
 	dialer := newBearerDialer()
-	link := newEndpointLink("sock", dialer, testBearer)
+	link := newEndpointLink("sock", dialer, testBearer, discardLogger)
 	ctx := context.Background()
 
 	if _, _, err := link.attach(ctx); err != nil {

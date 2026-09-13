@@ -202,8 +202,10 @@ func TestAConnectionRefusalReachesTheCallerAsItsReason(t *testing.T) {
 		err      error
 		sentence string
 	}{
-		"not enrolled":            {toolendpoint.ErrNotEnrolled, "not in a pane nocx has enrolled"},
-		"another caller holds it": {toolendpoint.ErrSessionCallerActive, "serves one at a time"},
+		"not enrolled":                 {toolendpoint.ErrNotEnrolled, "not in a pane nocx has enrolled"},
+		"the pane's interval ended":    {toolendpoint.ErrNoLiveInterval, "holds no live admission interval"},
+		"the bearer is not the pane's": {toolendpoint.ErrBearerRefused, "did not present the bearer nocx holds for the pane"},
+		"another caller holds it":      {toolendpoint.ErrSessionCallerActive, "serves one at a time"},
 	}
 	for name, refusal := range refusals {
 		t.Run(name, func(t *testing.T) {

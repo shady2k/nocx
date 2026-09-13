@@ -945,6 +945,26 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 	case errors.Is(err, ErrNotEnrolled):
 		return rpcPeerRefused, "worker caller refused",
 			"this process is not in a pane nocx has enrolled, so it has no worker tools. Nothing you can call will change that; tell the person their pane is not orchestrated."
+	case errors.Is(err, ErrNoLiveInterval):
+		// THE PANE IS REAL AND ITS ADMISSION IS OVER (nocx-50w7p.16). Split from
+		// the arm above because the two send the reader to different facts: that
+		// one means nocx does not know this pane, this one means it does and
+		// nothing admits into it — no answer has been given for its agent, or
+		// the answer that admitted it has ended (the session finished, or the
+		// person turned the agent off). Reported with the epoch's own words
+		// rather than as an orchestration fault, which is what a shared
+		// sentence would have sent a person to look for.
+		return rpcPeerRefused, "worker caller refused",
+			"the pane this connection arrived on holds no live admission interval, so nothing it asked for was run: either nobody has answered yet for the agent in that pane, or the answer that admitted it has ended — the session finished, or the person withdrew the approval. Tell the person; approving that agent in that pane again opens a new interval."
+	case errors.Is(err, ErrBearerRefused):
+		// THE CLAIM, NOT THE PANE. The interval is live and the caller is in an
+		// orchestrated pane; what does not match is the bearer it presented,
+		// which is a value from another pane, another launch, or an interval
+		// that has been replaced. Said in those terms because the repair is
+		// different: nobody has to re-approve anything, the agent in that pane
+		// has to present the value the pane actually holds.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection did not present the bearer nocx holds for the pane it arrived on, so nothing it asked for was run. A bearer belongs to one pane and one interval: one from another pane, an earlier launch, or an interval that has been replaced is refused here. Tell the person to restart the agent in that pane."
 	case errors.Is(err, panebind.ErrShortRecord):
 		// THE HELPER'S REPORT DID NOT ARRIVE WHOLE. Nothing of the call ran,
 		// and retrying on this connection is not possible — but the fact is

@@ -11,6 +11,12 @@ package mcpstdio
 // These tests drive the link rather than the MCP protocol: what is asserted is
 // the bytes that precede a request, and a test through the protocol would be
 // asserting the same bytes one layer further from the code that writes them.
+//
+// WHAT THIS FILE DOES NOT COVER, said rather than implied: a RECONNECT (a second
+// connection after the first drops) and the bridge's own logs and its children's
+// environments. The first has no missing code to find — attach presents the
+// bearer on every dial it makes — but nothing here proves it, and the second is
+// asserted where the value enters the process rather than where it could leave.
 
 import (
 	"bytes"
@@ -121,5 +127,38 @@ func TestTheBridgeWritesNoBearerWhenItHasNone(t *testing.T) {
 	case <-dialer.arrived:
 		t.Fatalf("a bridge with no bearer wrote %q to the endpoint", dialer.written())
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestTheRequestFollowsTheBearerOnTheSameConnection — the ORDER, on one
+// connection, byte for byte: the bearer and then the caller's request. The
+// endpoint reads its preamble before anything else, so a request that overtook
+// the bearer would be refused for a value that arrived a moment later.
+func TestTheRequestFollowsTheBearerOnTheSameConnection(t *testing.T) {
+	dialer := newBearerDialer()
+	link := newEndpointLink("sock", dialer, testBearer)
+	conn, _, err := link.attach(context.Background())
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if got := dialer.awaitBytes(t, len(testBearer)+1); got != testBearer+"\n" {
+		t.Fatalf("the connection began with %q, want the bearer alone", got)
+	}
+	// THE CALLER'S REQUEST, through the same send path the server uses, so what
+	// is asserted is the order the bridge actually produces and not a frame this
+	// test wrote itself.
+	if _, err := conn.send(context.Background(), 1, "tools/list", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	got := dialer.awaitBytes(t, len(testBearer)+1+1)
+	if !strings.HasPrefix(got, testBearer+"\n") {
+		t.Fatalf("the connection began with %q, want the bearer and nothing before it", got)
+	}
+	after := got[len(testBearer)+1:]
+	if !strings.Contains(after, "tools/list") {
+		t.Fatalf("the bearer was followed by %q, want the caller's request", after)
+	}
+	if strings.Index(got, "tools/list") < len(testBearer)+1 {
+		t.Fatalf("the request overtook the bearer: %q", got)
 	}
 }

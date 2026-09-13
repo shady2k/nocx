@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.probe.schema.json",
+  "title": "HelperSSHProbeResult",
+  "description": "What one credential test answered: an outcome from the closed set, and the classifier's own sentence beside it for the log and for the evidence a settings surface shows. `detail` is a string and not a second enum because it is Rust-from-the-classifier rather than a decision the caller switches on: the outcome is the contract, the sentence is what a person reads.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "detail"],
+  "properties": {
+    "outcome": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/probeOutcome"
+    },
+    "detail": {
+      "description": "The classifier's sentence — the same one ssh.ClassifyProbeError produces for the coordinator's own probe, so a person reading two paths sees one product.",
+      "type": "string"
+    }
+  }
+}

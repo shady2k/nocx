@@ -943,6 +943,15 @@ func New(opts ...Option) (*App, error) {
 		return errors.Is(err, vault.ErrVaultSealed)
 	}, v)
 
+	// THE ANSWERS THIS COORDINATOR GIVES ITS HELPER (nocx-50w7p.2). A helper
+	// that dials has to ask for the material it may present, a signature it
+	// cannot make, and a verdict on a host key it has no file to consult — and
+	// every one of those answers already lives in this process (the vault, the
+	// ssh client's known_hosts). They are bound here, where both exist, and
+	// handed to the connection the local opener builds (helper_local.go's
+	// connect), which is the only place a helper can ask.
+	localOpener.setReverseHandlers(helperReverseHandlers(sshClient, credResolver, slogger))
+
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is
 	// deliberately restricted to collection-file references.

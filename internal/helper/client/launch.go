@@ -25,6 +25,12 @@ type Config struct {
 	ExpectHash  string     // the content hash the installer wrote (D21)
 	SentinelTTL time.Duration
 	Log         *slog.Logger
+	// Reverse is the closed set of ops this coordinator answers when the
+	// HELPER asks (reverse.go). Nil is a real configuration and not a
+	// missing one: a caller with nothing to offer answers every reverse
+	// request with unknown_service, which is what a helper built against a
+	// newer generation needs to hear rather than wait forever for.
+	Reverse *ReverseRegistry
 }
 
 // DefaultSentinelTTL is the handshake budget when Config leaves SentinelTTL
@@ -68,6 +74,10 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		done:        make(chan struct{}),
 		hsCh:        make(chan error, 1),
 	}
+	// The reverse handlers' lifetime (reverse.go): the CONNECTION's, not the
+	// handshake's. Dial's own ctx governs bringing the helper up and is
+	// deliberately not the parent — the client outlives it by design.
+	c.reverseCtx, c.cancelReverse = context.WithCancel(context.Background())
 
 	hello := proto.Hello{Version: proto.Version, Nonce: nonce, Corr: randomCorr()}
 	raw, err := json.Marshal(hello)

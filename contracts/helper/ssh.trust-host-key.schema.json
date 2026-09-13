@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.trust-host-key.schema.json",
+  "title": "HelperSSHTrustHostKeyResult",
+  "description": "What the write produced: the fingerprint of the key now recorded for that host. It is the same value the coordinator's own accept path already returns (RealClient.TrustHostKey), so the evidence a person sees after accepting a host does not depend on which process did the writing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fingerprint"],
+  "properties": {
+    "fingerprint": {
+      "description": "The SHA256 fingerprint of the recorded key, in the `SHA256:base64` form ssh.FingerprintSHA256 produces.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

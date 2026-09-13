@@ -102,6 +102,12 @@ type localHelperOpener struct {
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
 	client *helperclient.Client
+	// reverse is the closed set of ops this coordinator answers when the
+	// helper asks it something (helper_reverse.go). It is bound by the
+	// composition root once the vault and the ssh client exist, and it is
+	// carried into every connection this opener builds — a helper that dials
+	// has nobody else to ask.
+	reverse *helperclient.ReverseRegistry
 }
 
 // installedLocalGeneration records what Start installed, so the open route can
@@ -312,7 +318,7 @@ func (o *localHelperOpener) screenClient(ctx context.Context, sid string) (*help
 
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
-	installed, dir, existing, toolSocketPath := o.installed, o.dir, o.client, o.toolSocketPath
+	installed, dir, existing, toolSocketPath, reverse := o.installed, o.dir, o.client, o.toolSocketPath, o.reverse
 	o.mu.Unlock()
 
 	if installed.Binary == "" || installed.Generation == "" || dir == "" {
@@ -324,6 +330,11 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 	c, err := helperlocal.Open(ctx, helperlocal.Config{
 		Dir: dir, Generation: installed.Generation, Binary: installed.Binary,
 		Log: o.log, Env: toolSocketEnv(toolSocketPath),
+		// The answers this coordinator gives the helper when it dials
+		// (helper_reverse.go). Read under the lock with everything else the
+		// connection is built from, so a connection is opened with ONE view of
+		// what this coordinator can answer.
+		Reverse: reverse,
 	})
 	if err != nil {
 		return nil, "", err

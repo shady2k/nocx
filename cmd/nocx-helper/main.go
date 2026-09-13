@@ -220,28 +220,32 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	})
 	defer sessions.Close()
 
-	// THE SSH CLIENT THIS DAEMON HOLDS, where the build has one
-	// (nocx-50w7p.1). It is opened here, beside the sessions and out of the
-	// accept loop, for the same reason they are: it is a property of the
-	// DAEMON, not of one connection — one pool serves every host this machine
-	// hosts for its whole life — and it is released at shutdown with them.
+	// THE SSH SERVICE THIS DAEMON SERVES, where the build has one
+	// (nocx-50w7p.2). The client and the service are opened here, beside the
+	// sessions and out of the accept loop, for the same reason they are: they
+	// are properties of the DAEMON, not of one connection — one client serves
+	// every host this machine hosts for its whole life — and they are released
+	// at shutdown with them.
 	//
 	// holdSSHClient is a build fact: a helper built with nocx_local_ssh opens
-	// a client and says so, and one built without it — every artifact
-	// `make helpers` produces, which is what reaches a host nobody here
-	// controls — returns a release that releases nothing. Nothing dials yet,
-	// so that is the whole difference today.
-	releaseSSH, err := holdSSHClient(log)
+	// a client and a service and says so, and one built without it — every
+	// artifact `make helpers` produces, which is what reaches a host nobody
+	// here controls — returns a seam that registers nothing, so every ssh op is
+	// answered `unknown_service`.
+	sshCap, err := holdSSHClient(log)
 	if err != nil {
 		log.Error("ssh client", "err", err)
 		return 1
 	}
-	defer releaseSSH()
+	defer sshCap.release()
 
 	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
-		h.Register(hostsvc.New(factory))
-		h.Register(sessions)
+		// Which services this build answers is decided by
+		// registerHelperServices, in one place (services.go) — including
+		// whether an ssh service is among them, which is the whole of what
+		// nocx_local_ssh changes about a helper.
+		registerHelperServices(h, hostsvc.New(factory), sessions, sshCap)
 		// The connection is bound to the service, not the other way round:
 		// the sessions outlive it. These are the two lines that used to sit
 		// in main around one stdin/stdout connection and now sit inside the

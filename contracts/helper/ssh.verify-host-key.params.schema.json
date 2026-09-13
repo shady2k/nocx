@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.verify-host-key.params.schema.json",
+  "title": "HelperSSHVerifyHostKeyParams",
+  "description": "The helper asking what to make of a host key it was just offered. It has no other way to find out: the helper links no knownhosts — a forbidden import in the deployed artifact (internal/helper/deploy/dependency_test.go) — and it must not decide for itself whether an unseen key may be accepted, because that decision is a question for a person.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "algorithm", "key"],
+  "properties": {
+    "host": {
+      "description": "The STORAGE identity the coordinator looks the key up under, not the dial address. A direct route records its key under its own address; a route through a jump host records it under an opaque digest that only the coordinator can compute (ssh_real.go's knownHostsTargetAddr), so the value is the coordinator's and a helper that derived one would write a line the next connection would not find.",
+      "type": "string",
+      "minLength": 1
+    },
+    "algorithm": {
+      "description": "The offered key's own type string, as the helper read it off the handshake. It is checked against the key bytes, so a disagreement between the two ends about WHICH key this is becomes a refusal rather than a fingerprint of a key nobody asked about.",
+      "type": "string",
+      "minLength": 1
+    },
+    "key": {
+      "description": "The wire-format public key blob the peer presented (RFC 4253 §6.6), base64. Public material: it is what the peer sends on the first packet of every handshake.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

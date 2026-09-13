@@ -89,6 +89,47 @@ const (
 	ErrCodeSpawnFailed = "spawn_failed"
 )
 
+// Refusal is one named refusal as a Go error, so a refusal survives the round
+// trip through a caller's ordinary error handling instead of being flattened
+// into a string at the point it is written and re-parsed by whoever reads it.
+//
+// It is the ENCODING half of the wire's error, and it exists because this
+// wire is spoken in BOTH directions. A refusal the coordinator answers to a
+// reverse request (the helper asked for material and the vault is sealed) has
+// to travel back out through the helper — which is not the party that
+// understands the vault — and reach the coordinator's caller as the same named
+// state. A code carried in an error, on both hops, is what makes that one
+// answer rather than three paraphrases.
+//
+// The DECODED half is the client's own RefusalError, which is a shipped shape
+// a caller already switches on; this type is what a handler returns and what
+// the host hands a service, and the two are not merged because they sit on
+// opposite sides of the encode/decode boundary.
+type Refusal struct {
+	Code    string
+	Message string
+	Details json.RawMessage
+}
+
+// Error makes a refusal an ordinary error. The message is the one that crosses.
+func (r *Refusal) Error() string { return r.Message }
+
+// Unwrap is nil: a refusal is a state, not a wrapper. It carries the code that
+// matters, and an errors.Is chain behind it would invite a caller to switch on
+// the cause instead of on the answer.
+func (r *Refusal) Unwrap() error { return nil }
+
+// WireCode implements Coded: a refusal names its own code and details.
+func (r *Refusal) WireCode() (string, json.RawMessage) { return r.Code, r.Details }
+
+// Coded is an error that knows the wire code it is answered with. A responder
+// that finds one sends its code; one that does not is `internal`, which is the
+// honest default — an unrecognised failure is not a state the caller can act
+// on, and inventing a code for it would be worse than admitting it.
+type Coded interface {
+	WireCode() (code string, details json.RawMessage)
+}
+
 // ChunkedResult is the sentinel a Response carries when the real payload
 // follows as TypeChunk frames, reassembled by concatenation (D14).
 type ChunkedResult struct {

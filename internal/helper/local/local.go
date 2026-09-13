@@ -174,6 +174,11 @@ type Config struct {
 	// SentinelTTL bounds the handshake; zero is client.DefaultSentinelTTL.
 	SentinelTTL time.Duration
 	Log         *slog.Logger
+	// Reverse is the closed set of ops this coordinator answers when the
+	// helper on this machine asks it something (client.Config.Reverse). It is
+	// carried here because the local carrier is where the coordinator's own
+	// connection is built, and a helper that dials has nobody else to ask.
+	Reverse *client.ReverseRegistry
 }
 
 // Open reaches the helper for one generation on this machine: it dials the
@@ -226,6 +231,7 @@ func Open(ctx context.Context, cfg Config) (*client.Client, error) {
 		ExpectHash:  string(cfg.Generation),
 		SentinelTTL: cfg.SentinelTTL,
 		Log:         cfg.Log,
+		Reverse:     cfg.Reverse,
 	})
 	if err != nil {
 		_ = carrier.Close()

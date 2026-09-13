@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"sync"
 
@@ -52,6 +53,10 @@ type workerAuthApproval interface {
 	// facts are one read: a verdict from one interval and an epoch from the
 	// next is the gap the epoch exists to close.
 	Interval(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, bool)
+	// IntervalToken answers the same question with the bearer that interval
+	// admits with, in one snapshot (nocx-50w7p.16): a verdict and a bearer read
+	// separately could come from two different intervals.
+	IntervalToken(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, string, bool)
 }
 
 // workerAuthAuthorityEnding is implemented by an approval seam whose answers
@@ -206,7 +211,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 	// on this arm at all — it is the HELPER's, and matching it against a
 	// process tree would admit whatever tree the helper happens to be in.
 	if peer.Pane != "" {
-		return a.admittedPane(peer.Pane)
+		return a.admittedPane(peer.Pane, peer.Token)
 	}
 	// The pinner is required HERE and not above it, because this is the only
 	// arm that uses it: admission by pane is a session, an enrolment and an
@@ -275,7 +280,7 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 //     closes with the approval interval exactly as a local one's does — and
 //     the publication below is the same publication, into the same record the
 //     session's end retires.
-func (a *toolAuthorizer) admittedPane(pane string) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
+func (a *toolAuthorizer) admittedPane(pane, token string) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
 	sid := session.ID(pane)
 	if sid == "" {
 		return "", nil, 0, false
@@ -290,8 +295,19 @@ func (a *toolAuthorizer) admittedPane(pane string) (session.ID, session.Session,
 	if !a.enrolments.Watched(pane) {
 		return "", nil, 0, false
 	}
-	epoch, live := a.approval.Interval(sid, agentToolEndpointScopePrefix+a.workspace)
+	epoch, minted, live := a.approval.IntervalToken(sid, agentToolEndpointScopePrefix+a.workspace)
 	if !live {
+		// RETIRED: no live interval, so nothing this pane ever carried admits
+		// now — a session that ended, an approval withdrawn, a re-approval that
+		// opened a new interval under a new bearer.
+		return "", nil, 0, false
+	}
+	// THE BEARER, compared in CONSTANT TIME and against the interval's own
+	// value: a token from another pane, an older interval, or no token at all
+	// is refused here, and the comparison says nothing about how far a wrong
+	// value got. An interval whose mint failed holds no bearer, and then
+	// nobody presents one.
+	if subtle.ConstantTimeCompare([]byte(token), []byte(minted)) != 1 {
 		return "", nil, 0, false
 	}
 	return sid, sess, epoch, true

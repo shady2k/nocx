@@ -460,6 +460,21 @@ type SSHSpawnParams struct {
 	// anything is dialed: a forward to nothing is the silent degrade a launch
 	// must never carry.
 	AgentToolEndpoint string `json:"agentToolEndpoint,omitempty"`
+	// AgentToolToken is the bearer the pane's agent presents to be admitted
+	// (nocx-50w7p.16): what the coordinator minted for THIS pane and its
+	// admission epoch, and what the endpoint on the coordinator's machine
+	// compares before it will admit a connection arriving on the far-side tool
+	// socket.
+	//
+	// It travels per request for the same reason AgentToolEndpoint does — a
+	// daemon serves several coordinators, and this is a fact about the pane one
+	// of them opened — and it is a SECRET, so the helper treats it as one: it
+	// reaches the far shell by the descriptor frame and is never part of the
+	// launch record, the logs, or anything the helper hands a child process.
+	// Empty is a real state: a coordinator that requires no bearer (the local
+	// tree rule admits those panes) sends none, and a pane whose frame carries
+	// none admits nobody answering to a token.
+	AgentToolToken string `json:"agentToolToken,omitempty"`
 	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
 	// SpawnParams states: a repeat answers with the session the first one made
 	// rather than forking a second remote shell.

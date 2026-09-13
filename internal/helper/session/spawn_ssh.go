@@ -158,6 +158,9 @@ func (p *sshSpawner) SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process
 			Enhanced:            true,
 			AgentHelperPath:     req.AgentHelperPath,
 			AgentToolSocketPath: req.AgentToolSocketPath,
+			// The bearer, on the frame-2 road the lifecycle capability takes
+			// rather than in the agent env block (nocx-50w7p.16).
+			AgentToolToken: req.AgentToolToken,
 		}
 		// The authenticated lifecycle channel's addressing. The CAPABILITY is
 		// not rendered anywhere by the launcher: it reaches the far shell as

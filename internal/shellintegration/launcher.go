@@ -39,6 +39,19 @@ const (
 // variable can never spell it two different ways (nocx-2tesu).
 const ToolSocketEnvVar = "NOCX_TOOL_SOCKET"
 
+// AgentToolTokenEnvVar is the one spelling of the variable an agent's MCP
+// bridge reads the pane's bearer from (nocx-50w7p.16).
+//
+// It is NOT an environment variable nocx sets in a shell: the staging writes it
+// into the launch directory's mcp.json — 0600 in a 0700 directory — and the
+// agent's own MCP client is what puts it in the bridge's environment. That is
+// the whole point of the carrier: the far host's argv is world-readable, and a
+// shell's environment is inherited by everything it starts, while this reaches
+// exactly one child. Every reader and writer of the name goes through this
+// constant, so the Go side and the shells cannot spell it two ways.
+// #nosec G101 -- a variable NAME, not a credential: what it carries is minted per interval and never written here.
+const AgentToolTokenEnvVar = "NOCX_AGENT_TOKEN"
+
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
@@ -48,6 +61,19 @@ type LaunchOptions struct {
 	// lifecycle capability and report rendezvous remain outside this config.
 	AgentHelperPath     string
 	AgentToolSocketPath string
+	// AgentToolToken is the pane's tool bearer (nocx-50w7p.16): what the far
+	// agent's MCP bridge presents to be admitted, and what the pane's epoch
+	// bounds. It is LOWER-CASE HEX and it is a SECRET, so it travels by one of
+	// the two bearer transports and no others (capability_source.go, design
+	// D4): on the remote path it is a line in frame 2's payload, read once
+	// into a NON-EXPORTED shell variable and staged into the launch
+	// directory's mcp.json — never in this struct's env block, never in argv,
+	// never exported, and never a name on a filesystem outside that directory.
+	//
+	// It is a different value from Capability and is not a second spelling of
+	// it: Capability addresses the lifecycle channel, this admits tool calls,
+	// and each is bounded by its own interval.
+	AgentToolToken string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
 	// reaches the shell through an inherited, already-unlinked descriptor

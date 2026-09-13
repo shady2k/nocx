@@ -159,4 +159,4 @@ package proto
 // other's key auth, and only the number tells them apart. Two peers that
 // disagree refuse each other at hello in both directions, which is what makes
 // the number the whole of the compatibility story.
-const Version = "11"
+const Version = "12"

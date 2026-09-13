@@ -873,8 +873,20 @@ __nocx_agent_stage() {
         __helper_json="$__nocx_lc_json_escaped"
         __nocx_lc_json_escape "$__socket" || exit 1
         __socket_json="$__nocx_lc_json_escaped"
-        printf '{"mcpServers":{"nocx":{"type":"stdio","command":"%s","args":["mcp","--socket","%s"]}}}\n' \
-            "$__helper_json" "$__socket_json" > "$__config" || exit 1
+        # THE AGENT'S BEARER, and the only place a child of this shell sees it
+        # (nocx-50w7p.16). It arrives as a NON-EXPORTED variable from the
+        # descriptor stage-1 read (capability_source.go), so nothing this shell
+        # runs inherits it; it is written here, 0600 inside the 0700 launch
+        # directory, and it goes in `env` rather than `args` because a far
+        # host's argv is world-readable and this file is not.
+        __nocx_lc_json_escape "${__nocx_agent_token:-}" || exit 1
+        __token_json="$__nocx_lc_json_escaped"
+        __env_json=
+        if [[ -n "$__token_json" ]]; then
+            __env_json=",\"env\":{\"NOCX_AGENT_TOKEN\":\"$__token_json\"}"
+        fi
+        printf '{"mcpServers":{"nocx":{"type":"stdio","command":"%s","args":["mcp","--socket","%s"]%s}}}\n' \
+            "$__helper_json" "$__socket_json" "$__env_json" > "$__config" || exit 1
         command chmod 600 "$__lease" "$__config"
     ); then
         command rm -rf -- "$__dir" 2>/dev/null || true
@@ -1017,6 +1029,13 @@ __nocx_agent_run() {
     # If a future Claude subcommand rejects trailing flags, update this
     # argv proof and feed the prompt through stdin instead of moving the flag
     # ahead of user arguments.
+    # Cleared before the agent is exec'd: the staging above has taken its copy,
+    # nothing after this point needs the bearer, and a shell that ran a child
+    # with it still in its own variable space is one `printenv`-style accident
+    # away from publishing it (nocx-50w7p.16). The unset is the second lock on
+    # the same door — a non-exported variable is not inherited anyway — and it
+    # is kept because the cost is one builtin.
+    unset __nocx_agent_token 2>/dev/null || true
     if (( __staged )); then
         NOCX_AGENT_REPORT="$__nocx_agent_report_path" command "$__agent" "$@" \
             --mcp-config "$__nocx_agent_launch_dir/mcp.json"

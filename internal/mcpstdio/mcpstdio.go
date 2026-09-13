@@ -12,11 +12,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 const (
@@ -45,8 +48,17 @@ type Dialer interface {
 // ServerVersion are reported during MCP initialization and do not affect the
 // endpoint protocol.
 type Config struct {
-	Socket        string
-	Dialer        Dialer
+	Socket string
+	Dialer Dialer
+	// Token is the pane's bearer, presented once per connection before any
+	// request (nocx-50w7p.16). It is a SECRET: this adapter writes it to its
+	// endpoint and nowhere else — never to a log, never to a child, never to
+	// its own output stream, which for a bridge is the agent's stdin/stdout.
+	// Empty for a caller that presents none, which is every local agent: the
+	// endpoint reads a preamble only on the helper's lane, and a bridge that
+	// wrote one anyway would put bytes the far side never asked for in front
+	// of a request.
+	Token         string
 	ServerName    string
 	ServerVersion string
 }
@@ -55,6 +67,7 @@ type Config struct {
 type Server struct {
 	socket        string
 	dialer        Dialer
+	token         string
 	serverName    string
 	serverVersion string
 }
@@ -76,6 +89,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		socket:        cfg.Socket,
 		dialer:        cfg.Dialer,
+		token:         cfg.Token,
 		serverName:    cfg.ServerName,
 		serverVersion: cfg.ServerVersion,
 	}, nil
@@ -83,7 +97,11 @@ func New(cfg Config) (*Server, error) {
 
 // Serve runs an adapter until Input reaches EOF or ctx is canceled.
 func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string) error {
-	server, err := New(Config{Socket: socket})
+	// THE PANE'S BEARER, read from this process's own environment and from
+	// nowhere else (nocx-50w7p.16). The agent's MCP client passes it from the
+	// staged config, so it is this process alone that holds it — never a
+	// sibling, never a child, never a log line.
+	server, err := New(Config{Socket: socket, Token: os.Getenv(shellintegration.AgentToolTokenEnvVar)})
 	if err != nil {
 		return err
 	}
@@ -114,7 +132,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	// words as a problem with the caller, though the peer was never in
 	// question. One shared connection is that interval expressed literally,
 	// and the endpoint already serves concurrent requests on it.
-	link := newEndpointLink(s.socket, s.dialer)
+	link := newEndpointLink(s.socket, s.dialer, s.token)
 	var requests sync.WaitGroup
 	defer func() {
 		// Cancel first, then close, then wait. Cancelling is what every
@@ -644,6 +662,11 @@ func (e *upstreamError) refusal() bool {
 type endpointLink struct {
 	socket string
 	dialer Dialer
+	// token is presented once, right after the dial and before any request:
+	// the endpoint reads its preamble before it decides anything, and a call
+	// that arrived first would be refused for a bearer that was about to be
+	// said.
+	token string
 
 	mu      sync.Mutex
 	conn    *endpointConn
@@ -651,8 +674,8 @@ type endpointLink struct {
 	stopped bool
 }
 
-func newEndpointLink(socket string, dialer Dialer) *endpointLink {
-	return &endpointLink{socket: socket, dialer: dialer}
+func newEndpointLink(socket string, dialer Dialer, token string) *endpointLink {
+	return &endpointLink{socket: socket, dialer: dialer, token: token}
 }
 
 // close releases the shared connection when the stdio session ends. The
@@ -688,6 +711,22 @@ func (l *endpointLink) attach(ctx context.Context) (*endpointConn, int64, error)
 		raw, err := l.dialer.DialContext(ctx, "unix", l.socket)
 		if err != nil {
 			return nil, 0, err
+		}
+		// THE BEARER GOES FIRST, on the one connection this bridge holds for
+		// its whole session (ADR-0058: a connection IS the admission interval).
+		// Only when there is one: a local agent's connection is not on the
+		// helper's lane and the endpoint reads no preamble on it, so writing
+		// bytes here would be bytes in front of a request.
+		if l.token != "" {
+			token, err := panebind.EncodeToken(l.token)
+			if err != nil {
+				_ = raw.Close()
+				return nil, 0, err
+			}
+			if _, err := raw.Write(token); err != nil {
+				_ = raw.Close()
+				return nil, 0, err
+			}
 		}
 		l.conn = newEndpointConn(raw)
 	}

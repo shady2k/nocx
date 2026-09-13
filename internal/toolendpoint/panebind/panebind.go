@@ -123,3 +123,60 @@ func isSessionHex(s string) bool {
 	}
 	return true
 }
+
+// TokenHexLen is the length of the bearer's hex and TokenLen the whole line.
+//
+// The bearer gets its OWN validator and its own length rather than borrowing the
+// session id's: a session id is an identifier that is safe to look at, and this
+// is a secret that admits, so the two are different domains and a shared
+// validator would be a shared answer to two questions (AD-8). 32 random bytes is
+// what the mint produces; a value of any other length is not one of ours.
+const (
+	TokenHexLen = 64
+	TokenLen    = TokenHexLen + 1
+)
+
+// ErrShortToken means the connection ended before a whole bearer arrived, and
+// ErrNotAToken means the bytes are not one this build understands. They are
+// separate from the record's own errors because they say something different
+// about the connection: the record is the helper's claim about the pane, this is
+// the agent's claim about itself.
+var (
+	ErrShortToken = errors.New("toolendpoint: the tool token ended before it was complete")
+	ErrNotAToken  = errors.New("toolendpoint: these bytes are not a tool token")
+)
+
+// isTokenHex is the bearer's alphabet and length: lower-case hex, exactly
+// TokenHexLen of it. Deliberately not isSessionHex, which is the same shape today
+// and a different question.
+func isTokenHex(s string) bool {
+	if len(s) != TokenHexLen {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// EncodeToken renders the bearer a forwarded connection presents.
+func EncodeToken(token string) ([]byte, error) {
+	if !isTokenHex(token) {
+		return nil, ErrNotAToken
+	}
+	return []byte(token + "\n"), nil
+}
+
+// ReadToken reads one bearer, never past it.
+func ReadToken(r io.Reader) (string, error) {
+	buf := make([]byte, TokenLen)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrShortToken, err)
+	}
+	if buf[TokenHexLen] != '\n' || !isTokenHex(string(buf[:TokenHexLen])) {
+		return "", ErrNotAToken
+	}
+	return string(buf[:TokenHexLen]), nil
+}

@@ -70,6 +70,12 @@ func emptyWorkerRecord() *workers.Registrar {
 // the approval is not the thing under test.
 type allowWorkerApproval struct{}
 
+// IntervalToken mirrors Interval for the double: a bearer nothing presents,
+// which is what every caller of this double is asserting about.
+func (allowWorkerApproval) IntervalToken(session.ID, string) (toolendpoint.AdmissionEpoch, string, bool) {
+	return 1, "", true
+}
+
 func (allowWorkerApproval) Interval(session.ID, string) (toolendpoint.AdmissionEpoch, bool) {
 	return 1, true
 }

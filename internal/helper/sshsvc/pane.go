@@ -180,6 +180,18 @@ type PaneListeners struct {
 	// session is the session id every connection on toolLn announces before
 	// its own bytes, or empty when this pane has no tool socket.
 	session string
+	// forwards are the far-side tool connections this pane is carrying right
+	// now, keyed by the connection itself. They are held so Close can end
+	// them: a listener that stops accepting leaves the connections it already
+	// accepted running, and a connection outlives the session that justified
+	// it — the far agent keeps a pipe into a coordinator that has forgotten
+	// the pane, which is the shape ADR-0058 forbids one layer up.
+	//
+	// closed is what makes the registration and the close one decision rather
+	// than two: an Accept that returns while Close is running must not leave a
+	// connection nobody will ever close.
+	forwards map[net.Conn]struct{}
+	closed   bool
 
 	mu       sync.Mutex
 	claimed  bool
@@ -345,14 +357,45 @@ func (p *PaneListeners) bridge(conn net.Conn) {
 
 // acceptTool serves the far side's tool socket: every connection an agent
 // process makes there is piped into the coordinator's own endpoint socket.
+//
+// Every accepted connection is REGISTERED before it is served, so this pane can
+// end them all when it ends (Close). An accept that loses the race with Close
+// gets a connection already marked closed: it is closed here rather than handed
+// to a forward nobody will end.
 func (p *PaneListeners) acceptTool() {
 	for {
 		conn, err := p.toolLn.Accept()
 		if err != nil {
 			return
 		}
+		if !p.trackForward(conn) {
+			_ = conn.Close()
+			continue
+		}
 		go p.forwardTool(conn)
 	}
+}
+
+// trackForward registers one accepted far-side connection, or reports that this
+// pane is already closed and the connection must be dropped.
+func (p *PaneListeners) trackForward(conn net.Conn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	if p.forwards == nil {
+		p.forwards = make(map[net.Conn]struct{})
+	}
+	p.forwards[conn] = struct{}{}
+	return true
+}
+
+// untrackForward forgets a connection whose forward has ended.
+func (p *PaneListeners) untrackForward(conn net.Conn) {
+	p.mu.Lock()
+	delete(p.forwards, conn)
+	p.mu.Unlock()
 }
 
 // forwardTool pipes one agent connection to the coordinator's tool endpoint.
@@ -375,6 +418,7 @@ func (p *PaneListeners) acceptTool() {
 // endpoint at all.
 func (p *PaneListeners) forwardTool(far net.Conn) {
 	defer func() { _ = far.Close() }()
+	defer p.untrackForward(far)
 	local, err := net.Dial("unix", p.toolTarget)
 	if err != nil {
 		p.log.Warn("ssh: refusing a far-side tool connection",
@@ -434,6 +478,29 @@ func (p *PaneListeners) ToolSocketPath() string { return p.toolPath }
 // teardown, which is where it is called from.
 func (p *PaneListeners) Close() error {
 	p.closeOne.Do(func() {
+		// THE FORWARDS THIS PANE IS CARRYING ARE ENDED WITH IT. Closing the
+		// listener stops new connections; what it does not do is end the ones
+		// already accepted, and those are connections a far agent holds into a
+		// coordinator that has forgotten this pane. The closing event is the
+		// pane's — its session ended, its listener was cancelled, the daemon is
+		// going away — and a forward outliving it is a session's authority
+		// outliving the session (ADR-0058), one layer below the endpoint where
+		// the same rule is already enforced.
+		//
+		// Taken under the same lock as the registration, so a connection
+		// arriving during this Close is either already in the map (and closed
+		// here) or sees closed (and is closed by acceptTool).
+		p.mu.Lock()
+		p.closed = true
+		open := make([]net.Conn, 0, len(p.forwards))
+		for conn := range p.forwards {
+			open = append(open, conn)
+		}
+		p.forwards = nil
+		p.mu.Unlock()
+		for _, conn := range open {
+			_ = conn.Close()
+		}
 		if p.lifecycleLn != nil {
 			_ = p.lifecycleLn.Close()
 		}

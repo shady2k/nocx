@@ -209,11 +209,14 @@ func coordinatorHolds(a *App, sid session.ID, within time.Duration) bool {
 // would be the other thing entirely.
 func helperHolds(t *testing.T, a *App, sid session.ID) bool {
 	t.Helper()
-	a.localHelper.mu.Lock()
-	c := a.localHelper.client
-	a.localHelper.mu.Unlock()
-	if c == nil {
-		return false
+	// CONNECTED FIRST, and that is the whole correction: a coordinator opens
+	// its connection to the daemon LAZILY, so looking at the opener's client
+	// right after Start asks nothing and answers "the daemon holds nothing".
+	// The question is what the DAEMON holds, and reaching it is the act the
+	// epic is about — a replacing coordinator asks the daemon what it kept.
+	c, _, err := a.localHelper.connect(context.Background())
+	if err != nil {
+		t.Fatalf("reaching this machine's helper: %v", err)
 	}
 	entries, err := c.Sessions(context.Background())
 	if err != nil {

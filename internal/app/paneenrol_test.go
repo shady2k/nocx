@@ -26,57 +26,72 @@ func TestNewPaneEnrollerRejectsMissingApproval(t *testing.T) {
 	}
 }
 
-// realGrid is the product's own store rather than a double: what this seam is
-// tested for is that an enrolment actually opens a grid, and a fake grid can
+// realStore is the product's own store rather than a double: what this seam is
+// tested for is that an enrolment actually opens a watch, and a fake store can
 // only report that the seam called something.
 func newEnroller(t *testing.T) (*paneEnroller, *paneviewtest.Views, *sessionRegistry) {
 	t.Helper()
-	e, grid, sessions, _ := newEnrollerWithWatcher(t)
-	return e, grid, sessions
+	e, views, sessions, _ := newEnrollerWithWatcher(t)
+	return e, views, sessions
 }
 
 // The same, plus the watcher — for the tests that assert the observation opens
-// and closes with the grid rather than beside it.
+// and closes with the watch rather than beside it.
 func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *paneviewtest.Views, *sessionRegistry, *paneobserve.Watcher) {
 	t.Helper()
 	lg := log.NewSlogAdapter(nil)
-	grid := paneviewtest.NewViews(lg)
+	views := paneviewtest.NewViews(lg)
 	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watch := paneobserve.New(lg, grid.Store, drivers, paneobserve.Config{})
+	watch := paneobserve.New(lg, views.Store, drivers, paneobserve.Config{})
 	sessions := newSessionRegistry()
-	e, err := newPaneEnroller(lg, sessions, grid.Store, watch, allowPaneApproval{})
+	e, err := newPaneEnroller(lg, sessions, views.Store, watch, allowPaneApproval{})
 	if err != nil {
 		t.Fatalf("enroller: %v", err)
 	}
-	return e, grid, sessions, watch
+	return e, views, sessions, watch
+}
+
+// placeSession registers the lane's session and declares that session's
+// runtime in the source, because production does the two in one act: a
+// session's PTY is opened by the helper that holds it, so the runtime beside
+// that PTY answers for the pane from the moment the session exists (the one
+// paneview.Source is internal/app/panescreen.go's). Enrolment probes that
+// runtime before it claims a watch slot, so a fixture that registered a lane
+// and declared no runtime would be asking nocx to watch a pane it has no way
+// to read — which is the state the probe exists to refuse.
+func placeSession(sessions *sessionRegistry, views *paneviewtest.Views, lane lifecycle.LaneID, sid string, cols, rows int) {
+	sessions.register(lane, sid)
+	views.Size(sid, cols, rows)
 }
 
 // The ordinary case, and every refusal below is paired against it: a lane that
-// belongs to a session gets a grid at the geometry it named.
-func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
-	e, grid, sessions := newEnroller(t)
-	sessions.register("lane-1", "sess-1")
+// belongs to a session gets a watch over that session's pane, and a frame read
+// comes back at the geometry the SESSION's runtime holds — the size a shell
+// reports for itself is not what a frame is measured at (panescreen.go).
+func TestEnrolmentOpensTheWatchForTheLanesSession(t *testing.T) {
+	e, views, sessions := newEnroller(t)
+	placeSession(sessions, views, "lane-1", "sess-1", 120, 40)
 
 	if err := e.Enrol("lane-1", "claude", 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
-	if !grid.Watched("sess-1") {
-		t.Fatal("the lane's session has no grid")
+	if !views.Watched("sess-1") {
+		t.Fatal("the lane's session has no watch")
 	}
-	f, err := grid.Frame("sess-1")
+	f, err := views.Frame("sess-1")
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
 	if f.Cols != 120 || f.Rows != 40 {
-		t.Errorf("grid size = %dx%d, want the enrolment's 120x40", f.Cols, f.Rows)
+		t.Errorf("frame size = %dx%d, want the session's 120x40", f.Cols, f.Rows)
 	}
 
 	e.Withdraw("lane-1")
-	if grid.Watched("sess-1") {
-		t.Error("the grid outlived the withdrawal: the interval has one end")
+	if views.Watched("sess-1") {
+		t.Error("the watch outlived the withdrawal: the interval has one end")
 	}
 }
 
@@ -85,23 +100,23 @@ func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
 // whose session has already gone — and answering it with "yes" would tell a
 // caller it is orchestrated while nothing is watching.
 func TestAnUnplaceableLaneIsRefused(t *testing.T) {
-	e, grid, _ := newEnroller(t)
+	e, views, _ := newEnroller(t)
 
 	err := e.Enrol("lane-nobody", "claude", 120, 40)
 	if err == nil {
 		t.Fatal("a lane belonging to no session was enrolled")
 	}
-	if grid.Count() != 0 {
-		t.Errorf("a refused enrolment left %d grids behind", grid.Count())
+	if views.Count() != 0 {
+		t.Errorf("a refused enrolment left %d watches behind", views.Count())
 	}
 }
 
 // Re-enrolling a watched pane is refused rather than silently restarted.
-// Restarting would discard the grid built so far, and with it the byte-zero
-// guarantee that is the only reason to trust a frame at all.
+// Restarting would absorb a second open, and one withdrawal could no longer be
+// said to close what it claimed: the interval has exactly one owner.
 func TestAWatchedPaneIsNotReEnrolled(t *testing.T) {
-	e, _, sessions := newEnroller(t)
-	sessions.register("lane-1", "sess-1")
+	e, views, sessions := newEnroller(t)
+	placeSession(sessions, views, "lane-1", "sess-1", 120, 40)
 
 	if err := e.Enrol("lane-1", "claude", 120, 40); err != nil {
 		t.Fatalf("first enrol: %v", err)
@@ -115,22 +130,26 @@ func TestAWatchedPaneIsNotReEnrolled(t *testing.T) {
 	}
 }
 
-// The bound the amendment asks for, reached: a grid is a real emulator with a
-// real allocation, so the refusal has to name the bound rather than fail
-// obscurely.
+// The bound the amendment asks for, reached: what a caller looping over
+// enrolments exhausts is the helper's willingness to answer a frame read per
+// pane, so the refusal has to name the bound rather than fail obscurely.
 func TestTheWatchBoundIsRefusedByName(t *testing.T) {
-	e, grid, sessions := newEnroller(t)
-	for i := 0; i < paneview.MaxWatched; i++ {
+	e, views, sessions := newEnroller(t)
+	for i := range paneview.MaxWatched {
 		lane := lifecycle.LaneID("lane-" + string(rune('a'+i%26)) + string(rune('a'+i/26)))
 		sid := "sess-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
-		sessions.register(lane, sid)
+		placeSession(sessions, views, lane, sid, 80, 24)
 		if err := e.Enrol(lane, "claude", 80, 24); err != nil {
 			t.Fatalf("enrol %d: %v", i, err)
 		}
 	}
-	if grid.Count() != paneview.MaxWatched {
-		t.Fatalf("opened %d grids, want %d", grid.Count(), paneview.MaxWatched)
+	if views.Count() != paneview.MaxWatched {
+		t.Fatalf("opened %d watches, want %d", views.Count(), paneview.MaxWatched)
 	}
+	// The last lane's session is deliberately left with no runtime in the
+	// source. The bound is checked BEFORE the pane is probed, so an
+	// implementation that asked for a screen first would refuse this enrolment
+	// for the other reason and fail the message assertion below.
 	sessions.register("lane-over", "sess-over")
 	err := e.Enrol("lane-over", "claude", 80, 24)
 	if err == nil {
@@ -145,8 +164,8 @@ func TestTheWatchBoundIsRefusedByName(t *testing.T) {
 // racing a session teardown should not have to find out who won, and the
 // backend closes the same interval again when the session's output ends.
 func TestWithdrawingAnUnwatchedPaneIsQuiet(t *testing.T) {
-	e, _, sessions := newEnroller(t)
-	sessions.register("lane-1", "sess-1")
+	e, views, sessions := newEnroller(t)
+	placeSession(sessions, views, "lane-1", "sess-1", 80, 24)
 	e.Withdraw("lane-1")    // never enrolled
 	e.Withdraw("lane-none") // not even placeable
 }
@@ -164,14 +183,14 @@ func TestPaneEnrollerRefusalsAreErrorsThePublisherCanShow(t *testing.T) {
 	}
 }
 
-// The enrolment act opens the OBSERVATION as well as the grid, and the pane is
+// The enrolment act opens the OBSERVATION as well as the watch, and the pane is
 // classified without waiting for another byte. A pane already has a screen by
 // the time its agent asks to be watched; a watcher that waited for the next
 // chunk would leave a settled agent invisible for as long as it stayed settled,
 // which is exactly the state the indicator most needs to show.
 func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T) {
-	e, grid, sessions, watch := newEnrollerWithWatcher(t)
-	sessions.register("lane-1", "sess-1")
+	e, views, sessions, watch := newEnrollerWithWatcher(t)
+	placeSession(sessions, views, "lane-1", "sess-1", 40, 14)
 	var got []paneobserve.Observation
 	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
 
@@ -179,7 +198,7 @@ func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T
 		t.Fatalf("enrol: %v", err)
 	}
 	rule := strings.Repeat("─", 40)
-	grid.Feed("sess-1", []byte("\x1b[2J\x1b[7;1H  0 tokens\x1b[8;1H"+rule+
+	views.Feed("sess-1", []byte("\x1b[2J\x1b[7;1H  0 tokens\x1b[8;1H"+rule+
 		"\x1b[9;1H❯ \x1b[10;1H"+rule+"\x1b[12;1H  ⏵⏵ auto mode on\x1b[9;3H"))
 	watch.Sweep()
 
@@ -192,10 +211,10 @@ func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T
 }
 
 // And closes it. The interval has both ends here too: a withdrawn pane is not
-// observed, and the observation does not outlive the grid it reads.
-func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
-	e, _, sessions, watch := newEnrollerWithWatcher(t)
-	sessions.register("lane-1", "sess-1")
+// observed, and the observation does not outlive the watch it reads through.
+func TestWithdrawalClosesTheObservationWithTheWatch(t *testing.T) {
+	e, views, sessions, watch := newEnrollerWithWatcher(t)
+	placeSession(sessions, views, "lane-1", "sess-1", 40, 14)
 	var got []paneobserve.Observation
 	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
 
@@ -222,7 +241,7 @@ func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
 	}
 }
 
-// A refused enrolment opens NOTHING. The grid is refused and the observation
+// A refused enrolment opens NOTHING. The watch is refused and the observation
 // must be refused with it, or nocx would go on reporting a state for a pane it
 // declined to watch — a claim with no evidence behind it.
 func TestARefusedEnrolmentOpensNoObservation(t *testing.T) {

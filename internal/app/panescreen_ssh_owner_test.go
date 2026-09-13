@@ -191,6 +191,155 @@ func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T)
 	t.Logf("MEASURED the moved-profile refusal: %v", err)
 }
 
+// TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen is the
+// acceptance for the shape this bead created (nocx-50w7p.5), and it is the one
+// the four local tests above are not: a REPLACING coordinator takes an ssh pane
+// back off this machine's daemon, the pane keeps the FAR destination it was
+// opened for, the carrier that holds it says so, and its screen answers.
+//
+// THE RESTART IS THE SECOND OPENER, which is what a restart is here: the daemon
+// and the shell behind it are the same, the coordinator asking is not. Nothing
+// is spawned twice — the daemon still holds the one session — so a pass that
+// adopted it would be adopting the shell that is already running, which is the
+// whole promise of a carried-over binding.
+func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T) {
+	home := storagetest.IsolateWithHome(t)
+	src := fakeArtifacts{payload: syntheticPayload}
+	gen := src.hash()
+	_ = startFakeLocalEndpoint(t, endpoint.Dir(home), gen)
+
+	logger := log.NewSlogAdapter(discardLogger())
+	lg := discardLogger()
+	newOpener := func(reg *session.Reg) *localHelperOpener {
+		rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
+		if err != nil {
+			t.Fatalf("ssh.NewReal: %v", err)
+		}
+		return &localHelperOpener{
+			log: lg, registry: reg, dir: endpoint.Dir(home), sshTargets: rc,
+			installed: helperlocal.Installed{
+				Binary: "/nonexistent/nocx-helper", Generation: proto.GenerationID(gen),
+			},
+		}
+	}
+
+	// The coordinator that is replaced: it opens the pane, and the pane becomes
+	// the daemon's.
+	firstReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	first := newOpener(firstReg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	opened, selected, err := first.OpenHosted(ctx, session.Config{
+		Kind: session.KindRemote, Host: "host.example",
+		Remote: &ssh.ConnectConfig{
+			User: "dev", Port: 22, AuthMode: "password",
+			Secrets: rememberedPassword{value: openPasswordFixturePassword}, SecretID: "sec:readopt:1",
+			AuthorizedEndpoint: "host.example:22",
+		},
+	}, "")
+	if err != nil || !selected {
+		t.Fatalf("opening the ssh pane that will outlive this coordinator: selected=%v err=%v", selected, err)
+	}
+	sid := opened.Session.ID()
+	if opened.Host == "" {
+		t.Fatal("the opened pane reported no destination, so there is nothing for a re-adoption to preserve")
+	}
+
+	// THE FIRST COORDINATOR GOES, which is what makes this a restart: it gives
+	// up the attachment it holds, so the daemon's keyboard is free for the
+	// replacement to take. Without this the pass meets its own predecessor
+	// still holding the write lease, which is the refusal a SECOND live
+	// coordinator gets and not the situation under test.
+	first.close()
+
+	// The replacement: same daemon, same socket, a new coordinator and a new
+	// registry.
+	secondReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	second := newOpener(secondReg)
+	if second.holds(sid) {
+		t.Fatal("the replacement holds the session before the pass has run, so the test cannot tell adoption from a no-op")
+	}
+	rp := &readoptPass{
+		registry: &helperRegistry{registry: secondReg, log: lg},
+		adopter:  &stubAdopter{},
+		local:    second,
+		routes:   &stubRoutes{host: "host.example", cfg: &ssh.ConnectConfig{User: "dev"}},
+	}
+
+	if _, rerr := rp.readoptLocal(ctx, content.PendingSession{
+		SessionID: string(sid), Generation: gen, PaneID: "pane-1",
+		Host: opened.Host, Account: opened.Account, ProfileID: "ssh:readopt",
+	}); rerr != nil {
+		t.Fatalf("re-adopting the ssh pane off this machine's daemon: %v", rerr)
+	}
+
+	// THE THREE FACTS THE ADOPTION MUST CARRY.
+	sess, err := secondReg.Get(sid)
+	if err != nil {
+		t.Fatalf("the replacement's registry does not hold the re-adopted session: %v", err)
+	}
+	if sess.Kind() != session.KindRemote {
+		t.Errorf("the re-adopted pane is %v, want KindRemote — its DESTINATION is the far host, and a "+
+			"local kind would claim this machine for a shell that is not on it", sess.Kind())
+	}
+	if got := sess.Host(); got != opened.Host {
+		t.Errorf("the re-adopted pane reports host %q, want the destination its binding named (%q)", got, opened.Host)
+	}
+	if !second.holds(sid) {
+		t.Error("the replacement's opener does not hold the session it just re-adopted, so its screen read " +
+			"would refuse a terminal this daemon is holding")
+	}
+
+	// AND IT ANSWERS, which is what makes the adoption more than a row: the
+	// same probe the enrolment uses.
+	ps := newPaneScreen(lg, secondReg, second, &helperRegistry{})
+	if err := ps.Available(string(sid)); err != nil {
+		t.Fatalf("the re-adopted pane's screen did not answer: %v", err)
+	}
+	t.Logf("MEASURED the re-adopted ssh pane: kind=%v host=%q held=%v screen=answered",
+		sess.Kind(), opened.Host, second.holds(sid))
+}
+
+// TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership is the pair
+// of the acceptance above, and the pair is what keeps the two apart.
+//
+// The daemon ANSWERS and holds nothing — the session ended while nocx was away
+// — so the pass must not adopt, and must not leave the session in the opener's
+// set. A `holds` entry left behind would be worse than a missing one: the owner
+// would route a pane to this daemon for a terminal that is gone, and the
+// refusal a person sees would name the wrong thing.
+func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testing.T) {
+	logger := log.NewSlogAdapter(discardLogger())
+	lg := discardLogger()
+	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	opener := &localHelperOpener{log: lg, registry: reg}
+
+	// The daemon answered, and this session was not in its answer.
+	rp := &readoptPass{
+		registry: &helperRegistry{registry: reg, log: lg},
+		adopter:  &stubAdopter{},
+		local:    &countingLocalRoute{entries: nil},
+		routes:   &stubRoutes{host: "host.example", cfg: &ssh.ConnectConfig{User: "dev"}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, rerr := rp.readoptLocal(ctx, content.PendingSession{
+		SessionID: "sess-gone", Generation: "gen-1", PaneID: "pane-1",
+		Host: "host.example", Account: "dev", ProfileID: "ssh:1",
+	}); rerr != nil {
+		t.Fatalf("a binding the daemon does not hold answered an error (%v), want the loss the callers "+
+			"apply as a verdict", rerr)
+	}
+	if _, gerr := reg.Get("sess-gone"); gerr == nil {
+		t.Error("a session the daemon no longer holds was adopted into the registry")
+	}
+	if opener.holds("sess-gone") {
+		t.Error("a session the daemon no longer holds is still in the opener's set, so the owner would " +
+			"route a pane to a terminal that is gone")
+	}
+}
+
 // TestTheReadoptPredicateAnswersForTheCarrierNotTheDestination is the focused
 // test for the question the readopt pass routes by (nocx-50w7p.5).
 //

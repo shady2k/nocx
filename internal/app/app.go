@@ -1569,7 +1569,15 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)),
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH,
+			// The endpoint a nested child on THIS machine is told, which is
+			// this backend's own (nocx-1n56d). Read through the opener rather
+			// than captured, because cmd/nocx-server publishes its tool socket
+			// after New returns and names it through SetLocalToolSocketPath —
+			// the same value every local pane here carries to its shell, so a
+			// nested child cannot be pointed at a socket that is not its
+			// parent's.
+			localOpener.toolEndpoint)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the

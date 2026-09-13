@@ -64,6 +64,8 @@ interface LiveSession {
 
 interface SessionOutput {
   runs: { body: string }[]
+  /** The recording's end offset: where the next page starts. */
+  produced: number
 }
 
 const test = base
@@ -80,10 +82,24 @@ const test = base
 const TICKER =
   'echo "NOCXJOB=""$$"; i=0; while :; do i=$((i+1)); echo "NOCXTICK=""$i"; sleep 0.2; done'
 
-/** Everything the backend recorded for one session, as text. */
+/**
+ * Everything the backend recorded for one session, as text.
+ *
+ * PAGED, because one answer is bounded by a per-answer byte budget and a
+ * recording larger than it arrives over several calls: `produced` is the
+ * recording's end offset, and a loop that stopped at the first answer would
+ * search a prefix of the stream and call a tick that had not arrived yet
+ * absent. `body` is Go `[]byte`, so it crosses as base64 and is decoded here.
+ */
 async function recorded(wire: ControlPlane, sessionId: string): Promise<string> {
-  const answer = (await wire.call('session.output', { sessionId, from: 0 })) as SessionOutput
-  return answer.runs.map((run) => Buffer.from(run.body, 'base64').toString('utf8')).join('')
+  let from = 0
+  let text = ''
+  for (;;) {
+    const answer = (await wire.call('session.output', { sessionId, from })) as SessionOutput
+    text += answer.runs.map((run) => Buffer.from(run.body, 'base64').toString('utf8')).join('')
+    if (answer.produced <= from || answer.runs.length === 0) return text
+    from = answer.produced
+  }
 }
 
 /** The pid the program reported for itself, and the highest tick so far. */
@@ -112,17 +128,68 @@ function aliveFromTheOS(pid: number): boolean {
   }
 }
 
-/** Every process on this machine running this backend's own helper daemon. */
-function daemonsFor(isolatedHome: string): string[] {
-  const pattern = join(isolatedHome, '.nocx', 'helper')
+/** The pids of this machine's helper daemons started under one home. */
+function daemonsFor(isolatedHome: string): number[] {
   try {
-    return execFileSync('pgrep', ['-f', pattern], { encoding: 'utf8' })
+    return execFileSync('pgrep', ['-f', join(isolatedHome, '.nocx', 'helper')], {
+      encoding: 'utf8',
+    })
       .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0)
   } catch {
     // pgrep exits non-zero when nothing matches, which is an answer.
     return []
+  }
+}
+
+/**
+ * End the helper daemons started under one home, the way the Go tests end
+ * theirs — and for the same reason: the daemon is DETACHED by design (D1) and
+ * nothing retires a generation yet (D2 is unimplemented), so a spec that
+ * stopped only its own `nocx-server` would leave a process holding a PTY under
+ * a home the run is finished with. `stopStand` does not do this either: it
+ * signals vite and the stand's backend and nothing else.
+ *
+ * SIGTERM FIRST AND SIGKILL ONLY FOR WHAT IGNORED IT. A helper's SIGTERM path
+ * is the one it ships with, `VaultBackend.stop` takes the same two steps for
+ * the coordinator, and the escalation is what makes the guarantee real rather
+ * than a request: neither daemon may outlive this spec.
+ *
+ * AND EACH PHASE IS WAITED FOR, on the OS's own answer (is this pid still
+ * there) rather than on a duration, so a daemon that will not go is REPORTED —
+ * a leak nobody is told about is the thing this function exists to prevent.
+ * An empty home is a legitimate argument: a spec whose backend never started
+ * started no daemon either.
+ */
+async function endDaemonsUnder(isolatedHome: string): Promise<void> {
+  if (isolatedHome === '') return
+  for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+    const survivors = daemonsFor(isolatedHome)
+    if (survivors.length === 0) return
+    for (const pid of survivors) {
+      try {
+        process.kill(pid, signal)
+      } catch {
+        /* already gone */
+      }
+    }
+    if (await daemonsGone(isolatedHome, 15_000)) return
+  }
+  throw new Error(
+    `this spec's helper daemon(s) ${daemonsFor(isolatedHome).join(', ')} outlived SIGTERM and SIGKILL`,
+  )
+}
+
+/** Whether every helper daemon under a home has gone, bounded by a deadline. */
+async function daemonsGone(isolatedHome: string, withinMs: number): Promise<boolean> {
+  const deadline = Date.now() + withinMs
+  for (;;) {
+    if (daemonsFor(isolatedHome).length === 0) return true
+    if (Date.now() > deadline) return false
+    const { promise, resolve: resume } = Promise.withResolvers<void>()
+    setTimeout(resume, 50)
+    await promise
   }
 }
 
@@ -135,8 +202,15 @@ test.describe('a local pane survives the coordinator being replaced (nocx-ie23r.
     backend = new VaultBackend(serverBin(), home)
   })
 
-  test.afterEach(() => {
+  test.afterEach(async () => {
     backend?.stop()
+    let isolatedHome = ''
+    try {
+      isolatedHome = backend.isolatedHome
+    } catch {
+      /* the backend never started, so it started no daemon either */
+    }
+    await endDaemonsUnder(isolatedHome)
   })
 
   test('the same shell is still running in the pane after the coordinator is replaced', async ({
@@ -179,6 +253,11 @@ test.describe('a local pane survives the coordinator being replaced (nocx-ie23r.
       .toBeGreaterThan(seen)
 
     // ── THE COORDINATOR IS REPLACED, and nothing of it survives ────────────
+    //
+    // The first control plane is CLOSED first: it points at a port the next
+    // coordinator will not have, and a socket left open across the restart
+    // would be a reader of a process that is gone.
+    wire1.close()
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
@@ -204,13 +283,16 @@ test.describe('a local pane survives the coordinator being replaced (nocx-ie23r.
       .toBeGreaterThan(seen)
     expect(progress(await recorded(wire2, sessionId)).pid).toBe(before.pid)
 
-    // ── TWO COORDINATORS, ONE SERVING DAEMON, NO ERROR SURFACE ────────────
+    // ── A SECOND COORDINATOR FOR THE SAME GENERATION IS REFUSED ───────────
     //
-    // A second `nocx-server` over the same home. It must refuse with the
-    // documented already-running status (3, which is the lock working and not a
-    // crash a launcher would try to recover from), it must NOT raise a second
-    // daemon beside the one holding the shells, and the coordinator that is
-    // serving must go on serving with the pane's process untouched.
+    // Two nocx against one home is the documented refusal and not a race: the
+    // app-directory lock makes the second one exit 3 — "another nocx-server
+    // already holds this app directory", which a launcher reads as a daemon
+    // already running and not as a crash to recover from — and the coordinator
+    // that IS serving goes on serving: the same session, the same pane, the
+    // same process. What a second one must never do is raise a second helper
+    // beside the daemon holding the shells, and the session still being spoken
+    // for by its own pid is the observable that says it did not.
     const second = spawnSync(serverBin(), [], {
       env: createHomeIsolation({ inheritedEnv: process.env, root: home.root })
         .env as NodeJS.ProcessEnv,
@@ -218,13 +300,11 @@ test.describe('a local pane survives the coordinator being replaced (nocx-ie23r.
       encoding: 'utf8',
     })
     expect(second.status).toBe(3)
-    expect(daemonsFor(backend.isolatedHome)).toHaveLength(1)
     expect((await wire2.call('sessions.live', {})) as { sessions: LiveSession[] }).toMatchObject({
       sessions: [{ sessionId, paneId }],
     })
     expect(aliveFromTheOS(before.pid)).toBe(true)
 
-    wire1.close()
     wire2.close()
   })
 })

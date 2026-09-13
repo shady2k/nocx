@@ -104,10 +104,14 @@ func TestAReplacingCoordinatorTakesALiveLocalSessionBackOverTheConnectionItAsked
 	// costs. A route that released the connection it attached over would have
 	// detached the session it had just recovered, and the adoption above would
 	// have failed rather than this assertion.
-	if got := ep.liveNow(); got != 1 {
-		t.Fatalf("%d connections to this machine's daemon are held after the re-attachment, want 1 — "+
-			"the session's own, with the ask's probe already released", got)
-	}
+	//
+	// The count is WAITED FOR and not read once, because the daemon notices a
+	// client's close on its own goroutine: the probe's release is the state
+	// this waits for, and the deadline is only there so a connection nobody
+	// releases fails the test instead of hanging it. The assertion is the
+	// predicate itself — one connection, meaning the session's own.
+	waitFor(t, "the ask's probe connection to be released, leaving the session's own",
+		func() bool { return ep.liveNow() == 1 })
 
 	// THE PANE CAN BE CLOSED, and this is not a formality: the session's
 	// teardown sends its detach over the very connection the attachment rides,
@@ -154,11 +158,12 @@ func TestALocalSessionAnotherCoordinatorIsHoldingIsLeftToIt(t *testing.T) {
 		t.Fatalf("opening a local pane through the shipped opener: %v", err)
 	}
 	sid := opened.Session.ID()
+	// The daemon accepts a connection on its own goroutine, so the holder's
+	// own socket is waited for rather than read once: what the rest of the test
+	// compares against is the count with the holder and nothing else, and a
+	// zero read here would make the final assertion pass for the wrong reason.
+	waitFor(t, "the holding coordinator's connection to be accepted", func() bool { return ep.liveNow() >= 1 })
 	live := ep.liveNow()
-	if live == 0 {
-		t.Fatal("the holding coordinator has no connection to this machine's daemon, so nothing is " +
-			"holding the keyboard and this test would prove nothing")
-	}
 
 	// A second coordinator's pass, over the same endpoint. Nothing of the
 	// holder is touched: the pass reads the binding a previous incarnation

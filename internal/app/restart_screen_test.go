@@ -85,16 +85,22 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 
 	// THE PROCESS THE DAEMON STARTED, read here because a shutdown is what
 	// releases a session's own record of it: read after the kill it would be
-	// unknown for a reason that has nothing to do with the re-attachment. What
-	// the replacing coordinator records is compared against THIS number, and
-	// it is the fact two decisions read (worker admission's root-pid check and
-	// agent approval's "is this pane ours") — a re-attached pane that lost it
-	// would silently refuse both, which is a feature going away across a
-	// restart with nothing on screen to say so.
+	// unknown for a reason that has nothing to do with the re-attachment.
 	beforePID, beforeKnown := first.Session.OwnedProcessPID(sid)
 	if !beforeKnown || beforePID <= 0 {
 		t.Fatalf("the first coordinator recorded no launch pid for %s (%d, known=%v): the pane was not "+
 			"really opened by the daemon", sid, beforePID, beforeKnown)
+	}
+	// AND THE OPERATING SYSTEM IS ASKED THE SAME QUESTION, because a record
+	// nocx wrote about itself is exactly what the criterion says not to read:
+	// the pid has to be a live process, and its parent has to be the daemon
+	// that is holding the PTY. A pane attached to the wrong thing would pass
+	// the registry's account of it and fail this.
+	if !alive(beforePID) {
+		t.Fatalf("the pid the first coordinator records for %s (%d) is not a running process", sid, beforePID)
+	}
+	if parent := commandOf(t, parentOf(t, beforePID)); !strings.Contains(parent, "nocx-helper") {
+		t.Fatalf("pid %d's parent is running %q, want this machine's nocx-helper daemon", beforePID, parent)
 	}
 
 	// THE COORDINATOR DIES. Its sessions, its store and its watches go with it;
@@ -113,29 +119,41 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 	// back — attaches to it, adopts it under the id the daemon minted, and
 	// registers the pane it was the pipe of.
 	//
+	// THE ANSWER IS ASSERTED, NOT POLLED FOR, and that is not a shortcut: the
+	// pass is synchronously before the server listens (readoptAttemptTimeout's
+	// own comment says why it must be), so by the time Start returned this
+	// question already has its final answer. A poll here would be a slower way
+	// of asking it, and a deadline used as a success mechanism is the shape
+	// the repo's "no timing" rule exists to refuse.
+	//
 	// The two failure outcomes are kept apart, because they are two different
 	// defects and only one of them is this test's: a daemon that no longer
 	// holds the session means something ENDED it, and a daemon that holds it
 	// while no pane claims it means nobody took it back. Calling the second
 	// the first would report a lost session where there is an unclaimed one.
-	if !coordinatorHolds(second, sid, reattachWindow) {
+	if _, err := second.Session.Get(sid); err != nil {
 		if !helperHolds(t, second, sid) {
 			t.Fatalf("the daemon no longer holds session %s: this is not an unclaimed session, it is a "+
 				"LOST one — the daemon is the same one and it is still running, so something ended the "+
 				"session rather than leaving it for the replacing coordinator to take back.", sid)
 		}
 		t.Fatalf("the replacing coordinator did not take session %s back, although this machine's daemon "+
-			"still holds it: the shell is running, the verdict says live, and no pane is its pipe — "+
-			"which is exactly the state nocx-ie23r.5 exists to end.", sid)
+			"still holds it: %v — the shell is running, the verdict says live, and no pane is its "+
+			"pipe, which is exactly the state nocx-ie23r.5 exists to end.", sid, err)
 	}
 
 	// THE SAME PROCESS the daemon started is what the replacing coordinator
-	// holds now.
+	// holds now — recorded for the decisions that read it, and running, which
+	// the kernel is asked directly.
 	afterPID, afterKnown := second.Session.OwnedProcessPID(sid)
 	if !afterKnown || afterPID != beforePID {
 		t.Fatalf("the re-attached pane records launch pid %d (known=%v), want the %d the daemon "+
 			"started for the FIRST coordinator — the pane is not attached to the process it was",
 			afterPID, afterKnown, beforePID)
+	}
+	if !alive(afterPID) {
+		t.Fatalf("pid %d is not running after the re-attachment, so the pane holds a shell the "+
+			"kernel no longer has", afterPID)
 	}
 
 	// The same watch is opened over the same session, in the NEW process.
@@ -208,32 +226,12 @@ func waitForMarker(t *testing.T, a *App, sid session.ID, marker string) paneview
 	}
 }
 
-// reattachWindow bounds the wait for a re-adoption. It is generous on purpose:
-// the pass is synchronous before the server listens, so a session that is
-// coming back has already come back by the time Start returns — the window is
-// here for a slow machine and not because the answer is expected to change.
-const reattachWindow = 30 * time.Second
-
-// coordinatorHolds reports whether the coordinator took the session back.
-func coordinatorHolds(a *App, sid session.ID, within time.Duration) bool {
-	deadline := time.Now().Add(within)
-	for {
-		if _, err := a.Session.Get(sid); err == nil {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 // helperHolds asks the DAEMON whether it still holds the session, through the
 // seated coordinator's own client — the same route a frame read takes.
 //
-// It is what separates the known gap from a lost session: the gap is "the PTY
-// is still there and nobody claimed it", and a helper that no longer holds it
-// would be the other thing entirely.
+// It is what separates an UNCLAIMED session from a LOST one: the first is "the
+// PTY is still there and nobody took it back", and a helper that no longer
+// holds it would be the other thing entirely.
 func helperHolds(t *testing.T, a *App, sid session.ID) bool {
 	t.Helper()
 	// CONNECTED FIRST, and that is the whole correction: a coordinator opens

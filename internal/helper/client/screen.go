@@ -123,10 +123,12 @@ func frameFromWire(w proto.ScreenFrame) paneview.Frame {
 	return f
 }
 
-// completenessFromWire spells the wire's claim as the contract's, and an
-// unrecognised spelling decodes to UNKNOWN — the state in which a write gate
-// refuses — rather than to the zero value of some other vocabulary. A claim
-// nobody understands must never arrive at a caller looking stronger than it is.
+// completenessFromWire spells the wire's claim as the contract's, and THIS
+// function is what makes an unrecognised spelling UNKNOWN — the state a write
+// gate refuses in. It cannot be left to the decode: a named string type keeps
+// whatever string it was handed, so a peer's invented claim would arrive at a
+// caller looking like something the caller recognises. A claim nobody
+// understands must never look stronger than it is.
 func completenessFromWire(c proto.Completeness) sessionruntime.Completeness {
 	switch c {
 	case proto.CompletenessComplete:

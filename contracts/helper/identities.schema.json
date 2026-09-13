@@ -229,7 +229,7 @@
       }
     },
     "completeness": {
-      "description": "What a runtime can honestly claim about the stream it holds. A closed set, spelled once here because both ends of this socket are the same Go package. An unrecognised spelling is NOT a claim a reader may strengthen: it decodes to `unknown`, where the write gate refuses.",
+      "description": "What a runtime can honestly claim about the stream it holds. A closed set, spelled once here because both ends of this socket are the same Go package. An unrecognised spelling is NOT a claim a reader may strengthen, and the refusal is the READER's: a decoder of this shape would pass an invented string through unchanged, so the coordinator's conversion maps anything outside this set onto `unknown`, which is the state the write gate refuses in.",
       "type": "string",
       "enum": ["unknown", "complete", "lostIngest", "noFence", "evicted"]
     },

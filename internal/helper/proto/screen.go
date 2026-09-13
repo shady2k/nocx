@@ -86,10 +86,15 @@ type ScreenResult struct {
 // (internal/sessionruntime.Completeness) spelled once, here, because both ends
 // of this socket are the same Go package.
 //
-// A spelling this coordinator has never heard of is NOT an unknown string it
-// may treat as complete: it decodes to the zero value, which is `unknown`, and
-// the write gate refuses there. That direction is deliberate — an unrecognised
-// claim must not be read as a stronger one.
+// A spelling this coordinator has never heard of does NOT arrive as unknown by
+// itself, and it is worth being exact about that because the difference is
+// where the safety lives: encoding/json decodes an unmatched string into a
+// named string type UNCHANGED, so the value that reaches a reader is whatever
+// the peer wrote. What turns it into `unknown` is the CONVERSION at the
+// reading end (client.completenessFromWire), whose default arm maps anything
+// outside this set onto the value a write gate refuses in. A decoder that
+// leaned on a zero value instead would read an invented claim as whatever its
+// zero happened to be.
 type Completeness string
 
 const (

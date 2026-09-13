@@ -118,6 +118,9 @@ func (c *Client) serveReverse(payload []byte) {
 		c.log.Warn("malformed reverse request", "err", err)
 		return
 	}
+	// Dial is the only constructor (launch.go) and it always mints the
+	// lifetime, so this is never nil: a Client exists only between Dial's first
+	// line and Close.
 	ctx := c.reverseCtx
 	go c.answerReverse(ctx, req)
 }

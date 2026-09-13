@@ -330,21 +330,14 @@ func TestThePrivateKeyNeverCrossesToTheHelper(t *testing.T) {
 		}
 	}
 
-	// The search itself is checked, so the two assertions above cannot pass
-	// because the predicate is blind: a recording that DID contain the key is
-	// seen by the very same call.
-	poisoned := append(append([]byte(nil), stand.toCoord.bytes()...), key.pem...)
-	if !bytes.Contains(poisoned, key.pem) {
-		t.Fatal("the leak predicate cannot see the private key at all, so the assertions above prove nothing")
-	}
-
-	// And the positive control, so the assertion above is not vacuous: the same
-	// probe DID put a signature and a public key on the wire.
+	// And the positive control, which is what shows the search above is not
+	// blind: the SAME recording, searched with the SAME bytes.Contains, does
+	// find a key — the public half, in the base64 JSON gives a byte slice. An
+	// assertion that found nothing ever would pass the two above for the wrong
+	// reason, and this is the one that would not.
 	if asked := coord.asked(); !contains(asked, proto.OpSign) {
 		t.Fatalf("reverse ops asked = %v: no signature was ever requested, so the search proved nothing", asked)
 	}
-	// The public half travels COORDINATOR to helper, inside the probe's
-	// identity — base64, because that is what JSON makes of a byte slice.
 	if !bytes.Contains(stand.toCoord.bytes(), []byte(base64.StdEncoding.EncodeToString(key.signer.PublicKey().Marshal()))) {
 		t.Fatal("the public half never crossed either, so this probe did not authenticate with a key at all")
 	}

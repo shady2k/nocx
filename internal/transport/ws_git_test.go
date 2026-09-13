@@ -327,6 +327,11 @@ func TestGitOpen_RemoteSessionWithoutHelperSelectionIsNotAvailable(t *testing.T)
 	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
+		// opening precedes — so the pane is given the route it has in
+		// production rather than measuring the named refusal.
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
 		// No WithGitHelperFactory: the helper plane is not wired at all.
@@ -407,6 +412,11 @@ func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 	local := newStubGitFactory()
 	helper := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
+		// opening precedes — so the pane is given the route it has in
+		// production rather than measuring the named refusal.
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(local),
 		WithGitHelperFactory(func(session.Session) GitOpenSelection { return GitOpenSelection{Factory: helper} }),
@@ -473,6 +483,11 @@ func TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError(t *testing.T)
 	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
+		// opening precedes — so the pane is given the route it has in
+		// production rather than measuring the named refusal.
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
 		// The machine's mode forbids the helper: the selection carries
@@ -555,6 +570,9 @@ func TestGitOpen_SSHSelectionRefusalsAreResultStates(t *testing.T) {
 			factory := newStubGitFactory()
 			r := refusal
 			ws := NewWSServer(logger, reg,
+				// Same reason as the stands above: the ssh pane is this
+				// machine's helper's, and this table's subject is git.open.
+				sshHelperOpt(reg),
 				WithGitRegistry(registry.New()),
 				WithGitRepoFactory(factory),
 				WithGitHelperFactory(func(session.Session) GitOpenSelection {
@@ -631,6 +649,11 @@ func TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory(t *testing.T) {
 		},
 	}
 	ws := NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
+		// opening precedes — so the pane is given the route it has in
+		// production rather than measuring the named refusal.
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(local),
 		WithGitHelperFactory(func(session.Session) GitOpenSelection {
@@ -694,6 +717,11 @@ func TestGitOpen_ConsentRequiredIsAResultState(t *testing.T) {
 	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
+		// The ssh pane this test opens is this machine's helper's
+		// (nocx-50w7p.5). This stand's subject is git.open — which the pane
+		// opening precedes — so the pane is given the route it has in
+		// production rather than measuring the named refusal.
+		sshHelperOpt(reg),
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
 		// The machine has no helper-tier answer: the selection answers

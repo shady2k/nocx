@@ -73,3 +73,35 @@ func TestTheHelperNeverHandsTheBearerBack(t *testing.T) {
 		}
 	}
 }
+
+// TestTheBearerSurvivesTheWire — the round trip the field exists for. A tag typo
+// or a field the encoder drops would fail every other assertion in this file in
+// a way nothing noticed: the helper would receive no bearer, the pane's agent
+// would present none, and the refusal would look like the agent's fault.
+func TestTheBearerSurvivesTheWire(t *testing.T) {
+	sent := SSHSpawnParams{
+		Destination:    SSHDestination{Host: "build.example.com"},
+		AgentToolToken: strings.Repeat("ab", 32),
+	}
+	raw, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var received SSHSpawnParams
+	if err := json.Unmarshal(raw, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if received.AgentToolToken != sent.AgentToolToken {
+		t.Fatalf("the helper received bearer %q, want %q", received.AgentToolToken, sent.AgentToolToken)
+	}
+	if received.Destination.Host != sent.Destination.Host {
+		t.Fatalf("the round trip lost the destination: %q", received.Destination.Host)
+	}
+	// AND THE KEY, spelled the way the other side reads it. A field that round
+	// trips under a different name is a field the helper's own decoder would take
+	// — until the day the two ends are built from different revisions and it is
+	// the name that has to agree.
+	if !strings.Contains(string(raw), `"agentToolToken":"`+sent.AgentToolToken+`"`) {
+		t.Fatalf("the bearer did not travel under its own name: %s", raw)
+	}
+}

@@ -39,6 +39,19 @@ const (
 // variable can never spell it two different ways (nocx-2tesu).
 const ToolSocketEnvVar = "NOCX_TOOL_SOCKET"
 
+// AgentToolTokenEnvVar is the one spelling of the variable an agent's MCP
+// bridge reads the pane's bearer from (nocx-50w7p.16).
+//
+// It is NOT an environment variable nocx sets in a shell: the staging writes it
+// into the launch directory's mcp.json — 0600 in a 0700 directory — and the
+// agent's own MCP client is what puts it in the bridge's environment. That is
+// the whole point of the carrier: the far host's argv is world-readable, and a
+// shell's environment is inherited by everything it starts, while this reaches
+// exactly one child. Every reader and writer of the name goes through this
+// constant, so the Go side and the shells cannot spell it two ways.
+// #nosec G101 -- a variable NAME, not a credential: what it carries is minted per interval and never written here.
+const AgentToolTokenEnvVar = "NOCX_AGENT_TOKEN"
+
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced

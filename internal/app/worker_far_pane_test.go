@@ -233,7 +233,26 @@ func (s *farStand) enrol(t *testing.T, sid session.ID, agent string) {
 
 // callOver writes one pane record and one request on a fresh connection and
 // answers what the endpoint said.
+// paneToken is the bearer the named pane's interval admits with, read from the
+// SAME service the endpoint asks: a test that presented a value of its own
+// choosing would be asserting about its own fixture.
+// A pane with no live interval has no bearer, and this returns the empty
+// string rather than failing: the tests that ask for one before enrolling a
+// pane, or after its session ended, are asserting about exactly that absence,
+// and a harness that refused to make them would be asserting it for them.
+func (s *farStand) paneToken(t *testing.T, pane string) string {
+	t.Helper()
+	_, token, _ := s.approval.IntervalToken(session.ID(pane), agentToolEndpointScopePrefix+workerTestWorkspace)
+	return token
+}
+
+// callOver presents the pane's CURRENT bearer, which is what a real bridge does.
 func (s *farStand) callOver(t *testing.T, pane string) rpcEnvelope {
+	t.Helper()
+	return s.callOverWithToken(t, pane, s.paneToken(t, pane))
+}
+
+func (s *farStand) callOverWithToken(t *testing.T, pane, token string) rpcEnvelope {
 	t.Helper()
 	conn, err := net.Dial("unix", s.endpoint.SocketPath())
 	if err != nil {
@@ -247,6 +266,18 @@ func (s *farStand) callOver(t *testing.T, pane string) rpcEnvelope {
 		}
 		if _, werr := conn.Write(record); werr != nil {
 			t.Fatalf("write record: %v", werr)
+		}
+	}
+	// The bearer, when the test supplied one. NOT written when it did not: a
+	// connection with no token then reaches the endpoint as a request where a
+	// bearer belongs, which is exactly the absence being tested.
+	if token != "" {
+		bearer, encErr := panebind.EncodeToken(token)
+		if encErr != nil {
+			t.Fatalf("encode token: %v", encErr)
+		}
+		if _, werr := conn.Write(bearer); werr != nil {
+			t.Fatalf("write token: %v", werr)
 		}
 	}
 	if _, werr := conn.Write([]byte(requestHoldings + "\n")); werr != nil {
@@ -368,7 +399,11 @@ func TestAFarPanesAgentIsRefusedAfterItsSessionEnds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if _, err := conn.Write(append(record, []byte(requestHoldings+"\n")...)); err != nil {
+	bearer, err := panebind.EncodeToken(stand.paneToken(t, string(farPaneP)))
+	if err != nil {
+		t.Fatalf("encode token: %v", err)
+	}
+	if _, err := conn.Write(append(append(record, bearer...), []byte(requestHoldings+"\n")...)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -419,11 +454,47 @@ func TestAFarPaneIsAdmittedWithoutAProcessPinner(t *testing.T) {
 		t.Fatalf("newToolAuthorizer: %v", err)
 	}
 
-	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{Pane: string(farPaneP)}); !ok {
+	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{
+		Pane: string(farPaneP), Token: stand.paneToken(t, string(farPaneP)),
+	}); !ok {
 		t.Fatal("a far pane was refused because this coordinator cannot pin processes")
 	}
 	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); ok {
 		t.Fatal("a pid was admitted with no pinner to check it against")
+	}
+}
+
+// TestAFarConnectionIsRefusedWithoutThePanesCurrentBearer — AC1's refusals,
+// each paired with the admission they are the absence of (nocx-50w7p.16):
+// nothing presented, a value that is not the pane's, and ANOTHER PANE's token,
+// which is the case a per-connection check could pass and a per-pane one cannot.
+func TestAFarConnectionIsRefusedWithoutThePanesCurrentBearer(t *testing.T) {
+	stand := newFarStand(t,
+		remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"),
+		remoteSession(farPaneQ, "build.example.com", "deploy", "SHA256:key-a"))
+	stand.enrol(t, farPaneP, "claude")
+	stand.enrol(t, farPaneQ, "claude")
+
+	// THE ADMITTED CASE FIRST, so each refusal below is a fact about the bearer
+	// and not about a pane that could not have been admitted at all.
+	if env := stand.callOver(t, string(farPaneP)); env.Error != nil {
+		t.Fatalf("the pane's own agent was refused with its current token: %+v", env.Error)
+	}
+
+	if env := stand.callOverWithToken(t, string(farPaneP), ""); env.Error == nil {
+		t.Fatal("a connection presenting no token was admitted")
+	} else if !strings.Contains(env.Error.Data.Reason, "did not present the token") {
+		t.Fatalf("a connection with no token was refused for %q, want the bearer's own sentence", env.Error.Data.Reason)
+	}
+
+	if env := stand.callOverWithToken(t, string(farPaneP), strings.Repeat("ab", 32)); env.Error == nil {
+		t.Fatal("a connection presenting a wrong token was admitted")
+	}
+
+	// ANOTHER PANE'S TOKEN, from the same coordinator, the same host and the
+	// same account: everything agrees except which pane it is for.
+	if env := stand.callOverWithToken(t, string(farPaneP), stand.paneToken(t, string(farPaneQ))); env.Error == nil {
+		t.Fatal("another pane's token admitted a connection")
 	}
 }
 

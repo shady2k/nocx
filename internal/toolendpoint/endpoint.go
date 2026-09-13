@@ -511,25 +511,32 @@ func (e *Endpoint) observePeerRefusal(peer Peer, reason string) {
 // connection. What follows it is a long-lived request loop, and a read deadline
 // that outlived the record would end every idle connection a helper holds —
 // which is every far agent that is thinking rather than calling.
-func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, error) {
+func (e *Endpoint) readPaneRecord(conn *net.UnixConn) (string, string, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(paneRecordTimeout)); err != nil {
-		return "", err
+		return "", "", err
 	}
 	pane, err := panebind.Read(conn)
-	// Cleared whether or not the read worked: on failure the connection is
-	// closed, and on success the request loop below must be able to wait.
+	if err == nil {
+		// THE BEARER, from the OTHER party. The record is the helper's claim
+		// about which pane this connection arrived on and the token is the
+		// agent's claim about itself; the authorizer is what decides whether
+		// they belong together (nocx-50w7p.16). Read here, in the same window,
+		// because one frame is useless without the other.
+		var token string
+		token, err = panebind.ReadToken(conn)
+		// Cleared whether or not the reads worked: on failure the connection is
+		// closed, and on success the request loop below must be able to wait.
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return "", "", err
+		}
+		if pane == "" {
+			return "", "", errPaneRecordRequired
+		}
+		return pane, token, nil
+	}
 	_ = conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		return "", err
-	}
-	if pane == "" {
-		// Unreachable through panebind.Read, which refuses an empty session.
-		// Answered rather than assumed, because a reader that could return ""
-		// would hand the authorizer an empty pane, and "" is the spelling of
-		// "this connection named no pane" — the opposite fact.
-		return "", errPaneRecordRequired
-	}
-	return pane, nil
+	return "", "", err
 }
 
 func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
@@ -543,14 +550,14 @@ func (e *Endpoint) serve(conn *net.UnixConn, peer Peer, onLane bool) {
 	// sentence, never a fall back to the local rule (which would admit the
 	// connection as whatever tree the kernel happened to match).
 	if onLane {
-		pane, err := e.readPaneRecord(conn)
+		pane, token, err := e.readPaneRecord(conn)
 		if err != nil {
 			code, message, reason := rpcErrorFor(err)
 			e.observePeerRefusal(peer, reason)
 			e.writeError(conn, nil, code, message, reason)
 			return
 		}
-		peer.Pane = pane
+		peer.Pane, peer.Token = pane, token
 	}
 
 	// published records that the authorizer admitted this connection through
@@ -945,6 +952,16 @@ func rpcErrorFor(err error) (code int, message, reason string) {
 		// so the sentence says which of the two is broken.
 		return rpcPeerRefused, "worker caller refused",
 			"this connection stopped before it said which pane it belongs to, so nocx never learned what it was for and ran none of it. The helper holding this pane is the part that failed; the pane's agent can try again once that helper is restarted."
+	case errors.Is(err, panebind.ErrShortToken), errors.Is(err, panebind.ErrNotAToken):
+		// THE BEARER, and it is the pane's OWN agent bridge that writes it —
+		// a different party from the helper whose record came first, which is
+		// why the two failures read differently. A connection that stopped
+		// before presenting one, or presented bytes that are not one, is
+		// refused rather than defaulted: the record says which pane this
+		// arrived on, and this is the claim that the caller holds that pane's
+		// bearer.
+		return rpcPeerRefused, "worker caller refused",
+			"this connection did not present the token nocx minted for the pane it arrived on, so nothing it asked for was run. The agent in that pane can try again; if it keeps failing, restart the agent there."
 	case errors.Is(err, panebind.ErrNotAPaneRecord), errors.Is(err, errPaneRecordRequired):
 		// A connection on the helper's lane that names no pane. It is refused
 		// rather than matched against the local rule: that rule answers for a

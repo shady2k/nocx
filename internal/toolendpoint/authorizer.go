@@ -19,6 +19,14 @@ type Peer struct {
 	// asserted pane may stand for — the endpoint only establishes that the
 	// report was made by the process allowed to make it.
 	Pane string
+	// Token is the bearer the connection PRESENTED, as the pane's own agent
+	// bridge wrote it (nocx-50w7p.16). It is a different party's claim from
+	// Pane: the helper's record says which pane the connection arrived on and
+	// no process on the far side can forge it, while this one says the caller
+	// holds the bearer the coordinator minted for that pane — and only the
+	// authorizer can decide whether the two belong together. EMPTY means
+	// nothing was presented, which is a refusal rather than a default.
+	Token string
 }
 
 // Lane is the identity of the one process whose connections may name a pane:

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -97,6 +99,11 @@ type enrolledAgent struct {
 	// another machine's answer.
 	domain agentapproval.Domain
 	epoch  toolendpoint.AdmissionEpoch
+	// token is the bearer this interval admits a far pane's agent with, minted
+	// with the epoch and retired with it (nocx-50w7p.16). It is read back under
+	// the same lock as the epoch, in one snapshot, because a bearer paired with
+	// a newer interval would admit into an authority the answer never covered.
+	token string
 }
 
 func newAgentApprovalService(sessions workerAuthSessions, store *agentapproval.Store, scope string) *agentApprovalService {
@@ -136,6 +143,41 @@ func (s *agentApprovalService) Interval(sid session.ID, scope string) (toolendpo
 		return 0, false
 	}
 	return enrolled.epoch, true
+}
+
+// IntervalToken answers the same question Interval does and returns the
+// bearer the interval admits with, in ONE snapshot (nocx-50w7p.16).
+//
+// Atomic on purpose: a caller that asked for the epoch and then for the token
+// could pair an epoch from one interval with a bearer from the next, and the
+// admission check exists to close exactly that kind of gap. The token is empty
+// for a session with no live interval — which is not a token that admits, it is
+// the absence of one.
+func (s *agentApprovalService) IntervalToken(sid session.ID, scope string) (toolendpoint.AdmissionEpoch, string, bool) {
+	s.mu.Lock()
+	enrolled, known := s.enrolled[sid]
+	s.mu.Unlock()
+	if !known {
+		return 0, "", false
+	}
+	answer, ok := s.store.Lookup(enrolled.executable, enrolled.domain, scope)
+	if !ok || answer != agentapproval.Granted {
+		return 0, "", false
+	}
+	return enrolled.epoch, enrolled.token, true
+}
+
+// mintToolToken mints the per-pane bearer: 32 random bytes, lower-case hex —
+// the shape panebind's own validator enforces on both ends. A
+// failure is not fatal here — an empty token is one no connection can present,
+// so the interval admits by epoch alone exactly as it did before this existed,
+// and the pane's agent is refused rather than admitted on a guess.
+func mintToolToken() string {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(raw[:])
 }
 
 // mintEpoch names the interval a session's answer opens. The counter only moves
@@ -293,7 +335,10 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 		// and a session whose interval ended gets a new one, which is what
 		// lets the next admission be told apart from a connection admitted
 		// under the interval that ended.
-		s.enrolled[sid] = enrolledAgent{executable: executable, domain: domain, epoch: s.mintEpoch(sid)}
+		s.enrolled[sid] = enrolledAgent{
+			executable: executable, domain: domain,
+			epoch: s.mintEpoch(sid), token: mintToolToken(),
+		}
 		s.mu.Unlock()
 		return nil
 	case found:

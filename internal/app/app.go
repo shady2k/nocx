@@ -46,7 +46,6 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
-	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -762,6 +761,13 @@ func New(opts ...Option) (*App, error) {
 	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
 	// path through which ~/.ssh/config is read.
 	home, _ := os.UserHomeDir()
+	// THE ROUTE'S DIRECTORY IS KNOWN NOW AND THE INSTALL IS NOT, which is why
+	// they are two setters rather than one (nocx-ie23r.5). Reconciliation runs
+	// at New — before Start has installed anything — and a carried-over local
+	// session is judged by asking this machine's daemon the question a binding
+	// names the generation for, on a probe connection that reaches an endpoint
+	// it may not start. That needs the directory and nothing else.
+	localOpener.routeDir(home)
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
 
@@ -2158,19 +2164,20 @@ func New(opts ...Option) (*App, error) {
 		_, err := workerRecord.Declared(ctx, id, l, d)
 		return err
 	}
-	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2). The
-	// endpoint directory comes off the same home this function already read
-	// for the ssh config, and the GENERATION comes off each binding rather
-	// than from here — a session is judged by the daemon it was spawned by,
-	// and the install that would name the current one has not run yet at this
-	// line anyway (Start does it). So the route is a directory and nothing
-	// else: no binary, because probing must never start a daemon, and no
-	// expected generation, because the binding supplies it.
+	// THIS MACHINE IS ONE OF THE GENERATIONS ASKED (nocx-ie23r.2), and it is
+	// also where a session that is still there is TAKEN BACK (nocx-ie23r.5).
+	// The route is the local opener itself, which already owns every fact of
+	// this machine: the endpoint directory Start's install and the ask both
+	// need, the generations it may dial, and the ONE connection to this
+	// machine's daemon that every pane — and every frame read — rides. The
+	// GENERATION comes off each binding rather than from here: a session is
+	// judged by the daemon it was spawned by, and the install that would name
+	// the current one has not run yet at this line (Start does it).
 	reconcileSessions(ctx, contentDB.Reconcile(),
 		helperReg.inventories(),
 		&readoptPass{
 			registry: helperReg, routes: resolver, adopter: tp,
-			local: &localInventoryRoute{dir: endpoint.Dir(home), log: slogger},
+			local: localOpener,
 		},
 		content.DefaultUnreconciledRetention, slogger)
 
@@ -2590,7 +2597,7 @@ func (a *App) installLocalHelper(ctx context.Context, home string) {
 	// itself would be a second answer to "where does this machine's helper
 	// live", and the two would agree until somebody moved HOME.
 	if a.localHelper != nil {
-		a.localHelper.installedLocalGeneration(installed, home)
+		a.localHelper.installedLocalGeneration(installed)
 	}
 }
 

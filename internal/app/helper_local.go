@@ -109,96 +109,22 @@ var errLocalEndpointUnreachable = errors.New(
 // failure, and therefore `unknown` — never `absent`, because nothing said the
 // session was gone.
 //
-// # One connection per carried-over session, and it is closed after the ask
+// # The connection the re-attachment rides is the coordinator's OWN one
 //
-// The same shape the remote re-adoption has and for the same stated reason: an
-// answer is not reused for the next session, so two sessions on one generation
-// are two asks rather than one ask and one session judged on somebody else's
-// evidence. The connection is released as soon as the ask returns (see
-// localSessionInventory.LiveSessions) because nothing in this bead attaches to
-// what it finds: re-attaching a local session is nocx-ie23r.5's, and holding a
-// helper connection open for a session no pane claims would be the coordinator
-// leasing a shell it does not use.
-type localInventoryRoute struct {
-	// dir is the endpoint directory — endpoint.Dir(home). Empty is a route
-	// that cannot reach anything, and it answers nil rather than dialling a
-	// path built out of nothing.
-	dir string
-	log *slog.Logger
-}
-
-// LocalInventory reaches this machine's daemon for one generation. It is the
-// sessionReadopter-adjacent seam's whole implementation — see session_readopt.go
-// for how the answer becomes a verdict.
-func (r *localInventoryRoute) LocalInventory(ctx context.Context, generation string) (sessionInventory, error) {
-	if r == nil || r.dir == "" || generation == "" {
-		return nil, nil
-	}
-	c, err := helperlocal.Open(ctx, helperlocal.Config{
-		Dir:        r.dir,
-		Generation: proto.GenerationID(generation),
-		// EMPTY: this caller may not start a helper. See the type's own doc —
-		// a probe is not a spawn, and a probe that spawned would answer its
-		// own question.
-		Binary: "",
-		Log:    r.log,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
-	}
-	return &localSessionInventory{client: c, generation: generation}, nil
-}
-
-// localSessionInventory answers, for this machine's daemon, which sessions the
-// generation a binding names still holds.
+// A session this machine's daemon still holds is ATTACHED over the same
+// connection every other pane and every frame read uses (nocx-ie23r.5) — see
+// Attach below. The ask itself is made on a PROBE connection that is
+// released the moment the answer is in, and the two are deliberately not the
+// same object: a probe may not start a daemon (a question that spawns answers
+// itself), while the pane's attachment is an open-shaped act on this machine's
+// daemon, which is the connection `connect` owns and `close` ends.
 //
-// Generation is the id-space owner, exactly as helperSessionInventory's is:
-// the daemon answers about every generation it serves, and only the ids of the
-// one the binding named may be judged. Host and Account are deliberately NOT
-// implemented — a local binding has neither, and satisfying
-// targetOwnedInventory with this machine's name would invent a route the
-// remote readopt pass would then try to resolve as a saved connection.
-type localSessionInventory struct {
-	client     *helperclient.Client
-	generation string
-	released   sync.Once
-}
-
-func (i *localSessionInventory) Generation() string { return i.generation }
-
-func (i *localSessionInventory) Owns(_ string) bool { return i.generation != "" }
-
-// LiveSessions asks once and releases the connection, whatever the answer.
-//
-// The release is deferred rather than left to a caller because there is no
-// caller that wants the connection afterwards: the verdict is the whole
-// product of the ask (nocx-ie23r.5 is what will need the connection, and it
-// will open its own). A connection held past the ask would be a socket, a
-// goroutine and a lease on this machine's daemon per carried-over session,
-// kept for nobody.
-func (i *localSessionInventory) LiveSessions(ctx context.Context) (map[string]struct{}, error) {
-	defer i.released.Do(func() { _ = i.client.Close() })
-	entries, err := i.client.Sessions(ctx)
-	if err != nil {
-		// WRAPPED IN THE SAME SENTINEL, and this half is the one that is easy
-		// to miss: a handshake that completed and a connection that then went
-		// away reports a loss, not a dial failure, and an unwrapped one would
-		// fall through to causeFor's generic branches and be described as a
-		// host that refused or timed out. It is still this machine's helper
-		// that did not answer the question.
-		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
-	}
-	live := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if entry.HostSessionID.Generation != i.generation {
-			continue
-		}
-		live[entry.HostSessionID.Session] = struct{}{}
-	}
-	return live, nil
-}
-
-var _ sessionInventory = (*localSessionInventory)(nil)
+// The bead before this one asked over a probe connection and closed it when
+// the answer came back, which was right while nothing attached to what it
+// found. An attachment lives on the connection it was made over and cannot be
+// moved to another, so that release would detach the session it had just
+// recovered — silently, because the attach result is a value and the
+// connection's end is not.
 
 // localHelperOpener opens a pane on this machine's helper.
 type localHelperOpener struct {
@@ -244,6 +170,36 @@ type localHelperOpener struct {
 	// client is the one connection to the local daemon. Held across panes,
 	// dropped when it is lost so the next open redials.
 	client *helperclient.Client
+	// reattached is one connection per RE-ATTACHED session (nocx-ie23r.5),
+	// keyed by the session it was attached for and carrying the generation its
+	// endpoint is named for. It is the local analogue of helperRegistry.hosts:
+	// a taken-back session's attachment lives on a connection that cannot be
+	// moved, so the pane's screen read has to reach THAT connection — and its
+	// daemon, which after an update is not the one this build installed. Held
+	// until the coordinator closes (see close), because the connection is what
+	// the session's own detach travels over.
+	reattached map[session.ID]localSessionConn
+}
+
+// routeDir records the endpoint directory this machine's daemon is reached
+// through — endpoint.Dir(home), derived from the same home the rest of the
+// composition root uses.
+//
+// IT IS ITS OWN SETTER, CALLED AT New, and that is a fact about WHEN the two
+// halves of the local route become knowable rather than a style choice
+// (nocx-ie23r.5). The directory is a fact of the HOME and is known before
+// anything is built; the INSTALL is a fact of Start, and the generation it
+// produces is what the open route and the pane's own connection need. The ask
+// needs only the directory — it dials the generation a binding names, on a
+// probe connection that may not start one — and the ask RUNS AT New, where
+// reconciliation is. A route whose directory arrived with the install would
+// answer `noInventory` for every carried-over local session, which is exactly
+// the silence nocx-ie23r.2 exists to end, arriving through the door this bead
+// opened.
+func (o *localHelperOpener) routeDir(home string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.dir = endpoint.Dir(home)
 }
 
 // installedLocalGeneration records what Start installed, so the open route can
@@ -251,11 +207,10 @@ type localHelperOpener struct {
 // install happens at Start and the composition root wires the opener at New:
 // the alternative is installing inside New, which is the brain method this
 // change is trying not to feed.
-func (o *localHelperOpener) installedLocalGeneration(installed helperlocal.Installed, home string) {
+func (o *localHelperOpener) installedLocalGeneration(installed helperlocal.Installed) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.installed = installed
-	o.dir = endpoint.Dir(home)
 }
 
 // setToolSocketPath records this backend's tool endpoint socket, so a pane
@@ -445,11 +400,47 @@ func (o *localHelperOpener) watchForReplacement(sess session.Session, pid int, s
 // nothing for the answer, and one that does not dials the daemon exactly as an
 // open would — the same endpoint, the same generation, no second route.
 func (o *localHelperOpener) screenClient(ctx context.Context, sid string) (*helperclient.Client, helperclient.HostSessionID, error) {
+	// A RE-ATTACHED SESSION'S OWN CONNECTION FIRST (nocx-ie23r.5). It is not an
+	// optimisation: that connection is named for the generation the session
+	// actually lives on, which after an update is not the one this build
+	// installed, and a frame asked for from the wrong generation's daemon is a
+	// refusal — a pane whose output flows and whose screen cannot be read.
+	if conn, ok := o.reattachedConn(session.ID(sid)); ok {
+		return conn.client, helperclient.HostSessionID{
+			Generation: string(conn.generation), Session: sid,
+		}, nil
+	}
 	c, generation, err := o.connect(ctx)
 	if err != nil {
 		return nil, helperclient.HostSessionID{}, err
 	}
 	return c, helperclient.HostSessionID{Generation: generation, Session: sid}, nil
+}
+
+// Release gives up the connection opened for a session that did not come back
+// (the local route's own method, called on the failure arm). It closes the
+// connection and forgets it, so a refused re-attachment — another coordinator
+// holding the keyboard, a transport that would not take the session — costs
+// nothing that outlives the attempt. Safe on a session that has no connection,
+// which is the ordinary case here.
+func (o *localHelperOpener) Release(sid string) {
+	key := session.ID(sid)
+	o.mu.Lock()
+	conn, ok := o.reattached[key]
+	delete(o.reattached, key)
+	o.mu.Unlock()
+	if ok {
+		_ = conn.client.Close()
+	}
+}
+
+// reattachedConn answers the connection a re-attached session rides, if it has
+// one. Read under the opener's own lock, and by the same key sessionConn writes.
+func (o *localHelperOpener) reattachedConn(sid session.ID) (localSessionConn, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	conn, ok := o.reattached[sid]
+	return conn, ok
 }
 
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
@@ -487,6 +478,174 @@ func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, 
 	return winner, string(installed.Generation), nil
 }
 
+// LocalSessions reaches this machine's daemon for the generation a carried-over
+// binding names, and answers with the sessions it holds.
+//
+// IT DIALS THE GENERATION THE BINDING NAMES, NOT THE ONE THAT IS INSTALLED. The
+// socket's name carries the generation (endpoint.Path), and the binding carries
+// the generation its session was spawned by. Those two are the same only while
+// the build has not changed — and the case that matters is exactly the one
+// where it has: a person updates nocx, the OLD daemon is still holding their
+// shells, and the generation to ask about is the old one. Asking the installed
+// generation instead would report every surviving session as unreachable the
+// first time somebody updated, which is a falsehood about half the users.
+//
+// IT NEVER STARTS A DAEMON, and that is not an optimisation: a probe that
+// spawned a helper would turn "was this session still there" into a process
+// nobody asked for, and would make the answer to the question depend on the
+// act of asking it. So the Binary is EMPTY — this caller may not start one,
+// which is a state helperlocal.Config names in its own words — and a machine
+// with nothing serving answers endpoint.ErrNoEndpoint. A failure, and therefore
+// `unknown`: never `absent`, because nothing said the session was gone.
+//
+// A NIL ANSWER MEANS NOBODY MAY BE ASKED: no endpoint directory, or no
+// generation to name. The caller's own `noInventory` stands.
+//
+// THE CONNECTION IS RELEASED BEFORE THIS RETURNS, whatever the answer, and
+// that is stated here because it is the one thing an ask's caller must know:
+// nothing of the ask outlives the question. What carries a re-attached pane's
+// attachment is the coordinator's own connection to this machine's daemon,
+// which Attach takes and whose generation is the one the binding named.
+func (o *localHelperOpener) LocalSessions(ctx context.Context, generation string) ([]helperclient.SessionEntry, error) {
+	o.mu.Lock()
+	dir := o.dir
+	o.mu.Unlock()
+	if dir == "" || generation == "" {
+		return nil, nil
+	}
+	c, err := helperlocal.Open(ctx, helperlocal.Config{
+		Dir:        dir,
+		Generation: proto.GenerationID(generation),
+		// EMPTY: this caller may not start a helper. See this method's own
+		// doc — a probe is not a spawn.
+		Binary: "",
+		Log:    o.log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
+	}
+	defer func() { _ = c.Close() }()
+	entries, err := c.Sessions(ctx)
+	if err != nil {
+		// WRAPPED IN THE SAME SENTINEL, and this half is the one that is easy
+		// to miss: a handshake that completed and a connection that then went
+		// away reports a loss, not a dial failure, and an unwrapped one would
+		// fall through to causeFor's generic branches and be described as a
+		// host that refused or timed out. It is still this machine's helper
+		// that did not answer the question.
+		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
+	}
+	return entries, nil
+}
+
+// Attach takes this machine's daemon attachment for a session that is still
+// running, over the connection THIS SESSION is re-attached on (hostedCarrier).
+//
+// THE CONNECTION IS PER SESSION AND NAMED BY THE BINDING'S GENERATION, not by
+// what this build installed, and the reason is the one the ask already gives: a
+// person updates nocx, the OLD daemon is holding their shells, and the generation
+// to attach to is the old one. What that costs is stated where the pane's two
+// halves meet — screenClient resolves the same connection, so the frame read and
+// the attachment are always the same daemon.
+//
+// IT MAY NOT START A DAEMON, for the same reason the ask may not: a session is
+// only there if something is already serving it, and a re-attachment that could
+// start a helper would answering its own question with a process nobody asked
+// for. Binary is therefore EMPTY, and nothing serving answers ErrNoEndpoint.
+//
+// THE CONNECTION OUTLIVES THIS CALL and is owned by the opener, closed when the
+// coordinator closes (see sessionConn). It cannot be closed when the session
+// ends, tempting as that is: the attachment lives ON the connection, and the
+// session's own teardown sends its detach over it — a close raced against that
+// would detach nothing and report the session's close as a failure. The
+// attachment's own Close is what releases the daemon's subscriber; this
+// connection then sits idle until the coordinator goes, which is exactly what
+// the ordinary open's shared connection does between panes.
+func (o *localHelperOpener) Attach(ctx context.Context, params proto.AttachParams) (*helperclient.AttachedSession, error) {
+	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
+	if err != nil {
+		return nil, err
+	}
+	return c.Attach(ctx, params)
+}
+
+// AdoptLifecycle asks this machine's daemon for the identity a taken-back
+// session's shell is still speaking with (hostedCarrier, nocx-k6p18.31), over
+// the SAME connection the attachment will be made on.
+//
+// The same connection, and not a new one, for a reason specific to this call:
+// what it answers is the capability the shell has been stamping its frames
+// with, handed to the holder the daemon considers the session's own
+// coordinator. Asking over a connection that is not about to hold the session
+// would be a second caller asking to be handed somebody else's authority.
+// sessionConn is what makes "same" true — it opens the connection on the first
+// of these two calls and answers with it on the second.
+func (o *localHelperOpener) AdoptLifecycle(ctx context.Context, id helperclient.HostSessionID) (*proto.LifecycleLaunch, error) {
+	c, err := o.sessionConn(ctx, proto.GenerationID(id.Generation), id.Session)
+	if err != nil {
+		return nil, err
+	}
+	return c.AdoptLifecycle(ctx, id)
+}
+
+// localSessionConn is one re-attached session's connection: the client, and the
+// generation its endpoint is named for — carried together because the screen
+// read needs both, and a handle addressed to the wrong generation names nothing.
+type localSessionConn struct {
+	client     *helperclient.Client
+	generation proto.GenerationID
+}
+
+// sessionConn answers with the connection one re-attached session rides,
+// opening it on the first call for that session and reusing it afterwards.
+//
+// IT IS THE LOCAL ANALOGUE OF helperRegistry.hosts, and for the same reason:
+// a pane's screen read has to reach the daemon that holds the session, and
+// after an update that daemon is not the one this build installed. The remote
+// route answers that with the helper channel it keeps per session (hostFor);
+// this is the same map one carrier over, and it is deliberately the opener's
+// rather than a second map anywhere else — `hosts` and this are the two
+// halves of one fact, "which daemon holds this session", told per carrier.
+//
+// The daemon is DIALED AND NEVER STARTED: a session a binding names is held by
+// a helper that is already serving, and this is only ever reached after the ask
+// proved exactly that.
+func (o *localHelperOpener) sessionConn(ctx context.Context, generation proto.GenerationID, sid string) (*helperclient.Client, error) {
+	key := session.ID(sid)
+	o.mu.Lock()
+	if conn, ok := o.reattached[key]; ok {
+		o.mu.Unlock()
+		return conn.client, nil
+	}
+	dir := o.dir
+	o.mu.Unlock()
+	if dir == "" || generation == "" {
+		return nil, errNoLocalGeneration
+	}
+	c, err := helperlocal.Open(ctx, helperlocal.Config{
+		Dir: dir, Generation: generation,
+		// EMPTY: a re-attachment reaches a daemon that is serving, and never
+		// starts one. See Attach's own doc.
+		Binary: "",
+		Log:    o.log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
+	}
+	o.mu.Lock()
+	if existing, ok := o.reattached[key]; ok {
+		o.mu.Unlock()
+		_ = c.Close()
+		return existing.client, nil
+	}
+	if o.reattached == nil {
+		o.reattached = map[session.ID]localSessionConn{}
+	}
+	o.reattached[key] = localSessionConn{client: c, generation: generation}
+	o.mu.Unlock()
+	return c, nil
+}
+
 // dropIfLost forgets a connection that has ended, so the next open dials
 // again. A connection that is merely refusing one spawn — a budget, a bad
 // key — is KEPT: every other pane on this machine is attached through it, and
@@ -512,9 +671,21 @@ func (o *localHelperOpener) close() {
 	o.mu.Lock()
 	c := o.client
 	o.client = nil
+	kept := make([]*helperclient.Client, 0, len(o.reattached))
+	for _, conn := range o.reattached {
+		kept = append(kept, conn.client)
+	}
+	o.reattached = nil
 	o.mu.Unlock()
 	if c != nil {
 		_ = c.Close()
+	}
+	// The re-attached panes' connections go with the coordinator, which is the
+	// closing event they were given rather than the session's own end: the
+	// daemon's subscriber was already released by the attachment's detach, and
+	// what is left here is an idle socket per re-attached pane.
+	for _, conn := range kept {
+		_ = conn.Close()
 	}
 }
 

@@ -46,6 +46,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -86,6 +87,7 @@ type fakeLocalEndpoint struct {
 
 	mu       sync.Mutex
 	accepted int
+	live     int
 }
 
 func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndpoint {
@@ -110,10 +112,18 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 		_ = endpoint.Serve(ctx, ln, func(conn net.Conn) {
 			ep.mu.Lock()
 			ep.accepted++
+			ep.live++
 			ep.mu.Unlock()
 			// ONE host protocol engine per connection, and the SERVICE bound
 			// beside it — cmd/nocx-helper's own accept loop (Serve's doc says
-			// why the sessions outlive the connection).
+			// why the sessions outlive the connection). Serve returns when the
+			// CARRIER ends, which is what makes `live` the count of connections
+			// a client still holds open.
+			defer func() {
+				ep.mu.Lock()
+				ep.live--
+				ep.mu.Unlock()
+			}()
 			h := host.New(conn, conn, generation, "instance-1", discardLogger())
 			h.Register(hostsvc.New(localgit.NewFactory()))
 			h.Register(svc)
@@ -139,6 +149,17 @@ func (e *fakeLocalEndpoint) spawned() int {
 	e.spawner.mu.Lock()
 	defer e.spawner.mu.Unlock()
 	return e.spawner.spawned
+}
+
+// live is how many connections a client still holds open: incremented when the
+// accept loop takes one and decremented when the carrier ends. It is what makes
+// a connection's LIFETIME observable — "the connection the ask was answered on
+// is closed when the session it feeds ends" is otherwise a claim about a
+// variable nobody can see.
+func (e *fakeLocalEndpoint) liveNow() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.live
 }
 
 // stop ends the daemon the way a machine ends one: the listener closes and the
@@ -216,13 +237,28 @@ func aStoreThatCarriedALocalSessionOver(t *testing.T, path string) content.Conte
 
 type countingLocalRoute struct {
 	generations []string
-	inv         sessionInventory
+	entries     []client.SessionEntry
 	err         error
 }
 
-func (r *countingLocalRoute) LocalInventory(_ context.Context, generation string) (sessionInventory, error) {
+func (r *countingLocalRoute) LocalSessions(_ context.Context, generation string) ([]client.SessionEntry, error) {
 	r.generations = append(r.generations, generation)
-	return r.inv, r.err
+	return r.entries, r.err
+}
+
+// The carrier half is unreachable in these tests — a binding that never
+// reaches the local route is never attached to — and a call to it is a bug
+// rather than a degenerate case, so it fails loudly instead of answering.
+func (r *countingLocalRoute) Attach(context.Context, proto.AttachParams) (*client.AttachedSession, error) {
+	panic("the local carrier was asked to attach for a binding that is not this machine's")
+}
+
+func (r *countingLocalRoute) AdoptLifecycle(context.Context, client.HostSessionID) (*proto.LifecycleLaunch, error) {
+	panic("the local carrier was asked for a lifecycle identity for a binding that is not this machine's")
+}
+
+func (r *countingLocalRoute) Release(string) {
+	panic("the local carrier was asked to release a connection for a binding that is not this machine's")
 }
 
 // ── the verdict ─────────────────────────────────────────────────────────
@@ -245,7 +281,7 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		dir := endpoint.Dir(storagetest.IsolateWithHome(t))
 
 		reconcileSessions(ctx, store.Reconcile(), nil,
-			&readoptPass{local: &localInventoryRoute{dir: dir, log: discardLogger()}},
+			&readoptPass{local: &localHelperOpener{dir: dir, log: discardLogger()}},
 			time.Hour, quietLogger())
 
 		pending, err := store.Reconcile().Pending(ctx)
@@ -315,7 +351,7 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 		ep := startFakeLocalEndpoint(t, endpoint.Dir(storagetest.IsolateWithHome(t)), localReconGeneration)
 
 		reconcileSessions(ctx, store.Reconcile(), nil,
-			&readoptPass{local: &localInventoryRoute{dir: ep.dir, log: discardLogger()}},
+			&readoptPass{local: &localHelperOpener{dir: ep.dir, log: discardLogger()}},
 			time.Hour, quietLogger())
 
 		if ep.asked() == 0 {
@@ -401,9 +437,10 @@ func TestALocalSessionIsUnknownWhenItsEndpointCannotBeAskedAndAbsentWhenItDenies
 // is still this machine's helper not answering.
 func TestTheLocalRouteMarksBothHalvesOfItsAsk(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "run")
-	route := &localInventoryRoute{dir: dir, log: discardLogger()}
+	route := &localHelperOpener{dir: dir, log: discardLogger()}
 
-	_, err := route.LocalInventory(context.Background(), localReconGeneration)
+	// NOTHING IS SERVING: the dial fails.
+	_, err := route.LocalSessions(context.Background(), localReconGeneration)
 	if err == nil {
 		t.Fatal("an endpoint nothing is serving answered a question")
 	}
@@ -416,8 +453,49 @@ func TestTheLocalRouteMarksBothHalvesOfItsAsk(t *testing.T) {
 
 	// A generation that is not a content hash is refused by the endpoint
 	// package, and it is still this machine's failure to reach, not a host's.
-	if _, err := route.LocalInventory(context.Background(), "not-a-generation"); !errors.Is(err, errLocalEndpointUnreachable) {
-		t.Fatalf("a malformed generation = %v, want the local sentinel", err)
+	_, malformed := route.LocalSessions(context.Background(), "not-a-generation")
+	if !errors.Is(malformed, errLocalEndpointUnreachable) {
+		t.Fatalf("a malformed generation = %v, want the local sentinel", malformed)
+	}
+
+	// SOMETHING ANSWERED AND THE ASK DID NOT COMPLETE: a daemon whose
+	// handshake succeeded and whose session service then refused the question.
+	// This is the half that is easy to lose, and it is not hypothetical — a
+	// handshake that completed and a connection that then went away reports a
+	// loss, not a dial failure, and an unwrapped one would be described to the
+	// person as a HOST that refused or timed out, which is a false statement
+	// about the machine they are sitting at.
+	dir = endpoint.Dir(storagetest.IsolateWithHome(t))
+	route.dir = dir
+	ln, err := endpoint.Listen(dir, proto.GenerationID(localReconGeneration))
+	if err != nil {
+		t.Fatalf("serving this machine's endpoint: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	serveCtx, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
+	go func() {
+		// The host protocol answers, and NO service is registered beside it —
+		// the helper is up, it is the right generation, and it does not serve
+		// sessions. The ask therefore fails after the handshake.
+		_ = endpoint.Serve(serveCtx, ln, func(conn net.Conn) {
+			h := host.New(conn, conn, localReconGeneration, "instance-1", discardLogger())
+			_ = h.Serve(serveCtx)
+		})
+	}()
+
+	entries, err := route.LocalSessions(context.Background(), localReconGeneration)
+	if err == nil {
+		t.Fatalf("a daemon with no session service answered %d entries", len(entries))
+	}
+	if !errors.Is(err, errLocalEndpointUnreachable) {
+		t.Fatalf("a failed ask = %v, want the local sentinel", err)
+	}
+	if cause := causeFor(err); cause != content.CauseLocalEndpointUnreachable {
+		t.Fatalf("causeFor(%v) = %q, want %q", err, cause, content.CauseLocalEndpointUnreachable)
+	}
+	if entries != nil {
+		t.Fatal("the route handed back entries for an ask that never completed")
 	}
 }
 

@@ -420,14 +420,18 @@ func TestAnAnswerThatCouldNotBeKeptClosesWithAReason(t *testing.T) {
 	}
 }
 
-func waitFor(t *testing.T, cond func() bool) {
+// waitFor polls an OBSERVABLE state until it holds, and fails the test on the
+// deadline. The deadline is a HANG LIMIT and not the answer: what is being
+// waited for is a state change, and every caller names it, so a timeout says
+// which one never happened.
+func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("condition never held")
+	t.Fatalf("timed out waiting for %s", what)
 }

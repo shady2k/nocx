@@ -99,7 +99,7 @@ type lifecycleAdoption struct {
 // the session unusable and must not refuse the re-adoption. The pane comes
 // back either way — live output, restored ledger, a working terminal — and the
 // difference is whether it goes on producing blocks or says why it cannot.
-func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, entry client.SessionEntry) lifecycleAdoption {
+func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier, entry client.SessionEntry) lifecycleAdoption {
 	kernel, ok := rp.registry.lifecycle.(lifecyclechannel.AdoptingKernel)
 	if !ok || rp.registry.lifecycle == nil {
 		// A coordinator built without a lifecycle kernel (a headless tool, a
@@ -107,7 +107,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, c *client.Client, ent
 		// never offers shell integration to anybody.
 		return lifecycleAdoption{}
 	}
-	launch, err := c.AdoptLifecycle(ctx, entry.HostSessionID)
+	launch, err := carrier.AdoptLifecycle(ctx, entry.HostSessionID)
 	if err != nil {
 		rp.registry.log.Warn("the lifecycle channel of a session taken back could not be re-established; its pane will not produce blocks",
 			"session_id", entry.HostSessionID.Session, "error", err)

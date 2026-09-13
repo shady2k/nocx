@@ -20,8 +20,12 @@
  *    The counter is the far host's own account — not a reading of the
  *    fixture's chatter, and not a fact either nocx or the test wrote down
  *    about itself. That the pane really is this machine's helper's dial is
- *    asserted beside it, through `sessions.inventory`: a conventional session
- *    has no `hostSessionId` and appears in no inventory at all.
+ *    structural rather than asserted through a second RPC: an ssh pane exists
+ *    only because a helper claimed the destination
+ *    (internal/transport/session_open.go refuses every other route for a
+ *    remote kind by name), and `sessions.inventory` — which walks the registry
+ *    only a FAR helper host fills — is asked for what it saw and carried into
+ *    this criterion's failure message instead of gating on it.
  * 2. **Answered with no browser client attached.** The pane runs a program that
  *    writes `ESC[6n` (DSR) to its terminal and READS the reply back off its own
  *    pty, then writes those bytes to a file on the far host and prints them.
@@ -486,12 +490,12 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       // `data-root="/"` is the rescope to a remote session (a local one roots
       // at its own cwd), and the rows below are the SFTP enumeration.
       //
-      // The row is asserted, NOT its `data-selected` reveal: the panel's
-      // highlight lands only on a cwd the frontend VERIFIED, that arrives as
-      // the far shell's OSC 7, and this pane never reports one (the product
-      // brings it up conventional — see the stage-2 note). Requiring the
-      // highlight would make this spec a test of shell integration, which is
-      // not what any of its three criteria are about.
+      // The row is asserted, NOT its `data-selected` reveal: the reveal lands
+      // only on a cwd the frontend VERIFIED, which a pane with no shell
+      // integration never has — and requiring it would make this spec a test
+      // of shell integration, which is not what any of its three criteria are
+      // about (the pane's integration state is the product's, and it is
+      // reported rather than assumed here).
       await showSidebarView(first, 'files')
       const panel = first.locator(FILES_PANEL)
       await expect(panel).toBeVisible({ timeout: 30_000 })

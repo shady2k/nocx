@@ -71,8 +71,19 @@ type Client struct {
 	pending     map[uint64]chan proto.Response
 	streams     map[uint64]*chunkStream
 	attachments map[[16]byte]*AttachedSession
-	nextID      uint64
-	lost        bool
+	// channels holds the proxied ssh channels this coordinator opened on this
+	// helper, keyed by the id the helper minted (channels.go). It is a
+	// separate map from attachments because the two are keyed by different
+	// identities and routed to different services; one map would make a
+	// channel id a possible key for a session lookup.
+	channels map[proto.ChannelID]*ChannelStream
+	// parkedChannels parks the frames of a channel whose open has not returned
+	// yet, so the first bytes of a stream are not lost to the round trip that
+	// names it. Bounded (channels.go), and emptied by the claim or by the
+	// loss. Distinct from pending above, which is the response waiters.
+	parkedChannels map[proto.ChannelID][][]byte
+	nextID         uint64
+	lost           bool
 
 	done      chan struct{}
 	hsCh      chan error
@@ -248,8 +259,23 @@ func (c *Client) lose(reason error) {
 			matched = append(matched, a)
 		}
 		c.attachments = make(map[[16]byte]*AttachedSession)
+		// Proxied channels end with the connection that carried them, and
+		// they are ended here rather than left registered so a reader parked
+		// in Read is released now instead of when it next looks at c.done.
+		channels := make([]*ChannelStream, 0, len(c.channels))
+		for _, s := range c.channels {
+			channels = append(channels, s)
+		}
+		c.channels = make(map[proto.ChannelID]*ChannelStream)
+		// The park goes with them: nothing can claim it once the wire is
+		// gone, and a payload retained by a dead transport is a leak with a
+		// caller's name on it.
+		c.parkedChannels = make(map[proto.ChannelID][][]byte)
 		c.mu.Unlock()
 		close(c.done)
+		for _, s := range channels {
+			s.finish(fmt.Errorf("%w: %v", ErrLost, reason))
+		}
 		for _, a := range matched {
 			a.finish()
 		}
@@ -282,6 +308,8 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.sessionData(payload)
 	case proto.TypeLifecycleData:
 		c.lifecycleData(payload)
+	case proto.TypeChannelData:
+		c.channelData(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
@@ -293,11 +321,21 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.log.Warn("malformed notify frame", "err", err)
 		return
 	}
-	if n.Service != proto.ServiceSession {
-		return
-	}
 	raw, err := json.Marshal(n.Params)
 	if err != nil {
+		return
+	}
+	switch n.Service {
+	case proto.ServiceSSH:
+		// The ssh service's one event: a proxied channel's remote end is
+		// gone (channels.go). Routed by service rather than folded into the
+		// session arm, because the two share nothing but the frame.
+		if n.Event == proto.EventChannelClosed {
+			c.channelNotify(raw)
+		}
+		return
+	case proto.ServiceSession:
+	default:
 		return
 	}
 	switch n.Event {

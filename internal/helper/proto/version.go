@@ -41,4 +41,15 @@ package proto
 // and drop, hanging the helper that asked (nocx-50w7p.2). Two peers that
 // disagree about this number refuse each other at hello in both directions,
 // which is what makes the bump the whole of the compatibility story.
-const Version = "3"
+// This is 4 rather than 3 because the wire grew the PROXIED-CHANNEL plane:
+// the `open` and `close` ops on the same `ssh` service, and the
+// TypeChannelData frame type with the ChannelID identity its bytes are keyed
+// by (nocx-50w7p.3). The frame type is the half that makes the bump
+// unavoidable rather than tidy — the decoder treats an unknown type byte as
+// garbage and rescans one byte at a time, so a generation speaking 3 would
+// resync THROUGH a live sftp stream instead of dropping one frame — and the
+// two ops are the half that makes it honest: a helper that cannot open a
+// channel answers `unknown_op`, which a coordinator would have to read as
+// "this machine's helper is older than this app" (nocx-50w7p.2's rationale,
+// one generation on).
+const Version = "4"

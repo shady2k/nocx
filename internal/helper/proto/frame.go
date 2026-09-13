@@ -55,6 +55,21 @@ const (
 	// plane tag. It shares SessionFrame's binary identity only as a carrier;
 	// the helper routes bytes and never decodes lifecycle envelopes.
 	TypeLifecycleData FrameType = 11
+	// TypeChannelData carries the bytes of a PROXIED ssh channel — a stream
+	// the helper opened on a pooled connection and the coordinator consumes —
+	// keyed by a ChannelID rather than by a host session. It is a separate
+	// type byte rather than a second meaning for TypeSessionData because the
+	// two are routed by different services off different identities: a
+	// channel frame delivered to the session service decodes cleanly and is
+	// then dropped by an inventory that has never heard of it (see
+	// channel_frame.go for the whole argument).
+	//
+	// Allocating the byte is the same move AD-1 made for its reserved
+	// metadata msg-type: an unknown type byte is garbage the decoder resyncs
+	// THROUGH, one byte at a time, so a generation that did not know this
+	// type would resync through a live sftp stream rather than dropping one
+	// frame. Recognising it is what makes that one dropped stream.
+	TypeChannelData FrameType = 12
 )
 
 // valid reports whether the type belongs to the closed set above. A byte
@@ -62,7 +77,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData:
 		return true
 	}
 	return false

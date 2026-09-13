@@ -78,6 +78,40 @@ const ServiceSSH = "ssh"
 // once the dial moves to the helper so does the question.
 const OpProbe = "probe"
 
+// OpOpen is the forward op that opens one PROXIED CHANNEL on the pooled
+// connection for a destination, and answers the id its bytes will be keyed by.
+//
+// It is a separate op from `probe` for a reason that is not stylistic. A probe
+// deliberately leaves nothing behind — it dials, it authenticates, it closes —
+// while this one must leave exactly one thing behind: a live stream whose
+// lifetime the CALLER owns, on a connection the helper keeps pooled for the
+// next channel. Folding them into one op with a flag would make "hold this
+// open" a mode of "answer and close", and the two would then have to agree
+// about pool semantics that only one of them has.
+//
+// The destination rides in full (SSHDestination): host, port and user are
+// RESOLVED values and the identity is the same one `probe` takes, so the
+// helper neither reads ~/.ssh/config nor decides which credential to offer.
+const OpOpen = "open"
+
+// OpClose ends one proxied channel and releases the pooled reference the
+// helper took for it. It is idempotent at the helper: an id it does not hold
+// is answered as closed rather than refused, because the ordinary caller is a
+// process shutting down and a second close is not a disagreement about state.
+const OpClose = "close"
+
+// EventChannelClosed is the notification a helper sends when a channel's
+// REMOTE end is gone: the server closed it, the stream errored, or the
+// connection died under it.
+//
+// It is a notification rather than an end-of-stream frame because a
+// zero-length channel frame is a legitimate write of no bytes
+// (channel_frame.go says why that distinction is load-bearing). Ordering is
+// what makes it sufficient: TypeNotify rides the same wire as the data frames,
+// so every byte the helper wrote before the close has already been written to
+// it, and a reader that sees this event has seen all of them.
+const EventChannelClosed = "channel-closed"
+
 // The REVERSE ops. Each is asked by the helper and answered by the coordinator.
 const (
 	// OpSecret returns credential material the helper must PRESENT: a
@@ -349,6 +383,82 @@ type TrustHostKeyResult struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
+// SSHDestination is one RESOLVED destination a connection is acquired for:
+// the address, the account, and what to authenticate as.
+//
+// Host, Port and User are resolved values, for the reason ProbeParams states at
+// length — alias resolution, ~/.ssh/config merging and the credential's own
+// authorization against an endpoint stay in the coordinator — and the fields
+// are not folded into a string ("user@host:port") because a destination is
+// three typed facts and a spelling of them would have to be parsed again on
+// the far side by something that is not allowed to guess.
+type SSHDestination struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	User string `json:"user"`
+	// Identity is what to authenticate with and, for a key, the public half
+	// the helper must declare before it is asked to sign. Required: a channel
+	// with no credential is not a question this op can answer.
+	Identity SSHIdentity `json:"identity"`
+}
+
+// ChannelKind is the closed set of proxied channels this generation opens.
+//
+// It is a KIND and not a command, and that is D3 rather than convenience: the
+// helper refuses a free-form argv (host.Schema refuses a bare []string) because
+// an argument list reaching a command line on somebody else's machine is the
+// capability this whole level exists to not hand out. A kind names a protocol
+// the helper itself implements; a caller that wants a new one adds a member
+// here, in a generation, with a test — which is the point.
+type ChannelKind string
+
+const (
+	// ChannelSFTP is a session channel carrying the `sftp` subsystem. The
+	// helper opens it and moves bytes; it does not speak the SFTP protocol,
+	// and pkg/sftp stays in the coordinator, where the file code that
+	// consumes it already lives.
+	ChannelSFTP ChannelKind = "sftp"
+)
+
+// OpenChannelParams asks the helper for one proxied channel.
+type OpenChannelParams struct {
+	Destination SSHDestination `json:"destination"`
+	Kind        ChannelKind    `json:"kind"`
+	// AcceptOnTrust is the same caller's decision ProbeParams carries, and it
+	// is here for the same reason: a channel's handshake may meet a host key
+	// nobody has recorded, and the helper may not decide that for itself.
+	AcceptOnTrust bool `json:"acceptOnTrust"`
+}
+
+// OpenChannelResult names the stream the caller's bytes will be keyed by. The
+// HELPER mints it — it is the end that owns the channel — and the coordinator
+// echoes it back verbatim on every frame and on the close.
+type OpenChannelResult struct {
+	Channel ChannelID `json:"channel"`
+}
+
+// CloseChannelParams ends one proxied channel.
+type CloseChannelParams struct {
+	Channel ChannelID `json:"channel"`
+}
+
+// CloseChannelResult is the empty answer an idempotent close gives. It is a
+// named struct rather than `any` so the wire shape is declared once and can be
+// frozen; an empty JSON object is its whole content.
+type CloseChannelResult struct{}
+
+// ChannelClosedEvent is the notification payload for EventChannelClosed.
+//
+// Error is the helper's own sentence for a close it did not ask for, empty on
+// an ordinary end. It is TEXT and not a refusal code, deliberately: this is
+// reporting, not dispatch — the caller's next read is what it acts on, and
+// giving a notification a code vocabulary would invite somebody to switch on
+// it for control flow that belongs to the read path.
+type ChannelClosedEvent struct {
+	Channel ChannelID `json:"channel"`
+	Error   string    `json:"error,omitempty"`
+}
+
 // The ssh service's wire refusals. Two, and each names a state the caller acts
 // on differently — which is the test a new code has to pass before it earns a
 // place here.
@@ -371,4 +481,55 @@ const (
 	// coordinator has nowhere to read. It is the key half of the
 	// `needs-interactive` outcome the probe reports.
 	ErrCodeNeedsInteractive = "needs_interactive"
+	// ErrCodeChannelRefused means the far side would not give the helper the
+	// channel it asked for: the server refused the session, or it refused the
+	// subsystem request on the session it did open. ONE code for the two,
+	// deliberately: a caller cannot act differently on them — either way this
+	// host will not serve that channel — and the sentence the helper fails
+	// with keeps the distinction for whoever reads the error.
+	ErrCodeChannelRefused = "channel_refused"
 )
+
+// # The codes an OPEN ends in, and why they are the probe's own spellings
+//
+// A channel open has no result to carry an outcome — the channel was not
+// opened, so the caller has a failure either way — yet the classes of that
+// failure are exactly the ones a probe already reports: unreachable, rejected,
+// needs-interactive, host-key-unknown, host-key-changed. So the refusal CODE
+// is ProbeOutcome's own spelling, character for character, rather than a
+// second enum naming the same states (AD-8). The coordinator already switches
+// on that vocabulary — it is what it maps a helper's probe into — and a second
+// set of names for one fact is the defect that mapping exists to avoid.
+//
+// The two host-key codes carry EVIDENCE in Details (HostKeyEvidence), because
+// the coordinator rebuilds its own typed error from it: the accept sheet and
+// the mismatch warning switch on ssh.ErrUnknownHostKey and ssh.ErrHostKeyMismatch,
+// and a fingerprint that stays inside the helper is a sheet nobody can raise.
+
+// HostKeyEvidence is what a refused channel's handshake knows about the key it
+// refused: the same facts internal/ssh's own error types carry, in a shape that
+// can cross a process boundary.
+//
+// It exists because the classification is preserved in ONE direction only. An
+// error raised inside the helper cannot arrive as the coordinator's typed error
+// — nothing carries Go values across this wire — so the coordinator rebuilds
+// its own error from these fields, and every path that switched on the type
+// (the accept sheet, the mismatch warning, the transport's hostKeyInfoFromError)
+// goes on working unchanged. Without it those paths would see an opaque failure
+// where they used to see evidence.
+type HostKeyEvidence struct {
+	// Addr is the address the handshake was against, and KnownHostsAddr is
+	// the STORAGE identity the key was looked up under — the same value for a
+	// direct route, and the field the accept path must write back.
+	Addr           string `json:"addr"`
+	KnownHostsAddr string `json:"knownHostsAddr"`
+	Algorithm      string `json:"algorithm"`
+	// Key is the offered public key's wire bytes, so the accept path can
+	// record it without a second handshake.
+	Key []byte `json:"key"`
+	// Fingerprint is the offered key's SHA256 fingerprint, and Expected the
+	// recorded one(s) — present exactly when the answer is `changed`, so a
+	// changed key can never be rendered without the value it changed from.
+	Fingerprint string `json:"fingerprint"`
+	Expected    string `json:"expected,omitempty"`
+}

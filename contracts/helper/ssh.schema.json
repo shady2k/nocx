@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.schema.json",
   "title": "HelperABISSHVocabulary",
-  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, and what a host-key question can answer. It declares $defs and nothing else, so one concept has one declaration (AD-8) — the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2). The service speaks in BOTH directions: `probe` is a forward op the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
+  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, and which channels this generation opens. It declares $defs and nothing else, so one concept has one declaration (AD-8) — the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels). The service speaks in BOTH directions: `probe`, `open` and `close` are forward ops the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
   "$defs": {
     "credential": {
       "description": "An opaque handle on one stored credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets — resolving one where the other was meant is how a wrong-but-valid password gets tried against a server — and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
@@ -63,6 +63,41 @@
           "minLength": 1
         }
       }
+    },
+    "destination": {
+      "description": "One RESOLVED destination: the address, the account and what to authenticate as. Its three parts are typed fields and never one `user@host:port` string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess. The fields carry the same meaning probe.params gives its own copies of them, since a destination and a probe take the same three facts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "user", "identity"],
+      "properties": {
+        "host": {
+          "description": "The dial target: an address, never an alias, because it is what the coordinator's own dial path resolved.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The resolved port. Required rather than defaulted here: a helper that picked 22 would be making a decision the profile already made.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "description": "The resolved account.",
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": { "$ref": "#/$defs/identity" }
+      }
+    },
+    "channelKind": {
+      "description": "The closed set of PROXIED CHANNELS this generation opens. A kind names a protocol the helper itself implements; it is never a command, an argv or a free-form string list — host.Register refuses a bare []string outright (D3) — so a caller that wants a different channel adds a member here in a generation, with a protocol bump and a test. `sftp` is a session channel carrying the sftp SUBSYSTEM: the helper moves its bytes and does not speak the protocol, which is why pkg/sftp stays in the coordinator.",
+      "type": "string",
+      "enum": ["sftp"]
+    },
+    "channelId": {
+      "description": "One proxied channel's identity, minted by the helper and echoed verbatim by the coordinator. It is 32 hex characters — sixteen raw bytes on the data plane — and it is opaque in both directions: the coordinator never derives it and the helper never lets a caller choose it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
     }
   }
 }

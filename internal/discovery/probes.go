@@ -3,37 +3,32 @@ package discovery
 import (
 	"bytes"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
-// sentinel is the fixed framing marker every probe command emits first and
-// last on stdout. A sample without it is rejected WHOLE: a forced command, a
-// login banner or a policy wrapper can prepend text, and we never scan
-// arbitrary stdout for plausible-looking port numbers (spec §3.1). Versioned
-// — bump when the probe protocol changes, so old parsers reject new output
-// instead of misreading it.
-const sentinel = "NOCX-PD/1"
+// sentinel is the fixed framing marker every port probe prints first and last
+// on stdout. A sample without it is rejected WHOLE: a forced command, a login
+// banner or a policy wrapper can prepend text, and we never scan arbitrary
+// stdout for plausible-looking port numbers (spec §3.1).
+//
+// It is remoteprobe's own constant, not a copy: the SCRIPT that prints it and
+// the parser that looks for it are on opposite sides of the helper wire now,
+// and two copies of a marker are the drift this package's framing rule exists
+// to make impossible.
+const sentinel = remoteprobe.Sentinel
 
 var sentinelBytes = []byte(sentinel)
 
-// Probe commands — fixed constants, never interpolated with user-controlled
-// values. Each wraps the probe with the leading and trailing sentinel and
-// preserves the probe's exit status across the trailing printf (the shell's
-// exit status is the LAST command's, so without the explicit `exit "$e"`
-// every probe would report success).
-const (
-	ssCmd             = `printf 'NOCX-PD/1\n'; LC_ALL=C ss -H -lntp; e=$?; printf 'NOCX-PD/1\n'; exit "$e"`
-	netstatCmd        = `printf 'NOCX-PD/1\n'; netstat -lntp; e=$?; printf 'NOCX-PD/1\n'; exit "$e"`
-	busyboxNetstatCmd = `printf 'NOCX-PD/1\n'; netstat -ltn; e=$?; printf 'NOCX-PD/1\n'; exit "$e"`
-	lsofCmd           = `printf 'NOCX-PD/1\n'; lsof -nP -iTCP -sTCP:LISTEN; e=$?; printf 'NOCX-PD/1\n'; exit "$e"`
-	sockstatCmd       = `printf 'NOCX-PD/1\n'; sockstat -4 -l; e=$?; printf 'NOCX-PD/1\n'; exit "$e"`
-)
-
-// step is one probe on the ladder: the fixed command, the parser for its
+// step is one probe on the ladder: which rung it is, the parser for its
 // dialect, and the exit status that means "ran fine, nothing matched" (lsof
 // exits 1 with no matches — a valid empty sample, not a failure).
+//
+// There is no command here, and its absence is the point: what runs is the
+// helper's, named by step.name, and the text lives in internal/remoteprobe
+// beside the scripts that this package's parsers read.
 type step struct {
-	name        string
-	cmd         string
+	name        ProbeName
 	parse       func(body []byte) ([]Listener, bool)
 	noMatchExit int
 }
@@ -44,16 +39,16 @@ type step struct {
 // netstat (detected explicitly; -p may be unavailable, so process evidence
 // is unsupported) → lsof → sockstat → unavailable.
 var probeLadder = []*step{
-	{name: "ss", cmd: ssCmd, parse: parseSS},
-	{name: "netstat", cmd: netstatCmd, parse: parseNetstat},
-	{name: "busybox-netstat", cmd: busyboxNetstatCmd, parse: parseBusyboxNetstat},
-	{name: "lsof", cmd: lsofCmd, parse: ParseLsof, noMatchExit: 1},
-	{name: "sockstat", cmd: sockstatCmd, parse: parseSockstat},
+	{name: ProbeSS, parse: parseSS},
+	{name: ProbeNetstat, parse: parseNetstat},
+	{name: ProbeBusyboxNetstat, parse: parseBusyboxNetstat},
+	{name: ProbeLsof, parse: ParseLsof, noMatchExit: 1},
+	{name: ProbeSockstat, parse: parseSockstat},
 }
 
 // ladderIndex returns the ladder position of the named probe, or 0 when
 // unknown (an unknown name means no selection — start at the top).
-func ladderIndex(name string) int {
+func ladderIndex(name ProbeName) int {
 	for i, st := range probeLadder {
 		if st.name == name {
 			return i

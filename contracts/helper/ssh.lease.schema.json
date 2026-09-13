@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.lease.schema.json",
+  "title": "HelperSSHLeaseResult",
+  "description": "What acquiring a lease answered: the reference, and the fingerprint of the host key observed at dial time. The fingerprint is not decoration — the helper-install path keys consent by the machine's host key (ADR-0023) and used to read the value off its own lease, so keeping it here is what makes the coordinator's answer to 'which machine did I just ask' unchanged by the dial having moved one process out.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease", "hostKeyFingerprint"],
+  "properties": {
+    "lease": {
+      "description": "The reference the helper holds. It is opaque: the coordinator echoes it verbatim on every probe and on the release.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    },
+    "hostKeyFingerprint": {
+      "description": "The SHA256 fingerprint of the TARGET host's public key as presented and verified at dial time. Empty is not a valid answer for a lease that was acquired: a connection whose key was never established could not have been authenticated.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

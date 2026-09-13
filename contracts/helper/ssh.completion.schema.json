@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.completion.schema.json",
+  "title": "HelperSSHCompletionResult",
+  "description": "What the completion probe answered, framed by the nonce the caller minted. The caller rejects an answer that is not framed WHOLE — a login banner or a chatty rc file lands on the same stream, and half-parsing a polluted answer is how a banner line becomes a completion candidate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stdout", "stderr", "exitStatus", "truncated"],
+  "properties": {
+    "stdout": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "stderr": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "exitStatus": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  }
+}

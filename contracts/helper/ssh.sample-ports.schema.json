@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.sample-ports.schema.json",
+  "title": "HelperSSHSamplePortsResult",
+  "description": "What one port probe answered. The exit status is part of the contract and not folded into it: ss missing (127), lsof finding nothing (1) and a policy wrapper refusing are three different facts, and telling them apart is the caller's judgement rather than the helper's.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stdout", "stderr", "exitStatus", "truncated"],
+  "properties": {
+    "stdout": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "stderr": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "exitStatus": {
+      "type": "integer",
+      "minimum": -1
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  }
+}

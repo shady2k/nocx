@@ -137,6 +137,47 @@ type fixture struct {
 	forwards      map[string]net.Listener
 	forwardBinds  []forwardBind
 	directTargets []string
+
+	// the probe plane (nocx-50w7p.9): what this host's shell answers to an
+	// exec, and how many sessions it will give. execHandler nil means this
+	// fixture serves no exec at all — the probe-only tests never open a
+	// session, and a test that asks for one then fails where it asked.
+	execHandler    func(cmd string) (stdout, stderr string, exit int, refuse bool)
+	execs          []string
+	refuseSessions bool
+	// dials counts how many connections this host accepted. The probes run on a
+	// POOLED connection, so the number is what says whether a lease kept one or
+	// whether every probe paid for its own handshake.
+	dials int
+}
+
+// connections is how many times this host was dialed.
+func (f *fixture) connections() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dials
+}
+
+// ran is the list of commands this host's shell was asked to run.
+func (f *fixture) ran() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.execs...)
+}
+
+// setExecHandler scripts what an exec request answers.
+func (f *fixture) setExecHandler(h func(cmd string) (stdout, stderr string, exit int, refuse bool)) {
+	f.mu.Lock()
+	f.execHandler = h
+	f.mu.Unlock()
+}
+
+// setSessionRefusal makes this host serve no session channel, which is how
+// OpenSSH answers at MaxSessions 1 with the user's own shell holding it.
+func (f *fixture) setSessionRefusal(refuse bool) {
+	f.mu.Lock()
+	f.refuseSessions = refuse
+	f.mu.Unlock()
 }
 
 func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixture {
@@ -204,6 +245,9 @@ func newFixture(t *testing.T, password string, acceptedKey gossh.Signer) *fixtur
 // subsystem) and the tcpip-forward global request (which is not a channel at
 // all and is answered out of band).
 func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
+	f.mu.Lock()
+	f.dials++
+	f.mu.Unlock()
 	defer func() { _ = conn.Close() }()
 	sconn, chans, reqs, err := gossh.NewServerConn(conn, config)
 	if err != nil {
@@ -212,6 +256,13 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 	defer func() { _ = sconn.Close() }()
 	go f.serveGlobalRequests(sconn, reqs)
 	for newChan := range chans {
+		f.mu.Lock()
+		refuse := f.refuseSessions
+		f.mu.Unlock()
+		if refuse {
+			_ = newChan.Reject(gossh.ResourceShortage, "too many sessions")
+			continue
+		}
 		if newChan.ChannelType() == "direct-tcpip" {
 			f.serveDirectTCPIP(newChan, newChan.ExtraData())
 			continue
@@ -222,6 +273,37 @@ func (f *fixture) serve(conn net.Conn, config *gossh.ServerConfig) {
 		}
 		go f.serveChannel(ch, chReqs)
 	}
+}
+
+// serveExec answers one exec request the way a host's shell would: run it,
+// report its status, close. A handler that returns refuse=true answers the exec
+// request's own false reply, which is what a restricted shell or a ForceCommand
+// policy does.
+func (f *fixture) serveExec(ch gossh.Channel, req *gossh.Request) {
+	var m struct{ Command string }
+	if err := gossh.Unmarshal(req.Payload, &m); err != nil {
+		_ = req.Reply(false, nil)
+		return
+	}
+	f.mu.Lock()
+	handler := f.execHandler
+	f.execs = append(f.execs, m.Command)
+	f.mu.Unlock()
+	if handler == nil {
+		_ = req.Reply(false, nil)
+		return
+	}
+	stdout, stderr, exit, refuse := handler(m.Command)
+	if refuse {
+		_ = req.Reply(false, nil)
+		return
+	}
+	_ = req.Reply(true, nil)
+	_, _ = ch.Write([]byte(stdout))
+	_, _ = ch.Stderr().Write([]byte(stderr))
+	//nolint:gosec // SSH exit statuses are 0-255 as far as this fixture is concerned
+	_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{uint32(exit)}))
+	_ = ch.Close()
 }
 
 // serveGlobalRequests answers the forwarding requests a remote listener needs.
@@ -453,6 +535,10 @@ func (p *forwardPayloadReader) u32() (uint32, bool) {
 // wrong subsystem fails where it asked instead of hanging.
 func (f *fixture) serveChannel(ch gossh.Channel, reqs <-chan *gossh.Request) {
 	for req := range reqs {
+		if req.Type == "exec" {
+			f.serveExec(ch, req)
+			return
+		}
 		if req.Type != "subsystem" {
 			if req.WantReply {
 				_ = req.Reply(false, nil)

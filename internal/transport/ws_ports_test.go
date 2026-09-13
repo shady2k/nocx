@@ -24,26 +24,26 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Scripted connector — the scheduler's lease surface, standing in for
-// ssh.RealClient. The Exec responses are real probe-shaped frames; the
-// parsing happens in the real detector.
+// Scripted connector — the scheduler's lease surface, standing in for the
+// helper-backed lease the composition root wires. The Sample responses are real
+// probe-shaped frames; the parsing happens in the real detector.
 // ---------------------------------------------------------------------------
 
 type portsFakeConn struct {
 	mu     sync.Mutex
 	done   chan struct{}
 	closed bool
-	resps  []*ssh.ExecResult
+	resps  []*discovery.ExecResult
 }
 
-func (f *portsFakeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
+func (f *portsFakeConn) Sample(_ context.Context, _ discovery.ProbeName) (*discovery.ExecResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
-		return nil, ssh.ErrExecClosed
+		return nil, &discovery.ExecError{Kind: discovery.ExecErrLeaseClosed}
 	}
 	if len(f.resps) == 0 {
-		return nil, ssh.ErrExecLost
+		return nil, &discovery.ExecError{Kind: discovery.ExecErrConnectionLost}
 	}
 	r := f.resps[0]
 	f.resps = f.resps[1:]
@@ -59,7 +59,7 @@ func (f *portsFakeConn) Close() error {
 	return nil
 }
 
-func (f *portsFakeConn) queue(resps ...*ssh.ExecResult) {
+func (f *portsFakeConn) queue(resps ...*discovery.ExecResult) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resps = append(f.resps, resps...)
@@ -68,10 +68,10 @@ func (f *portsFakeConn) queue(resps ...*ssh.ExecResult) {
 type portsFakeConnector struct {
 	mu    sync.Mutex
 	conns []*portsFakeConn
-	resp  *ssh.ExecResult // queued into every fresh conn (the settle sample)
+	resp  *discovery.ExecResult // queued into every fresh conn (the settle sample)
 }
 
-func (c *portsFakeConnector) DiscoveryConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
+func (c *portsFakeConnector) Lease(_ context.Context, _ string, _ ...ssh.ConnectOption) (discovery.Lease, error) {
 	f := &portsFakeConn{done: make(chan struct{})}
 	c.mu.Lock()
 	if c.resp != nil {
@@ -93,8 +93,8 @@ func (c *portsFakeConnector) conn() *portsFakeConn {
 
 // portsFramed wraps probe output in the fixed version sentinel the discovery
 // package requires; a body without it is rejected whole.
-func portsFramed(body string) *ssh.ExecResult {
-	return &ssh.ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "\nNOCX-PD/1\n"), ExitStatus: 0}
+func portsFramed(body string) *discovery.ExecResult {
+	return &discovery.ExecResult{Stdout: []byte("NOCX-PD/1\n" + body + "\nNOCX-PD/1\n"), ExitStatus: 0}
 }
 
 // portsSSMixed is the measured shape: three rows with process evidence and

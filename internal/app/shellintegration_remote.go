@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	pkgsftp "github.com/pkg/sftp"
 	gossh "golang.org/x/crypto/ssh"
 
+	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -54,7 +56,7 @@ func (a *remoteInstallerAdapter) UninstallRemote(ctx context.Context, client *go
 }
 
 func (a *remoteInstallerAdapter) GetRemoteHome(client *gossh.Client) (string, error) {
-	return a.inner.GetRemoteHome(remoteCommandRunner{client: client})
+	return a.inner.GetRemoteHome(remoteHomeOver{client: client})
 }
 
 func (a *remoteInstallerAdapter) EnsureInstalledOverPipe(ctx context.Context, rw io.ReadWriteCloser, home string) error {
@@ -66,15 +68,32 @@ func (a *remoteInstallerAdapter) EnsureInstalledOverPipe(ctx context.Context, rw
 	return a.inner.EnsureInstalledOverPipe(ctx, shellIntegrationSFTPFS{SFTPFS: ssh.NewSFTPFS(clientSFTP)}, home)
 }
 
-type remoteCommandRunner struct {
+// remoteHomeOver answers the home question over the client this path dials
+// with.
+//
+// The transport is this path's own and moves with its own task (the script-mode
+// carrier); what this type must not do is COMPOSE a command, and it does not:
+// the commands are internal/remoteprobe's list, in its order, and the only
+// decision here is "trim the answer and try the next one when it is empty" —
+// the same rule the helper applies on the other transport.
+type remoteHomeOver struct {
 	client *gossh.Client
 }
 
-func (r remoteCommandRunner) Output(command string) ([]byte, error) {
-	sess, err := r.client.NewSession()
-	if err != nil {
-		return nil, err
+func (r remoteHomeOver) Home() (string, error) {
+	for _, command := range remoteprobe.HomeCommands {
+		sess, err := r.client.NewSession()
+		if err != nil {
+			return "", err
+		}
+		out, err := sess.Output(command)
+		_ = sess.Close()
+		if err != nil {
+			return "", err
+		}
+		if home := strings.TrimSpace(string(out)); home != "" {
+			return home, nil
+		}
 	}
-	defer func() { _ = sess.Close() }()
-	return sess.Output(command)
+	return "", nil
 }

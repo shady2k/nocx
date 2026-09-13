@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"strings"
 )
 
 // EnsureInstalledRemote publishes the integration bundle through an injected
@@ -59,24 +58,21 @@ func (s *Impl) publishRemote(fs FS, remoteHome, event string) error {
 	return nil
 }
 
-// GetRemoteHome queries the remote host through an injected command seam. The
-// composition root adapts an SSH client without exposing its concrete type
-// here.
-func (s *Impl) GetRemoteHome(runner RemoteCommandRunner) (string, error) {
-	output, err := runner.Output("echo $HOME")
+// GetRemoteHome asks the remote host where the account's home is, through an
+// injected seam. The composition root adapts a transport to that seam without
+// exposing its concrete type here.
+//
+// The QUESTION is this function's and the COMMANDS are internal/remoteprobe's:
+// the probe is one fixed command and the fallback is another, both spelled
+// there, so this package neither composes shell text nor depends on which
+// transport runs it.
+func (s *Impl) GetRemoteHome(home RemoteHome) (string, error) {
+	dir, err := home.Home()
 	if err != nil {
 		return "", fmt.Errorf("shellintegration: get remote home: %w", err)
 	}
-	home := strings.TrimSpace(string(output))
-	if home == "" {
-		output2, err := runner.Output("cd ~ && pwd")
-		if err != nil {
-			return "", fmt.Errorf("shellintegration: get remote home via ~: %w", err)
-		}
-		home = strings.TrimSpace(string(output2))
-	}
-	if home == "" {
+	if dir == "" {
 		return "", fmt.Errorf("shellintegration: could not determine remote home")
 	}
-	return home, nil
+	return dir, nil
 }

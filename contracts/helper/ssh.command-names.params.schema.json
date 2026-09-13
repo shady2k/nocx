@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.command-names.params.schema.json",
+  "title": "HelperSSHCommandNamesParams",
+  "description": "One half of the PATH enumeration: the cheap per-session invalidation probe, or the full scan of executable names. The phase is a member of a closed set and not a command, and the nonce is the invocation's frame marker — the scripts print it around their answers and the parser accepts nothing else.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease", "phase", "nonce"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    },
+    "phase": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/commandNamesPhase"
+    },
+    "nonce": {
+      "description": "The invocation's frame marker, minted by the caller. It rides the heredoc delimiter as well, so the delimiter cannot collide with the script's own text.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

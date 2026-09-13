@@ -14,7 +14,7 @@ import "context"
 // the context is done.
 type Request struct {
 	// Host is the session's remote hostname. Empty for a local session.
-	// The SSH completer uses it to create a DiscoveryConn.
+	// The SSH completer leases a probe on it.
 	Host string
 
 	// Cwd is the session's current working directory, from OSC 7. When
@@ -67,8 +67,8 @@ type Response struct {
 }
 
 // Completer answers one completion query. Implementations: local filesystem
-// (LocalCompleter) and SSH remote (SSHCompleter, which uses the DiscoveryConn
-// seam from internal/ssh).
+// (LocalCompleter) and SSH remote (SSHCompleter, which asks this machine's
+// helper for one named completion probe — see ProbeConn).
 type Completer interface {
 	Complete(ctx context.Context, req Request) (*Response, error)
 }

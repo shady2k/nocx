@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // Platform is a GOOS/GOARCH pair naming a helper build target.
@@ -24,14 +26,16 @@ type ExecOnce interface {
 	Exec(ctx context.Context, cmd string) ([]byte, error)
 }
 
-// Probe asks the remote host what it is, with one bounded command:
-// `uname -s -m` answers the kernel and machine in one line. The kernel and
-// machine names are translated onto Go's vocabulary; anything that does not
-// translate is carried through verbatim so Artifact can answer
-// ErrUnsupportedPlatform with the host's own words — never a guessed
-// platform.
+// Probe asks the remote host what it is, with ONE bounded command — the kernel
+// and machine in one line. The command itself is internal/remoteprobe's, which
+// is the package the helper runs it from: this is a caller that has a lease and
+// a question, not a second place that spells a probe.
+//
+// The kernel and machine names are translated onto Go's vocabulary; anything
+// that does not translate is carried through verbatim so Artifact can answer
+// ErrUnsupportedPlatform with the host's own words — never a guessed platform.
 func Probe(ctx context.Context, exec ExecOnce) (Platform, error) {
-	out, err := exec.Exec(ctx, "uname -s -m")
+	out, err := exec.Exec(ctx, remoteprobe.UnameCommand)
 	if err != nil {
 		return Platform{}, err
 	}

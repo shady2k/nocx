@@ -903,6 +903,10 @@ func New(opts ...Option) (*App, error) {
 	// from this process. The git lane and the platform probe still do, and
 	// installLeaseRoutes names that split in one place rather than hiding it.
 	overHelper := &sshOverHelper{local: localOpener, resolve: sshClient, log: slogger}
+	// The named probes ride the same connection to this machine's helper, and
+	// the same resolver: what each consumer asks for is a LEASE on a
+	// destination, and the helper is what dials it (nocx-50w7p.9).
+	probes := &helperProbes{local: localOpener, resolve: sshClient}
 	helperFactory, helperReg := helperGitFactory(
 		installLeaseRoutes{direct: sshClient, viaLocal: overHelper},
 		helperartifacts.DefaultSource, helperConsent, helperInstalls, slogger)
@@ -1195,7 +1199,7 @@ func New(opts ...Option) (*App, error) {
 	// sampling every 10 s while the panel is visible and nothing is
 	// paused.
 	discoverySched := discovery.NewScheduler(
-		sshClient, logger,
+		probes, logger,
 		discovery.WithLocalProvider(func(l log.Logger) discovery.Provider {
 			return nativeports.NewProvider(l)
 		}),
@@ -1364,7 +1368,7 @@ func New(opts ...Option) (*App, error) {
 		// silently dialing the target directly.
 		transport.WithCompleters(
 			completion.NewLocal(),
-			&routedSSHCompleter{client: sshClient},
+			&routedSSHCompleter{probes: probes},
 		),
 		// Command discovery's shared half (carrier design §8, nocx-m8jwn.6).
 		// One backend-owned, in-memory cache serves every tab: the PATH
@@ -1375,7 +1379,7 @@ func New(opts ...Option) (*App, error) {
 		// nowhere else (AGENTS.md check 5).
 		transport.WithCommandNames(&commandNamesRouter{
 			svc:    commandnames.New(time.Now, logger),
-			client: sshClient,
+			probes: probes,
 		}),
 
 		transport.WithProbeResultStore(probeResultStore),

@@ -128,6 +128,60 @@
       "description": "One remote listener's identity, minted by the helper and echoed verbatim by the coordinator. It is a SEPARATE identity from a channel id rather than a second use of it: a channel is one stream somebody holds, a listener is the thing streams arrive ON, and the two are created and ended by different ops (`close` versus `unforward`). An id that could be either would make those interchangeable at the type level while meaning different things on the wire.",
       "type": "string",
       "pattern": "^[0-9a-f]{32}$"
+    },
+    "leaseId": {
+      "description": "One probe lease's identity: a reference the HELPER holds on a pooled ssh connection, minted by the helper and echoed verbatim by the coordinator. It is 32 hex characters, opaque in both directions, and it is neither a channelId nor a forwardId because the three name different things that different ops end: a channel is a stream somebody holds, a listener is the thing streams arrive on, and a lease is a REFERENCE to a connection held for as long as a caller wants commands run on the same transport.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "probeRun": {
+      "description": "What every named probe needs and nothing more: the lease it runs on. It is one $def and not five inline fields so that 'a probe runs on a lease' has one declaration — and so a probe added later cannot grow a destination of its own, which would be a second way to say which connection this is.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease"],
+      "properties": {
+        "lease": {
+          "description": "The reference this probe runs under. A lease this helper does not hold — a helper that restarted holds nothing — is refused as exec_lost rather than as a bad request: the connection it named is gone, which is the fact the caller acts on.",
+          "$ref": "#/$defs/leaseId"
+        }
+      }
+    },
+    "portProbe": {
+      "description": "One rung of port discovery's ladder, in the spellings internal/discovery reports as 'which dialect produced this sample'. A NAME and not a command: the caller chooses which probe to run, and the helper owns what it is (the text lives in internal/remoteprobe, which both ends link).",
+      "type": "string",
+      "enum": ["ss", "netstat", "busybox-netstat", "lsof", "sockstat"]
+    },
+    "commandNamesPhase": {
+      "description": "Which half of the PATH enumeration to run, in a closed set of two. Two members rather than a flag because they are bounded differently: the cheap invalidation probe runs once per session, the full scan runs once per target and is shared.",
+      "type": "string",
+      "enum": ["probe", "scan"]
+    },
+    "probeExecResult": {
+      "description": "What every named probe answers: the captured streams, the remote exit status, and whether a capture bound was hit. It is ONE shape for all five probes deliberately — each caller classifies these facts its own way (discovery reads exit 127 as 'tool absent' and lsof's exit 1 as a valid empty sample, completion rejects an unframed answer, deploy refuses a nonzero status outright) and none of those are decisions the helper may take on the caller's behalf. `truncated` means the answer is a PREFIX: a partial table must never be read as a complete one, which for port discovery is the difference between 'no listeners' and 'I could not see them'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr", "exitStatus", "truncated"],
+      "properties": {
+        "stdout": {
+          "description": "The command's standard output, base64 in JSON ([]byte). Bounded by the helper's own capture cap; reaching it sets truncated rather than quietly returning less.",
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "stderr": {
+          "description": "The command's standard error, same encoding. Carried rather than merged: completion rejects an unframed answer and discovery reports a bounded excerpt, and both need to see what the far side said.",
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "exitStatus": {
+          "description": "The remote command's exit status, and it is an ANSWER rather than a failure: a missing tool exits 127, lsof exits 1 when nothing matched, a policy wrapper exits whatever it likes. The helper never folds a nonzero status into a refusal.",
+          "type": "integer",
+          "minimum": -1
+        },
+        "truncated": {
+          "description": "True when the capture bound was hit or the remote died mid-write — the payload is a prefix and must be treated as one.",
+          "type": "boolean"
+        }
+      }
     }
   }
 }

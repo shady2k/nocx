@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -165,15 +167,6 @@ func (s *pwSSHServer) authAttempts() []string {
 	return append([]string(nil), s.passwords...)
 }
 
-// execCount is how many pty-less exec requests the far side served. The
-// platform probe is the only thing in this test that issues one, so a
-// non-zero count is the probe having authenticated and reached the host.
-func (s *pwSSHServer) execCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.execs
-}
-
 // ---------------------------------------------------------------------------
 // The user at the other end of the ask.
 // ---------------------------------------------------------------------------
@@ -223,7 +216,7 @@ func (f *openPasswordPTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, e
 // open blocks behind it.
 func TestOpenPath_PasswordAskFiresOncePerOpen(t *testing.T) {
 	srv := startPasswordSSHServer(t)
-	reg, helperReg := openPasswordStack(t, srv)
+	reg, helperReg := openPasswordStack(t, srv, noLocalHelperProbes{t: t})
 
 	asker := &countingPasswordRequester{answer: openPasswordFixturePassword}
 	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
@@ -273,15 +266,19 @@ func writeKnownHostsFor(t *testing.T, path string, srv *pwSSHServer) {
 // TestOpenPath_ProbeStillRunsOnARememberedPassword is the other end of the
 // same rule, and the reason the suppression is narrow. A destination whose
 // password has been remembered (ADR-0017: the profile references a vault
-// secret) authenticates without interrupting anyone, so the platform probe
-// must still dial it, still reach the far host and still be able to select
-// the helper. Only the rung that would stop a person is off.
+// secret) resolves without interrupting anyone, so the platform probe must
+// still be ENTERED and still be handed the destination — only the rung that
+// would stop a person is off.
 //
-// Without this, "the probe must not prompt" could be satisfied by a probe
-// that no longer probes.
+// Without this, "the probe must not prompt" could be satisfied by a probe that
+// no longer probes. What the probe then DOES with that credential — authenticating
+// against the far side and running the uname command — is the helper's half, and
+// it is asserted where a helper exists: internal/helper/sshsvc's probe tests
+// drive a real ssh server with a password only the scripted coordinator has.
 func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	srv := startPasswordSSHServer(t)
-	reg, helperReg := openPasswordStack(t, srv)
+	probes := &recordingProbeSource{}
+	reg, helperReg := openPasswordStack(t, srv, probes)
 
 	asker := &countingPasswordRequester{answer: "the ask must never fire"}
 	cfg := openPasswordConfig(srv, &ssh.ConnectConfig{
@@ -314,13 +311,15 @@ func TestOpenPath_ProbeStillRunsOnARememberedPassword(t *testing.T) {
 	if got := asker.count(); got != 0 {
 		t.Errorf("a remembered password still raised %d ask(s); the open must be silent", got)
 	}
-	if got := srv.execCount(); got == 0 {
-		t.Error("the platform probe never reached the host: the suppression stopped the probe, not just the prompt")
+	asked := probes.asked()
+	if len(asked) != 1 {
+		t.Fatalf("the platform probe was entered %d time(s), want 1: the suppression stopped the probe, not just the prompt", len(asked))
 	}
-	for i, pw := range srv.authAttempts() {
-		if pw != openPasswordFixturePassword {
-			t.Errorf("auth attempt %d sent %q, want the remembered password", i, pw)
-		}
+	if asked[0].User != "e2euser" || net.JoinHostPort(asked[0].Host, strconv.Itoa(asked[0].Port)) != srv.addr {
+		t.Errorf("the probe was handed %+v, want the destination the profile resolved (%s)", asked[0], srv.addr)
+	}
+	if asked[0].Identity.Credential.Ref == "" {
+		t.Error("the probe was handed no credential reference: a probe that cannot authenticate is not a probe")
 	}
 }
 
@@ -335,7 +334,7 @@ func (r rememberedPassword) Resolve(context.Context, credential.SecretID, creden
 // openPasswordStack builds the real composition the open path runs through —
 // the session registry over a real ssh.RealClient, and the helper registry
 // whose selection runs before it. The only double is the artifact source.
-func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperRegistry) {
+func openPasswordStack(t *testing.T, srv *pwSSHServer, probes probeHelperSource) (*session.Reg, *helperRegistry) {
 	t.Helper()
 	logger := log.NewSlogAdapter(discardLogger())
 
@@ -361,7 +360,15 @@ func openPasswordStack(t *testing.T, srv *pwSSHServer) (*session.Reg, *helperReg
 	// for BOTH halves. Nothing in this test's path acquires the install lease
 	// — it drives the AUTH ladder of a pane open — so the substitution is
 	// unreachable code with a name rather than a weakened assertion.
-	lanes := installLeaseRoutes{direct: client, viaLocal: noLocalHelperLease{t: t}}
+	lanes := installLeaseRoutes{
+		direct:   client,
+		viaLocal: noLocalHelperLease{t: t},
+		// The platform probe is this machine's helper's now (nocx-50w7p.9).
+		// This stack has no daemon, so the route is the caller's: a test that
+		// asserts the probe RUNS passes a recording source, and one that only
+		// drives the pane's auth ladder passes the failing default.
+		probes: &helperProbes{local: probes, resolve: client},
+	}
 	_, helperReg := helperGitFactory(lanes, refusingArtifactSource{}, consentStore, installStore, discardLogger())
 	helperReg.registry = reg
 	return reg, helperReg
@@ -377,6 +384,47 @@ type noLocalHelperLease struct{ t *testing.T }
 func (n noLocalHelperLease) HelperInstallConn(context.Context, string, ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
 	n.t.Error("this stack has no local helper, so no install lease can be acquired")
 	return nil, errors.New("no local helper in this stack")
+}
+
+// noLocalHelperProbes is the probe half of a stack that has no daemon: no
+// helper, so no lease. It fails the test if it is reached, which is the honest
+// shape for a test whose subject is the pane's auth ladder — a stand-in that
+// answered would hide the day that path starts needing a probe.
+type noLocalHelperProbes struct{ t *testing.T }
+
+func (n noLocalHelperProbes) probeHelper(context.Context) (probeHelper, error) {
+	n.t.Error("this stack has no local helper, so no probe lease can be acquired")
+	return nil, errors.New("no local helper in this stack")
+}
+
+// recordingProbeSource stands where this machine's helper stands, and records
+// what it was asked.
+//
+// The platform probe answers a credential question the COORDINATOR resolves and
+// the helper presents (the suppression travels with the resolution), and the
+// assertion this source serves is about that pair: the probe is ENTERED with a
+// remembered password and no ask. Whether the far side then authenticates is the
+// helper's half of the same criterion, and it is asserted where a helper exists
+// — internal/helper/sshsvc's probe tests drive a real server with a password
+// only the scripted coordinator has.
+type recordingProbeSource struct {
+	mu      sync.Mutex
+	targets []proto.SSHDestination
+}
+
+func (r *recordingProbeSource) probeHelper(context.Context) (probeHelper, error) { return r, nil }
+
+func (r *recordingProbeSource) AcquireProbeLease(_ context.Context, params proto.LeaseParams) (probeCommands, error) {
+	r.mu.Lock()
+	r.targets = append(r.targets, params.Destination)
+	r.mu.Unlock()
+	return &fakeProbeCommands{}, nil
+}
+
+func (r *recordingProbeSource) asked() []proto.SSHDestination {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proto.SSHDestination(nil), r.targets...)
 }
 
 func openPasswordConfig(srv *pwSSHServer, remote *ssh.ConnectConfig) session.Config {

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.home.params.schema.json",
+  "title": "HelperSSHHomeParams",
+  "description": "The home-directory probe: where this account's home is. Asked over a shell because there is no portable other way, and fixed because the question is fixed — the caller trims the answer and refuses an empty one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lease"],
+  "properties": {
+    "lease": {
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/leaseId"
+    }
+  }
+}

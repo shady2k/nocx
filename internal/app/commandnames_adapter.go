@@ -7,7 +7,6 @@ import (
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // commandNamesRouter is the composition root's half of command discovery: it
@@ -22,7 +21,7 @@ import (
 // two jobs.
 type commandNamesRouter struct {
 	svc    *commandnames.Service
-	client discoveryLeaseProvider
+	probes *helperProbes
 }
 
 // CommandNames implements transport.CommandNamesResolver.
@@ -32,7 +31,7 @@ func (r *commandNamesRouter) CommandNames(ctx context.Context, target capability
 	case session.KindLocal:
 		return r.svc.Names(ctx, commandnames.NewLocalSource(gen, nil))
 	case session.KindRemote:
-		if r.client == nil {
+		if r.probes == nil {
 			return commandnames.Result{
 				State:  commandnames.StateFailed,
 				Reason: "command discovery has no connection to this host",
@@ -45,7 +44,7 @@ func (r *commandNamesRouter) CommandNames(ctx context.Context, target capability
 		// reports them from the far side and they are part of the key, so a
 		// route reached as two different users never shares one name set.
 		return r.svc.Names(ctx, commandnames.NewRemoteSource("ssh:"+target.Host, gen,
-			sshCommandNamesProvider(r.client, target.Host, target.SSHOptions...)))
+			r.probes.HelperCommandNamesProvider(target.Host, target.SSHOptions...)))
 	default:
 		return commandnames.Result{
 			State:  commandnames.StateFailed,
@@ -54,38 +53,11 @@ func (r *commandNamesRouter) CommandNames(ctx context.Context, target capability
 	}
 }
 
-// commandNamesConnAdapter adapts ssh.DiscoveryConn to commandnames.ExecConn.
-// It is the twin of discoveryConnAdapter and exists for the same reason: the
-// feature package declares the one method it needs rather than importing
-// internal/ssh.
-type commandNamesConnAdapter struct {
-	inner ssh.DiscoveryConn
-}
-
-func (a *commandNamesConnAdapter) Exec(ctx context.Context, cmd string) (*commandnames.ExecResult, error) {
-	r, err := a.inner.Exec(ctx, cmd)
-	if err != nil {
-		return nil, err
-	}
-	return &commandnames.ExecResult{
-		Stdout:     r.Stdout,
-		ExitStatus: r.ExitStatus,
-		Truncated:  r.Truncated,
-	}, nil
-}
-
-func (a *commandNamesConnAdapter) Close() error { return a.inner.Close() }
-
-// sshCommandNamesProvider leases the pooled connection with the terminal
-// session's own connect options. Forwarding them is what makes a jump route
-// reuse the session's connection instead of silently dialing the target
-// directly — the same contract the completion adapter documents.
-func sshCommandNamesProvider(client discoveryLeaseProvider, host string, opts ...ssh.ConnectOption) commandnames.ExecConnProvider {
-	return func(ctx context.Context) (commandnames.ExecConn, error) {
-		dc, err := client.DiscoveryConn(ctx, host, opts...)
-		if err != nil {
-			return nil, err
-		}
-		return &commandNamesConnAdapter{inner: dc}, nil
-	}
-}
+// The enumeration's lease and the session's own connect options: forwarding
+// them is what makes a jump route resolve to the connection the session itself
+// reached instead of silently reaching past it — the same contract the
+// completion adapter documents.
+//
+// There is no adapter between the two any more: the enumeration names a PHASE
+// and passes its nonce, and the helper's own command builder owns the script
+// (D3), so what is wired here is a provider rather than a translation.

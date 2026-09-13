@@ -17,6 +17,8 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // TestSSHCompleter_E2E_RemotePaths exercises the SSHCompleter through a
@@ -42,7 +44,7 @@ func TestSSHCompleter_E2E_RemotePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := NewSSH(func(ctx context.Context, host string) (ExecConn, error) {
+	c := NewSSH(func(ctx context.Context, host string) (ProbeConn, error) {
 		return &gosshExecConn{client: client}, nil
 	})
 
@@ -99,7 +101,7 @@ func TestSSHCompleter_E2E_GitCompletion(t *testing.T) {
 		t.Skip("bash-completion not available")
 	}
 
-	c := NewSSH(func(ctx context.Context, host string) (ExecConn, error) {
+	c := NewSSH(func(ctx context.Context, host string) (ProbeConn, error) {
 		return &gosshExecConn{client: client}, nil
 	})
 
@@ -242,7 +244,7 @@ func (s *completionSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh
 }
 
 // runRemoteCompletion executes the completion script command in bash.
-// The command from buildRemoteCommand is:
+// The command from remoteprobe.CompletionCommand is:
 //
 //	bash -s -- '<cwd>' '<line>' <pos> <limit> '<nonce>' << 'NOCXEOF_<nonce>'
 //	<script>
@@ -316,7 +318,11 @@ type gosshExecConn struct {
 	client *gossh.Client
 }
 
-func (c *gosshExecConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
+func (c *gosshExecConn) Complete(ctx context.Context, probe CompletionProbe) (*ExecResult, error) {
+	// The command is composed HERE, from the same package the helper composes
+	// it from: this test stands where the helper stands, and the only thing the
+	// two must agree about is the command a completion probe is.
+	cmd := remoteprobe.CompletionCommand(probe.Cwd, probe.Line, probe.Pos, probe.Limit, probe.Nonce)
 	sess, err := c.client.NewSession()
 	if err != nil {
 		return nil, err

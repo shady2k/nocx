@@ -15,9 +15,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/remoteprobe"
 )
 
 // runScript executes the embedded script under bash with the given line and
@@ -29,11 +29,12 @@ func runScript(t *testing.T, cwd, line string, pos int) []Candidate {
 		t.Skip("bash not on PATH; the remote script cannot be exercised here")
 	}
 	const nonce = "testnonce"
-	// #nosec G204 -- the interpreter is resolved from PATH and every argument
-	// is a test literal; this is the point of the test, which is to run the
-	// real script rather than a paraphrase of it.
-	cmd := exec.Command(bash, "-s", "--", cwd, line, strconv.Itoa(pos), "50", nonce)
-	cmd.Stdin = strings.NewReader(completionScript)
+	// The command is the COMPOSED one — the same bytes the helper hands to the
+	// far side, script and framing included — so what runs here is what runs on
+	// a host, not a paraphrase of it.
+	// #nosec G204 -- the interpreter is resolved from PATH and the arguments are
+	// test literals; running the real thing is the point of the test.
+	cmd := exec.Command(bash, "-c", remoteprobe.CompletionCommand(cwd, line, pos, 50, nonce))
 	cmd.Env = append(os.Environ(), "HOME="+cwd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

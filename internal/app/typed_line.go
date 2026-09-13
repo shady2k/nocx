@@ -13,6 +13,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -652,7 +653,7 @@ func (d *typedDelivery) awaitMasterEnd(ctx context.Context, own *ssh.Ownership) 
 // channel of the connection nocx owns. It is the same question
 // GetRemoteHome asks over a *gossh.Client, over the transport this path has.
 func typedRemoteHome(master TypedMaster) (string, error) {
-	aux, err := master.Aux(mux.SessionRequest{Command: "echo $HOME"})
+	aux, err := master.Aux(mux.SessionRequest{Command: remoteprobe.HomeCommand})
 	if err != nil {
 		return "", err
 	}

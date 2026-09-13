@@ -408,8 +408,8 @@ func (o *sessionOpener) resolveRemote(ctx context.Context, svc capability.OpenSe
 			remoteHost = resolved.HostName
 		}
 		var keyFile string
-		if resolved != nil {
-			keyFile = resolved.IdentityFile
+		if resolved != nil && len(resolved.IdentityFiles) > 0 {
+			keyFile = resolved.IdentityFiles[0]
 		}
 		remote = &ssh.ConnectConfig{
 			User:    user,

@@ -591,17 +591,43 @@ func pemEncode(block *pem.Block) []byte { return pem.EncodeToMemory(block) }
 // points SSH_AUTH_SOCK at it, answering that key's public half.
 func startAgent(t *testing.T) gossh.PublicKey {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate agent key: %v", err)
+	return startAgentHolding(t, freshAgentPrivates(t, 1)...)[0]
+}
+
+// freshAgentPrivates generates n private keys in the order an agent will offer
+// them, so a test can name one of them on disk as well.
+func freshAgentPrivates(t *testing.T, n int) []ed25519.PrivateKey {
+	t.Helper()
+	privates := make([]ed25519.PrivateKey, 0, n)
+	for i := range n {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate agent key %d: %v", i, err)
+		}
+		privates = append(privates, priv)
 	}
-	signer, err := gossh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("agent signer: %v", err)
-	}
+	return privates
+}
+
+// startAgentHolding runs a real ssh-agent holding exactly these private keys, in
+// this order, and points SSH_AUTH_SOCK at it.
+//
+// The private halves are the CALLER's so that one of them can also be an
+// identity file on disk — which is the setup IdentitiesOnly exists for, and the
+// one this fixture has to be able to build.
+func startAgentHolding(t *testing.T, privates ...ed25519.PrivateKey) []gossh.PublicKey {
+	t.Helper()
 	keyring := agent.NewKeyring()
-	if addErr := keyring.Add(agent.AddedKey{PrivateKey: priv, Comment: "nocx-test"}); addErr != nil {
-		t.Fatalf("add key to the agent: %v", addErr)
+	public := make([]gossh.PublicKey, 0, len(privates))
+	for i, priv := range privates {
+		signer, err := gossh.NewSignerFromKey(priv)
+		if err != nil {
+			t.Fatalf("agent signer %d: %v", i, err)
+		}
+		if addErr := keyring.Add(agent.AddedKey{PrivateKey: priv, Comment: "nocx-test"}); addErr != nil {
+			t.Fatalf("add key %d to the agent: %v", i, addErr)
+		}
+		public = append(public, signer.PublicKey())
 	}
 	sock := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", sock)
@@ -622,7 +648,7 @@ func startAgent(t *testing.T) gossh.PublicKey {
 		}
 	}()
 	t.Setenv("SSH_AUTH_SOCK", sock)
-	return signer.PublicKey()
+	return public
 }
 
 // assertNoKeyBytesOnTheWire searches BOTH recorded directions for the private
@@ -666,4 +692,314 @@ func assertNoSubstringOnTheWire(t *testing.T, st *probeStack, want, what string)
 // bytesContains is a substring search over recorded bytes.
 func bytesContains(haystack []byte, needle string) bool {
 	return strings.Contains(string(haystack), needle)
+}
+
+// ── the ordinary local setup, through the helper (nocx-50w7p.19) ────────────
+//
+// Everything below is a profile that names NO credential. That is the setup a
+// person has on the machine in front of them — "connect to this host with my
+// keys" — and OpenSSH answers it from the agent and from the identity files its
+// configuration lists, which is ssh's own default list when it lists none.
+//
+// Each case runs the REAL resolver (ssh -G, against the disposable home's own
+// ~/.ssh), the REAL helper over a real socket and a REAL ssh server, and the
+// negative halves are read off the recorded wire as above.
+
+// sshHomeKey writes a fresh private key into the DISPOSABLE home's ~/.ssh under
+// the given name, exactly where ssh looks for a default key, and answers its path
+// and signer.
+func sshHomeKey(t *testing.T, name string) (string, gossh.Signer) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := gossh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	path := filepath.Join(disposableSSHDir(t), name)
+	if err := os.WriteFile(path, pemEncode(block), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path, signer
+}
+
+// writeHomeKey writes an EXISTING private key into the disposable home's ~/.ssh
+// under the given name and answers the path. It is the half a test needs when the
+// same key must be an identity file AND an agent key, which is the setup
+// IdentitiesOnly exists for.
+func writeHomeKey(t *testing.T, name string, priv ed25519.PrivateKey) string {
+	t.Helper()
+	dir := disposableSSHDir(t)
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, pemEncode(block), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// disposableSSHDir answers the ~/.ssh of the DISPOSABLE home, creating it if
+// needed — and REFUSES to hand out a path anywhere else.
+//
+// The refusal is the point. $HOME is replaced per test by the harness, and a
+// fixture called before that replacement would otherwise write a private key and
+// an ssh config into the developer's real ~/.ssh. That is not a theoretical
+// failure: it happened while this file was being written, and the check below is
+// what makes it impossible rather than unlikely.
+func disposableSSHDir(t *testing.T) string {
+	t.Helper()
+	home := os.Getenv("HOME")
+	if home == "" {
+		t.Fatal("the fixture left no HOME, so a default key or a config would go somewhere unintended")
+	}
+	tmp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the temp dir: %v", err)
+	}
+	real, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("resolve HOME %q: %v", home, err)
+	}
+	if !strings.HasPrefix(real, tmp+string(filepath.Separator)) {
+		t.Fatalf("HOME is %q, which is not under %q: this fixture writes keys and ssh config, and it must only ever write them into a disposable home", real, tmp)
+	}
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	return dir
+}
+
+// sshHomeConfig writes the disposable home's ~/.ssh/config, which is the file the
+// REAL ssh -G oracle reads for these cases.
+func sshHomeConfig(t *testing.T, body string) {
+	t.Helper()
+	dir := disposableSSHDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write the home's ssh config: %v", err)
+	}
+}
+
+// TestAProbeWithNoNamedCredentialUsesADefaultKey is the default-key criterion
+// through the whole stack: a profile that names nothing authenticates with a key
+// from ~/.ssh, resolved and signed in the coordinator, and the private half never
+// reaches the helper.
+//
+// Nothing else in this home says anything about the key, so what makes this work
+// is the discovery and not a profile field — and the home is a disposably empty
+// one apart from the key this test wrote, which is what keeps a developer's own
+// ~/.ssh out of it.
+func TestAProbeWithNoNamedCredentialUsesADefaultKey(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	srv := startPasswordSSHServer(t)
+	st := startProbeStack(t, srv)
+	trustFixtureHostKey(t, st.khPath, srv)
+
+	keyPath, keySigner := sshHomeKey(t, "id_ed25519")
+	srv.acceptKey(keySigner.PublicKey())
+
+	cfg := &ssh.ConnectConfig{
+		User:               "e2euser",
+		ConnectionName:     "Default Key",
+		AuthorizedEndpoint: srv.addr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	fingerprint, err := st.helper.ProbeWithResult(ctx, srv.addr, cfg)
+	if err != nil {
+		t.Fatalf("a probe naming no credential, with a default key in this home: %v", err)
+	}
+	if fingerprint != pwServerFingerprint(srv) {
+		t.Fatalf("the probe reported %q, want the host key it met", fingerprint)
+	}
+	want := gossh.FingerprintSHA256(keySigner.PublicKey())
+	if got := srv.keyFingerprintsSeen(); len(got) != 1 || got[0] != want {
+		t.Fatalf("the destination authenticated key(s) %v, want the default key %s exactly once", got, want)
+	}
+	t.Logf("MEASURED default key discovery authenticated with %s through the helper", want)
+	assertNoKeyBytesOnTheWire(t, st, keyPath)
+}
+
+// TestAProbeWithNoDefaultKeyAndNoAgentIsRefused is the paired refusal: the same
+// profile in a home with no key ssh would offer and no agent to ask. It is a
+// refusal by NAME — nothing was named and nothing was found — and the far side
+// is not contacted with a credential at all.
+func TestAProbeWithNoDefaultKeyAndNoAgentIsRefused(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	srv := startPasswordSSHServer(t)
+	st := startProbeStack(t, srv)
+	trustFixtureHostKey(t, st.khPath, srv)
+
+	cfg := &ssh.ConnectConfig{
+		User:               "e2euser",
+		ConnectionName:     "Nothing At All",
+		AuthorizedEndpoint: srv.addr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := st.helper.ProbeWithResult(ctx, srv.addr, cfg)
+	var noMethod *ssh.ErrNoAuthMethod
+	if !errors.As(err, &noMethod) {
+		t.Fatalf("a probe with nothing to offer = %v (%T), want *ssh.ErrNoAuthMethod", err, err)
+	}
+	if got := srv.authAttempts(); len(got) != 0 {
+		t.Fatalf("the destination was offered %q, want nothing at all", got)
+	}
+	if got := srv.keyFingerprintsSeen(); len(got) != 0 {
+		t.Fatalf("the destination was shown key(s) %v, want none", got)
+	}
+}
+
+// TestAProbeWithAnAgentHoldingSeveralKeysUsesTheOneTheHostAccepts is the
+// multi-key criterion end to end: the agent holds three keys, the host accepts
+// only the LAST, and the probe authenticates — because the helper declares the
+// whole queue inside one `publickey` method and the far side answers each entry
+// in turn.
+//
+// The ORDER is asserted and not just the outcome: a queue that reached the helper
+// reversed, or truncated to its first key, is a different connection, and the
+// recording at the far side is what tells them apart.
+func TestAProbeWithAnAgentHoldingSeveralKeysUsesTheOneTheHostAccepts(t *testing.T) {
+	held := startAgentHolding(t, freshAgentPrivates(t, 3)...)
+	srv := startPasswordSSHServer(t)
+	srv.acceptKey(held[2])
+	st := startProbeStack(t, srv)
+	trustFixtureHostKey(t, st.khPath, srv)
+
+	cfg := &ssh.ConnectConfig{
+		User:               "e2euser",
+		AuthMode:           "agent",
+		ConnectionName:     "Three Keys",
+		AuthorizedEndpoint: srv.addr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := st.helper.ProbeWithResult(ctx, srv.addr, cfg); err != nil {
+		t.Fatalf("a probe whose agent holds three keys, with the host accepting the last: %v", err)
+	}
+	declared := srv.keyFingerprintsSeen()
+	if len(declared) != len(held) {
+		t.Fatalf("the destination was shown %v, want all %d keys the agent holds", declared, len(held))
+	}
+	for i, key := range held {
+		if want := gossh.FingerprintSHA256(key); declared[i] != want {
+			t.Fatalf("the destination was shown %v, want %s at position %d (the agent's own order)",
+				declared, want, i)
+		}
+	}
+	t.Logf("MEASURED the multi-key offer %v, authenticated with the third", declared)
+
+	// The agent's socket stays here, and so does every private half: what
+	// crosses is a fingerprint per key, and one signature per challenge.
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		t.Fatal("the test set no agent socket, so there was nothing to keep off the wire")
+	}
+	assertNoSubstringOnTheWire(t, st, sock, "the agent socket path")
+}
+
+// TestAProbeWithARejectedQueueStillOffersEveryKey is the refusal pair for the
+// case above: a host that accepts NONE of the three keys rejects the connection,
+// and it saw the whole queue before it did — which is the difference between a
+// refused credential and a queue that never arrived.
+func TestAProbeWithARejectedQueueStillOffersEveryKey(t *testing.T) {
+	held := startAgentHolding(t, freshAgentPrivates(t, 3)...)
+	// A key the agent does NOT hold, so every key of the queue is refused. It is
+	// generated here rather than through a second agent, because a second agent
+	// would replace SSH_AUTH_SOCK and the probe would meet a key that is
+	// actually there.
+	acceptedSigner, err := gossh.NewSignerFromKey(freshAgentPrivates(t, 1)[0])
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	srv := startPasswordSSHServer(t)
+	srv.acceptKey(acceptedSigner.PublicKey())
+	st := startProbeStack(t, srv)
+	trustFixtureHostKey(t, st.khPath, srv)
+
+	cfg := &ssh.ConnectConfig{
+		User:               "e2euser",
+		AuthMode:           "agent",
+		ConnectionName:     "Three Keys, None Accepted",
+		AuthorizedEndpoint: srv.addr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = st.helper.ProbeWithResult(ctx, srv.addr, cfg)
+	if err == nil {
+		t.Fatal("a probe whose every key the host refuses succeeded")
+	}
+	if outcome, _, _ := ssh.ClassifyProbeError(err); outcome != ssh.OutcomeRejected {
+		t.Fatalf("classified as %q, want %s (err %v)", outcome, ssh.OutcomeRejected, err)
+	}
+	if got := srv.keyFingerprintsSeen(); len(got) != len(held) {
+		t.Fatalf("the destination was shown %v, want every key of the queue", got)
+	}
+}
+
+// TestAProbeHonoursIdentityFileAndIdentitiesOnlyFromTheConfig is the config half
+// of the criterion, driven through the REAL resolver: the home's ~/.ssh/config
+// names one identity file and sets IdentitiesOnly, the agent holds that key AND
+// another, and only the named one is offered.
+//
+// IdentitiesOnly is what a person uses when their agent holds many keys, and it
+// must suppress the keys the configuration does not name WITHOUT suppressing the
+// agent itself — the named key here is signed for by the agent, so a resolution
+// that dropped the agent's keys would refuse this connection entirely.
+func TestAProbeHonoursIdentityFileAndIdentitiesOnlyFromTheConfig(t *testing.T) {
+	privates := freshAgentPrivates(t, 2)
+	// The UNNAMED key is added FIRST, which is the order an agent offers them
+	// in — and the suppression is only observable that way: a key that would be
+	// offered after the named one is never reached, because the handshake ends
+	// at the key the host accepts.
+	held := startAgentHolding(t, privates[1], privates[0])
+
+	srv := startPasswordSSHServer(t)
+	srv.acceptKey(held[1]) // the key the config names, which the agent signs for
+	// The stack REPLACES $HOME with a disposable one, so everything that writes
+	// into that home happens after it — a config written before would land in
+	// whatever home the process was started with.
+	st := startProbeStack(t, srv)
+	trustFixtureHostKey(t, st.khPath, srv)
+
+	namedPath := writeHomeKey(t, "id_ed25519", privates[0])
+	sshHomeConfig(t, "Host 127.0.0.1\n    IdentityFile "+namedPath+"\n    IdentitiesOnly yes\n")
+
+	cfg := &ssh.ConnectConfig{
+		User:               "e2euser",
+		ConnectionName:     "IdentitiesOnly",
+		AuthorizedEndpoint: srv.addr,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := st.helper.ProbeWithResult(ctx, srv.addr, cfg); err != nil {
+		t.Fatalf("a probe under IdentityFile + IdentitiesOnly: %v", err)
+	}
+	declared := srv.keyFingerprintsSeen()
+	if len(declared) != 1 {
+		t.Fatalf("the destination was shown %v, want only the key the config names", declared)
+	}
+	if want := gossh.FingerprintSHA256(held[1]); declared[0] != want {
+		t.Fatalf("the destination was shown %v, want %s", declared, want)
+	}
+	if withheld := gossh.FingerprintSHA256(held[0]); declared[0] == withheld {
+		t.Fatal("the agent's UNNAMED key was offered under IdentitiesOnly")
+	}
+	t.Logf("MEASURED IdentitiesOnly offered %v and withheld the agent's unnamed key %s",
+		declared, gossh.FingerprintSHA256(held[0]))
+	assertNoKeyBytesOnTheWire(t, st, namedPath)
 }

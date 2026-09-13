@@ -68,10 +68,30 @@ func IsOptionLikeHost(host string) bool {
 // HostConfig holds the SSH configuration directives for a resolved host.
 // Fields are populated from ssh -G output.
 type HostConfig struct {
-	HostName     string
-	User         string
-	Port         int
-	IdentityFile string
+	HostName string
+	User     string
+	Port     int
+
+	// IdentityFiles are the private key files ssh would offer for this host,
+	// in the order ssh would offer them: every `identityfile` line of the
+	// resolved configuration, which is OpenSSH's own default list when no
+	// configuration names one. It is a LIST and not one path because that is
+	// what the oracle answers and what OpenSSH does — `IdentityFile` "may be
+	// used multiple times", every entry is tried in turn, and `ssh -G` prints
+	// one line per entry including the defaults.
+	//
+	// A caller that wants ONE path (the profile overlay, a pool key) reads
+	// IdentityFiles[0], which is not a second derivation: it is this list's
+	// first element, and the only one the old single-valued field could ever
+	// have held.
+	IdentityFiles []string
+
+	// IdentitiesOnly is the resolved IdentitiesOnly directive: when set, ssh
+	// offers only the keys its configuration names, even ones an agent could
+	// supply. It is read here because the party that decides which keys to
+	// offer is the party that knows which files the configuration names, and
+	// that is this resolver's own answer.
+	IdentitiesOnly bool
 
 	// RemoteCommand is the command ssh would execute on the remote host,
 	// verbatim from the RemoteCommand directive. The empty string means
@@ -412,11 +432,37 @@ func (r *sshConfigResolver) purgeCacheLocked() {
 	r.lastMtime = time.Time{}
 }
 
-// runSSHG executes ssh -F <configPath> -G <host> and parses the output.
-// Using -F restricts ssh to the specified config file only, matching the
+// runSSHG executes ssh -F <configPath> -G <host> and parses the output,
+// using -F to restrict ssh to the specified config file only — matching the
 // existing behavior of the kevinburke/ssh_config library it replaces.
+//
+// The file it restricts to may not exist, and that is why the -F value comes
+// from configFileArg rather than from the field: ssh -F with a path that is
+// not there is a FATAL error, so a machine that has never written
+// ~/.ssh/config got no oracle answer at all — every directive degraded on the
+// machines least likely to have a config, including the default identity-file
+// list ssh itself would have answered with.
 func (r *sshConfigResolver) runSSHG(ctx context.Context, host string) (*HostConfig, error) {
-	return r.execSSHG(ctx, []string{"-F", r.configPath, "-G", host}, host)
+	return r.execSSHG(ctx, []string{"-F", r.configFileArg(), "-G", host}, host)
+}
+
+// configFileArg is the file -F names: the configured path when it exists, and
+// the null device when it does not.
+//
+// The null device is not a special case invented here, it is the SAME question
+// asked of a file that is empty: -F suppresses the system-wide config
+// (/etc/ssh/ssh_config) exactly as a configured path does, so the answer stays
+// "this file and nothing else", and an absent file answers what an empty one
+// would — ssh's own defaults, which is a real answer where exit 255 with
+// "Can't open user config file" was not.
+func (r *sshConfigResolver) configFileArg() string {
+	if r.configPath == "" {
+		return os.DevNull
+	}
+	if _, err := os.Stat(r.configPath); err != nil {
+		return os.DevNull
+	}
+	return r.configPath
 }
 
 // runSSHGArgv executes ssh -G with the TYPED argv (after the leading
@@ -508,9 +554,17 @@ func parseSSHGOutput(output, host string) (*HostConfig, error) {
 				cfg.Port = p
 			}
 		case "identityfile":
-			if cfg.IdentityFile == "" && value != "" {
-				cfg.IdentityFile = expandPath(value)
+			// Every line, in the order the oracle printed them. The first is
+			// no longer the only one kept: a config with three keys has three
+			// entries and OpenSSH tries all three, so collapsing them here was
+			// the same defect as keeping only one `identityfile` directive.
+			if value != "" {
+				cfg.IdentityFiles = append(cfg.IdentityFiles, expandPath(value))
 			}
+		case "identitiesonly":
+			// OpenSSH >= 10 spells booleans true/false where older versions
+			// print yes/no, exactly as requesttty and controlmaster do above.
+			cfg.IdentitiesOnly = value == "yes" || value == "true"
 		case "remotecommand":
 			// ssh -G prints "none" when RemoteCommand is unset; "none" is
 			// OpenSSH's sentinel for "no command" (the man page and ssh

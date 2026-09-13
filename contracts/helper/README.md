@@ -452,3 +452,41 @@ Two peers that disagree refuse each other at hello in both directions.
 The schemas are frozen from here like every sibling's: the new op degrades (an
 older helper answers `unknown_op`, which a coordinator reads as "this machine's
 helper is older than this app"), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.19`, and why `Version` moved to 10
+
+The **key queue**: `ssh.identity` no longer carries one `credential` plus one
+`publicKey` for key auth. It carries an ordered `keys` list — each entry a public
+half beside the reference the coordinator signs through — and the password arm is
+unchanged in meaning, so `credential` now belongs to password alone.
+
+Two ordinary setups were refusals before this, and both are the same shape
+underneath: the coordinator could nominate exactly ONE key per dial.
+
+- **A profile that names no credential.** "Connect to this host with my keys" is
+  what most saved profiles mean, and OpenSSH answers it by offering what it finds:
+  the agent's keys, and the identity files its configuration lists — ssh's own
+  default `~/.ssh/id_*` list when the configuration lists none, honouring
+  `IdentityFile` and `IdentitiesOnly`. The coordinator's own dial path always did
+  this; through the helper the same profile was refused, because there was one
+  slot and nothing to put in it.
+- **An agent holding several keys.** Only one of them is the key a given host
+  accepts, and it is frequently not the one the agent lists first. Offering the
+  first was a refusal that reads as "the host rejected your credential".
+
+**A queue is not a second attempt at authentication.** ssh's `publickey` method IS
+a query per key: the client declares a public half, the server answers whether it
+would accept a signature with it, and the client either signs or moves on. That is
+what `gossh.PublicKeys(signers...)` implements, so the whole queue travels inside
+ONE method and one connection's auth — which is why this is not the thing
+`MaxAuthTries` exists to bound. What crosses is a public half per key; every
+private half stays in the coordinator, and `sign` is still exactly a challenge and
+a signature.
+
+The version moved because the SHAPE moved. `additionalProperties: false` means a
+9-helper REJECTS an identity carrying `keys`: a key-auth dial would not degrade
+into a single-key one, it would not dial at all, and both setups above would
+arrive as protocol failures rather than as the working connections they are meant
+to be. A 10-helper reading a password identity behaves exactly as one speaking 9
+did — the break is confined to the kind that changed. Two peers that disagree
+refuse each other at hello in both directions.

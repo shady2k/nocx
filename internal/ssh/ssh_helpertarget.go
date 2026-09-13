@@ -82,30 +82,54 @@ const (
 	DialAuthInteractive DialAuthKind = "interactive"
 )
 
-// DialEndpoint is one resolved ssh endpoint: the address, the account, the
-// credential to present there, and the address its host key is stored under. It
-// is a destination and a hop at once, because they are the same three facts and
-// a hop is a destination that is not routed any further.
+// DialKey is ONE private key this endpoint may offer, and the credential that
+// signs with it.
+//
+// It is the pair and not two parallel lists, because the two halves are one
+// fact: x/crypto/ssh asks a Signer for PublicKey() BEFORE it asks for a
+// signature, so a key is "the public half the far side is shown, and the
+// reference this process signs with when it is challenged" — and a list of
+// keys whose order did not travel with their references would be two things to
+// keep in step across the wire.
+type DialKey struct {
+	// Credential names where the private half lives: a vault secret, a file
+	// this process reads, an agent key by fingerprint. Opaque to the helper.
+	Credential CredentialRef
+	// Passphrase names the passphrase of an encrypted key, when the profile
+	// bound one. Empty for an unencrypted key and for an agent key, which this
+	// process never parses.
+	Passphrase CredentialRef
+	// PublicKey is the wire-format public half (RFC 4253 §6.6).
+	PublicKey []byte
+}
+
+// DialEndpoint is one resolved ssh endpoint: the address, the account, what to
+// present there, and the address its host key is stored under. It is a
+// destination and a hop at once, because they are the same three facts and a
+// hop is a destination that is not routed any further.
 type DialEndpoint struct {
 	Host string
 	Port int
 	User string
 	Auth DialAuthKind
-	// Credential names the material to present: the password for
-	// DialAuthPassword, the private key for DialAuthKey. It is the
-	// COORDINATOR's reference — vault, file or agent — and is opaque to the
-	// helper, which echoes it back when it asks for what it names. Empty for
-	// DialAuthInteractive, which names no material at all.
+	// Credential names the material a PASSWORD presents. It is the
+	// COORDINATOR's reference and is opaque to the helper, which echoes it back
+	// when it asks for what it names. Empty for DialAuthKey, whose material is
+	// in Keys, and for DialAuthInteractive, which names no material at all.
 	Credential CredentialRef
-	// Passphrase names the passphrase of an encrypted key. Empty for a
-	// password, for an unencrypted key, and for the agent (whose keys this
-	// process never parses).
-	Passphrase CredentialRef
-	// PublicKey is the wire-format public half of a key credential (RFC 4253
-	// §6.6). Required for DialAuthKey: x/crypto/ssh asks a signer for
-	// PublicKey() BEFORE it asks for a signature, so the party that dials must
-	// be able to declare which key it is offering without holding it.
-	PublicKey []byte
+	// Keys are the private keys this endpoint offers, IN ORDER — one for a
+	// credential the profile named, and several for the discovery and
+	// agent cases, where OpenSSH itself offers a queue of keys and lets the
+	// server answer the first one it accepts.
+	//
+	// It is a list rather than a single key because one key per dial is a
+	// refusal for two ordinary setups: an agent holding several keys, and a
+	// home directory with more than one default key in it. Both are the
+	// handshake's own shape — `publickey` is a query per key, and the far side
+	// answers each in turn — so what travels is the queue, and NOT a second
+	// attempt after a failed authentication, which is what MaxAuthTries exists
+	// to bound.
+	Keys []DialKey
 	// KnownHostsAddr is the address this endpoint's host key is stored under,
 	// which is the dial address for a direct route and a route-derived digest
 	// for a host reached through a jump (see knownHostsTargetAddr). It is
@@ -199,27 +223,35 @@ func (rc *RealClient) resolveDialEndpoint(
 // # The order, and why it is the profile's before the ladder's
 //
 // The coordinator's own auth chain tries several rungs in a fixed order, and
-// this wire carries exactly ONE method per dial — deliberately, because a
-// second attempt against one host is indistinguishable from password spraying
-// and MaxAuthTries is finite. So the ladder has to be collapsed, and the rule
-// for collapsing it is: what the PROFILE declared wins, and the chain's own
-// order decides only among things nobody declared.
+// this wire carries ONE METHOD per dial — deliberately, because a second
+// METHOD against one host is indistinguishable from password spraying and
+// MaxAuthTries is finite. So the ladder has to be collapsed, and the rule for
+// collapsing it is: what the PROFILE declared wins, and the chain's own order
+// decides only among things nobody declared.
 //
 // That is what keeps a connection whose profile binds a stored password from
 // silently being dialed with an agent key that happens to be loaded on this
-// machine, while still letting a profile that declares no credential at all
-// fall back the way the ladder does — a running agent first, then the prompt.
+// machine — and it is also why DEFAULT KEY DISCOVERY is the arm for "the
+// profile named nothing", not an arm that outranks a stored password. Those
+// paths are the ladder's last-resort discovery rather than a credential a
+// profile names; putting them above the password rung would re-key every
+// connection whose profile binds a password to whichever default key happens to
+// sit in the person's home, which is a change nobody asked for.
 //
-// # What this deliberately does NOT replicate
+// # What the discovery arm does, and why it is not optional
 //
-// The ladder's DEFAULT KEY DISCOVERY — ~/.ssh/id_ed25519, id_rsa, id_ecdsa —
-// is not consulted here, and the reason is the ordering above. Those paths are
-// the ladder's last-resort discovery rather than a credential a profile names,
-// and they come BEFORE the stored password in the chain: resolving them here
-// would silently re-key every connection whose profile binds a password to
-// whichever default key happens to sit in the person's home, which is a change
-// nobody asked for. A profile that means "use this key" names it (an inline
-// file, or a vault key), and a profile that means "use my agent" says so.
+// A profile that names NOTHING is the ordinary local setup — "connect to this
+// host with my keys" — and OpenSSH answers it by offering every key it finds:
+// the agent's, and the identity files its configuration lists, which is ssh's
+// own default list when the configuration lists none. Without this arm such a
+// profile is REFUSED by name through the helper, which is the ordinary setup
+// turned into a failure. The order, the deduplication and the fall-through past
+// a locked key are discoveredKeys' own subject.
+//
+// One method, several KEYS: the queue above is a list of public keys inside a
+// single `publickey` method, and each is a query the far side answers in turn.
+// That is not a second attempt at authentication, it is what the method is —
+// the same shape the agent rung has always had on the coordinator's own path.
 func (rc *RealClient) resolveCredential(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig, endpoint *DialEndpoint) error {
 	mode := cfg.AuthMode
 	passwordCapable := mode == "" || mode == "password"
@@ -235,29 +267,30 @@ func (rc *RealClient) resolveCredential(ctx context.Context, resolved *resolvedC
 			return err
 		}
 		endpoint.Auth = DialAuthKey
-		endpoint.Credential = VaultRef(cfg.KeySecretID)
-		endpoint.PublicKey = signer.PublicKey().Marshal()
-		if cfg.PassphraseSecretID != "" {
-			endpoint.Passphrase = VaultRef(cfg.PassphraseSecretID)
-		}
+		endpoint.Keys = []DialKey{{
+			Credential: VaultRef(cfg.KeySecretID),
+			Passphrase: passphraseRef(cfg.PassphraseSecretID),
+			PublicKey:  signer.PublicKey().Marshal(),
+		}}
 		return nil
 
-	case resolved.identityFile != "":
-		// An inline key FILE. The bytes are read and parsed HERE — parse and
-		// sign, never hand over — and the passphrase, when the profile binds
-		// one, is read from the same store it has always been read from. A key
-		// this process cannot unlock is ErrEncryptedKey, which the probe
-		// reports as `needs-interactive`: the key is fine, it is only locked.
-		signer, err := rc.loadKey(ctx, resolved.identityFile, cfg)
+	case cfg.KeyFile != "":
+		// An inline key FILE: what the profile named. The bytes are read and
+		// parsed HERE — parse and sign, never hand over — and the passphrase,
+		// when the profile binds one, is read from the same store it has always
+		// been read from. A key this process cannot unlock is ErrEncryptedKey,
+		// which the probe reports as `needs-interactive`: the key is fine, it
+		// is only locked.
+		signer, err := rc.loadKey(ctx, cfg.KeyFile, cfg)
 		if err != nil {
 			return err
 		}
 		endpoint.Auth = DialAuthKey
-		endpoint.Credential = FileRef(resolved.identityFile)
-		endpoint.PublicKey = signer.PublicKey().Marshal()
-		if cfg.PassphraseSecretID != "" {
-			endpoint.Passphrase = VaultRef(cfg.PassphraseSecretID)
-		}
+		endpoint.Keys = []DialKey{{
+			Credential: FileRef(cfg.KeyFile),
+			Passphrase: passphraseRef(cfg.PassphraseSecretID),
+			PublicKey:  signer.PublicKey().Marshal(),
+		}}
 		return nil
 
 	case mode == "agent":
@@ -276,12 +309,24 @@ func (rc *RealClient) resolveCredential(ctx context.Context, resolved *resolvedC
 	case mode == "keyboardInteractive":
 		return rc.resolveInteractiveCredential(resolved, cfg, endpoint)
 
-	case mode == "" && rc.agentAvailable():
-		// Auto, nothing declared, an agent loaded: the ladder's own next rung
-		// after keys. It is consulted only where nothing was declared, so a
-		// profile that binds a password is not quietly dialed with an agent
-		// key.
-		return rc.resolveAgentCredential(resolved, endpoint)
+	case mode == "" || mode == "publicKey":
+		// NOTHING declared, and the mode permits a key: OpenSSH's own
+		// discovery, in OpenSSH's own order.
+		if keys := rc.discoveredKeys(ctx, resolved, cfg); len(keys) > 0 {
+			endpoint.Auth = DialAuthKey
+			endpoint.Keys = keys
+			return nil
+		}
+		// Nothing was found to offer, and that is a state with two different
+		// endings rather than one: a connection that can ask a PERSON still has
+		// the ladder's last rung, and one that cannot — a probe, which takes
+		// the requester off — is refused below by name. "No default key is
+		// present" therefore reads as the refusal it is, and never as a dial
+		// with no method.
+		if passwordCapable && cfg.PasswordRequester != nil {
+			endpoint.Auth = DialAuthInteractive
+			return nil
+		}
 
 	case passwordCapable && cfg.PasswordRequester != nil:
 		// The prompt rung — the ladder's last password-capable rung, and the
@@ -300,18 +345,33 @@ func (rc *RealClient) resolveCredential(ctx context.Context, resolved *resolvedC
 	return &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: mode}
 }
 
-// resolveAgentCredential offers the first key the running ssh-agent holds.
+// passphraseRef names a passphrase only when the profile bound one: an empty
+// secret id is the zero reference, which is how "this key has no passphrase"
+// crosses.
+func passphraseRef(id credential.SecretID) CredentialRef {
+	if id == "" {
+		return CredentialRef{}
+	}
+	return VaultRef(id)
+}
+
+// resolveAgentCredential offers EVERY key the running ssh-agent holds, in the
+// agent's own order.
 //
-// # Why one key and not all of them
+// # Why the whole set and not the first one
 //
-// The coordinator's own ladder offers every key the agent has, and lets the
-// server try them in turn. This wire carries one identity, and that is the
-// deliberate narrowing: a destination's identity is what the helper DECLARES
-// before a signature is asked for, and a list would make every hop's handshake
-// try keys the profile never named. Which key it picks is the agent's own
-// order, which is the order `ssh` itself would try them in — and a profile
-// that needs a later one can bind that key as an inline file, or load only it
-// into the agent.
+// An agent is where a person's keys are: several of them, for several hosts,
+// and the one a given host accepts is frequently not the one the agent lists
+// first. Offering one was a refusal for that setup — and a refusal that reads
+// as "the host rejected your credential", which sends somebody to look at a
+// host that is fine.
+//
+// The list is the handshake's own shape rather than a second attempt: ssh's
+// `publickey` method is a QUERY per key ("would you accept this one?") and the
+// server answers each in turn, which is what `ssh` itself does with an agent
+// holding several keys. `gossh.PublicKeys(signers...)` is that method, so the
+// order the agent reports is the order the far side sees, and the first key it
+// accepts is the one that signs.
 //
 // The failure is ErrNoAuthMethod with Mode "agent", which is the type the app's
 // own ladder has answered with since it had this rung: an agent is a fact about
@@ -323,9 +383,145 @@ func (rc *RealClient) resolveAgentCredential(resolved *resolvedConfig, endpoint 
 		return &ErrNoAuthMethod{User: resolved.user, Host: resolved.hostName, Mode: "agent"}
 	}
 	endpoint.Auth = DialAuthKey
-	endpoint.Credential = AgentRef(gossh.FingerprintSHA256(keys[0]))
-	endpoint.PublicKey = keys[0].Marshal()
+	endpoint.Keys = agentDialKeys(keys)
 	return nil
+}
+
+// agentDialKeys renders agent public keys into what the wire carries: a
+// fingerprint reference and the public half, one pair per key, in order.
+func agentDialKeys(keys []gossh.PublicKey) []DialKey {
+	out := make([]DialKey, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, DialKey{
+			Credential: AgentRef(gossh.FingerprintSHA256(key)),
+			PublicKey:  key.Marshal(),
+		})
+	}
+	return out
+}
+
+// discoveredKeys is OpenSSH's own key discovery, for a connection whose profile
+// names no credential at all: the keys the agent holds, and the identity files
+// the resolved configuration lists.
+//
+// # Where the list comes from, and why not from here
+//
+// The identity files are the resolver's answer — every `identityfile` line of
+// ssh -G's output, in its order, which is OpenSSH's own default list when the
+// configuration names none. They are read through the ONE resolver this
+// package already has (ADR-0015) rather than from a list kept here: the
+// hard-coded `id_ed25519, id_rsa, id_ecdsa` that used to sit beside it was a
+// second answer to "which keys does this machine offer", and it disagreed with
+// ssh on the order, on the key types ssh 10 knows (id_ecdsa_sk, id_mldsa44…)
+// and on every config that names its own files.
+//
+// # The order
+//
+// OpenSSH's own queue (`pubkey_prepare`) is: certificates, the identity files
+// the agent also holds, the agent's other keys, PKCS#11 keys, and last the
+// identity files read from disk. Two of those arms do not exist here — this
+// package handles no certificate files and no PKCS#11 provider — and what is
+// left collapses to what is built below: the AGENT's keys first, then the
+// identity files, with the file whose key the agent already offered dropped.
+// The collapse preserves the one thing the first two arms exist for: a key the
+// agent holds is used through the agent rather than by reading the private key
+// from disk, and the key is offered once.
+//
+// # IdentitiesOnly
+//
+// It suppresses the agent's keys the configuration does not name, and NOT the
+// agent as a rung: a key that an `identityfile` names is still signed for by
+// the agent, which is the case the directive exists to make work (a passphrase
+// protected key, loaded once, while other keys on the agent stay unoffered).
+// That is why the files are resolved BEFORE the agent is asked: whether a key
+// the agent holds is admissible is a question about these files, and answering
+// it by suppressing the agent entirely would refuse exactly that setup.
+//
+// A file that cannot be read, cannot be parsed, or is encrypted with a
+// passphrase the profile did not bind is SKIPPED, not fatal — ssh offers the
+// next key, and it does not stop to ask for a passphrase a profile never named.
+// A `.pub` beside such a key is still read, because that public half is what
+// lets the agent's copy of the key stay admissible under IdentitiesOnly.
+func (rc *RealClient) discoveredKeys(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig) []DialKey {
+	type fileKey struct {
+		path   string
+		signer gossh.Signer
+	}
+	var (
+		files []fileKey
+		named = map[string]bool{}
+	)
+	for _, path := range resolved.identityFiles {
+		signer, err := rc.loadKey(ctx, path, cfg)
+		if err != nil {
+			rc.log.Debug("skipping a key file in discovery", "path", path, "error", err)
+			if resolved.identitiesOnly {
+				if pub := publicHalfOf(path); pub != nil {
+					named[gossh.FingerprintSHA256(pub)] = true
+				}
+			}
+			continue
+		}
+		files = append(files, fileKey{path: path, signer: signer})
+		named[gossh.FingerprintSHA256(signer.PublicKey())] = true
+	}
+
+	var keys []DialKey
+	if rc.agentAvailable() {
+		agentKeys, err := rc.agentKeys()
+		if err != nil {
+			rc.log.Debug("no agent key to offer", "host", resolved.hostName, "error", err)
+		}
+		for _, key := range agentKeys {
+			if resolved.identitiesOnly && !named[gossh.FingerprintSHA256(key)] {
+				continue
+			}
+			keys = append(keys, DialKey{
+				Credential: AgentRef(gossh.FingerprintSHA256(key)),
+				PublicKey:  key.Marshal(),
+			})
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, f := range keys {
+		seen[string(f.PublicKey)] = true
+	}
+	for _, f := range files {
+		pub := f.signer.PublicKey().Marshal()
+		if seen[string(pub)] {
+			// The agent already offered this key, and its copy signs for it.
+			continue
+		}
+		seen[string(pub)] = true
+		keys = append(keys, DialKey{
+			Credential: FileRef(f.path),
+			Passphrase: passphraseRef(cfg.PassphraseSecretID),
+			PublicKey:  pub,
+		})
+	}
+	return keys
+}
+
+// publicHalfOf answers the public key the `.pub` file beside a private key
+// names, and nil when there is none to read.
+//
+// It exists for one case: an ENCRYPTED private key that the agent holds. This
+// process cannot parse the file — that is what encrypted means — and it does not
+// need to, because the signature comes from the agent; all it needs is the
+// public half, to declare the key and to know that IdentitiesOnly admits it.
+// OpenSSH reads exactly this file for exactly this reason
+// (`sshkey_load_public` tries `<path>.pub`).
+func publicHalfOf(path string) gossh.PublicKey {
+	data, err := readFileFn(path + ".pub")
+	if err != nil {
+		return nil
+	}
+	key, _, _, _, err := gossh.ParseAuthorizedKey(data)
+	if err != nil {
+		return nil
+	}
+	return key
 }
 
 // resolveInteractiveCredential resolves the keyboard-interactive rung, which
@@ -386,19 +582,30 @@ func WireDestination(t DialTarget) proto.SSHDestination {
 
 // WireIdentity is the credential half of the same conversion.
 //
-// The credential is present exactly when this endpoint HAS one: the interactive
-// rung names a person, and an identity that carried an empty credential for it
-// would make "a password identity names material" a rule the wire states and
-// does not enforce.
+// Each kind is spelled ONCE, in the field its kind owns: a password carries a
+// credential, a key carries the ordered list of keys it offers, and the
+// interactive rung — a person — carries neither, which is what makes "a
+// password identity names material" and "a key identity names the keys it
+// declares" rules the wire states rather than ones it merely implies.
 func WireIdentity(ep DialEndpoint) proto.SSHIdentity {
-	id := proto.SSHIdentity{
-		Auth:      proto.SSHAuthKind(ep.Auth),
-		PublicKey: ep.PublicKey,
-	}
-	if !ep.Credential.IsZero() || !ep.Passphrase.IsZero() {
-		id.Credential = &proto.SSHCredential{
-			Ref:           ep.Credential.String(),
-			PassphraseRef: ep.Passphrase.String(),
+	id := proto.SSHIdentity{Auth: proto.SSHAuthKind(ep.Auth)}
+	switch ep.Auth {
+	case DialAuthKey:
+		id.Keys = make([]proto.SSHKeyOffer, 0, len(ep.Keys))
+		for _, k := range ep.Keys {
+			id.Keys = append(id.Keys, proto.SSHKeyOffer{
+				Credential: proto.SSHCredential{
+					Ref:           k.Credential.String(),
+					PassphraseRef: k.Passphrase.String(),
+				},
+				PublicKey: k.PublicKey,
+			})
+		}
+	default:
+		if !ep.Credential.IsZero() {
+			// A password has no second half: the passphrase belongs to a KEY,
+			// and it now travels with the key it unlocks (DialKey.Passphrase).
+			id.Credential = &proto.SSHCredential{Ref: ep.Credential.String()}
 		}
 	}
 	return id

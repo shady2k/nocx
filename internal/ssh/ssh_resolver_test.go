@@ -61,18 +61,10 @@ func (s *StubConfigResolver) ResolveHost(_ context.Context, host string) (string
 
 func (s *StubConfigResolver) ResolveConfig(_ context.Context, host string) (*HostConfig, error) {
 	if e, ok := s.Entries[host]; ok {
-		return &HostConfig{
-			HostName:      e.HostName,
-			User:          e.User,
-			Port:          e.Port,
-			IdentityFile:  e.IdentityFile,
-			RemoteCommand: e.RemoteCommand,
-			RequestTTY:    e.RequestTTY,
-
-			ControlMaster:  e.ControlMaster,
-			ControlPath:    e.ControlPath,
-			ControlPersist: e.ControlPersist,
-		}, nil
+		// The WHOLE entry, by value: the field-by-field copy this used to be
+		// is a place for a directive the resolver learns later to be silently
+		// dropped from every stubbed answer.
+		return &e, nil
 	}
 	return &HostConfig{HostName: host, User: currentUser(), Port: 22}, nil
 }
@@ -105,8 +97,8 @@ stricthostkeychecking accept-new
 	if cfg.Port != 2222 {
 		t.Errorf("Port = %d, want 2222", cfg.Port)
 	}
-	if cfg.IdentityFile != expandPath("~/.ssh/special_id") {
-		t.Errorf("IdentityFile = %q, want %q", cfg.IdentityFile, expandPath("~/.ssh/special_id"))
+	if len(cfg.IdentityFiles) != 1 || cfg.IdentityFiles[0] != expandPath("~/.ssh/special_id") {
+		t.Errorf("IdentityFiles = %q, want [%q]", cfg.IdentityFiles, expandPath("~/.ssh/special_id"))
 	}
 }
 
@@ -131,9 +123,17 @@ identityfile ~/.ssh/id_ecdsa
 	if cfg.Port != 22 {
 		t.Errorf("Port = %d, want 22", cfg.Port)
 	}
-	// Should take the first identityfile.
-	if cfg.IdentityFile != expandPath("~/.ssh/id_rsa") {
-		t.Errorf("IdentityFile = %q, want %q", cfg.IdentityFile, expandPath("~/.ssh/id_rsa"))
+	// EVERY identityfile line, in the order the oracle printed them: this is
+	// what ssh itself offers, and keeping only the first is how a second
+	// configured key became invisible to the product.
+	want := []string{expandPath("~/.ssh/id_rsa"), expandPath("~/.ssh/id_ecdsa")}
+	if len(cfg.IdentityFiles) != len(want) {
+		t.Fatalf("IdentityFiles = %q, want %q", cfg.IdentityFiles, want)
+	}
+	for i, wantPath := range want {
+		if cfg.IdentityFiles[i] != wantPath {
+			t.Errorf("IdentityFiles[%d] = %q, want %q", i, cfg.IdentityFiles[i], wantPath)
+		}
 	}
 }
 

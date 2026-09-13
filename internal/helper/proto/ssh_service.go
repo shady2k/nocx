@@ -257,33 +257,73 @@ const (
 	SSHAuthInteractive SSHAuthKind = "interactive"
 )
 
-// SSHIdentity is the credential a probe authenticates with, plus the public
-// half of a key credential the helper must declare before it is asked to sign.
+// SSHIdentity is what a dial authenticates with: a password's material, or the
+// KEY QUEUE the helper must declare before it is asked to sign.
 //
-// PublicKey is the wire-format public key blob (RFC 4253 §6.6, what
-// gossh.Marshal on a PublicKey produces). It is required for SSHAuthKey and
-// absent for SSHAuthPassword; a helper that is asked to sign with a key it was
-// not given will refuse rather than invent one.
+// Which field a kind uses is a decision rather than a convention — a password
+// names material, a key names keys, and the interactive rung names neither —
+// so `Credential` is absent for key auth and `Keys` is absent for the others,
+// and the schema enforces both directions. That is what makes an identity
+// self-describing without a reader having to know which fields "usually" go
+// together.
 type SSHIdentity struct {
-	// Credential is a POINTER so that "this identity carries no credential" is
-	// a fact on the wire rather than a zero-valued struct: encoding/json's
-	// omitempty does not omit a struct, so an interactive rung would otherwise
-	// carry {"credential":{"ref":""}} — which the frozen schema must either
-	// accept as noise (making "a password identity names material" unenforced)
-	// or reject, while a nil credential is simply not there. The schema
-	// requires it exactly for password and key auth, and forbids it for
-	// interactive.
+	// Credential is the material a PASSWORD presents. It is a POINTER so that
+	// "this identity carries no credential" is a fact on the wire rather than a
+	// zero-valued struct: encoding/json's omitempty does not omit a struct, so
+	// an interactive rung would otherwise carry
+	// {"credential":{"ref":""}} — which the frozen schema must either accept as
+	// noise (making "a password identity names material" unenforced) or reject,
+	// while a nil credential is simply not there.
 	Credential *SSHCredential `json:"credential,omitempty"`
 	Auth       SSHAuthKind    `json:"auth"`
-	// PublicKey is base64 in JSON (encoding/json's []byte). Public material:
-	// it is what the peer learns anyway on the first packet.
-	PublicKey []byte `json:"publicKey,omitempty"`
+	// Keys is the queue a KEY identity offers, in the order the helper must
+	// declare it: one entry for a credential the coordinator named, and several
+	// where OpenSSH itself would offer several (an agent holding more than one
+	// key, a home directory with more than one default key in it).
+	//
+	// It is a list rather than a single key because ssh's `publickey` method IS
+	// a query per key — the helper declares each public half and the far side
+	// answers whether it would accept a signature with it — so a connection
+	// whose key is not the first one offered is an ordinary connection, not a
+	// failed authentication. The private halves never cross: each entry carries
+	// a reference to material that stays in the coordinator, and `sign` is what
+	// turns a challenge into a signature.
+	Keys []SSHKeyOffer `json:"keys,omitempty"`
+}
+
+// SSHKeyOffer is ONE key in an identity's queue: the public half the helper
+// declares, and the reference it signs through when the far side asks.
+//
+// The two travel together because they are one fact at two moments of the same
+// handshake — an entry whose reference did not belong to its public half would
+// be a signature with a key nobody asked about, which is the shape a mismatch
+// between them would take.
+type SSHKeyOffer struct {
+	// Credential names where the private half lives. Opaque to the helper, and
+	// the same reference grammar every other credential on this wire uses
+	// (`vault:`, `file:`, `agent:`) — the three places a key lives differ only
+	// in what the coordinator does when this reference comes back on a `sign`.
+	Credential SSHCredential `json:"credential"`
+	// PublicKey is the wire-format public key blob (RFC 4253 §6.6) as base64 in
+	// JSON. Public material: it is what the peer learns on the first packet.
+	PublicKey []byte `json:"publicKey"`
 }
 
 // CredentialOf answers the credential this identity carries, as a value: the
 // interactive rung carries none, and every caller that reads a field rather
 // than a pointer reads it through here instead of testing for nil itself.
+//
+// For a KEY identity it is the FIRST key of the queue — the one the coordinator
+// would offer first, and the only one a caller that needs a single principal
+// (a session's launch record, for instance) can be given. The full queue is
+// Keys, and a caller that needs to offer keys reads that.
 func (id SSHIdentity) CredentialOf() SSHCredential {
+	if id.Auth == SSHAuthKey {
+		if len(id.Keys) == 0 {
+			return SSHCredential{}
+		}
+		return id.Keys[0].Credential
+	}
 	if id.Credential == nil {
 		return SSHCredential{}
 	}

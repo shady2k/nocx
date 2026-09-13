@@ -50,7 +50,7 @@
       "enum": ["trusted", "changed", "unknown"]
     },
     "identity": {
-      "description": "The credential a dial authenticates with, plus the PUBLIC half of a key credential. The public key is here rather than discovered by an op of its own because x/crypto/ssh's Signer interface answers PublicKey() BEFORE it asks for a signature: the helper must be able to declare which key it is offering before it can be asked to sign with it. It is public material \u2014 what the peer learns on the first packet \u2014 and the private half never crosses, which is why `sign` is exactly a challenge and a signature and why there is no empty-challenge sentinel hiding a discovery question inside a cryptographic one. Which fields are REQUIRED depends on `auth`: password and key name a credential reference, key additionally carries the public half, and `interactive` carries neither \u2014 it names a person, and a reference there would name something that does not exist.",
+      "description": "The credential a dial authenticates with: a password's material, or the KEY QUEUE a key dial declares. Which field a kind uses is a decision rather than a convention, and this schema enforces it in both directions \u2014 `credential` belongs to password, `keys` belongs to key, and BOTH are forbidden on the interactive rung, where the person IS the credential. A key is a LIST because ssh's `publickey` method IS a query per key: the helper declares each public half and the far side answers whether it would accept a signature with it, so a connection whose key is not the first one offered is an ordinary connection \u2014 an agent holding several keys, a home directory with more than one default key in it \u2014 rather than a failed authentication, and not a second ATTEMPT against one host, which is what MaxAuthTries bounds. Each entry carries the reference the coordinator signs through, because the private half never crosses: `sign` is exactly a challenge and a signature.",
       "type": "object",
       "additionalProperties": false,
       "required": ["auth"],
@@ -61,10 +61,13 @@
         "auth": {
           "$ref": "#/$defs/authKind"
         },
-        "publicKey": {
-          "description": "The wire-format public key blob (RFC 4253 \u00a76.6) as base64. Required for key auth \u2014 a helper asked to sign with a key it was not given would have to invent one \u2014 and absent for password and interactive auth.",
-          "type": "string",
-          "minLength": 1
+        "keys": {
+          "description": "The key QUEUE this identity offers, in the order the helper must DECLARE it, and it is required for key auth \u2014 a helper asked to sign with a key it was not given would have to invent one. One entry for a credential the coordinator named, and several where OpenSSH itself would offer several; the order is the offer order, not a preference.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/keyOffer"
+          }
         }
       },
       "allOf": [
@@ -72,13 +75,16 @@
           "if": {
             "properties": {
               "auth": {
-                "enum": ["password", "key"]
+                "const": "password"
               }
             },
             "required": ["auth"]
           },
           "then": {
-            "required": ["credential"]
+            "required": ["credential"],
+            "properties": {
+              "keys": false
+            }
           }
         },
         {
@@ -91,7 +97,10 @@
             "required": ["auth"]
           },
           "then": {
-            "required": ["publicKey"]
+            "required": ["keys"],
+            "properties": {
+              "credential": false
+            }
           }
         },
         {
@@ -106,11 +115,27 @@
           "then": {
             "properties": {
               "credential": false,
-              "publicKey": false
+              "keys": false
             }
           }
         }
       ]
+    },
+    "keyOffer": {
+      "description": "ONE key of an identity's queue: the public half the helper declares, and the reference it signs through when the far side asks for a signature. The two travel together because they are one fact at two moments of the same handshake \u2014 an entry whose reference did not belong to its public half would be a signature with a key nobody asked about, which is the shape that mismatch would take.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["credential", "publicKey"],
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/credential"
+        },
+        "publicKey": {
+          "description": "The wire-format public key blob (RFC 4253 \u00a76.6) as base64. Public material: it is what the peer learns on the first packet, and it is what lets the helper declare which key it is offering before it can be asked to sign with it.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "destination": {
       "description": "One RESOLVED destination: the address, the account, what to authenticate as, the route it is reached through, and the identity its host key is stored under. Its address parts are typed fields and never one `user@host:port` string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess. This is the declaration `probe`, `open`, `forward`, `lease` and `lane` all take \u2014 a probe that carried its own copy of the same three facts would be a second place for a route to be forgotten, which is the difference between 'does this credential work' being answered about the host a person named and about a host they cannot reach.",

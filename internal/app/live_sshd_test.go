@@ -40,7 +40,6 @@ package app
 // carries, and the test asserts the home gains nothing else.
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -478,29 +477,6 @@ func (fx *liveSshd) knownHostsPath(t *testing.T) string {
 	return path
 }
 
-// rawClient opens a production-compatible SSH client to the fixture. Tests
-// that exercise SFTP publication use this instead of reaching through
-// ssh.RealClient's connection pool.
-func (fx *liveSshd) rawClient(t *testing.T) *gossh.Client {
-	t.Helper()
-	client, err := gossh.Dial("tcp", fx.addr, &gossh.ClientConfig{
-		User: fx.user,
-		Auth: []gossh.AuthMethod{gossh.PublicKeys(fx.signer)},
-		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
-			if !bytes.Equal(key.Marshal(), fx.hostKey.Marshal()) {
-				return fmt.Errorf("host key mismatch")
-			}
-			return nil
-		},
-		Timeout: 10 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("dial live sshd: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
-}
-
 // forceInstalledVersion turns the current committed bundle into an older,
 // still-valid activation. The next EnsureInstalledRemote must therefore
 // stage a new generation and atomically replace the existing manifest.
@@ -871,7 +847,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -943,9 +919,8 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 // SSH_FX_FAILURE, and a subsequent enhanced session establishes its domain.
 func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	installer := &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))}
-	client := fx.rawClient(t)
-	if err := installer.EnsureInstalledRemote(context.Background(), client, fx.home); err != nil {
+	installer := liveBundleCarrier(t, fx)
+	if err := installer.EnsureInstalledRemote(context.Background(), fx.addr); err != nil {
 		t.Fatalf("first remote publish: %v", err)
 	}
 	forceInstalledVersion(t, fx.home, "0")
@@ -974,7 +949,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
 	// The refusal is synchronous: no domain may ever be minted. The native
 	// prompt is the observable that the bootstrap has finished and the
@@ -1032,7 +1007,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
 	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -1101,7 +1076,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh, &remoteInstallerAdapter{inner: shellintegration.New(log.NewSlogAdapter(nil))})
+	ch, out := fx.connect(t, kernel, ssh.ShellZsh, liveBundleCarrier(t, fx))
 
 	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
 		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },

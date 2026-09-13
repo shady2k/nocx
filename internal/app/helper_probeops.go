@@ -232,6 +232,12 @@ type helperProbeLease struct {
 	lease probeCommands
 }
 
+// Home answers where the far account's home directory is, for the one caller
+// that is not one of those four seams: the bundle publish, which holds a lease
+// for the lifetime of the publish so that its sftp channel lands on the same
+// pooled connection (helper_publish.go).
+func (l *helperProbeLease) Home(ctx context.Context) (string, error) { return l.lease.Home(ctx) }
+
 // Sample answers discovery's ExecConn: one rung of the port ladder, named.
 func (l *helperProbeLease) Sample(ctx context.Context, probe discovery.ProbeName) (*discovery.ExecResult, error) {
 	return l.lease.SamplePorts(ctx, probe)

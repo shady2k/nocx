@@ -191,7 +191,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, publishTarget{host: host, opts: opts}, func() { rc.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
@@ -759,7 +759,7 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //  5. No launcher wired: a plain shell, reason none. There is deliberately
 //     no installer-supplied command any more — a session either runs the
 //     carrier or runs nothing at all.
-func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, lc *lifecycleHandle) (string, RefusalReason, BootstrapRun) {
+func (rc *RealClient) shellStartCommand(ctx context.Context, resolved *resolvedConfig, cfg *ConnectConfig, pub publishTarget, lc *lifecycleHandle) (string, RefusalReason, BootstrapRun) {
 	if resolved.remoteCommand != "" {
 		return resolved.remoteCommand, ReasonRemoteCommand, nil
 	}
@@ -777,7 +777,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 	// installer supplies no command any more; a session either runs the
 	// carrier or runs nothing at all.
 	if cfg.RemoteLauncher == nil {
-		rc.startPublish(ctx, gclient, resolved, cfg, nil)
+		rc.startPublish(ctx, pub, resolved, cfg, nil)
 		return "", ReasonNone, nil
 	}
 
@@ -820,7 +820,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		// far host for the NEXT connection, and a session that cannot
 		// bootstrap today is exactly the one that most needs the next
 		// one to work.
-		rc.startPublish(ctx, gclient, resolved, cfg, nil)
+		rc.startPublish(ctx, pub, resolved, cfg, nil)
 		return "", ReasonUnsupportedShell, nil
 	}
 	opts.StageDigest = digest
@@ -841,7 +841,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 	// Step 4 is answered synchronously, because it already is: the
 	// transport was established before the session was opened, so by
 	// here the receiver either exists or never will.
-	rc.startPublish(ctx, gclient, resolved, cfg, gate)
+	rc.startPublish(ctx, pub, resolved, cfg, gate)
 	if lc != nil {
 		gate.ReceiverReady()
 	} else {
@@ -872,7 +872,22 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 	return "", reason, nil
 }
 
-// startPublish runs the SFTP publish on its own schedule and tells the gate
+// publishTarget is where a publish goes, named the way the caller named it:
+// the address it dialed and the options it resolved with.
+//
+// It is the WHOLE of what the publish needs to name the same destination the
+// pane did, and it is deliberately not a `*gossh.Client`: the publish no longer
+// rides this connection. It rides this machine's helper's — a home probe and an
+// sftp channel on the pooled connection AD-4 keys by (host, port, user,
+// identity) — and the helper is handed the same triple the pane's open hands it
+// (nocx-50w7p.15). Passing a different spelling of one destination would be a
+// different pool key, and therefore a second authentication for one machine.
+type publishTarget struct {
+	host string
+	opts []ConnectOption
+}
+
+// startPublish runs the bundle publish on its own schedule and tells the gate
 // when it has settled (design §6.1 step 5, §7).
 //
 // It used to run inline, ahead of everything, and that is what made the
@@ -894,7 +909,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 // that is already writing to the far host. The bound is the publisher's own T,
 // which it enforces against its own clock; adding a second timer here would be
 // a second, unsynchronised deadline for one budget.
-func (rc *RealClient) startPublish(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, gate BootstrapGate) {
+func (rc *RealClient) startPublish(ctx context.Context, pub publishTarget, resolved *resolvedConfig, cfg *ConnectConfig, gate BootstrapGate) {
 	if cfg.RemoteInstaller == nil {
 		// A terminal outcome all the same, and it must be: a gate waiting
 		// for a fact nobody will ever supply is a session that never leaves
@@ -906,7 +921,7 @@ func (rc *RealClient) startPublish(ctx context.Context, gclient *gossh.Client, r
 	}
 	pctx := context.WithoutCancel(ctx)
 	go func() {
-		err := rc.publishBundle(pctx, gclient, resolved, cfg)
+		err := rc.publishBundle(pctx, pub, resolved, cfg)
 		if gate != nil {
 			gate.PublishSettled(err)
 		}
@@ -915,14 +930,15 @@ func (rc *RealClient) startPublish(ctx context.Context, gclient *gossh.Client, r
 
 // publishBundle is the publish itself, separated so startPublish is about the
 // schedule and this is about the work.
-func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) error {
-	remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
-	if err != nil {
-		rc.log.Warn("ssh: could not determine remote home for shell integration",
-			"host", resolved.hostName, "error", err)
-		return err
-	}
-	if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
+//
+// The HOME QUESTION is no longer asked here, and that is the whole of
+// nocx-50w7p.15's defect: it used to be asked over this connection's exec
+// channel, and the answer a session's shell activates with is not the one
+// every other path into the account reports. It is asked by the party that
+// owns the carrier now, on the destination's pooled connection, and the
+// account's own `$HOME` is what the bundle is written under.
+func (rc *RealClient) publishBundle(ctx context.Context, pub publishTarget, resolved *resolvedConfig, cfg *ConnectConfig) error {
+	if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, pub.host, pub.opts...); err != nil {
 		rc.log.Warn("ssh: shell integration publish failed",
 			"host", resolved.hostName, "error", err)
 		return err
@@ -943,16 +959,15 @@ func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, 
 // # The user's session channel is claimed FIRST, and that ordering is the
 // product's promise rather than the scheduler's
 //
-// The session channel is opened before shellStartCommand runs, because
-// shellStartCommand is what starts the publish, and the publish opens an
-// auxiliary channel of its own. A server bounds the sessions it will grant one
-// connection (OpenSSH's MaxSessions, and a subsystem counts), so with one slot
-// those two are competing for it — and they were, in opposite directions:
-// whichever asked first won, and when the publish won, gclient.NewSession()
-// for the INTERACTIVE session was refused and Connect returned an error, so
-// the user got no terminal at all. Measured before this line moved: 4 of 10
-// attempts reached the working un-integrated prompt §0 promises and 6 reached
-// nothing.
+// The session channel is opened before shellStartCommand runs, and that
+// ordering was BOUGHT: the publish used to open an auxiliary channel on this
+// same connection, a server bounds the sessions it grants one connection
+// (OpenSSH's MaxSessions, and a subsystem counts), and with one slot the two
+// competed for it — in opposite directions. Whichever asked first won, and
+// when the publish won, gclient.NewSession() for the INTERACTIVE session was
+// refused and Connect returned an error, so the user got no terminal at all.
+// Measured before this line moved: 4 of 10 attempts reached the working
+// un-integrated prompt §0 promises and 6 reached nothing.
 //
 // ADR-0004 makes an ordinary usable terminal with a visible native prompt the
 // one thing no failure path may suppress, and losing it to nocx's OWN
@@ -962,15 +977,24 @@ func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, 
 // the rule is better than two (AD-8), so this is the saved path saying the
 // same thing: the user's session exists before any channel of ours does.
 //
+// # Since nocx-50w7p.15 the claim stands, and the race it answered is gone
+//
+// The publish no longer opens anything here: it is this machine's helper's, on
+// the helper's own pooled connection (pub is the destination, not a client).
+// So this connection now carries exactly ONE session channel — the user's —
+// and the ordering above is no longer load-bearing for it; it is kept because
+// the assert it encodes is the product's promise and is cheaper to keep than
+// to re-derive, and because the pane itself moves onto the helper under
+// nocx-50w7p.5, where the same bound will be about the helper's connection.
+//
 // It does NOT make the publish sequential with the loader, and it must not:
 // design §6.1 step 2 and §7's arithmetic need those concurrent (3 + 3 + 10 is
 // 16 against a 15 s deadline; only the concurrent schedule closes at 13).
 // Opening the session CHANNEL is not finishing the bootstrap — the loader has
 // not been sent, the frames have not started, nothing has been minted. What
 // happens between these two statements is one round trip for a channel and its
-// pty; the publish then runs beside the loader on that same connection exactly
-// as before.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
+// pty, and the publish runs beside the loader on a connection of its own.
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, pub publishTarget, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
 	sess, err := rc.openSessionWithPTY(gclient, resolved, cfg)
 	if err != nil {
 		lc.close()
@@ -978,7 +1002,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	}
 	session, stdin, stdout := sess.session, sess.stdin, sess.stdout
 
-	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
+	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, resolved, cfg, pub, lc)
 
 	// A start command that does not use the lifecycle channel — the
 	// launcher declined, the destination ran a configured remote command,

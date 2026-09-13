@@ -907,6 +907,16 @@ func New(opts ...Option) (*App, error) {
 	// the same resolver: what each consumer asks for is a LEASE on a
 	// destination, and the helper is what dials it (nocx-50w7p.9).
 	probes := &helperProbes{local: localOpener, resolve: sshClient}
+	// The script-mode bundle publish, over the same two halves (nocx-50w7p.15):
+	// the home is a named probe on a lease, the bundle rides an sftp channel,
+	// and both name the destination the pane's own open named so the helper's
+	// pool hands them ONE authenticated connection. It is assigned onto the
+	// carrier HERE rather than at its construction, because the helper halves
+	// did not exist then — and before either option list below captures the
+	// carrier, which is what makes the assignment visible to both.
+	remoteInstaller.bundle = &helperBundlePublisher{
+		probes: probes, channels: overHelper, publish: shint, log: slogger,
+	}
 	// ONE value for "who serves which lease", read twice: the git factory takes
 	// it and so does the file panel's factory below. Two literals would be two
 	// answers to one question, and the second would be the one that drifts.

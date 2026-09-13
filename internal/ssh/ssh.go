@@ -25,9 +25,9 @@ type Channel interface {
 	ShellIntegrationReason() RefusalReason
 }
 
-// RemoteInstaller publishes the shell integration bundle on a remote host
-// over SSH/SFTP. Defined here (not in shellintegration) to avoid a cyclic
-// import.
+// RemoteInstaller puts the shell integration bundle on a remote host and
+// takes it away again. Defined here (not in shellintegration) to avoid a
+// cyclic import.
 //
 // It no longer answers "what should the session run": that was
 // RemoteStartCommand, the far-side `[ -x "$HOME/.nocx/launch" ]` guard, and
@@ -35,15 +35,35 @@ type Channel interface {
 // against the publish it runs concurrently with, so the session degraded
 // while the publish succeeded. The remote command now comes from the
 // launcher, unconditionally and whatever the publish did.
+//
+// # Why the publish names a DESTINATION and the removal names a CLIENT
+//
+// The two halves ride different transports, and the asymmetry is the epic's
+// state rather than a preference (nocx-50w7p.15). The PUBLISH is this
+// machine's helper's: the helper dials the far host, answers where the
+// account's home is, and opens the sftp channel the bundle travels on — all
+// on the one pooled connection AD-4 keys by destination. So the publish takes
+// what a helper is handed and nothing more: the address the caller named and
+// the options it resolved with, exactly as the pane's own open does, because
+// a different naming of one destination is a different pool key and therefore
+// a second authentication.
+//
+// The REMOVAL is still the coordinator's own dial (UninstallIntegration holds
+// the pooled connection and calls this with it), and it will move the same way
+// when its own task lands. Until then it keeps the raw client, and the home
+// question travels with it: internal/ssh must not compose shell text (the
+// commands are internal/remoteprobe's), so the carrier asks, over the client
+// it is handed.
 type RemoteInstaller interface {
-	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
-	GetRemoteHome(sshClient *gossh.Client) (string, error)
+	// EnsureInstalledRemote publishes the bundle into the remote account's
+	// home, as the far side reports it.
+	EnsureInstalledRemote(ctx context.Context, host string, opts ...ConnectOption) error
 	// UninstallRemote removes the committed integration bundle on the host,
 	// over the SFTP carrier, and reports the two lists: root-relative paths
 	// removed and root-relative paths the user modified (left in place).
-	// Defined here with the other carrier methods so internal/ssh can own
+	// Defined here with the other carrier method so internal/ssh can own
 	// the dial-and-call (P10) without depending on shellintegration.
-	UninstallRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) (removed, conflicts []string, err error)
+	UninstallRemote(ctx context.Context, sshClient *gossh.Client) (removed, conflicts []string, err error)
 }
 
 // modeAllowsIntegration reports whether the resolved destination mode
@@ -453,16 +473,21 @@ type SSH interface {
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
-	User            string
-	Port            int
-	KeyFile         string
-	UseAgent        bool
-	Cols            uint16
-	Rows            uint16
-	XPixel          uint16
-	YPixel          uint16
-	AuthMethods     []gossh.AuthMethod
-	KeyExchanges    []string
+	User         string
+	Port         int
+	KeyFile      string
+	UseAgent     bool
+	Cols         uint16
+	Rows         uint16
+	XPixel       uint16
+	YPixel       uint16
+	AuthMethods  []gossh.AuthMethod
+	KeyExchanges []string
+	// RemoteInstaller publishes the integration bundle on the far host, over
+	// the transport the carrier owns: this machine's helper since
+	// nocx-50w7p.15, which opens an sftp channel on the destination's pooled
+	// connection and writes the bundle under the account's own $HOME. Nil
+	// means this connection publishes nothing.
 	RemoteInstaller RemoteInstaller
 
 	// RemoteLauncher builds the start command for an integrated remote shell
@@ -470,7 +495,7 @@ type ConnectConfig struct {
 	// RemoteCommand (which refuses a command-line remote command); when it
 	// declines, openShell starts a plain shell and surfaces the reason on the
 	// channel. The RemoteInstaller is consulted before it in script mode so
-	// a saved connection publishes the bundle over SFTP.
+	// a saved connection publishes the bundle.
 	RemoteLauncher RemoteLauncher
 
 	// RemoteLifecycle establishes the authenticated lifecycle channel for
@@ -736,8 +761,11 @@ func WithShell(shell ShellKind) ConnectOption {
 
 // WithRemoteInstaller injects the bundle publisher for the remote session.
 // It remains an EXPLICIT opt-in, so a connection that does not ask for it
-// never SFTP-mutates a remote home (nocx-r52q). What it publishes no longer
+// never touches a remote home (nocx-r52q). What it publishes no longer
 // decides what the session runs — the carrier is emitted either way.
+//
+// The carrier is handed the destination and publishes over ITS OWN transport:
+// this machine's helper, since nocx-50w7p.15 (see RemoteInstaller).
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }

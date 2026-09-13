@@ -42,6 +42,23 @@ import (
 const (
 	// OpSpawn starts a shell under a new PTY and returns its inventory entry.
 	OpSpawn = "spawn"
+	// OpSpawnSSH starts one session whose PROCESS is a shell channel on a
+	// connection THIS helper dialed — an ssh pane (nocx-50w7p.4).
+	//
+	// It is a second op beside `spawn` rather than a destination field on
+	// SpawnParams, and the freeze is what decides that rather than taste: every
+	// shape here is `additionalProperties: false`, so a field added to `spawn`
+	// is a payload an older generation REJECTS, while a new OP is one it
+	// answers `unknown_op` to — and `unknown_op` is what a coordinator already
+	// reads as "this machine's helper is older than this app". A destination
+	// folded into `spawn` would also have to be absent ON EVERY LOCAL SPAWN,
+	// which is a field whose absence is the common case and whose presence
+	// changes what the op means.
+	//
+	// It shares the launch union and the inventory entry with `spawn`: a
+	// session is a session, and a caller that spawned one and a caller that
+	// found one must hold the same value.
+	OpSpawnSSH = "spawn-ssh"
 	// OpSessions is the inventory: every live host session this generation
 	// holds.
 	OpSessions = "sessions"
@@ -259,6 +276,154 @@ type SpawnResult struct {
 	Entry SessionEntry `json:"entry"`
 }
 
+// SSHShellKind is the far shell a remote session is launched FOR, in a closed
+// set.
+//
+// It is the same four-member vocabulary shellintegration.ShellKind already
+// owns, spelled here rather than imported because this package is the wire's
+// leaf: proto is linked by every helper, including the untagged artifact
+// deployed to somebody else's host, and that artifact carries no launcher
+// (plan §1). The pairing is checked rather than hoped for —
+// TestTheSSHShellKindSpellingsMatchTheLauncher is what keeps the two tables
+// from drifting, in the package that converts between them.
+type SSHShellKind string
+
+const (
+	// SSHShellAuto means the FAR side decides: the launcher emits one
+	// strictly-POSIX dispatcher that detects the login shell at runtime and
+	// execs the matching tier. It is the honest default, because which shell a
+	// host logs you into is the host's business and the coordinator has not
+	// always asked.
+	SSHShellAuto SSHShellKind = "auto"
+	// SSHShellBash and SSHShellZsh pin the tier a profile names.
+	SSHShellBash SSHShellKind = "bash"
+	SSHShellZsh  SSHShellKind = "zsh"
+	// SSHShellUnknown means "start it, integrate nothing, and say so" — never
+	// "substitute bash".
+	SSHShellUnknown SSHShellKind = "unknown"
+)
+
+// SSHMode is what the caller WANTS of this session's integration, in the
+// closed set internal/profile declares as DesiredMode.
+//
+// Spelled here for the leaf-package reason above, and the GATE is not spelled
+// here: whether a mode delivers shell integration is profile.DesiredMode
+// .DeliversScripts(), one predicate with one owner, which the helper's ssh
+// spawner asks directly (it is build-tagged, and a tagged helper links
+// internal/profile already through internal/ssh).
+type SSHMode string
+
+const (
+	// SSHModeAuto: the caller has not answered for this destination. Scripts
+	// as the default does, and the helper may be offered.
+	SSHModeAuto SSHMode = "auto"
+	// SSHModeRaw: nothing is added to the far side. A plain login shell, no
+	// carrier, no frames, no publish.
+	SSHModeRaw SSHMode = "raw"
+	// SSHModeScript and SSHModeHelper integrate through the script tiers.
+	SSHModeScript SSHMode = "script"
+	SSHModeHelper SSHMode = "helper"
+)
+
+// SSHSpawnParams starts one session whose process is a shell channel on a
+// connection this helper dials (nocx-50w7p.4).
+//
+// # There is no command here either, and this is the op it matters most for
+//
+// D3 refuses any op whose params carry a free-form []string, because an argv
+// reaches a command line on somebody else's machine. The remote command this
+// op results in is the launch CARRIER — bounded, payload-free, and built by
+// the helper from internal/shellintegration — and the caller cannot name it,
+// shorten it or substitute it. What the caller names is a DESTINATION and the
+// shape of the session, which is the same division `spawn` draws between the
+// environment and the program.
+//
+// The destination is RESOLVED (host, port, user) for the reason ProbeParams
+// states at length: alias resolution, ~/.ssh/config merging and the
+// credential's own authorization stay in the coordinator, which is the party
+// that reads the config and holds the binding.
+type SSHSpawnParams struct {
+	// Workspace is D15's reservation, as in SpawnParams.
+	Workspace WorkspaceID `json:"workspace"`
+	// Destination is where the channel is opened and what it authenticates
+	// with. Its identity is a REFERENCE plus, for a key, the public half the
+	// helper must declare before the coordinator is asked to sign.
+	Destination SSHDestination `json:"destination"`
+	// AcceptOnTrust is the CALLER's decision about a host key nobody has
+	// recorded, exactly as it is on a probe and on a channel open: the helper
+	// may not trust a host on its own initiative, and the accept flow that
+	// sets this flag already ran in the coordinator.
+	AcceptOnTrust bool `json:"acceptOnTrust"`
+	// HostKeyFingerprint is the fingerprint the caller BELIEVES this host
+	// presents — the value its own known_hosts answered with, or the one a
+	// person just accepted. Empty means the caller has no expectation and the
+	// coordinator's verdict alone decides.
+	//
+	// When it is present it is ENFORCED, before anything is authenticated: a
+	// handshake that offers a different key ends the spawn with
+	// `host-key-changed`. It is a local bind on top of the coordinator's
+	// verdict and not a substitute for it — the verdict travels over a
+	// connection this helper has, and this value travelled with the REQUEST —
+	// so two facts must agree before a shell is opened on somebody's host.
+	HostKeyFingerprint string `json:"hostKeyFingerprint"`
+	// Shell is the far shell this session is launched for. Empty means
+	// SSHShellAuto.
+	Shell SSHShellKind `json:"shell"`
+	// Cwd is where the caller wants the far shell to start, and this
+	// generation can only honour an EMPTY one.
+	//
+	// A non-empty value is refused by name rather than accepted and ignored.
+	// The far login shell starts in the far account's own directory and this
+	// helper has no mechanism to move it: the only ways to name a directory on
+	// the far side travel as a command (which this wire refuses) or as an
+	// extension the launcher does not carry. A field that accepted a value
+	// nothing acts on is the shape that a later generation starts reading
+	// under a caller that never expected it to — and the launch record has no
+	// `cwd` key for a remote session for the same reason: this helper resolved
+	// no directory, so it reports none.
+	Cwd string `json:"cwd"`
+	// Cols and Rows are the size the channel's pty is requested at.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+	// WindowBytes is the bound on this session's output window, clamped by the
+	// helper exactly as SpawnParams' is. Zero means the helper's default.
+	WindowBytes int64 `json:"windowBytes"`
+	// Lifecycle is optional, on the same terms as SpawnParams'.
+	//
+	// WHAT THIS GENERATION DOES WITH IT, stated rather than implied: it
+	// delivers the PANE and does not establish the enhanced lifecycle channel.
+	// The lifecycle tunnel is a REMOTE LOOPBACK LISTENER on the ssh connection
+	// (plan §6), which needs a forward on this helper's connection — the
+	// direct-tcpip/forward ops of nocx-50w7p.8. Until that lands, a request
+	// carrying one is answered with a session that has no lifecycle window,
+	// `adopt-lifecycle` answers null for it, and the helper logs the refusal
+	// by name. Nothing is silently dropped: the two facts that the channel
+	// exists are exactly the two a caller can already check.
+	Lifecycle *LifecycleLaunch `json:"lifecycle,omitempty"`
+	// DesiredMode is the caller's integration intent, and the helper applies
+	// profile.DesiredMode's own gate to it: `raw` opens a plain login shell
+	// and integrates nothing, and an unrecognised value fails closed.
+	DesiredMode SSHMode `json:"desiredMode"`
+	// AgentHelperPath and AgentToolSocketPath are the two FAR-HOST paths a
+	// launched shell needs to reach nocx's tool surface (nocx-e2bws): the
+	// installed helper generation's executable, and the socket the pane's MCP
+	// bridge connects to.
+	//
+	// They are the COORDINATOR's values and they are paths, never commands:
+	// the coordinator owns the deploy, so it is the party that knows where the
+	// generation landed, and the socket is reachable only through a forward it
+	// arranges. Empty renders no variable at all, which is the soft degrade
+	// the local path already states (nocx-2tesu): the shell's own refusal text
+	// is what a user sees, rather than a pane pointed at a path nothing
+	// answers.
+	AgentHelperPath     string `json:"agentHelperPath,omitempty"`
+	AgentToolSocketPath string `json:"agentToolSocketPath,omitempty"`
+	// IdempotencyKey is the caller's name for the spawn, on exactly the terms
+	// SpawnParams states: a repeat answers with the session the first one made
+	// rather than forking a second remote shell.
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
 // SessionsParams asks for the inventory. The workspace filter is D15's
 // reservation on the read side; empty means every session this generation
 // holds, which is what level 1 always asks for.
@@ -323,10 +488,53 @@ type SessionEntry struct {
 	Exit *SessionExitStatus `json:"exit"`
 }
 
-// LaunchRecord is what the helper recorded at the moment it spawned. Nothing
-// read from the OS afterwards may overwrite it: this is the canonical identity
-// of the session (D10), and OS inspection is a cross-check against it.
+// LaunchKind discriminates the launch union (nocx-50w7p.4). It is a required
+// field of every branch rather than something a reader infers from which keys
+// are present, because "which of these is it" is the FIRST question a decoder
+// asks and inferring it from a key's presence makes an incomplete record
+// indistinguishable from the other branch.
+type LaunchKind string
+
+const (
+	// LaunchKindLocal is a process on THIS machine: a PTY, a pid and a
+	// process group the helper owns and signals.
+	LaunchKindLocal LaunchKind = "local"
+	// LaunchKindSSH is a shell channel on a connection this helper dialed:
+	// the process is on the far host and this machine has no pid for it.
+	LaunchKindSSH LaunchKind = "ssh"
+)
+
+// LaunchRecord is what the helper recorded at the moment it spawned.
+// Nothing read from the OS afterwards may overwrite it: this is the canonical
+// identity of the session (D10), and OS inspection is a cross-check against it.
+//
+// # Why it is a union now, and why the branches are separate TYPES
+//
+// A session's process is either a PTY this helper owns or a shell channel on a
+// remote host, and the two have different facts: a local shell has a pid and a
+// process group, a remote one has a destination and no pid AT ALL. Spelling
+// that as one flat record with an optional pid would be a record whose `pid`
+// key exists and reads 0 for a remote session — and 0 is the kernel scheduler,
+// so a reader that trusted the key would ask the OS about a process this
+// machine never started. Absence is the honest encoding, and a union with two
+// branch TYPES is how absence stops being a convention and becomes a fact the
+// decoder enforces: `sshLaunchRecord` declares no `pid` key, so no generation
+// can put one there and no reader can find one.
 type LaunchRecord struct {
+	// Kind is the discriminator, and it is required.
+	Kind LaunchKind `json:"kind"`
+	// Local is the branch for a process on this machine, and is absent for the
+	// other. Exactly one of the two is present; the schema enforces that with
+	// `oneOf`, and the helper always sets exactly one.
+	Local *LocalLaunchRecord `json:"local,omitempty"`
+	// SSH is the branch for a remote shell channel.
+	SSH *SSHLaunchRecord `json:"ssh,omitempty"`
+}
+
+// LocalLaunchRecord is the launch record a PTY session has always had. It is
+// the same seven facts as before the union existed — a local session's record
+// is unchanged, and only its position moved.
+type LocalLaunchRecord struct {
 	// Shell is the binary the helper actually started, as exec resolved it.
 	Shell string `json:"shell"`
 	// Cwd is the directory the helper started it in — the resolved one, not
@@ -347,6 +555,109 @@ type LaunchRecord struct {
 	// must be able to see that it was.
 	WindowBytes int64 `json:"windowBytes"`
 }
+
+// SSHLaunchRecord is the launch record of a session whose process is a shell
+// channel on a connection this helper dialed.
+//
+// # What is deliberately NOT here
+//
+// There is no `pid` and no `pgid`, and that is the shape rather than an
+// omission: the process is on another machine, its pid belongs to that
+// machine's namespace, and pid 0 — the only value left if a record insisted on
+// carrying one — is the kernel scheduler. A helper that wrote it would report
+// the scheduler's facts under this session's authority.
+//
+// There is no `cwd` VALUE either, and the key is kept rather than dropped:
+// every reader of a launch record asks the same five questions of whichever
+// branch it holds, and a key that exists in one branch and not the other is a
+// decoder that has to branch before it can parse. What it carries is the
+// honest answer — EMPTY — meaning this helper resolved no directory, because
+// the far login shell starts in the far account's own home and nothing on this
+// wire can see or move it. `spawn-ssh` refuses a caller's non-empty cwd by
+// name rather than accepting one it could never honour, so the empty value is
+// a fact and not a placeholder.
+type SSHLaunchRecord struct {
+	// Host, Port and User are the RESOLVED destination, echoed so a reader of
+	// the inventory knows which machine this pane is on. The identity is a
+	// REFERENCE and never material: the credential reference is the
+	// coordinator's opaque handle and the helper never interprets it.
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	User        string `json:"user"`
+	IdentityRef string `json:"identityRef"`
+	// Shell is the far shell this session was launched FOR, in SSHShellKind's
+	// closed set. `auto` is the honest value for the ordinary case: the far
+	// side's own dispatcher decides which tier runs, and its answer is not
+	// reported back on this wire.
+	Shell string `json:"shell"`
+	// Cwd is empty, always, in this generation — see the type's own comment:
+	// the far login shell's directory is the far side's answer and this helper
+	// neither asks for it nor changes it.
+	Cwd string `json:"cwd"`
+	// Cols and Rows are the size the channel's pty was requested at. The
+	// CURRENT size is not here, for the same reason the local record omits it.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+	// WindowBytes is the bound this session actually got.
+	WindowBytes int64 `json:"windowBytes"`
+}
+
+// WindowBytes reports the output-window bound this session actually got, from
+// whichever branch the record is. It is a method rather than a field on the
+// union because the value belongs to the BRANCH: the two records carry it for
+// the same reason and it is one question to a reader.
+func (r LaunchRecord) WindowBytes() int64 {
+	switch {
+	case r.Local != nil:
+		return r.Local.WindowBytes
+	case r.SSH != nil:
+		return r.SSH.WindowBytes
+	}
+	return 0
+}
+
+// Shell names the shell this session runs, from whichever branch it is. For a
+// local session it is the resolved binary; for an ssh session it is the far
+// shell kind the launcher was built for.
+func (r LaunchRecord) Shell() string {
+	switch {
+	case r.Local != nil:
+		return r.Local.Shell
+	case r.SSH != nil:
+		return r.SSH.Shell
+	}
+	return ""
+}
+
+// LocalPid is the pid of a process THIS machine runs, and ZERO when the
+// session has no process here.
+//
+// Zero is the answer rather than a placeholder, and the caller acts on it: the
+// OS-evidence seam takes a pid, pid 0 is the scheduler, and a session with no
+// local process must therefore not be observed at all — which is exactly what
+// the helper does with this value (session.entry), rather than passing a zero
+// along and asking the kernel about the scheduler.
+func (r LaunchRecord) LocalPid() int {
+	if r.Local == nil {
+		return 0
+	}
+	return r.Local.Pid
+}
+
+// LocalPgid is the process group the helper owns for a LOCAL session, and zero
+// for one it does not own. Zero means "no group here", which the signal path
+// reads as "the session's own process, whatever kind it is" — for a remote
+// session that is the shell channel.
+func (r LaunchRecord) LocalPgid() int {
+	if r.Local == nil {
+		return 0
+	}
+	return r.Local.Pgid
+}
+
+// IsLocal reports whether this session's process runs on this machine. It is
+// the question the OS-evidence seam must ask before it is asked anything else.
+func (r LaunchRecord) IsLocal() bool { return r.Local != nil }
 
 // Observation is what the OS says about the process NOW. It is evidence: a
 // cross-check against the launch record and a source of the derived

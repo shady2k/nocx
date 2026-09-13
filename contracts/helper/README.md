@@ -228,3 +228,76 @@ sentence keeps the distinction.
 The schemas are frozen from here like every sibling's: a new op degrades (an older
 helper answers `unknown_op`, which a coordinator reads as "this machine's helper
 is older than this app"), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.4`, and why `Version` moved to 5
+
+The **ssh pane**: a session whose process is a shell channel on a connection the
+helper dialed, rather than a PTY this machine forked. Two shapes carry it.
+
+**A new op, `session.spawn-ssh`, beside `spawn`** — never a destination field on
+`spawn`, which the freeze forbids. Every shape here is `additionalProperties:
+false`, so a field added to `spawn` is a payload an older generation REJECTS,
+while a new op is one it answers `unknown_op` to; and a destination on `spawn`
+would have to be absent on every local spawn, making its absence the common case
+and its presence a change in what the op means. Its params carry the destination
+as typed fields (via `ssh.schema.json`'s own `$defs/destination`, so "a resolved
+ssh destination" has one declaration — the same one `probe` and `open` take), the
+caller's host-key statements, the session's geometry, the mode, and the far
+host's two tool-surface paths. There is no command and no argv: the remote
+command is the launch carrier, built by the helper from `internal/shellintegration`.
+
+**`launch` is a discriminated union**, with `kind` required and the branches under
+`local` and `ssh`:
+
+- `local` is the record every session had before, field for field, moved one
+  level down. A local session's facts are unchanged.
+- `ssh` has **no `pid` and no `pgid` key at all**. That is the shape rather than
+  an omission: the process is on another machine, its pid belongs to that
+  machine's namespace, and the only value a record insisting on one could carry
+  is 0 — the kernel scheduler — which a reader would then ask the OS about.
+  Absence is the honest encoding, and `additionalProperties: false` is what makes
+  it an absence the decoder enforces.
+- `ssh.cwd` is a required key that is **always empty**: the far login shell
+  starts in the far account's own directory and this helper has no mechanism to
+  move it, so the record reports the resolution it performed — none. The key
+  stays because every reader asks the same questions of whichever branch it
+  holds, and `spawn-ssh` REFUSES a caller's non-empty `cwd` by name rather than
+  accepting one nothing acts on.
+- For such a session `observed` is `null` — "nobody could be asked". Evidence
+  about pids is evidence about THIS machine's kernel, and the helper's
+  OS-evidence seam is never reached for a session with no process here.
+
+Three decisions in these shapes are worth naming rather than leaving to a reader:
+
+- **The refusal codes a `spawn-ssh` ends in are the ssh service's own.** An
+  unreachable host, a credential the server refuses, a key nobody recorded, a
+  key that CHANGED, a sealed vault and a helper with no coordinator connection
+  are the vocabulary `probe` already reports, and a `changed` key carries
+  `hostKeyEvidence` in its details for the same reason it does there. A helper
+  service that hands one of these on keeps the code: reporting `internal` instead
+  would tell every caller the helper broke, while the sheet that should have been
+  raised never was.
+- **A build without an ssh client answers `no_ssh_client`.** A helper built
+  without `nocx_local_ssh` links no client, so `spawn-ssh` there is a fact about
+  the BINARY and not about the request: it is distinct from `spawn_failed`
+  (nothing about the request would work) and from `unknown_op` (this generation
+  is not older — it is built for a host that must not dial).
+- **The enhanced lifecycle channel and the tool socket are NOT in this
+  generation's ssh pane.** The lifecycle channel is a remote loopback listener on
+  the connection and the socket needs the same forward; both are the
+  `direct-tcpip`/forward ops of nocx-50w7p.8. A request carrying a lifecycle
+  launch is answered with the PANE and no lifecycle window — `adopt-lifecycle`
+  answers `null` and the helper logs the refusal by name — because ADR-0004 makes
+  an ordinary usable terminal the one thing no failure path may suppress, and
+  losing it to nocx's own optional work is the only way to lose it that is nocx's
+  fault. The two bearer values are accepted and never rendered anywhere.
+
+The version moved because the entry changed shape: `sessionEntry` is
+`additionalProperties: false` on both sides, so a generation speaking 4 REJECTS an
+entry carrying `kind`, and one speaking 5 answers a `spawn` with a shape a
+4-reader cannot read. Two peers that disagree refuse each other at hello in both
+directions, and each generation installs beside the other — which is what makes
+the entry change safe: no reader of the new shape was built without it.
+
+The schemas are frozen from here like every sibling's: a new op degrades (an older
+helper answers `unknown_op`), and a new FIELD on one of these shapes does not.

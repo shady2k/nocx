@@ -9,7 +9,40 @@
       "type": "string"
     },
     "launchRecord": {
-      "description": "What the helper RECORDED at the moment it spawned. This is the canonical identity of a session and nothing read from the OS afterwards may overwrite it: argv is mutable by the process itself, a process can be replaced by exec, /proc does not exist on macOS and proc_pidinfo answers a different set of questions there. The helper's own record is the authority; OS inspection is a cross-check (see `observation`).",
+      "description": "What the helper RECORDED at the moment it spawned. This is the canonical identity of a session and nothing read from the OS afterwards may overwrite it: argv is mutable by the process itself, a process can be replaced by exec, /proc does not exist on macOS and proc_pidinfo answers a different set of questions there. The helper's own record is the authority; OS inspection is a cross-check (see `observation`). It is a DISCRIMINATED UNION since nocx-50w7p.4, because a session's process is either a PTY this helper owns or a shell channel on a remote host and the two have different facts: which branch it is, is the first question a decoder asks, so `kind` is required and exactly one branch is present.",
+      "oneOf": [
+        {
+          "required": ["kind", "local"],
+          "properties": {
+            "kind": { "const": "local" },
+            "local": { "$ref": "#/$defs/localLaunchRecord" }
+          },
+          "not": { "required": ["ssh"] }
+        },
+        {
+          "required": ["kind", "ssh"],
+          "properties": {
+            "kind": { "const": "ssh" },
+            "ssh": { "$ref": "#/$defs/sshLaunchRecord" }
+          },
+          "not": { "required": ["local"] }
+        }
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "Which branch this record is: `local` for a process on this machine, `ssh` for a shell channel on a connection the helper dialed. Required rather than inferred from which branch key is present, because 'which of these is it' is the FIRST question and inferring it makes an incomplete record indistinguishable from the other branch.",
+          "type": "string",
+          "enum": ["local", "ssh"]
+        },
+        "local": { "$ref": "#/$defs/localLaunchRecord" },
+        "ssh": { "$ref": "#/$defs/sshLaunchRecord" }
+      }
+    },
+    "localLaunchRecord": {
+      "description": "The launch record of a session whose process runs on THIS machine: a PTY the helper owns and its process group. It is the record every session had before the union existed, unchanged.",
       "type": "object",
       "additionalProperties": false,
       "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
@@ -32,6 +65,53 @@
         "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "windowBytes": {
           "description": "The output-window bound this session ACTUALLY got, after the helper's floor, ceiling and aggregate budget were applied to what the coordinator asked for. Reported rather than assumed: a caller whose request was clamped must be able to see that it was, because a silently ignored setting is the degrade the product must never hide. The session keeps this bound for its whole life — changing the setting affects the next session, never a running one.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "sshLaunchRecord": {
+      "description": "The launch record of a session whose process is a shell channel on a connection this helper dialed (nocx-50w7p.4). It has NO `pid` and NO `pgid` key at all, and that is the shape rather than an omission: the process is on another machine, its pid belongs to that machine's namespace, and the only value a record insisting on one could carry is 0 — the kernel scheduler — which a reader would then ask the OS about. Absence is the honest encoding, and `additionalProperties: false` is what makes an absence the decoder enforces rather than a convention.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "user",
+        "identityRef",
+        "shell",
+        "cwd",
+        "cols",
+        "rows",
+        "windowBytes"
+      ],
+      "properties": {
+        "host": {
+          "description": "The RESOLVED dial target, echoed so a reader of the inventory knows which machine this pane is on. Alias resolution and ~/.ssh/config merging stay in the coordinator, which is the party that reads the config.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "user": { "type": "string", "minLength": 1 },
+        "identityRef": {
+          "description": "The credential REFERENCE the channel authenticated with — the coordinator's opaque handle, which the helper echoes and never interprets. It is a reference and never material: no key or password is on this wire, and a rotation mints a new reference rather than changing this one.",
+          "type": "string",
+          "minLength": 1
+        },
+        "shell": {
+          "description": "The far shell this session was launched FOR, from the wire's closed set (auto|bash|zsh|unknown, spelled `auto`, `bash`, `zsh`, `unknown`). `auto` is the honest value for the ordinary case: the far side's own dispatcher decides which tier runs, and its answer is not reported back on this wire.",
+          "type": "string",
+          "enum": ["auto", "bash", "zsh", "unknown"]
+        },
+        "cwd": {
+          "description": "EMPTY, always, in this generation, and the key is kept rather than dropped because every reader of a launch record asks the same questions of whichever branch it holds. The far login shell starts in the far account's own directory, which this helper cannot see or move, so the record reports the resolution it performed — none. `spawn-ssh` refuses a caller's non-empty cwd by name rather than accepting one it could never honour, so this is a fact and not a placeholder.",
+          "type": "string",
+          "const": ""
+        },
+        "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "windowBytes": {
+          "description": "The output-window bound this session ACTUALLY got, on the same terms as the local branch's: clamped by the helper, reported rather than assumed, and fixed for the session's whole life.",
           "type": "integer",
           "minimum": 1
         }

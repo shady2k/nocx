@@ -250,7 +250,7 @@ func TestTheSessionSurvivesTheCoordinatorAndTheProcessRanAcrossTheGap(t *testing
 	if handle.Generation != "content-hash" {
 		t.Fatalf("the handle names generation %q", handle.Generation)
 	}
-	if spawned.Entry.Launch.Pid == 0 {
+	if spawned.Entry.Launch.Local.Pid == 0 {
 		t.Fatal("no pid was recorded: the helper did not actually spawn anything")
 	}
 

@@ -72,11 +72,48 @@ func (e *ExitStatus) Error() string {
 
 func (e *ExitStatus) ExitCode() int { return e.Code }
 
+// RemoteLaunch is the SSH branch of the wire's launch union
+// (proto.SSHLaunchRecord, nocx-50w7p.4): a session whose process is a shell
+// channel on a connection this machine's helper dialed.
+//
+// # Why it is a second field rather than a second Launch type
+//
+// The wire carries the union as `launch.kind` plus one populated branch, and
+// this boundary projects it as TWO GO VALUES: `Launch` for a process on this
+// machine and `RemoteLaunch` for one that is not, distinguished by which is
+// non-nil. That is a projection and not a second encoding — nothing above this
+// boundary switches on a string tag, and the two branches are two different
+// sets of facts rather than two spellings of one.
+//
+// It carries no pid, no pgid and no cwd, by CONSTRUCTION and not by omission:
+// the process is on another machine, its pid belongs to that machine's
+// namespace, and the directory it started in is that machine's answer. The
+// wire's ssh branch has no such keys at all, so nothing here can invent one.
+type RemoteLaunch struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	User        string `json:"user"`
+	IdentityRef string `json:"identityRef"`
+	Shell       string `json:"shell"`
+	Cwd         string `json:"cwd"`
+	Cols        uint16 `json:"cols"`
+	Rows        uint16 `json:"rows"`
+	WindowBytes int64  `json:"windowBytes"`
+}
+
 type SessionEntry struct {
-	HostSessionID   HostSessionID `json:"hostSessionId"`
-	Workspace       string        `json:"workspace"`
-	StartedAt       string        `json:"startedAt"`
-	Launch          LaunchRecord  `json:"launch"`
+	HostSessionID HostSessionID `json:"hostSessionId"`
+	Workspace     string        `json:"workspace"`
+	StartedAt     string        `json:"startedAt"`
+	// Launch is the LOCAL branch of the wire's launch union: the record a
+	// helper-hosted local pane has always had, unchanged. It is the ZERO
+	// record exactly when RemoteLaunch is non-nil — see that field.
+	Launch LaunchRecord `json:"launch"`
+	// RemoteLaunch is the SSH branch, present exactly when this session's
+	// process is a remote shell channel. When it is present, Launch describes
+	// nothing: there is no process on this machine to describe, and the wire
+	// sends no local record for one.
+	RemoteLaunch    *RemoteLaunch `json:"remoteLaunch,omitempty"`
 	Observed        *Observation  `json:"observed"`
 	Window          WindowSpan    `json:"window"`
 	LifecycleWindow WindowSpan    `json:"lifecycleWindow"`
@@ -84,6 +121,9 @@ type SessionEntry struct {
 	WriterEpoch     uint64        `json:"writerEpoch"`
 	Exit            *ExitStatus   `json:"exit"`
 }
+
+// IsRemote reports whether this session's process is on a remote host.
+func (e SessionEntry) IsRemote() bool { return e.RemoteLaunch != nil }
 
 // Sessions asks one helper generation for the sessions it currently holds.
 // An empty answer is an answer and is returned as a non-nil empty slice.
@@ -169,14 +209,31 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 		HostSessionID: HostSessionID{Generation: string(in.Session.Generation), Session: in.Session.Session},
 		Workspace:     string(in.Workspace),
 		StartedAt:     in.StartedAt,
-		Launch: LaunchRecord{
-			Shell: in.Launch.Shell, Cwd: in.Launch.Cwd, Pid: in.Launch.Pid,
-			Pgid: in.Launch.Pgid, Cols: in.Launch.Cols, Rows: in.Launch.Rows,
-			WindowBytes: in.Launch.WindowBytes,
+		Window:        WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
+		LifecycleWindow: WindowSpan{
+			Base: uint64(in.LifecycleWindow.Base), Written: uint64(in.LifecycleWindow.Written),
 		},
-		Window:          WindowSpan{Base: uint64(in.Window.Base), Written: uint64(in.Window.Written)},
-		LifecycleWindow: WindowSpan{Base: uint64(in.LifecycleWindow.Base), Written: uint64(in.LifecycleWindow.Written)},
-		WriterEpoch:     uint64(in.WriterEpoch),
+		WriterEpoch: uint64(in.WriterEpoch),
+	}
+	// The union is projected as two Go values, and exactly one of them is
+	// populated — the wire enforces that with oneOf, so this switch is a
+	// translation rather than a guess. A record that somehow carried neither
+	// branch leaves BOTH zero, which is the honest projection of "this helper
+	// described no process": it is not a local session with pid 0.
+	switch {
+	case in.Launch.Local != nil:
+		out.Launch = LaunchRecord{
+			Shell: in.Launch.Local.Shell, Cwd: in.Launch.Local.Cwd, Pid: in.Launch.Local.Pid,
+			Pgid: in.Launch.Local.Pgid, Cols: in.Launch.Local.Cols, Rows: in.Launch.Local.Rows,
+			WindowBytes: in.Launch.Local.WindowBytes,
+		}
+	case in.Launch.SSH != nil:
+		out.RemoteLaunch = &RemoteLaunch{
+			Host: in.Launch.SSH.Host, Port: in.Launch.SSH.Port, User: in.Launch.SSH.User,
+			IdentityRef: in.Launch.SSH.IdentityRef, Shell: in.Launch.SSH.Shell,
+			Cwd: in.Launch.SSH.Cwd, Cols: in.Launch.SSH.Cols, Rows: in.Launch.SSH.Rows,
+			WindowBytes: in.Launch.SSH.WindowBytes,
+		}
 	}
 	if in.Writer != nil {
 		writer := string(*in.Writer)
@@ -280,6 +337,29 @@ type inbound struct {
 func (c *Client) Spawn(ctx context.Context, params proto.SpawnParams) (SessionEntry, error) {
 	var result proto.SpawnResult
 	if err := c.Call(ctx, proto.ServiceSession, proto.OpSpawn, params, &result); err != nil {
+		return SessionEntry{}, err
+	}
+	return mapSessionEntry(result.Entry), nil
+}
+
+// SpawnSSH opens a session whose process is a shell channel on a FAR host —
+// a remote pane (nocx-50w7p.4). The helper dials through its own ssh client
+// and answers with the same inventory entry every other session answers with,
+// whose RemoteLaunch is populated instead of Launch.
+//
+// It returns the helper's refusal unchanged, and those refusals are the
+// caller's to switch on: `no_ssh_client` (this machine's helper was built
+// without an ssh client), `unreachable` / `rejected` / `needs-interactive` /
+// `host-key-unknown` / `host-key-changed` (the destination, in the vocabulary
+// the probe already reports), `vault_sealed` (the material could not be read),
+// `no_auth_channel` (no coordinator connection to ask), `channel_refused` (the
+// server would not give the helper a session or would not start the command)
+// and `bad_params` (the request itself). None of them is a spawn failure: a
+// failed spawn is `spawn_failed`, and telling the two apart is what keeps a
+// person looking at the host rather than at their own request.
+func (c *Client) SpawnSSH(ctx context.Context, params proto.SSHSpawnParams) (SessionEntry, error) {
+	var result proto.SpawnResult
+	if err := c.Call(ctx, proto.ServiceSession, proto.OpSpawnSSH, params, &result); err != nil {
 		return SessionEntry{}, err
 	}
 	return mapSessionEntry(result.Entry), nil

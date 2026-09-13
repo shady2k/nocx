@@ -211,21 +211,20 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		log.Warn("nocx-helper: cannot name its own executable for a pane's agent", "error", err)
 		agentHelperPath = ""
 	}
-	sessions := session.New(session.Options{
-		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath, agentHelperPath),
-		Inspector:  session.NewInspector(),
-		Log:        log,
-		Limits:     session.DefaultLimits(),
-	})
-	defer sessions.Close()
-
 	// THE SSH SERVICE THIS DAEMON SERVES, where the build has one
 	// (nocx-50w7p.2). The client and the service are opened here, beside the
 	// sessions and out of the accept loop, for the same reason they are: they
 	// are properties of the DAEMON, not of one connection — one client serves
 	// every host this machine hosts for its whole life — and they are released
 	// at shutdown with them.
+	//
+	// It is opened BEFORE the sessions, and that ordering is load-bearing
+	// rather than tidy: a helper-hosted pane's process is a shell channel on a
+	// connection this client dialed, so the session service is constructed
+	// WITH the spawner that client answers (nocx-50w7p.4). Building the
+	// sessions first would leave the pane seam nil on a build that can dial —
+	// which is the state the dependency test calls out by name: a local helper
+	// that refuses every ssh pane while announcing nothing wrong.
 	//
 	// holdSSHClient is a build fact: a helper built with nocx_local_ssh opens
 	// a client and a service and says so, and one built without it — every
@@ -238,6 +237,16 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		return 1
 	}
 	defer sshCap.release()
+
+	sessions := session.New(session.Options{
+		Generation: generation,
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentToolSocketPath, agentHelperPath),
+		SSHSpawner: sshCap.sessionSpawner,
+		Inspector:  session.NewInspector(),
+		Log:        log,
+		Limits:     session.DefaultLimits(),
+	})
+	defer sessions.Close()
 
 	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)

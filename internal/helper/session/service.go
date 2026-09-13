@@ -66,6 +66,35 @@ var (
 	// terminal would not take. It is BadParams rather than internal because
 	// the caller composed the request and can fix it.
 	ErrReplay = errors.New("session: the capture cannot be replayed")
+	// ErrNoSSHSpawner is a spawn-ssh this BUILD cannot answer: a helper built
+	// without nocx_local_ssh links no ssh client, so it has nothing to open a
+	// remote channel with (plan §1). It is not a misconfiguration the caller
+	// can repair in the request — it is a fact about the binary, which is why
+	// it carries its own code rather than being reported as a failed spawn:
+	// the caller's action is to use a helper built for this machine, not to
+	// retry or to look at the host.
+	ErrNoSSHSpawner = errors.New("session: this helper's build has no ssh client")
+	// ErrBadSSHParams is a spawn-ssh the helper will not perform because the
+	// REQUEST is incomplete: no host, a port outside the range, no user, no
+	// credential reference. It is a separate sentinel from ErrNoSSHSpawner on
+	// purpose — a caller that reads `no_ssh_client` goes looking at the binary,
+	// and one that reads `bad_params` goes looking at its own request. Folding
+	// the two would send every malformed request to the wrong place.
+	ErrBadSSHParams = errors.New("session: the ssh spawn request is incomplete")
+	// ErrCwdUnsupported is a spawn-ssh naming a directory for the far shell.
+	// This generation cannot honour one: a remote session's starting directory
+	// belongs to the far account, the launcher carries no way to move it, and
+	// the only route that could would be a caller-supplied command, which this
+	// wire refuses (D3). It is REFUSED rather than ignored — a field that
+	// accepted a value nothing acts on is the shape a later generation starts
+	// reading under a caller that never expected it to.
+	ErrCwdUnsupported = errors.New("session: a remote session's directory cannot be named on this wire")
+	// ErrRemotePgid is a signal addressed to a process GROUP of the far host.
+	// A group number is that kernel's namespace, this helper cannot see it,
+	// and the ssh protocol's signal request addresses the channel's command
+	// and nothing else — so a named group is refused by name rather than
+	// silently sent to the wrong thing.
+	ErrRemotePgid = errors.New("session: a remote process group cannot be addressed from this host")
 )
 
 // Limits are the helper's bounds on output windows: D8 asks for all three,
@@ -148,6 +177,12 @@ type Options struct {
 	// generation rather than needing a lookup service (D10).
 	Generation proto.GenerationID
 	Spawner    Spawner
+	// SSHSpawner opens a session whose process is a shell channel on a far
+	// host (nocx-50w7p.4). NIL IS A BUILD FACT, not a misconfiguration: a
+	// helper built without nocx_local_ssh links no ssh client, so it has
+	// nothing to open a remote channel with, and the op is refused by name
+	// rather than answered with a session that could never carry bytes.
+	SSHSpawner SSHSpawner
 	// Inspector is optional: nil means this helper offers no OS evidence,
 	// which is the honest answer on a platform that has none.
 	Inspector Inspector
@@ -168,6 +203,7 @@ type Options struct {
 type Service struct {
 	generation proto.GenerationID
 	spawner    Spawner
+	sshSpawner SSHSpawner
 	inspector  Inspector
 	screen     ScreenFactory
 	log        *slog.Logger
@@ -217,6 +253,7 @@ func New(opts Options) *Service {
 	s := &Service{
 		generation: opts.Generation,
 		spawner:    opts.Spawner,
+		sshSpawner: opts.SSHSpawner,
 		inspector:  opts.Inspector,
 		screen:     opts.Screen,
 		log:        opts.Log,
@@ -320,7 +357,7 @@ func (s *Service) Name() string { return proto.ServiceSession }
 
 func (s *Service) Ops() []string {
 	return []string{
-		proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck,
+		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
 		proto.OpAdoptLifecycle, proto.OpScreen, proto.OpReplay,
 	}
@@ -330,6 +367,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 	switch op {
 	case proto.OpSpawn:
 		return host.SchemaFor(proto.SpawnParams{})
+	case proto.OpSpawnSSH:
+		return host.SchemaFor(proto.SSHSpawnParams{})
 	case proto.OpSessions:
 		return host.SchemaFor(proto.SessionsParams{})
 	case proto.OpAttach:
@@ -364,6 +403,22 @@ func (s *Service) RefusesCancel(string) bool { return false }
 // that matters most: the coordinator's reconciliation turns exactly this code
 // into the `absent` verdict, and anything it cannot recognise stays `unknown`.
 func (s *Service) Refusal(err error) (string, json.RawMessage) {
+	// A REFUSAL MADE BY ANOTHER SERVICE CROSSES UNCHANGED, and it comes first
+	// because it is the only arm whose code this service did not invent.
+	//
+	// spawn-ssh asks the ssh service to open a channel, and everything that can
+	// go wrong there — an unreachable host, a credential the server refuses, a
+	// host key that changed, a sealed vault the coordinator answered with — is
+	// already a refusal in the caller's own vocabulary, carrying the evidence
+	// the coordinator rebuilds its typed error from. Dropping that code here
+	// and reporting `internal` instead would tell every caller that the helper
+	// broke, while the host-key sheet that should have been raised never was:
+	// the exact conflation internal/helper/sshsvc's own classifier exists to
+	// prevent, one service over.
+	var refusal *proto.Refusal
+	if errors.As(err, &refusal) {
+		return refusal.Code, refusal.Details
+	}
 	switch {
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
@@ -380,6 +435,10 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrSpawn):
 		return proto.ErrCodeSpawnFailed, nil
+	case errors.Is(err, ErrNoSSHSpawner):
+		return proto.ErrCodeNoSSHClient, nil
+	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams):
+		return proto.ErrCodeBadParams, nil
 	}
 	return "", nil
 }
@@ -392,6 +451,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.spawn(ctx, p)
+	case proto.OpSpawnSSH:
+		var p proto.SSHSpawnParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.spawnSSH(ctx, p)
 	case proto.OpSessions:
 		var p proto.SessionsParams
 		if err := decode(params, &p); err != nil {
@@ -564,9 +629,14 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	}
 
 	s.mu.Lock()
-	if s.budget+reserved > s.limits.BudgetBytes {
+	committed := s.budget
+	if committed+reserved > s.limits.BudgetBytes {
 		s.mu.Unlock()
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, s.budget, s.limits.BudgetBytes)
+		// The total is read UNDER the lock and carried out of it: reporting it
+		// from the field after unlocking is a read of shared state that another
+		// spawn may already have changed, which is a data race whatever it
+		// prints.
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
 	s.budget += reserved
 	s.mu.Unlock()
@@ -605,26 +675,253 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
-	// THE SESSION'S OWN TERMINAL, CREATED WITH IT (ADR-0066, nocx-ygxjv.12).
-	// This is where the emulator stops being the browser's property: it is
-	// built here, beside the PTY, before the pump reads a byte, and it is
-	// therefore authoritative for the session's whole life — through every
-	// attach, every coordinator that comes and goes, and every moment when
-	// nobody is attached at all. A failure is REFUSED rather than degraded: a
-	// shell running under no terminal would answer none of the questions a
-	// program asks its terminal, and the pane would look alive while being
-	// unable to run anything that asks.
-	rt, screen, err := newSessionRuntime(s.screen, proc, proto.SessionHex(raw), cols, rows)
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
+		Kind: proto.LaunchKindLocal,
+		Local: &proto.LocalLaunchRecord{
+			Shell:       proc.Shell(),
+			Cwd:         resolvedCwd(p.Cwd, proc),
+			Pid:         proc.Pid(),
+			Pgid:        processGroup(proc),
+			Cols:        cols,
+			Rows:        rows,
+			WindowBytes: bound,
+		},
+	}, spawnShape{
+		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
+		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+	}, lg, &spawned)
+}
+
+// spawnSSH opens a session whose process is a shell channel on a FAR host
+// (nocx-50w7p.4).
+//
+// It is the same walk as spawn with three differences, and each is a fact
+// about what a remote session is rather than a variation of taste:
+//
+//   - the process comes from the SSHSpawner, which dials through this
+//     machine's helper-side ssh client and asks THIS request's coordinator
+//     connection for the credential and the host-key verdict;
+//   - the launch record is the union's SSH branch, which carries no pid, no
+//     pgid and no resolved cwd, because this machine has none of those facts;
+//   - the inventory's observed evidence stays null, because the OS-evidence
+//     seam answers about pids of THIS machine and there is no such pid here.
+//
+// Everything else — the idempotency claim, the budget, the runtime beside the
+// process, the window, the exit watcher — is the same code, and it is the same
+// code on purpose: a second copy of "a session is registered once its process
+// exists" is where the two kinds of session would start disagreeing.
+func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto.SpawnResult, err error) {
+	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn-ssh",
+		"host", p.Destination.Host, "port", p.Destination.Port, "user", p.Destination.User,
+		"cols", p.Cols, "rows", p.Rows, "mode", p.DesiredMode, "lifecycle_requested", p.Lifecycle != nil)
+	defer func() { end(err) }()
+
+	// THE BUILD, FIRST, because it decides whether the rest of this function
+	// can mean anything. A helper without the tag links no ssh client, so
+	// there is no dial to make and no request that would work: the caller is
+	// told what the binary is rather than what this request was.
+	if s.sshSpawner == nil {
+		return proto.SpawnResult{}, fmt.Errorf("%w: build with nocx_local_ssh to open ssh panes", ErrNoSSHSpawner)
+	}
+	if verr := validateSSHSpawn(p); verr != nil {
+		// Renamed rather than assigned to the named return: this function's
+		// `err` is the one its deferred end() reports, and a shadowed error
+		// there is a failure whose cause and whose report can disagree.
+		return proto.SpawnResult{}, verr
+	}
+	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
+			ErrBadKey, len(p.IdempotencyKey), proto.MaxIdempotencyKey)
+	}
+	claim, existing, err := s.claimKey(ctx, p.IdempotencyKey)
 	if err != nil {
-		// Nothing has been read from this process and nothing has been
-		// registered, so the spawn has produced nothing: end the shell rather
-		// than leave a process running with no terminal state behind it, give
-		// the reserved window back, and report the refusal the caller acts on.
-		_ = proc.Close()
+		return proto.SpawnResult{}, err
+	}
+	if existing != nil {
+		return proto.SpawnResult{Entry: existing.entry(s.inspector)}, nil
+	}
+	// From here the claim is HELD, exactly as in spawn: every return either
+	// resolves it onto a registered session or releases it.
+	spawned := false
+	defer func() {
+		if !spawned {
+			s.releaseKey(claim)
+		}
+	}()
+
+	bound := s.clamp(p.WindowBytes)
+	reserved := bound
+	if p.Lifecycle != nil {
+		reserved += bound
+	}
+	s.mu.Lock()
+	committed := s.budget
+	if committed+reserved > s.limits.BudgetBytes {
+		s.mu.Unlock()
+		// The total is read UNDER the lock and carried out of it: reporting it
+		// from the field after unlocking is a read of shared state that another
+		// spawn may already have changed, which is a data race whatever it
+		// prints.
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
+	}
+	s.budget += reserved
+	s.mu.Unlock()
+
+	cols, rows := p.Cols, p.Rows
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	raw, err := s.newID()
+	if err != nil {
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
-		lg.Error("helper: the pane's terminal could not be created", "error", err)
+		lg.Error("helper: could not mint a session id", "error", err)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
+	lg = lg.With("session", proto.SessionHex(raw))
+
+	proc, err := s.sshSpawner.SpawnSSH(ctx, SSHSpawnRequest{
+		SessionID:           proto.SessionHex(raw),
+		Destination:         p.Destination,
+		AcceptOnTrust:       p.AcceptOnTrust,
+		HostKeyFingerprint:  p.HostKeyFingerprint,
+		Shell:               p.Shell,
+		Mode:                p.DesiredMode,
+		AgentHelperPath:     p.AgentHelperPath,
+		AgentToolSocketPath: p.AgentToolSocketPath,
+		Cols:                cols,
+		Rows:                rows,
+		Lifecycle:           p.Lifecycle,
+	})
+	if err != nil {
+		s.mu.Lock()
+		s.budget -= reserved
+		s.mu.Unlock()
+		lg.Error("helper: the remote shell channel could not be opened", "error", err)
+		// The refusal is the ssh service's own where it has one — a sealed
+		// vault, a changed host key, an unreachable host are all *proto.Refusal
+		// with a code the coordinator already switches on — and only what has
+		// no code becomes a spawn failure. Wrapping everything as ErrSpawn
+		// would send a person to look at the request when the answer is about
+		// the host.
+		var refusal *proto.Refusal
+		if errors.As(err, &refusal) {
+			return proto.SpawnResult{}, err
+		}
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
+
+	return s.finishSpawn(claim, proc, proto.LaunchRecord{
+		Kind: proto.LaunchKindSSH,
+		SSH: &proto.SSHLaunchRecord{
+			Host:        p.Destination.Host,
+			Port:        p.Destination.Port,
+			User:        p.Destination.User,
+			IdentityRef: p.Destination.Identity.Credential.Ref,
+			Shell:       string(shellKindOrAuto(p.Shell)),
+			// Empty, always: this helper resolved no directory on the far
+			// side. See proto.SSHLaunchRecord.
+			Cwd:         "",
+			Cols:        cols,
+			Rows:        rows,
+			WindowBytes: bound,
+		},
+	}, spawnShape{
+		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
+		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+	}, lg, &spawned)
+}
+
+// validateSSHSpawn refuses a remote spawn the helper will not perform, before
+// the claim is taken or anything is dialed.
+func validateSSHSpawn(p proto.SSHSpawnParams) error {
+	switch {
+	case p.Destination.Host == "":
+		return fmt.Errorf("%w: no host", ErrBadSSHParams)
+	case p.Destination.Port <= 0 || p.Destination.Port > 65535:
+		return fmt.Errorf("%w: port %d", ErrBadSSHParams, p.Destination.Port)
+	case p.Destination.User == "":
+		return fmt.Errorf("%w: no user", ErrBadSSHParams)
+	case p.Destination.Identity.Credential.Ref == "":
+		return fmt.Errorf("%w: no credential reference", ErrBadSSHParams)
+	}
+	if p.Cwd != "" {
+		return fmt.Errorf("%w: %q", ErrCwdUnsupported, p.Cwd)
+	}
+	switch p.Shell {
+	case "", proto.SSHShellAuto, proto.SSHShellBash, proto.SSHShellZsh, proto.SSHShellUnknown:
+	default:
+		return fmt.Errorf("%w: shell %q is not one this helper launches", ErrBadSSHParams, p.Shell)
+	}
+	return nil
+}
+
+// shellKindOrAuto resolves the empty default, which the wire allows because it
+// is the ordinary value: a caller that has not pinned a tier means "the far
+// side decides".
+func shellKindOrAuto(kind proto.SSHShellKind) proto.SSHShellKind {
+	if kind == "" {
+		return proto.SSHShellAuto
+	}
+	return kind
+}
+
+// spawnShape is everything finishSpawn needs that is not the process itself:
+// the identity the session is registered under, the window accounting already
+// reserved, and the lifecycle request (which decides whether a second window is
+// reserved for the descriptor channel).
+type spawnShape struct {
+	sessionID string
+	// raw is the same id in the data plane's spelling. It travels BESIDE the
+	// hex rather than being derived from it in finishSpawn, because the bytes
+	// are what newID produced and the hex is what was made from them: parsing
+	// the hex back would be a second derivation of one fact, with a failure
+	// arm that can only fire if the first one is already broken.
+	raw       [16]byte
+	workspace proto.WorkspaceID
+	key       string
+	cols      uint16
+	rows      uint16
+	bound     int64
+	reserved  int64
+	lifecycle *proto.LifecycleLaunch
+}
+
+// finishSpawn builds the session around a process that ALREADY EXISTS: the
+// terminal beside it, the window, the launch record, the inventory row, and the
+// three goroutines that serve it.
+//
+// It is the second half of both spawn and spawn-ssh, and it is one function
+// rather than two copies because these are the steps that must agree about the
+// intervals D5 and D10 are written in: the session enters the inventory once
+// its process exists and not before, its claim resolves in the same critical
+// section that adds the row, and the runtime is created before the first byte
+// is read.
+//
+// On failure it releases the budget reservation and closes the process, and
+// reports `spawned` false through the pointer so the caller's deferred
+// releaseKey runs — there is no path on which a claim is resolved onto a
+// session that was never registered, and none on which a reserved window is
+// leaked by a spawn that produced nothing.
+func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.LaunchRecord, shape spawnShape, lg nocxlog.Logger, spawned *bool) (proto.SpawnResult, error) {
+	release := func() {
+		_ = proc.Close()
+		s.mu.Lock()
+		s.budget -= shape.reserved
+		s.mu.Unlock()
+	}
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows)
+	if err != nil {
+		// Nothing has been read from this process and nothing has been
+		// registered, so the spawn has produced nothing: end it rather than
+		// leave a process running with no terminal state behind it, give the
+		// reserved window back, and report the refusal the caller acts on.
+		release()
+		lg.Error("helper: the session's terminal could not be created", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 	lifecycleWin := (*window)(nil)
@@ -633,28 +930,31 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	if lp, ok := proc.(LifecycleProcess); ok {
 		lifecycleCarrier = lp.Lifecycle()
 		if lifecycleCarrier != nil {
-			lifecycleWin = newWindow(bound)
-			lifecycleBudget = bound
+			lifecycleWin = newWindow(shape.bound)
+			lifecycleBudget = shape.bound
 		}
 	}
-	if p.Lifecycle != nil && lifecycleWin == nil {
+	if shape.lifecycle != nil && lifecycleWin == nil {
 		s.mu.Lock()
-		s.budget -= bound
+		s.budget -= shape.bound
 		s.mu.Unlock()
 		// A LIFECYCLE ASKED FOR AND NOT GIVEN. The caller will now wait out a
 		// hello budget for a channel that does not exist, and until this line
 		// the only sign of it was that timeout, ten seconds later and in
-		// another process.
+		// another process. For an ssh session this is the ordinary answer of
+		// this generation rather than a launcher declining: the tunnel is a
+		// forward on the helper's connection and lands with nocx-50w7p.8
+		// (proto.SSHSpawnParams.Lifecycle).
 		lg.Warn("helper: a lifecycle channel was asked for and the launcher provided none")
 	}
 	hs := &hostSession{
-		id:              proto.HostSessionID{Generation: s.generation, Session: proto.SessionHex(raw)},
-		raw:             raw,
-		workspace:       p.Workspace,
-		key:             p.IdempotencyKey,
+		id:              proto.HostSessionID{Generation: s.generation, Session: shape.sessionID},
+		raw:             shape.raw,
+		workspace:       shape.workspace,
+		key:             shape.key,
 		startedAt:       s.now(),
 		proc:            proc,
-		win:             newWindow(bound),
+		win:             newWindow(shape.bound),
 		runtime:         rt,
 		screen:          screen,
 		lifecycleWin:    lifecycleWin,
@@ -663,29 +963,20 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// window behind it: a launch kept for a shell that never got a
 		// channel would be an identity a replacing coordinator could adopt
 		// and then hear nothing on (nocx-k6p18.31).
-		lifecycleLaunch: adoptableLaunch(p.Lifecycle, lifecycleWin),
+		lifecycleLaunch: adoptableLaunch(shape.lifecycle, lifecycleWin),
 		log:             s.log,
+		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
 	}
-	hs.launch = proto.LaunchRecord{
-		Shell:       proc.Shell(),
-		Cwd:         resolvedCwd(p.Cwd, proc),
-		Pid:         proc.Pid(),
-		Pgid:        processGroup(proc),
-		Cols:        cols,
-		Rows:        rows,
-		WindowBytes: bound,
-	}
 
 	s.mu.Lock()
-
 	s.sessions[hs.id.Session] = hs
 	// The claim resolves onto the row in the SAME critical section that adds
 	// it, so no reader can ever see a resolved claim naming a session the
 	// inventory does not hold.
 	s.resolveKeyLocked(claim, hs.id.Session)
-	spawned = true
+	*spawned = true
 	s.mu.Unlock()
 	go hs.pump()
 	if lifecycleCarrier != nil {
@@ -694,8 +985,8 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	go hs.watchExit(s.now, s.notifyExit)
 
 	lg.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
-		"shell", hs.launch.Shell, "cwd", hs.launch.Cwd,
-		"pid", hs.launch.Pid, "pgid", hs.launch.Pgid, "windowBytes", bound,
+		"kind", string(launch.Kind), "shell", launch.Shell(),
+		"pid", launch.LocalPid(), "pgid", launch.LocalPgid(), "windowBytes", shape.bound,
 		// The fact the hello-timeout hangs on: a pane with no carrier can
 		// never authenticate, and that is knowable here rather than a
 		// deadline later.
@@ -834,7 +1125,7 @@ func (s *Service) closeSession(p proto.CloseSessionParams) error {
 				delete(s.keys, hs.key)
 			}
 		}
-		s.budget -= hs.launch.WindowBytes + hs.lifecycleBudget
+		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget
 	}
 	s.mu.Unlock()
 	return nil
@@ -861,9 +1152,16 @@ func (s *Service) signal(p proto.SignalParams) error {
 	// asked for and what the launch record names. A caller that named a group
 	// gets that group — see SignalParams.Pgid for why that is addressing and
 	// not authority.
+	// For a session whose process is on another machine, "the session's own
+	// group" resolves to ZERO: this helper owns no group there, the launch
+	// record carries none, and the process's own signaller reads zero as "the
+	// session's own process" and sends the channel's signal request. A caller
+	// that NAMED a group on such a session is refused by that signaller, by
+	// name, rather than having its request pointed at a number from a
+	// different kernel's namespace (ErrRemotePgid).
 	pgid := p.Pgid
 	if pgid <= 0 {
-		pgid = hs.launch.Pgid
+		pgid = hs.launch.LocalPgid()
 	}
 	if err := signaller.SignalProcessGroup(pgid, syscall.Signal(p.Signal)); err != nil {
 		return fmt.Errorf("%w: %v", ErrSignal, err)

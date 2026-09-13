@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/helper/sshdial"
 	"github.com/shady2k/nocx/internal/helper/sshsvc"
 )
@@ -38,5 +39,11 @@ func holdSSHClient(log *slog.Logger) (sshSeam, error) {
 	return sshSeam{
 		register: func(h *host.Host) { h.Register(svc) },
 		release:  func() { _ = client.Close() },
+		// The session service's half of the same client: a pane whose process
+		// is a shell channel on a connection THIS daemon dialed. It is built
+		// here, over the service that already owns the pool, because the two
+		// must share ONE pool — a second client would be a second connection
+		// per host, which is what AD-4's ref-counted pool exists to prevent.
+		sessionSpawner: session.NewSSHSpawner(svc, log),
 	}, nil
 }

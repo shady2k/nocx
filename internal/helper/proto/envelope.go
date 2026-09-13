@@ -87,6 +87,18 @@ const (
 	ErrCodeWindowBudget = "window_budget"
 	// ErrCodeSpawnFailed is the shell or its PTY not starting.
 	ErrCodeSpawnFailed = "spawn_failed"
+	// ErrCodeNoSSHClient is a spawn-ssh on a helper built without
+	// nocx_local_ssh — the build that links no ssh client, and therefore the
+	// bytes written to a host nobody here controls (nocx-50w7p.4, plan §1).
+	//
+	// It is distinct from `spawn_failed` because the caller's action is
+	// different: a failed spawn is a fact about this attempt, and this is a
+	// fact about the BINARY — the request cannot be repaired, and retrying it
+	// or looking at the host are both the wrong move. It is distinct from
+	// `unknown_op` for the same reason the ssh service's own absence is: an
+	// `unknown_op` means the generation is older than the caller, and this
+	// generation is not.
+	ErrCodeNoSSHClient = "no_ssh_client"
 )
 
 // Refusal is one named refusal as a Go error, so a refusal survives the round

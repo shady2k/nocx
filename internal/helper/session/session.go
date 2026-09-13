@@ -80,6 +80,71 @@ type Spawner interface {
 	Spawn(req SpawnRequest) (Process, error)
 }
 
+// SSHSpawnRequest is what the helper decided to open on a FAR host, after the
+// wire's params have been validated: a resolved destination, the shape of the
+// session, and the two launch decisions the spawner needs.
+//
+// There is no command here, and there is no way to put one: the remote command
+// is the launch carrier, built by the spawner from internal/shellintegration.
+// What the caller decides is a DESTINATION and whether this session
+// integrates, which is the same division SpawnRequest draws between the
+// environment and the program.
+type SSHSpawnRequest struct {
+	// SessionID is minted by the service before the channel is opened, so the
+	// launcher can identify the session on the far side without an installed
+	// script — the same reason SpawnRequest carries one.
+	SessionID string
+	// Destination is the resolved address, account and identity. The helper
+	// dials exactly this and resolves nothing.
+	Destination proto.SSHDestination
+	// AcceptOnTrust and HostKeyFingerprint are the caller's two statements
+	// about the host key: whether a key nobody recorded may be trusted, and
+	// which key the caller expects. See proto.SSHSpawnParams.
+	AcceptOnTrust      bool
+	HostKeyFingerprint string
+	// Shell is the far shell the launcher is built for.
+	Shell proto.SSHShellKind
+	// Mode is the caller's integration intent, carried through UNINTERPRETED.
+	// The gate that decides whether a mode integrates is
+	// profile.DesiredMode.DeliversScripts() and it has one owner: the spawner
+	// asks it, in the build-tagged file, because internal/profile is reachable
+	// only from a tagged helper and a second copy of the predicate here would
+	// be a second answer to one question (AD-8).
+	Mode proto.SSHMode
+	// AgentHelperPath and AgentToolSocketPath are the far host's two paths to
+	// nocx's tool surface, or empty — see proto.SSHSpawnParams.
+	AgentHelperPath     string
+	AgentToolSocketPath string
+	// Cols and Rows are the channel's pty size.
+	Cols uint16
+	Rows uint16
+	// Lifecycle is the caller's request for the authenticated lifecycle
+	// channel, carried so the gap can be NAMED where it is refused: this
+	// generation delivers the pane and opens no tunnel (the forward ops of
+	// nocx-50w7p.8), and the spawner logs that by name. It is never rendered
+	// into the launcher — a bearer value with no channel behind it would be a
+	// credential minted for nobody.
+	Lifecycle *proto.LifecycleLaunch
+}
+
+// SSHSpawner opens one shell channel on a far host and adapts it to Process.
+//
+// # Why it is a separate interface, and why nil is an answer
+//
+// A session whose process is a remote shell channel needs an ssh client, and a
+// helper carries one only when it was built with nocx_local_ssh (plan §1): the
+// artifact written to a host we do not own links none. So this seam is nil in
+// every untagged build, and a spawn-ssh that reaches one is REFUSED BY NAME
+// rather than answered with a session that cannot work — the same answer
+// cmd/nocx-helper gives for the whole ssh service, one op in.
+//
+// It takes a context because the connection to ask is the REQUEST's, not the
+// service's: a helper serves several coordinators at once (D12), and the
+// credential and the host-key verdict belong to the one that asked.
+type SSHSpawner interface {
+	SpawnSSH(ctx context.Context, req SSHSpawnRequest) (Process, error)
+}
+
 // Inspector is the OS-evidence seam (D10), and it draws two distinctions
 // rather than one.
 //
@@ -344,7 +409,7 @@ func (s *hostSession) watchExit(now func() time.Time, notify func(proto.SessionE
 	s.log.Info("session exited", "session", s.id.Session,
 		"code", status.Code, "signal", status.Signal,
 		"produced", uint64(written), "retained", uint64(written-base),
-		"windowResidentBytes", s.win.allocated(), "windowBytes", s.launch.WindowBytes)
+		"windowResidentBytes", s.win.allocated(), "windowBytes", s.launch.WindowBytes())
 
 	notify(proto.SessionExit{Session: s.id, Status: status})
 }
@@ -379,12 +444,24 @@ func (s *hostSession) entry(inspector Inspector) proto.SessionEntry {
 	if writer != nil {
 		e.WriterEpoch = epoch
 	}
-	if inspector != nil && exit == nil {
+	// THE ONE PLACE A SESSION'S EVIDENCE IS TAKEN, and it is taken only where
+	// there is a process on THIS MACHINE to ask about.
+	//
+	// `s.launch.Pid` used to be read unconditionally, and a session whose
+	// process is somewhere else makes that a defect rather than a stale field:
+	// the union's remote branch has no pid at all, so the value here would be
+	// zero — and pid 0 is the kernel scheduler. The helper would then report
+	// the scheduler's argv, start time and state under this session's
+	// authority, which is the exact confusion the authority/evidence split
+	// exists to prevent. A remote session is observed by NOBODY, and its entry
+	// says so the way the schema already means: `observed: null` — "nobody
+	// could be asked".
+	if inspector != nil && exit == nil && s.launch.IsLocal() {
 		fg, err := s.proc.ForegroundProcessGroup()
 		if err != nil {
 			fg = 0
 		}
-		e.Observed = inspector.Observe(s.launch.Pid, fg)
+		e.Observed = inspector.Observe(s.launch.LocalPid(), fg)
 	}
 	return e
 }

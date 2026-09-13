@@ -31,13 +31,13 @@
 // It is gitignored build output, so nothing here links until `make vt-archives`
 // has verified those bytes against the manifest and put them there. NOTHING
 // BUILDS THE ARCHIVE LOCALLY ANY MORE: these directives used to name a
-// `.vendor/ghostty/zig-out` checkout built by hand from upstream source, which
-// made the linked bytes depend on whoever last ran the build, and a ghostty
-// source checkout inside the repository breaks the root eslint run because
-// ghostty's own tree contains JavaScript. The pin — source commit, toolchain
-// and flags together: ghostty e2e53f861482e080bf45054ba49ef471f9849937,
-// Zig 0.16.0 and ReleaseFast — lives in the manifest now, and the bytes that
-// reach the linker are the ones published against it.
+// hand-built checkout of upstream source inside this package, which made the
+// linked bytes depend on whoever last ran that build, and a ghostty source
+// checkout inside the repository breaks the root eslint run because ghostty's
+// own tree contains JavaScript. The pin — source commit, toolchain and flags
+// together: ghostty e2e53f861482e080bf45054ba49ef471f9849937, Zig 0.16.0 and
+// ReleaseFast — lives in the manifest now, and the bytes that reach the linker
+// are the ones published against it.
 //
 // TWO ARCHIVES FOR EACH LINUX TARGET, chosen by the `vtmusl` build tag. An
 // archive's libc is baked into its objects, so which of the pair a build links

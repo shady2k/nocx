@@ -2159,6 +2159,35 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
   })
 })
 
+// The other half of the one-answerer change (ADR-0066, nocx-ygxjv.12). The
+// renderer stopped producing xterm's automatic replies to the program's own
+// queries — proved against the REAL engine in renderers/xterm.test.ts — and
+// this is the half that lives at the surface: the replies travelled
+// renderer.onData → session.send, which is ALSO the path a keystroke takes, so
+// removing the path with the replies would have left a terminal nobody can
+// type into. What this pins is the path, not the engine: a key reaching the
+// terminal still reaches the session, byte for byte and in order.
+describe('typing still reaches the session (nocx-ygxjv.12)', () => {
+  it('forwards every key the terminal produces, in order', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      session.send.mockClear()
+
+      // A word and the Enter that submits it: three separate onData events at
+      // xterm, and three writes at the pty.
+      rendererOf(content)._fireData('l')
+      rendererOf(content)._fireData('s')
+      rendererOf(content)._fireData('\r')
+
+      expect(session.send.mock.calls).toEqual([['l'], ['s'], ['\r']])
+    } finally {
+      teardown()
+    }
+  })
+})
+
 // Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The
 // authority axis moves only on published facts; the buffer axis is a
 // renderer-owned presentation fact; no stream marker, submit or passport

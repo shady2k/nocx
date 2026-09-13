@@ -146,8 +146,14 @@ type Options struct {
 	// Inspector is optional: nil means this helper offers no OS evidence,
 	// which is the honest answer on a platform that has none.
 	Inspector Inspector
-	Log       *slog.Logger
-	Limits    Limits
+	// Screen builds the emulator each session's runtime is created over
+	// (ADR-0066): the screen, the modes and the answers to the program's own
+	// questions. Nil is the shipped engine — see defaultScreen, which is the
+	// one place that choice is named — so production leaves it nil and the
+	// seam exists for a test that needs a screen it can read back.
+	Screen ScreenFactory
+	Log    *slog.Logger
+	Limits Limits
 	// Now and NewID are seams for tests. Production leaves them nil.
 	Now   func() time.Time
 	NewID func() ([16]byte, error)
@@ -158,6 +164,7 @@ type Service struct {
 	generation proto.GenerationID
 	spawner    Spawner
 	inspector  Inspector
+	screen     ScreenFactory
 	log        *slog.Logger
 	limits     Limits
 	now        func() time.Time
@@ -206,6 +213,7 @@ func New(opts Options) *Service {
 		generation: opts.Generation,
 		spawner:    opts.Spawner,
 		inspector:  opts.Inspector,
+		screen:     opts.Screen,
 		log:        opts.Log,
 		limits:     opts.Limits.withDefaults(),
 		now:        opts.Now,
@@ -213,6 +221,9 @@ func New(opts Options) *Service {
 		sessions:   make(map[string]*hostSession),
 		keys:       make(map[string]*keyClaim),
 		sinks:      make(map[Sink]struct{}),
+	}
+	if s.screen == nil {
+		s.screen = defaultScreen
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -417,7 +428,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		if err := hs.proc.Resize(ctx, p.Cols, p.Rows, 0, 0); err != nil {
+		// Through the runtime, so the PTY and the emulator take the size
+		// together and the commit in force is the one both are running at. The
+		// request's context is not threaded: the commit is two ioctls and a
+		// write on fds this process owns, and there is no partial state for a
+		// cancellation to leave behind.
+		if err := hs.resize(p.Cols, p.Rows); err != nil {
 			return nil, err
 		}
 		return proto.ResizeResult{}, nil
@@ -565,6 +581,29 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		lg.Error("helper: the pane's shell could not be started", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+
+	// THE SESSION'S OWN TERMINAL, CREATED WITH IT (ADR-0066, nocx-ygxjv.12).
+	// This is where the emulator stops being the browser's property: it is
+	// built here, beside the PTY, before the pump reads a byte, and it is
+	// therefore authoritative for the session's whole life — through every
+	// attach, every coordinator that comes and goes, and every moment when
+	// nobody is attached at all. A failure is REFUSED rather than degraded: a
+	// shell running under no terminal would answer none of the questions a
+	// program asks its terminal, and the pane would look alive while being
+	// unable to run anything that asks.
+	rt, screen, err := newSessionRuntime(s.screen, proc, proto.SessionHex(raw), cols, rows)
+	if err != nil {
+		// Nothing has been read from this process and nothing has been
+		// registered, so the spawn has produced nothing: end the shell rather
+		// than leave a process running with no terminal state behind it, give
+		// the reserved window back, and report the refusal the caller acts on.
+		_ = proc.Close()
+		s.mu.Lock()
+		s.budget -= reserved
+		s.mu.Unlock()
+		lg.Error("helper: the pane's terminal could not be created", "error", err)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
 	lifecycleWin := (*window)(nil)
 	lifecycleBudget := int64(0)
 	var lifecycleCarrier io.ReadWriteCloser
@@ -593,6 +632,8 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		startedAt:       s.now(),
 		proc:            proc,
 		win:             newWindow(bound),
+		runtime:         rt,
+		screen:          screen,
 		lifecycleWin:    lifecycleWin,
 		lifecycleBudget: lifecycleBudget,
 		// Retained for the life of the session, and only when there is a

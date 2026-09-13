@@ -251,10 +251,18 @@ func (f *sshFixture) serveSession(ch gossh.Channel, reqs <-chan *gossh.Request) 
 			}
 			_ = req.Reply(true, nil)
 		case "shell":
-			_ = req.Reply(true, nil)
+			// Recorded BEFORE the reply, like the pty and window-change arms
+			// above, and for the same reason: the reply is what a caller waits
+			// on, so a test that asserts what the far host was asked for reads
+			// it after the answer has travelled back — and a record written
+			// after the reply is one that assertion can outrun. It did, in 82
+			// of 2000 repetitions under load: the spawn answered, and this
+			// fixture's own count said the far host had never been asked for a
+			// shell.
 			f.mu.Lock()
 			f.shells++
 			f.mu.Unlock()
+			_ = req.Reply(true, nil)
 			f.start(ch, st, f.shellCommand)
 		case "exec":
 			var e struct{ Command string }
@@ -262,10 +270,12 @@ func (f *sshFixture) serveSession(ch gossh.Channel, reqs <-chan *gossh.Request) 
 				_ = req.Reply(false, nil)
 				continue
 			}
-			_ = req.Reply(true, nil)
+			// Same ordering as `shell`: the command line is on record before
+			// the request that made it is answered.
 			f.mu.Lock()
 			f.execs = append(f.execs, e.Command)
 			f.mu.Unlock()
+			_ = req.Reply(true, nil)
 			f.signal(f.execSeen)
 			f.start(ch, st, e.Command)
 		default:
@@ -299,7 +309,11 @@ func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string) {
 	f.mu.Unlock()
 	f.signal(f.started)
 
-	go f.pumpToChannel(ch, master)
+	// drained is closed by the output pump when the pty has nothing left to
+	// hand it — see the exit watcher below for why the close waits on it.
+	drained := make(chan struct{})
+
+	go f.pumpToChannel(ch, master, drained)
 	go f.pumpToProgram(ch, master)
 	go func() {
 		werr := cmd.Wait()
@@ -320,6 +334,17 @@ func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string) {
 			_, _ = ch.SendRequest("exit-status", false,
 				gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)})) // #nosec G115 -- clamped above.
 		}
+		// The far side's OUTPUT is drained before anything is closed, and this
+		// wait is what makes that true. Closing the pty from here — which is
+		// what this watcher used to do — kills whatever read the pump has
+		// parked, and the bytes the kernel was still holding for it (the
+		// program's last line) die with the descriptor: measured, 3 runs in
+		// 2000 under load, with the far side's `od` line recorded and its final
+		// `DSR-DONE` line gone. Nothing has to be closed to end that read: once
+		// the command and anything it left holding the slave are gone, a read
+		// on the master returns EIO after draining what is buffered, so the
+		// pump finishing IS the far host having nothing left to say.
+		<-drained
 		_ = master.Close()
 		_ = ch.Close()
 		f.signal(f.exited)
@@ -332,7 +357,14 @@ func (f *sshFixture) start(ch gossh.Channel, st *sessionState, command string) {
 // and every chunk wakes the far-output waiter, which is what lets a test assert
 // a far-side TOKEN (the loader's own readiness line) without ever asking how
 // long it took.
-func (f *sshFixture) pumpToChannel(ch gossh.Channel, master *os.File) {
+//
+// It also closes drained on the way out, which is the only signal that the far
+// side has no more output: the pty hands a read an error of its own once the
+// command is gone, and the exit watcher in start waits on this before it closes
+// anything — closing the pty out from under this read is what used to drop the
+// program's last line.
+func (f *sshFixture) pumpToChannel(ch gossh.Channel, master *os.File, drained chan<- struct{}) {
+	defer close(drained)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := master.Read(buf)

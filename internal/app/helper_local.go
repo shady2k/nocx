@@ -651,6 +651,26 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	// a shell channel it dialed. That is exactly the fact paneScreen.owner
 	// cannot read off the session's kind.
 	o.noteHeld(sid)
+	// THE OTHER END OF THE SET, for a session that ENDS (nocx-50w7p.5). The
+	// daemon reports the process's own end on the session, and an owner that
+	// went on routing to it would be pointing at a terminal that is gone. It is
+	// the shape watchForReplacement already uses on the local half — one
+	// goroutine that ends with the session it watches, which is why a pane
+	// costs one of these whether it is local or remote — and it is started for
+	// BOTH destinations, because the remote one has no shell replacement to
+	// watch and would otherwise have nothing observing its end at all.
+	//
+	// A LOST CONNECTION IS NOT THIS, and nothing is cleared when the socket
+	// drops (dropIfLost): the daemon still holds the sessions behind it, which
+	// is the whole reason a replacement can take them back.
+	//
+	// It deliberately does not select on the caller's context: an open's
+	// context ends when the request that asked for the pane does, and a watcher
+	// that stopped there would forget a session that is still running.
+	go func() {
+		<-res.Session.Done()
+		o.forgetHeld(sid)
+	}()
 	return out, true, nil
 }
 

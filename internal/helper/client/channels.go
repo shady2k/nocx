@@ -110,15 +110,8 @@ func (c *Client) OpenChannel(ctx context.Context, params proto.OpenChannelParams
 	if result.Channel.IsZero() {
 		return nil, errors.New("helper: open channel: the helper answered no channel id")
 	}
-	s := &ChannelStream{
-		client: c,
-		id:     result.Channel,
-		data:   newStream(),
-		done:   make(chan struct{}),
-	}
-	c.mu.Lock()
-	if _, exists := c.channels[result.Channel]; exists {
-		c.mu.Unlock()
+	s, err := c.claimChannel(result.Channel)
+	if err != nil {
 		// The helper minted an id it is already serving. Closing it is the
 		// only honest answer: it is a stream nobody can address, and leaving
 		// it open would be a channel the helper holds for a caller that has
@@ -131,17 +124,44 @@ func (c *Client) OpenChannel(ctx context.Context, params proto.OpenChannelParams
 		_ = c.tellHelperChannelClosed(ctx, result.Channel)
 		return nil, fmt.Errorf("helper: the helper reused channel id %s", result.Channel)
 	}
-	c.channels[result.Channel] = s
-	// Anything that arrived while this call was in flight goes in FIRST, in
-	// the order it arrived: the queue is the stream's own, so the parked bytes
-	// land ahead of whatever the helper sends next.
-	if parked, ok := c.parkedChannels[result.Channel]; ok {
-		delete(c.parkedChannels, result.Channel)
+	return s, nil
+}
+
+// errChannelIDInUse is the helper having minted an id this client is already
+// serving: a stream whose bytes would go to whichever of the two claimed it
+// first, and a protocol mistake rather than a state to resolve.
+var errChannelIDInUse = errors.New("helper: the channel id is already in use")
+
+// claimChannel registers a stream for an id THE HELPER MINTED, handing it the
+// frames that arrived before anything here could address them (see OpenChannel
+// for the whole race).
+//
+// One function for both ways a channel is born, because the parking rule is
+// the same one in both and a second registration site would be a second place
+// to forget it: a stream whose id this client already serves is refused, and
+// the caller decides what to tell the helper.
+func (c *Client) claimChannel(id proto.ChannelID) (*ChannelStream, error) {
+	s := &ChannelStream{
+		client: c,
+		id:     id,
+		data:   newStream(),
+		done:   make(chan struct{}),
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.channels[id]; exists {
+		return nil, errChannelIDInUse
+	}
+	c.channels[id] = s
+	// Anything that arrived while the id was being established goes in FIRST,
+	// in the order it arrived: the queue is the stream's own, so the parked
+	// bytes land ahead of whatever the helper sends next.
+	if parked, ok := c.parkedChannels[id]; ok {
+		delete(c.parkedChannels, id)
 		for _, payload := range parked {
 			s.data.push(inbound{payload: payload})
 		}
 	}
-	c.mu.Unlock()
 	return s, nil
 }
 

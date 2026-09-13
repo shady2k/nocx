@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/ssh.forward-closed.schema.json",
+  "title": "HelperSSHForwardClosedEvent",
+  "description": "The announcement that a listener is over: the coordinator asked (its own unforward), the far side's connection died under it, or the server closed it. It exists for the case nothing else covers — a caller parked in Accept, which would otherwise wait for ever — and the CAUSE is the field that separates the two meanings: empty when the coordinator itself asked, the helper's sentence when nobody here did. It is announced on both ways of ending, for the reason a channel's close is: an id the coordinator has already forgotten is dropped by its own routing, and one dropped frame is cheaper than a reader waiting for an end that never comes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["forward"],
+  "properties": {
+    "forward": {
+      "description": "The listener that ended, as 32 hex characters.",
+      "$ref": "https://nocx.local/contracts/helper/ssh.schema.json#/$defs/forwardId"
+    },
+    "error": {
+      "description": "The helper's own sentence for an end nobody here asked for: the far side's connection dying under the listener is the case a -R forward and the remote lifecycle channel both have to hear, because both hold an Accept. Empty when the coordinator's own unforward is what ended it.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

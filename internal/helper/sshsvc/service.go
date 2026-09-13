@@ -118,13 +118,15 @@ type Service struct {
 	client Client
 	log    *slog.Logger
 
-	// mu guards channels: the proxied channels this daemon holds, across every
-	// connection it serves. The service is process-scoped (one per daemon,
-	// beside the sessions) while the ssh connections are per-COORDINATOR, so
-	// the registry is one map and the identity of a channel is its random
-	// 128-bit id rather than anything derived from a connection.
+	// mu guards channels and forwards: the proxied channels and remote
+	// listeners this daemon holds, across every connection it serves. The
+	// service is process-scoped (one per daemon, beside the sessions) while
+	// the ssh connections are per-COORDINATOR, so the registry is one map and
+	// the identity of a channel is its random 128-bit id rather than anything
+	// derived from a connection.
 	mu       sync.Mutex
 	channels map[proto.ChannelID]*openChannel
+	forwards map[proto.ForwardID]*openForward
 }
 
 // Compile-time proof that this satisfies the host's registerable service and
@@ -151,7 +153,7 @@ func (s *Service) Name() string { return proto.ServiceSSH }
 // a helper that claimed to answer `sign` would be claiming to hold key
 // material it does not have.
 func (s *Service) Ops() []string {
-	return append([]string{proto.OpProbe}, s.channelOps()...)
+	return append(append([]string{proto.OpProbe}, s.channelOps()...), s.forwardOps()...)
 }
 
 // ParamsSchema declares the shape of each op. D3 is enforced off this table:
@@ -165,6 +167,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.OpenChannelParams{})
 	case proto.OpClose:
 		return host.SchemaFor(proto.CloseChannelParams{})
+	case proto.OpForward:
+		return host.SchemaFor(proto.ForwardParams{})
+	case proto.OpUnforward:
+		return host.SchemaFor(proto.UnforwardParams{})
 	}
 	return nil
 }
@@ -220,6 +226,22 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return s.closeChannel(p.Channel)
+	case proto.OpForward:
+		var p proto.ForwardParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadChannelParams, err)
+			}
+		}
+		return s.forward(ctx, p)
+	case proto.OpUnforward:
+		var p proto.UnforwardParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, fmt.Errorf("%w: %w", errBadChannelParams, err)
+			}
+		}
+		return s.unforward(p.Forward)
 	}
 	return nil, fmt.Errorf("ssh: no op %q on this service", op)
 }
@@ -239,20 +261,10 @@ func (s *Service) probe(ctx context.Context, p proto.ProbeParams) (proto.ProbeRe
 		return proto.ProbeResult{}, err
 	}
 
-	auth, err := s.authMethod(ctx, conn, p.Identity)
+	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	gcfg, err := s.clientConfig(ctx, conn, p.User, p.Identity, p.AcceptOnTrust)
 	if err != nil {
 		return proto.ProbeResult{}, err
-	}
-
-	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
-	gcfg := &gossh.ClientConfig{
-		User: p.User,
-		// Exactly one method, as the coordinator's own probe path insists: a
-		// second attempt against one host is indistinguishable from password
-		// spraying, and MaxAuthTries is finite.
-		Auth:            []gossh.AuthMethod{auth},
-		HostKeyCallback: s.hostKeyCallback(ctx, conn, p.AcceptOnTrust),
-		Timeout:         ProbeTimeout,
 	}
 
 	client, err := s.client.DialAuth(ctx, addr, p.Host, p.User, gcfg)
@@ -327,6 +339,30 @@ func validateIdentity(id proto.SSHIdentity) error {
 		return nil
 	}
 	return fmt.Errorf("%w: auth %q is not one this helper knows", errBadProbeParams, id.Auth)
+}
+
+// clientConfig builds the ONE client configuration this helper dials with.
+//
+// Shared by the probe and by every channel op, and by the forward op, because a
+// second builder would be a second answer to "how does this helper
+// authenticate" — and the two would first disagree about the arm that matters:
+// a config with more than one method is password spraying against somebody
+// else's host, and a config with no host-key callback is one that trusts
+// whatever answers.
+func (s *Service) clientConfig(ctx context.Context, conn *host.Host, user string, id proto.SSHIdentity, acceptOnTrust bool) (*gossh.ClientConfig, error) {
+	auth, err := s.authMethod(ctx, conn, id)
+	if err != nil {
+		return nil, err
+	}
+	return &gossh.ClientConfig{
+		User: user,
+		// Exactly one method, as the coordinator's own probe path insists: a
+		// second attempt against one host is indistinguishable from password
+		// spraying, and MaxAuthTries is finite.
+		Auth:            []gossh.AuthMethod{auth},
+		HostKeyCallback: s.hostKeyCallback(ctx, conn, acceptOnTrust),
+		Timeout:         ProbeTimeout,
+	}, nil
 }
 
 // authMethod builds the ONE method this probe will send.

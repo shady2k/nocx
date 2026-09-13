@@ -74,7 +74,7 @@ func newTunnelHarness(t *testing.T, connector tunnel.Connector) *tunnelHarness {
 	srv := startTunnelTestSSHServer(t)
 	conn := connector
 	if conn == nil {
-		conn = tunnelTestClient(t, srv)
+		conn = tunnelTestConnector(t, srv)
 	}
 	resolver := &fixedProfileResolver{host: srv.addr, cfg: tunnelResolveConfig(srv)}
 	ws := NewWSServer(

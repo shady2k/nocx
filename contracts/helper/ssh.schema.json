@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/ssh.schema.json",
   "title": "HelperABISSHVocabulary",
-  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, and which channels this generation opens. It declares $defs and nothing else, so one concept has one declaration (AD-8) — the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels). The service speaks in BOTH directions: `probe`, `open` and `close` are forward ops the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
+  "description": "The shared vocabulary of the helper ABI's ssh service: what a credential reference is, what a probe can answer, what a destination is, which channels this generation opens, where a channel connects, and the identity of a remote listener. It declares $defs and nothing else, so one concept has one declaration (AD-8) — the same discipline identities.schema.json applies to sessions, applied to the second subject this wire grew (nocx-50w7p.2, extended by nocx-50w7p.3's proxied channels and nocx-50w7p.8's forwards). The service speaks in BOTH directions: `probe`, `open`, `close`, `forward` and `unforward` are forward ops the helper answers, and `secret`, `sign`, `verify-host-key` and `trust-host-key` are reverse ops the helper ASKS the coordinator, over the same connection its own request arrived on.",
   "$defs": {
     "credential": {
       "description": "An opaque handle on one stored credential, minted by the COORDINATOR and echoed back by the helper verbatim. The helper never interprets either field, and that is the whole authorization story on this wire: it cannot ask for material the coordinator did not name. PassphraseRef exists because a key and the passphrase that unlocks it are two stored secrets — resolving one where the other was meant is how a wrong-but-valid password gets tried against a server — and it is a REFERENCE and never material: the coordinator is the party that parses a private key, so a passphrase never reaches the helper at all.",
@@ -55,8 +55,12 @@
       "additionalProperties": false,
       "required": ["credential", "auth"],
       "properties": {
-        "credential": { "$ref": "#/$defs/credential" },
-        "auth": { "$ref": "#/$defs/authKind" },
+        "credential": {
+          "$ref": "#/$defs/credential"
+        },
+        "auth": {
+          "$ref": "#/$defs/authKind"
+        },
         "publicKey": {
           "description": "The wire-format public key blob (RFC 4253 §6.6) as base64. Required for key auth — a helper asked to sign with a key it was not given would have to invent one — and absent for password auth.",
           "type": "string",
@@ -86,16 +90,42 @@
           "type": "string",
           "minLength": 1
         },
-        "identity": { "$ref": "#/$defs/identity" }
+        "identity": {
+          "$ref": "#/$defs/identity"
+        }
       }
     },
     "channelKind": {
-      "description": "The closed set of PROXIED CHANNELS this generation opens. A kind names a protocol the helper itself implements; it is never a command, an argv or a free-form string list — host.Register refuses a bare []string outright (D3) — so a caller that wants a different channel adds a member here in a generation, with a protocol bump and a test. `sftp` is a session channel carrying the sftp SUBSYSTEM: the helper moves its bytes and does not speak the protocol, which is why pkg/sftp stays in the coordinator.",
+      "description": "The closed set of PROXIED CHANNELS this generation opens. A kind names a protocol the helper itself implements; it is never a command, an argv or a free-form string list — host.Register refuses a bare []string outright (D3) — so a caller that wants a different channel adds a member here in a generation, with a protocol bump and a test. `sftp` is a session channel carrying the sftp SUBSYSTEM: the helper moves its bytes and does not speak the protocol, which is why pkg/sftp stays in the coordinator. `direct-tcpip` is a channel to an ADDRESS on the far side's network: it is the outbound half of a forward (-L) and of every SOCKS CONNECT, and it takes the `target` a subsystem open does not (nocx-50w7p.8).",
       "type": "string",
-      "enum": ["sftp"]
+      "enum": ["sftp", "direct-tcpip"]
     },
     "channelId": {
       "description": "One proxied channel's identity, minted by the helper and echoed verbatim by the coordinator. It is 32 hex characters — sixteen raw bytes on the data plane — and it is opaque in both directions: the coordinator never derives it and the helper never lets a caller choose it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "channelTarget": {
+      "description": "One address a channel is opened to, TYPED: two fields and never one \"host:port\" string, because a spelling would have to be parsed again on the far side by something that is not allowed to guess, and the one caller that legitimately carries a name rather than an address — a SOCKS CONNECT — still carries a NAME and a PORT. An IPv6 literal therefore crosses without brackets and is joined there.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "description": "The address or name to connect to, resolved on the FAR side. Empty is refused: an address that names nothing is not a target.",
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "The port, 0-65535. 0 is legal on a LISTENER (the server allocates, and the answer carries what it allocated) and refused on a direct-tcpip target, where the far side would answer a connection to port 0 with a refusal of its own.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "forwardId": {
+      "description": "One remote listener's identity, minted by the helper and echoed verbatim by the coordinator. It is a SEPARATE identity from a channel id rather than a second use of it: a channel is one stream somebody holds, a listener is the thing streams arrive ON, and the two are created and ended by different ops (`close` versus `unforward`). An id that could be either would make those interchangeable at the type level while meaning different things on the wire.",
       "type": "string",
       "pattern": "^[0-9a-f]{32}$"
     }

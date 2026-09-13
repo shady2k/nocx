@@ -16,10 +16,6 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 )
 
-// Compile-time proof that the production SSH client satisfies the tunnel's
-// connector seam directly — the future app wiring needs no adapter.
-var _ tunnel.Connector = (*ssh.RealClient)(nil)
-
 // ---------------------------------------------------------------------------
 // Fake connector: models the pooled-connection semantics the strategies
 // depend on — one shared connection per host, a lease per forward, refcounted

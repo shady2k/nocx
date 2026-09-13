@@ -82,6 +82,17 @@ type Client struct {
 	// names it. Bounded (channels.go), and emptied by the claim or by the
 	// loss. Distinct from pending above, which is the response waiters.
 	parkedChannels map[proto.ChannelID][][]byte
+	// forwards holds the remote listeners this coordinator asked for, keyed by
+	// the id the helper minted (forward.go). A listener's accepted connections
+	// are ordinary channels and live in the map above; this one owns the
+	// listener's lifetime and nothing else.
+	forwards map[proto.ForwardID]*Forward
+	// parkedForwards parks the announcements of a listener whose `ssh.forward`
+	// has not returned yet, so the first connection somebody makes to it is not
+	// lost to the round trip that names the listener. Bounded (forward.go), and
+	// emptied by the claim or by the loss. Distinct from parkedChannels above,
+	// which parks a CHANNEL's bytes rather than a listener's connections.
+	parkedForwards map[proto.ForwardID][]proto.ForwardedTCPIPEvent
 	nextID         uint64
 	lost           bool
 
@@ -121,6 +132,19 @@ func (c *Client) InstanceID() string { return c.instanceID }
 // Done closes when the transport is lost: connection loss, server close,
 // keepalive failure. It does not close on Close.
 func (c *Client) Done() <-chan struct{} { return c.done }
+
+// LostErr reports why the transport shut down. Meaningful once Done has
+// closed; nil while the connection is alive, and nil when it closed cleanly.
+//
+// It is the same value Call puts in the error it fails a request with, so a
+// caller that watched Done can report the cause a request would have reported
+// — which is what a lease carrying several streams needs, since none of them
+// was in flight when the connection died.
+func (c *Client) LostErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lostErr
+}
 
 // Call sends one named operation and waits for its response. A refusal
 // (proto.Error) returns *RefusalError; a dead transport returns an error
@@ -251,8 +275,15 @@ func (c *Client) lose(reason error) {
 		// Every reverse handler still running is freed here: the connection
 		// that asked is gone, so an answer has nowhere to go (reverse.go).
 		c.cancelReverse()
-		c.lostErr = reason
 		c.mu.Lock()
+		// The cause is written UNDER the same mutex its readers take, which is
+		// what the field's own note in sendChannelData requires and what this
+		// line used to break: it was assigned before the lock, so LostErr — the
+		// accessor a lease watcher reads to report WHY its transport died — was
+		// an unsynchronized read against an unsynchronized write. The window was
+		// invisible while nobody read the field without also watching Done
+		// first, and a reader that does not is exactly what a lease's watcher is.
+		c.lostErr = reason
 		c.lost = true
 		matched := make([]*AttachedSession, 0, len(c.attachments))
 		for _, a := range c.attachments {
@@ -267,6 +298,18 @@ func (c *Client) lose(reason error) {
 			channels = append(channels, s)
 		}
 		c.channels = make(map[proto.ChannelID]*ChannelStream)
+		// Remote listeners end with it too, for the same reason one step out:
+		// a caller parked in Accept is waiting on the connection that just
+		// died, and leaving the listener registered would park it for ever.
+		forwards := make([]*Forward, 0, len(c.forwards))
+		for _, f := range c.forwards {
+			forwards = append(forwards, f)
+		}
+		c.forwards = make(map[proto.ForwardID]*Forward)
+		// Announcements nobody can claim any more: the listener they belong to
+		// is gone with the connection, and a paired stream held for one is a
+		// leak with a caller's name on it.
+		c.parkedForwards = make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent)
 		// The park goes with them: nothing can claim it once the wire is
 		// gone, and a payload retained by a dead transport is a leak with a
 		// caller's name on it.
@@ -278,6 +321,14 @@ func (c *Client) lose(reason error) {
 		}
 		for _, a := range matched {
 			a.finish()
+		}
+		for _, f := range forwards {
+			f.mu.Lock()
+			if f.cause == nil {
+				f.cause = fmt.Errorf("%w: %v", ErrLost, reason)
+			}
+			f.mu.Unlock()
+			f.close()
 		}
 	})
 }
@@ -327,11 +378,18 @@ func (c *Client) sessionNotify(payload []byte) {
 	}
 	switch n.Service {
 	case proto.ServiceSSH:
-		// The ssh service's one event: a proxied channel's remote end is
-		// gone (channels.go). Routed by service rather than folded into the
-		// session arm, because the two share nothing but the frame.
-		if n.Event == proto.EventChannelClosed {
+		// The ssh service's events: a proxied channel's remote end is gone, a
+		// connection arrived on a listener this coordinator asked for, and a
+		// listener ended (channels.go, forward.go). Routed by service rather
+		// than folded into the session arm, because the two share nothing but
+		// the frame.
+		switch n.Event {
+		case proto.EventChannelClosed:
 			c.channelNotify(raw)
+		case proto.EventForwardedTCPIP:
+			c.forwardedTCPIP(raw)
+		case proto.EventForwardClosed:
+			c.forwardClosed(raw)
 		}
 		return
 	case proto.ServiceSession:

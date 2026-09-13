@@ -55,6 +55,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -779,9 +780,12 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 	fx.client = client
 
 	provider := &remoteLifecycleProvider{
-		client: client,
-		kernel: kernel,
-		logger: logger,
+		// The tunnel this journey's lifecycle channel rides. See
+		// liveSshdTunnelTransport's own doc for why the transport is the one
+		// stand in a journey whose subject is the far side.
+		tunnels: liveSshdTunnelTransport{lease: fx.tunnelLease(t)},
+		kernel:  kernel,
+		logger:  logger,
 		registerLane: func(lane lifecycle.LaneID, sid string) {
 			fx.registeredLanes = append(fx.registeredLanes, string(lane)+"->"+sid)
 		},
@@ -1134,4 +1138,113 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 			return false
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// The lifecycle channel's tunnel, for a journey whose subject is the FAR side
+
+// liveSshdTunnelTransport is the lease the live-sshd journey's remote lifecycle
+// channel rides: the coordinator's OWN pooled connection to the fixture, with
+// the -R seam (Listen/Done/LostErr/Close) and nothing else.
+//
+// # Why this exists, and what it is standing in for
+//
+// It is a test double for a production path that no longer dials from this
+// process: nocx-50w7p.8 moved every tunnel onto THIS MACHINE'S HELPER
+// (internal/helper/tunnelchan), and the helper's own ssh service is what asks a
+// real sshd for the tcpip-forward this journey is about. Driving THAT would mean
+// installing, starting and trusting a helper daemon inside a unit test — which
+// is what the containerized e2e suite does and what the tunnel package's own
+// tests do against an in-process ssh server, with the whole helper path and its
+// failure modes covered there.
+//
+// What this file's subject is, and what it therefore must not fake, is the FAR
+// side: a real OpenSSH server, a real login shell, the real launcher and the
+// real lifecycle kernel. The transport underneath is the one part of this
+// journey that is not that server — so it is the one part that is allowed to be
+// a stand, and it is built out of the same library, on the same pooled
+// connection, with the same loss watcher the pool lease used to carry.
+type liveSshdTunnelTransport struct {
+	lease ssh.TunnelConn
+}
+
+func (t liveSshdTunnelTransport) TunnelConn(context.Context, string, ...ssh.ConnectOption) (ssh.TunnelConn, error) {
+	return t.lease, nil
+}
+
+// liveSshdTunnelLease builds that lease over the fixture: one pooled reference
+// on the connection the coordinator's own client holds, released by Close (or
+// by the loss watcher, whichever fires first).
+type liveSshdTunnelLease struct {
+	pool      *ssh.PooledConn
+	client    *gossh.Client
+	done      chan struct{}
+	closeOnce sync.Once
+
+	mu      sync.Mutex
+	lostErr error
+}
+
+func (fx *liveSshd) tunnelLease(t *testing.T) *liveSshdTunnelLease {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(fx.addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", fx.addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("port %q: %v", portStr, err)
+	}
+	pool, err := fx.client.AcquirePooled(context.Background(), ssh.PooledSpec{
+		Host: host,
+		Port: port,
+		User: fx.user,
+		// The identity component of the pool key: this lease's own, so it never
+		// shares an entry with a session's connection here (the journey is
+		// about one channel, and sharing would make "which reference closed
+		// it" a question about this test).
+		Identity: "live-sshd-lifecycle",
+		Config: &gossh.ClientConfig{
+			User:            fx.user,
+			Auth:            []gossh.AuthMethod{gossh.PublicKeys(fx.signer)},
+			HostKeyCallback: gossh.FixedHostKey(fx.hostKey),
+		},
+	})
+	if err != nil {
+		t.Fatalf("acquire the pooled connection for the lifecycle tunnel: %v", err)
+	}
+	l := &liveSshdTunnelLease{pool: pool, client: pool.Client(), done: make(chan struct{})}
+	// One watcher, as the pool lease carried: gossh.Client.Wait returns when the
+	// transport shuts down, which is the loss the lifecycle adapter reports.
+	go func() {
+		lost := l.client.Wait()
+		l.mu.Lock()
+		l.lostErr = lost
+		l.mu.Unlock()
+		close(l.done)
+		l.closeOnce.Do(func() { _ = l.pool.Close() })
+	}()
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
+func (l *liveSshdTunnelLease) Dial(addr string) (net.Conn, error) {
+	return l.client.Dial("tcp", addr)
+}
+
+func (l *liveSshdTunnelLease) Listen(addr string) (net.Listener, error) {
+	return l.client.Listen("tcp", addr)
+}
+
+func (l *liveSshdTunnelLease) Done() <-chan struct{} { return l.done }
+
+func (l *liveSshdTunnelLease) LostErr() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lostErr
+}
+
+func (l *liveSshdTunnelLease) Close() error {
+	l.closeOnce.Do(func() { _ = l.pool.Close() })
+	return nil
 }

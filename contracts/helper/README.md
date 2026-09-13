@@ -228,3 +228,54 @@ sentence keeps the distinction.
 The schemas are frozen from here like every sibling's: a new op degrades (an older
 helper answers `unknown_op`, which a coordinator reads as "this machine's helper
 is older than this app"), and a new FIELD on one of these shapes does not.
+
+## What landed with `nocx-50w7p.8`, and why `Version` moved to 5
+
+The **forward plane**, which is the other direction a channel can be born in.
+The proxied-channel plane let the coordinator ASK for a stream and hold it; a
+forward is the far side LISTENING, and the connections that arrive on it are
+nobody's request here — so they need an announcement, and the listener needs an
+identity and an end of its own.
+
+Three shapes and two events:
+
+- **`direct-tcpip` joins `channelKind`, with a `target`.** It is the outbound
+  half of every forward: -L dials the far side's network, and a SOCKS CONNECT
+  names a host and port that only the far side can resolve. The target is a
+  `channelTarget` — TYPED, two fields, never a `"host:port"` string — and the
+  schema requires it exactly when the kind does (`ssh.open.params`'s if/then,
+  with a test that proves the condition fires).
+- **`forward` and `unforward`**, plus `forwardId`. A listener is not a channel:
+  it is a stream FACTORY, it is created by a different op, and it is ended by a
+  different one. Folding it into `open` would have made "accept on the far side"
+  a mode of "open one stream", and the two would then have to agree about who
+  announces what.
+- **`forwarded-tcpip` and `forward-closed`.** The first says a connection
+  arrived and names the channel its bytes are keyed by; the second says the
+  listener is over, with a cause that is empty when the coordinator asked and
+  the helper's sentence when it broke. Both ride the data plane's ordering
+  guarantee (a `TypeNotify` takes the same writer mutex as the frames), which is
+  what makes an announcement sufficient where a response is not available.
+
+Three decisions worth naming rather than leaving to a reader:
+
+- **A forwarded connection is an ORDINARY channel.** It is registered in the
+  same table, read through the same `ChannelStream`, closed by the same `close`
+  and ended by the same `channel-closed`. Only its creation differs, and its
+  lifetime is tied to the listener's: cancelling a forward ends the streams it
+  produced, because a listener and the streams on it are one resource.
+- **The accept loop starts after the response, like the reader pump.** An
+  accepted connection is announced under the forward's id, and the coordinator
+  learns that id from the response — so a loop started in the handler could
+  announce a connection nobody can address. `ResponseObserver` is the same
+  happens-before edge `open` uses, one op over.
+- **A refused forward is a refusal, not a dial failure.** The server's
+  `AllowTcpForwarding` and its `PermitListen` are indistinguishable on the wire;
+  the sentence carries both possibilities rather than inventing a diagnosis,
+  which is exactly what the -R strategy has always said.
+
+The schemas are frozen from here like every sibling's: the two new ops degrade
+(an older helper answers `unknown_op`), and the `target` FIELD does not — which
+is what makes this a version bump rather than an addition, since a helper
+speaking 4 would build its params schema from the same struct, accept a field it
+does not know, and answer a direct-tcpip open as a subsystem one.

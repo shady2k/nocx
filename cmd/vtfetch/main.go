@@ -38,10 +38,13 @@ import (
 // the Makefile, CI and the recipe all name this file too.
 const DefaultManifest = vtpin.ManifestPath
 
-// DefaultStubs is the macOS cross-link stub directory: two empty .tbd files
-// that satisfy the linker's lookup for libresolv and CoreFoundation, which
-// Go's own darwin runtime puts on every link line and a Linux host has no
-// macOS SDK to supply. See third_party/libghostty-vt/README.md.
+// DefaultStubs is the macOS cross-link stub directory. Three .tbd files satisfy
+// the linker's lookup for libresolv and for the CoreFoundation and Security
+// frameworks, which Go's own darwin x509 path puts on the link line of any
+// binary that imports crypto/x509 and a Linux host has no macOS SDK to supply.
+// libresolv's export list is empty because nothing references a res_9_* symbol;
+// the two frameworks export the names Go declares, because something does. See
+// third_party/libghostty-vt/stubs/README.md.
 const DefaultStubs = "third_party/libghostty-vt/stubs"
 
 func main() {

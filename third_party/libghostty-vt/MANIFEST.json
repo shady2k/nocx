@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "dependency": "libghostty-vt",
+  "upstream": {
+    "repository": "https://github.com/ghostty-org/ghostty",
+    "commit": "e2e53f861482e080bf45054ba49ef471f9849937",
+    "version": "1.3.2-dev",
+    "license": "MIT"
+  },
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "build": {
+    "command": "zig build -Demit-lib-vt=true -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget={zigTarget}",
+    "flags": ["-Demit-lib-vt=true", "-Demit-xcframework=false", "-Doptimize=ReleaseFast"],
+    "archive": "zig-out/lib/libghostty-vt.a",
+    "headers": "zig-out/include/ghostty",
+    "canonicalHost": "linux/amd64, Zig 0.16.0"
+  },
+  "release": {
+    "tag": "libghostty-vt-e2e53f861482",
+    "assetURLTemplate": "https://github.com/shady2k/nocx/releases/download/libghostty-vt-e2e53f861482/{asset}",
+    "prerelease": true
+  },
+  "source": {
+    "sha256": "2b5fec89a149350878eb5578b0e583b4f0fa9586ac96e0c500c3b3318cd4c17c",
+    "bytes": 39411008
+  },
+  "targets": [
+    {
+      "name": "linux-amd64",
+      "goos": "linux",
+      "goarch": "amd64",
+      "libc": "musl",
+      "zigTarget": "x86_64-linux-musl",
+      "archive": {
+        "sha256": "857e71052f14aebced240804803139c4feeb14b02fc0d6c0b451eb0826b60932",
+        "bytes": 18413024
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    },
+    {
+      "name": "linux-arm64",
+      "goos": "linux",
+      "goarch": "arm64",
+      "libc": "musl",
+      "zigTarget": "aarch64-linux-musl",
+      "archive": {
+        "sha256": "fc09cc701fb364e76f4b819e552273265896af87daf08f24adff01e839ec5cfd",
+        "bytes": 18848716
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    },
+    {
+      "name": "linux-amd64-gnu",
+      "goos": "linux",
+      "goarch": "amd64",
+      "libc": "glibc",
+      "zigTarget": "x86_64-linux",
+      "archive": {
+        "sha256": "4f54a741fb81d81dd7a39fe7a52d61664f9531f941bfcad9e16ccdf4dea3eb46",
+        "bytes": 18413024
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    },
+    {
+      "name": "linux-arm64-gnu",
+      "goos": "linux",
+      "goarch": "arm64",
+      "libc": "glibc",
+      "zigTarget": "aarch64-linux",
+      "archive": {
+        "sha256": "59b5e95b56ecb5cf1ca4106a0ce0b8229506be16603006c6433748021b91ee81",
+        "bytes": 18848716
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    },
+    {
+      "name": "darwin-amd64",
+      "goos": "darwin",
+      "goarch": "amd64",
+      "libc": "system",
+      "zigTarget": "x86_64-macos",
+      "archive": {
+        "sha256": "fff62f32963aad6a2d6ac77b07dea9655abc5a1d944f5884f14bc6a401ec8b31",
+        "bytes": 11908344
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    },
+    {
+      "name": "darwin-arm64",
+      "goos": "darwin",
+      "goarch": "arm64",
+      "libc": "system",
+      "zigTarget": "aarch64-macos",
+      "archive": {
+        "sha256": "3d007e422548ccf19feb0bbb88cea411d76b3598bb5b1670cc7890c7cf8e6fea",
+        "bytes": 10979992
+      },
+      "headers": {
+        "sha256": "47d6261e33b8eb2afbf1b8992882a28611555d33e60131197087affc0da42613",
+        "bytes": 101191
+      }
+    }
+  ]
+}

@@ -7,6 +7,11 @@ GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
 PKG_CONFIG ?= pkg-config
+# The C compiler `make helpers` needs, on every target: Zig 0.16.0, the version
+# ghostty's build.zig.zon declares. A different Zig is different bytes, so
+# `vtfetch zig` checks the version and refuses rather than building something
+# nobody pinned. Install it (nixpkgs, brew, or ziglang.org) or pass ZIG=<path>.
+ZIG ?= zig
 
 # The Linux build targets webkit2gtk-4.1, the surface ADR-0007 decided for
 # this product. Wails v3 defaults to GTK4/WebKitGTK-6.0; the `gtk3` build tag
@@ -56,19 +61,38 @@ endif
 # into the artifact package's bin/ directory and embedded by
 # //go:embed all:bin. The 2x2 matrix was adopted in nocx-v1ltv,
 # which added the Intel macOS target.
-# CGO_ENABLED=0 is load-bearing ON LINUX: a static binary is what a helper on
-# an unknown remote host must be — no remote glibc, no dynamic-loader
-# surprises. ON macOS IT NEVER BOUGHT THAT, and this line said otherwise until
-# somebody measured it (nocx-cm1ac, .internal/spikes/buildmatrix): the darwin
-# helper built by this very target already carries LC_LOAD_DYLIB for
-# /usr/lib/libSystem.B.dylib and /usr/lib/libresolv.9.dylib, because Go's own
-# darwin runtime links them. Read it back with `otool -L`, or from a Linux box
-# with the debug/macho reader in that spike. It matters because adopting a CGo
-# dependency is priced against what the zero actually holds: on Linux it holds
-# everything and the archive must be built -musl to keep it, on macOS it holds
-# nothing that is not already part of the OS. The artifacts are gitignored; a fresh checkout compiles with
-# only the committed .gitignore embedded, and Artifact answers
-# ErrArtifactsNotBuilt until this target has run.
+#
+# CGO_ENABLED=0 IS GONE FROM THIS TARGET (nocx-ygxjv.10): the helper links
+# ghostty's libghostty-vt (ADR-0065), which is a C library, so every target now
+# needs a C compiler and the archive built for it. What the zero USED to buy is
+# still the requirement, and it is now bought by the choice of archive instead
+# of by the absence of CGo:
+#
+#   * ON LINUX a helper on an unknown remote host must be static — no remote
+#     glibc, no dynamic-loader surprises — and that is the `-musl` triple's to
+#     give: the archive's libc is baked into its objects (the glibc pair is the
+#     same size and different bytes), and only the musl build comes out with no
+#     PT_INTERP and no DT_NEEDED. Measured, not assumed: the assertion is in the
+#     recipe below and in third_party/libghostty-vt/scripts/verify-link.sh.
+#   * ON macOS IT NEVER HELD ANYTHING (nocx-cm1ac, .internal/spikes/buildmatrix):
+#     the darwin helper this target has always produced already carries
+#     LC_LOAD_DYLIB for /usr/lib/libSystem.B.dylib and /usr/lib/libresolv.9.dylib,
+#     because Go's own darwin runtime links them. Read it back with `otool -L`, or
+#     from a Linux box with the debug/macho reader in `.internal/spikes/buildmatrix`.
+#
+# -linkmode=external IS REQUIRED, and Go does not choose it here. With
+# CGO_ENABLED=1 the helper pulls in the cgo variants of net, os/user and
+# runtime/cgo, but the program's own packages contain no `import "C"` — so
+# `go build` keeps the INTERNAL linker, which cannot resolve a libc symbol and
+# fails with `relocation target getaddrinfo not defined` and a pile of others
+# (measured: go1.26.7, both Linux targets). Passing the flag makes Zig's linker
+# resolve them, and it is not a workaround for the current state: a target's
+# link mode must not be a function of whether some future package imports C,
+# and nocx-ygxjv.2 adds exactly such a package.
+#
+# The artifacts are gitignored; a fresh checkout compiles with only the
+# committed .gitignore embedded, and Artifact answers ErrArtifactsNotBuilt until
+# this target has run.
 #
 # IT IS A PREREQUISITE OF EVERY TARGET THAT PRODUCES A RUNNABLE BINARY, and
 # that changed on 2026-09-04 with ADR-0057. It used to be the release build's
@@ -92,13 +116,74 @@ endif
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts/bin
 
+# --- the pinned libghostty-vt archives (nocx-ygxjv.10) ------------------------
+#
+# third_party/libghostty-vt/MANIFEST.json is the pin: the ghostty commit, the
+# exact Zig, the build flags, and per target the sha256 of the archive and of
+# its matched headers. Nothing here repeats a hash — `vt-archives` verifies
+# against that file, and it is the only way these bytes reach the tree.
+#
+# `make helpers` therefore needs a pinned Zig (0.16.0, the version
+# build.zig.zon declares) and the archives, which come from the GitHub release
+# the manifest names (or from a local directory, with VT_ASSETS=<dir> — how the
+# tamper check and a pre-publish run are exercised).
+VT_MANIFEST := third_party/libghostty-vt/MANIFEST.json
+VT_ROOT := build/libghostty-vt
+VT_DIST := $(VT_ROOT)/dist
+VT_VENDOR := $(VT_ROOT)/vendor
+VT_STUBS := third_party/libghostty-vt/stubs
+
+.PHONY: vt-archives vt-recipe-audit vt-recipe-pin vt-verify-link vt-helper-size
+
+# Fetch-and-verify. Every job that compiles a CGo package needs this FIRST: an
+# archive that is not the pinned one must stop a build, not link into it.
+vt-archives:
+	@$(GO) run ./cmd/vtfetch fetch --manifest $(VT_MANIFEST) --root $(VT_ROOT) \
+	  $(if $(VT_ASSETS),--base "$(VT_ASSETS)",)
+
+# TWO TARGETS, because a rebuild and a re-pin are opposite jobs and one name
+# for both is a target that always "fails" — `recipe.sh` exits non-zero when
+# the archives it built are not the pinned bytes, which on a rebuild is the
+# NORM (measured: the differing bytes are Zig's own .zig-cache object directory
+# names, which the objects embed and which source + toolchain + flags do not
+# determine; the header bundles and the source tarball DO reproduce).
+#
+# So neither is in a gate: `-audit` reads and reports, `-pin` writes. Publishing
+# is the coordinator's and is one command away; the README says which.
+vt-recipe-audit:
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)"
+
+# Records what this build produced as the pin. That is the act of publishing a
+# new set of archives, so it is explicit and its diff is read before anything
+# is uploaded.
+vt-recipe-pin:
+	@third_party/libghostty-vt/scripts/recipe.sh --out "$(VT_DIST)" --update-manifest
+
+# Prove every pinned archive links, and that the Linux ones link statically —
+# the property the helper needs, asserted on the artifact rather than assumed.
+vt-verify-link:
+	@third_party/libghostty-vt/scripts/verify-link.sh --base "$(VT_DIST)"
+
+# What the helper actually costs per target, and the numbers a size budget has
+# to be derived from.
+vt-helper-size:
+	@third_party/libghostty-vt/scripts/measure-helper-size.sh
+
 .PHONY: helpers
-helpers:
+helpers: vt-archives
 	@mkdir -p $(HELPER_ARTIFACT_DIR)
-	@for t in $(HELPER_TARGETS); do \
+	@zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
+	for t in $(HELPER_TARGETS); do \
 	  os=$${t%/*}; arch=$${t#*/}; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="-s -w" \
+	  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
+	  CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
+	    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" \
 	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
+	  case "$$os" in \
+	    linux) $(GO) run ./cmd/vtfetch inspect --require-static \
+	             $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch >/dev/null || \
+	           { echo "helpers: the linux/$$arch helper is dynamically linked; it must be static on an unknown host" >&2; exit 1; } ;; \
+	  esac; \
 	  gzip -9 -f $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch || exit 1; \
 	done
 	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"

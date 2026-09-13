@@ -112,6 +112,18 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
       - name: Install gofumpt
         run: go install mvdan.cc/gofumpt@latest
 
@@ -219,6 +231,18 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
       # The shells internal/shellintegration drives. That package is portable Go,
       # so it rides here rather than with the OS split — and the bash VERSION it
       # must survive is provisioned below rather than borrowed from a Mac. The
@@ -323,6 +347,18 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      # THE PINNED EMULATOR BYTES, BEFORE ANYTHING THAT LOADS A CGo PACKAGE.
+      # libghostty-vt is linked statically into the helper and the app
+      # (ADR-0065), so `go build`, `go test`, golangci-lint's type-checker and
+      # the dead-code ratchet in this job all compile CGo packages — and every
+      # one of them needs the archive and its matched headers present, and
+      # present as the PINNED bytes. Fetch-and-verify refuses a substituted
+      # archive instead of linking it, with a test that proves it refuses
+      # (internal/vtpin); third_party/libghostty-vt/MANIFEST.json is the pin
+      # and that directory's README is the argument for holding it this way.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
 
       - name: Install Secret Service & dbus-x11
         if: matrix.keyring == 'with-secret-service'

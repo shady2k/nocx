@@ -269,8 +269,13 @@ export async function startStand(): Promise<StandManifest> {
   // could never render. The suite needs them, so the suite builds them
   // (nocx-eoijp).
   //
-  // `make helpers`, not a second copy of the build matrix: HELPER_TARGETS and
-  // the CGO_ENABLED=0 static recipe have one owner, and it is the Makefile.
+  // `make helpers`, not a second copy of the build matrix: HELPER_TARGETS, the
+  // per-target Zig compiler and the pinned libghostty-vt archives have one
+  // owner, and it is the Makefile. Since nocx-ygxjv.10 that target also fetches
+  // the archives from the release the manifest names and verifies them against
+  // it — so this line needs the image to carry the pinned Zig and the fetch to
+  // be able to reach that release, and it links a statically built helper on
+  // Linux rather than a purely Go one.
   execFileSync('make', ['helpers'], { cwd: repoRoot, stdio: 'inherit' })
 
   // Built, not `go run`: go run wraps the binary in a child that survives a

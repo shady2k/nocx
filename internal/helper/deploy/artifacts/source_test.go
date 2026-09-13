@@ -25,10 +25,31 @@ var helperArtifactTargets = []string{
 	"nocx-helper-darwin-arm64.gz",
 }
 
-// The largest stripped target measured after the SSH/SFTP split is 4,212,352
-// bytes (darwin/amd64). A 5 MiB ceiling leaves 1,030,528 bytes (24.5%) for
-// ordinary helper growth while still rejecting a reintroduced client stack.
-const maxHelperBytes int64 = 5 * 1024 * 1024
+// THE CEILING IS SET FROM A MEASUREMENT, and this one is the CGo switch's
+// cost rather than the library's. Measured 2026-09-13 with
+// third_party/libghostty-vt/scripts/measure-helper-size.sh, on the artifacts
+// `make helpers` now produces (per-target Zig, CGO_ENABLED=1, external
+// linking, statically linked musl on Linux):
+//
+//	linux/amd64   6,610,992
+//	linux/arm64   6,452,000
+//	darwin/amd64  4,378,173
+//	darwin/arm64  4,158,306
+//
+// The Linux pair moved from ~4.2 MB to ~6.6 MB because a static musl binary
+// carries its libc; that is the price of the property Makefile's helpers
+// comment protects, and it was paid deliberately rather than measured away.
+// 8 MiB leaves 1,777,616 bytes (21%) above the largest, which is the same
+// proportion the previous 5 MiB ceiling left above 4,212,352 — and it still
+// rejects a reintroduced client stack.
+//
+// IT IS NOT THE INTEGRATION BUDGET. The helper links libghostty-vt in
+// nocx-ygxjv.2, and the spike measured roughly +12.4 MB per Linux helper for a
+// probe that links it (.internal/spikes/buildmatrix/README.md §4). That bump
+// must be derived from a REAL helper — through the same script and from the
+// sizes the test below logs — rather than applied in advance, because a
+// ceiling raised ahead of the measurement measures nothing.
+const maxHelperBytes int64 = 8 * 1024 * 1024
 
 func TestMakeHelpersIsIdempotent(t *testing.T) {
 	first := artifactSizes(t)
@@ -43,7 +64,22 @@ func TestMakeHelpersIsIdempotent(t *testing.T) {
 }
 
 func TestHelperArtifactsStayBelowSizeCeiling(t *testing.T) {
-	for name, size := range artifactSizes(t) {
+	// THE MEASUREMENT HOOK. The release helpers job runs with -v on a failure
+	// and always prints a summary line, so the numbers a budget decision needs
+	// are in the job's own output rather than in somebody's terminal: the
+	// ceiling, the largest artifact, and each target's size.
+	sizes := artifactSizes(t)
+	largest := int64(0)
+	for _, name := range helperArtifactTargets {
+		size := sizes[name]
+		if size > largest {
+			largest = size
+		}
+		t.Logf("helper artifact %s: %d bytes decompressed", name, size)
+	}
+	t.Logf("largest helper artifact %d bytes; ceiling %d bytes; headroom %d bytes",
+		largest, maxHelperBytes, maxHelperBytes-largest)
+	for name, size := range sizes {
 		if size > maxHelperBytes {
 			t.Fatalf("helper artifact %s exceeds size ceiling: decompressed size %d, ceiling %d", name, size, maxHelperBytes)
 		}

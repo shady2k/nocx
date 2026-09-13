@@ -41,6 +41,12 @@ npm ci --prefer-offline --no-audit --no-fund
 # (e2e/stand.ts), so they land root-owned next to the .gitignore that hides
 # them, where the next `make helpers` on the host cannot overwrite them.
 #
+# build/libghostty-vt joins them for exactly that reason and for the same
+# owner — `make helpers` fetches the pinned archives there now
+# (nocx-ygxjv.10). Its files are verified rather than rewritten when they are
+# already the pinned bytes, so the common case needs no write; a NEW pin does,
+# and that is the write that would fail as root-owned.
+#
 # In the EXIT trap, not after the run: the point is the FAILING run, whose
 # artefacts are the ones somebody is about to read. `|| true` because a
 # best-effort tidy must never be what a run reports — the test result is.
@@ -48,7 +54,8 @@ handback() {
   local status=$?
   if [ -n "${NOCX_E2E_HOST_UID:-}" ] && [ -n "${NOCX_E2E_HOST_GID:-}" ]; then
     chown -R "$NOCX_E2E_HOST_UID:$NOCX_E2E_HOST_GID" \
-      /work/.e2e /work/test-results /work/internal/helper/deploy/artifacts 2>/dev/null || true
+      /work/.e2e /work/test-results /work/internal/helper/deploy/artifacts \
+      /work/build/libghostty-vt 2>/dev/null || true
   fi
   return $status
 }

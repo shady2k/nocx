@@ -268,6 +268,55 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# nocx-sf1. C4 cashes the stubs' promise for a binary that references NO
+# framework symbol; this one does reference them, and it is built with the
+# product's own `vtfetch cc` so the flags under test are the ones `make helpers`
+# uses.
+#
+# WHY IT MUST CALL SOMETHING. `crypto/x509/internal/macos` puts `-framework
+# CoreFoundation -framework Security` on the link line of any darwin binary that
+# imports crypto/x509, and the helper's own build references no symbol from
+# either — which is why it linked for as long as it did against a stub that
+# exported nothing. The symbols Go declares are the ones
+# third_party/libghostty-vt/stubs exports, and Go emits them as LAZY binds: a
+# name the real framework does not export does not fail until the function is
+# first called, so a binary that is merely started proves nothing.
+# `cmd/x509probe` generates a certificate and calls Verify, which on darwin
+# routes straight into the platform verifier.
+say "10. the framework stubs' promise: a binary that CALLS Security runs"
+STUBS="$SPIKE/../../../third_party/libghostty-vt/stubs"
+if [ -f "$STUBS/frameworks/Security.framework/Security.tbd" ]; then
+  for spec in arm64:darwin/arm64 amd64:darwin/amd64; do
+    a=${spec%%:*}; t=${spec##*:}
+    cc="$(cd "$SPIKE/../../.." && go run ./cmd/vtfetch cc --target "$t" --zig "$ZIG" 2>>"$LOG")"
+    if [ -z "$cc" ]; then record C10 FAIL "$t: no compiler from vtfetch cc — see $LOG"; continue; fi
+    if CGO_ENABLED=1 GOOS=darwin GOARCH="$a" CC="$cc" \
+         go build -trimpath -ldflags="-s -w -linkmode=external" \
+         -o "bin/x509-$a" ./cmd/x509probe >"logs/x509-$a.log" 2>&1; then
+      if [ "$a" != "$(uname -m)" ]; then
+        record C10 PASS "$a: the stub-linked x509 probe LINKS (not this Mac's arch, so not run)"
+      else
+        out=$("./bin/x509-$a" 2>&1); rc=$?
+        echo "$out" | tee -a "$LOG"
+        case "$out" in
+          *"Symbol not found"*|*"dyld:"*)
+            record C10 FAIL "$a: dyld refused the stub's promise: $out" ;;
+          *) if [ $rc -eq 0 ]; then
+               record C10 PASS "$a: stub-linked probe linked AND called the platform verifier: $out"
+             else
+               record C10 FAIL "$a: probe exit $rc: $out"
+             fi ;;
+        esac
+      fi
+    else
+      record C10 FAIL "$a: the x509 probe does not link — tail: $(why "logs/x509-$a.log")"
+    fi
+  done
+else
+  record C10 SKIP "no Security stub at $STUBS"
+fi
+
+# ---------------------------------------------------------------------------
 {
   printf '\n================ SUMMARY (paste this back) ================\n'
   echo "macOS $(sw_vers -productVersion 2>/dev/null) $(uname -m) · $(go version 2>/dev/null | cut -d' ' -f3) · zig $("$ZIG" version)"

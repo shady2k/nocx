@@ -159,6 +159,15 @@ symbol will exist at runtime"; the resulting Mach-O therefore _declares_ a depen
 §3 shows the current macOS helper already declares the first — but only a Mac can prove the
 binary launches (§5, item 1).
 
+> **Correction, 2026-09-14 (nocx-sf1).** The sentence "nothing in a Go darwin binary
+> references a … CoreFoundation symbol" above is true of _the probes built here_ and false
+> in general: `crypto/x509/internal/macos` references 16 CoreFoundation and 8 Security
+> symbols, and any binary that verifies a certificate references them. The spike's own
+> stubs are still empty and its results stand, because `cmd/probe` imports neither. The
+> stubs a build actually links — `third_party/libghostty-vt/stubs/` — now export those
+> names, and its README carries the derivation and the measurement. Do not copy an empty
+> framework stub from here.
+
 ### 2.4 `dsymutil`, which cost a debugging round
 
 The first successful darwin link did **not** look successful:

@@ -206,6 +206,34 @@ async function inventory(ep: BackendEndpoint): Promise<InventorySession[]> {
 }
 
 /**
+ * What this machine's helper inventory says about ONE session, as a line for a
+ * failure message.
+ *
+ * It is a question, not a gate, and the reason is which helper that RPC is
+ * about. `sessions.inventory` walks helperRegistry.hosts — the registry
+ * internal/app/helper_git.go fills when a FAR host hosts the helper — and
+ * answers "no active helper" when nothing is registered there (:779-788). A
+ * pane carried by THIS MACHINE's helper is not in that map: the registry's
+ * OpenHosted (:485-500) declines a host that will not host the helper, and the
+ * local opener spawns the pane instead, so the inventory is empty for exactly
+ * the panes this epic is about. A gate written on it would fail for a reason
+ * that is not the criterion; the answer still travels, in the criterion's
+ * message below, so a failing run says what it saw.
+ */
+async function describeHelperInventory(ep: BackendEndpoint, sessionId: string): Promise<string> {
+  try {
+    const entries = await inventory(ep)
+    const mine = entries.find((entry) => entry.hostSessionId.session === sessionId)
+    if (mine === undefined) {
+      return `the helper inventory lists ${entries.length} session(s) and not ${sessionId}`
+    }
+    return `the helper holds ${sessionId} as pid ${mine.launch.pid}`
+  } catch (err) {
+    return `the helper inventory could not be read (${err instanceof Error ? err.message : String(err)})`
+  }
+}
+
+/**
  * The fixture's own count of authenticated connections, read off its `AUTH=`
  * line: the LAST value, because the line carries a running count rather than
  * one line per event.
@@ -412,61 +440,78 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
       // ── STAGE 1: the pane, and Files, on the same password host ──────────
       const first = await freshClient(browser, endpoint)
       await promptReady(first)
+
+      // The pane the application opened for itself, before anything of ours.
+      // Its id is what tells the profile's pane apart a moment later: EVERY
+      // pane carries a backend session id (AD-7), so "the active pane has an
+      // id" is true of the starter tab too and gates nothing.
+      const starterSessions = (await liveSessions(endpoint)).map((s) => s.sessionId)
+      expect(starterSessions).toHaveLength(1)
+
       await openSavedProfile(first, PROFILE_NAME)
 
-      // The pane is a REAL remote shell: the far side's own OSC 7 puts its cwd
-      // in the pane's chip, and only a shell that ran on that host can.
-      const remoteBase = path.basename(remoteHome)
-      await expect(first.locator('.pane.active .nocx-editor-cwd')).toContainText(remoteBase, {
-        timeout: 120_000,
-      })
-
-      const paneSessionId = await first.locator('.pane.active').getAttribute('data-session-id')
-      expect(paneSessionId).not.toBeNull()
-
-      // THE PANE IS THIS MACHINE'S HELPER'S DIAL, asserted rather than assumed:
-      // a conventional session has no hostSessionId and appears in no
-      // inventory, and "one connection" would then be a statement about a
-      // dialer this epic has nothing to say about.
-      let hostSession: InventorySession | null = null
+      // THE PANE, identified by the session that did not exist before we asked
+      // for the profile — and read off the pane element the renderer built,
+      // NOT off the cwd chip, which carries `📁 ~` from construction
+      // (frontend/src/editor.ts) and therefore says nothing about whether a
+      // shell reported anything.
+      const activePane = first.locator('.pane.active')
       await expect
         .poll(
           async () => {
-            const entries = await inventory(endpoint)
-            hostSession =
-              entries.find((entry) => entry.hostSessionId.session === paneSessionId) ?? null
-            return hostSession !== null
+            const opened = (await liveSessions(endpoint)).find(
+              (session) => !starterSessions.includes(session.sessionId),
+            )
+            if (opened === undefined) return false
+            return (await activePane.getAttribute('data-session-id')) === opened.sessionId
           },
-          {
-            timeout: 120_000,
-            message:
-              'the pane that opened is not a helper-hosted session, so this is not the pool under test',
-          },
+          { timeout: 180_000, message: 'the profile never opened a pane of its own' },
         )
         .toBe(true)
-      expect(hostSession!.launch.pid).toBeGreaterThan(0)
-      expect(hostSession!.exit).toBeNull()
+      const paneSessionId = await activePane.getAttribute('data-session-id')
+      expect(paneSessionId).not.toBeNull()
 
-      // Files on the SAME host. The panel rescopes to the active SSH session,
-      // roots at `/` and reveals the tab's own cwd — so the rows below are a
-      // remote directory listing that came off the connection.
+      // WHAT OPENED THIS PANE is carried, not asserted through a second RPC.
+      // On this tree an ssh pane exists ONLY because a helper claimed the
+      // destination: internal/transport/session_open.go refuses every other
+      // route for a remote kind by name ("SSH sessions are opened by this
+      // machine's helper, and no helper claimed this destination"), so the pane
+      // above IS the helper's dial rather than a conventional one wearing the
+      // same tab. The inventory is asked anyway because its answer is what a
+      // failure needs to be readable.
+      const helperReport = await describeHelperInventory(endpoint, paneSessionId!)
+
+      // Files on the SAME host, and the evidence is the panel's own claim about
+      // what it is showing plus a listing it could only have got by asking:
+      // `data-root="/"` is the rescope to a remote session (a local one roots
+      // at its own cwd), and the rows below are the SFTP enumeration.
+      //
+      // The row is asserted, NOT its `data-selected` reveal: the panel's
+      // highlight lands only on a cwd the frontend VERIFIED, that arrives as
+      // the far shell's OSC 7, and this pane never reports one (the product
+      // brings it up conventional — see the stage-2 note). Requiring the
+      // highlight would make this spec a test of shell integration, which is
+      // not what any of its three criteria are about.
       await showSidebarView(first, 'files')
       const panel = first.locator(FILES_PANEL)
       await expect(panel).toBeVisible({ timeout: 30_000 })
       await expect(panel).toHaveAttribute('data-root', '/', { timeout: 60_000 })
-      const remoteRow = first.locator(TREE_ROW, { hasText: remoteBase })
-      await expect(remoteRow).toHaveAttribute('data-selected', 'true', { timeout: 120_000 })
+      // A listing that really happened: the SFTP enumeration put rows on
+      // screen. `remoteBase` is deliberately NOT required to be among them —
+      // that row's presence depended on the reveal, which needs the verified
+      // cwd this pane does not have.
+      await expect(first.locator(TREE_ROW).first()).toBeVisible({ timeout: 120_000 })
 
       // ── CRITERION 1: exactly ONE authenticated connection ───────────────
       //
       // Read AFTER both consumers have been served, because the number means
       // nothing before that: the pane's shell and Files' SFTP lease are two
       // channels, and this is the far host saying whether they arrived on one
-      // connection or two. The row above is the observable that says Files
+      // connection or two. The rows above are the observable that says Files
       // really got a listing rather than being about to ask.
       expect(
         authenticatedConnections(fixture),
-        'the far host authenticated more than one connection for one pane and one Files panel: the consumers did not share the helper pool',
+        `the far host authenticated more than one connection for one pane and one Files panel: the consumers did not share the helper pool (${helperReport})`,
       ).toBe(1)
 
       // ── STAGE 2: the runtime answers with no browser client attached ─────

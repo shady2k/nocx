@@ -133,6 +133,13 @@ VT_DIST := $(VT_ROOT)/dist
 VT_VENDOR := $(VT_ROOT)/vendor
 VT_STUBS := third_party/libghostty-vt/stubs
 
+# Where the helper's //go:embed reads the third-party notices (see
+# internal/helper/notices): a path in OUR tree, because an embed cannot escape
+# the package directory. The document itself is never committed — it is a
+# pinned asset like the archives — and this is the one generated file that
+# lives in the tree, which is why its directory carries a .gitignore.
+VT_NOTICES := internal/helper/notices/licenses/THIRD_PARTY_LICENSES.txt
+
 # VT_SOURCE is for a pin whose commit is not published yet — the coordinator
 # builds a fork branch's archives before pushing that branch. The recipe checks
 # the checkout is AT the manifest's commit, so this can be a different tree on
@@ -143,9 +150,17 @@ VT_SOURCE ?=
 
 # Fetch-and-verify. Every job that compiles a CGo package needs this FIRST: an
 # archive that is not the pinned one must stop a build, not link into it.
+#
+# IT ALSO STAGES THE NOTICES, and that is the second half of the same job
+# rather than a target of its own: THIRD_PARTY_LICENSES is one of the assets
+# the fetch verifies, and every binary that links these archives owes it. The
+# helper carries its copy inside the binary (internal/helper/notices, printed
+# by `nocx-helper --licenses`), so the document the fetch just verified is
+# copied to the path its embed reads — same bytes, one verification.
 vt-archives:
 	@$(GO) run ./cmd/vtfetch fetch --manifest $(VT_MANIFEST) --root $(VT_ROOT) \
 	  $(if $(VT_ASSETS),--base "$(VT_ASSETS)",)
+	@VT_ROOT="$(VT_ROOT)" third_party/libghostty-vt/scripts/stage-notices.sh $(VT_NOTICES)
 
 # TWO TARGETS, because a rebuild and a re-pin are opposite jobs and one name
 # for both is a target that always "fails" — `recipe.sh` exits non-zero when

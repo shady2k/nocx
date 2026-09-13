@@ -40,10 +40,12 @@ package session_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -164,6 +166,12 @@ func dialFarTool(t *testing.T, path string) net.Conn {
 //   - the helper's own account of the refusal NAMES the endpoint that is gone,
 //     which is what "refused by name" means where the refusing party is the
 //     only one that can say it: a closed Unix socket can carry no sentence.
+//
+// The far agent's WRITE is not one of them. The helper closes this connection
+// in the same moment it refuses it, and the far side is free to write into a
+// connection that has already been closed — EPIPE is the refusal winning the
+// race, which is the outcome this test wants, not a failure. Asserting that
+// write would make the test about which goroutine reached the socket first.
 func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	var logs bytes.Buffer
 	standLogger = slog.New(slog.NewTextHandler(&logs, nil))
@@ -194,8 +202,29 @@ func TestAPaneWhoseCoordinatorHasGoneIsRefusedAndNotReRouted(t *testing.T) {
 	}
 
 	agent := dialFarTool(t, farPath)
-	if _, err := agent.Write([]byte("tools/list\n")); err != nil {
-		t.Fatalf("the far agent could not write to the forwarded path: %v", err)
+
+	// The write is an ATTEMPT, and its outcome is deliberately NOT asserted.
+	//
+	// The refusal happens on the helper's side: it accepts this connection,
+	// dials the pane's endpoint, finds it gone, logs the refusal and closes the
+	// connection. `net.Dial` on the far side returns as soon as the connection
+	// is ACCEPTED, which is before any of that — so the byte below can arrive
+	// either before the close (write succeeds, the read then sees the end) or
+	// after it (EPIPE). Both are the same product behaviour, and the second is
+	// the refusal arriving FIRST rather than a failure of anything.
+	//
+	// What the criterion requires is that no byte reaches another coordinator
+	// and that the refusal is named. Those are asserted below and neither of
+	// them needs this write to have landed — which is why the ONLY error
+	// tolerated here is the refusal itself (the helper closed the connection
+	// under the write: EPIPE, or ECONNRESET where the kernel delivers a reset
+	// instead). Anything else is a broken arrangement rather than a refusal, so
+	// it still fails this test.
+	if _, writeErr := agent.Write([]byte("tools/list\n")); writeErr != nil {
+		if !errors.Is(writeErr, syscall.EPIPE) && !errors.Is(writeErr, syscall.ECONNRESET) {
+			t.Fatalf("the far agent's write failed for a reason that is not the pane's refusal: %v", writeErr)
+		}
+		t.Logf("the pane refused the connection before the far agent's write arrived: %v", writeErr)
 	}
 
 	// The refusal is the connection ending. A read that blocks would be the

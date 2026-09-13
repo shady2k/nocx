@@ -104,6 +104,11 @@ func startFakeLocalEndpoint(t *testing.T, dir, generation string) *fakeLocalEndp
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(generation),
 		Spawner:    spawner,
+		// The ssh half of the same script (nocx-50w7p.5): without it a
+		// `spawn-ssh` on this endpoint is refused as unavailable, so no test
+		// built here can open an ssh pane for this machine's daemon to hold —
+		// which is the shape the pane-screen owner must answer for.
+		SSHSpawner: spawner,
 		Log:        discardLogger(),
 	})
 	ep := &fakeLocalEndpoint{generation: generation, dir: dir, ln: ln, svc: svc, spawner: spawner}

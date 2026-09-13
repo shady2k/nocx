@@ -55,8 +55,8 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
@@ -144,6 +144,10 @@ type App struct {
 	// which generation was installed, and Shutdown is what releases its
 	// connection — the sessions behind it survive both, which is the epic.
 	localHelper *localHelperOpener
+	// paneViews is the store every observation, typing decision and worker
+	// read goes through (nocx-ygxjv.3): the composition root's object, held
+	// here for the same reason the enroller and the registry are.
+	paneViews *paneview.Store
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -1414,7 +1418,12 @@ func New(opts ...Option) (*App, error) {
 	// built HERE, ahead of the publisher, because both ends need it — the
 	// publisher opens and closes intervals through it, and the transport feeds
 	// it from the session read path.
-	paneGrid := panegrid.New(logger)
+	// The pane store: the set of panes nocx is watching, and the read of their
+	// screens from the helpers that own them (ADR-0066). It holds NO emulator
+	// — cmd/nocx-server is built CGO_ENABLED=0 and the one emulator is beside
+	// each PTY — so the frame every consumer below acts on is a question asked
+	// of the process that holds the terminal.
+	paneViews := paneview.NewStore(logger, newPaneScreen(slogger, sess, localOpener, helperReg))
 	// The worker's rendezvous, built before the enroller because it is what the
 	// enroller notifies (nocx-dkawo.7). An enrolment is the ONE moment nocx
 	// knows an agent started rather than inferring it, so a registration
@@ -1462,7 +1471,7 @@ func New(opts ...Option) (*App, error) {
 	// because it is the seam the per-agent setting arrives through
 	// (nocx-y6w66): production's clock is the watcher's own default and the
 	// number is the package's until that setting has one.
-	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers, paneobserve.Config{
+	paneWatch := paneobserve.New(logger, paneViews, paneDrivers, paneobserve.Config{
 		StallAfter: paneobserve.DefaultStallAfter,
 	})
 	// The guided calibration (nocx-etejh): nocx asks a person to drive their
@@ -1481,9 +1490,9 @@ func New(opts ...Option) (*App, error) {
 	// to be typed against. The SAME registry the watcher classifies through,
 	// so the rule a person is shown a verdict about is the rule that reads
 	// their pane.
-	paneCalibration := agentcalib.New(logger, paneGrid, calibrationStore, paneDrivers)
+	paneCalibration := agentcalib.New(logger, paneViews, calibrationStore, paneDrivers, paneReplay{local: localOpener})
 	paneEnrol, paneEnrolErr := newPaneEnroller(
-		logger, childSessions, paneGrid, paneWatch, agentApprovalService,
+		logger, childSessions, paneViews, paneWatch, agentApprovalService,
 	)
 	if paneEnrolErr != nil {
 		return nil, fmt.Errorf("pane enroller: %w", paneEnrolErr)
@@ -1832,8 +1841,8 @@ func New(opts ...Option) (*App, error) {
 	// Named rather than inlined, because the worker's wake reaches THIS one
 	// (nocx-dkawo.3). A second typist would be a second answer to "may nocx
 	// write into this pane", decided against a second grid.
-	paneTyping := newPaneTypist(logger, paneGrid, paneDrivers, paneCalibration, paneWatch, sess)
-	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid),
+	paneTyping := newPaneTypist(logger, paneViews, paneDrivers, paneCalibration, paneWatch, sess)
+	tpOpts = append(tpOpts, transport.WithPaneScreens(paneViews),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
 		transport.WithAgentRuleStore(ruleStore),
 		transport.WithAgentCalibration(paneCalibration),
@@ -2094,7 +2103,7 @@ func New(opts ...Option) (*App, error) {
 		// paneGrid and paneWatch are the SAME grid and watcher the enrolment
 		// act opens and the typing gate reads, so what a coordinator is shown
 		// is the screen every other decision about that pane is made from.
-		workers.WithScreener(&workerScreener{grid: paneGrid, watch: paneWatch}),
+		workers.WithScreener(&workerScreener{screens: paneViews, watch: paneWatch}),
 		// And the seam workers.answer reaches (nocx-f545a.4): paneTyping is the
 		// SAME Typist agent.type, a wake and a spawn's task delivery go through,
 		// so an answer is one more act through the one gate onto a pane's input.
@@ -2107,7 +2116,7 @@ func New(opts ...Option) (*App, error) {
 		// confirm into it, so the cache is guaranteed stale the instant after
 		// one.
 		workers.WithAnswerer(&workerAnswerer{
-			grid: paneGrid, typist: paneTyping,
+			screens: paneViews, typist: paneTyping,
 			owed: workerOwed, classify: paneWatch, typing: paneTyping, log: logger,
 		}),
 		workers.WithBound(workerParticipantBound),
@@ -2128,7 +2137,7 @@ func New(opts ...Option) (*App, error) {
 	// The record is handed in so the authorizer can tell the two callers
 	// apart: a session it holds a live participant for is a WORKER calling
 	toolAuthorizer, toolAuthorizerErr := newToolAuthorizer(
-		peerpin.SystemPinner{}, sess, paneGrid, workerRecord, string(workspace.Default),
+		peerpin.SystemPinner{}, sess, paneViews, workerRecord, string(workspace.Default),
 		agentApprovalService,
 	)
 	if toolAuthorizerErr != nil {
@@ -2174,6 +2183,7 @@ func New(opts ...Option) (*App, error) {
 		helperRegistry:      helperReg,
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,
+		paneViews:           paneViews,
 		logFilePath:         logFilePath,
 		logFile:             logFile,
 		procs:               procs,

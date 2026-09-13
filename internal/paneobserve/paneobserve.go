@@ -1,10 +1,11 @@
-// Package paneobserve turns an enrolled pane's grid into a state somebody can
+// Package paneobserve turns a watched pane's screen into a state somebody can
 // act on, and pushes it only when it changes.
 //
-// # Why this is not in panegrid and not in the driver
+// # Why this is not in the frame reader and not in the driver
 //
-// panegrid answers what is on the screen, and its own comment says a verdict
-// computed there would be a third power the AD-6 amendment does not grant.
+// internal/paneview answers what is on the screen, and its own comment says a
+// verdict computed there would be a third power the AD-6 amendment does not
+// grant.
 // agentdriver answers what one frame means, holds no state between frames, and
 // emits nothing. This package is the third thing neither may be: it remembers
 // what a pane was last seen as, so that what crosses the wire is a CHANGE.
@@ -62,10 +63,10 @@
 //
 // # No timer is visible from a test
 //
-// Touch marks a pane dirty and is on the hot path of every session in the
-// product, so it does nothing else. Sweep does the work. Production drives
-// Sweep from a coalescing ticker at the composition root; a test drives it
-// directly, and therefore asserts on a state change rather than on a duration.
+// Sweep does the work and nothing else runs per byte, so no timer is ever
+// racing a reader: production drives Sweep from a coalescing ticker at the
+// composition root, and a test drives it directly — which is what lets a test
+// assert on a state change rather than on a duration.
 // The clock is a dependency for the same reason: an interval with two ends has
 // a low end as well as a high one, and a test that slept to reach either would
 // be measuring the machine rather than the rule.
@@ -78,7 +79,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // Observation is what one pane was seen to be. It carries the agent because
@@ -217,15 +218,22 @@ type Config struct {
 	StallAfter time.Duration
 }
 
-// Emit hands an observation on. It is called from the sweep, never from Touch.
+// Emit hands an observation on. It is called from the sweep.
 type Emit func(Observation)
 
+// Screens is the seam onto a pane's screen (AD-8). One method, because the
+// observer may READ a frame and may not enrol, withdraw, classify or type: the
+// interval is the store's and the verdict is a caller's.
+type Screens interface {
+	Frame(paneID string) (paneview.Frame, error)
+}
+
 // Watcher observes the panes it has been told to watch. Nothing watches itself:
-// the enrolment act names the pane and the agent, exactly as it does for the
-// grid.
+// the enrolment act names the pane and the agent, and the store that answers
+// the act is what holds the interval a read needs.
 type Watcher struct {
 	log     log.Logger
-	grid    panegrid.Observer
+	screens Screens
 	drivers *agentdriver.Registry
 	emit    Emit
 	// now is the clock this watcher reads, and stallAfter is the threshold it
@@ -240,7 +248,6 @@ type Watcher struct {
 
 type watched struct {
 	agent string
-	dirty bool
 	// gone marks a pane whose agent has exited. The pane's SCREEN does not
 	// stop moving when that happens — the shell is still there and still
 	// repainting — so without this the next sweep would classify the
@@ -282,7 +289,7 @@ type watched struct {
 // passes the clock it advances and the interval it is asserting about, because
 // the threshold has two ends and a test that waited for either would be
 // measuring the machine rather than the rule.
-func New(lg log.Logger, grid panegrid.Observer, drivers *agentdriver.Registry, cfg Config) *Watcher {
+func New(lg log.Logger, screens Screens, drivers *agentdriver.Registry, cfg Config) *Watcher {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -291,7 +298,7 @@ func New(lg log.Logger, grid panegrid.Observer, drivers *agentdriver.Registry, c
 	}
 	return &Watcher{
 		log:        lg,
-		grid:       grid,
+		screens:    screens,
 		drivers:    drivers,
 		now:        cfg.Now,
 		stallAfter: cfg.StallAfter,
@@ -309,7 +316,7 @@ func (w *Watcher) SetEmitter(emit Emit) {
 	w.emit = emit
 }
 
-// Watch opens the observation for a pane, and starts it dirty: the pane
+// Watch opens the observation for a pane: the pane
 // already has a screen by the time anybody says to watch it, and waiting for
 // the next byte to report a state that is already true is how a settled pane
 // stays invisible.
@@ -319,7 +326,7 @@ func (w *Watcher) Watch(paneID, agent string) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.panes[paneID] = &watched{agent: agent, dirty: true}
+	w.panes[paneID] = &watched{agent: agent}
 	w.log.Debug("pane observation opened", "pane_id", paneID, "agent", agent)
 }
 
@@ -333,16 +340,6 @@ func (w *Watcher) Unwatch(paneID string) {
 	w.mu.Unlock()
 	if ok {
 		w.log.Debug("pane observation closed", "pane_id", paneID)
-	}
-}
-
-// Touch marks a pane as having moved. It is called for every chunk of every
-// enrolled pane's output, so it takes one lock and does nothing else.
-func (w *Watcher) Touch(paneID string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if p, ok := w.panes[paneID]; ok && !p.gone {
-		p.dirty = true
 	}
 }
 
@@ -368,7 +365,6 @@ func (w *Watcher) Exited(paneID string) {
 		return
 	}
 	p.gone = true
-	p.dirty = false
 	p.seen = agentdriver.StateExited
 	// An agent that exited has no screen, so it names no children. Clearing
 	// them is what keeps the retained observation from leaving the last rows
@@ -390,21 +386,28 @@ func (w *Watcher) Exited(paneID string) {
 	emit(Observation{PaneID: paneID, Agent: agent, State: agentdriver.StateExited, Progress: ProgressMoving})
 }
 
-// Sweep classifies every pane that has moved since the last one — and every
-// working pane whose stall deadline has passed — and emits the ones whose
-// answer changed.
+// Sweep classifies every pane being watched and emits the ones whose answer
+// changed.
 //
-// # Why the deadline is in the work set
+// # Why there is no "has it moved" filter any more
 //
-// The dirty flag is set by the session's READ path, so it says a pane emitted
-// bytes. Progress is not a question about bytes: a suspended or wedged agent
-// paints nothing at all, and a sweep that only looked at panes that had moved
-// would never look at it again — the one pane whose stall is the whole point
-// of the facet would be the one pane nobody could report. So a pane already
-// working, already measured, and already past the threshold is swept whether it
-// moved or not. It stops qualifying the moment its progress is emitted as
-// stalled, which is why this costs one classification per stalled pane rather
-// than a poll per pane per tick.
+// There used to be one, and it was the coordinator's own read path that set it:
+// bytes arrived, so the pane was dirty, so it was swept. That path is gone —
+// the emulator is beside the PTY now (ADR-0066) and the coordinator sees a pane
+// through a QUESTION rather than a stream — so "this pane emitted bytes" is not
+// a fact this process can observe at all. The only way to learn that a pane
+// moved is to read it, which is what a classification does.
+//
+// What that costs is one frame read per watched pane per tick, and it is the
+// price of the honesty: a pane is watched because somebody asked to watch it
+// (the interval is explicit and bounded), and the alternative is an observer
+// that reports nothing until something else happens to tell it to look. The
+// stall facet never depended on the filter — it is measured from the
+// transcript — and it still does not.
+
+// A sweep that emitted only on change also means the cost of a settled pane is
+// one read and no message, which is the ordinary case.
+
 func (w *Watcher) Sweep() {
 	w.mu.Lock()
 	emit := w.emit
@@ -422,20 +425,21 @@ func (w *Watcher) Sweep() {
 		if p.gone {
 			continue
 		}
-		if p.dirty || overdue(p, w.stallAfter, now) {
-			jobs = append(jobs, job{paneID: id, agent: p.agent})
-		}
+		jobs = append(jobs, job{paneID: id, agent: p.agent})
 	}
 	w.mu.Unlock()
 
 	for _, j := range jobs {
-		f, err := w.grid.Frame(j.paneID)
+		f, err := w.screens.Frame(j.paneID)
 		if err != nil {
 			// The ordinary race: the session ended and the transport
-			// withdrew the grid before whoever enrolled got to unwatch. The
-			// pane is not observable, and inventing a state for it would be
-			// the guess this whole path exists to refuse.
-			w.clean(j.paneID)
+			// unwatched the pane before whoever enrolled got to withdraw it,
+			// or the helper that holds it stopped answering. The pane is not
+			// observable, and inventing a state for it would be the guess
+			// this whole path exists to refuse. Nothing is recorded and
+			// nothing is forgotten: the next sweep asks again, and a pane
+			// nobody watches takes itself out of the set when the watch is
+			// withdrawn.
 			continue
 		}
 		o := w.drivers.Observe(j.agent, f)
@@ -453,22 +457,11 @@ func (w *Watcher) Sweep() {
 	}
 }
 
-// overdue reports whether a working pane's transcript has stood still past the
-// threshold, so that a pane sending nothing at all is still looked at. A pane
-// with no transcript measurement never qualifies: a stall is a claim, and this
-// is the condition under which one could be made — see Sweep.
-func overdue(p *watched, after time.Duration, now time.Time) bool {
-	return p.seen.Working() &&
-		p.seenProgress != ProgressStalled &&
-		!p.transcriptAt.IsZero() &&
-		now.Sub(p.transcriptAt) > after
-}
-
-// commit records the transcript yield this sweep read, clears the dirty flag,
-// and reports the pane's progress together with whether the observation is
-// news.
+// commit records the transcript yield this sweep read and reports the pane's
+// progress together with whether the observation is news.
 //
-// All of it under one lock, so a Touch that lands mid-sweep is not lost.
+// All of it under one lock, so a classification that lands mid-sweep is not
+// lost and a pane's record is never half-updated.
 //
 // The state, the children and the progress are compared TOGETHER and stored
 // together, because they are one answer about one screen: a pane whose verdict
@@ -489,7 +482,6 @@ func (w *Watcher) commit(paneID string, state agentdriver.State, children []agen
 		// Unwatched, or the agent exited, while the frame was being read.
 		return ProgressMoving, false
 	}
-	p.dirty = false
 	moved := !sameTranscript(p.transcript, transcript)
 	if moved {
 		p.transcript = transcript
@@ -532,14 +524,6 @@ func progressOf(p *watched, state agentdriver.State, moved bool, after time.Dura
 	return ProgressMoving
 }
 
-func (w *Watcher) clean(paneID string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if p, ok := w.panes[paneID]; ok {
-		p.dirty = false
-	}
-}
-
 // Snapshot answers what a pane was last seen as, for a client that attached
 // after the change that produced it. False for a pane nobody watches, and for
 // one whose first sweep has not happened.
@@ -561,9 +545,9 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 
 // Classify reads paneID's CURRENT frame and answers what it is classified as
 // RIGHT NOW — the live reading Sweep would produce if it ran this instant,
-// rather than the cache Snapshot answers from. It touches none of dirty,
-// seen, seenChildren, seenProgress or the transcript record, and it emits
-// nothing: it is a READ, not a second sweep, and must never make a later real
+// rather than the cache Snapshot answers from. It touches none of the record
+// a sweep keeps — seen, seenChildren, seenProgress, the transcript — and it
+// emits nothing: it is a READ, not a second sweep, and must never make a later real
 // Sweep believe this pane was already reported.
 //
 // THE PROGRESS IT ANSWERS IS DERIVED AND NOT RECORDED, exactly as the observer
@@ -577,10 +561,10 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 // It exists for exactly one caller (nocx-f545a.7, the race a review of
 // 1ffd3a56 found): a wait that has just written a confirm key into a pane
 // and needs to know what the screen shows now, not what a coalescer last
-// swept it as. Touch is called only on the session's OWN READ side (this
-// package's own doc) — nothing about writing into a pane touches it — so
-// immediately after such a write, Snapshot's cache is, with certainty,
-// still the reading from before the write. A caller that cannot afford that
+// swept it as. Sweep runs on a coalescing ticker and nothing in this package
+// is woken by a byte, so immediately after such a write Snapshot's cache is,
+// with certainty, still the reading from before the write. A caller that
+// cannot afford that
 // staleness asks here instead; internal/app's classifyingReadiness is the
 // adapter that lets it reuse the same wait Snapshot's callers use.
 //
@@ -592,13 +576,12 @@ func (w *Watcher) Snapshot(paneID string) (Observation, bool) {
 // Same two absence answers as Snapshot, so a caller cannot tell which of the
 // two methods produced a false or an exited reading from its shape alone:
 // false for a pane nobody watches, and StateExited — with no read of the
-// grid at all — for one whose agent has already gone. A frame the grid
+// screen at all — for one whose agent has already gone. A frame the store
 // cannot currently produce (the ordinary race: the session ended and the
-// grid was withdrawn a moment ago) is answered as an absent reading too,
+// pane was unwatched a moment ago) is answered as an absent reading too,
 // which is stricter than Sweep's own handling of the same race — Sweep
-// clears the pane's dirty flag when this happens because it owns that
-// bookkeeping; Classify owns none of it and leaves the pane exactly as it
-// found it. A pane unwatched while its frame was being read is the same
+// forgets the pane when this happens because it owns that bookkeeping;
+// Classify owns none of it and leaves the pane exactly as it found it. A pane unwatched while its frame was being read is the same
 // absence, answered the same way: there is no record left to read a progress
 // against, and inventing one would be the guess this path refuses.
 func (w *Watcher) Classify(paneID string) (Observation, bool) {
@@ -617,7 +600,7 @@ func (w *Watcher) Classify(paneID string) (Observation, bool) {
 	lastTranscript := p.transcript
 	w.mu.Unlock()
 
-	f, err := w.grid.Frame(paneID)
+	f, err := w.screens.Frame(paneID)
 	if err != nil {
 		return Observation{}, false
 	}

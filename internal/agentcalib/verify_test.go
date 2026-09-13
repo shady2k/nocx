@@ -19,6 +19,7 @@ package agentcalib_test
 // two that are evidence against the rule, disagreement and no-rule-at-all.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // fixedRule is a driver whose whole behaviour is a lookup from the text on row
@@ -40,7 +41,7 @@ type fixedRule struct {
 
 func (r fixedRule) Agent() string { return r.agent }
 
-func (r fixedRule) Classify(f panegrid.Frame) agentdriver.State {
+func (r fixedRule) Classify(f paneview.Frame) agentdriver.State {
 	for label, state := range r.say {
 		if strings.Contains(f.Text(2), "state: "+label) {
 			return state
@@ -111,7 +112,7 @@ func TestARuleThatClassifiesEveryLabelledFrameMayGateTyping(t *testing.T) {
 	c, sc, _, _ := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatalf("a rule that classified every label may not type: %+v", v)
 	}
@@ -132,7 +133,7 @@ func TestASkippedOptionalStateIsNotADisagreement(t *testing.T) {
 	skip := map[agentcalib.Label]bool{agentcalib.LabelError: true, agentcalib.LabelMenuOpen: true}
 	walkAll(t, c, sc, skip)
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatalf("a rule verified against the states that WERE produced may not type: %+v", v)
 	}
@@ -152,7 +153,7 @@ func TestOneMisclassifiedLabelRevokesTypingAuthority(t *testing.T) {
 	c, sc, _, _ := newCalibrationsWith(t, registryOf(t, broken))
 	walkAll(t, c, sc, nil)
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if v.MayType() {
 		t.Fatal("a rule that reads a tool-approval dialog as an input box may type into it")
 	}
@@ -176,7 +177,7 @@ func TestOneMisclassifiedLabelRevokesTypingAuthority(t *testing.T) {
 func TestChangingALabelRevokesAVerifiedRule(t *testing.T) {
 	c, sc, store, _ := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
-	if !c.Verify(agent).MayType() {
+	if !c.Verify(context.Background(), agent).MayType() {
 		t.Fatal("the rule did not verify before the set was changed")
 	}
 
@@ -202,7 +203,7 @@ func TestChangingALabelRevokesAVerifiedRule(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if v.MayType() {
 		t.Fatal("a rule whose labels no longer classify kept its typing authority")
 	}
@@ -220,7 +221,7 @@ func TestAnAgentWithNoRuleMayNotBeTypedInto(t *testing.T) {
 	c, sc, _, _ := newCalibrationsWith(t, registryOf(t, fixedRule{agent: "someone-else"}))
 	walkAll(t, c, sc, nil)
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if v.MayType() {
 		t.Fatal("an agent with no rule at all may be typed into")
 	}
@@ -236,7 +237,7 @@ func TestAnAgentWithNoRuleMayNotBeTypedInto(t *testing.T) {
 // show, because "may type" and "verified" are not the same claim.
 func TestAnUncalibratedAgentMayBeTypedInto(t *testing.T) {
 	c, _, _, _ := newCalibrationsWith(t, registryOf(t, correct()))
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatal("an agent nobody has calibrated may not be typed into, though nothing contradicts its rule")
 	}
@@ -268,7 +269,7 @@ func TestAnIncompleteLabelledSetMayStillBeTypedAgainst(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatalf("a set missing a required label may not be typed against: %+v", v)
 	}
@@ -283,7 +284,7 @@ func TestAnIncompleteLabelledSetMayStillBeTypedAgainst(t *testing.T) {
 func TestASetThatCannotBeReplayedMayStillBeTypedAgainst(t *testing.T) {
 	c, sc, _, root := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
-	if !c.Verify(agent).MayType() {
+	if !c.Verify(context.Background(), agent).MayType() {
 		t.Fatal("the rule did not verify before the capture was damaged")
 	}
 
@@ -291,7 +292,7 @@ func TestASetThatCannotBeReplayedMayStillBeTypedAgainst(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{\"agent\":\"claude\"}\n"), 0o600); err != nil {
 		t.Fatalf("damage the capture: %v", err)
 	}
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatalf("a set whose capture is unreadable may not be typed against: %+v", v)
 	}
@@ -318,7 +319,7 @@ func TestALabelThisBuildDoesNotAskForStillPermitsWithAReason(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	v := c.Verify(agent)
+	v := c.Verify(context.Background(), agent)
 	if !v.MayType() {
 		t.Fatal("a set carrying a label this build cannot map may not be typed against")
 	}
@@ -349,7 +350,7 @@ func TestStatusCarriesTheVerdictBesideTheSet(t *testing.T) {
 	c, sc, _, _ := newCalibrationsWith(t, registryOf(t, correct()))
 	walkAll(t, c, sc, nil)
 
-	st, err := c.Status(pane, agent)
+	st, err := c.Status(context.Background(), pane, agent)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}

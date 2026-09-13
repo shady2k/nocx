@@ -29,7 +29,7 @@ func TestAWorkersScreenShowsTheQuestionInItsOwnWords(t *testing.T) {
 	stand.feedCapture(t, sid, "claude-trust", 11000)
 	stand.watch.Sweep()
 
-	screener := &workerScreener{grid: stand.grid, watch: stand.watch}
+	screener := &workerScreener{screens: stand.grid, watch: stand.watch}
 	got, err := screener.ReadScreen(context.Background(), workers.Participant{
 		ID: "p-screen", Liveness: workers.Liveness{SessionID: string(sid)},
 	})
@@ -67,7 +67,7 @@ func TestAWorkersScreenShowsTheQuestionInItsOwnWords(t *testing.T) {
 // no reading, answered as such.
 func TestAPaneNocxIsNotWatchingHasNoReading(t *testing.T) {
 	stand := newTaskDeliveryStand(t)
-	screener := &workerScreener{grid: stand.grid, watch: stand.watch}
+	screener := &workerScreener{screens: stand.grid, watch: stand.watch}
 	got, err := screener.ReadScreen(context.Background(), workers.Participant{
 		ID: "p-gone", Liveness: workers.Liveness{SessionID: "session-nobody-enrolled"},
 	})

@@ -32,8 +32,9 @@ import (
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // stallAfter is the threshold every test below states, and it is deliberately
@@ -67,16 +68,16 @@ func newClock() *clock { return &clock{now: time.Unix(1_700_000_000, 0)} }
 // threshold. The grid is returned too: these tests read frames off it directly
 // to prove the CASE they are about — that the chrome moved while the transcript
 // did not — rather than asserting it in a comment.
-func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *panegrid.Store, *recorder) {
+func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *paneviewtest.Views, *recorder) {
 	t.Helper()
 	lg := log.NewSlogAdapter(nil)
-	grid := panegrid.New(lg)
+	grid := paneviewtest.NewViews(lg)
 	reg, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
 	rec := &recorder{}
-	w := paneobserve.New(lg, grid, reg, paneobserve.Config{
+	w := paneobserve.New(lg, grid.Store, reg, paneobserve.Config{
 		Now:        c.Now,
 		StallAfter: stallAfter,
 	})
@@ -87,19 +88,19 @@ func watcher(t *testing.T, c *clock) (*paneobserve.Watcher, *panegrid.Store, *re
 // feeder replays a committed capture into a real grid the way a pane does: from
 // byte zero, one mark at a time. Each call advances the pane to atMs and
 // returns the frame it is showing there, so a test can compare two of them.
-func feeder(t *testing.T, grid *panegrid.Store, pane, capture string) func(atMs int64) panegrid.Frame {
+func feeder(t *testing.T, grid *paneviewtest.Views, pane, capture string) func(atMs int64) paneview.Frame {
 	t.Helper()
 	path := filepath.Join("..", "agentdriver", "testdata", "captures", capture+".jsonl")
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		t.Fatalf("read capture %s: %v", capture, err)
 	}
-	if err := grid.Enrol(pane, header.Cols, header.Rows); err != nil {
+	if err := grid.Watch(pane, header.Cols, header.Rows); err != nil {
 		t.Fatalf("enrol %s: %v", pane, err)
 	}
 	t.Cleanup(func() { grid.Withdraw(pane) })
 	fed := 0
-	return func(atMs int64) panegrid.Frame {
+	return func(atMs int64) paneview.Frame {
 		through := agentcapture.ChunksThrough(chunks, atMs, fed)
 		for _, c := range chunks[fed:through] {
 			grid.Feed(pane, []byte(c.Data))
@@ -116,7 +117,7 @@ func feeder(t *testing.T, grid *panegrid.Store, pane, capture string) func(atMs 
 // screenText renders a frame whole, so a test can state that two frames DIFFER.
 // That is the case this whole facet exists for, and asserting it is what keeps
 // the tests below from passing against a rule that compared frames.
-func screenText(f panegrid.Frame) string {
+func screenText(f paneview.Frame) string {
 	var b strings.Builder
 	for y := range f.Rows {
 		b.WriteString(f.Text(y))
@@ -165,7 +166,6 @@ func TestALiveSpinnerOverAFrozenTranscriptReadsStalled(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	first := feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading of a working pane")
 	if got.State != agentdriver.StateWorking || got.Progress != paneobserve.ProgressMoving {
@@ -180,13 +180,11 @@ func TestALiveSpinnerOverAFrozenTranscriptReadsStalled(t *testing.T) {
 
 	// THE LOW END. The transcript has not moved, but the threshold has not
 	// passed either, so this is still a pane that is thinking.
-	w.Touch("p1")
 	w.Sweep()
 	assertSilent(t, rec, "a frozen transcript younger than the threshold")
 
 	// THE HIGH END, one second past it.
 	c.advance(stallAfter + time.Second)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a frozen transcript past the threshold")
 	if got.State != agentdriver.StateWorking {
@@ -213,7 +211,6 @@ func TestAWorkingPaneThatHasGoneCompletelySilentIsStillReported(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	assertNews(t, rec, "the first reading")
 
@@ -247,7 +244,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	feed(79000)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading of a streaming turn")
 	if got.State != agentdriver.StateWorking || got.Progress != paneobserve.ProgressMoving {
@@ -257,7 +253,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	// Nothing more arrives for a while. This pane is now genuinely stalled —
 	// its turn is live and its transcript has stood still past the threshold.
 	c.advance(stallAfter + time.Second)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a streaming turn that has gone quiet")
 	if got.Progress != paneobserve.ProgressStalled {
@@ -267,7 +262,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	// And here the reply continues: the transcript grows, the chrome does not
 	// move at all, and the pane is moving again.
 	feed(80000)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a transcript that grew after the threshold")
 	if got.State != agentdriver.StateWorking {
@@ -295,16 +289,12 @@ func TestStalledIsNotAStateAndAWorkingListingStillContainsThePane(t *testing.T) 
 
 	frozen(15000)
 	growing(79000)
-	w.Touch("frozen")
-	w.Touch("growing")
 	w.Sweep()
 	rec.drain()
 
 	// The frozen pane's deadline passes; the growing pane's transcript does not.
 	c.advance(stallAfter + time.Second)
 	growing(80000)
-	w.Touch("frozen")
-	w.Touch("growing")
 	w.Sweep()
 
 	// The scalar set has no member that means "stalled", and a stalled reading
@@ -354,7 +344,6 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	// 47500ms is a turn before its elapsed timer, on a pane whose transcript is
 	// the user's own prompt.
 	feed(47500)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading")
 	if got.State != agentdriver.StateWorking {
@@ -364,11 +353,10 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	// An agent nothing was written for answers unknown for its whole life, and
 	// unknown is not a working state: the facet has nothing to say about it.
 	w.Watch("p2", "no-such-agent")
-	if err := grid.Enrol("p2", 40, 14); err != nil {
+	if err := grid.Watch("p2", 40, 14); err != nil {
 		t.Fatalf("enrol p2: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw("p2") })
-	w.Touch("p2")
 	w.Sweep()
 	other := assertNews(t, rec, "an agent with no driver")
 	if other.State != agentdriver.StateUnknown || other.Progress != paneobserve.ProgressMoving {
@@ -376,7 +364,6 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	}
 
 	c.advance(10 * stallAfter)
-	w.Touch("p2")
 	w.Sweep()
 	// Exactly one pane is news here, and it is the one with a measurable
 	// transcript: the pane the driver cannot read stays silent on the same
@@ -398,14 +385,12 @@ func TestUnwatchForgetsTheTranscriptAndItsClock(t *testing.T) {
 	feed := feeder(t, grid, "p1", "claude-working")
 	w.Watch("p1", "claude")
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	c.advance(stallAfter + time.Second)
 	w.Unwatch("p1")
 	w.Watch("p1", "claude")
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "a pane watched again")
 	if got.Progress != paneobserve.ProgressMoving {
@@ -422,7 +407,6 @@ func TestAnExitedPaneIsNeverStalled(t *testing.T) {
 	feed := feeder(t, grid, "p1", "claude-working")
 	w.Watch("p1", "claude")
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 

@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,8 +31,8 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 type scriptStep struct {
@@ -562,15 +563,23 @@ func scriptLabels(steps []scriptStep) []string {
 	return labels
 }
 
-// replayCapture prints the screen at each mark. The replay itself belongs to
-// internal/agentcapture, which is also what a calibration set is read with:
-// one format, one emulator path, one owner.
+// replayCapture prints the screen at each mark. The FORMAT belongs to
+// internal/agentcapture, which is also what a calibration set is read with: one
+// format, one arithmetic, one owner.
+//
+// The emulator is this tool's OWN process — replaylocal — and that is a
+// deliberate difference from the product, not a second implementation of one
+// thing. In the product the emulator is the helper's (proto.OpReplay) because
+// cmd/nocx-server is built CGO_ENABLED=0; this tool is a person's command over
+// a file, it may link the emulator, and it uses the SAME one
+// (internal/emulator/ghostty through paneview.Replay), so the frames it prints
+// are the frames the product produces.
 func replayCapture(path string, marks []int64, stdout io.Writer) error {
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		return err
 	}
-	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, marks)
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, marks)
 	if err != nil {
 		return err
 	}
@@ -599,7 +608,7 @@ func printFrame(w io.Writer, m agentcapture.Moment) error {
 // rowText renders one row the way the frame reports it: a continuation cell
 // contributes nothing, because the double-width grapheme before it already
 // stands for both of its columns.
-func rowText(f panegrid.Frame, y int) string {
+func rowText(f paneview.Frame, y int) string {
 	var line strings.Builder
 	for _, c := range f.Lines[y] {
 		if c.Width == 0 {

@@ -13,11 +13,11 @@ package agentcalib
 //	go run ./cmd/agent-capture replay -at 0,1,2 <set>/capture.jsonl
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // Record is one step's outcome: the label, and either the mark it sits at or
@@ -55,7 +55,7 @@ type Set struct {
 type LabelledFrame struct {
 	Label Label
 	AtMs  int64
-	Frame panegrid.Frame
+	Frame paneview.Frame
 }
 
 // Complete reports whether the set carries every required label with a frame
@@ -100,7 +100,11 @@ func (s Set) Record(l Label) (Record, bool) {
 // Frames replays the capture and hands back each labelled screen, in label
 // order. A skipped label contributes nothing, because nothing was captured
 // for it.
-func (s Set) Frames(lg log.Logger) ([]LabelledFrame, error) {
+//
+// The emulator is the helper's (agentcapture.Replay): this computes the marks
+// and asks, because the coordinator holds no emulator at all — cmd/nocx-server
+// is built CGO_ENABLED=0 and the one emulator is beside the PTY (ADR-0066).
+func (s Set) Frames(ctx context.Context, r agentcapture.Replay) ([]LabelledFrame, error) {
 	marks := make([]int64, 0, len(s.Labels))
 	labelled := make([]Record, 0, len(s.Labels))
 	for _, rec := range s.Labels {
@@ -120,7 +124,7 @@ func (s Set) Frames(lg log.Logger) ([]LabelledFrame, error) {
 		marks = append(marks, *rec.AtMs)
 		labelled = append(labelled, rec)
 	}
-	moments, err := agentcapture.Frames(lg, s.Header, s.Chunks, marks)
+	moments, err := agentcapture.Frames(ctx, r, s.Header, s.Chunks, marks)
 	if err != nil {
 		return nil, err
 	}

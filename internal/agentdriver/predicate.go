@@ -7,7 +7,7 @@ package agentdriver
 // may not lift a bound the engine enforces — a region's cap, the cursor's
 // unforgeability, the exact column a marker must occupy.
 //
-// Every predicate here is a pure function of one panegrid.Frame. Nothing
+// Every predicate here is a pure function of one paneview.Frame. Nothing
 // remembers a previous frame, because Driver's own contract forbids it: "a
 // rule that remembers is a rule that can be stuck".
 
@@ -15,7 +15,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // cursorOn answers whether the cursor's OWN cell carries this text.
@@ -23,7 +23,7 @@ import (
 // This is the predicate an agent cannot forge. Printed text cannot take the
 // cursor: the TUI parks it after every repaint, so a "❯ 1. Yes" an agent wrote
 // into its own transcript sits under no cursor and matches nothing.
-func cursorOn(f panegrid.Frame, glyph string) bool {
+func cursorOn(f paneview.Frame, glyph string) bool {
 	cell, ok := cellAt(f, f.CursorX, f.CursorY)
 	return ok && cell.Text == glyph
 }
@@ -31,7 +31,7 @@ func cursorOn(f panegrid.Frame, glyph string) bool {
 // rowOpensWith answers whether the first NON-BLANK cell of a row is this text.
 // The transcript is indented and the chrome is not, so "opens with" is what
 // separates a marker from the same glyph wrapped into a sentence.
-func rowOpensWith(f panegrid.Frame, row int, glyph string) bool {
+func rowOpensWith(f paneview.Frame, row int, glyph string) bool {
 	col, ok := firstNonBlankCol(f, row)
 	if !ok {
 		return false
@@ -46,7 +46,7 @@ func rowOpensWith(f panegrid.Frame, row int, glyph string) bool {
 // together: the input box requires its marker at column 0 exactly, while a
 // menu marker may open an indented row. The box is one of the two markers the
 // driver's safety argument rests on, and widening it would weaken that.
-func cellAtCol(f panegrid.Frame, row, col int, glyph string) bool {
+func cellAtCol(f paneview.Frame, row, col int, glyph string) bool {
 	cell, ok := cellAt(f, col, row)
 	return ok && cell.Text == glyph
 }
@@ -55,7 +55,7 @@ func cellAtCol(f panegrid.Frame, row, col int, glyph string) bool {
 // to edge. It does NOT skip zero-width continuation cells, unlike Frame.Text:
 // a rule is a statement about every column, and a row that needs interpreting
 // to look like one is not one.
-func fullWidthRule(f panegrid.Frame, row int, glyph string) bool {
+func fullWidthRule(f paneview.Frame, row int, glyph string) bool {
 	if row < 0 || row >= len(f.Lines) || f.Cols <= 0 {
 		return false
 	}
@@ -73,7 +73,7 @@ func fullWidthRule(f panegrid.Frame, row int, glyph string) bool {
 
 // rowContains reads the anchor's OWN row. Every other text predicate here
 // looks above or below an anchor; the mode line has to be read where it sits.
-func rowContains(f panegrid.Frame, row int, text string) bool {
+func rowContains(f paneview.Frame, row int, text string) bool {
 	if row < 0 || row >= f.Rows {
 		return false
 	}
@@ -82,7 +82,7 @@ func rowContains(f panegrid.Frame, row int, text string) bool {
 
 // nearestNonBlankAbove walks up from a row and returns the first row with any
 // non-blank cell, rendered whole.
-func nearestNonBlankAbove(f panegrid.Frame, row int) (string, bool) {
+func nearestNonBlankAbove(f paneview.Frame, row int) (string, bool) {
 	for i := row - 1; i >= 0; i-- {
 		if _, ok := firstNonBlankCol(f, i); ok {
 			return f.Text(i), true
@@ -174,7 +174,7 @@ type region struct {
 
 // stackTop answers where the status stack the region begins in ends: the row
 // its walk may start above, or the anchor itself when there is no stack.
-func (r region) stackTop(f panegrid.Frame) int {
+func (r region) stackTop(f paneview.Frame) int {
 	top := -1
 	for y := r.anchor - 1; y >= 0; y-- {
 		if _, ok := firstNonBlankCol(f, y); !ok {
@@ -200,7 +200,7 @@ func (r region) stackTop(f panegrid.Frame) int {
 // into a markdown list the agent printed is not a spinner, and a bound that
 // could not tell them apart would step over the transcript it was written to
 // measure.
-func opensAtColumnZero(f panegrid.Frame, row int, glyphs []string) bool {
+func opensAtColumnZero(f paneview.Frame, row int, glyphs []string) bool {
 	cell, ok := cellAt(f, 0, row)
 	if !ok {
 		return false
@@ -221,7 +221,7 @@ func opensAtColumnZero(f panegrid.Frame, row int, glyphs []string) bool {
 // status-stack step and the frame's own edge are enforced in a single place — a
 // second walk written beside it is a second set of bounds, and the whole
 // argument for the region is that its bounds are the engine's.
-func (r region) eachRow(f panegrid.Frame, visit func(text string) bool) {
+func (r region) eachRow(f paneview.Frame, visit func(text string) bool) {
 	start := r.anchor
 	if r.up && len(r.skipStatusGlyphs) > 0 {
 		start = r.stackTop(f)
@@ -254,7 +254,7 @@ func (r region) eachRow(f panegrid.Frame, visit func(text string) bool) {
 
 // anyRow reports whether any row inside the region satisfies match, which is
 // handed the row's text right-trimmed.
-func (r region) anyRow(f panegrid.Frame, match func(text string) bool) bool {
+func (r region) anyRow(f paneview.Frame, match func(text string) bool) bool {
 	found := false
 	r.eachRow(f, func(text string) bool {
 		if match(text) {
@@ -275,7 +275,7 @@ func (r region) anyRow(f panegrid.Frame, match func(text string) bool) bool {
 // carries for a forged spinner, applied to a forged panel row. A group that did
 // not participate in a match contributes no key, so an absent field is absent
 // rather than empty.
-func (r region) capture(f panegrid.Frame, re *regexp.Regexp) []map[string]string {
+func (r region) capture(f paneview.Frame, re *regexp.Regexp) []map[string]string {
 	names := re.SubexpNames()
 	var out []map[string]string
 	r.eachRow(f, func(text string) bool {
@@ -333,7 +333,7 @@ const (
 // The frame's own bottom edge is the cap here, and that is the engine owning
 // the bound as much as maxRows is elsewhere: there is nothing below the last
 // row to reach.
-func belowAnchorOpensOnlyWith(f panegrid.Frame, anchor int, glyphs []string) belowVerdict {
+func belowAnchorOpensOnlyWith(f paneview.Frame, anchor int, glyphs []string) belowVerdict {
 	mode, ok := firstNonBlankRowBelow(f, anchor)
 	if !ok {
 		return belowNothing
@@ -369,17 +369,17 @@ func belowAnchorOpensOnlyWith(f panegrid.Frame, anchor int, glyphs []string) bel
 // predicates — they are how a predicate reads a row — and they are here rather
 // than beside one agent because every rule needs them.
 
-func cellAt(f panegrid.Frame, x, y int) (panegrid.Cell, bool) {
+func cellAt(f paneview.Frame, x, y int) (paneview.Cell, bool) {
 	if y < 0 || y >= len(f.Lines) {
-		return panegrid.Cell{}, false
+		return paneview.Cell{}, false
 	}
 	if x < 0 || x >= len(f.Lines[y]) {
-		return panegrid.Cell{}, false
+		return paneview.Cell{}, false
 	}
 	return f.Lines[y][x], true
 }
 
-func firstNonBlankCol(f panegrid.Frame, y int) (int, bool) {
+func firstNonBlankCol(f paneview.Frame, y int) (int, bool) {
 	if y < 0 || y >= len(f.Lines) {
 		return 0, false
 	}
@@ -396,7 +396,7 @@ func firstNonBlankCol(f panegrid.Frame, y int) (int, bool) {
 
 // rowTextFrom renders a row from a column onwards, so a marker's own cell does
 // not have to be trimmed off the front of the text it introduces.
-func rowTextFrom(f panegrid.Frame, y, from int) string {
+func rowTextFrom(f paneview.Frame, y, from int) string {
 	if y < 0 || y >= len(f.Lines) {
 		return ""
 	}
@@ -414,7 +414,7 @@ func rowTextFrom(f panegrid.Frame, y, from int) string {
 	return strings.TrimRight(b.String(), " ")
 }
 
-func firstNonBlankRowBelow(f panegrid.Frame, y int) (int, bool) {
+func firstNonBlankRowBelow(f paneview.Frame, y int) (int, bool) {
 	for i := y + 1; i < f.Rows && i < len(f.Lines); i++ {
 		if _, ok := firstNonBlankCol(f, i); ok {
 			return i, true

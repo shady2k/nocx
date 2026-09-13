@@ -8,15 +8,16 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 )
 
 // paneEnroller answers the agent_enrol / agent_withdraw pair by opening and
-// closing a pane's backend grid (protocol doc §15, and the AD-6 amendment's
+// opening and closing the observation of a pane (protocol doc §15, and the
+// AD-6 amendment's
 // INTERVAL constraint). It is the composition root's, because it is the only
 // place that holds both halves of the answer: the lane→session map the child
-// grant builder already uses, and the grid store the transport feeds.
+// grant builder already uses, and the store every frame read goes through.
 //
 // It decides nothing about what is on the screen and could not: what it hands
 // out is a grid, and what a grid answers is a Frame. The two decisions the
@@ -25,7 +26,7 @@ import (
 type paneEnroller struct {
 	log      log.Logger
 	sessions *sessionRegistry
-	grid     panegrid.Observer
+	screens  paneWatchStore
 	// watch is the OBSERVATION's end of the same act. It opens and closes
 	// with the grid and never before or after it: a pane nocx reports a
 	// state for but declined to watch would be a claim with no evidence
@@ -39,6 +40,20 @@ type paneEnroller struct {
 	// most enrolments are a person running an agent in their own tab and
 	// belong to no workers.
 	onEnrol func(sessionID, lane string)
+}
+
+// paneWatchStore is the enroller's narrow view of the pane store (AD-8): it
+// opens an interval and closes one, and may do nothing else with it.
+//
+// It is an interface and not the store itself because opening an interval is
+// the ONE thing this file does with a pane's screen. The store is the
+// composition root's object — it is also what the observation sweeps, what the
+// typing gate reads and what the authorizer asks about — and an enroller that
+// held it could reach every one of those, which is how one behaviour acquires
+// a second owner.
+type paneWatchStore interface {
+	Enrol(paneID string) error
+	Withdraw(paneID string)
 }
 
 // paneWatcher is the enroller's narrow view of the observation (AD-8): open
@@ -59,14 +74,14 @@ type agentApproval interface {
 func newPaneEnroller(
 	lg log.Logger,
 	sessions *sessionRegistry,
-	grid panegrid.Observer,
+	screens paneWatchStore,
 	watch paneWatcher,
 	approval agentApproval,
 ) (*paneEnroller, error) {
 	if approval == nil {
 		return nil, errors.New("pane enroller: no agent approval")
 	}
-	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch, approval: approval}, nil
+	return &paneEnroller{log: lg, sessions: sessions, screens: screens, watch: watch, approval: approval}, nil
 }
 
 // Enrol opens the interval for the pane the lane belongs to.
@@ -99,26 +114,41 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 			"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
 		return err
 	}
-	if err := e.grid.Enrol(sid, cols, rows); err != nil {
+	// The size the shell reported is NOT passed on: the runtime beside the PTY
+	// already holds the geometry the program is running at, and a second number
+	// taken from a shell's report would be a claim about a terminal nobody
+	// asked (nocx-ygxjv.3). cols and rows stay in the signature because the
+	// authenticated channel carries them and the log line states what was
+	// asked for.
+	if err := e.screens.Enrol(sid); err != nil {
 		switch {
-		case errors.Is(err, panegrid.ErrAlreadyEnrolled):
-			// Re-enrolling would discard the grid built so far, and with it
-			// the byte-zero guarantee that is the only reason to trust a
-			// frame. So it is refused, and the caller says so.
+		case errors.Is(err, paneview.ErrAlreadyWatched):
+			// A second enrolment is a caller that has lost track of the first.
+			// It is refused rather than folded in, and the caller says so:
+			// one withdrawal must close the interval, which it cannot do if a
+			// second open was silently absorbed.
 			e.log.Warn("agent enrolment refused: the pane is already watched",
 				"lane", string(lane), "session_id", sid, "agent", agent)
 			return errors.New("this pane is already being watched")
-		case errors.Is(err, panegrid.ErrTooManyEnrolled):
+		case errors.Is(err, paneview.ErrTooManyWatched):
 			e.log.Warn("agent enrolment refused: the watch bound is reached",
-				"lane", string(lane), "session_id", sid, "agent", agent, "bound", panegrid.MaxEnrolled)
-			return fmt.Errorf("nocx is already watching %d panes", panegrid.MaxEnrolled)
+				"lane", string(lane), "session_id", sid, "agent", agent, "bound", paneview.MaxWatched)
+			return fmt.Errorf("nocx is already watching %d panes", paneview.MaxWatched)
+		case errors.Is(err, errNoPaneRuntime):
+			// The pane's PTY is not a helper's, so there is no runtime to read
+			// and nothing to watch. It is the sentence a person reads in the
+			// pane that asked to be enrolled, which is what D4 requires — and
+			// nocx-ygxjv.13 is what ends the state that produces it.
+			e.log.Info("agent enrolment refused: no helper holds the pane's terminal",
+				"lane", string(lane), "session_id", sid, "agent", agent)
+			return err
 		default:
 			e.log.Warn("agent enrolment refused",
 				"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
 			return errors.New("nocx could not start watching this pane")
 		}
 	}
-	// Only now, and only for an enrolment that actually opened a grid.
+	// Only now, and only for an enrolment that actually opened a watch.
 	e.watch.Watch(sid, agent)
 	if e.onEnrol != nil {
 		e.onEnrol(sid, string(lane))
@@ -143,7 +173,7 @@ func (e *paneEnroller) Withdraw(lane lifecycle.LaneID) {
 	// Before the grid closes: what it reports is the pane's last state, and
 	// a client attaching afterwards is answered with it.
 	e.watch.Exited(sid)
-	e.grid.Withdraw(sid)
+	e.screens.Withdraw(sid)
 	// The agent this pane approved is no longer enrolled, so what it was
 	// approved AS goes with the interval. The durable answer in the store is
 	// untouched: the person permitted an agent, not this one run of it.

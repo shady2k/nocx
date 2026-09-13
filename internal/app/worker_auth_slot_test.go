@@ -15,7 +15,7 @@ func TestToolAuthorizerRefusesASecondLiveCallerForTheSameSession(t *testing.T) {
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 
@@ -42,7 +42,7 @@ func TestToolAuthorizerReleasesSlotAfterConnectionAndInFlightCallSettle(t *testi
 	if err := reg.RecordOwnedProcessPID(sess.ID(), ownedPID); err != nil {
 		t.Fatalf("record owned process pid: %v", err)
 	}
-	if err := grid.Enrol(string(sess.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(sess.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol session grid: %v", err)
 	}
 

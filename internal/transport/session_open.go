@@ -652,7 +652,7 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// handleOpen (ws_session_handlers.go), reached exclusively by a
 	// RENDERER'S OWN `session.open`. A backend-opened session — every worker
 	// participant, since workerSpawner is this method's only caller — got no
-	// rx and no pump: its pty was never read, so panegrid never saw a byte of
+	// rx and no pump: its pty was never read, so no screen was ever derived
 	// it, paneobserve could never classify it past its enrolled-but-blank
 	// starting state, and internal/agenttyping's free_text gate could never
 	// open. deliverTask's own awaitFreeText polls exactly that answer, so

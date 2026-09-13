@@ -16,24 +16,33 @@
 //
 //	go run ./cmd/agent-capture replay -at 0,1,2 <set>/capture.jsonl
 //
-// # Replay goes through panegrid, not through a bare emulator
+// # Replay is the RUNTIME's, and this package only says what to feed it
 //
-// The frame a driver classifies in production comes out of a panegrid Store
-// fed from byte zero. Replaying through anything else would answer about a
-// screen the product never produces, and the difference is exactly the column
-// geometry ADR-0041 pins the emulator for.
+// The frame a driver classifies in production is read from the session's
+// runtime (ADR-0066), so a capture must be replayed through THE SAME emulator
+// or the rules are verified against a screen the product never produces —
+// which is the column-geometry difference ADR-0041 measured. That emulator is
+// the helper's: cmd/nocx-server is built CGO_ENABLED=0, so the coordinator
+// cannot hold one, and [Frames] therefore computes WHICH bytes belong to each
+// mark and asks a [Replay] for the screens. The helper answers that question
+// with the same emulator it directs sessions with (proto.OpReplay).
+//
+// What stays here is the FORMAT and the arithmetic: which chunk belongs to
+// which mark is a fact about a capture file, and the two callers that must
+// agree about it (this package and the helper's replay) agree because the
+// caller computes it and the helper is told.
 package agentcapture
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // Header is the capture's first line: what was recorded, at what geometry.
@@ -60,7 +69,7 @@ type Chunk struct {
 // the stream had been consumed to get it.
 type Moment struct {
 	AtMs   int64
-	Frame  panegrid.Frame
+	Frame  paneview.Frame
 	Chunks int
 	Offset int
 }
@@ -173,14 +182,16 @@ func EndOffset(chunks []Chunk, consumed int) int {
 // non-decreasing, because the emulator is fed forward once: a capture cannot
 // be rewound, only replayed from byte zero, and asking for an earlier mark
 // after a later one would silently answer the later screen.
-func Frames(lg log.Logger, header Header, chunks []Chunk, marks []int64) ([]Moment, error) {
-	r, err := NewReplayer(lg, header)
-	if err != nil {
-		return nil, err
+//
+// The emulator is not this package's (see the package doc): this computes what
+// to feed and WHERE the marks fall, and the [Replay] answers the screens. The
+// arithmetic stays here, in one place, because the helper is TOLD which chunks
+// each mark consumes rather than deriving it a second time.
+func Frames(ctx context.Context, r Replay, header Header, chunks []Chunk, marks []int64) ([]Moment, error) {
+	if header.Cols <= 0 || header.Rows <= 0 {
+		return nil, fmt.Errorf("agentcapture: capture geometry is %dx%d", header.Cols, header.Rows)
 	}
-	defer r.Close()
-
-	out := make([]Moment, 0, len(marks))
+	through := make([]int, 0, len(marks))
 	consumed := 0
 	var previous int64
 	for i, mark := range marks {
@@ -188,58 +199,46 @@ func Frames(lg log.Logger, header Header, chunks []Chunk, marks []int64) ([]Mome
 			return nil, fmt.Errorf("agentcapture: marks must be non-decreasing; %d follows %d", mark, previous)
 		}
 		previous = mark
-		from := consumed
 		consumed = ChunksThrough(chunks, mark, consumed)
-		if err := r.Feed(chunks[from:consumed]); err != nil {
-			return nil, fmt.Errorf("agentcapture: feed capture at %dms: %w", mark, err)
-		}
-		f, err := r.Frame()
-		if err != nil {
-			return nil, fmt.Errorf("agentcapture: frame at %dms: %w", mark, err)
-		}
-		out = append(out, Moment{AtMs: mark, Frame: f, Chunks: consumed, Offset: EndOffset(chunks, consumed)})
+		through = append(through, consumed)
+	}
+	if r == nil {
+		return nil, errors.New("agentcapture: no replay emulator is wired")
+	}
+	// Only the prefix the last mark needs is sent: a capture may be long and
+	// nothing after the final mark can reach a screen anybody asked for.
+	frames, err := r.Replay(ctx, header, chunks[:consumed], through)
+	if err != nil {
+		return nil, err
+	}
+	if len(frames) != len(through) {
+		// A replay that answered a different number of marks than it was
+		// asked for would silently pair a label with another moment's screen.
+		return nil, fmt.Errorf("agentcapture: replay answered %d frames for %d marks", len(frames), len(through))
+	}
+	out := make([]Moment, 0, len(frames))
+	for i, f := range frames {
+		out = append(out, Moment{AtMs: marks[i], Frame: f, Chunks: through[i], Offset: EndOffset(chunks, through[i])})
 	}
 	return out, nil
 }
 
-// Replayer is one emulator fed forward through a capture. Callers that want
-// every mark in one pass use Frames; this is for a caller that also wants to
-// paint something MORE onto the replayed screen.
-type Replayer struct {
-	store *panegrid.Store
-	pane  string
+// Replay is the seam onto the emulator that turns a capture's bytes into
+// screens (AD-8). It is one method, and it takes the marks as CHUNK COUNTS
+// rather than as times, because that arithmetic is this package's and is not
+// repeated on the other side.
+//
+// The implementation in the product is the helper's (proto.OpReplay), wired at
+// the composition root. An in-process implementation exists for the capture
+// tool and for tests — internal/agentcapture/replaylocal — and is deliberately
+// NOT reachable from the coordinator: cmd/nocx-server is built CGO_ENABLED=0
+// and an emulator here would be a second one (ADR-0066).
+// The context is the CALLER'S exchange: a replay crosses a process, and a
+// caller that has given up must be able to say so rather than wait for a
+// frame nobody will read.
+type Replay interface {
+	Replay(ctx context.Context, header Header, chunks []Chunk, through []int) ([]paneview.Frame, error)
 }
-
-// replayPane is the pane id a replay enrols under. A Replayer owns its Store,
-// so the name never collides with anything.
-const replayPane = "capture"
-
-// NewReplayer enrols a grid at the capture's geometry. Close releases it.
-func NewReplayer(lg log.Logger, header Header) (*Replayer, error) {
-	if header.Cols <= 0 || header.Rows <= 0 {
-		return nil, fmt.Errorf("agentcapture: capture geometry is %dx%d", header.Cols, header.Rows)
-	}
-	store := panegrid.New(lg)
-	if err := store.Enrol(replayPane, header.Cols, header.Rows); err != nil {
-		return nil, fmt.Errorf("agentcapture: enrol replay grid: %w", err)
-	}
-	return &Replayer{store: store, pane: replayPane}, nil
-}
-
-// Feed hands the next chunks to the emulator.
-func (r *Replayer) Feed(chunks []Chunk) error {
-	for _, c := range chunks {
-		r.store.Feed(r.pane, []byte(c.Data))
-	}
-	return nil
-}
-
-// Frame is the screen as it stands.
-func (r *Replayer) Frame() (panegrid.Frame, error) { return r.store.Frame(r.pane) }
-
-// Close withdraws the grid. A Replayer that is not closed leaks one emulator
-// and the goroutine draining its replies.
-func (r *Replayer) Close() { r.store.Withdraw(r.pane) }
 
 // Paint encodes a frame as the bytes that reproduce it, so that a frame can be
 // stored in a capture and read back by replaying to its mark.
@@ -254,14 +253,14 @@ func (r *Replayer) Close() { r.store.Withdraw(r.pane) }
 //
 // # What survives, and why that is everything a rule can read
 //
-// A Frame is text, width and cursor — panegrid answers nothing else, on
+// A Frame is text, width and cursor — paneview answers nothing else, on
 // purpose, because both powers the AD-6 amendment grants are positional. So
 // colour and attributes are not lost here; they were never in the frame. Each
 // row is written from its first column so a double-width grapheme lands where
 // it stood, the alternate screen is restored because a rule may read it, and
 // the cursor is parked LAST because it is the one marker an agent cannot
 // forge and everything before it moves the cursor.
-func Paint(f panegrid.Frame) []byte {
+func Paint(f paneview.Frame) []byte {
 	var b strings.Builder
 	if f.AltScreen {
 		b.WriteString("\x1b[?1049h")
@@ -283,7 +282,7 @@ func Paint(f panegrid.Frame) []byte {
 // rowBytes renders one row, trimmed of the trailing blanks an erased screen
 // already has. Trimming is safe precisely because the paint begins with an
 // erase: what is not written is blank, and what is blank was not written.
-func rowBytes(line []panegrid.Cell) string {
+func rowBytes(line []paneview.Cell) string {
 	last := -1
 	for x, c := range line {
 		if c.Width == 0 {

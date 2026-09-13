@@ -95,6 +95,7 @@ package agentcalib
 // be manufactured, and that every failure answers no.
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
@@ -191,13 +192,13 @@ func (v Verdict) MayType() bool { return v.mayType }
 // true and mayType left at its zero value; every other path only records why,
 // and falls through to it. See the file comment for what belongs on which
 // side.
-func (c *Calibrations) Verify(agent string) Verdict {
+func (c *Calibrations) Verify(ctx context.Context, agent string) Verdict {
 	v := Verdict{Agent: agent}
 	if err := validAgent(agent); err != nil {
 		v.Reason = err.Error()
 		return v
 	}
-	refused := c.evaluate(agent, &v)
+	refused := c.evaluate(ctx, agent, &v)
 	if !refused {
 		v.mayType = true
 	}
@@ -207,7 +208,7 @@ func (c *Calibrations) Verify(agent string) Verdict {
 // evaluate fills in v's Labelled, Agreed, Disagreements and Reason, and
 // reports whether what it found is evidence against the rule. Only a name
 // that already passed validAgent reaches this.
-func (c *Calibrations) evaluate(agent string, v *Verdict) (refused bool) {
+func (c *Calibrations) evaluate(ctx context.Context, agent string, v *Verdict) (refused bool) {
 	set, found, err := c.store.Load(agent)
 	switch {
 	case err != nil:
@@ -224,7 +225,7 @@ func (c *Calibrations) evaluate(agent string, v *Verdict) (refused bool) {
 			"%s's labelled set is missing a state a rule must classify, so it cannot verify one", agent)
 		return false
 	}
-	frames, err := set.Frames(c.log)
+	frames, err := set.Frames(ctx, c.replay)
 	if err != nil {
 		v.Reason = fmt.Sprintf("%s's labelled set could not be replayed: %v", agent, err)
 		return false

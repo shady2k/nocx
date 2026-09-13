@@ -12,7 +12,7 @@ package app
 // real internal/shellintegration/scripts/nocx.bash, which sends a real
 // agent_enrol hello over the real internal/lifecyclechannel socketpair and
 // waits for a real accept; the enrolment reaches a real paneEnroller, which
-// opens a real panegrid.Store interval and calls a real paneobserve.Watcher's
+// opens a real *paneview.Store interval and calls a real paneobserve.Watcher's
 // Watch; the pane's bytes are fed into that same grid on the pump path
 // transport.WSServer already runs for every session; a real
 // agentdriver.Registry (the shipped Claude() rule) classifies the resulting

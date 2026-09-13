@@ -296,6 +296,20 @@ func (o *localHelperOpener) watchForReplacement(sess session.Session, pid int, s
 // locally: the socket's name carries 64 bits of the generation, the hello-ok
 // carries the whole content hash, and a stale binary under ~/.nocx is likelier
 // on the machine where builds land than on a server (D21).
+// screenClient is the route a pane's screen is read through: this machine's
+// daemon, and the handle it knows the session by.
+//
+// It reuses connect, so a coordinator that already holds the connection pays
+// nothing for the answer, and one that does not dials the daemon exactly as an
+// open would — the same endpoint, the same generation, no second route.
+func (o *localHelperOpener) screenClient(ctx context.Context, sid string) (*helperclient.Client, helperclient.HostSessionID, error) {
+	c, generation, err := o.connect(ctx)
+	if err != nil {
+		return nil, helperclient.HostSessionID{}, err
+	}
+	return c, helperclient.HostSessionID{Generation: generation, Session: sid}, nil
+}
+
 func (o *localHelperOpener) connect(ctx context.Context) (*helperclient.Client, string, error) {
 	o.mu.Lock()
 	installed, dir, existing, toolSocketPath := o.installed, o.dir, o.client, o.toolSocketPath

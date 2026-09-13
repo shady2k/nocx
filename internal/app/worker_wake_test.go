@@ -20,13 +20,15 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -52,7 +54,7 @@ type wakeStand struct {
 	*workerStand
 	coordinator session.ID
 	coordPTY    *recordingPTY
-	grid        *panegrid.Store
+	grid        *paneviewtest.Views
 	rules       *agentdriver.Registry
 	raiser      *recordingRaiser
 	chunks      []agentcapture.Chunk
@@ -69,12 +71,12 @@ func newWakeStand(t *testing.T) *wakeStand {
 	ctx := context.Background()
 	logger := log.NewSlogAdapter(nil)
 
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("driver registry: %v", err)
 	}
-	watch := paneobserve.New(logger, grid, rules, paneobserve.Config{})
+	watch := paneobserve.New(logger, grid.Store, rules, paneobserve.Config{})
 	raiser := &recordingRaiser{}
 
 	// The stand is built with the backstop already in it, because the record
@@ -87,7 +89,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 		workers.WithFactDeadline(workerFactDeadline))
 	stand := newWorkerStand(t, workers.WithBackstop(backstop))
 
-	typist = newPaneTypist(logger, grid, rules, verifiedClaude(t), watch, stand.reg)
+	typist = newPaneTypist(logger, grid.Store, rules, verifiedClaude(t), watch, stand.reg)
 	waker.typist = typist
 
 	// The coordinator's own pane, opened through the SAME one session-open
@@ -104,7 +106,7 @@ func newWakeStand(t *testing.T) *wakeStand {
 
 	// Its grid, opened from byte zero, and its observation — the two halves of
 	// one act, exactly as the pane enroller opens them.
-	if enrolErr := grid.Enrol(string(coordinator), participantCols, participantRows); enrolErr != nil {
+	if enrolErr := grid.Watch(string(coordinator), participantCols, participantRows); enrolErr != nil {
 		t.Fatalf("enrol the coordinator's pane: %v", enrolErr)
 	}
 	t.Cleanup(func() { grid.Withdraw(string(coordinator)) })
@@ -200,7 +202,7 @@ func (w *wakeStand) register(t *testing.T, task string) workers.Participant {
 // wanted to shortcut this would be faking the gate it is here to exercise.
 func verifiedClaude(t *testing.T) agenttyping.Authority {
 	t.Helper()
-	frames := &stepFrames{frames: []panegrid.Frame{
+	frames := &stepFrames{frames: []paneview.Frame{
 		captureFrame(t, "claude-idle", 11000),       // Begin: the geometry
 		captureFrame(t, "claude-idle", 11000),       // idle     → free_text
 		captureFrame(t, "claude-working", 17000),    // working  → working
@@ -214,8 +216,8 @@ func verifiedClaude(t *testing.T) agenttyping.Authority {
 	if err != nil {
 		t.Fatalf("driver registry: %v", err)
 	}
-	calib := agentcalib.New(log.NewSlogAdapter(nil), frames, store, rules)
-	if _, err := calib.Begin("calibration-pane", wakeAgent); err != nil {
+	calib := agentcalib.New(log.NewSlogAdapter(nil), frames, store, rules, replaylocal.Replayer{})
+	if _, err := calib.Begin(context.Background(), "calibration-pane", wakeAgent); err != nil {
 		t.Fatalf("begin calibration: %v", err)
 	}
 	for i, step := range agentcalib.Steps() {
@@ -223,11 +225,11 @@ func verifiedClaude(t *testing.T) agenttyping.Authority {
 		if !step.Required {
 			answer = agentcalib.AnswerSkip
 		}
-		if _, err := calib.Answer("calibration-pane", i, answer); err != nil {
+		if _, err := calib.Answer(context.Background(), "calibration-pane", i, answer); err != nil {
 			t.Fatalf("answer step %d (%s): %v", i, step.Label, err)
 		}
 	}
-	if v := calib.Verify(wakeAgent); !v.MayType() {
+	if v := calib.Verify(context.Background(), wakeAgent); !v.MayType() {
 		t.Fatalf("the shipped rule did not verify against the corpus it was written from: %+v", v)
 	}
 	return calib
@@ -236,20 +238,20 @@ func verifiedClaude(t *testing.T) agenttyping.Authority {
 // stepFrames hands out one frame per read, which is what a calibration walk
 // is: a person drives their agent into a state and nocx labels what it sees.
 type stepFrames struct {
-	frames []panegrid.Frame
+	frames []paneview.Frame
 	at     int
 }
 
-func (s *stepFrames) Frame(string) (panegrid.Frame, error) {
+func (s *stepFrames) Frame(string) (paneview.Frame, error) {
 	if s.at >= len(s.frames) {
-		return panegrid.Frame{}, panegrid.ErrNotEnrolled
+		return paneview.Frame{}, paneview.ErrNotWatched
 	}
 	f := s.frames[s.at]
 	s.at++
 	return f, nil
 }
 
-func captureFrame(t *testing.T, name string, atMs int64) panegrid.Frame {
+func captureFrame(t *testing.T, name string, atMs int64) paneview.Frame {
 	t.Helper()
 	//nolint:gosec // The path is joined literals naming a corpus in the tree.
 	header, chunks, err := agentcapture.Read(
@@ -257,7 +259,7 @@ func captureFrame(t *testing.T, name string, atMs int64) panegrid.Frame {
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
-	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{atMs})
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{atMs})
 	if err != nil {
 		t.Fatalf("replay %s to %dms: %v", name, atMs, err)
 	}
@@ -499,7 +501,7 @@ func TestAGroupWhoseCoordinatorPaneIsNotWatchedIsNotTyped(t *testing.T) {
 // is not a two-line switch nobody read.
 type fakeTypist struct{ res agenttyping.Result }
 
-func (f fakeTypist) Submit(string, string) agenttyping.Result { return f.res }
+func (f fakeTypist) Submit(ctx context.Context, _, _ string) agenttyping.Result { return f.res }
 
 // ONLY a submission is a delivery.
 //

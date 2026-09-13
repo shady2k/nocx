@@ -11,17 +11,20 @@ package transport
 // a menu, showing an error, or showing anything the rule cannot read.
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -30,7 +33,7 @@ import (
 // to land.
 type typingEnv struct {
 	env  *lifecycleTestEnv
-	grid *panegrid.Store
+	grid *paneviewtest.Views
 	sid  string
 	sent *sentInput
 }
@@ -63,14 +66,14 @@ func (e enrolledAs) AgentOn(paneID string) (string, bool) {
 // corpusFrame replays one moment of the driver's own corpus. The captures live
 // in internal/agentdriver because the rule was written from them, and are
 // replayed through internal/agentcapture, which owns the format.
-func corpusFrame(t *testing.T, name string, atMs int64) panegrid.Frame {
+func corpusFrame(t *testing.T, name string, atMs int64) paneview.Frame {
 	t.Helper()
 	path := filepath.Join("..", "agentdriver", "testdata", "captures", name+".jsonl")
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{atMs})
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{atMs})
 	if err != nil {
 		t.Fatalf("replay %s to %dms: %v", path, atMs, err)
 	}
@@ -79,11 +82,11 @@ func corpusFrame(t *testing.T, name string, atMs int64) panegrid.Frame {
 
 // walkFrames hands a calibration walk one frame per read, in order.
 type walkFrames struct {
-	frames []panegrid.Frame
+	frames []paneview.Frame
 	at     int
 }
 
-func (w *walkFrames) Frame(string) (panegrid.Frame, error) {
+func (w *walkFrames) Frame(string) (paneview.Frame, error) {
 	f := w.frames[w.at]
 	if w.at < len(w.frames)-1 {
 		w.at++
@@ -102,15 +105,15 @@ func verifiedCalibration(t *testing.T, rules *agentdriver.Registry) *agentcalib.
 	if err != nil {
 		t.Fatalf("calibration store: %v", err)
 	}
-	screens := &walkFrames{frames: []panegrid.Frame{
+	screens := &walkFrames{frames: []paneview.Frame{
 		corpusFrame(t, "claude-idle", 11000),       // Begin: the geometry
 		corpusFrame(t, "claude-idle", 11000),       // idle     → free_text
 		corpusFrame(t, "claude-working", 17000),    // working  → working
 		corpusFrame(t, "claude-permission", 49000), // asks-you → permission_choice
 	}}
-	calib := agentcalib.New(log.NewSlogAdapter(nil), screens, store, rules)
+	calib := agentcalib.New(log.NewSlogAdapter(nil), screens, store, rules, replaylocal.Replayer{})
 	const walkPane = "calibration"
-	if _, err := calib.Begin(walkPane, "claude"); err != nil {
+	if _, err := calib.Begin(context.Background(), walkPane, "claude"); err != nil {
 		t.Fatalf("begin calibration: %v", err)
 	}
 	for i, step := range agentcalib.Steps() {
@@ -118,11 +121,11 @@ func verifiedCalibration(t *testing.T, rules *agentdriver.Registry) *agentcalib.
 		if !step.Required {
 			answer = agentcalib.AnswerSkip
 		}
-		if _, err := calib.Answer(walkPane, i, answer); err != nil {
+		if _, err := calib.Answer(context.Background(), walkPane, i, answer); err != nil {
 			t.Fatalf("answer step %d (%s): %v", i, step.Label, err)
 		}
 	}
-	if v := calib.Verify("claude"); !v.MayType() {
+	if v := calib.Verify(context.Background(), "claude"); !v.MayType() {
 		t.Fatalf("the shipped rule did not verify against the corpus it was written from: %+v", v)
 	}
 	return calib
@@ -131,7 +134,7 @@ func verifiedCalibration(t *testing.T, rules *agentdriver.Registry) *agentcalib.
 func newTypingEnv(t *testing.T) *typingEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
@@ -147,14 +150,14 @@ func newTypingEnv(t *testing.T) *typingEnv {
 	typist := agenttyping.New(logger, grid, rules, verifiedCalibration(t, rules), enrol, sent)
 
 	env := newLifecycleTestEnv(t,
-		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentTypist(typist))
+		WithPaneScreens(grid), WithPaneObserver(watcher), WithAgentTypist(typist))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)
 	sid := env.openSession(t, 1)
 	enrol.pane = sid
 
 	// The enrolment act, as the pane enroller performs it: the grid first,
 	// then the observation beside it.
-	if err := grid.Enrol(sid, 120, 40); err != nil {
+	if err := grid.Watch(sid, 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw(sid) })

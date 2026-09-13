@@ -61,6 +61,11 @@ var (
 	ErrSpawn         = errors.New("session: the shell could not be started")
 	ErrSignal        = errors.New("session: signal is invalid or unavailable")
 	ErrBadKey        = errors.New("session: the idempotency key is longer than the protocol allows")
+	// ErrReplay is a capture the helper will not feed to an emulator: a
+	// geometry it refuses to allocate, marks it cannot honour, or a chunk the
+	// terminal would not take. It is BadParams rather than internal because
+	// the caller composed the request and can fix it.
+	ErrReplay = errors.New("session: the capture cannot be replayed")
 )
 
 // Limits are the helper's bounds on output windows: D8 asks for all three,
@@ -317,7 +322,7 @@ func (s *Service) Ops() []string {
 	return []string{
 		proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle,
+		proto.OpAdoptLifecycle, proto.OpScreen, proto.OpReplay,
 	}
 }
 
@@ -341,6 +346,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.SignalParams{})
 	case proto.OpAdoptLifecycle:
 		return host.SchemaFor(proto.AdoptLifecycleParams{})
+	case proto.OpScreen:
+		return host.SchemaFor(proto.ScreenParams{})
+	case proto.OpReplay:
+		return host.SchemaFor(proto.ReplayParams{})
 	}
 	return nil
 }
@@ -366,6 +375,8 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	case errors.Is(err, ErrBudget):
 		return proto.ErrCodeWindowBudget, nil
 	case errors.Is(err, ErrSignal):
+		return proto.ErrCodeBadParams, nil
+	case errors.Is(err, ErrReplay):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrSpawn):
 		return proto.ErrCodeSpawnFailed, nil
@@ -412,6 +423,18 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			}
 		}
 		return proto.AckResult{}, nil
+	case proto.OpScreen:
+		var p proto.ScreenParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.readScreen(p)
+	case proto.OpReplay:
+		var p proto.ReplayParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.replay(p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {

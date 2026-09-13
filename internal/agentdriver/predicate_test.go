@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
-// A predicate is a pure function of one panegrid.Frame, so these tests build
+// A predicate is a pure function of one paneview.Frame, so these tests build
 // frames directly rather than through a Store. That is deliberate and it is
 // not the shortcut capture_test.go warns against: the fidelity of a Frame to a
 // screen the product actually produces is what the capture corpus asserts, and
@@ -18,21 +18,21 @@ import (
 // way of reading it.
 
 // grid builds a frame from rows of runes, one cell per rune, no double-width.
-func grid(cols, rows int, lines []string, cursorX, cursorY int) panegrid.Frame {
-	f := panegrid.Frame{Cols: cols, Rows: rows, CursorX: cursorX, CursorY: cursorY}
-	f.Lines = make([][]panegrid.Cell, rows)
+func grid(cols, rows int, lines []string, cursorX, cursorY int) paneview.Frame {
+	f := paneview.Frame{Cols: cols, Rows: rows, CursorX: cursorX, CursorY: cursorY}
+	f.Lines = make([][]paneview.Cell, rows)
 	for y := 0; y < rows; y++ {
-		row := make([]panegrid.Cell, cols)
+		row := make([]paneview.Cell, cols)
 		var runes []rune
 		if y < len(lines) {
 			runes = []rune(lines[y])
 		}
 		for x := 0; x < cols; x++ {
 			if x < len(runes) {
-				row[x] = panegrid.Cell{Text: string(runes[x]), Width: 1}
+				row[x] = paneview.Cell{Text: string(runes[x]), Width: 1}
 				continue
 			}
-			row[x] = panegrid.Cell{Text: " ", Width: 1}
+			row[x] = paneview.Cell{Text: " ", Width: 1}
 		}
 		f.Lines[y] = row
 	}

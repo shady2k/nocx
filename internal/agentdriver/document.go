@@ -28,7 +28,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // maxExtractorRows is the ENGINE's ceiling on how many rows a document may ask
@@ -253,7 +253,7 @@ type bound map[string]int
 // Classify is the SCALAR PROJECTION of Observe. It is written as one rather
 // than as a second evaluation so that there is one place the answer comes
 // from; two evaluations of one question is how the two come to disagree.
-func (d documentDriver) Classify(f panegrid.Frame) State {
+func (d documentDriver) Classify(f paneview.Frame) State {
 	return d.Observe(f).State
 }
 
@@ -264,7 +264,7 @@ func (d documentDriver) Classify(f panegrid.Frame) State {
 // extractor runs and from a value no extractor can see, which is what makes
 // "extras never decide the state" a property of the shape rather than a
 // promise about the branches somebody wrote.
-func (d documentDriver) Observe(f panegrid.Frame) Observation {
+func (d documentDriver) Observe(f paneview.Frame) Observation {
 	// The degenerate frame is the engine's, not a branch: a document cannot
 	// express "there is no grid to read", and should not have to.
 	if f.Rows <= 0 || f.Cols <= 0 || len(f.Lines) == 0 {
@@ -283,7 +283,7 @@ func (d documentDriver) Observe(f panegrid.Frame) Observation {
 // question is how the two come to disagree on the frame nobody tried. Nothing
 // it records is read back here: recording cannot change an answer, because
 // every branch below is decided before the recorder is told about it.
-func (d documentDriver) decide(f panegrid.Frame, anchors bound, tr *trace) State {
+func (d documentDriver) decide(f paneview.Frame, anchors bound, tr *trace) State {
 	for i, b := range d.doc.Branches {
 		if b.Below != nil {
 			_, bound := anchors[b.Below.Anchor]
@@ -316,7 +316,7 @@ func (d documentDriver) decide(f panegrid.Frame, anchors bound, tr *trace) State
 // because a reader must be able to tell "the panel is not on screen" from "the
 // panel is on screen and says nothing", and only the first of those is true
 // here.
-func (d documentDriver) extract(f panegrid.Frame, anchors bound) []Extra {
+func (d documentDriver) extract(f paneview.Frame, anchors bound) []Extra {
 	var out []Extra
 	for _, e := range d.extractors {
 		row, ok := anchors[e.spec.Anchor]
@@ -332,7 +332,7 @@ func (d documentDriver) extract(f panegrid.Frame, anchors bound) []Extra {
 	return out
 }
 
-func allHold(f panegrid.Frame, anchors bound, preds []Pred) bool {
+func allHold(f paneview.Frame, anchors bound, preds []Pred) bool {
 	for _, p := range preds {
 		if !holds(f, anchors, p) {
 			return false
@@ -344,7 +344,7 @@ func allHold(f panegrid.Frame, anchors bound, preds []Pred) bool {
 // holds evaluates one predicate. A predicate naming an anchor that did not
 // bind answers false, EXCEPT aboveAnchorIfBound, whose whole purpose is the
 // other answer.
-func holds(f panegrid.Frame, anchors bound, p Pred) bool {
+func holds(f paneview.Frame, anchors bound, p Pred) bool {
 	switch p.Kind {
 	case "cursorOn":
 		return cursorOn(f, p.Glyph)
@@ -414,7 +414,7 @@ func holds(f panegrid.Frame, anchors bound, p Pred) bool {
 	return false
 }
 
-func (d documentDriver) bindAnchors(f panegrid.Frame) bound {
+func (d documentDriver) bindAnchors(f paneview.Frame) bound {
 	anchors := make(bound, len(d.doc.Anchors))
 	for _, a := range d.doc.Anchors {
 		row, ok := bindOne(f, anchors, a)
@@ -426,7 +426,7 @@ func (d documentDriver) bindAnchors(f panegrid.Frame) bound {
 	return anchors
 }
 
-func bindOne(f panegrid.Frame, anchors bound, a AnchorSpec) (int, bool) {
+func bindOne(f paneview.Frame, anchors bound, a AnchorSpec) (int, bool) {
 	for _, need := range a.RequireBound {
 		if _, ok := anchors[need]; !ok {
 			return 0, false
@@ -465,7 +465,7 @@ func bindOne(f panegrid.Frame, anchors bound, a AnchorSpec) (int, bool) {
 	return 0, false
 }
 
-func guard(f panegrid.Frame, row int, a AnchorSpec) (int, bool) {
+func guard(f paneview.Frame, row int, a AnchorSpec) (int, bool) {
 	if row < 0 || row >= f.Rows {
 		return 0, false
 	}

@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // stubRules is a RuleSource with one canned answer per agent.
@@ -26,7 +26,7 @@ func (s stubRules) RuleState(agent string) agentdriver.RuleState { return s[agen
 // the prompt marker — the screen the whole typing decision is about. It is the
 // same chrome internal/transport's tests feed, because a frame this rule reads
 // is the only thing that makes the assertions below mean anything.
-func shippedFrame(t *testing.T) panegrid.Frame {
+func shippedFrame(t *testing.T) paneview.Frame {
 	t.Helper()
 	const cols = 32
 	rule := strings.Repeat("─", cols)

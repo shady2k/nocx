@@ -22,7 +22,8 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // ── fixtures ───────────────────────────────────────────────────────────
@@ -107,11 +108,11 @@ func registryFor(t *testing.T, raws ...string) *agentdriver.Registry {
 
 // fixtureFrame is the screen the shipped rule's branch matches: "READY" one
 // row above the cursor.
-func fixtureFrame(t *testing.T) panegrid.Frame {
+func fixtureFrame(t *testing.T) paneview.Frame {
 	t.Helper()
-	grid := panegrid.New(log.NewSlogAdapter(nil))
+	grid := paneviewtest.NewViews(log.NewSlogAdapter(nil))
 	const pane = "fixture"
-	if err := grid.Enrol(pane, 24, 4); err != nil {
+	if err := grid.Watch(pane, 24, 4); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw(pane) })

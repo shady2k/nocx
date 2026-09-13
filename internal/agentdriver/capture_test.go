@@ -7,20 +7,23 @@ package agentdriver_test
 // is gone by the end of the capture. So a test names a capture and a
 // millisecond mark, and gets the screen as it stood there.
 //
-// It replays through internal/panegrid rather than through a bare emulator on
-// purpose: the frame a driver classifies in production comes out of a Store
-// that was fed from byte zero, and a test that built its frame some other way
-// would be asserting about a screen the product never produces.
+// It replays through the SAME emulator the product reads a pane with — the
+// helper's, which in a test is this process's copy of the same adapter, over
+// the same bytes from byte zero. A frame assembled any other way would be a
+// frame the product never makes.
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // captureNames is the corpus, named once. Two tests walk all of it — the
@@ -44,31 +47,57 @@ func capturePath(name string) string {
 	return filepath.Join("testdata", "captures", name+".jsonl")
 }
 
-// replayer feeds a capture up to atMs through internal/agentcapture — the one
-// reader of the format, the same one calibration and cmd/agent-capture use —
-// and hands the replayer back, so a test that wants to paint something MORE
-// onto that screen can Feed it.
-func replayer(t *testing.T, name string, atMs int64) *agentcapture.Replayer {
+// replayer is a capture plus whatever a test paints onto it, read through the
+// emulator that owns the terminal.
+//
+// It replaces a stateful Replayer that held an emulator of its own: the
+// emulator is the helper's now (ADR-0066), and a replay is a QUESTION — feed
+// these bytes and answer the screen at this mark. "Paint something more" is one
+// more chunk and one more mark, which is exactly what the old Feed was.
+type replayer struct {
+	header agentcapture.Header
+	chunks []agentcapture.Chunk
+	mark   int64
+}
+
+func newReplayer(t *testing.T, name string, atMs int64) *replayer {
 	t.Helper()
 	header, chunks, err := agentcapture.Read(capturePath(name))
 	if err != nil {
 		t.Fatalf("read capture %s: %v", name, err)
 	}
-	r, err := agentcapture.NewReplayer(log.NewSlogAdapter(nil), header)
+	if header.Cols <= 0 || header.Rows <= 0 {
+		t.Fatalf("capture %s has no geometry", name)
+	}
+	through := agentcapture.ChunksThrough(chunks, atMs, 0)
+	return &replayer{header: header, chunks: chunks[:through], mark: atMs}
+}
+
+// Feed appends chunks to the stream, as painting onto the replayed screen.
+func (r *replayer) Feed(chunks []agentcapture.Chunk) error {
+	r.chunks = append(r.chunks, chunks...)
+	// Past every mark already asked for, so a later read still replays from
+	// byte zero through everything fed so far.
+	r.mark++
+	return nil
+}
+
+// Frame answers the screen as it stands.
+func (r *replayer) Frame() (paneview.Frame, error) {
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, r.header, r.chunks, []int64{r.mark})
 	if err != nil {
-		t.Fatalf("replayer for %s: %v", name, err)
+		return paneview.Frame{}, err
 	}
-	t.Cleanup(r.Close)
-	if err := r.Feed(chunks[:agentcapture.ChunksThrough(chunks, atMs, 0)]); err != nil {
-		t.Fatalf("feed %s to %dms: %v", name, atMs, err)
+	if len(moments) != 1 {
+		return paneview.Frame{}, fmt.Errorf("replay answered %d moments, want 1", len(moments))
 	}
-	return r
+	return moments[0].Frame, nil
 }
 
 // replay is the common case: the screen at a moment, and nothing else.
-func replay(t *testing.T, name string, atMs int64) panegrid.Frame {
+func replay(t *testing.T, name string, atMs int64) paneview.Frame {
 	t.Helper()
-	f, err := replayer(t, name, atMs).Frame()
+	f, err := newReplayer(t, name, atMs).Frame()
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
@@ -78,11 +107,11 @@ func replay(t *testing.T, name string, atMs int64) panegrid.Frame {
 // screen paints rows onto a real emulator and parks the cursor, for the shapes
 // the corpus does not contain. It goes through panegrid for the same reason
 // replay does: a frame assembled by hand is a frame the product never makes.
-func screen(t *testing.T, cols, rows int, lines []string, cursorX, cursorY int) panegrid.Frame {
+func screen(t *testing.T, cols, rows int, lines []string, cursorX, cursorY int) paneview.Frame {
 	t.Helper()
-	store := panegrid.New(log.NewSlogAdapter(nil))
+	store := paneviewtest.NewViews(log.NewSlogAdapter(nil))
 	const pane = "synthetic"
-	if err := store.Enrol(pane, cols, rows); err != nil {
+	if err := store.Watch(pane, cols, rows); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { store.Withdraw(pane) })

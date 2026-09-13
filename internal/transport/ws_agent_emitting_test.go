@@ -17,8 +17,9 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 // claudeIdleScreen is the chrome the shipped rule reads: a token meter, two
@@ -34,33 +35,33 @@ func claudeIdleScreen(cols int) string {
 
 type emittingEnv struct {
 	env  *lifecycleTestEnv
-	grid *panegrid.Store
+	grid *paneview.Store
 	sid  string
 }
 
 func newEmittingEnv(t *testing.T) *emittingEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
 	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
 	env := newLifecycleTestEnv(t,
-		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentRules(rules))
+		WithPaneScreens(grid.Store), WithPaneObserver(watcher), WithAgentRules(rules))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)
 	sid := env.openSession(t, 1)
 
 	// The enrolment act, as the pane enroller performs it at the composition
 	// root: the grid first, then the observation beside it.
-	if err := grid.Enrol(sid, 40, 14); err != nil {
+	if err := grid.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw(sid) })
 	watcher.Watch(sid, "claude")
 	grid.Feed(sid, []byte(claudeIdleScreen(40)))
-	return &emittingEnv{env: env, grid: grid, sid: sid}
+	return &emittingEnv{env: env, grid: grid.Store, sid: sid}
 }
 
 func (e *emittingEnv) call(t *testing.T, params any, id int) agentEmittingResult {
@@ -242,7 +243,7 @@ func TestAgentEmittingCreatesNoEnrolment(t *testing.T) {
 	if e.grid.Count() != before {
 		t.Fatalf("grids = %d after asking about an unenrolled pane, was %d", e.grid.Count(), before)
 	}
-	if e.grid.Enrolled(other) {
+	if e.grid.Watched(other) {
 		t.Fatal("asking about a pane enrolled it, which is the inference the amendment forbids")
 	}
 }

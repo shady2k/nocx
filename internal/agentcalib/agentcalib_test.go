@@ -16,6 +16,7 @@ package agentcalib_test
 //     hand-edited file that claims to be complete is not.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,9 +26,11 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 const (
@@ -37,27 +40,31 @@ const (
 	rows  = 14
 )
 
-// screens is the pane the person is driving, as the product sees one: a real
-// panegrid Store the test paints into, and the Calibrations reads out of.
-type screens struct{ store *panegrid.Store }
+// screens is the pane the person is driving, as the product sees one: the REAL
+// store over a source a test feeds bytes to, and the Calibrations reads out of.
+type screens struct {
+	store *paneview.Store
+	src   *paneviewtest.Screens
+}
 
 func newScreens(t *testing.T) *screens {
 	t.Helper()
-	s := &screens{store: panegrid.New(log.NewSlogAdapter(nil))}
-	if err := s.store.Enrol(pane, cols, rows); err != nil {
+	views := paneviewtest.NewViews(log.NewSlogAdapter(nil))
+	s := &screens{store: views.Store, src: views.Source()}
+	if err := views.Watch(pane, cols, rows); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
-	t.Cleanup(func() { s.store.Withdraw(pane) })
+	t.Cleanup(func() { views.Withdraw(pane) })
 	return s
 }
 
-func (s *screens) Frame(paneID string) (panegrid.Frame, error) { return s.store.Frame(paneID) }
+func (s *screens) Frame(paneID string) (paneview.Frame, error) { return s.store.Frame(paneID) }
 
 // drive paints a distinguishable screen, which is what a person does with
 // their agent between one step and the next.
-func (s *screens) drive(t *testing.T, text string) panegrid.Frame {
+func (s *screens) drive(t *testing.T, text string) paneview.Frame {
 	t.Helper()
-	s.store.Feed(pane, []byte("\x1b[2J\x1b[3;1H"+text+"\x1b[3;1H"))
+	s.src.Feed(pane, []byte("\x1b[2J\x1b[3;1H"+text+"\x1b[3;1H"))
 	f, err := s.store.Frame(pane)
 	if err != nil {
 		t.Fatalf("frame: %v", err)
@@ -83,18 +90,18 @@ func newCalibrationsWith(t *testing.T, rules *agentdriver.Registry) (*agentcalib
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	return agentcalib.New(log.NewSlogAdapter(nil), sc, store, rules), sc, store, root
+	return agentcalib.New(log.NewSlogAdapter(nil), sc, store, rules, replaylocal.Replayer{}), sc, store, root
 }
 
 // walkAll answers every step: captured unless its label is in skip.
-func walkAll(t *testing.T, c *agentcalib.Calibrations, sc *screens, skip map[agentcalib.Label]bool) map[agentcalib.Label]panegrid.Frame {
+func walkAll(t *testing.T, c *agentcalib.Calibrations, sc *screens, skip map[agentcalib.Label]bool) map[agentcalib.Label]paneview.Frame {
 	t.Helper()
-	if _, err := c.Begin(pane, agent); err != nil {
+	if _, err := c.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	produced := map[agentcalib.Label]panegrid.Frame{}
+	produced := map[agentcalib.Label]paneview.Frame{}
 	for {
-		st, err := c.Status(pane, agent)
+		st, err := c.Status(context.Background(), pane, agent)
 		if err != nil {
 			t.Fatalf("status: %v", err)
 		}
@@ -103,13 +110,13 @@ func walkAll(t *testing.T, c *agentcalib.Calibrations, sc *screens, skip map[age
 		}
 		step := st.Steps[st.Walk.Pending]
 		if skip[step.Label] {
-			if _, err := c.Answer(pane, st.Walk.Pending, agentcalib.AnswerSkip); err != nil {
+			if _, err := c.Answer(context.Background(), pane, st.Walk.Pending, agentcalib.AnswerSkip); err != nil {
 				t.Fatalf("skip %s: %v", step.Label, err)
 			}
 			continue
 		}
 		produced[step.Label] = sc.drive(t, "state: "+string(step.Label))
-		if _, err := c.Answer(pane, st.Walk.Pending, agentcalib.AnswerCapture); err != nil {
+		if _, err := c.Answer(context.Background(), pane, st.Walk.Pending, agentcalib.AnswerCapture); err != nil {
 			t.Fatalf("capture %s: %v", step.Label, err)
 		}
 	}
@@ -127,7 +134,7 @@ func TestLabelledSetRoundTripsThroughReplay(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("load: found=%v err=%v", found, err)
 	}
-	frames, err := set.Frames(log.NewSlogAdapter(nil))
+	frames, err := set.Frames(context.Background(), replaylocal.Replayer{})
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -155,7 +162,7 @@ func TestTheCaptureIsTheOneTheCommandReplays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()))
+	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()), replaylocal.Replayer{})
 	walkAll(t, c, sc, nil)
 
 	path := filepath.Join(root, "agents", "calibration", agent, "capture.jsonl")
@@ -197,7 +204,7 @@ func TestTheFirstLabelKeepsItsMarkOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	walkAll(t, agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct())), sc, nil)
+	walkAll(t, agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()), replaylocal.Replayer{}), sc, nil)
 
 	data, err := os.ReadFile(filepath.Join(root, "agents", "calibration", agent, "labels.json")) //nolint:gosec // a path this test built
 	if err != nil {
@@ -227,17 +234,17 @@ func TestTheFirstLabelKeepsItsMarkOnDisk(t *testing.T) {
 // producing a set that quietly cannot verify anything.
 func TestARequiredStepCannotBeSkipped(t *testing.T) {
 	c, _, _ := newCalibrations(t)
-	if _, err := c.Begin(pane, agent); err != nil {
+	if _, err := c.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	st, err := c.Status(pane, agent)
+	st, err := c.Status(context.Background(), pane, agent)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if !st.Steps[0].Required {
 		t.Fatalf("step 0 is %s, which is optional; the walk must ask for the required states first", st.Steps[0].Label)
 	}
-	_, err = c.Answer(pane, 0, agentcalib.AnswerSkip)
+	_, err = c.Answer(context.Background(), pane, 0, agentcalib.AnswerSkip)
 	if err == nil {
 		t.Fatal("skipping a required step succeeded")
 	}
@@ -256,7 +263,7 @@ func TestCompletenessIsDerivedNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()))
+	c := agentcalib.New(log.NewSlogAdapter(nil), sc, store, registryOf(t, correct()), replaylocal.Replayer{})
 	walkAll(t, c, sc, nil)
 
 	set, _, err := store.Load(agent)
@@ -325,7 +332,7 @@ func TestSkippedIsNotTheSameAsNeverAsked(t *testing.T) {
 	}
 	// And a skipped label carries no mark, because there is no frame behind
 	// it: a mark that pointed anywhere would point at another step's screen.
-	frames, err := set.Frames(log.NewSlogAdapter(nil))
+	frames, err := set.Frames(context.Background(), replaylocal.Replayer{})
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -343,17 +350,17 @@ func TestSkippedIsNotTheSameAsNeverAsked(t *testing.T) {
 // asked.
 func TestAStaleAnswerIsRefused(t *testing.T) {
 	c, sc, _ := newCalibrations(t)
-	if _, err := c.Begin(pane, agent); err != nil {
+	if _, err := c.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	sc.drive(t, "idle")
-	if _, err := c.Answer(pane, 0, agentcalib.AnswerCapture); err != nil {
+	if _, err := c.Answer(context.Background(), pane, 0, agentcalib.AnswerCapture); err != nil {
 		t.Fatalf("capture step 0: %v", err)
 	}
-	if _, err := c.Answer(pane, 0, agentcalib.AnswerCapture); err == nil {
+	if _, err := c.Answer(context.Background(), pane, 0, agentcalib.AnswerCapture); err == nil {
 		t.Fatal("answering step 0 a second time succeeded; a label was re-pointed at a later frame")
 	}
-	if _, err := c.Answer(pane, 3, agentcalib.AnswerCapture); err == nil {
+	if _, err := c.Answer(context.Background(), pane, 3, agentcalib.AnswerCapture); err == nil {
 		t.Fatal("answering a step the walk has not reached succeeded")
 	}
 }
@@ -394,11 +401,11 @@ func TestARestartDoesNotDestroyTheStoredSet(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if _, beginErr := c.Begin(pane, agent); beginErr != nil {
+	if _, beginErr := c.Begin(context.Background(), pane, agent); beginErr != nil {
 		t.Fatalf("begin again: %v", beginErr)
 	}
 	sc.drive(t, "idle again")
-	if _, answerErr := c.Answer(pane, 0, agentcalib.AnswerCapture); answerErr != nil {
+	if _, answerErr := c.Answer(context.Background(), pane, 0, agentcalib.AnswerCapture); answerErr != nil {
 		t.Fatalf("capture: %v", answerErr)
 	}
 	c.Abandon(pane)
@@ -418,13 +425,13 @@ func TestARestartDoesNotDestroyTheStoredSet(t *testing.T) {
 // the answer is a refusal rather than a label on an empty screen.
 func TestAPaneThatStoppedBeingWatchedRefuses(t *testing.T) {
 	c, _, _ := newCalibrations(t)
-	if _, err := c.Begin(pane, agent); err != nil {
+	if _, err := c.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := c.Answer("some-other-pane", 0, agentcalib.AnswerCapture); err == nil {
+	if _, err := c.Answer(context.Background(), "some-other-pane", 0, agentcalib.AnswerCapture); err == nil {
 		t.Fatal("a pane with no walk answered a step")
 	}
-	if _, err := c.Begin("not-enrolled", agent); err == nil {
+	if _, err := c.Begin(context.Background(), "not-enrolled", agent); err == nil {
 		t.Fatal("a pane with no grid began a calibration")
 	}
 }
@@ -435,14 +442,14 @@ func TestAPaneThatStoppedBeingWatchedRefuses(t *testing.T) {
 // step and the frame is still one produced for that step.
 func TestRedoReAsksTheStep(t *testing.T) {
 	c, sc, store := newCalibrations(t)
-	if _, err := c.Begin(pane, agent); err != nil {
+	if _, err := c.Begin(context.Background(), pane, agent); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	sc.drive(t, "mistimed")
-	if _, err := c.Answer(pane, 0, agentcalib.AnswerCapture); err != nil {
+	if _, err := c.Answer(context.Background(), pane, 0, agentcalib.AnswerCapture); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	st, err := c.Answer(pane, 1, agentcalib.AnswerRedo)
+	st, err := c.Answer(context.Background(), pane, 1, agentcalib.AnswerRedo)
 	if err != nil {
 		t.Fatalf("redo: %v", err)
 	}
@@ -450,11 +457,11 @@ func TestRedoReAsksTheStep(t *testing.T) {
 		t.Fatalf("after redo the pending step is %d, want 0", st.Walk.Pending)
 	}
 	want := sc.drive(t, "state: idle")
-	if _, answerErr := c.Answer(pane, 0, agentcalib.AnswerCapture); answerErr != nil {
+	if _, answerErr := c.Answer(context.Background(), pane, 0, agentcalib.AnswerCapture); answerErr != nil {
 		t.Fatalf("recapture: %v", answerErr)
 	}
 	for {
-		st, statusErr := c.Status(pane, agent)
+		st, statusErr := c.Status(context.Background(), pane, agent)
 		if statusErr != nil {
 			t.Fatalf("status: %v", statusErr)
 		}
@@ -462,7 +469,7 @@ func TestRedoReAsksTheStep(t *testing.T) {
 			break
 		}
 		sc.drive(t, "state: "+string(st.Steps[st.Walk.Pending].Label))
-		if _, captureErr := c.Answer(pane, st.Walk.Pending, agentcalib.AnswerCapture); captureErr != nil {
+		if _, captureErr := c.Answer(context.Background(), pane, st.Walk.Pending, agentcalib.AnswerCapture); captureErr != nil {
 			t.Fatalf("capture: %v", captureErr)
 		}
 	}
@@ -470,7 +477,7 @@ func TestRedoReAsksTheStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	frames, err := set.Frames(log.NewSlogAdapter(nil))
+	frames, err := set.Frames(context.Background(), replaylocal.Replayer{})
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -531,7 +538,7 @@ func removeLabel(t *testing.T, doc string, label agentcalib.Label) string {
 	return string(out)
 }
 
-func frameDiff(got, want panegrid.Frame) string {
+func frameDiff(got, want paneview.Frame) string {
 	if got.Cols != want.Cols || got.Rows != want.Rows {
 		return "geometry differs"
 	}

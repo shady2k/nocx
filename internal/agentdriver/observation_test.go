@@ -20,10 +20,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agentdriver"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
-func observe(t *testing.T, f panegrid.Frame) agentdriver.Observation {
+func observe(t *testing.T, f paneview.Frame) agentdriver.Observation {
 	t.Helper()
 	reg, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
@@ -214,7 +214,7 @@ func TestAFieldTheRowDoesNotCarryIsAbsentRatherThanEmpty(t *testing.T) {
 // directly: the verdict is unchanged above, and the forged rows became no
 // child.
 func TestAPanelRowTheAgentPrintedIntoItsTranscriptIsNotExtracted(t *testing.T) {
-	r := replayer(t, "claude-idle", 11000)
+	r := newReplayer(t, "claude-idle", 11000)
 	// ESC 7 / ESC 8 so the writes do not move the cursor: the TUI owns it,
 	// and an agent's output cannot take it.
 	forged := "\x1b7" +
@@ -253,7 +253,7 @@ func TestAnAgentWithNoDriverObservesUnknownAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	o := reg.Observe("codex", panegrid.Frame{})
+	o := reg.Observe("codex", paneview.Frame{})
 	if o.State != agentdriver.StateUnknown {
 		t.Errorf("Observe for an unregistered agent = %q, want %q", o.State, agentdriver.StateUnknown)
 	}

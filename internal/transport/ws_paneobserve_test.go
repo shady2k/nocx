@@ -13,24 +13,24 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-func newObservedWS(t *testing.T, cfg paneobserve.Config) (*WSServer, *panegrid.Store, *paneobserve.Watcher, *feedablePTY) {
+func newObservedWS(t *testing.T, cfg paneobserve.Config) (*WSServer, *paneviewtest.Views, *paneobserve.Watcher, *feedablePTY) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	term := newFeedablePTY()
 	reg := session.New(logger, &feedableFactory{p: term})
-	store := panegrid.New(logger)
+	store := paneviewtest.NewViews(logger)
 	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watch := paneobserve.New(logger, store, drivers, cfg)
-	ws := NewWSServer(logger, reg, WithPaneGrid(store), WithPaneObserver(watch))
+	watch := paneobserve.New(logger, store.Store, drivers, cfg)
+	ws := NewWSServer(logger, reg, WithPaneScreens(store.Store), WithPaneObserver(watch))
 	watch.SetEmitter(ws.EmitPaneObservation)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -79,9 +79,12 @@ func TestSessionObservationChangedOverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 
@@ -133,9 +136,12 @@ func TestSessionObservationChangedCarriesTheChildRowsOverTheWire(t *testing.T) {
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 
-	if err := store.Enrol(sid, 60, 18); err != nil {
+	if err := store.Watch(sid, 60, 18); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeSubagentChrome(60))
 
@@ -242,9 +248,12 @@ func TestSessionObservationChangedCarriesAStalledProgressOverTheWire(t *testing.
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeWorkingChrome(40))
 
@@ -353,9 +362,12 @@ func TestAnUnwatchedPaneSendsNoObservation(t *testing.T) {
 	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	term.emit(t, claudeIdleChrome(40))
 
 	// The grid proves the bytes really arrived, so the silence below is the
@@ -383,9 +395,12 @@ func TestAReattachingClientIsToldWhatThePaneAlreadyIs(t *testing.T) {
 	ws, store, watch, term := newObservedWS(t, paneobserve.Config{})
 	connA := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, connA, 1)
-	if err := store.Enrol(sid, 40, 14); err != nil {
+	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 	readNotification(t, connA, "session.observationChanged", wantWithin)
@@ -413,7 +428,6 @@ type countingObserver struct {
 	sweeps int
 }
 
-func (c *countingObserver) Touch(string)   {}
 func (c *countingObserver) Unwatch(string) {}
 func (c *countingObserver) Sweep() {
 	c.mu.Lock()

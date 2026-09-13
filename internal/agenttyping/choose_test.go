@@ -12,13 +12,15 @@ package agenttyping_test
 // between the decision and the key.
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 const (
@@ -35,15 +37,15 @@ const (
 // trustFrame is the real capture at its mark, with extra bytes painted after —
 // through a real grid, because a frame assembled any other way is a frame the
 // product never produces.
-func trustFrame(t *testing.T, extra string) panegrid.Frame {
+func trustFrame(t *testing.T, extra string) paneview.Frame {
 	t.Helper()
 	header, chunks, err := agentcapture.Read(filepath.Join("..", "agentdriver", "testdata", "captures", "claude-trust.jsonl"))
 	if err != nil {
 		t.Fatalf("read capture: %v", err)
 	}
-	store := panegrid.New(log.NewSlogAdapter(nil))
+	store := paneviewtest.NewViews(log.NewSlogAdapter(nil))
 	const id = "trust"
-	if enrolErr := store.Enrol(id, header.Cols, header.Rows); enrolErr != nil {
+	if enrolErr := store.Watch(id, header.Cols, header.Rows); enrolErr != nil {
 		t.Fatalf("enrol: %v", enrolErr)
 	}
 	t.Cleanup(func() { store.Withdraw(id) })
@@ -77,7 +79,7 @@ func TestReadMenuReadsTheTrustQuestionsOptionsAsDrawn(t *testing.T) {
 // show the move, and confirming on the belief that it landed is the mistake.
 func TestChoosingAnotherOptionMovesTheSelectionAndConfirmsNothing(t *testing.T) {
 	ty, _, q := typistOn(t, trustFrame(t, ""), verifiedFor(t))
-	got := ty.Choose(pane, optYes)
+	got := ty.Choose(context.Background(), pane, optYes)
 	if got.Outcome != agenttyping.OutcomeTyped {
 		t.Fatalf("outcome = %q (%s), want %q", got.Outcome, got.Reason, agenttyping.OutcomeTyped)
 	}
@@ -90,7 +92,7 @@ func TestChoosingAnotherOptionMovesTheSelectionAndConfirmsNothing(t *testing.T) 
 // confirm key and only that.
 func TestChoosingTheSelectedOptionConfirmsIt(t *testing.T) {
 	ty, _, q := typistOn(t, trustFrame(t, selectYes), verifiedFor(t))
-	got := ty.Choose(pane, optYes)
+	got := ty.Choose(context.Background(), pane, optYes)
 	if got.Outcome != agenttyping.OutcomeSubmitted {
 		t.Fatalf("outcome = %q (%s), want %q", got.Outcome, got.Reason, agenttyping.OutcomeSubmitted)
 	}
@@ -113,14 +115,14 @@ func TestANumberedMenusOptionIsNamedWithoutItsNumber(t *testing.T) {
 		t.Fatalf("option %q is empty or kept its numbering", selected)
 	}
 	ty, _, q := typistOn(t, f, verifiedFor(t))
-	if got := ty.Choose(pane, selected); got.Outcome != agenttyping.OutcomeSubmitted || q.all() != enter {
+	if got := ty.Choose(context.Background(), pane, selected); got.Outcome != agenttyping.OutcomeSubmitted || q.all() != enter {
 		t.Fatalf("choosing the selected %q = %+v, bytes %q; want the confirm key alone", selected, got, q.all())
 	}
 }
 
 func TestAnOptionTheMenuDoesNotOfferReceivesNothing(t *testing.T) {
 	ty, _, q := typistOn(t, trustFrame(t, ""), verifiedFor(t))
-	got := ty.Choose(pane, "Yes, and trust every folder forever")
+	got := ty.Choose(context.Background(), pane, "Yes, and trust every folder forever")
 	if got.Outcome != agenttyping.OutcomeRefused || got.Reason == "" {
 		t.Fatalf("result = %+v, want a refusal with its reason", got)
 	}
@@ -133,7 +135,7 @@ func TestAnOptionTheMenuDoesNotOfferReceivesNothing(t *testing.T) {
 // menu, and naming an "option" there writes nothing.
 func TestAPaneThatIsNotAMenuCannotBeAnswered(t *testing.T) {
 	ty, _, q := typistOn(t, replay(t, "claude-idle", 11000), verifiedFor(t))
-	if got := ty.Choose(pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Choose(context.Background(), pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("result = %+v, want refused", got)
 	}
 	if len(q.jobs) != 0 {
@@ -143,7 +145,7 @@ func TestAPaneThatIsNotAMenuCannotBeAnswered(t *testing.T) {
 
 func TestARuleWithoutAuthorityCannotAnswerAMenu(t *testing.T) {
 	ty, _, q := typistOn(t, trustFrame(t, ""), unverified{})
-	if got := ty.Choose(pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Choose(context.Background(), pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("result = %+v, want refused", got)
 	}
 	if len(q.jobs) != 0 {
@@ -157,7 +159,7 @@ func TestARuleWithoutAuthorityCannotAnswerAMenu(t *testing.T) {
 func TestAMenuThatVanishesBeforeTheKeyReceivesNothing(t *testing.T) {
 	ty, sc, q := typistOn(t, trustFrame(t, ""), verifiedFor(t))
 	sc.changeAfter(1, replay(t, "claude-idle", 11000))
-	if got := ty.Choose(pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Choose(context.Background(), pane, optYes); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("result = %+v, want refused", got)
 	}
 	if len(q.jobs) != 0 {
@@ -167,7 +169,7 @@ func TestAMenuThatVanishesBeforeTheKeyReceivesNothing(t *testing.T) {
 
 func TestChooseNeedsAnOption(t *testing.T) {
 	ty, _, q := typistOn(t, trustFrame(t, ""), verifiedFor(t))
-	if got := ty.Choose(pane, "   "); got.Outcome != agenttyping.OutcomeRefused {
+	if got := ty.Choose(context.Background(), pane, "   "); got.Outcome != agenttyping.OutcomeRefused {
 		t.Fatalf("result = %+v, want refused", got)
 	}
 	if len(q.jobs) != 0 {

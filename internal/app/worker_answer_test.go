@@ -17,8 +17,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
@@ -397,11 +397,11 @@ type refusingSubmitTypist struct {
 	choose paneChooser
 }
 
-func (r refusingSubmitTypist) Choose(paneID, option string) agenttyping.Result {
-	return r.choose.Choose(paneID, option)
+func (r refusingSubmitTypist) Choose(ctx context.Context, paneID, option string) agenttyping.Result {
+	return r.choose.Choose(context.Background(), paneID, option)
 }
 
-func (refusingSubmitTypist) Submit(string, string) agenttyping.Result {
+func (refusingSubmitTypist) Submit(_ context.Context, _, _ string) agenttyping.Result {
 	return agenttyping.Result{
 		Outcome: agenttyping.OutcomeRefused, State: agentdriver.StateFreeText,
 		Reason: "test: submit refused at the gate",
@@ -417,7 +417,7 @@ func TestAnOwedTasksSubmitIsRefusedAtTheGate(t *testing.T) {
 	sid, participant, _ := spawnStuckOnQuestion(t, stand, "p-owed-gate-refused", task)
 	real := stand.realTypist(t)
 	answerer := &workerAnswerer{
-		grid: stand.grid, typist: refusingSubmitTypist{choose: real},
+		screens: stand.grid.Store, typist: refusingSubmitTypist{choose: real},
 		owed: stand.owed, classify: stand.watch, typing: refusingSubmitTypist{choose: real}, log: stand.log,
 		now: settledClock(),
 	}
@@ -493,7 +493,7 @@ func TestAnOwedTaskWaitsWhenThePaneNeverBecomesTypableWithinTheSubBudget(t *test
 	// corpus — but the pane settles on "working" and goes no further: a
 	// stub pty, unlike a real agent, never reaches free_text on its own.
 	stand.grid.Withdraw(string(sid))
-	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+	if err := stand.grid.Watch(string(sid), participantCols, participantRows); err != nil {
 		t.Fatalf("re-enrol the worker's pane: %v", err)
 	}
 	stand.feedCapture(t, sid, "claude-working", 17000)
@@ -580,7 +580,7 @@ func TestOwedTaskIsTypedWithoutASweepAfterTheConfirm(t *testing.T) {
 	// Feed only. No Touch, no Sweep: exactly what a review of 1ffd3a56
 	// asked this test to prove is enough.
 	stand.grid.Withdraw(string(sid))
-	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+	if err := stand.grid.Watch(string(sid), participantCols, participantRows); err != nil {
 		t.Fatalf("re-enrol the worker's pane: %v", err)
 	}
 	stand.feedCapture(t, sid, "claude-idle", 11000)
@@ -647,7 +647,7 @@ func TestOwedTaskWaitsOnADifferentQuestionWithoutASweepAfterTheConfirm(t *testin
 	// A DIFFERENT question — a menu the agent did not raise itself, off the
 	// real corpus — reset onto the pane with no Touch and no Sweep.
 	stand.grid.Withdraw(string(sid))
-	if err := stand.grid.Enrol(string(sid), participantCols, participantRows); err != nil {
+	if err := stand.grid.Watch(string(sid), participantCols, participantRows); err != nil {
 		t.Fatalf("re-enrol the worker's pane: %v", err)
 	}
 	stand.feedCapture(t, sid, "claude-modal", 20000)
@@ -764,26 +764,26 @@ func waitForNextPoll(t *testing.T, pc *pollCounter, before int) {
 	})
 }
 
-// fakeMenuFrame builds a panegrid.Frame agenttyping.ReadMenu reads back as a
+// fakeMenuFrame builds a paneview.Frame agenttyping.ReadMenu reads back as a
 // menu offering exactly options, selected on options[selected] — synthetic,
 // for testing awaitMenuSettled's own timing directly rather than through a
 // real terminal capture, which has no scripted way to change a menu's option
 // list mid-render on demand.
-func fakeMenuFrame(options []string, selected int) panegrid.Frame {
-	lines := make([][]panegrid.Cell, len(options))
+func fakeMenuFrame(options []string, selected int) paneview.Frame {
+	lines := make([][]paneview.Cell, len(options))
 	for i, opt := range options {
 		marker := "  "
 		if i == selected {
 			marker = "❯ " // "❯ ", the same marker selectYesRepaint moves in this file's other tests
 		}
 		text := marker + opt
-		cells := make([]panegrid.Cell, 0, len(text))
+		cells := make([]paneview.Cell, 0, len(text))
 		for _, r := range text {
-			cells = append(cells, panegrid.Cell{Text: string(r), Width: 1})
+			cells = append(cells, paneview.Cell{Text: string(r), Width: 1})
 		}
 		lines[i] = cells
 	}
-	return panegrid.Frame{Cols: 80, Rows: len(options), CursorX: 0, CursorY: selected, Lines: lines}
+	return paneview.Frame{Cols: 80, Rows: len(options), CursorX: 0, CursorY: selected, Lines: lines}
 }
 
 // fakeSettleGrid is a minimal panegrid.Observer whose Frame is swappable
@@ -792,16 +792,16 @@ func fakeMenuFrame(options []string, selected int) panegrid.Frame {
 // exist to satisfy the interface.
 type fakeSettleGrid struct {
 	mu    sync.Mutex
-	frame panegrid.Frame
+	frame paneview.Frame
 }
 
-func (g *fakeSettleGrid) set(f panegrid.Frame) {
+func (g *fakeSettleGrid) set(f paneview.Frame) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.frame = f
 }
 
-func (g *fakeSettleGrid) Frame(string) (panegrid.Frame, error) {
+func (g *fakeSettleGrid) Frame(string) (paneview.Frame, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.frame, nil
@@ -853,7 +853,7 @@ func TestAnAnswerWaitsForTheMenuToSettleBeforeItsFirstMove(t *testing.T) {
 	clock := newFakeClock(time.Now())
 	var pc pollCounter
 	answerer := &workerAnswerer{
-		grid: stand.grid, typist: typist,
+		screens: stand.grid.Store, typist: typist,
 		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
 		now: clock.now, pollHook: pc.hook,
 	}
@@ -927,7 +927,7 @@ func TestAwaitMenuSettledRestartsTheClockWhenTheMenusOptionsChange(t *testing.T)
 	clock := newFakeClock(time.Now())
 	var pc pollCounter
 	answerer := &workerAnswerer{
-		grid: grid, classify: classify,
+		screens: grid, classify: classify,
 		now: clock.now, pollHook: pc.hook,
 	}
 
@@ -1001,7 +1001,7 @@ func TestAnAnswerWritesNothingWhenTheMenuDisappearsDuringTheSettle(t *testing.T)
 	typist := stand.realTypist(t)
 	var pc pollCounter
 	answerer := &workerAnswerer{
-		grid: stand.grid, typist: typist,
+		screens: stand.grid.Store, typist: typist,
 		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
 		// now is left nil (real time.Now) deliberately: this wait must end
 		// because the pane stopped offering the menu, never because the
@@ -1064,7 +1064,7 @@ func TestAnAnswerReturnsPromptlyWhenCtxIsCancelledDuringTheSettle(t *testing.T) 
 	clock := newFakeClock(time.Now())
 	var pc pollCounter
 	answerer := &workerAnswerer{
-		grid: stand.grid, typist: typist,
+		screens: stand.grid.Store, typist: typist,
 		owed: stand.owed, classify: stand.watch, typing: typist, log: stand.log,
 		now: clock.now, pollHook: pc.hook,
 	}

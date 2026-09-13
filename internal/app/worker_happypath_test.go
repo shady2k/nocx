@@ -18,6 +18,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttyping"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -27,8 +28,9 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/peerpin"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -265,6 +267,30 @@ type happyRealPTYFactory struct {
 	mu             sync.Mutex
 	lanesBySession map[string]lifecycle.LaneID
 	adapters       []*lifecyclechannel.Adapter
+	// views is the stand's stand-in for the runtime beside the PTY: every byte
+	// a pane prints is fed to it, from the same fd the session reads. In
+	// production that reader IS the session's one handler (the transport's
+	// pump) and the emulator sits behind it; here the pump belongs to the
+	// product, so the stand tees the PTY itself rather than deriving a screen
+	// from a stream the coordinator no longer reads.
+	views *paneviewtest.Views
+}
+
+// teePTY hands every byte a pane produced to the stand's pane source as well as
+// to whoever read it. That order is the product's: the runtime is fed before
+// anything downstream is served, so a frame read never describes a stream that
+// had not reached the emulator yet.
+type teePTY struct {
+	pty.Pty
+	feed func([]byte)
+}
+
+func (t teePTY) Read(b []byte) (int, error) {
+	n, err := t.Pty.Read(b)
+	if n > 0 && t.feed != nil {
+		t.feed(b[:n])
+	}
+	return n, err
 }
 
 func (f *happyRealPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
@@ -360,7 +386,12 @@ func (f *happyRealPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty
 		<-lp.Done()
 		_ = os.Remove(rcPath)
 	}()
-	return lp, nil
+	if f.views == nil {
+		return lp, nil
+	}
+	views := f.views
+	paneID := cfg.SessionID
+	return teePTY{Pty: lp, feed: func(b []byte) { views.Feed(paneID, b) }}, nil
 }
 
 func (f *happyRealPTYFactory) closeAdapters() {
@@ -375,12 +406,21 @@ func (f *happyRealPTYFactory) closeAdapters() {
 type happyRealHelperOpener struct {
 	reg     *session.Reg
 	factory *happyRealPTYFactory
+	// views is the stand's pane source. A session this opener starts is a
+	// session the product will be asked to WATCH (the agent wrapper enrols),
+	// and the source has to know the pane before that question arrives — in
+	// production the helper holds the runtime from spawn, and in a stand this
+	// is what stands in for that.
+	views *paneviewtest.Views
 }
 
 func (o *happyRealHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, _ string) (transport.HostedSessionOpen, bool, error) {
 	sess, err := o.reg.Open(ctx, cfg)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
+	}
+	if o.views != nil {
+		o.views.Size(string(sess.ID()), int(cfg.Cols), int(cfg.Rows))
 	}
 	o.factory.mu.Lock()
 	lane := o.factory.lanesBySession[string(sess.ID())]
@@ -399,7 +439,7 @@ type happyStand struct {
 	reg      *session.Reg
 	tp       *transport.WSServer
 	factory  *happyRealPTYFactory
-	grid     *panegrid.Store
+	grid     *paneviewtest.Views
 	watch    *happyPaneWatch
 	record   *workers.Registrar
 	endpoint *toolendpoint.Endpoint
@@ -480,7 +520,7 @@ func withHappyStandEnrolmentDeadline(d time.Duration) happyStandOption {
 
 // withHappyStandRealTyping wires workerSpawner's readiness and typist seams
 // to the real orchestration stack instead of leaving them nil (nocx-66gd0):
-// a real agentdriver.Registry classifying a real panegrid.Store, a real
+// a real agentdriver.Registry classifying a real *paneview.Store, a real
 // paneobserve.Watcher, an agentcalib.Calibrations verified against real
 // corpus captures, and the real agenttyping.Typist every consumer of this
 // package's typing seam goes through. Nothing about the pane, the channel or
@@ -539,16 +579,16 @@ type happyCorpusMoment struct {
 // happyReplayCapture replays a real capture from internal/agentdriver's own
 // corpus up to atMs, through agentcapture.Frames — the same replay path
 // agentdriver's own tests use, and the one that goes through a real
-// panegrid.Store rather than a bare emulator (agentcapture's own package doc
+// *paneview.Store rather than a bare emulator (agentcapture's own package doc
 // names why that distinction matters: ADR-0041's column geometry).
-func happyReplayCapture(t *testing.T, name string, atMs int64) panegrid.Frame {
+func happyReplayCapture(t *testing.T, name string, atMs int64) paneview.Frame {
 	t.Helper()
 	path := filepath.Join("..", "agentdriver", "testdata", "captures", name+".jsonl")
 	header, chunks, err := agentcapture.Read(path)
 	if err != nil {
 		t.Fatalf("read capture %s: %v", name, err)
 	}
-	moments, err := agentcapture.Frames(log.NewSlogAdapter(nil), header, chunks, []int64{atMs})
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{atMs})
 	if err != nil {
 		t.Fatalf("replay capture %s at %dms: %v", name, atMs, err)
 	}
@@ -623,8 +663,8 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	lanes := newSessionRegistry()
 	var watch *happyPaneWatch
 	var paneWatcherSeam paneWatcher
-	grid := panegrid.New(logger)
-	factory := &happyRealPTYFactory{log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID)}
+	grid := paneviewtest.NewViews(logger)
+	factory := &happyRealPTYFactory{log: logger, lanes: lanes, lanesBySession: make(map[string]lifecycle.LaneID), views: grid}
 	reg := session.New(logger, factory)
 	enrol := newWorkerEnrolments(logger, reg)
 
@@ -642,21 +682,21 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		if driversErr != nil {
 			t.Fatalf("pane drivers: %v", driversErr)
 		}
-		realWatch = paneobserve.New(logger, grid, paneDrivers, paneobserve.Config{})
+		realWatch = paneobserve.New(logger, grid.Store, paneDrivers, paneobserve.Config{})
 		paneWatcherSeam = realWatch
 		calibStore := newHappyVerifiedClaudeCalibration(t)
 		// Screens is nil deliberately, exactly as agentdriver's own
 		// verify_corpus_test.go leaves it: verification replays a stored
 		// set and never reads a live pane, so passing one would suggest it
 		// could.
-		paneCalibration := agentcalib.New(logger, nil, calibStore, paneDrivers)
-		paneTyping = newPaneTypist(logger, grid, paneDrivers, paneCalibration, realWatch, reg)
+		paneCalibration := agentcalib.New(logger, nil, calibStore, paneDrivers, replaylocal.Replayer{})
+		paneTyping = newPaneTypist(logger, grid.Store, paneDrivers, paneCalibration, realWatch, reg)
 	} else {
 		watch = &happyPaneWatch{}
 		paneWatcherSeam = watch
 	}
 
-	paneEnrol, err := newPaneEnroller(logger, lanes, grid, paneWatcherSeam, allowPaneApproval{})
+	paneEnrol, err := newPaneEnroller(logger, lanes, grid.Store, paneWatcherSeam, allowPaneApproval{})
 	if err != nil {
 		t.Fatalf("pane enroller: %v", err)
 	}
@@ -669,10 +709,10 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub
-	opener := &happyRealHelperOpener{reg: reg, factory: factory}
+	opener := &happyRealHelperOpener{reg: reg, factory: factory, views: grid}
 	tpOpts := []transport.WSServerOption{transport.WithHelperSessionOpener(opener)}
 	if cfg.realTyping {
-		tpOpts = append(tpOpts, transport.WithPaneGrid(grid), transport.WithPaneObserver(realWatch))
+		tpOpts = append(tpOpts, transport.WithPaneScreens(grid.Store), transport.WithPaneObserver(realWatch))
 	}
 	tp := transport.NewWSServer(logger, reg, tpOpts...)
 	if cfg.realTyping {
@@ -729,9 +769,9 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		owed := newOwedTasks()
 		spawner.owed = owed
 		recordOpts = append(recordOpts,
-			workers.WithScreener(&workerScreener{grid: grid, watch: realWatch}),
+			workers.WithScreener(&workerScreener{screens: grid, watch: realWatch}),
 			workers.WithAnswerer(&workerAnswerer{
-				grid: grid, typist: paneTyping,
+				screens: grid, typist: paneTyping,
 				owed: owed, classify: realWatch, typing: paneTyping, log: logger,
 			}),
 		)
@@ -779,7 +819,7 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 	if err := reg.RecordOwnedProcessPID(coord.ID(), os.Getpid()); err != nil {
 		t.Fatalf("record coordinator root: %v", err)
 	}
-	if err := grid.Enrol(string(coord.ID()), 80, 24); err != nil {
+	if err := grid.Watch(string(coord.ID()), 80, 24); err != nil {
 		t.Fatalf("enrol coordinator pane: %v", err)
 	}
 

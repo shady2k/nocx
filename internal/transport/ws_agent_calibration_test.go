@@ -10,20 +10,22 @@ package transport
 // end with a labelled set on disk that a rule can be verified against.
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcalib"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 )
 
 type calibrationEnv struct {
 	env   *lifecycleTestEnv
-	grid  *panegrid.Store
+	grid  *paneviewtest.Views
 	store agentcalib.Store
 	sid   string
 }
@@ -31,22 +33,22 @@ type calibrationEnv struct {
 func newCalibrationEnv(t *testing.T) *calibrationEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	grid := panegrid.New(logger)
+	grid := paneviewtest.NewViews(logger)
 	rules, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watcher := paneobserve.New(logger, grid, rules, paneobserve.Config{})
+	watcher := paneobserve.New(logger, grid.Store, rules, paneobserve.Config{})
 	store, err := agentcalib.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	env := newLifecycleTestEnv(t,
-		WithPaneGrid(grid), WithPaneObserver(watcher), WithAgentRules(rules),
-		WithAgentCalibration(agentcalib.New(logger, grid, store, rules)))
+		WithPaneScreens(grid.Store), WithPaneObserver(watcher), WithAgentRules(rules),
+		WithAgentCalibration(agentcalib.New(logger, grid.Store, store, rules, replaylocal.Replayer{})))
 	watcher.SetEmitter(env.ws.EmitPaneObservation)
 	sid := env.openSession(t, 1)
-	if err := grid.Enrol(sid, 40, 14); err != nil {
+	if err := grid.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw(sid) })
@@ -162,7 +164,7 @@ func TestAgentCalibration_OverTheWireConformsToContract(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("load the set: found=%v err=%v", found, err)
 	}
-	frames, err := set.Frames(log.NewSlogAdapter(nil))
+	frames, err := set.Frames(context.Background(), replaylocal.Replayer{})
 	if err != nil {
 		t.Fatalf("replay the set: %v", err)
 	}

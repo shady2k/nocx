@@ -19,14 +19,15 @@ package agentdriver
 // it, so the falsifier is asserted over the whole corpus at the bottom.
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
-	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
+	"github.com/shady2k/nocx/internal/paneview"
 )
 
 // transcriptDoc is the shape the shipped Claude rule uses: a transcript read
@@ -52,7 +53,7 @@ func transcriptDoc() Document {
 // transcriptScreen is the chrome the corpus shows, with the rows a test wants
 // above it. Row 5 (0-based) is the row directly above the token meter, which
 // is where a status stack begins.
-func transcriptScreen(above []string) panegrid.Frame {
+func transcriptScreen(above []string) paneview.Frame {
 	const cols = 20
 	rule := strings.Repeat("─", cols)
 	lines := make([]string, 14)
@@ -218,19 +219,11 @@ func TestTheTranscriptExtractorCannotChangeTheState(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for at := int64(0); at <= 130000; at += 2000 {
-			r, err := agentcapture.NewReplayer(log.NewSlogAdapter(nil), header)
+			moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{at})
 			if err != nil {
-				t.Fatalf("replayer for %s: %v", path, err)
+				t.Fatalf("replay %s@%dms: %v", path, at, err)
 			}
-			if feedErr := r.Feed(chunks[:agentcapture.ChunksThrough(chunks, at, 0)]); feedErr != nil {
-				r.Close()
-				t.Fatalf("feed %s to %dms: %v", path, at, feedErr)
-			}
-			f, err := r.Frame()
-			r.Close()
-			if err != nil {
-				t.Fatalf("frame %s@%dms: %v", path, at, err)
-			}
+			f := moments[0].Frame
 			if got, want := withExtractors.Classify(f), without.Classify(f); got != want {
 				t.Fatalf("%s@%dms: with extractors = %q, without = %q", filepath.Base(path), at, got, want)
 			}

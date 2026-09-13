@@ -9,8 +9,9 @@ import (
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
+	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -28,7 +29,7 @@ func TestNewPaneEnrollerRejectsMissingApproval(t *testing.T) {
 // realGrid is the product's own store rather than a double: what this seam is
 // tested for is that an enrolment actually opens a grid, and a fake grid can
 // only report that the seam called something.
-func newEnroller(t *testing.T) (*paneEnroller, *panegrid.Store, *sessionRegistry) {
+func newEnroller(t *testing.T) (*paneEnroller, *paneviewtest.Views, *sessionRegistry) {
 	t.Helper()
 	e, grid, sessions, _ := newEnrollerWithWatcher(t)
 	return e, grid, sessions
@@ -36,17 +37,17 @@ func newEnroller(t *testing.T) (*paneEnroller, *panegrid.Store, *sessionRegistry
 
 // The same, plus the watcher — for the tests that assert the observation opens
 // and closes with the grid rather than beside it.
-func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *panegrid.Store, *sessionRegistry, *paneobserve.Watcher) {
+func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *paneviewtest.Views, *sessionRegistry, *paneobserve.Watcher) {
 	t.Helper()
 	lg := log.NewSlogAdapter(nil)
-	grid := panegrid.New(lg)
+	grid := paneviewtest.NewViews(lg)
 	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
 	}
-	watch := paneobserve.New(lg, grid, drivers, paneobserve.Config{})
+	watch := paneobserve.New(lg, grid.Store, drivers, paneobserve.Config{})
 	sessions := newSessionRegistry()
-	e, err := newPaneEnroller(lg, sessions, grid, watch, allowPaneApproval{})
+	e, err := newPaneEnroller(lg, sessions, grid.Store, watch, allowPaneApproval{})
 	if err != nil {
 		t.Fatalf("enroller: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
 	if err := e.Enrol("lane-1", "claude", 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
-	if !grid.Enrolled("sess-1") {
+	if !grid.Watched("sess-1") {
 		t.Fatal("the lane's session has no grid")
 	}
 	f, err := grid.Frame("sess-1")
@@ -74,7 +75,7 @@ func TestEnrolmentOpensTheGridForTheLanesSession(t *testing.T) {
 	}
 
 	e.Withdraw("lane-1")
-	if grid.Enrolled("sess-1") {
+	if grid.Watched("sess-1") {
 		t.Error("the grid outlived the withdrawal: the interval has one end")
 	}
 }
@@ -119,7 +120,7 @@ func TestAWatchedPaneIsNotReEnrolled(t *testing.T) {
 // obscurely.
 func TestTheWatchBoundIsRefusedByName(t *testing.T) {
 	e, grid, sessions := newEnroller(t)
-	for i := 0; i < panegrid.MaxEnrolled; i++ {
+	for i := 0; i < paneview.MaxWatched; i++ {
 		lane := lifecycle.LaneID("lane-" + string(rune('a'+i%26)) + string(rune('a'+i/26)))
 		sid := "sess-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 		sessions.register(lane, sid)
@@ -127,8 +128,8 @@ func TestTheWatchBoundIsRefusedByName(t *testing.T) {
 			t.Fatalf("enrol %d: %v", i, err)
 		}
 	}
-	if grid.Count() != panegrid.MaxEnrolled {
-		t.Fatalf("opened %d grids, want %d", grid.Count(), panegrid.MaxEnrolled)
+	if grid.Count() != paneview.MaxWatched {
+		t.Fatalf("opened %d grids, want %d", grid.Count(), paneview.MaxWatched)
 	}
 	sessions.register("lane-over", "sess-over")
 	err := e.Enrol("lane-over", "claude", 80, 24)
@@ -210,7 +211,6 @@ func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
 		t.Fatalf("after the withdrawal: %+v, want one exited observation", got)
 	}
 	got = nil
-	watch.Touch("sess-1")
 	watch.Sweep()
 	if len(got) != 0 {
 		t.Fatalf("a withdrawn pane was still classified: %+v", got)

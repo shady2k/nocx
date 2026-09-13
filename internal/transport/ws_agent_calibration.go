@@ -63,9 +63,9 @@ import (
 // Four methods and no fifth: the transport may drive a walk and read its
 // state, and may not name a label, hand in a frame, or write a set.
 type agentCalibrator interface {
-	Status(pane, agent string) (agentcalib.Status, error)
-	Begin(pane, agent string) (agentcalib.Status, error)
-	Answer(pane string, step int, answer agentcalib.Answer) (agentcalib.Status, error)
+	Status(ctx context.Context, pane, agent string) (agentcalib.Status, error)
+	Begin(ctx context.Context, pane, agent string) (agentcalib.Status, error)
+	Answer(ctx context.Context, pane string, step int, answer agentcalib.Answer) (agentcalib.Status, error)
 	Abandon(pane string)
 }
 
@@ -206,7 +206,7 @@ type agentCalibrationRecord struct {
 	AtMs    *int64 `json:"atMs,omitempty"`
 }
 
-func (s *WSServer) handleAgentCalibration(_ context.Context, req jsonrpcRequest, r Responder) {
+func (s *WSServer) handleAgentCalibration(ctx context.Context, req jsonrpcRequest, r Responder) {
 	var p agentCalibrationParams
 	if msg := decodeParamsStrict(req.Params, &p); msg != "" {
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
@@ -214,7 +214,7 @@ func (s *WSServer) handleAgentCalibration(_ context.Context, req jsonrpcRequest,
 	}
 	out, agent, found := s.calibrationPanes(p.SessionID)
 	if found {
-		state, err := s.agentCalibration.Status(p.SessionID, agent)
+		state, err := s.agentCalibration.Status(ctx, p.SessionID, agent)
 		if err != nil {
 			_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return
@@ -224,7 +224,7 @@ func (s *WSServer) handleAgentCalibration(_ context.Context, req jsonrpcRequest,
 	_ = r.TryResult(req.ID, mustMarshal(out))
 }
 
-func (s *WSServer) handleAgentCalibrationAnswer(_ context.Context, req jsonrpcRequest, r Responder) {
+func (s *WSServer) handleAgentCalibrationAnswer(ctx context.Context, req jsonrpcRequest, r Responder) {
 	var p agentCalibrationAnswerParams
 	if msg := decodeParamsStrict(req.Params, &p); msg != "" {
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
@@ -241,7 +241,7 @@ func (s *WSServer) handleAgentCalibrationAnswer(_ context.Context, req jsonrpcRe
 		})
 		return
 	}
-	state, err := s.applyCalibrationAction(p, agent)
+	state, err := s.applyCalibrationAction(ctx, p, agent)
 	if err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + err.Error()})
 		return
@@ -250,15 +250,15 @@ func (s *WSServer) handleAgentCalibrationAnswer(_ context.Context, req jsonrpcRe
 	_ = r.TryResult(req.ID, mustMarshal(out))
 }
 
-func (s *WSServer) applyCalibrationAction(p agentCalibrationAnswerParams, agent string) (agentcalib.Status, error) {
+func (s *WSServer) applyCalibrationAction(ctx context.Context, p agentCalibrationAnswerParams, agent string) (agentcalib.Status, error) {
 	switch p.Action {
 	case "begin":
-		return s.agentCalibration.Begin(p.SessionID, agent)
+		return s.agentCalibration.Begin(ctx, p.SessionID, agent)
 	case "abandon":
 		s.agentCalibration.Abandon(p.SessionID)
-		return s.agentCalibration.Status(p.SessionID, agent)
+		return s.agentCalibration.Status(ctx, p.SessionID, agent)
 	default:
-		return s.agentCalibration.Answer(p.SessionID, *p.Step, agentcalib.Answer(p.Action))
+		return s.agentCalibration.Answer(ctx, p.SessionID, *p.Step, agentcalib.Answer(p.Action))
 	}
 }
 

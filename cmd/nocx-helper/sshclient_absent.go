@@ -25,5 +25,12 @@ func holdSSHClient(*slog.Logger) (sshSeam, error) {
 	return sshSeam{
 		register: func(*host.Host) {},
 		release:  func() {},
+		// No client, so no ssh PANE either: the session service's spawner is
+		// nil and `spawn-ssh` is refused by name (no_ssh_client) instead of
+		// forking a shell this binary could not reach. It is the same build
+		// fact as the empty register above, one layer in — a daemon that could
+		// serve the service would be able to dial, and one that cannot must
+		// not pretend a pane is merely unavailable.
+		sessionSpawner: nil,
 	}, nil
 }

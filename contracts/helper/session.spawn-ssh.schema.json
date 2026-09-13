@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.spawn-ssh.schema.json",
+  "title": "HelperSessionSpawnSSHResult",
+  "description": "Result of the helper session service's spawn-ssh op: the new session's inventory entry (nocx-50w7p.4). It is the SAME shape `spawn` and `sessions` return — a session is a session, and a caller that spawned one and a caller that found one must hold the same value — with the union's `ssh` branch carrying the destination and no pid, no pgid and no resolved cwd, because this machine has none of those facts about a process that lives on another one. The inventory's `observed` is null for such a session: evidence about pids is evidence about THIS machine's kernel, and nobody here can be asked about a remote shell.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry"],
+  "properties": {
+    "entry": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/sessionEntry"
+    }
+  }
+}

@@ -65,4 +65,17 @@ package proto
 // caller would have a channel to the wrong thing. That is the half that makes
 // this a bump rather than an addition, and the two new ops are the half that
 // makes it honest.
-const Version = "5"
+//
+// This is 6 rather than 5 because the wire grew the SSH PANE: the `spawn-ssh`
+// op, and with it a launch record that is a discriminated union — a session
+// whose process is a shell channel on a connection the helper dialed carries
+// no pid, no pgid and no cwd, because this machine has no such facts about it
+// (nocx-50w7p.4). The launch record is the half that makes the bump
+// unavoidable rather than tidy: `sessionEntry` is `additionalProperties:
+// false` on both sides, so a generation speaking 4 REJECTS an entry carrying
+// `kind`, and one speaking 5 answers a `spawn` with a shape a 4-reader cannot
+// read — the two cannot be told apart by anything less than the number. The op
+// is the half that makes it honest: a 4-helper answers `unknown_op`, which a
+// coordinator reads as "this machine's helper is older than this app"
+// (nocx-50w7p.2's rationale, two generations on).
+const Version = "6"

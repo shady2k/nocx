@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/session"
 )
 
 // sshSeam is what this BUILD's ssh capability is to the daemon: how to put its
@@ -31,4 +32,16 @@ type sshSeam struct {
 	// has one. Called once, at shutdown, whether or not any connection ever
 	// arrived.
 	release func()
+	// sessionSpawner is what the SESSION service uses to open an ssh pane
+	// (nocx-50w7p.4): the session package's seam, built over the same client
+	// this seam serves. It is nil for a build with no client, which is what
+	// makes `spawn-ssh` a named refusal (no_ssh_client) there rather than a
+	// session that could never carry a byte.
+	//
+	// It is a field of this seam rather than of session.Options directly
+	// because the two travel together: what registers the ssh SERVICE and what
+	// opens a remote PANE are the same client, and a daemon wired with one of
+	// them and not the other is a build that dials for a probe and cannot open
+	// a shell.
+	sessionSpawner session.SSHSpawner
 }

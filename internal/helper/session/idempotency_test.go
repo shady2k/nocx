@@ -86,7 +86,7 @@ func TestASpawnRepeatedWithOneKeyIsOneSession(t *testing.T) {
 	}
 	// The repeat is an ANSWER about an existing session and not a second
 	// reservation: the budget was committed once.
-	if used, want := svc.WindowBytesInUse(), inv.Sessions[0].Launch.WindowBytes; used != want {
+	if used, want := svc.WindowBytesInUse(), inv.Sessions[0].Launch.WindowBytes(); used != want {
 		t.Fatalf("budget in use = %d, want %d: the repeated spawn reserved a second window", used, want)
 	}
 }

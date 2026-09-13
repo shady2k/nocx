@@ -13,27 +13,27 @@ import (
 )
 
 // paneEnroller answers the agent_enrol / agent_withdraw pair by opening and
-// opening and closing the observation of a pane (protocol doc §15, and the
+// closing the observation of a pane (protocol doc §15, and the
 // AD-6 amendment's
 // INTERVAL constraint). It is the composition root's, because it is the only
 // place that holds both halves of the answer: the lane→session map the child
 // grant builder already uses, and the store every frame read goes through.
 //
-// It decides nothing about what is on the screen and could not: what it hands
-// out is a grid, and what a grid answers is a Frame. The two decisions the
-// amendment permits — may nocx type here, what does the indicator show — are
-// made by the callers that read one.
+// It decides nothing about what is on the screen and could not: what it opens
+// is a watch, and what the read behind it answers is a Frame. The two decisions
+// the amendment permits — may nocx type here, what does the indicator show —
+// are made by the callers that read one.
 type paneEnroller struct {
 	log      log.Logger
 	sessions *sessionRegistry
 	screens  paneWatchStore
 	// watch is the OBSERVATION's end of the same act. It opens and closes
-	// with the grid and never before or after it: a pane nocx reports a
+	// with the watch and never before or after it: a pane nocx reports a
 	// state for but declined to watch would be a claim with no evidence
 	// behind it, and one it watches without reporting is the silent degrade.
 	watch    paneWatcher
 	approval agentApproval
-	// onEnrol is told when an enrolment actually opened a grid, so a worker
+	// onEnrol is told when an enrolment actually opened a watch, so a worker
 	// registration blocked on that enrolment can proceed (nocx-dkawo.7). It
 	// is a NOTIFICATION and not a second enroller: it is called after the act
 	// succeeded, it cannot refuse one, and a nil hook is the ordinary case —
@@ -161,7 +161,7 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 // Withdraw closes the interval. It cannot fail and says nothing about whether
 // there was anything to close: a caller racing a session teardown should not
 // have to care who won, and this is not the only end of the interval — the
-// transport withdraws the same grid when the session's output ends, which is
+// transport withdraws the same watch when the session's output ends, which is
 // the end that covers a caller that was killed rather than returning.
 func (e *paneEnroller) Withdraw(lane lifecycle.LaneID) {
 	sid, ok := e.sessions.lookup(lane)
@@ -170,7 +170,7 @@ func (e *paneEnroller) Withdraw(lane lifecycle.LaneID) {
 	}
 	// The agent withdrawing IS the agent finishing, and it is the one moment
 	// nocx knows a process is gone rather than inferring it from a screen.
-	// Before the grid closes: what it reports is the pane's last state, and
+	// Before the watch closes: what it reports is the pane's last state, and
 	// a client attaching afterwards is answered with it.
 	e.watch.Exited(sid)
 	e.screens.Withdraw(sid)

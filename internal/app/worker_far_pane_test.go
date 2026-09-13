@@ -399,6 +399,34 @@ func TestAFarPanesAgentIsRefusedAfterItsSessionEnds(t *testing.T) {
 	}
 }
 
+// TestAFarPaneIsAdmittedWithoutAProcessPinner — the seam that keeps the two
+// arms from being one arm. Admission by pane is a session, an enrolment and an
+// interval: it names a session on a host, and asks nothing of THIS machine's
+// process tree. Admission by pid is the opposite — it says "a process of mine
+// is the caller", and `pinner` is what turns a pid into that claim.
+//
+// So a coordinator that cannot pin processes must still admit a far agent and
+// must not admit a local one. Required at the top of admittedPeer, the pinner
+// would refuse far agents for a reason that does not apply to them, and the
+// test would pass while the far arm was unreachable on such a machine.
+func TestAFarPaneIsAdmittedWithoutAProcessPinner(t *testing.T) {
+	stand := newFarStand(t, remoteSession(farPaneP, "build.example.com", "deploy", "SHA256:key-a"))
+	stand.enrol(t, farPaneP, "claude")
+
+	unpinnable, err := newToolAuthorizer(
+		nil, stand.sessions, stand.watched, emptyWorkerRecord(), workerTestWorkspace, stand.approval)
+	if err != nil {
+		t.Fatalf("newToolAuthorizer: %v", err)
+	}
+
+	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{Pane: string(farPaneP)}); !ok {
+		t.Fatal("a far pane was refused because this coordinator cannot pin processes")
+	}
+	if _, _, _, ok := unpinnable.admittedPeer(toolendpoint.Peer{PID: farOwnedPID}); ok {
+		t.Fatal("a pid was admitted with no pinner to check it against")
+	}
+}
+
 // TestAFarRecordCannotStandForALocalPane — the arm's guard. A local pane's
 // agent can dial this socket itself, and it could prefix a record naming its own
 // session; if a record were honoured for a local pane, that would be a way to

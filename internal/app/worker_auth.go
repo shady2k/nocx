@@ -196,7 +196,7 @@ func (a *toolAuthorizer) retire(sid session.ID, epoch toolendpoint.AdmissionEpoc
 }
 
 func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, session.Session, toolendpoint.AdmissionEpoch, bool) {
-	if a == nil || a.pinner == nil || a.sessions == nil || a.enrolments == nil {
+	if a == nil || a.sessions == nil || a.enrolments == nil {
 		return "", nil, 0, false
 	}
 	// THE ASSERTED PANE, and it is a different answer rather than a shortcut
@@ -208,7 +208,12 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 	if peer.Pane != "" {
 		return a.admittedPane(peer.Pane)
 	}
-	if peer.PID <= 0 {
+	// The pinner is required HERE and not above it, because this is the only
+	// arm that uses it: admission by pane is a session, an enrolment and an
+	// interval, and asks nothing of this machine's process tree. Required
+	// further up, a coordinator that cannot pin would refuse far agents for a
+	// reason that does not apply to them.
+	if a.pinner == nil || peer.PID <= 0 {
 		return "", nil, 0, false
 	}
 	var admitted session.ID

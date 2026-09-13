@@ -427,6 +427,16 @@ func (p *PaneListeners) forwardTool(far net.Conn) {
 		return
 	}
 	defer func() { _ = local.Close() }()
+	// BOTH ENDS ARE THE PANE'S. Closing only the far side ends the pump that
+	// reads from it, but not the one writing INTO the endpoint: a pump parked
+	// on a write would hold its goroutine and this connection open past the
+	// pane's end, which is the same defect one pump over. The registration
+	// loses to a concurrent Close exactly as the accept did — the pair is
+	// closed here and the forward ends before it starts.
+	if !p.trackForward(local) {
+		return
+	}
+	defer p.untrackForward(local)
 
 	// THE PANE RECORD GOES FIRST, before a single far byte, and it is the
 	// helper's whole contribution to admission (nocx-50w7p.16): the endpoint
@@ -441,9 +451,12 @@ func (p *PaneListeners) forwardTool(far net.Conn) {
 			"path", p.toolTarget, "error", err)
 		return
 	}
-	if _, err := local.Write(record); err != nil {
+	if n, err := local.Write(record); err != nil || n != len(record) {
+		// The COUNT is checked as well as the error: a short write with no
+		// error would hand the endpoint a truncated record, which is a pane
+		// frame that says nothing rather than no frame at all.
 		p.log.Warn("ssh: refusing a far-side tool connection: the pane record did not reach the endpoint",
-			"path", p.toolTarget, "error", err)
+			"path", p.toolTarget, "wrote", n, "want", len(record), "error", err)
 		return
 	}
 

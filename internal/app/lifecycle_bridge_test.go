@@ -45,7 +45,7 @@ func TestTheLifecycleBridgeSaysItStartedAndWhatItCarried(t *testing.T) {
 	}
 
 	carrier.close()
-	waitFor(t, func() bool { return strings.Contains(buf.String(), "lifecycle bridge: the shell's end closed") })
+	waitFor(t, "the bridge to report the shell's end", func() bool { return strings.Contains(buf.String(), "lifecycle bridge: the shell's end closed") })
 
 	out := buf.String()
 	for _, want := range []string{
@@ -74,7 +74,7 @@ func TestABridgeThatEndsWithoutCarryingAnythingSaysSo(t *testing.T) {
 	bridgeLifecycle(lg, lifecycle.TransportID("tpt-quiet"), peer, carrier)
 	carrier.close()
 
-	waitFor(t, func() bool { return strings.Contains(buf.String(), "carried_nothing=true") })
+	waitFor(t, "the bridge to report an empty carry", func() bool { return strings.Contains(buf.String(), "carried_nothing=true") })
 }
 
 // fakeCarrier stands in for the helper attachment's lifecycle stream: bytes

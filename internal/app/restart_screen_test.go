@@ -40,6 +40,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -82,6 +83,26 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 			before.Cols, before.Rows)
 	}
 
+	// THE PROCESS THE DAEMON STARTED, read here because a shutdown is what
+	// releases a session's own record of it: read after the kill it would be
+	// unknown for a reason that has nothing to do with the re-attachment.
+	beforePID, beforeKnown := first.Session.OwnedProcessPID(sid)
+	if !beforeKnown || beforePID <= 0 {
+		t.Fatalf("the first coordinator recorded no launch pid for %s (%d, known=%v): the pane was not "+
+			"really opened by the daemon", sid, beforePID, beforeKnown)
+	}
+	// AND THE OPERATING SYSTEM IS ASKED THE SAME QUESTION, because a record
+	// nocx wrote about itself is exactly what the criterion says not to read:
+	// the pid has to be a live process, and its parent has to be the daemon
+	// that is holding the PTY. A pane attached to the wrong thing would pass
+	// the registry's account of it and fail this.
+	if !alive(beforePID) {
+		t.Fatalf("the pid the first coordinator records for %s (%d) is not a running process", sid, beforePID)
+	}
+	if parent := commandOf(t, parentOf(t, beforePID)); !strings.Contains(parent, "nocx-helper") {
+		t.Fatalf("pid %d's parent is running %q, want this machine's nocx-helper daemon", beforePID, parent)
+	}
+
 	// THE COORDINATOR DIES. Its sessions, its store and its watches go with it;
 	// the daemon holding the PTY does not, and neither does the runtime beside
 	// it.
@@ -89,47 +110,51 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 
 	second := bootLocalAppOn(t, src)
 
-	// ── THE KNOWN GAP, AND ITS THREE OUTCOMES ──────────────────────────────
+	// ── THE SESSION COMES BACK, AND THE PANE IS ITS PIPE AGAIN ─────────────
 	//
 	// Everything above is asserted unconditionally: the first coordinator
 	// really opened a pane and really read its screen through the product's
-	// own store. What follows is where the gap lives, and it is written so the
-	// gap cannot outlive itself.
+	// own store. What follows is the criterion that used to be a known gap
+	// (nocx-ie23r.5): the replacing coordinator takes the LIVE local session
+	// back — attaches to it, adopts it under the id the daemon minted, and
+	// registers the pane it was the pipe of.
 	//
-	//   * The session comes BACK → FAIL. The gap has closed, and a test that
-	//     kept skipping would be a test nobody deletes.
-	//   * The session is GONE from the helper too → FAIL. That is a lost
-	//     session, not an unclaimed one, and calling it the known gap would
-	//     hide exactly the defect this test exists to find.
-	//   * The helper still holds it and the coordinator did not take it back →
-	//     SKIP, naming the bead that owns the route (nocx-ie23r.5).
+	// THE ANSWER IS ASSERTED, NOT POLLED FOR, and that is not a shortcut: the
+	// pass is synchronously before the server listens (readoptAttemptTimeout's
+	// own comment says why it must be), so by the time Start returned this
+	// question already has its final answer. A poll here would be a slower way
+	// of asking it, and a deadline used as a success mechanism is the shape
+	// the repo's "no timing" rule exists to refuse.
 	//
-	// The distinction is the whole value: a bare skip would pass on all three.
-	if tookBack := coordinatorHolds(second, sid, reattachWindow); tookBack {
-		t.Fatalf("stale: the replacing coordinator took session %s back, so nocx-ie23r.5 has landed — "+
-			"delete this gap and keep the assertions below", sid)
+	// The two failure outcomes are kept apart, because they are two different
+	// defects and only one of them is this test's: a daemon that no longer
+	// holds the session means something ENDED it, and a daemon that holds it
+	// while no pane claims it means nobody took it back. Calling the second
+	// the first would report a lost session where there is an unclaimed one.
+	if _, err := second.Session.Get(sid); err != nil {
+		if !helperHolds(t, second, sid) {
+			t.Fatalf("the daemon no longer holds session %s: this is not an unclaimed session, it is a "+
+				"LOST one — the daemon is the same one and it is still running, so something ended the "+
+				"session rather than leaving it for the replacing coordinator to take back.", sid)
+		}
+		t.Fatalf("the replacing coordinator did not take session %s back, although this machine's daemon "+
+			"still holds it: %v — the shell is running, the verdict says live, and no pane is its "+
+			"pipe, which is exactly the state nocx-ie23r.5 exists to end.", sid, err)
 	}
-	if !helperHolds(t, second, sid) {
-		t.Fatalf("the helper no longer holds session %s: this is not the known gap, it is a LOST "+
-			"session — the daemon is the same one and it is still running, so something ended the "+
-			"session rather than leaving it unclaimed. That is a different defect from the one this "+
-			"gap names, and it must not be skipped over.", sid)
+
+	// THE SAME PROCESS the daemon started is what the replacing coordinator
+	// holds now — recorded for the decisions that read it, and running, which
+	// the kernel is asked directly.
+	afterPID, afterKnown := second.Session.OwnedProcessPID(sid)
+	if !afterKnown || afterPID != beforePID {
+		t.Fatalf("the re-attached pane records launch pid %d (known=%v), want the %d the daemon "+
+			"started for the FIRST coordinator — the pane is not attached to the process it was",
+			afterPID, afterKnown, beforePID)
 	}
-	// WHAT CHANGED, AND WHAT DID NOT (nocx-ie23r.2 has since landed). The
-	// session is no longer unjudged: the replacing coordinator now ASKS this
-	// machine's daemon — over the endpoint, by dialling the generation the
-	// binding names — and records the verdict `live` for it, which is the
-	// claim the ledger and the notice are built on. What it still does not do
-	// is ATTACH, and that is the whole of what this gap is now: a judged
-	// session with no pane, rather than an unjudged one. Taking it back needs
-	// a second attach against a live local session and the pane it was the
-	// pipe of, which is nocx-ie23r.5's.
-	t.Skip("known gap (nocx-ie23r.5): a local pane's session is re-adopted into the registry — and so " +
-		"into a restored pane — by nobody yet. readoptPass.readoptLocal asks the generation the " +
-		"binding names and judges it (session_readopt.go), and it deliberately stops there: " +
-		"attaching to a live local session is the next bead. So the daemon still holds the PTY, the " +
-		"verdict says `live`, and no pane owns it. The first coordinator's read of the marker is " +
-		"asserted above; the resolution below is the criterion that is waiting on that bead.")
+	if !alive(afterPID) {
+		t.Fatalf("pid %d is not running after the re-attachment, so the pane holds a shell the "+
+			"kernel no longer has", afterPID)
+	}
 
 	// The same watch is opened over the same session, in the NEW process.
 	if err := second.paneViews.Enrol(string(sid)); err != nil {
@@ -139,6 +164,16 @@ func TestASessionsScreenOutlivesTheCoordinatorThatOpenedIt(t *testing.T) {
 
 	if got := after.Text(2); !strings.Contains(got, marker) {
 		t.Fatalf("the replaced coordinator reads row 3 as %q, want the marker the FIRST one's program drew", got)
+	}
+	// WHAT THE FRAME CAN HONESTLY CLAIM ABOUT ITSELF, asserted rather than
+	// left to the marker: a screen that came back through a re-attachment
+	// whose ingest lost bytes would still show this marker and would be a
+	// different, quieter defect. `Complete` is the daemon's own statement that
+	// every byte of the interval reached the emulator, and the runtime only
+	// says it when that is true.
+	if after.Completeness != sessionruntime.CompletenessComplete {
+		t.Fatalf("the re-attached pane's frame claims completeness %v, want Complete: the screen the "+
+			"pane is drawn from is not the whole stream the daemon holds", after.Completeness)
 	}
 	if after.Cols != 100 || after.Rows != 30 {
 		t.Errorf("the screen came back at %dx%d, want the 100x30 the session was opened at", after.Cols, after.Rows)
@@ -191,32 +226,12 @@ func waitForMarker(t *testing.T, a *App, sid session.ID, marker string) paneview
 	}
 }
 
-// reattachWindow bounds the wait for a re-adoption. It is generous on purpose:
-// the pass is synchronous before the server listens, so a session that is
-// coming back has already come back by the time Start returns — the window is
-// here for a slow machine and not because the answer is expected to change.
-const reattachWindow = 30 * time.Second
-
-// coordinatorHolds reports whether the coordinator took the session back.
-func coordinatorHolds(a *App, sid session.ID, within time.Duration) bool {
-	deadline := time.Now().Add(within)
-	for {
-		if _, err := a.Session.Get(sid); err == nil {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
 // helperHolds asks the DAEMON whether it still holds the session, through the
 // seated coordinator's own client — the same route a frame read takes.
 //
-// It is what separates the known gap from a lost session: the gap is "the PTY
-// is still there and nobody claimed it", and a helper that no longer holds it
-// would be the other thing entirely.
+// It is what separates an UNCLAIMED session from a LOST one: the first is "the
+// PTY is still there and nobody took it back", and a helper that no longer
+// holds it would be the other thing entirely.
 func helperHolds(t *testing.T, a *App, sid session.ID) bool {
 	t.Helper()
 	// CONNECTED FIRST, and that is the whole correction: a coordinator opens

@@ -418,12 +418,24 @@ async function resetStand(): Promise<void> {
   }
 }
 
+/**
+ * A spec's own view of the control plane: one JSON-RPC call at a time, over a
+ * socket opened for this purpose. The data plane is not touched — every frame
+ * here is text — which is why it is a TYPE and not the renderer's client.
+ *
+ * Named rather than inferred because specs hold it across a whole test (a
+ * restart changes the endpoint, not the shape), and a type spelled out of the
+ * function that mints it would make every caller depend on that function's
+ * identity.
+ */
+export interface ControlPlane {
+  call: (method: string, params: unknown) => Promise<unknown>
+  close: () => void
+}
+
 /** One JSON-RPC call at a time over a socket opened for this purpose. The
  *  data plane is not touched: every frame here is text. */
-export async function openControlPlane(
-  port: number,
-  token: string,
-): Promise<{ call: (method: string, params: unknown) => Promise<unknown>; close: () => void }> {
+export async function openControlPlane(port: number, token: string): Promise<ControlPlane> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, `nocx.token.${token}`)
   await new Promise<void>((resolve, reject) => {
     const failed = (): void => reject(new Error(`e2e: control plane refused on port ${port}`))

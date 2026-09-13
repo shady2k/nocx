@@ -6,5 +6,10 @@ current-version: 1.0
 compatibility-version: 1.0
 exports:
   - targets:         [ x86_64-macos, arm64-macos ]
-    symbols:         [ ]
+    symbols:         [ _CFArrayAppendValue, _CFArrayCreateMutable, _CFArrayGetCount, 
+                       _CFArrayGetValueAtIndex, _CFDataCreate, _CFDataGetBytePtr, 
+                       _CFDataGetLength, _CFDateCreate, _CFDictionaryGetValueIfPresent, 
+                       _CFEqual, _CFErrorCopyDescription, _CFErrorGetCode, 
+                       _CFNumberGetValue, _CFRelease, _CFStringCreateExternalRepresentation, 
+                       _CFStringCreateWithBytes ]
 ...

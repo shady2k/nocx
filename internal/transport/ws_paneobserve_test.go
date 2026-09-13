@@ -82,6 +82,9 @@ func TestSessionObservationChangedOverTheWireConformsToContract(t *testing.T) {
 	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 
@@ -136,6 +139,9 @@ func TestSessionObservationChangedCarriesTheChildRowsOverTheWire(t *testing.T) {
 	if err := store.Watch(sid, 60, 18); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeSubagentChrome(60))
 
@@ -245,6 +251,9 @@ func TestSessionObservationChangedCarriesAStalledProgressOverTheWire(t *testing.
 	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeWorkingChrome(40))
 
@@ -356,6 +365,9 @@ func TestAnUnwatchedPaneSendsNoObservation(t *testing.T) {
 	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	term.emit(t, claudeIdleChrome(40))
 
 	// The grid proves the bytes really arrived, so the silence below is the
@@ -386,6 +398,9 @@ func TestAReattachingClientIsToldWhatThePaneAlreadyIs(t *testing.T) {
 	if err := store.Watch(sid, 40, 14); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 	term.emit(t, claudeIdleChrome(40))
 	readNotification(t, connA, "session.observationChanged", wantWithin)
@@ -413,7 +428,6 @@ type countingObserver struct {
 	sweeps int
 }
 
-func (c *countingObserver) Touch(string)   {}
 func (c *countingObserver) Unwatch(string) {}
 func (c *countingObserver) Sweep() {
 	c.mu.Lock()

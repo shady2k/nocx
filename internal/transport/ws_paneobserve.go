@@ -23,19 +23,24 @@ import (
 // paneObserverSweep is how often the backend asks its watched panes what they
 // are now.
 //
-// It is a COALESCER, not a poll: Touch marks a pane dirty on the session read
-// path, and a pane that has not moved costs nothing at all. The interval is
-// what keeps an agent that repaints its token counter on every response chunk
-// from producing a classification per chunk. Nothing waits on it — a test
+// It is a COALESCER, and the thing that used to make it one is gone: the dirty
+// mark came from the session's read path, and the coordinator no longer reads a
+// session's bytes for a screen (ADR-0066). What a sweep visits is therefore
+// every pane somebody is watching, and its cost is one frame read per watched
+// pane — bounded by this interval, by the watch set's own bound, and by the
+// fact that a pane whose classification did not change sends nothing.
+//
+// What the interval still buys is the coalescing it was written for: an agent
+// that repaints its token counter on every chunk produces one classification
+// per tick rather than one per chunk. Nothing waits on the number — a test
 // drives Sweep directly and asserts on the state change it produces, which is
-// why no test in this repository depends on this number.
+// why no test in this repository depends on it.
 const paneObserverSweep = 120 * time.Millisecond
 
 // paneObserver is the transport's half of the seam (AD-8). Narrow on purpose:
 // the transport may say a pane moved, may close an observation when the
 // session ends, and may ask what a pane currently is. It may not classify.
 type paneObserver interface {
-	Touch(paneID string)
 	Unwatch(paneID string)
 	Sweep()
 	Snapshot(paneID string) (paneobserve.Observation, bool)

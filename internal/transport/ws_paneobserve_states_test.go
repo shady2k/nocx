@@ -66,6 +66,9 @@ func TestAnObservedPaneReportsEachStateItsScreenShows(t *testing.T) {
 	if err := store.Watch(sid, 120, 40); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}
+	// The pane's screen comes from the bytes this stand's program prints:
+	// in production the helper's runtime is what holds it.
+	term.feedsTo(store, sid)
 	watch.Watch(sid, "claude")
 
 	steps := []struct {

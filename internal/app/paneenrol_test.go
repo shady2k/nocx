@@ -211,7 +211,6 @@ func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
 		t.Fatalf("after the withdrawal: %+v, want one exited observation", got)
 	}
 	got = nil
-	watch.Touch("sess-1")
 	watch.Sweep()
 	if len(got) != 0 {
 		t.Fatalf("a withdrawn pane was still classified: %+v", got)

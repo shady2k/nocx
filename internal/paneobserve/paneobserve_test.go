@@ -100,7 +100,6 @@ func TestAWatchedPaneIsReportedWhenItsScreenIsFirstRead(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 
 	got := rec.drain()
@@ -123,11 +122,9 @@ func TestASweepWithNothingNewSaysNothing(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
-	w.Touch("p1")
 	w.Sweep()
 	w.Sweep()
 	if got := rec.drain(); len(got) != 0 {
@@ -144,12 +141,10 @@ func TestAChangedScreenIsReportedAgain(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	grid.Feed("p1", []byte(workingScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	got := rec.drain()
 	if len(got) != 1 || got[0].State != agentdriver.StateWorking {
@@ -168,7 +163,6 @@ func TestAnAgentWithNoDriverIsReportedAsUnknown(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "some-other-agent")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	got := rec.drain()
 	if len(got) != 1 || got[0].State != agentdriver.StateUnknown {
@@ -188,19 +182,16 @@ func TestUnwatchEndsTheObservationAndForgetsTheLastState(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	w.Unwatch("p1")
-	w.Touch("p1")
 	w.Sweep()
 	if got := rec.drain(); len(got) != 0 {
 		t.Fatalf("an unwatched pane was still reported: %+v", got)
 	}
 
 	w.Watch("p1", "claude")
-	w.Touch("p1")
 	w.Sweep()
 	got := rec.drain()
 	if len(got) != 1 || got[0].State != agentdriver.StateFreeText {
@@ -218,12 +209,10 @@ func TestAPaneWhoseGridHasGoneIsNotReported(t *testing.T) {
 	}
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	grid.Withdraw("p1") // the session ended; the watcher has not been told yet
-	w.Touch("p1")
 	w.Sweep()
 	if got := rec.drain(); len(got) != 0 {
 		t.Fatalf("a pane with no grid was reported: %+v", got)
@@ -234,7 +223,6 @@ func TestAPaneWhoseGridHasGoneIsNotReported(t *testing.T) {
 // watches must cost nothing and must never reach the grid.
 func TestTouchingAnUnwatchedPaneIsSilent(t *testing.T) {
 	w, _, rec := newFixture(t)
-	w.Touch("never-watched")
 	w.Sweep()
 	if got := rec.drain(); len(got) != 0 {
 		t.Fatalf("an unwatched pane produced %+v", got)
@@ -252,7 +240,6 @@ func TestSnapshotAnswersTheCurrentStateForAReattachingClient(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 
 	o, ok := w.Snapshot("p1")
@@ -283,7 +270,6 @@ func TestClassifyReadsTheCurrentFrameAndSnapshotStaysStale(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 
 	if o, ok := w.Snapshot("p1"); !ok || o.State != agentdriver.StateFreeText {
@@ -307,7 +293,6 @@ func TestClassifyReadsTheCurrentFrameAndSnapshotStaysStale(t *testing.T) {
 	// change as news — Classify is a read, not a second sweep.
 	rec := &recorder{}
 	w.SetEmitter(rec.emit)
-	w.Touch("p1")
 	w.Sweep()
 	after := rec.drain()
 	if len(after) != 1 || after[0].State != agentdriver.StateWorking {
@@ -336,7 +321,6 @@ func TestClassifyOfAnExitedPaneAnswersExitedWithoutReadingTheGrid(t *testing.T) 
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	w.Exited("p1")
 
@@ -368,7 +352,6 @@ func TestASweepWithNoEmitterYetLosesNothing(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 
 	rec := &recorder{}
@@ -395,7 +378,6 @@ func TestAnAgentThatExitedIsReportedAsExited(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
@@ -420,7 +402,6 @@ func TestAnExitedPaneIsNotClassifiedAgain(t *testing.T) {
 	rec.drain()
 
 	grid.Feed("p1", []byte(idleScreen(40)))
-	w.Touch("p1")
 	w.Sweep()
 	if got := rec.drain(); len(got) != 0 {
 		t.Fatalf("an exited pane was classified again: %+v", got)
@@ -473,7 +454,6 @@ func TestTheChildRowsTravelWithTheObservation(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files in directory")))
-	w.Touch("p1")
 	w.Sweep()
 
 	got := rec.drain()
@@ -506,7 +486,6 @@ func TestARepaintThatOnlyMovesAChildsClockIsNotNews(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(panelScreen(80, "Explore  List files in directory                  7s · ↓ 11.6k tokens")))
-	w.Touch("p1")
 	w.Sweep()
 	if got := rec.drain(); len(got) != 1 || len(got[0].Children) != 1 {
 		t.Fatalf("first sweep = %+v, want one observation carrying one child", got)
@@ -517,7 +496,6 @@ func TestARepaintThatOnlyMovesAChildsClockIsNotNews(t *testing.T) {
 	// asserts the elapsed time follows the screen.
 	for _, elapsed := range []string{"8s", "9s", "10s", "11s"} {
 		grid.Feed("p1", []byte(panelScreen(80, "Explore  List files in directory                 "+elapsed+" · ↓ 11.9k tokens")))
-		w.Touch("p1")
 		w.Sweep()
 	}
 	if got := rec.drain(); len(got) != 0 {
@@ -535,12 +513,10 @@ func TestAChildAppearingAndVanishingAreBothNews(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files", "Plan  Draft the change")))
-	w.Touch("p1")
 	w.Sweep()
 	got := rec.drain()
 	if len(got) != 1 {
@@ -551,7 +527,6 @@ func TestAChildAppearingAndVanishingAreBothNews(t *testing.T) {
 	}
 
 	grid.Feed("p1", []byte(panelScreen(60, "Plan  Draft the change")))
-	w.Touch("p1")
 	w.Sweep()
 	got = rec.drain()
 	if len(got) != 1 {
@@ -589,7 +564,6 @@ func TestAChildAppearingOrVanishingDoesNotChangeTheParentsState(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
-	w.Touch("p1")
 	w.Sweep()
 	first := rec.drain()
 	if len(first) != 1 || first[0].State != agentdriver.StateWorking {
@@ -605,7 +579,6 @@ func TestAChildAppearingOrVanishingDoesNotChangeTheParentsState(t *testing.T) {
 		{"the child is replaced", panelScreen(60, "Review  Read the diff")},
 	} {
 		grid.Feed("p1", []byte(step.screen))
-		w.Touch("p1")
 		w.Sweep()
 		got := rec.drain()
 		if len(got) != 1 {
@@ -620,7 +593,6 @@ func TestAChildAppearingOrVanishingDoesNotChangeTheParentsState(t *testing.T) {
 	// named — and the pane does NOT go back to inviting input, because the
 	// mode line still says a background agent is alive.
 	grid.Feed("p1", []byte(collapsedPanelScreen(60)))
-	w.Touch("p1")
 	w.Sweep()
 	got := rec.drain()
 	if len(got) != 1 {
@@ -646,7 +618,6 @@ func TestSnapshotCarriesTheChildRows(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files in directory")))
-	w.Touch("p1")
 	w.Sweep()
 
 	o, ok := w.Snapshot("p1")
@@ -669,7 +640,6 @@ func TestAnExitedPaneNamesNoChildren(t *testing.T) {
 	defer grid.Withdraw("p1")
 	w.Watch("p1", "claude")
 	grid.Feed("p1", []byte(panelScreen(60, "Explore  List files")))
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 

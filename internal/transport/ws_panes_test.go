@@ -35,6 +35,15 @@ type feedablePTY struct {
 	pw   *io.PipeWriter
 	done chan struct{}
 	once sync.Once
+	// feed is the stand's stand-in for the runtime beside the PTY: every byte
+	// the program printed goes to it as well as to the session's reader.
+	//
+	// In production the runtime IS the reader (the helper's pump ingests before
+	// it delivers); here the reader is the product's own pump, so a stand that
+	// wants a screen to exist has to keep the emulator fed itself. Without this
+	// the watcher classifies an EMPTY pane — which is what it did, and what
+	// turned a working turn into "unknown".
+	feed func([]byte)
 }
 
 func newFeedablePTY() *feedablePTY {
@@ -58,10 +67,26 @@ func (f *feedablePTY) Done() <-chan struct{}                                    
 func (f *feedablePTY) emit(t *testing.T, s string) {
 	t.Helper()
 	f.mu.Lock()
+	feed := f.feed
+	f.mu.Unlock()
+	if feed != nil {
+		// Fed FIRST, so the screen the observer reads is one that already
+		// holds what was printed — the product's own order (the helper
+		// ingests before it delivers).
+		feed([]byte(s))
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, err := f.pw.Write([]byte(s)); err != nil {
 		t.Fatalf("emit %q: %v", s, err)
 	}
+}
+
+// feedsTo installs the pane source this stand's PTY reports into.
+func (f *feedablePTY) feedsTo(views *paneviewtest.Views, paneID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.feed = func(b []byte) { views.Feed(paneID, b) }
 }
 
 type feedableFactory struct{ p *feedablePTY }

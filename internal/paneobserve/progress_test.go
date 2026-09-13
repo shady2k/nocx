@@ -166,7 +166,6 @@ func TestALiveSpinnerOverAFrozenTranscriptReadsStalled(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	first := feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading of a working pane")
 	if got.State != agentdriver.StateWorking || got.Progress != paneobserve.ProgressMoving {
@@ -181,13 +180,11 @@ func TestALiveSpinnerOverAFrozenTranscriptReadsStalled(t *testing.T) {
 
 	// THE LOW END. The transcript has not moved, but the threshold has not
 	// passed either, so this is still a pane that is thinking.
-	w.Touch("p1")
 	w.Sweep()
 	assertSilent(t, rec, "a frozen transcript younger than the threshold")
 
 	// THE HIGH END, one second past it.
 	c.advance(stallAfter + time.Second)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a frozen transcript past the threshold")
 	if got.State != agentdriver.StateWorking {
@@ -214,7 +211,6 @@ func TestAWorkingPaneThatHasGoneCompletelySilentIsStillReported(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	assertNews(t, rec, "the first reading")
 
@@ -248,7 +244,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	w.Watch("p1", "claude")
 
 	feed(79000)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading of a streaming turn")
 	if got.State != agentdriver.StateWorking || got.Progress != paneobserve.ProgressMoving {
@@ -258,7 +253,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	// Nothing more arrives for a while. This pane is now genuinely stalled —
 	// its turn is live and its transcript has stood still past the threshold.
 	c.advance(stallAfter + time.Second)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a streaming turn that has gone quiet")
 	if got.Progress != paneobserve.ProgressStalled {
@@ -268,7 +262,6 @@ func TestAGrowingTranscriptReadsMovingHoweverStillTheChromeIs(t *testing.T) {
 	// And here the reply continues: the transcript grows, the chrome does not
 	// move at all, and the pane is moving again.
 	feed(80000)
-	w.Touch("p1")
 	w.Sweep()
 	got = assertNews(t, rec, "a transcript that grew after the threshold")
 	if got.State != agentdriver.StateWorking {
@@ -296,16 +289,12 @@ func TestStalledIsNotAStateAndAWorkingListingStillContainsThePane(t *testing.T) 
 
 	frozen(15000)
 	growing(79000)
-	w.Touch("frozen")
-	w.Touch("growing")
 	w.Sweep()
 	rec.drain()
 
 	// The frozen pane's deadline passes; the growing pane's transcript does not.
 	c.advance(stallAfter + time.Second)
 	growing(80000)
-	w.Touch("frozen")
-	w.Touch("growing")
 	w.Sweep()
 
 	// The scalar set has no member that means "stalled", and a stalled reading
@@ -355,7 +344,6 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	// 47500ms is a turn before its elapsed timer, on a pane whose transcript is
 	// the user's own prompt.
 	feed(47500)
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "the first reading")
 	if got.State != agentdriver.StateWorking {
@@ -369,7 +357,6 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 		t.Fatalf("enrol p2: %v", err)
 	}
 	t.Cleanup(func() { grid.Withdraw("p2") })
-	w.Touch("p2")
 	w.Sweep()
 	other := assertNews(t, rec, "an agent with no driver")
 	if other.State != agentdriver.StateUnknown || other.Progress != paneobserve.ProgressMoving {
@@ -377,7 +364,6 @@ func TestAPaneWithNoMeasurableTranscriptIsNeverCalledStalled(t *testing.T) {
 	}
 
 	c.advance(10 * stallAfter)
-	w.Touch("p2")
 	w.Sweep()
 	// Exactly one pane is news here, and it is the one with a measurable
 	// transcript: the pane the driver cannot read stays silent on the same
@@ -399,14 +385,12 @@ func TestUnwatchForgetsTheTranscriptAndItsClock(t *testing.T) {
 	feed := feeder(t, grid, "p1", "claude-working")
 	w.Watch("p1", "claude")
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
 	c.advance(stallAfter + time.Second)
 	w.Unwatch("p1")
 	w.Watch("p1", "claude")
-	w.Touch("p1")
 	w.Sweep()
 	got := assertNews(t, rec, "a pane watched again")
 	if got.Progress != paneobserve.ProgressMoving {
@@ -423,7 +407,6 @@ func TestAnExitedPaneIsNeverStalled(t *testing.T) {
 	feed := feeder(t, grid, "p1", "claude-working")
 	w.Watch("p1", "claude")
 	feed(15000)
-	w.Touch("p1")
 	w.Sweep()
 	rec.drain()
 
